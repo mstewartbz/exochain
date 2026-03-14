@@ -1,15 +1,7 @@
 [workspace]
+resolver = "2"
 members = [
     "crates/decision-forum",
-    "crates/exochain-core",
-    "crates/exochain-node",
-    "crates/exochain-crypto",
-    "crates/exochain-network",
-    "crates/exochain-storage",
-    "crates/exochain-consensus",
-    "crates/exochain-governance"
-]
-members = [
     "crates/exo-core",
     "crates/exo-dag",
     "crates/exo-identity",
