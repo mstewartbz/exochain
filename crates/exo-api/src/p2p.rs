@@ -1,17 +1,14 @@
 use libp2p::{
     noise,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Swarm, SwarmBuilder,
+    swarm::NetworkBehaviour,
+    tcp, yamux,
 };
 use std::time::Duration;
-use tokio::io;
 
 /// Custom Network Behaviour (Stub).
 /// In future, this will include Gossipsub and Kademlia.
 #[derive(NetworkBehaviour)]
 pub struct ExoBehaviour {
-    // For stub, we use a Ping behaviour or just connection limits?
-    // Using Ping-like empty behaviour for minimal scaffold.
     pub ping: libp2p::ping::Behaviour,
 }
 
@@ -22,7 +19,7 @@ pub async fn start_p2p_node() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Local Peer ID: {}", peer_id);
 
-    // 2. Transport
+    // 2. Build swarm with transport + behaviour
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
         .with_tokio()
         .with_tcp(
@@ -39,8 +36,6 @@ pub async fn start_p2p_node() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Listen
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // 4. Event Loop (Stub)
-    // In a real run, this would be spawned in a task.
-    // For now we just return Ok to signify setup works.
+    // 4. Event Loop (Stub — future: Gossipsub + Kademlia DHT for node discovery)
     Ok(())
 }
