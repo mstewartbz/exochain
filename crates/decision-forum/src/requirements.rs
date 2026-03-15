@@ -1,16 +1,14 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub const NUM_REQUIREMENTS: usize = 15;
+pub const NUM_REQUIREMENTS: usize = 16;
 
 #[cfg(test)]
-static COVERAGE: [AtomicUsize; NUM_REQUIREMENTS] = [
-    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
-    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
-    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
-    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
-    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
-];
+#[allow(clippy::declare_interior_mutable_const)]
+const ZERO: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+static COVERAGE: [AtomicUsize; NUM_REQUIREMENTS] = [ZERO; NUM_REQUIREMENTS];
 
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
@@ -30,6 +28,7 @@ pub enum Requirement {
     FiduciaryPackageGeneration = 12,
     CliRun = 13,
     GenesisDecision = 14,
+    AdvancedPolicyValidation = 15,
 }
 
 impl Requirement {
@@ -49,6 +48,7 @@ impl Requirement {
         Requirement::FiduciaryPackageGeneration,
         Requirement::CliRun,
         Requirement::GenesisDecision,
+        Requirement::AdvancedPolicyValidation,
     ];
 
     #[cfg(test)]

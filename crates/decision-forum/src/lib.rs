@@ -8,6 +8,7 @@ pub mod authority;
 pub mod tnc_enforcer;
 pub mod fiduciary_package;
 pub mod cli;
+pub mod advanced_policy;
 pub mod requirements;
 
 pub use decision_object::DecisionObject;
@@ -50,6 +51,8 @@ pub mod tests {
         crate::fiduciary_package::tests::test_fiduciary_package();
         crate::cli::tests::test_cli_run();
         test_create_genesis_decision();
+
+        crate::advanced_policy::tests::test_valid_advanced_policy();
 
         // Validate that 100% of explicit requirements have been tested.
         crate::requirements::assert_all_requirements_covered();
