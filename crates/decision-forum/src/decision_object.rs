@@ -1,7 +1,7 @@
 use super::*;
 use sha2::{Sha256, Digest};
 use uuid::Uuid;
-use crate::advanced_policy::AdvancedReasoningPolicy;
+use crate::advanced_policy::{AdvancedReasoningPolicy};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DecisionObject {
@@ -15,6 +15,8 @@ pub struct DecisionObject {
     pub evidence: Vec<Evidence>,
     // Advanced Bayesian/Neuro-Symbolic Option
     pub advanced_reasoning: Option<AdvancedReasoningPolicy>,
+    // Audit Observability
+    pub audit_log: Vec<AuditEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -22,6 +24,13 @@ pub enum Status { Draft, Pending, Approved, Rejected, Contested, Void }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Evidence { pub hash: String, pub description: String }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditEvent {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub event_type: String,
+    pub reason: String,
+}
 
 impl DecisionObject {
     pub fn new(title: &str) -> Self {
@@ -43,6 +52,7 @@ impl DecisionObject {
             created_at: chrono::Utc::now(),
             evidence: vec![],
             advanced_reasoning: None,
+            audit_log: vec![],
         }
     }
 
@@ -53,6 +63,11 @@ impl DecisionObject {
         // Advanced Mode Fast-Fail Validation
         if let Some(adv) = &self.advanced_reasoning {
             if let Err(reason) = adv.validate_thresholds() {
+                self.audit_log.push(AuditEvent {
+                    timestamp: chrono::Utc::now(),
+                    event_type: "ESCALATION_REJECTION".to_string(),
+                    reason: format!("{:?}", reason),
+                });
                 return Err(format!("Advanced Reasoning Threshold Violated: {:?}", reason));
             }
         }
@@ -63,6 +78,11 @@ impl DecisionObject {
 
         if let Err(e) = TNCEnforcer::enforce_all(self) {
             self.status = original_status;
+            self.audit_log.push(AuditEvent {
+                timestamp: chrono::Utc::now(),
+                event_type: "TNC_ENFORCEMENT_FAILED".to_string(),
+                reason: e.clone(),
+            });
             return Err(e);
         }
         
@@ -74,7 +94,7 @@ impl DecisionObject {
 pub mod tests {
     use super::*;
     use crate::requirements::Requirement;
-    use crate::advanced_policy::{AdvancedReasoningPolicy, BayesianAssessment};
+    use crate::advanced_policy::{AdvancedReasoningPolicy, BayesianAssessment, HumanReviewStatus};
 
     #[test]
     pub fn test_decision_object_creation() {
@@ -87,6 +107,7 @@ pub mod tests {
         assert!(obj.authority_chain.is_empty());
         assert!(obj.evidence.is_empty());
         assert!(obj.advanced_reasoning.is_none());
+        assert!(obj.audit_log.is_empty());
         Requirement::DecisionObjectCreation.mark_covered();
     }
 
@@ -113,6 +134,8 @@ pub mod tests {
         assert!(res.is_err());
         // Status should be reverted to Draft
         assert_eq!(obj.status, Status::Draft);
+        assert_eq!(obj.audit_log.len(), 1);
+        assert_eq!(obj.audit_log[0].event_type, "TNC_ENFORCEMENT_FAILED");
     }
 
     #[test]
@@ -123,23 +146,24 @@ pub mod tests {
             signature: "SIG1".into(),
         });
         // Fails due to high instability
-        obj.advanced_reasoning = Some(AdvancedReasoningPolicy {
-            assessment: BayesianAssessment {
-                prior: 0.5,
-                posterior: 0.9,
-                confidence_interval: 0.90,
-                sensitivity_instability: 0.20, // Threshold is 0.10
-                teacher_student_disagreement: 0.01,
-                symbolic_rule_trace_hash: "0x123".to_string(),
-                evidence_references: vec![],
-            }
+        let policy = AdvancedReasoningPolicy::new(BayesianAssessment {
+            prior: 0.5,
+            posterior: 0.9,
+            confidence_interval: 0.90,
+            sensitivity_instability: 0.20, // Threshold is 0.10
+            teacher_student_disagreement: 0.01,
+            symbolic_rule_trace_hash: "0x1234567890123456789012345678901234567890123456789012345678901234".to_string(),
+            evidence_references: vec!["http://evidence.link".to_string()],
         });
+        obj.advanced_reasoning = Some(policy);
         
         let res = obj.seal();
         assert!(res.is_err());
         let err_str = res.unwrap_err();
         assert!(err_str.contains("HighInstability"));
         assert_eq!(obj.status, Status::Draft);
+        assert_eq!(obj.audit_log.len(), 1);
+        assert_eq!(obj.audit_log[0].event_type, "ESCALATION_REJECTION");
     }
 
     #[test]
@@ -149,17 +173,19 @@ pub mod tests {
             pubkey: "PK1".into(),
             signature: "SIG1".into(),
         });
-        obj.advanced_reasoning = Some(AdvancedReasoningPolicy {
-            assessment: BayesianAssessment {
-                prior: 0.5,
-                posterior: 0.9,
-                confidence_interval: 0.90,
-                sensitivity_instability: 0.05,
-                teacher_student_disagreement: 0.01,
-                symbolic_rule_trace_hash: "0x123".to_string(),
-                evidence_references: vec!["doc".to_string()],
-            }
+        
+        let mut policy = AdvancedReasoningPolicy::new(BayesianAssessment {
+            prior: 0.5,
+            posterior: 0.9,
+            confidence_interval: 0.90,
+            sensitivity_instability: 0.05,
+            teacher_student_disagreement: 0.01,
+            symbolic_rule_trace_hash: "0x1234567890123456789012345678901234567890123456789012345678901234".to_string(),
+            evidence_references: vec!["http://evidence.link".to_string()],
         });
+        policy.human_review = HumanReviewStatus::approved_by("council-member-1");
+        
+        obj.advanced_reasoning = Some(policy);
         
         let res = obj.seal();
         assert!(res.is_ok());
