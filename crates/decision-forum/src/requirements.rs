@@ -65,5 +65,9 @@ pub fn assert_all_requirements_covered() {
             missing.push(req);
         }
     }
-    assert!(missing.is_empty(), "Missing test coverage for requirements: {:?}", missing);
+    assert!(
+        missing.is_empty(),
+        "Missing test coverage for requirements: {:?}",
+        missing
+    );
 }

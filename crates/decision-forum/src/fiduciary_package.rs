@@ -7,8 +7,12 @@ impl FiduciaryDefensePackage {
         #[cfg(test)]
         crate::requirements::Requirement::FiduciaryPackageGeneration.mark_covered();
 
-        format!("Fiduciary Defense Package for {} (FRE 803(6) compliant)\nAuthority: {}\nEvidence hash: {}",
-            obj.title, obj.authority_chain.len(), obj.merkle_root)
+        format!(
+            "Fiduciary Defense Summary for {}\nAuthority count: {}\nMerkle root: {}\nNote: FRE 803(6) review required before any evidentiary compliance claim.",
+            obj.title,
+            obj.authority_chain.len(),
+            obj.merkle_root
+        )
     }
 }
 
@@ -22,8 +26,9 @@ pub mod tests {
         let obj = DecisionObject::new("Fiduciary Title");
         let pkg = FiduciaryDefensePackage::generate(&obj);
         assert!(pkg.contains("Fiduciary Title"));
-        assert!(pkg.contains("Authority: 0"));
+        assert!(pkg.contains("Authority count: 0"));
         assert!(pkg.contains(&obj.merkle_root));
+        assert!(pkg.contains("FRE 803(6) review required"));
         Requirement::FiduciaryPackageGeneration.mark_covered();
     }
 }

@@ -207,7 +207,10 @@ pub mod tests {
         let mut assessment = valid_assessment();
         assessment.confidence_interval = 0.80;
         let policy = AdvancedReasoningPolicy::new(assessment);
-        assert_eq!(policy.validate_thresholds(), Err(EscalationReason::LowConfidence));
+        assert_eq!(
+            policy.validate_thresholds(),
+            Err(EscalationReason::LowConfidence)
+        );
     }
 
     #[test]
@@ -215,7 +218,10 @@ pub mod tests {
         let mut assessment = valid_assessment();
         assessment.sensitivity_instability = 0.15;
         let policy = AdvancedReasoningPolicy::new(assessment);
-        assert_eq!(policy.validate_thresholds(), Err(EscalationReason::HighInstability));
+        assert_eq!(
+            policy.validate_thresholds(),
+            Err(EscalationReason::HighInstability)
+        );
     }
 
     #[test]
@@ -223,7 +229,10 @@ pub mod tests {
         let mut assessment = valid_assessment();
         assessment.teacher_student_disagreement = 0.10;
         let policy = AdvancedReasoningPolicy::new(assessment);
-        assert_eq!(policy.validate_thresholds(), Err(EscalationReason::HighDisagreement));
+        assert_eq!(
+            policy.validate_thresholds(),
+            Err(EscalationReason::HighDisagreement)
+        );
     }
 
     #[test]
@@ -231,7 +240,10 @@ pub mod tests {
         let mut assessment = valid_assessment();
         assessment.symbolic_rule_trace_hash = "0x123".to_string();
         let policy = AdvancedReasoningPolicy::new(assessment);
-        assert_eq!(policy.validate_thresholds(), Err(EscalationReason::VerifierMismatch));
+        assert_eq!(
+            policy.validate_thresholds(),
+            Err(EscalationReason::VerifierMismatch)
+        );
     }
 
     #[test]

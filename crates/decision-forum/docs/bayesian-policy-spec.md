@@ -5,29 +5,49 @@
 The Exochain decision council relies on a multi-layered governance model ensuring that mathematical rigor and symbolic constitutional law are never superseded by probabilistic heuristics.
 
 ## 2. Architecture: The Tri-Layered Model
-This policy enforces a "Balanced" approach consisting of three distinct layers:
-1. **Constitutional Inside (Symbolic Layer):** Hard rules, constraints, Truth-Critical Non-Negotiable Controls (TNCs), authority validations, quorum limits.
-2. **Epistemic Engine (Bayesian Layer):** Rigorous risk modeling, forecasting, evidence weighting, and uncertainty measurement.
-3. **Advisory Speed Layer (Neural Distillate):** High-speed pattern recognition and proposal generation trained strictly on teacher-verified data.
+This policy enforces a balanced approach consisting of three distinct layers:
+1. **Constitutional Inside (Symbolic Layer):** hard rules, TNCs, authority validations, quorum limits, ratification.
+2. **Epistemic Engine (Bayesian Layer):** risk modeling, forecasting, evidence weighting, uncertainty measurement.
+3. **Advisory Speed Layer (Neural Distillate):** optional proposal assistance trained on teacher-verified data.
 
 ## 3. Mandatory Requirements for Advanced Mode Claims
-Every council decision electing to use the advanced Bayesian/neural option must include a comprehensive evidence package containing:
-- **Prior:** The baseline likelihood before new evidence.
-- **Evidence References:** Verifiable hashes or links to the raw data informing the update.
-- **Likelihood Weighting:** The math/logic applied to adjust the prior.
-- **Posterior & Confidence Interval:** The resultant likelihood and its stability margin.
-- **Symbolic Rule Trace Hash:** Proof that the neural output successfully simulated all hard constitutional rules.
-- **Teacher/Student Disagreement Score:** Delta showing how closely the neural proposal matches the symbolic verification.
+Every advanced-mode decision must carry:
+- **Prior**
+- **Evidence references** (URI or reproducible hash)
+- **Posterior + confidence interval**
+- **Symbolic rule trace hash**
+- **Teacher/student disagreement score**
+- **Human review status**
+- **Policy version / threshold profile**
 
 ## 4. Hard Escalation and Abstention Thresholds (The Verifier Gate)
-The `decision.forum` crate enforces these rejection/escalation criteria:
-1. **Low Confidence:** If the posterior confidence interval is below the minimum threshold, the system MUST abstain or escalate.
-2. **Sensitivity Instability:** If minor perturbations in the prior or likelihood drastically alter the posterior (high instability), the system MUST escalate.
-3. **Verifier Mismatch:** If the neural student's proposal violates the symbolic verification replay, the decision MUST be summarily rejected.
-4. **Disagreement Too High:** If the disagreement score between the neural logic and the symbolic engine exceeds the allowable threshold, the decision MUST escalate.
-5. **Ratification Guard:** Any decision touching core sovereignty or policy MUST be handed over to a human council (gate TNC02).
+The current constitutional threshold profile is:
+- **Minimum confidence interval:** `0.85`
+- **Maximum sensitivity instability:** `0.10`
+- **Maximum teacher/student disagreement:** `0.05`
+- **Trace hash format:** 64 hex chars, optionally prefixed with `0x` or `sha256:`
+- **Evidence references:** at least one entry, each either `http://`, `https://`, or a valid hash reference
 
-## 5. Recursive Fine-Tuning Constraints
-Recursive supervised fine-tuning (SFT) is explicitly restricted:
-- **Curated Aggregation Only:** Neural students may ONLY be fine-tuned on adjudicated, teacher-verified, and council-ratified examples.
-- Raw self-play or unconstrained generative self-training is strictly prohibited to prevent Goodhart's Law drift, epistemic collapse, and the entrenchment of hallucinations.
+If any of the above fail, `decision.forum` MUST reject or escalate the decision before approval.
+
+## 5. Human Governance Requirements
+- Advanced reasoning does **not** replace symbolic verification.
+- Advanced reasoning does **not** replace human review.
+- Policy and sovereignty decisions require explicit ratification before terminal approval.
+- Humans must retain majority control over AI participants.
+
+## 6. Recursive Fine-Tuning Constraints
+Recursive supervised fine-tuning (SFT) is restricted to **teacher-verified, council-ratified** examples.
+
+Important: this restriction is a **process/governance control**, not a runtime training-enforcement mechanism inside `decision.forum` itself.
+
+## 7. Auditability
+Every failed verifier-gate or TNC enforcement path must leave a structured audit event containing:
+- timestamp
+- event type
+- reason
+- escalation reason where applicable
+- assessment snapshot where applicable
+
+## 8. Documentation Integrity
+Generated reports must not assert legal/evidentiary compliance unless the crate actually enforces it. Where full legal validation is out of scope, outputs must explicitly say review is still required.
