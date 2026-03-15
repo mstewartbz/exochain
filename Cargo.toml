@@ -1,14 +1,5 @@
 [workspace]
-members = [
-    "crates/decision-forum",
-    "crates/exochain-core",
-    "crates/exochain-node",
-    "crates/exochain-crypto",
-    "crates/exochain-network",
-    "crates/exochain-storage",
-    "crates/exochain-consensus",
-    "crates/exochain-governance"
-]
+resolver = "2"
 members = [
     "crates/exo-core",
     "crates/exo-dag",
@@ -16,6 +7,9 @@ members = [
     "crates/exo-consent",
     "crates/exo-api",
     "crates/exo-gatekeeper",
+    # decision.forum governance crates
+    "crates/exo-governance",
+    "crates/exo-authority",
 ]
 
 [workspace.package]
@@ -31,6 +25,8 @@ exo-core = { path = "crates/exo-core", version = "0.1.0" }
 exo-dag = { path = "crates/exo-dag", version = "0.1.0" }
 exo-identity = { path = "crates/exo-identity", version = "0.1.0" }
 exo-consent = { path = "crates/exo-consent", version = "0.1.0" }
+exo-governance = { path = "crates/exo-governance", version = "0.1.0" }
+exo-authority = { path = "crates/exo-authority", version = "0.1.0" }
 
 # Third-party dependencies (Pinned for security)
 serde = { version = "1.0", features = ["derive"] }
