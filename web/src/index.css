@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-governance-primary: #2563eb;
+  --color-governance-bg: #f0f7ff;
+}
+
+body {
+  @apply bg-white text-gray-900 antialiased;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* WCAG 2.2 AA focus indicators */
+*:focus-visible {
+  @apply outline-2 outline-offset-2 outline-governance-600;
+}
+
+/* Skip to main content link for screen readers */
+.skip-link {
+  @apply absolute -top-10 left-0 bg-governance-600 text-white px-4 py-2 z-50;
+  transition: top 0.2s;
+}
+.skip-link:focus {
+  @apply top-0;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
