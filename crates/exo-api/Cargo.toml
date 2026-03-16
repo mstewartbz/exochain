@@ -19,5 +19,6 @@ serde_cbor.workspace = true
 libp2p = { version = "0.53", features = ["tcp", "tls", "noise", "yamux", "macros", "tokio", "ping"] }
 
 [dev-dependencies]
+serde_json = "1.0.149"
 tokio.workspace = true
 serde_json.workspace = true
