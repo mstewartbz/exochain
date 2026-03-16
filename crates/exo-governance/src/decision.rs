@@ -2,6 +2,9 @@
 //!
 //! Satisfies: GOV-001, GOV-002, GOV-003, TNC-01, TNC-02, TNC-08
 
+use crate::anchor::AnchorReceipt;
+use crate::clearance::ClearanceCertificate;
+use crate::crosscheck::CrosscheckReport;
 use crate::errors::GovernanceError;
 use crate::types::*;
 use exo_core::crypto::Blake3Hash;
@@ -171,6 +174,16 @@ pub struct DecisionObject {
     pub signatures: Vec<GovernanceSignature>,
     /// History of status transitions.
     pub transition_log: Vec<StatusTransition>,
+
+    // --- decision.forum protocol extensions ---
+
+    /// CrosscheckReports attached to this decision (plural intelligence).
+    /// Produced by crosschecked.ai and attached as evidence of deliberation.
+    pub crosscheck_reports: Vec<CrosscheckReport>,
+    /// ClearanceCertificates issued for this decision (legitimacy proof).
+    pub clearance_certificates: Vec<ClearanceCertificate>,
+    /// AnchorReceipts proving immutable anchoring in EXOCHAIN.
+    pub anchor_receipts: Vec<AnchorReceipt>,
 }
 
 /// Conflict disclosure filed by a participant (TNC-06).
@@ -250,12 +263,24 @@ impl DecisionObject {
     /// Enforces:
     /// - Decision must be in Voting status
     /// - Voter must be in eligible voters list
-    /// - TNC-06: Voter must have disclosed any conflicts
+    /// - TNC-02: AI agents cannot vote on HUMAN_GATE_REQUIRED classes
+    /// - TNC-09: AI agent delegation ceiling
+    /// - No duplicate votes
     pub fn cast_vote(&mut self, vote: Vote) -> Result<(), GovernanceError> {
         if self.status != DecisionStatus::Voting {
             return Err(GovernanceError::InvalidTransition {
                 from: format!("{:?}", self.status),
                 to: "CastVote".to_string(),
+            });
+        }
+
+        // TNC-02 + TNC-09: AI agents cannot vote on human-gate-required classes
+        if matches!(vote.signer_type, SignerType::AiAgent { .. })
+            && self.decision_class.requires_human_gate()
+        {
+            return Err(GovernanceError::HumanGateViolation {
+                class: self.decision_class.clone(),
+                signer: vote.voter.clone(),
             });
         }
 
@@ -270,10 +295,6 @@ impl DecisionObject {
             });
         }
 
-        // TNC-06: Check conflict disclosure
-        // Voters who have a known conflict must have filed disclosure
-        // (This is a simplified check — full implementation would query a conflict registry)
-
         // Prevent duplicate votes
         if self.votes.iter().any(|v| v.voter == vote.voter) {
             return Err(GovernanceError::AuthorityChainBroken {
@@ -282,6 +303,37 @@ impl DecisionObject {
         }
 
         self.votes.push(vote);
+        Ok(())
+    }
+
+    /// File a challenge against this decision (GOV-008).
+    ///
+    /// Transitions the decision to Contested status, pausing execution.
+    /// Returns error if the decision is in a terminal or already contested state.
+    pub fn file_challenge(
+        &mut self,
+        challenge_id: Blake3Hash,
+        actor: Did,
+        signature: GovernanceSignature,
+        timestamp: HybridLogicalClock,
+    ) -> Result<(), GovernanceError> {
+        if !self.status.can_transition_to(&DecisionStatus::Contested) {
+            return Err(GovernanceError::InvalidTransition {
+                from: format!("{:?}", self.status),
+                to: "Contested".to_string(),
+            });
+        }
+
+        self.challenge_ids.push(challenge_id);
+        self.transition_log.push(StatusTransition {
+            from: self.status.clone(),
+            to: DecisionStatus::Contested,
+            timestamp,
+            actor,
+            reason: Some("Challenge filed — execution paused".to_string()),
+            signature,
+        });
+        self.status = DecisionStatus::Contested;
         Ok(())
     }
 
@@ -376,6 +428,9 @@ mod tests {
             challenge_ids: vec![],
             signatures: vec![],
             transition_log: vec![],
+            crosscheck_reports: vec![],
+            clearance_certificates: vec![],
+            anchor_receipts: vec![],
         }
     }
 
@@ -534,6 +589,70 @@ mod tests {
         assert!(!DecisionStatus::Created.is_terminal());
         assert!(!DecisionStatus::Contested.is_terminal());
         assert!(!DecisionStatus::RatificationRequired.is_terminal());
+    }
+
+    #[test]
+    fn test_tnc02_ai_blocked_on_human_gate() {
+        let mut d = test_decision();
+        d.decision_class = DecisionClass::Strategic; // requires human gate
+        d.status = DecisionStatus::Voting;
+
+        let ai_vote = Vote {
+            voter: "did:exo:alice".into(),
+            signer_type: SignerType::AiAgent {
+                delegation_id: Blake3Hash([99u8; 32]),
+                expires_at: 9999999,
+            },
+            choice: VoteChoice::Approve,
+            rationale: None,
+            signature: test_signature("did:exo:alice"),
+            timestamp: test_hlc(3000),
+        };
+        let result = d.cast_vote(ai_vote);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GovernanceError::HumanGateViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn test_file_challenge_transitions_to_contested() {
+        let mut d = test_decision();
+        d.advance(
+            DecisionStatus::Deliberation,
+            "did:exo:alice".into(),
+            None,
+            test_signature("did:exo:alice"),
+            test_hlc(2000),
+        )
+        .unwrap();
+
+        d.file_challenge(
+            Blake3Hash([50u8; 32]),
+            "did:exo:bob".into(),
+            test_signature("did:exo:bob"),
+            test_hlc(3000),
+        )
+        .unwrap();
+
+        assert_eq!(d.status, DecisionStatus::Contested);
+        assert_eq!(d.challenge_ids.len(), 1);
+        assert_eq!(d.transition_log.len(), 2); // Deliberation + Contested
+    }
+
+    #[test]
+    fn test_cannot_challenge_terminal_decision() {
+        let mut d = test_decision();
+        d.status = DecisionStatus::Approved; // terminal
+
+        let result = d.file_challenge(
+            Blake3Hash([50u8; 32]),
+            "did:exo:bob".into(),
+            test_signature("did:exo:bob"),
+            test_hlc(3000),
+        );
+        assert!(result.is_err());
     }
 
     #[test]

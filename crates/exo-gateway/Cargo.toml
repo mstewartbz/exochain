@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "API gateway: GraphQL/REST API, auth middleware, notifications for decision.forum"
 
+[[bin]]
+name = "decision-forum-server"
+path = "src/main.rs"
+
 [dependencies]
 exo-core.workspace = true
 exo-governance.workspace = true
@@ -18,6 +22,12 @@ thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+serde_cbor.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

@@ -6,6 +6,9 @@
 use exo_core::crypto::{hash_bytes, Blake3Hash};
 use serde::{Deserialize, Serialize};
 
+/// Domain separator for zkML proofs.
+const DOMAIN_SEP: &[u8] = b"EXOCHAIN-ZKML-v1";
+
 /// A zkML proof attesting to AI recommendation provenance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AiProvenanceProof {
@@ -15,6 +18,22 @@ pub struct AiProvenanceProof {
     pub confidence_score: f64,
     pub proof_bytes: Vec<u8>,
     pub model_version: String,
+}
+
+/// Compute expected proof bytes from the constituent fields.
+fn compute_proof_bytes(
+    model_hash: &Blake3Hash,
+    input_hash: &Blake3Hash,
+    output_hash: &Blake3Hash,
+    confidence: f64,
+) -> Vec<u8> {
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(DOMAIN_SEP);
+    preimage.extend_from_slice(&model_hash.0);
+    preimage.extend_from_slice(&input_hash.0);
+    preimage.extend_from_slice(&output_hash.0);
+    preimage.extend_from_slice(&confidence.to_le_bytes());
+    hash_bytes(&preimage).0.to_vec()
 }
 
 /// zkML prover for AI provenance.
@@ -32,12 +51,7 @@ impl ZkMlProver {
         let input_hash = hash_bytes(input_data);
         let output_hash = hash_bytes(output_data);
 
-        let mut preimage = Vec::new();
-        preimage.extend_from_slice(&model_hash.0);
-        preimage.extend_from_slice(&input_hash.0);
-        preimage.extend_from_slice(&output_hash.0);
-        preimage.extend_from_slice(&confidence.to_le_bytes());
-        let proof_bytes = hash_bytes(&preimage).0.to_vec();
+        let proof_bytes = compute_proof_bytes(&model_hash, &input_hash, &output_hash, confidence);
 
         AiProvenanceProof {
             model_hash,
@@ -51,9 +65,32 @@ impl ZkMlProver {
 }
 
 impl AiProvenanceProof {
-    /// Verify the provenance proof (stub).
+    /// Verify the provenance proof.
+    ///
+    /// Checks:
+    /// - confidence is in [0.0, 1.0]
+    /// - model_version is non-empty
+    /// - Recomputed proof from stored hashes and confidence matches proof_bytes
     pub fn verify(&self) -> bool {
-        !self.proof_bytes.is_empty() && self.confidence_score >= 0.0 && self.confidence_score <= 1.0
+        // Check confidence bounds
+        if self.confidence_score < 0.0 || self.confidence_score > 1.0 {
+            return false;
+        }
+
+        // Check model_version is non-empty
+        if self.model_version.is_empty() {
+            return false;
+        }
+
+        // Recompute expected proof and verify match
+        let expected = compute_proof_bytes(
+            &self.model_hash,
+            &self.input_hash,
+            &self.output_hash,
+            self.confidence_score,
+        );
+
+        self.proof_bytes == expected
     }
 
     /// Check if confidence meets a minimum threshold.
@@ -79,5 +116,44 @@ mod tests {
         assert!(proof.verify());
         assert!(proof.meets_confidence_threshold(0.9));
         assert!(!proof.meets_confidence_threshold(0.99));
+    }
+
+    #[test]
+    fn test_tampered_proof_fails() {
+        let mut proof = ZkMlProver::prove_recommendation(
+            Blake3Hash([1u8; 32]),
+            b"input features",
+            b"recommendation output",
+            0.95,
+            "governance-llm-v2".into(),
+        );
+        proof.proof_bytes[0] ^= 0xff;
+        assert!(!proof.verify());
+    }
+
+    #[test]
+    fn test_invalid_confidence_fails() {
+        let mut proof = ZkMlProver::prove_recommendation(
+            Blake3Hash([1u8; 32]),
+            b"input",
+            b"output",
+            0.5,
+            "model-v1".into(),
+        );
+        proof.confidence_score = 1.5;
+        assert!(!proof.verify());
+    }
+
+    #[test]
+    fn test_empty_model_version_fails() {
+        let mut proof = ZkMlProver::prove_recommendation(
+            Blake3Hash([1u8; 32]),
+            b"input",
+            b"output",
+            0.5,
+            "model-v1".into(),
+        );
+        proof.model_version = String::new();
+        assert!(!proof.verify());
     }
 }

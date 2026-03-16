@@ -84,10 +84,63 @@ impl EmergencyFrequencyTracker {
 }
 
 impl EmergencyAction {
+    /// Create an emergency action with auto-generated ratification requirement (TNC-10).
+    ///
+    /// The ratification_decision_id is auto-created — the caller must
+    /// create a corresponding RatificationRequired decision with this ID.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create(
+        id: Blake3Hash,
+        tenant_id: TenantId,
+        decision_id: Blake3Hash,
+        invoker: Did,
+        justification: String,
+        scope_description: String,
+        invoked_at: HybridLogicalClock,
+        ratification_deadline: u64,
+        ratification_decision_id: Blake3Hash,
+        signature: GovernanceSignature,
+    ) -> Self {
+        Self {
+            id,
+            tenant_id,
+            decision_id,
+            invoker,
+            justification,
+            scope_description,
+            invoked_at,
+            ratification_deadline,
+            ratification_decision_id,
+            ratification_status: RatificationStatus::Pending,
+            signature,
+        }
+    }
+
     /// Check if ratification deadline has passed.
     pub fn is_ratification_expired(&self, current_time_ms: u64) -> bool {
         current_time_ms >= self.ratification_deadline
             && self.ratification_status == RatificationStatus::Pending
+    }
+
+    /// Mark the emergency action as ratified.
+    pub fn ratify(&mut self) -> Result<(), &'static str> {
+        if self.ratification_status != RatificationStatus::Pending {
+            return Err("Can only ratify a pending emergency action");
+        }
+        self.ratification_status = RatificationStatus::Ratified;
+        Ok(())
+    }
+
+    /// Mark the emergency action as expired (ratification deadline passed).
+    pub fn expire(&mut self, current_time_ms: u64) -> Result<(), &'static str> {
+        if self.ratification_status != RatificationStatus::Pending {
+            return Err("Can only expire a pending emergency action");
+        }
+        if current_time_ms < self.ratification_deadline {
+            return Err("Deadline has not yet passed");
+        }
+        self.ratification_status = RatificationStatus::Expired;
+        Ok(())
     }
 }
 
@@ -122,6 +175,78 @@ mod tests {
 
         tracker.reset_quarter();
         assert_eq!(tracker.count(), 0);
+    }
+
+    #[test]
+    fn test_create_and_ratify() {
+        let mut action = EmergencyAction::create(
+            Blake3Hash([1u8; 32]),
+            "t1".to_string(),
+            Blake3Hash([2u8; 32]),
+            "did:exo:admin".to_string(),
+            "Critical security incident".to_string(),
+            "Suspend user access".to_string(),
+            HybridLogicalClock {
+                physical_ms: 1000,
+                logical: 0,
+            },
+            5000,
+            Blake3Hash([3u8; 32]),
+            GovernanceSignature {
+                signer: "did:exo:admin".to_string(),
+                signer_type: SignerType::Human,
+                signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
+                key_version: 1,
+                timestamp: HybridLogicalClock {
+                    physical_ms: 1000,
+                    logical: 0,
+                },
+            },
+        );
+
+        assert_eq!(action.ratification_status, RatificationStatus::Pending);
+        assert!(!action.is_ratification_expired(4000));
+
+        action.ratify().unwrap();
+        assert_eq!(action.ratification_status, RatificationStatus::Ratified);
+
+        // Cannot ratify again
+        assert!(action.ratify().is_err());
+    }
+
+    #[test]
+    fn test_expire_emergency_action() {
+        let mut action = EmergencyAction::create(
+            Blake3Hash([1u8; 32]),
+            "t1".to_string(),
+            Blake3Hash([2u8; 32]),
+            "did:exo:admin".to_string(),
+            "Emergency".to_string(),
+            "Scope".to_string(),
+            HybridLogicalClock {
+                physical_ms: 1000,
+                logical: 0,
+            },
+            5000,
+            Blake3Hash([3u8; 32]),
+            GovernanceSignature {
+                signer: "did:exo:admin".to_string(),
+                signer_type: SignerType::Human,
+                signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
+                key_version: 1,
+                timestamp: HybridLogicalClock {
+                    physical_ms: 1000,
+                    logical: 0,
+                },
+            },
+        );
+
+        // Cannot expire before deadline
+        assert!(action.expire(4000).is_err());
+
+        // Can expire after deadline
+        action.expire(5000).unwrap();
+        assert_eq!(action.ratification_status, RatificationStatus::Expired);
     }
 
     #[test]

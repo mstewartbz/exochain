@@ -99,7 +99,8 @@ pub enum GovSubscription {
 pub struct GovSchema;
 
 impl GovSchema {
-    /// Get the SDL (Schema Definition Language) for the governance API.
+    /// Get the SDL (Schema Definition Language) for the governance API,
+    /// including LiveSafe extensions.
     pub fn sdl() -> &'static str {
         r#"
 type Query {

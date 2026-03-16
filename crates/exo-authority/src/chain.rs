@@ -107,9 +107,7 @@ pub fn verify_chain(
         delegations
             .iter()
             .find(|d| d.id == *d_id)
-            .is_some_and(|d| {
-                matches!(d.signature.signer_type, SignerType::Human)
-            })
+            .is_some_and(|d| matches!(d.signature.signer_type, SignerType::Human))
     }) || matches!(actor_signer_type, SignerType::Human);
 
     Ok(ChainProof {

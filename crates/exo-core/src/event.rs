@@ -78,6 +78,53 @@ pub enum EventPayload {
         decision_id: Blake3Hash,
         discloser: Did,
     },
+    // --- Holon lifecycle events (per spec v2.1 Section 3A) ---
+    HolonCreated {
+        holon_did: Did,
+        sponsor_did: Did,
+        genesis_model_cid: Blake3Hash,
+    },
+    HolonActivated {
+        holon_did: Did,
+        approver_did: Did,
+        approval_level: u32,
+    },
+    HolonActionProposed {
+        holon_did: Did,
+        action_hash: Blake3Hash,
+        reasoning_trace_cid: Blake3Hash,
+    },
+    HolonActionVerified {
+        holon_did: Did,
+        action_hash: Blake3Hash,
+        cgr_proof_hash: Blake3Hash,
+    },
+    HolonActionExecuted {
+        holon_did: Did,
+        action_hash: Blake3Hash,
+        outcome_hash: Blake3Hash,
+    },
+    HolonSuspended {
+        holon_did: Did,
+        reason: String,
+        suspended_by: Did,
+    },
+    HolonReinstated {
+        holon_did: Did,
+        reinstated_by: Did,
+        remediation_evidence_cid: Blake3Hash,
+    },
+    HolonSunset {
+        holon_did: Did,
+        reason: String,
+        initiated_by: Did,
+    },
+    // --- CGR Kernel events ---
+    CgrProofIssued {
+        proof_id: u64,
+        invariants_checked: u32,
+        registry_hash: Blake3Hash,
+    },
     // Generic extension point
     Opaque(Vec<u8>),
 }

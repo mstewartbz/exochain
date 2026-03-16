@@ -8,6 +8,7 @@ members = [
     "crates/exo-api",
     "crates/exo-gatekeeper",
     # decision.forum governance crates
+    "crates/decision-forum",
     "crates/exo-governance",
     "crates/exo-authority",
     # decision.forum Phase 2-4 crates
@@ -15,6 +16,7 @@ members = [
     "crates/exo-tenant",
     "crates/exo-proofs",
     "crates/exo-gateway",
+    "crates/exo-escalation",
 ]
 
 [workspace.package]
@@ -53,3 +55,5 @@ bs58 = "0.5"
 hex = "0.4"
 rand = "0.8"
 uuid = { version = "1.0", features = ["v4", "serde"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "fs"] }

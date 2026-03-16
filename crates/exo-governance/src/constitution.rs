@@ -157,6 +157,7 @@ impl Constitution {
         results
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_single_constraint(
         &self,
         constraint: &Constraint,

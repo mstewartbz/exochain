@@ -10,6 +10,7 @@ export default defineConfig({
     },
   },
   server: {
+    port: 3100,
     proxy: {
       '/api': 'http://localhost:8080',
       '/graphql': 'http://localhost:8080',

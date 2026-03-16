@@ -29,6 +29,30 @@ pub enum RestRoute {
     EDiscoveryExport,
     /// GET /api/v1/audit/:decision_id
     AuditTrail,
+    /// POST /api/v1/auth/register
+    AuthRegister,
+    /// POST /api/v1/auth/login
+    AuthLogin,
+    /// POST /api/v1/auth/refresh
+    AuthRefresh,
+    /// GET /api/v1/auth/me
+    AuthMe,
+    /// POST /api/v1/auth/logout
+    AuthLogout,
+    /// POST /api/v1/agents/enroll
+    AgentEnroll,
+    /// GET /api/v1/agents
+    ListAgents,
+    /// GET /api/v1/agents/:did
+    GetAgent,
+    /// POST /api/v1/agents/:did/advance-pace
+    AdvanceAgentPace,
+    /// GET /api/v1/identity/:did/score
+    GetIdentityScore,
+    /// GET /api/v1/users
+    ListUsers,
+    /// POST /api/v1/users/:did/advance-pace
+    AdvanceUserPace,
 }
 
 impl RestRoute {
@@ -38,11 +62,23 @@ impl RestRoute {
             RestRoute::Health
             | RestRoute::GetDecision
             | RestRoute::GetConstitution
-            | RestRoute::AuditTrail => "GET",
+            | RestRoute::AuditTrail
+            | RestRoute::AuthMe
+            | RestRoute::ListAgents
+            | RestRoute::GetAgent
+            | RestRoute::GetIdentityScore
+            | RestRoute::ListUsers => "GET",
             RestRoute::CreateDecision
             | RestRoute::AuthToken
             | RestRoute::SamlCallback
-            | RestRoute::EDiscoveryExport => "POST",
+            | RestRoute::EDiscoveryExport
+            | RestRoute::AuthRegister
+            | RestRoute::AuthLogin
+            | RestRoute::AuthRefresh
+            | RestRoute::AuthLogout
+            | RestRoute::AgentEnroll
+            | RestRoute::AdvanceAgentPace
+            | RestRoute::AdvanceUserPace => "POST",
         }
     }
 
@@ -57,6 +93,18 @@ impl RestRoute {
             RestRoute::GetConstitution => "/api/v1/tenants/:id/constitution",
             RestRoute::EDiscoveryExport => "/api/v1/ediscovery/export",
             RestRoute::AuditTrail => "/api/v1/audit/:decision_id",
+            RestRoute::AuthRegister => "/api/v1/auth/register",
+            RestRoute::AuthLogin => "/api/v1/auth/login",
+            RestRoute::AuthRefresh => "/api/v1/auth/refresh",
+            RestRoute::AuthMe => "/api/v1/auth/me",
+            RestRoute::AuthLogout => "/api/v1/auth/logout",
+            RestRoute::AgentEnroll => "/api/v1/agents/enroll",
+            RestRoute::ListAgents => "/api/v1/agents",
+            RestRoute::GetAgent => "/api/v1/agents/:did",
+            RestRoute::AdvanceAgentPace => "/api/v1/agents/:did/advance-pace",
+            RestRoute::GetIdentityScore => "/api/v1/identity/:did/score",
+            RestRoute::ListUsers => "/api/v1/users",
+            RestRoute::AdvanceUserPace => "/api/v1/users/:did/advance-pace",
         }
     }
 
@@ -71,6 +119,18 @@ impl RestRoute {
             RestRoute::GetConstitution,
             RestRoute::EDiscoveryExport,
             RestRoute::AuditTrail,
+            RestRoute::AuthRegister,
+            RestRoute::AuthLogin,
+            RestRoute::AuthRefresh,
+            RestRoute::AuthMe,
+            RestRoute::AuthLogout,
+            RestRoute::AgentEnroll,
+            RestRoute::ListAgents,
+            RestRoute::GetAgent,
+            RestRoute::AdvanceAgentPace,
+            RestRoute::GetIdentityScore,
+            RestRoute::ListUsers,
+            RestRoute::AdvanceUserPace,
         ]
     }
 }
@@ -83,17 +143,32 @@ mod tests {
     fn test_route_methods() {
         assert_eq!(RestRoute::Health.method(), "GET");
         assert_eq!(RestRoute::CreateDecision.method(), "POST");
+        assert_eq!(RestRoute::AuthRegister.method(), "POST");
+        assert_eq!(RestRoute::AuthLogin.method(), "POST");
+        assert_eq!(RestRoute::AuthMe.method(), "GET");
+        assert_eq!(RestRoute::ListAgents.method(), "GET");
+        assert_eq!(RestRoute::AgentEnroll.method(), "POST");
+        assert_eq!(RestRoute::GetIdentityScore.method(), "GET");
+        assert_eq!(RestRoute::ListUsers.method(), "GET");
+        assert_eq!(RestRoute::AdvanceUserPace.method(), "POST");
     }
 
     #[test]
     fn test_route_paths() {
         assert_eq!(RestRoute::Health.path(), "/health");
         assert!(RestRoute::GetDecision.path().contains(":id"));
+        assert_eq!(RestRoute::AuthRegister.path(), "/api/v1/auth/register");
+        assert_eq!(RestRoute::AuthLogin.path(), "/api/v1/auth/login");
+        assert_eq!(RestRoute::GetAgent.path(), "/api/v1/agents/:did");
+        assert_eq!(
+            RestRoute::GetIdentityScore.path(),
+            "/api/v1/identity/:did/score"
+        );
     }
 
     #[test]
     fn test_all_routes() {
         let routes = RestRoute::all();
-        assert_eq!(routes.len(), 8);
+        assert_eq!(routes.len(), 20);
     }
 }

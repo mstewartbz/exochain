@@ -54,6 +54,7 @@ pub struct FiduciaryDefense;
 
 impl FiduciaryDefense {
     /// Generate a defense package for a decision, checking each fiduciary element.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate(
         decision_id: Blake3Hash,
         tenant_id: String,
@@ -115,7 +116,12 @@ impl FiduciaryDefense {
             },
         ];
 
-        let content_hash = decision_id; // Simplified — real impl would hash all elements
+        // Compute real content hash by hashing all element evidence_hashes concatenated
+        let mut hash_preimage = Vec::new();
+        for element in &elements {
+            hash_preimage.extend_from_slice(&element.evidence_hash.0);
+        }
+        let content_hash = exo_core::crypto::hash_bytes(&hash_preimage);
 
         DefensePackage {
             id: Uuid::new_v4(),

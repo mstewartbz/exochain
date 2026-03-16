@@ -58,6 +58,7 @@ impl EvidenceCapture {
     }
 
     /// Capture a new piece of evidence for a decision.
+    #[allow(clippy::too_many_arguments)]
     pub fn capture(
         &mut self,
         decision_id: Blake3Hash,
