@@ -6,6 +6,7 @@
 //! Satisfies: ENT-004, UX-005, UX-006
 
 pub mod auth;
+pub mod db;
 pub mod graphql;
 pub mod livesafe;
 pub mod middleware;
