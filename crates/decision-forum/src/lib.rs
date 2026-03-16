@@ -14,6 +14,9 @@ pub mod requirements;
 pub mod tnc_enforcer;
 
 pub use decision_object::DecisionObject;
+pub use decision_object::{DecisionObject, DecisionClass, SignerType, Status};
+pub use constitution::ConstitutionRef;
+pub use tnc_enforcer::TNCEnforcer;
 pub use fiduciary_package::FiduciaryDefensePackage;
 pub use tnc_enforcer::TNCEnforcer;
 
