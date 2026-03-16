@@ -177,109 +177,207 @@ pub enum LiveSafeMutation {
 // ---------------------------------------------------------------------------
 
 /// Resolve a `LiveSafeQuery` and return a JSON-serialisable result.
+/// Falls back to mock data when no database pool is provided.
 pub fn resolve_query(query: &LiveSafeQuery) -> serde_json::Value {
+    resolve_query_mock(query)
+}
+
+/// Resolve a query against a real PostgreSQL database.
+pub async fn resolve_query_db(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> serde_json::Value {
+    use crate::db;
     match query {
         LiveSafeQuery::Identity { did } => {
-            let identity = LiveSafeIdentity {
-                did: did.clone(),
-                odentity_composite: 72.5,
-                pace_status: PaceStatus::Active,
-                card_status: CardStatus::Active,
-                created_at_ms: 1_700_000_000_000,
-                exochain_anchor: Some("anchor_abc123".to_string()),
-            };
-            serde_json::to_value(identity).unwrap_or_default()
+            match db::get_livesafe_identity(pool, did).await {
+                Ok(Some(row)) => serde_json::json!({
+                    "did": row.did,
+                    "odentityComposite": row.odentity_composite,
+                    "paceStatus": row.pace_status,
+                    "cardStatus": row.card_status,
+                    "createdAtMs": row.created_at_ms,
+                    "exochainAnchor": row.exochain_anchor,
+                }),
+                _ => resolve_query_mock(query),
+            }
         }
         LiveSafeQuery::ScanHistory { subscriber_did } => {
-            let receipt = ScanReceipt {
-                scan_id: "scan-001".to_string(),
-                subscriber_did: subscriber_did.clone(),
-                responder_did: "did:exo:responder:42".to_string(),
-                location: Some("40.7128,-74.0060".to_string()),
-                scanned_at_ms: 1_700_000_100_000,
-                consent_expires_at_ms: 1_700_000_200_000,
-                audit_receipt_hash: "deadbeef".to_string(),
-                anchor_receipt: Some("anchor_scan_001".to_string()),
-            };
-            serde_json::to_value(vec![receipt]).unwrap_or_default()
+            match db::list_scan_receipts(pool, subscriber_did).await {
+                Ok(rows) if !rows.is_empty() => {
+                    let receipts: Vec<_> = rows.iter().map(|r| serde_json::json!({
+                        "scanId": r.scan_id,
+                        "subscriberDid": r.subscriber_did,
+                        "responderDid": r.responder_did,
+                        "location": r.location,
+                        "scannedAtMs": r.scanned_at_ms,
+                        "consentExpiresAtMs": r.consent_expires_at_ms,
+                        "auditReceiptHash": r.audit_receipt_hash,
+                        "anchorReceipt": r.anchor_receipt,
+                    })).collect();
+                    serde_json::to_value(receipts).unwrap_or_default()
+                }
+                _ => resolve_query_mock(query),
+            }
         }
         LiveSafeQuery::ConsentLog { subscriber_did } => {
-            let consent = ConsentAnchor {
-                consent_id: "consent-001".to_string(),
-                subscriber_did: subscriber_did.clone(),
-                provider_did: "did:exo:provider:99".to_string(),
-                scope: vec!["medical".to_string(), "emergency".to_string()],
-                granted_at_ms: 1_700_000_050_000,
-                expires_at_ms: Some(1_700_086_400_000),
-                revoked_at_ms: None,
-                audit_receipt_hash: "cafebabe".to_string(),
-            };
-            serde_json::to_value(vec![consent]).unwrap_or_default()
+            match db::list_consent_anchors(pool, subscriber_did).await {
+                Ok(rows) if !rows.is_empty() => {
+                    let consents: Vec<_> = rows.iter().map(|r| serde_json::json!({
+                        "consentId": r.consent_id,
+                        "subscriberDid": r.subscriber_did,
+                        "providerDid": r.provider_did,
+                        "scope": r.scope,
+                        "grantedAtMs": r.granted_at_ms,
+                        "expiresAtMs": r.expires_at_ms,
+                        "revokedAtMs": r.revoked_at_ms,
+                        "auditReceiptHash": r.audit_receipt_hash,
+                    })).collect();
+                    serde_json::to_value(consents).unwrap_or_default()
+                }
+                _ => resolve_query_mock(query),
+            }
         }
-        LiveSafeQuery::PaceStatus { subscriber_did: _ } => {
-            let shard = TrusteeShardStatus {
-                trustee_did: "did:exo:trustee:primary".to_string(),
-                role: "primary".to_string(),
-                shard_confirmed: true,
-                accepted_at_ms: Some(1_700_000_010_000),
-            };
-            serde_json::to_value(vec![shard]).unwrap_or_default()
+        LiveSafeQuery::PaceStatus { subscriber_did } => {
+            match db::list_trustee_shards(pool, subscriber_did).await {
+                Ok(rows) if !rows.is_empty() => {
+                    let shards: Vec<_> = rows.iter().map(|r| serde_json::json!({
+                        "trusteeDid": r.trustee_did,
+                        "role": r.role,
+                        "shardConfirmed": r.shard_confirmed,
+                        "acceptedAtMs": r.accepted_at_ms,
+                    })).collect();
+                    serde_json::to_value(shards).unwrap_or_default()
+                }
+                _ => resolve_query_mock(query),
+            }
+        }
+    }
+}
+
+fn resolve_query_mock(query: &LiveSafeQuery) -> serde_json::Value {
+    match query {
+        LiveSafeQuery::Identity { did } => {
+            serde_json::to_value(LiveSafeIdentity {
+                did: did.clone(), odentity_composite: 72.5,
+                pace_status: PaceStatus::Active, card_status: CardStatus::Active,
+                created_at_ms: 1_700_000_000_000, exochain_anchor: Some("anchor_abc123".into()),
+            }).unwrap_or_default()
+        }
+        LiveSafeQuery::ScanHistory { subscriber_did } => {
+            serde_json::to_value(vec![ScanReceipt {
+                scan_id: "scan-001".into(), subscriber_did: subscriber_did.clone(),
+                responder_did: "did:exo:responder:42".into(),
+                location: Some("40.7128,-74.0060".into()),
+                scanned_at_ms: 1_700_000_100_000, consent_expires_at_ms: 1_700_000_200_000,
+                audit_receipt_hash: "deadbeef".into(), anchor_receipt: Some("anchor_scan_001".into()),
+            }]).unwrap_or_default()
+        }
+        LiveSafeQuery::ConsentLog { subscriber_did } => {
+            serde_json::to_value(vec![ConsentAnchor {
+                consent_id: "consent-001".into(), subscriber_did: subscriber_did.clone(),
+                provider_did: "did:exo:provider:99".into(),
+                scope: vec!["medical".into(), "emergency".into()],
+                granted_at_ms: 1_700_000_050_000, expires_at_ms: Some(1_700_086_400_000),
+                revoked_at_ms: None, audit_receipt_hash: "cafebabe".into(),
+            }]).unwrap_or_default()
+        }
+        LiveSafeQuery::PaceStatus { .. } => {
+            serde_json::to_value(vec![TrusteeShardStatus {
+                trustee_did: "did:exo:trustee:primary".into(), role: "primary".into(),
+                shard_confirmed: true, accepted_at_ms: Some(1_700_000_010_000),
+            }]).unwrap_or_default()
         }
     }
 }
 
 /// Resolve a `LiveSafeMutation` and return a JSON-serialisable result.
 pub fn resolve_mutation(mutation: &LiveSafeMutation) -> serde_json::Value {
+    resolve_mutation_mock(mutation)
+}
+
+/// Resolve a mutation against a real PostgreSQL database.
+pub async fn resolve_mutation_db(mutation: &LiveSafeMutation, pool: &sqlx::PgPool) -> serde_json::Value {
+    use crate::db;
     match mutation {
         LiveSafeMutation::AnchorScan { input } => {
-            let receipt = ScanReceipt {
-                scan_id: format!("scan-{}", uuid::Uuid::new_v4()),
-                subscriber_did: input.subscriber_did.clone(),
-                responder_did: input.responder_did.clone(),
-                location: input.location.clone(),
-                scanned_at_ms: now_ms(),
-                consent_expires_at_ms: input.consent_expires_at_ms,
-                audit_receipt_hash: hex::encode(
-                    exo_core::hash_bytes(input.subscriber_did.as_bytes()).0,
-                ),
-                anchor_receipt: Some(format!("anchor_{}", uuid::Uuid::new_v4())),
-            };
-            serde_json::to_value(receipt).unwrap_or_default()
+            let scan_id = format!("scan-{}", uuid::Uuid::new_v4());
+            let audit_hash = hex::encode(exo_core::hash_bytes(input.subscriber_did.as_bytes()).0);
+            let anchor = format!("anchor_{}", uuid::Uuid::new_v4());
+            let _ = db::insert_scan_receipt(
+                pool, &scan_id, &input.subscriber_did, &input.responder_did,
+                input.location.as_deref(), now_ms() as i64,
+                input.consent_expires_at_ms as i64, &audit_hash, Some(&anchor),
+            ).await;
+            serde_json::to_value(ScanReceipt {
+                scan_id, subscriber_did: input.subscriber_did.clone(),
+                responder_did: input.responder_did.clone(), location: input.location.clone(),
+                scanned_at_ms: now_ms(), consent_expires_at_ms: input.consent_expires_at_ms,
+                audit_receipt_hash: audit_hash, anchor_receipt: Some(anchor),
+            }).unwrap_or_default()
         }
         LiveSafeMutation::AnchorConsent { input } => {
-            let consent = ConsentAnchor {
-                consent_id: format!("consent-{}", uuid::Uuid::new_v4()),
-                subscriber_did: input.subscriber_did.clone(),
-                provider_did: input.provider_did.clone(),
-                scope: input.scope.clone(),
-                granted_at_ms: now_ms(),
-                expires_at_ms: input.expires_at_ms,
-                revoked_at_ms: None,
-                audit_receipt_hash: hex::encode(
-                    exo_core::hash_bytes(input.subscriber_did.as_bytes()).0,
-                ),
-            };
-            serde_json::to_value(consent).unwrap_or_default()
+            let consent_id = format!("consent-{}", uuid::Uuid::new_v4());
+            let audit_hash = hex::encode(exo_core::hash_bytes(input.subscriber_did.as_bytes()).0);
+            let scope_json = serde_json::to_value(&input.scope).unwrap_or_default();
+            let _ = db::insert_consent_anchor(
+                pool, &consent_id, &input.subscriber_did, &input.provider_did,
+                &scope_json, now_ms() as i64, input.expires_at_ms.map(|v| v as i64), &audit_hash,
+            ).await;
+            serde_json::to_value(ConsentAnchor {
+                consent_id, subscriber_did: input.subscriber_did.clone(),
+                provider_did: input.provider_did.clone(), scope: input.scope.clone(),
+                granted_at_ms: now_ms(), expires_at_ms: input.expires_at_ms,
+                revoked_at_ms: None, audit_receipt_hash: audit_hash,
+            }).unwrap_or_default()
         }
         LiveSafeMutation::RegisterIdentity { did } => {
-            let identity = LiveSafeIdentity {
-                did: did.clone(),
-                odentity_composite: 0.0,
-                pace_status: PaceStatus::Incomplete,
-                card_status: CardStatus::NotIssued,
-                created_at_ms: now_ms(),
-                exochain_anchor: Some(format!("anchor_{}", uuid::Uuid::new_v4())),
-            };
-            serde_json::to_value(identity).unwrap_or_default()
+            let anchor = format!("anchor_{}", uuid::Uuid::new_v4());
+            let _ = db::insert_livesafe_identity(
+                pool, did, 0.0, "Incomplete", "NotIssued", now_ms() as i64, Some(&anchor),
+            ).await;
+            serde_json::to_value(LiveSafeIdentity {
+                did: did.clone(), odentity_composite: 0.0,
+                pace_status: PaceStatus::Incomplete, card_status: CardStatus::NotIssued,
+                created_at_ms: now_ms(), exochain_anchor: Some(anchor),
+            }).unwrap_or_default()
         }
-        LiveSafeMutation::AnchorAuditReceipt {
-            subscriber_did,
-            receipt_hash,
-            event_type,
-        } => {
+        LiveSafeMutation::AnchorAuditReceipt { subscriber_did, receipt_hash, event_type } => {
             let combined = format!("{}:{}:{}", subscriber_did, receipt_hash, event_type);
             let anchor_hash = hex::encode(exo_core::hash_bytes(combined.as_bytes()).0);
-            serde_json::to_value(anchor_hash).unwrap_or_default()
+            serde_json::to_value(&anchor_hash).unwrap_or_default()
+        }
+    }
+}
+
+fn resolve_mutation_mock(mutation: &LiveSafeMutation) -> serde_json::Value {
+    match mutation {
+        LiveSafeMutation::AnchorScan { input } => {
+            serde_json::to_value(ScanReceipt {
+                scan_id: format!("scan-{}", uuid::Uuid::new_v4()),
+                subscriber_did: input.subscriber_did.clone(),
+                responder_did: input.responder_did.clone(), location: input.location.clone(),
+                scanned_at_ms: now_ms(), consent_expires_at_ms: input.consent_expires_at_ms,
+                audit_receipt_hash: hex::encode(exo_core::hash_bytes(input.subscriber_did.as_bytes()).0),
+                anchor_receipt: Some(format!("anchor_{}", uuid::Uuid::new_v4())),
+            }).unwrap_or_default()
+        }
+        LiveSafeMutation::AnchorConsent { input } => {
+            serde_json::to_value(ConsentAnchor {
+                consent_id: format!("consent-{}", uuid::Uuid::new_v4()),
+                subscriber_did: input.subscriber_did.clone(),
+                provider_did: input.provider_did.clone(), scope: input.scope.clone(),
+                granted_at_ms: now_ms(), expires_at_ms: input.expires_at_ms, revoked_at_ms: None,
+                audit_receipt_hash: hex::encode(exo_core::hash_bytes(input.subscriber_did.as_bytes()).0),
+            }).unwrap_or_default()
+        }
+        LiveSafeMutation::RegisterIdentity { did } => {
+            serde_json::to_value(LiveSafeIdentity {
+                did: did.clone(), odentity_composite: 0.0,
+                pace_status: PaceStatus::Incomplete, card_status: CardStatus::NotIssued,
+                created_at_ms: now_ms(), exochain_anchor: Some(format!("anchor_{}", uuid::Uuid::new_v4())),
+            }).unwrap_or_default()
+        }
+        LiveSafeMutation::AnchorAuditReceipt { subscriber_did, receipt_hash, event_type } => {
+            let combined = format!("{}:{}:{}", subscriber_did, receipt_hash, event_type);
+            serde_json::to_value(hex::encode(exo_core::hash_bytes(combined.as_bytes()).0)).unwrap_or_default()
         }
     }
 }

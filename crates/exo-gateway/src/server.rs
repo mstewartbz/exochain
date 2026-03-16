@@ -137,6 +137,8 @@ pub struct AppState {
     pub identity_scores: HashMap<String, IdentityScore>,
     pub jwt_service: JwtService,
     pub enrollment_log: Vec<EnrollmentRecord>,
+    /// Optional PostgreSQL pool for write-through persistence.
+    pub pool: Option<sqlx::PgPool>,
 }
 
 impl Default for AppState {
@@ -160,6 +162,7 @@ impl AppState {
             identity_scores: HashMap::new(),
             jwt_service,
             enrollment_log: Vec::new(),
+            pool: None,
         };
         seed_users(&mut state);
         seed_agents(&mut state);
@@ -1547,6 +1550,27 @@ async fn create_decision(
         "tenant-1".into(),
         hlc,
     );
+    // Write-through to PostgreSQL
+    if let Some(pool) = &s.pool {
+        let payload = serde_json::to_value(&decision).unwrap_or_default();
+        let id_hash = format_hash(&decision.id);
+        let _ = crate::db::insert_decision(
+            pool, &id_hash, &decision.tenant_id,
+            &status_to_string(&decision.status), &decision.title,
+            &decision_class_to_string(&decision.decision_class),
+            &decision.author, decision.created_at.physical_ms as i64,
+            &decision.constitution_version.to_string(), &payload,
+        ).await;
+        // Persist the audit entry
+        if let Some(entry) = s.audit_log.entries().last() {
+            let _ = crate::db::insert_audit_entry(
+                pool, entry.sequence as i64, &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash), &format!("{:?}", entry.event_type),
+                &entry.actor, &entry.tenant_id, entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32, &format_hash(&entry.entry_hash),
+            ).await;
+        }
+    }
     let json = decision_to_json(&decision);
     s.decisions.push(decision);
     Ok((StatusCode::CREATED, Json(json)))
@@ -1603,6 +1627,26 @@ async fn advance_decision(
         "tenant-1".into(),
         hlc,
     );
+    // Write-through: update decision + persist audit entry
+    if let Some(pool) = &s.pool {
+        let payload = serde_json::to_value(&s.decisions[idx]).unwrap_or_default();
+        let id_hash = format_hash(&s.decisions[idx].id);
+        let _ = crate::db::upsert_decision(
+            pool, &id_hash, &s.decisions[idx].tenant_id,
+            &status_to_string(&s.decisions[idx].status), &s.decisions[idx].title,
+            &decision_class_to_string(&s.decisions[idx].decision_class),
+            &s.decisions[idx].author, s.decisions[idx].created_at.physical_ms as i64,
+            &s.decisions[idx].constitution_version.to_string(), &payload,
+        ).await;
+        if let Some(entry) = s.audit_log.entries().last() {
+            let _ = crate::db::insert_audit_entry(
+                pool, entry.sequence as i64, &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash), &format!("{:?}", entry.event_type),
+                &entry.actor, &entry.tenant_id, entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32, &format_hash(&entry.entry_hash),
+            ).await;
+        }
+    }
 
     let json = decision_to_json(&s.decisions[idx]);
     Ok(Json(json))
@@ -1668,6 +1712,26 @@ async fn cast_vote(
         "tenant-1".into(),
         hlc,
     );
+    // Write-through: update decision + persist audit entry
+    if let Some(pool) = &s.pool {
+        let payload = serde_json::to_value(&s.decisions[idx]).unwrap_or_default();
+        let id_hash = format_hash(&s.decisions[idx].id);
+        let _ = crate::db::upsert_decision(
+            pool, &id_hash, &s.decisions[idx].tenant_id,
+            &status_to_string(&s.decisions[idx].status), &s.decisions[idx].title,
+            &decision_class_to_string(&s.decisions[idx].decision_class),
+            &s.decisions[idx].author, s.decisions[idx].created_at.physical_ms as i64,
+            &s.decisions[idx].constitution_version.to_string(), &payload,
+        ).await;
+        if let Some(entry) = s.audit_log.entries().last() {
+            let _ = crate::db::insert_audit_entry(
+                pool, entry.sequence as i64, &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash), &format!("{:?}", entry.event_type),
+                &entry.actor, &entry.tenant_id, entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32, &format_hash(&entry.entry_hash),
+            ).await;
+        }
+    }
 
     let json = decision_to_json(&s.decisions[idx]);
     Ok(Json(json))
@@ -1729,6 +1793,26 @@ async fn tally_decision(
         "tenant-1".into(),
         hlc,
     );
+    // Write-through: update decision + persist audit entry
+    if let Some(pool) = &s.pool {
+        let payload = serde_json::to_value(&s.decisions[idx]).unwrap_or_default();
+        let id_hash = format_hash(&s.decisions[idx].id);
+        let _ = crate::db::upsert_decision(
+            pool, &id_hash, &s.decisions[idx].tenant_id,
+            &status_to_string(&s.decisions[idx].status), &s.decisions[idx].title,
+            &decision_class_to_string(&s.decisions[idx].decision_class),
+            &s.decisions[idx].author, s.decisions[idx].created_at.physical_ms as i64,
+            &s.decisions[idx].constitution_version.to_string(), &payload,
+        ).await;
+        if let Some(entry) = s.audit_log.entries().last() {
+            let _ = crate::db::insert_audit_entry(
+                pool, entry.sequence as i64, &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash), &format!("{:?}", entry.event_type),
+                &entry.actor, &entry.tenant_id, entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32, &format_hash(&entry.entry_hash),
+            ).await;
+        }
+    }
 
     let json = decision_to_json(&s.decisions[idx]);
     Ok(Json(json))
@@ -1892,6 +1976,24 @@ async fn auth_register(
         tenant_id,
         hlc,
     );
+
+    // Write-through: persist user + audit entry
+    if let Some(pool) = &s.pool {
+        let roles = serde_json::to_value(&user.roles).unwrap_or_default();
+        let _ = crate::db::insert_user(
+            pool, &user.did, &user.display_name, &user.email, &roles,
+            &user.tenant_id, user.created_at as i64, &format!("{:?}", user.status),
+            &format!("{:?}", user.pace_status), &user.password_hash, &user.salt, user.mfa_enabled,
+        ).await;
+        if let Some(entry) = s.audit_log.entries().last() {
+            let _ = crate::db::insert_audit_entry(
+                pool, entry.sequence as i64, &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash), &format!("{:?}", entry.event_type),
+                &entry.actor, &entry.tenant_id, entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32, &format_hash(&entry.entry_hash),
+            ).await;
+        }
+    }
 
     s.users.push(user);
 
@@ -2133,6 +2235,26 @@ async fn enroll_agent(
         agent.tenant_id.clone(),
         hlc,
     );
+
+    // Write-through: persist agent, delegation, audit entry
+    if let Some(pool) = &s.pool {
+        let caps = serde_json::to_value(&agent.capabilities).unwrap_or_default();
+        let del_id_str = agent.delegation_id.as_deref();
+        let _ = crate::db::insert_agent(
+            pool, &agent.did, &agent.agent_name, &agent.agent_type, &agent.owner_did,
+            &agent.tenant_id, &caps, &format!("{:?}", agent.trust_tier), agent.trust_score as i32,
+            del_id_str, &format!("{:?}", agent.pace_status), agent.created_at as i64,
+            &format!("{:?}", agent.status), &agent.max_decision_class,
+        ).await;
+        if let Some(entry) = s.audit_log.entries().last() {
+            let _ = crate::db::insert_audit_entry(
+                pool, entry.sequence as i64, &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash), &format!("{:?}", entry.event_type),
+                &entry.actor, &entry.tenant_id, entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32, &format_hash(&entry.entry_hash),
+            ).await;
+        }
+    }
 
     let res = EnrollAgentRes {
         did: agent_did,
@@ -2569,7 +2691,282 @@ pub fn create_router(state: SharedState) -> Router {
 pub async fn run_server(port: u16) {
     let state = Arc::new(RwLock::new(AppState::new()));
     let app = create_router(state);
+    start_server(port, app).await;
+}
 
+/// Run the server with PostgreSQL persistence.
+/// Seeds the database on first run, then loads state from DB.
+pub async fn run_server_with_db(port: u16, pool: sqlx::PgPool) {
+    use crate::db;
+
+    // Check if this is first run (empty users table)
+    let user_count = db::count_users(&pool).await.unwrap_or(0);
+
+    if user_count == 0 {
+        println!("[DB] Empty database detected — seeding initial data");
+        // Create in-memory state to generate seed data
+        let seed_state = AppState::new();
+
+        // Persist users
+        for u in &seed_state.users {
+            let roles = serde_json::to_value(&u.roles).unwrap_or_default();
+            let _ = db::insert_user(
+                &pool, &u.did, &u.display_name, &u.email, &roles,
+                &u.tenant_id, u.created_at as i64, &format!("{:?}", u.status),
+                &format!("{:?}", u.pace_status), &u.password_hash, &u.salt, u.mfa_enabled,
+            ).await;
+        }
+
+        // Persist agents
+        for a in &seed_state.agents {
+            let caps = serde_json::to_value(&a.capabilities).unwrap_or_default();
+            let del_id = a.delegation_id.as_deref();
+            let _ = db::insert_agent(
+                &pool, &a.did, &a.agent_name, &a.agent_type, &a.owner_did,
+                &a.tenant_id, &caps, &format!("{:?}", a.trust_tier), a.trust_score as i32,
+                del_id, &format!("{:?}", a.pace_status), a.created_at as i64,
+                &format!("{:?}", a.status), &a.max_decision_class,
+            ).await;
+        }
+
+        // Persist decisions
+        for d in &seed_state.decisions {
+            let payload = serde_json::to_value(d).unwrap_or_default();
+            let id_hash = format_hash(&d.id);
+            let _ = db::insert_decision(
+                &pool, &id_hash, &d.tenant_id, &status_to_string(&d.status),
+                &d.title, &decision_class_to_string(&d.decision_class),
+                &d.author, d.created_at.physical_ms as i64,
+                &d.constitution_version.to_string(), &payload,
+            ).await;
+        }
+
+        // Persist delegations
+        for d in &seed_state.delegations {
+            let payload = serde_json::to_value(d).unwrap_or_default();
+            let id_hash = format_hash(&d.id);
+            let _ = db::insert_delegation(
+                &pool, &id_hash, &d.tenant_id, &d.delegator, &d.delegatee,
+                d.created_at.physical_ms as i64, d.expires_at as i64,
+                &d.constitution_version.to_string(), &payload,
+            ).await;
+        }
+
+        // Persist audit entries
+        for entry in seed_state.audit_log.entries() {
+            let _ = db::insert_audit_entry(
+                &pool,
+                entry.sequence as i64,
+                &format_hash(&entry.prev_hash),
+                &format_hash(&entry.event_hash),
+                &format!("{:?}", entry.event_type),
+                &entry.actor,
+                &entry.tenant_id,
+                entry.timestamp.physical_ms as i64,
+                entry.timestamp.logical as i32,
+                &format_hash(&entry.entry_hash),
+            ).await;
+        }
+
+        // Persist identity scores
+        for (did, score) in &seed_state.identity_scores {
+            let factors = serde_json::to_value(&score.factors).unwrap_or_default();
+            let _ = db::upsert_identity_score(
+                &pool, did, score.score as i32, &format!("{:?}", score.tier),
+                &factors, score.last_updated as i64,
+            ).await;
+        }
+
+        // Persist enrollment records
+        for e in &seed_state.enrollment_log {
+            let _ = db::insert_enrollment(
+                &pool, &e.did, &e.entity_type, &e.step,
+                e.timestamp as i64, &e.verified_by, &e.audit_hash,
+            ).await;
+        }
+
+        // Persist constitution
+        let const_payload = serde_json::to_value(&seed_state.constitution).unwrap_or_default();
+        let _ = db::upsert_constitution(
+            &pool, &seed_state.constitution.tenant_id,
+            &seed_state.constitution.version.to_string(),
+            &const_payload,
+        ).await;
+
+        println!("[DB] Seed data persisted: {} users, {} agents, {} decisions, {} delegations, {} audit entries",
+            seed_state.users.len(), seed_state.agents.len(),
+            seed_state.decisions.len(), seed_state.delegations.len(),
+            seed_state.audit_log.len());
+    } else {
+        println!("[DB] Found existing data ({} users) — skipping seed", user_count);
+    }
+
+    // Load state from database — this ensures all persisted data (including
+    // data created after seeding) survives restarts.
+    let mut state = load_state_from_db(&pool).await;
+    state.pool = Some(pool);
+    println!(
+        "[DB] Loaded from PostgreSQL: {} users, {} agents, {} decisions, {} delegations, {} audit entries",
+        state.users.len(), state.agents.len(), state.decisions.len(),
+        state.delegations.len(), state.audit_log.len()
+    );
+    let state = Arc::new(RwLock::new(state));
+    let app = create_router(state);
+    start_server(port, app).await;
+}
+
+/// Load AppState from PostgreSQL database.
+async fn load_state_from_db(pool: &sqlx::PgPool) -> AppState {
+    use crate::db;
+
+    let constitution = seed_constitution();
+    let jwt_service = JwtService::new("decision.forum".into(), 3600);
+
+    // Load users
+    let user_rows = db::list_users_db(pool).await.unwrap_or_default();
+    let users: Vec<UserAccount> = user_rows.into_iter().map(|r| {
+        let roles: Vec<String> = serde_json::from_value(r.roles).unwrap_or_default();
+        let status = match r.status.as_str() {
+            "Active" => AccountStatus::Active,
+            "Suspended" => AccountStatus::Suspended,
+            "PendingVerification" => AccountStatus::PendingVerification,
+            "Revoked" => AccountStatus::Revoked,
+            _ => AccountStatus::Active,
+        };
+        let pace = match r.pace_status.as_str() {
+            "Unenrolled" => PaceStatus::Unenrolled,
+            "Provable" => PaceStatus::Provable,
+            "Auditable" => PaceStatus::Auditable,
+            "Compliant" => PaceStatus::Compliant,
+            "Enforceable" => PaceStatus::Enforceable,
+            _ => PaceStatus::Provable,
+        };
+        UserAccount {
+            did: r.did, display_name: r.display_name, email: r.email,
+            roles, tenant_id: r.tenant_id, created_at: r.created_at as u64,
+            status, pace_status: pace, password_hash: r.password_hash,
+            salt: r.salt, mfa_enabled: r.mfa_enabled,
+        }
+    }).collect();
+
+    // Load agents
+    let agent_rows = db::list_agents_db(pool, None).await.unwrap_or_default();
+    let agents: Vec<AgentIdentity> = agent_rows.into_iter().map(|r| {
+        let capabilities: Vec<String> = serde_json::from_value(r.capabilities).unwrap_or_default();
+        let trust_tier = match r.trust_tier.as_str() {
+            "Untrusted" => TrustTier::Untrusted,
+            "Probationary" => TrustTier::Probationary,
+            "Standard" => TrustTier::Standard,
+            "Trusted" => TrustTier::Trusted,
+            "Verified" => TrustTier::Verified,
+            _ => TrustTier::Standard,
+        };
+        let status = match r.status.as_str() {
+            "Active" => AccountStatus::Active,
+            "Suspended" => AccountStatus::Suspended,
+            _ => AccountStatus::Active,
+        };
+        let pace = match r.pace_status.as_str() {
+            "Unenrolled" => PaceStatus::Unenrolled,
+            "Provable" => PaceStatus::Provable,
+            "Auditable" => PaceStatus::Auditable,
+            "Compliant" => PaceStatus::Compliant,
+            "Enforceable" => PaceStatus::Enforceable,
+            _ => PaceStatus::Provable,
+        };
+        AgentIdentity {
+            did: r.did, agent_name: r.agent_name, agent_type: r.agent_type,
+            owner_did: r.owner_did, tenant_id: r.tenant_id, capabilities,
+            trust_tier, trust_score: r.trust_score as u32,
+            delegation_id: r.delegation_id, pace_status: pace,
+            created_at: r.created_at as u64, status, max_decision_class: r.max_decision_class,
+        }
+    }).collect();
+
+    // Load decisions from JSONB payload
+    let decision_rows = db::list_decisions_db(pool).await.unwrap_or_default();
+    let decisions: Vec<DecisionObject> = decision_rows.into_iter().filter_map(|r| {
+        serde_json::from_value(r.payload).ok()
+    }).collect();
+
+    // Load delegations from JSONB payload
+    let delegation_rows = db::list_delegations_db(pool).await.unwrap_or_default();
+    let delegations: Vec<Delegation> = delegation_rows.into_iter().filter_map(|r| {
+        serde_json::from_value(r.payload).ok()
+    }).collect();
+
+    // Load audit entries and reconstruct AuditLog
+    let audit_rows = db::list_audit_entries(pool).await.unwrap_or_default();
+    let mut audit_log = AuditLog::new();
+    for row in &audit_rows {
+        let event_type = match row.event_type.as_str() {
+            "DecisionCreated" => AuditEventType::DecisionCreated,
+            "DecisionAdvanced" => AuditEventType::DecisionAdvanced,
+            "VoteCast" => AuditEventType::VoteCast,
+            "DelegationGranted" => AuditEventType::DelegationGranted,
+            "DelegationRevoked" => AuditEventType::DelegationRevoked,
+            "ChallengeRaised" => AuditEventType::ChallengeRaised,
+            "EmergencyActionTaken" => AuditEventType::EmergencyActionTaken,
+            "ConstitutionAmended" => AuditEventType::ConstitutionAmended,
+            "AuditSelfVerification" => AuditEventType::AuditSelfVerification,
+            _ => AuditEventType::DecisionCreated,
+        };
+        let event_hash = hash_bytes(format!("{}-{}", row.event_type, row.actor).as_bytes());
+        audit_log.append(
+            event_hash,
+            event_type,
+            row.actor.clone(),
+            row.tenant_id.clone(),
+            HybridLogicalClock {
+                physical_ms: row.timestamp_physical_ms as u64,
+                logical: row.timestamp_logical as u32,
+            },
+        );
+    }
+
+    // Determine HLC counter from max timestamp in audit entries
+    let max_hlc = audit_rows.iter().map(|r| r.timestamp_physical_ms).max().unwrap_or(1000);
+
+    // Load identity scores
+    let mut identity_scores = HashMap::new();
+    for user in &users {
+        if let Ok(Some(score_row)) = db::get_identity_score(pool, &user.did).await {
+            let factors: ScoreFactors = serde_json::from_value(score_row.factors).unwrap_or(ScoreFactors {
+                tenure_days: 0,
+                decisions_participated: 0,
+                votes_cast: 0,
+                compliance_violations: 0,
+                delegation_depth: 0,
+                pace_complete: false,
+            });
+            let tier = match score_row.tier.as_str() {
+                "Untrusted" => TrustTier::Untrusted,
+                "Probationary" => TrustTier::Probationary,
+                "Standard" => TrustTier::Standard,
+                "Trusted" => TrustTier::Trusted,
+                "Verified" => TrustTier::Verified,
+                _ => TrustTier::Standard,
+            };
+            identity_scores.insert(user.did.clone(), IdentityScore {
+                did: user.did.clone(),
+                score: score_row.score as u32,
+                tier,
+                factors,
+                last_updated: score_row.last_updated as u64,
+            });
+        }
+    }
+
+    AppState {
+        decisions, delegations, audit_log, constitution,
+        hlc_counter: max_hlc as u64 + 1,
+        users, agents, identity_scores, jwt_service,
+        enrollment_log: Vec::new(),
+        pool: None,
+    }
+}
+
+async fn start_server(port: u16, app: Router) {
     let addr = format!("0.0.0.0:{}", port);
     println!("decision.forum API server starting on http://{}", addr);
     println!("  GET  /api/v1/health");
