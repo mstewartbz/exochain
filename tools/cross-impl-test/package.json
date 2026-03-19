@@ -1,0 +1,13 @@
+{
+  "name": "exochain-cross-impl-test",
+  "version": "1.0.0",
+  "description": "Cross-implementation test vectors for EXOCHAIN",
+  "main": "index.js",
+  "scripts": {
+    "test": "node index.js"
+  },
+  "dependencies": {
+    "blake3": "^2.1.7",
+    "cbor": "^9.0.0"
+  }
+}
