@@ -55,4 +55,13 @@ pub enum IdentityError {
 
     #[error("duplicate DID across PACE levels: {0}")]
     DuplicatePaceDid(Did),
+
+    #[error("vault encryption failed: {0}")]
+    VaultEncryptionFailed(String),
+
+    #[error("vault decryption failed: authentication or ciphertext invalid")]
+    VaultDecryptionFailed,
+
+    #[error("vault ciphertext too short")]
+    VaultCiphertextTooShort,
 }

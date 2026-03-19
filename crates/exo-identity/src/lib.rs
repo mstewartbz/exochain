@@ -14,3 +14,4 @@ pub mod key_management;
 pub mod pace;
 pub mod risk;
 pub mod shamir;
+pub mod vault;

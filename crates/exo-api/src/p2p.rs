@@ -1,7 +1,7 @@
 //! Peer-to-peer mesh networking.
 use exo_core::{Did, Hash256, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{ApiError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -87,6 +87,174 @@ pub fn discover_peers(registry: &mut PeerRegistry, bootstrap: &[String]) -> Resu
     Ok(discovered)
 }
 
+// ---------------------------------------------------------------------------
+// ASN Diversity Enforcement (T-06: Eclipse Attack mitigation)
+// ---------------------------------------------------------------------------
+
+/// Autonomous System Number wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Asn(pub u32);
+
+/// Extended peer metadata including ASN information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerMetadata {
+    pub info: PeerInfo,
+    pub asn: Option<Asn>,
+    pub first_seen: Timestamp,
+    pub last_seen: Timestamp,
+}
+
+/// Policy governing ASN diversity requirements.
+#[derive(Debug, Clone)]
+pub struct AsnPolicy {
+    /// Minimum number of unique ASNs required for a healthy peer set.
+    pub min_unique_asns: usize,
+    /// Maximum number of peers allowed from a single ASN.
+    pub max_peers_per_asn: usize,
+    /// Interval in milliseconds after which peers are considered for rotation.
+    pub rotation_interval_ms: u64,
+}
+
+impl Default for AsnPolicy {
+    fn default() -> Self {
+        Self {
+            min_unique_asns: 3,
+            max_peers_per_asn: 5,
+            rotation_interval_ms: 3_600_000, // 1 hour
+        }
+    }
+}
+
+/// Result of an ASN diversity check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiversityResult {
+    Sufficient,
+    Insufficient { unique_asns: usize, required: usize },
+}
+
+/// Sentinel ASN value used to group peers with no known ASN.
+const UNKNOWN_ASN: Asn = Asn(0);
+
+/// Resolve a peer's ASN for grouping purposes.
+/// Peers with `asn: None` are all placed in the same group ([`UNKNOWN_ASN`]).
+fn effective_asn(peer: &PeerMetadata) -> Asn {
+    peer.asn.unwrap_or(UNKNOWN_ASN)
+}
+
+/// Check whether the peer set meets the ASN diversity threshold.
+#[must_use]
+pub fn check_asn_diversity(peers: &[PeerMetadata], policy: &AsnPolicy) -> DiversityResult {
+    let unique: BTreeSet<Asn> = peers.iter().map(|p| effective_asn(p)).collect();
+    if unique.len() >= policy.min_unique_asns {
+        DiversityResult::Sufficient
+    } else {
+        DiversityResult::Insufficient {
+            unique_asns: unique.len(),
+            required: policy.min_unique_asns,
+        }
+    }
+}
+
+/// Select peers that maximise ASN diversity.
+///
+/// Strategy: round-robin across unique ASNs, then fill within each ASN up to
+/// `max_peers_per_asn`, stopping when `max_peers` is reached.
+#[must_use]
+pub fn select_diverse_peers(
+    candidates: &[PeerMetadata],
+    policy: &AsnPolicy,
+    max_peers: usize,
+) -> Vec<PeerMetadata> {
+    if candidates.is_empty() || max_peers == 0 {
+        return Vec::new();
+    }
+
+    // Group candidates by effective ASN, preserving order within each group.
+    let mut by_asn: BTreeMap<Asn, Vec<&PeerMetadata>> = BTreeMap::new();
+    for c in candidates {
+        by_asn.entry(effective_asn(c)).or_default().push(c);
+    }
+
+    let mut selected: Vec<PeerMetadata> = Vec::with_capacity(max_peers);
+    let mut round = 0usize;
+
+    loop {
+        if selected.len() >= max_peers {
+            break;
+        }
+        let mut added_this_round = false;
+        for (_asn, bucket) in &by_asn {
+            if selected.len() >= max_peers {
+                break;
+            }
+            if round >= policy.max_peers_per_asn {
+                continue;
+            }
+            if let Some(peer) = bucket.get(round) {
+                selected.push((*peer).clone());
+                added_this_round = true;
+            }
+        }
+        if !added_this_round {
+            break;
+        }
+        round += 1;
+    }
+
+    selected
+}
+
+/// Return the IDs of peers that have not been seen within `max_age_ms` of `now`.
+#[must_use]
+pub fn identify_stale_peers(
+    peers: &[PeerMetadata],
+    now: &Timestamp,
+    max_age_ms: u64,
+) -> Vec<PeerId> {
+    peers
+        .iter()
+        .filter(|p| {
+            // A peer is stale when its last_seen is older than now - max_age_ms.
+            now.physical_ms.saturating_sub(p.last_seen.physical_ms) > max_age_ms
+        })
+        .map(|p| p.info.id.clone())
+        .collect()
+}
+
+/// Evict stale peers from `current` and replace them with diverse candidates.
+///
+/// Returns the [`PeerId`]s of the evicted peers.
+pub fn rotate_peers(
+    current: &mut Vec<PeerMetadata>,
+    candidates: &[PeerMetadata],
+    policy: &AsnPolicy,
+    now: &Timestamp,
+) -> Vec<PeerId> {
+    let stale_ids: BTreeSet<PeerId> =
+        identify_stale_peers(current, now, policy.rotation_interval_ms)
+            .into_iter()
+            .collect();
+
+    let evicted: Vec<PeerId> = stale_ids.iter().cloned().collect();
+
+    // Remove stale peers.
+    current.retain(|p| !stale_ids.contains(&p.info.id));
+
+    // Filter candidates that are not already in current.
+    let current_ids: BTreeSet<PeerId> = current.iter().map(|p| p.info.id.clone()).collect();
+    let fresh_candidates: Vec<PeerMetadata> = candidates
+        .iter()
+        .filter(|c| !current_ids.contains(&c.info.id))
+        .cloned()
+        .collect();
+
+    // Select diverse replacements up to the number of evicted peers.
+    let replacements = select_diverse_peers(&fresh_candidates, policy, evicted.len());
+    current.extend(replacements);
+
+    evicted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,4 +282,154 @@ mod tests {
     #[test] fn rate_limiter_reset() { let mut rl = RateLimiter::new(); for _ in 0..100 { rl.check_and_increment(&pid("a")).unwrap(); } rl.reset(); assert!(rl.check_and_increment(&pid("a")).is_ok()); }
     #[test] fn peer_id_ord() { assert!(pid("a") < pid("b")); }
     #[test] fn message_serde() { let m = msg("a", Some("b")); let j = serde_json::to_string(&m).unwrap(); assert!(!j.is_empty()); }
+
+    // -- ASN diversity helpers -----------------------------------------------
+
+    fn peer_meta(name: &str, asn: Option<u32>, last_seen_ms: u64) -> PeerMetadata {
+        PeerMetadata {
+            info: info(name),
+            asn: asn.map(Asn),
+            first_seen: Timestamp::ZERO,
+            last_seen: Timestamp::new(last_seen_ms, 0),
+        }
+    }
+
+    // 1. All peers from a single ASN → Insufficient
+    #[test]
+    fn reject_single_asn_peer_set() {
+        let peers: Vec<PeerMetadata> = (0..5)
+            .map(|i| peer_meta(&format!("p{i}"), Some(64512), 1000))
+            .collect();
+        let policy = AsnPolicy::default();
+        assert_eq!(
+            check_asn_diversity(&peers, &policy),
+            DiversityResult::Insufficient { unique_asns: 1, required: 3 }
+        );
+    }
+
+    // 2. Peers from 3+ ASNs → Sufficient
+    #[test]
+    fn accept_diverse_peer_set() {
+        let peers = vec![
+            peer_meta("a", Some(100), 1000),
+            peer_meta("b", Some(200), 1000),
+            peer_meta("c", Some(300), 1000),
+        ];
+        let policy = AsnPolicy::default();
+        assert_eq!(check_asn_diversity(&peers, &policy), DiversityResult::Sufficient);
+    }
+
+    // 3. 10 peers from same ASN, max_peers_per_asn=5 → only 5 selected
+    #[test]
+    fn max_peers_per_asn_enforced() {
+        let candidates: Vec<PeerMetadata> = (0..10)
+            .map(|i| peer_meta(&format!("p{i}"), Some(64512), 1000))
+            .collect();
+        let policy = AsnPolicy { max_peers_per_asn: 5, ..AsnPolicy::default() };
+        let selected = select_diverse_peers(&candidates, &policy, 20);
+        assert_eq!(selected.len(), 5);
+    }
+
+    // 4. Candidates from 4 ASNs, max 8 → 2 per ASN (round-robin)
+    #[test]
+    fn select_diverse_round_robin() {
+        let mut candidates = Vec::new();
+        for asn in [10, 20, 30, 40] {
+            for i in 0..4 {
+                candidates.push(peer_meta(&format!("asn{asn}-p{i}"), Some(asn), 1000));
+            }
+        }
+        let policy = AsnPolicy::default();
+        let selected = select_diverse_peers(&candidates, &policy, 8);
+        assert_eq!(selected.len(), 8);
+        // Count per ASN — each should have exactly 2
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for p in &selected {
+            *counts.entry(p.asn.unwrap().0).or_default() += 1;
+        }
+        for &c in counts.values() {
+            assert_eq!(c, 2);
+        }
+    }
+
+    // 5. Stale peers identified correctly
+    #[test]
+    fn identify_stale_peers_test() {
+        let now = Timestamp::new(10_000_000, 0);
+        let max_age_ms = 7_200_000; // 2 hours
+        let peers = vec![
+            peer_meta("fresh", Some(1), 9_000_000),   // seen 1 s ago, not stale
+            peer_meta("stale1", Some(2), 1_000_000),   // seen 9000 s ago, stale
+            peer_meta("stale2", Some(3), 2_000_000),   // seen 8000 s ago, stale
+        ];
+        let stale = identify_stale_peers(&peers, &now, max_age_ms);
+        assert_eq!(stale.len(), 2);
+        assert!(stale.contains(&pid("stale1")));
+        assert!(stale.contains(&pid("stale2")));
+    }
+
+    // 6. Stale peers evicted and replaced with diverse candidates
+    #[test]
+    fn rotate_replaces_stale_with_diverse() {
+        let now = Timestamp::new(10_000_000, 0);
+        let policy = AsnPolicy {
+            rotation_interval_ms: 3_600_000,
+            ..AsnPolicy::default()
+        };
+        let mut current = vec![
+            peer_meta("keep", Some(100), 9_000_000),   // fresh
+            peer_meta("old1", Some(100), 1_000_000),   // stale
+            peer_meta("old2", Some(100), 2_000_000),   // stale
+        ];
+        let candidates = vec![
+            peer_meta("new1", Some(200), 9_500_000),
+            peer_meta("new2", Some(300), 9_500_000),
+        ];
+        let evicted = rotate_peers(&mut current, &candidates, &policy, &now);
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&pid("old1")));
+        assert!(evicted.contains(&pid("old2")));
+        // current should now have: keep + up to 2 replacements
+        assert!(current.len() >= 2 && current.len() <= 3);
+        let ids: Vec<PeerId> = current.iter().map(|p| p.info.id.clone()).collect();
+        assert!(ids.contains(&pid("keep")));
+    }
+
+    // 7. Empty candidates → no crash
+    #[test]
+    fn empty_candidates_no_crash() {
+        let selected = select_diverse_peers(&[], &AsnPolicy::default(), 10);
+        assert!(selected.is_empty());
+        let stale = identify_stale_peers(&[], &Timestamp::ZERO, 1000);
+        assert!(stale.is_empty());
+    }
+
+    // 8. Peers with asn: None grouped together
+    #[test]
+    fn no_asn_peers_treated_as_same_group() {
+        let peers = vec![
+            peer_meta("a", None, 1000),
+            peer_meta("b", None, 1000),
+            peer_meta("c", None, 1000),
+        ];
+        let policy = AsnPolicy::default();
+        // All None → single effective ASN group → 1 unique ASN
+        assert_eq!(
+            check_asn_diversity(&peers, &policy),
+            DiversityResult::Insufficient { unique_asns: 1, required: 3 }
+        );
+        // select_diverse_peers respects max_peers_per_asn for the None group
+        let policy2 = AsnPolicy { max_peers_per_asn: 2, ..AsnPolicy::default() };
+        let selected = select_diverse_peers(&peers, &policy2, 10);
+        assert_eq!(selected.len(), 2);
+    }
+
+    // 9. Policy default values
+    #[test]
+    fn policy_default_values() {
+        let p = AsnPolicy::default();
+        assert_eq!(p.min_unique_asns, 3);
+        assert_eq!(p.max_peers_per_asn, 5);
+        assert_eq!(p.rotation_interval_ms, 3_600_000);
+    }
 }

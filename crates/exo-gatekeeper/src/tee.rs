@@ -25,6 +25,20 @@ pub enum TeePlatform {
 }
 
 // ---------------------------------------------------------------------------
+// TEE environment
+// ---------------------------------------------------------------------------
+
+/// The deployment environment for TEE policy enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TeeEnvironment {
+    /// Production — simulated TEE is rejected unless the
+    /// `allow-simulated-tee` feature flag is enabled.
+    Production,
+    /// Testing — all platforms including Simulated are permitted.
+    Testing,
+}
+
+// ---------------------------------------------------------------------------
 // TEE attestation
 // ---------------------------------------------------------------------------
 
@@ -56,6 +70,68 @@ pub struct TeePolicy {
     pub max_age_ms: u64,
     /// Current time in milliseconds (for age checking).
     pub current_time_ms: u64,
+    /// Deployment environment (Production or Testing).
+    pub environment: TeeEnvironment,
+}
+
+impl Default for TeePolicy {
+    /// Secure by default: Production environment, hardware-only platforms.
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
+impl TeePolicy {
+    /// Production policy — only hardware TEE platforms accepted.
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            accepted_platforms: vec![
+                TeePlatform::Sgx,
+                TeePlatform::TrustZone,
+                TeePlatform::Sev,
+            ],
+            required_measurements: vec![],
+            max_age_ms: 0,
+            current_time_ms: 0,
+            environment: TeeEnvironment::Production,
+        }
+    }
+
+    /// Testing policy — all platforms including Simulated are accepted.
+    #[must_use]
+    pub fn testing() -> Self {
+        Self {
+            accepted_platforms: vec![
+                TeePlatform::Sgx,
+                TeePlatform::TrustZone,
+                TeePlatform::Sev,
+                TeePlatform::Simulated,
+            ],
+            required_measurements: vec![],
+            max_age_ms: 0,
+            current_time_ms: 0,
+            environment: TeeEnvironment::Testing,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Platform gating
+// ---------------------------------------------------------------------------
+
+/// Check whether a platform is allowed by policy, enforcing the production
+/// gate against simulated TEEs.
+fn is_platform_allowed(platform: &TeePlatform, policy: &TeePolicy) -> bool {
+    if *platform == TeePlatform::Simulated {
+        #[cfg(not(feature = "allow-simulated-tee"))]
+        {
+            if policy.environment == TeeEnvironment::Production {
+                return false;
+            }
+        }
+    }
+    policy.accepted_platforms.contains(platform)
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +174,8 @@ pub fn verify_attestation(
     attestation: &TeeAttestation,
     policy: &TeePolicy,
 ) -> Result<(), GatekeeperError> {
-    // Check platform.
-    if !policy.accepted_platforms.contains(&attestation.platform) {
+    // Check platform (includes production gate for Simulated).
+    if !is_platform_allowed(&attestation.platform, policy) {
         return Err(GatekeeperError::TeeError(format!(
             "Platform {:?} is not accepted by policy",
             attestation.platform
@@ -177,6 +253,7 @@ mod tests {
             required_measurements: vec![],
             max_age_ms: 0,
             current_time_ms: TIMESTAMP,
+            environment: TeeEnvironment::Testing,
         }
     }
 
@@ -252,6 +329,7 @@ mod tests {
             required_measurements: vec![],
             max_age_ms: 0,
             current_time_ms: TIMESTAMP,
+            environment: TeeEnvironment::Testing,
         };
         let result = verify_attestation(&att, &policy);
         assert!(result.is_err());
@@ -268,6 +346,7 @@ mod tests {
             required_measurements: vec![[0u8; 32]], // wrong hash
             max_age_ms: 0,
             current_time_ms: TIMESTAMP,
+            environment: TeeEnvironment::Testing,
         };
         let result = verify_attestation(&att, &policy);
         assert!(result.is_err());
@@ -282,6 +361,7 @@ mod tests {
             required_measurements: vec![att.measurement_hash],
             max_age_ms: 0,
             current_time_ms: TIMESTAMP,
+            environment: TeeEnvironment::Testing,
         };
         assert!(verify_attestation(&att, &policy).is_ok());
     }
@@ -308,6 +388,7 @@ mod tests {
             required_measurements: vec![],
             max_age_ms: 1000,                         // 1 second max
             current_time_ms: TIMESTAMP + 5000,        // 5 seconds later
+            environment: TeeEnvironment::Testing,
         };
         let result = verify_attestation(&att, &policy);
         assert!(result.is_err());
@@ -322,6 +403,7 @@ mod tests {
             required_measurements: vec![],
             max_age_ms: 10_000,
             current_time_ms: TIMESTAMP + 5_000,
+            environment: TeeEnvironment::Testing,
         };
         assert!(verify_attestation(&att, &policy).is_ok());
     }
@@ -334,6 +416,7 @@ mod tests {
             required_measurements: vec![],
             max_age_ms: 0, // no limit
             current_time_ms: TIMESTAMP + 999_999_999,
+            environment: TeeEnvironment::Testing,
         };
         assert!(verify_attestation(&att, &policy).is_ok());
     }
@@ -378,7 +461,79 @@ mod tests {
             required_measurements: vec![[0u8; 32], att.measurement_hash, [1u8; 32]],
             max_age_ms: 0,
             current_time_ms: TIMESTAMP,
+            environment: TeeEnvironment::Testing,
         };
         assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    // --- Production TEE gate tests ---
+
+    #[test]
+    fn simulated_rejected_in_production() {
+        let att = generate_attestation(&TeePlatform::Simulated, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::production();
+        // Even if someone manually adds Simulated to accepted_platforms,
+        // the production gate must still reject it.
+        policy.accepted_platforms.push(TeePlatform::Simulated);
+        policy.current_time_ms = TIMESTAMP;
+        assert!(verify_attestation(&att, &policy).is_err());
+    }
+
+    #[test]
+    fn simulated_accepted_in_testing() {
+        let att = generate_attestation(&TeePlatform::Simulated, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::testing();
+        policy.current_time_ms = TIMESTAMP;
+        assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn sgx_accepted_in_production() {
+        let att = generate_attestation(&TeePlatform::Sgx, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::production();
+        policy.current_time_ms = TIMESTAMP;
+        assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn sgx_accepted_in_testing() {
+        let att = generate_attestation(&TeePlatform::Sgx, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::testing();
+        policy.current_time_ms = TIMESTAMP;
+        assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn trustzone_accepted_in_production() {
+        let att = generate_attestation(&TeePlatform::TrustZone, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::production();
+        policy.current_time_ms = TIMESTAMP;
+        assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn sev_accepted_in_production() {
+        let att = generate_attestation(&TeePlatform::Sev, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::production();
+        policy.current_time_ms = TIMESTAMP;
+        assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn default_policy_is_production() {
+        let policy = TeePolicy::default();
+        assert_eq!(policy.environment, TeeEnvironment::Production);
+    }
+
+    #[test]
+    fn production_constructor_excludes_simulated() {
+        let policy = TeePolicy::production();
+        assert!(!policy.accepted_platforms.contains(&TeePlatform::Simulated));
+    }
+
+    #[test]
+    fn testing_constructor_includes_simulated() {
+        let policy = TeePolicy::testing();
+        assert!(policy.accepted_platforms.contains(&TeePlatform::Simulated));
     }
 }
