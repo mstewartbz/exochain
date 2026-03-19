@@ -1,0 +1,169 @@
+# EXOCHAIN Constitutional CI
+#
+# Enforces CR-001 Section 8.8 quality gates.
+# ALL gates must pass before any merge to main or release.
+#
+# Constitutional requirements enforced:
+#   - Determinism: no floats, no HashMap, canonical serialization
+#   - Clippy float_arithmetic = deny (workspace lint)
+#   - 90%+ line coverage
+#   - Zero dependency vulnerabilities
+#   - License compliance (no copyleft contamination of AGPL boundary)
+
+name: EXOCHAIN Constitutional CI
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # Determinism: force single-threaded codegen in CI to match release profile
+  CARGO_BUILD_JOBS: "4"
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Gate 1: Build
+  # -----------------------------------------------------------------------
+  build:
+    name: "Gate 1 — Build (release)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace (release)
+        run: cargo build --workspace --release
+
+  # -----------------------------------------------------------------------
+  # Gate 2: Test
+  # -----------------------------------------------------------------------
+  test:
+    name: "Gate 2 — Test"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run all workspace tests
+        run: cargo test --workspace
+      - name: Run tests in release mode (determinism check)
+        run: cargo test --workspace --release
+
+  # -----------------------------------------------------------------------
+  # Gate 3: Coverage (90%+ line coverage required)
+  # -----------------------------------------------------------------------
+  coverage:
+    name: "Gate 3 — Coverage (>= 90%)"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Run coverage
+        run: |
+          cargo tarpaulin \
+            --workspace \
+            --out xml \
+            --output-dir coverage \
+            --skip-clean \
+            --engine llvm \
+            --timeout 300 \
+            --fail-under 90
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/cobertura.xml
+
+  # -----------------------------------------------------------------------
+  # Gate 4: Lint (clippy with constitutional denials)
+  # -----------------------------------------------------------------------
+  lint:
+    name: "Gate 4 — Clippy Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # -----------------------------------------------------------------------
+  # Gate 5: Format
+  # -----------------------------------------------------------------------
+  format:
+    name: "Gate 5 — Format Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo +nightly fmt --all -- --check
+
+  # -----------------------------------------------------------------------
+  # Gate 6: Audit (dependency vulnerabilities)
+  # -----------------------------------------------------------------------
+  audit:
+    name: "Gate 6 — Cargo Audit"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
+
+  # -----------------------------------------------------------------------
+  # Gate 7: Deny (license + advisory compliance)
+  # -----------------------------------------------------------------------
+  deny:
+    name: "Gate 7 — Cargo Deny"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check
+
+  # -----------------------------------------------------------------------
+  # Gate 8: Documentation (must build without warnings)
+  # -----------------------------------------------------------------------
+  doc:
+    name: "Gate 8 — Documentation"
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps
+
+  # -----------------------------------------------------------------------
+  # Constitutional gate: all must pass
+  # -----------------------------------------------------------------------
+  all-gates:
+    name: "All Constitutional Gates"
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - test
+      - coverage
+      - lint
+      - format
+      - audit
+      - deny
+      - doc
+    steps:
+      - name: All quality gates passed
+        run: echo "All CR-001 Section 8.8 quality gates satisfied."

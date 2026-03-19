@@ -1,0 +1,58 @@
+//! Identity-specific error types for the EXOCHAIN identity subsystem.
+
+use exo_core::Did;
+
+/// Errors that can occur during identity operations.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("DID already registered: {0}")]
+    DuplicateDid(Did),
+
+    #[error("DID not found: {0}")]
+    DidNotFound(Did),
+
+    #[error("DID has been revoked: {0}")]
+    DidRevoked(Did),
+
+    #[error("invalid signature")]
+    InvalidSignature,
+
+    #[error("invalid revocation proof for DID: {0}")]
+    InvalidRevocationProof(Did),
+
+    #[error("public key not found on DID: {0}")]
+    KeyNotFound(Did),
+
+    #[error("key already revoked")]
+    KeyAlreadyRevoked,
+
+    #[error("key already rotated")]
+    KeyAlreadyRotated,
+
+    #[error("invalid Shamir config: threshold={threshold}, shares={shares}")]
+    InvalidShamirConfig { threshold: u8, shares: u8 },
+
+    #[error("insufficient shares: need {need}, got {got}")]
+    InsufficientShares { need: u8, got: u8 },
+
+    #[error("invalid share index: {0}")]
+    InvalidShareIndex(u8),
+
+    #[error("duplicate share indices")]
+    DuplicateShareIndices,
+
+    #[error("invalid PACE config: {0}")]
+    InvalidPaceConfig(String),
+
+    #[error("cannot escalate: already at maximum level")]
+    CannotEscalate,
+
+    #[error("cannot de-escalate: already at Normal")]
+    CannotDeescalate,
+
+    #[error("risk attestation expired")]
+    AttestationExpired,
+
+    #[error("duplicate DID across PACE levels: {0}")]
+    DuplicatePaceDid(Did),
+}

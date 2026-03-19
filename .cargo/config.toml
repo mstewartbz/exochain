@@ -1,0 +1,40 @@
+# EXOCHAIN build configuration
+#
+# Enforces deterministic builds as required by the constitutional trust fabric.
+# Reference: CR-001 Section 8.8 — Determinism Enforcement
+
+[build]
+# Single codegen unit for deterministic output
+# (also set in [profile.release] in Cargo.toml)
+jobs = 4
+
+# NOTE: panic=abort is set in Cargo.toml [profile.release] only.
+# Tests require unwinding, so we do NOT set panic=abort globally here.
+[target.'cfg(all())']
+rustflags = [
+    # Determinism: disable frame pointers for consistent codegen
+    "-C", "force-frame-pointers=no",
+]
+
+# Deterministic environment variables stripped from build
+[env]
+# Force UTC for any build-time timestamps
+TZ = "UTC"
+
+# Alias commonly used commands
+[alias]
+# Run all constitutional quality gates locally
+gate = "make --makefile=Makefile gate"
+# Quick check without full build
+ck = "clippy --workspace --all-targets -- -D warnings"
+# Run all tests with output
+tt = "test --workspace -- --nocapture"
+# Build documentation
+dd = "doc --workspace --no-deps --open"
+
+[registries.crates-io]
+protocol = "sparse"
+
+# Deterministic net configuration
+[net]
+retry = 3

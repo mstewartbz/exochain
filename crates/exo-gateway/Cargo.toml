@@ -1,0 +1,26 @@
+[package]
+name = "exo-gateway"
+description = "EXOCHAIN constitutional trust fabric — HTTP gateway server with default-deny pattern"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
+exo-consent = { path = "../exo-consent" }
+exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-governance = { path = "../exo-governance" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

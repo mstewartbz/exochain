@@ -1,0 +1,24 @@
+[package]
+name = "exo-governance"
+description = "EXOCHAIN constitutional trust fabric — legislative legitimacy: quorum, clearance, crosscheck, challenge, delegation, deliberation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
+exo-consent = { path = "../exo-consent" }
+exo-authority = { path = "../exo-authority" }
+serde = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

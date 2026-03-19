@@ -1,0 +1,285 @@
+//! Quorum computation with independence-aware counting.
+//!
+//! Constitutional principle: "Numerical multiplicity without attributable
+//! independence is theater, not legitimacy."
+
+use exo_core::{Did, Signature, Timestamp};
+use serde::{Deserialize, Serialize};
+
+use crate::error::GovernanceError;
+
+/// Roles that can participate in governance actions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Role {
+    Steward,
+    Governor,
+    Reviewer,
+    Contributor,
+    Observer,
+}
+
+/// A signed declaration of independence — no common control, no coordination,
+/// identity verified through independent channels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndependenceAttestation {
+    pub attester_did: Did,
+    pub no_common_control: bool,
+    pub no_coordination: bool,
+    pub identity_verified: bool,
+    pub signature: Signature,
+}
+
+impl IndependenceAttestation {
+    /// An attestation is valid only if all three declarations are true.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.no_common_control && self.no_coordination && self.identity_verified
+    }
+}
+
+/// A single approval cast toward a quorum decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Approval {
+    pub approver_did: Did,
+    pub role: Role,
+    pub timestamp: Timestamp,
+    pub signature: Signature,
+    pub independence_attestation: Option<IndependenceAttestation>,
+}
+
+/// Policy defining what constitutes a valid quorum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuorumPolicy {
+    pub min_approvals: u32,
+    pub min_independent: u32,
+    pub required_roles: Vec<Role>,
+    pub timeout: Timestamp,
+}
+
+/// The result of a quorum computation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuorumResult {
+    Met { independent_count: u32, total_count: u32 },
+    NotMet { reason: String },
+    Contested { challenge: String },
+}
+
+/// Compute whether a quorum is met given a set of approvals and a policy.
+#[must_use]
+pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumResult {
+    let total_count = approvals.len() as u32;
+
+    if total_count < policy.min_approvals {
+        return QuorumResult::NotMet {
+            reason: format!(
+                "insufficient approvals: {total_count} < {}",
+                policy.min_approvals
+            ),
+        };
+    }
+
+    for required_role in &policy.required_roles {
+        if !approvals.iter().any(|a| &a.role == required_role) {
+            return QuorumResult::NotMet {
+                reason: format!("missing required role: {required_role:?}"),
+            };
+        }
+    }
+
+    let independent_count = approvals
+        .iter()
+        .filter(|a| a.independence_attestation.as_ref().is_some_and(|att| att.is_valid()))
+        .count() as u32;
+
+    if independent_count < policy.min_independent {
+        return QuorumResult::NotMet {
+            reason: format!(
+                "insufficient independence: {independent_count} independent of {} required \
+                 (numerical multiplicity without attributable independence is theater, not legitimacy)",
+                policy.min_independent
+            ),
+        };
+    }
+
+    QuorumResult::Met { independent_count, total_count }
+}
+
+/// Validate a single approval's basic structure.
+pub fn validate_approval(approval: &Approval) -> Result<(), GovernanceError> {
+    if approval.approver_did.as_str().is_empty() {
+        return Err(GovernanceError::QuorumNotMet {
+            reason: "empty approver DID".to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exo_core::crypto;
+
+    fn test_sig() -> Signature {
+        let (_pk, sk) = crypto::generate_keypair();
+        crypto::sign(b"test", &sk)
+    }
+
+    fn valid_attestation(did: &Did) -> IndependenceAttestation {
+        IndependenceAttestation {
+            attester_did: did.clone(),
+            no_common_control: true,
+            no_coordination: true,
+            identity_verified: true,
+            signature: test_sig(),
+        }
+    }
+
+    fn invalid_attestation(did: &Did) -> IndependenceAttestation {
+        IndependenceAttestation {
+            attester_did: did.clone(),
+            no_common_control: false,
+            no_coordination: true,
+            identity_verified: true,
+            signature: test_sig(),
+        }
+    }
+
+    fn did(name: &str) -> Did {
+        Did::new(&format!("did:exo:{name}")).expect("valid test DID")
+    }
+
+    fn make_approval(name: &str, role: Role, independent: bool) -> Approval {
+        let d = did(name);
+        Approval {
+            approver_did: d.clone(),
+            role,
+            timestamp: Timestamp::new(1000, 0),
+            signature: test_sig(),
+            independence_attestation: if independent { Some(valid_attestation(&d)) } else { None },
+        }
+    }
+
+    fn default_policy() -> QuorumPolicy {
+        QuorumPolicy {
+            min_approvals: 3,
+            min_independent: 2,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        }
+    }
+
+    #[test]
+    fn quorum_met_with_sufficient_independent_approvals() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        assert_eq!(
+            compute_quorum(&approvals, &default_policy()),
+            QuorumResult::Met { independent_count: 3, total_count: 3 }
+        );
+    }
+
+    #[test]
+    fn quorum_fails_with_sufficient_approvals_but_insufficient_independence() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, false),
+            make_approval("carol", Role::Contributor, false),
+        ];
+        match compute_quorum(&approvals, &default_policy()) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("insufficient independence"));
+                assert!(reason.contains("theater, not legitimacy"));
+            }
+            other => panic!("expected NotMet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quorum_fails_with_insufficient_total_approvals() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+        ];
+        match compute_quorum(&approvals, &default_policy()) {
+            QuorumResult::NotMet { reason } => assert!(reason.contains("insufficient approvals")),
+            other => panic!("expected NotMet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quorum_fails_with_missing_required_role() {
+        let approvals = vec![
+            make_approval("alice", Role::Reviewer, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        match compute_quorum(&approvals, &default_policy()) {
+            QuorumResult::NotMet { reason } => assert!(reason.contains("missing required role")),
+            other => panic!("expected NotMet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quorum_fails_with_no_approvals() {
+        assert!(matches!(compute_quorum(&[], &default_policy()), QuorumResult::NotMet { .. }));
+    }
+
+    #[test]
+    fn quorum_with_invalid_attestation_counts_as_non_independent() {
+        let d = did("dave");
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            Approval {
+                approver_did: d.clone(),
+                role: Role::Contributor,
+                timestamp: Timestamp::new(1000, 0),
+                signature: test_sig(),
+                independence_attestation: Some(invalid_attestation(&d)),
+            },
+        ];
+        assert_eq!(
+            compute_quorum(&approvals, &default_policy()),
+            QuorumResult::Met { independent_count: 2, total_count: 3 }
+        );
+    }
+
+    #[test]
+    fn independence_attestation_validity() {
+        let d = did("test");
+        assert!(valid_attestation(&d).is_valid());
+        assert!(!invalid_attestation(&d).is_valid());
+        let partial = IndependenceAttestation {
+            attester_did: d.clone(),
+            no_common_control: true,
+            no_coordination: true,
+            identity_verified: false,
+            signature: test_sig(),
+        };
+        assert!(!partial.is_valid());
+    }
+
+    #[test]
+    fn validate_approval_accepts_valid() {
+        let approval = make_approval("alice", Role::Steward, true);
+        assert!(validate_approval(&approval).is_ok());
+    }
+
+    #[test]
+    fn quorum_policy_with_no_required_roles() {
+        let policy = QuorumPolicy {
+            min_approvals: 1, min_independent: 1, required_roles: vec![], timeout: Timestamp::new(999_999, 0),
+        };
+        let approvals = vec![make_approval("alice", Role::Contributor, true)];
+        assert!(matches!(compute_quorum(&approvals, &policy), QuorumResult::Met { .. }));
+    }
+
+    #[test]
+    fn contested_variant_exists() {
+        let contested = QuorumResult::Contested { challenge: "test".to_string() };
+        assert!(matches!(contested, QuorumResult::Contested { .. }));
+    }
+}

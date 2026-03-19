@@ -1,0 +1,284 @@
+{
+  "$schema": "https://exochain.dev/schemas/syntaxis-node-registry-v1.json",
+  "version": "1.0.0",
+  "description": "EXO Syntaxis visual builder node registry. Maps each node type to its EXOCHAIN Rust implementation, combinator algebra term, and required constitutional invariants.",
+  "nodes": {
+    "identity-verify": {
+      "label": "Identity Verify",
+      "description": "Verify a DID identity against the identity registry with cryptographic proof.",
+      "crate": "exo-identity",
+      "rust_trait": "IdentityVerifier::verify",
+      "rust_module": "exo_identity::verification",
+      "combinator": "Guard(Identity, Predicate { required_key: 'did_valid' })",
+      "invariants": ["ProvenanceVerifiable", "AuthorityChainValid"],
+      "inputs": ["did", "proof"],
+      "outputs": ["verified_identity"]
+    },
+    "consent-request": {
+      "label": "Consent Request",
+      "description": "Request bailment consent from a principal for a specific scope and duration.",
+      "crate": "exo-consent",
+      "rust_trait": "ConsentEngine::request",
+      "rust_module": "exo_consent::engine",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'principal_exists' }), Transform(Identity, { output_key: 'consent_pending' })])",
+      "invariants": ["ConsentRequired"],
+      "inputs": ["principal_did", "scope", "duration"],
+      "outputs": ["consent_token"]
+    },
+    "consent-verify": {
+      "label": "Consent Verify",
+      "description": "Verify that active bailment consent exists for the requested operation.",
+      "crate": "exo-consent",
+      "rust_trait": "ConsentEngine::verify",
+      "rust_module": "exo_consent::engine",
+      "combinator": "Guard(Identity, Predicate { required_key: 'consent_active' })",
+      "invariants": ["ConsentRequired"],
+      "inputs": ["consent_token", "operation"],
+      "outputs": ["consent_verified"]
+    },
+    "consent-revoke": {
+      "label": "Consent Revoke",
+      "description": "Revoke previously granted bailment consent with immediate effect.",
+      "crate": "exo-consent",
+      "rust_trait": "ConsentEngine::revoke",
+      "rust_module": "exo_consent::engine",
+      "combinator": "Transform(Identity, { output_key: 'consent_revoked' })",
+      "invariants": ["ConsentRequired", "HumanOverride"],
+      "inputs": ["consent_token", "revocation_reason"],
+      "outputs": ["revocation_receipt"]
+    },
+    "authority-check": {
+      "label": "Authority Check",
+      "description": "Verify that the actor has the required authority for the operation via delegation chain.",
+      "crate": "exo-authority",
+      "rust_trait": "AuthorityEngine::check",
+      "rust_module": "exo_authority::engine",
+      "combinator": "Guard(Identity, Predicate { required_key: 'authority_valid' })",
+      "invariants": ["AuthorityChainValid", "SeparationOfPowers", "NoSelfGrant"],
+      "inputs": ["actor_did", "permission", "delegation_chain"],
+      "outputs": ["authority_proof"]
+    },
+    "authority-delegate": {
+      "label": "Authority Delegate",
+      "description": "Delegate a subset of authority to another actor with attenuation.",
+      "crate": "exo-authority",
+      "rust_trait": "AuthorityEngine::delegate",
+      "rust_module": "exo_authority::engine",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'can_delegate' }), Transform(Identity, { output_key: 'delegation_created' })])",
+      "invariants": ["AuthorityChainValid", "NoSelfGrant", "SeparationOfPowers"],
+      "inputs": ["grantor_did", "grantee_did", "permissions", "constraints"],
+      "outputs": ["delegation_token"]
+    },
+    "kernel-adjudicate": {
+      "label": "Kernel Adjudicate",
+      "description": "Submit an action request to the immutable kernel for constitutional adjudication.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "Kernel::adjudicate",
+      "rust_module": "exo_gatekeeper::kernel",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'request_valid' }), Transform(Identity, { output_key: 'verdict' })])",
+      "invariants": ["KernelImmutability", "SeparationOfPowers", "ProvenanceVerifiable"],
+      "inputs": ["action_request", "adjudication_context"],
+      "outputs": ["verdict"]
+    },
+    "invariant-check": {
+      "label": "Invariant Check",
+      "description": "Evaluate a specific constitutional invariant against the current context.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "InvariantEngine::check",
+      "rust_module": "exo_gatekeeper::invariants",
+      "combinator": "Guard(Identity, Predicate { required_key: 'invariant_holds' })",
+      "invariants": ["KernelImmutability"],
+      "inputs": ["invariant_id", "context"],
+      "outputs": ["invariant_result"]
+    },
+    "combinator-sequence": {
+      "label": "Sequence",
+      "description": "Execute child nodes in order. Each output feeds as input to the next.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "combinator::reduce",
+      "rust_module": "exo_gatekeeper::combinator",
+      "combinator": "Sequence(children)",
+      "invariants": [],
+      "inputs": ["children", "initial_input"],
+      "outputs": ["final_output"]
+    },
+    "combinator-parallel": {
+      "label": "Parallel",
+      "description": "Execute child nodes independently and merge all outputs.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "combinator::reduce",
+      "rust_module": "exo_gatekeeper::combinator",
+      "combinator": "Parallel(children)",
+      "invariants": [],
+      "inputs": ["children", "shared_input"],
+      "outputs": ["merged_output"]
+    },
+    "combinator-choice": {
+      "label": "Choice",
+      "description": "Try child nodes in order. First success wins.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "combinator::reduce",
+      "rust_module": "exo_gatekeeper::combinator",
+      "combinator": "Choice(children)",
+      "invariants": [],
+      "inputs": ["children", "input"],
+      "outputs": ["first_success"]
+    },
+    "combinator-guard": {
+      "label": "Guard",
+      "description": "Only proceed if predicate evaluates to true.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "combinator::reduce",
+      "rust_module": "exo_gatekeeper::combinator",
+      "combinator": "Guard(inner, predicate)",
+      "invariants": [],
+      "inputs": ["inner_combinator", "predicate", "input"],
+      "outputs": ["guarded_output"]
+    },
+    "combinator-transform": {
+      "label": "Transform",
+      "description": "Apply a transformation function to the output of the inner combinator.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "combinator::reduce",
+      "rust_module": "exo_gatekeeper::combinator",
+      "combinator": "Transform(inner, transform_fn)",
+      "invariants": [],
+      "inputs": ["inner_combinator", "transform_fn", "input"],
+      "outputs": ["transformed_output"]
+    },
+    "governance-propose": {
+      "label": "Governance Propose",
+      "description": "Submit a governance proposal to the legislative branch for deliberation.",
+      "crate": "exo-governance",
+      "rust_trait": "GovernanceEngine::propose",
+      "rust_module": "exo_governance::engine",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'proposer_authorized' }), Transform(Identity, { output_key: 'proposal_id' })])",
+      "invariants": ["SeparationOfPowers", "QuorumLegitimate", "ProvenanceVerifiable"],
+      "inputs": ["proposer_did", "proposal_content", "quorum_requirement"],
+      "outputs": ["proposal_id", "deliberation_state"]
+    },
+    "governance-vote": {
+      "label": "Governance Vote",
+      "description": "Cast a vote on an active governance proposal.",
+      "crate": "exo-governance",
+      "rust_trait": "GovernanceEngine::vote",
+      "rust_module": "exo_governance::engine",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'voter_eligible' }), Transform(Identity, { output_key: 'vote_recorded' })])",
+      "invariants": ["QuorumLegitimate", "ProvenanceVerifiable"],
+      "inputs": ["voter_did", "proposal_id", "vote_value"],
+      "outputs": ["vote_receipt"]
+    },
+    "governance-resolve": {
+      "label": "Governance Resolve",
+      "description": "Resolve a governance proposal after quorum is met.",
+      "crate": "exo-governance",
+      "rust_trait": "GovernanceEngine::resolve",
+      "rust_module": "exo_governance::engine",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'quorum_met' }), Transform(Identity, { output_key: 'resolution' })])",
+      "invariants": ["QuorumLegitimate", "SeparationOfPowers"],
+      "inputs": ["proposal_id"],
+      "outputs": ["resolution", "enacted"]
+    },
+    "escalation-trigger": {
+      "label": "Escalation Trigger",
+      "description": "Trigger constitutional escalation when an invariant violation is detected.",
+      "crate": "exo-escalation",
+      "rust_trait": "EscalationEngine::trigger",
+      "rust_module": "exo_escalation::engine",
+      "combinator": "Sequence([Transform(Identity, { output_key: 'escalation_id' }), Guard(Identity, Predicate { required_key: 'human_notified' })])",
+      "invariants": ["HumanOverride", "ProvenanceVerifiable"],
+      "inputs": ["violation", "severity", "context"],
+      "outputs": ["escalation_id", "notification_sent"]
+    },
+    "human-override": {
+      "label": "Human Override",
+      "description": "Emergency human intervention point. Always available per constitutional requirement.",
+      "crate": "exo-escalation",
+      "rust_trait": "EscalationEngine::human_override",
+      "rust_module": "exo_escalation::engine",
+      "combinator": "Choice([Guard(Identity, Predicate { required_key: 'human_approved' }), Guard(Identity, Predicate { required_key: 'human_rejected' })])",
+      "invariants": ["HumanOverride"],
+      "inputs": ["escalation_id", "human_decision", "justification"],
+      "outputs": ["override_result"]
+    },
+    "dag-append": {
+      "label": "DAG Append",
+      "description": "Append a causally-ordered event to the immutable DAG ledger.",
+      "crate": "exo-dag",
+      "rust_trait": "Dag::append",
+      "rust_module": "exo_dag::dag",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'parents_valid' }), Transform(Identity, { output_key: 'event_hash' })])",
+      "invariants": ["ProvenanceVerifiable"],
+      "inputs": ["event", "parent_hashes"],
+      "outputs": ["event_hash", "dag_state"]
+    },
+    "proof-generate": {
+      "label": "Proof Generate",
+      "description": "Generate a cryptographic proof for a constitutional claim.",
+      "crate": "exo-proofs",
+      "rust_trait": "ProofEngine::generate",
+      "rust_module": "exo_proofs::engine",
+      "combinator": "Transform(Identity, { output_key: 'proof' })",
+      "invariants": ["ProvenanceVerifiable"],
+      "inputs": ["claim", "evidence"],
+      "outputs": ["proof"]
+    },
+    "proof-verify": {
+      "label": "Proof Verify",
+      "description": "Verify a cryptographic proof against its claim.",
+      "crate": "exo-proofs",
+      "rust_trait": "ProofEngine::verify",
+      "rust_module": "exo_proofs::engine",
+      "combinator": "Guard(Identity, Predicate { required_key: 'proof_valid' })",
+      "invariants": ["ProvenanceVerifiable"],
+      "inputs": ["proof", "claim"],
+      "outputs": ["verification_result"]
+    },
+    "tenant-isolate": {
+      "label": "Tenant Isolate",
+      "description": "Enforce tenant boundary isolation, ensuring operations cannot cross tenant boundaries without explicit delegation.",
+      "crate": "exo-tenant",
+      "rust_trait": "TenantEngine::isolate",
+      "rust_module": "exo_tenant::engine",
+      "combinator": "Guard(Identity, Predicate { required_key: 'tenant_boundary_valid' })",
+      "invariants": ["SeparationOfPowers", "AuthorityChainValid"],
+      "inputs": ["tenant_id", "operation", "actor_did"],
+      "outputs": ["isolation_verified"]
+    },
+    "mcp-enforce": {
+      "label": "MCP Enforce",
+      "description": "Enforce Model Context Protocol rules on an AI system interaction.",
+      "crate": "exo-gatekeeper",
+      "rust_trait": "McpEnforcer::enforce",
+      "rust_module": "exo_gatekeeper::mcp",
+      "combinator": "Sequence([Guard(Identity, Predicate { required_key: 'mcp_context_valid' }), Guard(Identity, Predicate { required_key: 'mcp_rules_satisfied' })])",
+      "invariants": ["KernelImmutability", "ConsentRequired", "HumanOverride"],
+      "inputs": ["mcp_context", "ai_action", "rules"],
+      "outputs": ["enforcement_result"]
+    }
+  },
+  "combinator_algebra": {
+    "description": "The combinator algebra provides a deterministic composition language for governance operations.",
+    "terms": [
+      "Identity — pass-through, returns input unchanged",
+      "Sequence([a, b, c]) — execute in order, threading output to input",
+      "Parallel([a, b, c]) — execute independently, merge outputs",
+      "Choice([a, b, c]) — try in order, first success wins",
+      "Guard(inner, predicate) — proceed only if predicate holds",
+      "Transform(inner, fn) — modify the output of inner",
+      "Retry(inner, policy) — retry with backoff policy",
+      "Timeout(inner, duration) — time-bounded execution",
+      "Checkpoint(inner, id) — resumable execution point"
+    ]
+  },
+  "invariants": {
+    "SeparationOfPowers": "No single actor may hold legislative + executive + judicial power",
+    "ConsentRequired": "Action denied without active bailment consent",
+    "NoSelfGrant": "An actor cannot expand its own permissions",
+    "HumanOverride": "Emergency human intervention must always be possible",
+    "KernelImmutability": "Kernel configuration cannot be modified after creation",
+    "AuthorityChainValid": "Authority chain must be valid and unbroken",
+    "QuorumLegitimate": "Quorum decisions must meet threshold requirements",
+    "ProvenanceVerifiable": "All actions must have verifiable provenance"
+  }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "exo-gatekeeper"
+description = "EXOCHAIN judicial branch — CGR kernel, combinator algebra, invariant enforcement, Holon runtime, MCP middleware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-core = { path = "../exo-core" }
+serde = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

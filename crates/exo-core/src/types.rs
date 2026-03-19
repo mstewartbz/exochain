@@ -1,0 +1,1070 @@
+//! Core deterministic types for the EXOCHAIN trust fabric.
+//!
+//! **Determinism contract**: every type in this module has a canonical
+//! representation.  `DeterministicMap` wraps `BTreeMap` so that iteration
+//! order is always sorted-key.  No `HashMap` or floating-point value is
+//! ever exposed.
+
+use core::fmt;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use zeroize::Zeroize;
+
+use crate::error::{ExoError, Result};
+
+// ---------------------------------------------------------------------------
+// DeterministicMap
+// ---------------------------------------------------------------------------
+
+/// A map that guarantees deterministic iteration order (sorted by key).
+///
+/// This is the **only** map type permitted in EXOCHAIN.  It wraps
+/// `BTreeMap` and re-exports a minimal surface so callers never
+/// accidentally introduce a `HashMap`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeterministicMap<K: Ord, V> {
+    inner: BTreeMap<K, V>,
+}
+
+impl<K: Ord, V> DeterministicMap<K, V> {
+    /// Create an empty map.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: BTreeMap::new(),
+        }
+    }
+
+    /// Insert a key-value pair, returning the previous value if any.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.inner.insert(key, value)
+    }
+
+    /// Get a reference to the value for `key`.
+    #[must_use]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.inner.get(key)
+    }
+
+    /// Remove a key, returning its value if present.
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.inner.remove(key)
+    }
+
+    /// Returns `true` if the map contains `key`.
+    #[must_use]
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.inner.contains_key(key)
+    }
+
+    /// Number of entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Is the map empty?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Deterministic iterator — always sorted by key.
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, K, V> {
+        self.inner.iter()
+    }
+
+    /// Sorted keys iterator.
+    pub fn keys(&self) -> std::collections::btree_map::Keys<'_, K, V> {
+        self.inner.keys()
+    }
+
+    /// Values iterator (in key order).
+    pub fn values(&self) -> std::collections::btree_map::Values<'_, K, V> {
+        self.inner.values()
+    }
+
+    /// Consume self and return the inner `BTreeMap`.
+    #[must_use]
+    pub fn into_inner(self) -> BTreeMap<K, V> {
+        self.inner
+    }
+}
+
+impl<K: Ord, V> Default for DeterministicMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Ord, V> From<BTreeMap<K, V>> for DeterministicMap<K, V> {
+    fn from(inner: BTreeMap<K, V>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<K: Ord, V> IntoIterator for DeterministicMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::collections::btree_map::IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+impl<'a, K: Ord, V> IntoIterator for &'a DeterministicMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::collections::btree_map::Iter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hash256
+// ---------------------------------------------------------------------------
+
+/// A 256-bit (32-byte) hash value, used as the canonical content-address
+/// throughout EXOCHAIN.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Hash256(pub [u8; 32]);
+
+impl Hash256 {
+    /// The all-zero hash, used as a sentinel / genesis value.
+    pub const ZERO: Self = Self([0u8; 32]);
+
+    /// Create from a raw 32-byte array.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the inner bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Compute the blake3 hash of arbitrary data and wrap it.
+    #[must_use]
+    pub fn digest(data: &[u8]) -> Self {
+        let h = blake3::hash(data);
+        Self(*h.as_bytes())
+    }
+}
+
+impl fmt::Display for Hash256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Hash256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Hash256({self})")
+    }
+}
+
+impl AsRef<[u8]> for Hash256 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signature
+// ---------------------------------------------------------------------------
+
+/// An Ed25519 signature (64 bytes).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Signature(pub [u8; 64]);
+
+// Custom Serialize/Deserialize for [u8; 64] because serde only supports arrays up to 32.
+impl Serialize for Signature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> core::result::Result<Self, D::Error> {
+        struct Vis;
+        impl<'v> serde::de::Visitor<'v> for Vis {
+            type Value = Signature;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("64 bytes")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> core::result::Result<Signature, E> {
+                if v.len() != 64 {
+                    return Err(E::invalid_length(v.len(), &self));
+                }
+                let mut buf = [0u8; 64];
+                buf.copy_from_slice(v);
+                Ok(Signature(buf))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'v>>(self, mut seq: A) -> core::result::Result<Signature, A::Error> {
+                let mut buf = [0u8; 64];
+                for (i, slot) in buf.iter_mut().enumerate() {
+                    *slot = seq.next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                }
+                Ok(Signature(buf))
+            }
+        }
+        deserializer.deserialize_bytes(Vis)
+    }
+}
+
+impl Signature {
+    /// Create from raw bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 64]) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the inner bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+
+    /// The all-zeros signature, used as a placeholder before acceptance.
+    pub const EMPTY: Self = Self([0u8; 64]);
+
+    /// Create an empty (all-zeros) signature placeholder.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self::EMPTY
+    }
+
+    /// Check if this signature is the empty placeholder (all zeros).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0 == [0u8; 64]
+    }
+}
+
+impl fmt::Debug for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Signature({}..)", hex_prefix(&self.0))
+    }
+}
+
+impl fmt::Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PublicKey / SecretKey
+// ---------------------------------------------------------------------------
+
+/// An Ed25519 public key (32 bytes).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PublicKey(pub [u8; 32]);
+
+impl PublicKey {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PublicKey({}..)", hex_prefix(&self.0))
+    }
+}
+
+impl fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// An Ed25519 secret (signing) key.  Zeroized on drop.
+#[derive(Clone, Zeroize)]
+#[zeroize(drop)]
+pub struct SecretKey(pub [u8; 32]);
+
+impl SecretKey {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretKey(***)")
+    }
+}
+
+impl PartialEq for SecretKey {
+    fn eq(&self, other: &Self) -> bool {
+        // Constant-time comparison would be ideal but for PartialEq trait
+        // we do a simple byte compare — the secret is zeroized on drop.
+        self.0 == other.0
+    }
+}
+
+impl Eq for SecretKey {}
+
+// ---------------------------------------------------------------------------
+// Did — Decentralized Identifier
+// ---------------------------------------------------------------------------
+
+/// A Decentralized Identifier conforming to the `did:exo:<method-specific>` format.
+///
+/// The method-specific portion must be non-empty and consist only of
+/// alphanumeric characters, hyphens, underscores, and colons.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Did(String);
+
+impl Did {
+    /// Parse and validate a DID string.
+    ///
+    /// Accepted format: `did:exo:<id>` where `<id>` is `[a-zA-Z0-9_:-]+`.
+    pub fn new(value: &str) -> Result<Self> {
+        Self::validate(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    fn validate(value: &str) -> Result<()> {
+        // Must start with "did:exo:"
+        let rest = value.strip_prefix("did:exo:").ok_or_else(|| ExoError::InvalidDid {
+            value: value.to_owned(),
+        })?;
+        if rest.is_empty() {
+            return Err(ExoError::InvalidDid {
+                value: value.to_owned(),
+            });
+        }
+        // Method-specific portion: alphanumeric, hyphen, underscore, colon
+        if !rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
+        {
+            return Err(ExoError::InvalidDid {
+                value: value.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the full DID string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Did {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Did({})", self.0)
+    }
+}
+
+impl fmt::Display for Did {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CorrelationId
+// ---------------------------------------------------------------------------
+
+/// A UUID v4 correlation identifier for tracking transactions end-to-end.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CorrelationId(Uuid);
+
+impl CorrelationId {
+    /// Generate a new random correlation ID.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Wrap an existing UUID.
+    #[must_use]
+    pub const fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Return the inner UUID.
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for CorrelationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for CorrelationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CorrelationId({})", self.0)
+    }
+}
+
+impl fmt::Display for CorrelationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp — HLC timestamp (no floating point)
+// ---------------------------------------------------------------------------
+
+/// A Hybrid Logical Clock timestamp.
+///
+/// - `physical_ms`: milliseconds since Unix epoch (wall-clock component).
+/// - `logical`: monotonic counter within the same millisecond.
+///
+/// Ordering: physical first, then logical.  **No floating-point** involved.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Timestamp {
+    pub physical_ms: u64,
+    pub logical: u32,
+}
+
+impl Timestamp {
+    /// Create a new timestamp.
+    #[must_use]
+    pub const fn new(physical_ms: u64, logical: u32) -> Self {
+        Self {
+            physical_ms,
+            logical,
+        }
+    }
+
+    /// The zero / genesis timestamp.
+    pub const ZERO: Self = Self {
+        physical_ms: 0,
+        logical: 0,
+    };
+
+    /// Create a timestamp from the current system clock (non-deterministic).
+    #[must_use]
+    pub fn now_utc() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        #[allow(clippy::unwrap_used)]
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            physical_ms: millis,
+            logical: 0,
+        }
+    }
+
+    /// Check if this timestamp is expired relative to `now`.
+    /// Returns true if `self <= now`.
+    #[must_use]
+    pub fn is_expired(&self, now: &Timestamp) -> bool {
+        self <= now
+    }
+}
+
+impl PartialOrd for Timestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Timestamp {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.physical_ms
+            .cmp(&other.physical_ms)
+            .then_with(|| self.logical.cmp(&other.logical))
+    }
+}
+
+impl fmt::Debug for Timestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Timestamp({}:{})", self.physical_ms, self.logical)
+    }
+}
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.physical_ms, self.logical)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Version
+// ---------------------------------------------------------------------------
+
+/// A monotonically increasing version counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Version(pub u64);
+
+impl Version {
+    /// The initial version.
+    pub const ZERO: Self = Self(0);
+
+    /// Increment and return the next version.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    /// Return the raw counter value.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// First 4 bytes as hex for debug displays.
+fn hex_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    // -- DeterministicMap --------------------------------------------------
+
+    #[test]
+    fn map_new_is_empty() {
+        let m: DeterministicMap<String, i32> = DeterministicMap::new();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
+    }
+
+    #[test]
+    fn map_default_is_empty() {
+        let m: DeterministicMap<String, i32> = DeterministicMap::default();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn map_insert_get_remove() {
+        let mut m = DeterministicMap::new();
+        assert_eq!(m.insert("a".to_string(), 1), None);
+        assert_eq!(m.insert("a".to_string(), 2), Some(1));
+        assert_eq!(m.get(&"a".to_string()), Some(&2));
+        assert!(m.contains_key(&"a".to_string()));
+        assert!(!m.contains_key(&"b".to_string()));
+        assert_eq!(m.remove(&"a".to_string()), Some(2));
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn map_deterministic_iteration_order() {
+        let mut m = DeterministicMap::new();
+        m.insert("c", 3);
+        m.insert("a", 1);
+        m.insert("b", 2);
+        let keys: Vec<_> = m.keys().copied().collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+        let values: Vec<_> = m.values().copied().collect();
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn map_from_btreemap() {
+        let mut bt = BTreeMap::new();
+        bt.insert(1, "one");
+        bt.insert(2, "two");
+        let dm = DeterministicMap::from(bt.clone());
+        assert_eq!(dm.len(), 2);
+        assert_eq!(dm.into_inner(), bt);
+    }
+
+    #[test]
+    fn map_into_iter() {
+        let mut m = DeterministicMap::new();
+        m.insert(1, "a");
+        m.insert(2, "b");
+        let pairs: Vec<_> = m.into_iter().collect();
+        assert_eq!(pairs, vec![(1, "a"), (2, "b")]);
+    }
+
+    #[test]
+    fn map_ref_into_iter() {
+        let mut m = DeterministicMap::new();
+        m.insert(1, "a");
+        let pairs: Vec<_> = (&m).into_iter().collect();
+        assert_eq!(pairs, vec![(&1, &"a")]);
+    }
+
+    #[test]
+    fn map_iter() {
+        let mut m = DeterministicMap::new();
+        m.insert(10, "x");
+        let pairs: Vec<_> = m.iter().collect();
+        assert_eq!(pairs, vec![(&10, &"x")]);
+    }
+
+    #[test]
+    fn map_serde_roundtrip() {
+        let mut m = DeterministicMap::new();
+        m.insert("key".to_string(), 42u32);
+        let json = serde_json::to_string(&m).expect("serialize");
+        let m2: DeterministicMap<String, u32> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn map_clone_eq_ord_hash() {
+        let mut m1 = DeterministicMap::new();
+        m1.insert(1, 2);
+        let m2 = m1.clone();
+        assert_eq!(m1, m2);
+        // Ord
+        let mut m3 = DeterministicMap::new();
+        m3.insert(2, 3);
+        assert!(m1 < m3);
+        // Hash
+        use std::hash::{Hash, Hasher};
+        let mut h1 = std::hash::DefaultHasher::new();
+        m1.hash(&mut h1);
+        let mut h2 = std::hash::DefaultHasher::new();
+        m2.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    // -- Hash256 -----------------------------------------------------------
+
+    #[test]
+    fn hash256_zero() {
+        assert_eq!(Hash256::ZERO.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn hash256_from_bytes_roundtrip() {
+        let bytes = [42u8; 32];
+        let h = Hash256::from_bytes(bytes);
+        assert_eq!(*h.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn hash256_digest() {
+        let h1 = Hash256::digest(b"hello");
+        let h2 = Hash256::digest(b"hello");
+        assert_eq!(h1, h2);
+        let h3 = Hash256::digest(b"world");
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn hash256_display() {
+        let h = Hash256::from_bytes([0xab; 32]);
+        let s = h.to_string();
+        assert_eq!(s.len(), 64);
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash256_debug() {
+        let h = Hash256::ZERO;
+        let dbg = format!("{h:?}");
+        assert!(dbg.starts_with("Hash256("));
+    }
+
+    #[test]
+    fn hash256_as_ref() {
+        let h = Hash256::from_bytes([1u8; 32]);
+        let slice: &[u8] = h.as_ref();
+        assert_eq!(slice.len(), 32);
+    }
+
+    #[test]
+    fn hash256_ord() {
+        let a = Hash256::from_bytes([0u8; 32]);
+        let b = Hash256::from_bytes([1u8; 32]);
+        assert!(a < b);
+    }
+
+    #[test]
+    fn hash256_serde_roundtrip() {
+        let h = Hash256::digest(b"test");
+        let cbor = {
+            let mut buf = Vec::new();
+            ciborium::into_writer(&h, &mut buf).expect("cbor encode");
+            buf
+        };
+        let h2: Hash256 = ciborium::from_reader(&cbor[..]).expect("cbor decode");
+        assert_eq!(h, h2);
+    }
+
+    // -- Signature ---------------------------------------------------------
+
+    #[test]
+    fn signature_from_bytes() {
+        let sig = Signature::from_bytes([0xffu8; 64]);
+        assert_eq!(sig.as_bytes(), &[0xff; 64]);
+    }
+
+    #[test]
+    fn signature_display() {
+        let sig = Signature::from_bytes([0xab; 64]);
+        let s = sig.to_string();
+        assert_eq!(s.len(), 128);
+    }
+
+    #[test]
+    fn signature_debug() {
+        let sig = Signature::from_bytes([0; 64]);
+        let dbg = format!("{sig:?}");
+        assert!(dbg.starts_with("Signature("));
+    }
+
+    #[test]
+    fn signature_clone_eq() {
+        let s1 = Signature::from_bytes([1u8; 64]);
+        let s2 = s1;
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn signature_serde_roundtrip() {
+        let sig = Signature::from_bytes([0xab; 64]);
+        let json = serde_json::to_string(&sig).expect("ser");
+        let sig2: Signature = serde_json::from_str(&json).expect("de");
+        assert_eq!(sig, sig2);
+    }
+
+    // -- PublicKey ----------------------------------------------------------
+
+    #[test]
+    fn public_key_basics() {
+        let pk = PublicKey::from_bytes([7u8; 32]);
+        assert_eq!(*pk.as_bytes(), [7u8; 32]);
+        let pk2 = pk;
+        assert_eq!(pk, pk2);
+    }
+
+    #[test]
+    fn public_key_display_debug() {
+        let pk = PublicKey::from_bytes([0xab; 32]);
+        let disp = pk.to_string();
+        assert_eq!(disp.len(), 64);
+        let dbg = format!("{pk:?}");
+        assert!(dbg.starts_with("PublicKey("));
+    }
+
+    #[test]
+    fn public_key_ord_hash() {
+        let a = PublicKey::from_bytes([0; 32]);
+        let b = PublicKey::from_bytes([1; 32]);
+        assert!(a < b);
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        a.hash(&mut h);
+        let _ = h.finish(); // just ensure it doesn't panic
+    }
+
+    #[test]
+    fn public_key_serde() {
+        let pk = PublicKey::from_bytes([42; 32]);
+        let json = serde_json::to_string(&pk).expect("ser");
+        let pk2: PublicKey = serde_json::from_str(&json).expect("de");
+        assert_eq!(pk, pk2);
+    }
+
+    // -- SecretKey ----------------------------------------------------------
+
+    #[test]
+    fn secret_key_zeroize_on_drop() {
+        // We can't observe the drop zeroize directly, but we can verify
+        // that the type compiles with Zeroize derive and the bytes are
+        // accessible before drop.
+        let sk = SecretKey::from_bytes([99u8; 32]);
+        assert_eq!(*sk.as_bytes(), [99u8; 32]);
+    }
+
+    #[test]
+    fn secret_key_debug_redacted() {
+        let sk = SecretKey::from_bytes([0; 32]);
+        let dbg = format!("{sk:?}");
+        assert_eq!(dbg, "SecretKey(***)");
+        // Must NOT leak key material
+        assert!(!dbg.contains("00"));
+    }
+
+    #[test]
+    fn secret_key_eq() {
+        let a = SecretKey::from_bytes([1; 32]);
+        let b = SecretKey::from_bytes([1; 32]);
+        let c = SecretKey::from_bytes([2; 32]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn secret_key_clone() {
+        let a = SecretKey::from_bytes([5; 32]);
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // -- Did ---------------------------------------------------------------
+
+    #[test]
+    fn did_valid() {
+        let d = Did::new("did:exo:alice").expect("valid");
+        assert_eq!(d.as_str(), "did:exo:alice");
+        assert_eq!(d.to_string(), "did:exo:alice");
+    }
+
+    #[test]
+    fn did_valid_with_special_chars() {
+        Did::new("did:exo:node-1_alpha:sub").expect("valid with hyphens/underscores/colons");
+    }
+
+    #[test]
+    fn did_invalid_prefix() {
+        let err = Did::new("did:btc:abc").unwrap_err();
+        assert!(matches!(err, ExoError::InvalidDid { .. }));
+    }
+
+    #[test]
+    fn did_empty_method_specific() {
+        let err = Did::new("did:exo:").unwrap_err();
+        assert!(matches!(err, ExoError::InvalidDid { .. }));
+    }
+
+    #[test]
+    fn did_invalid_chars() {
+        let err = Did::new("did:exo:has space").unwrap_err();
+        assert!(matches!(err, ExoError::InvalidDid { .. }));
+    }
+
+    #[test]
+    fn did_no_prefix() {
+        let err = Did::new("alice").unwrap_err();
+        assert!(matches!(err, ExoError::InvalidDid { .. }));
+    }
+
+    #[test]
+    fn did_debug() {
+        let d = Did::new("did:exo:bob").expect("valid");
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("did:exo:bob"));
+    }
+
+    #[test]
+    fn did_clone_ord_hash() {
+        let a = Did::new("did:exo:a").expect("valid");
+        let b = Did::new("did:exo:b").expect("valid");
+        assert!(a < b);
+        let c = a.clone();
+        assert_eq!(a, c);
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        a.hash(&mut h);
+        let _ = h.finish();
+    }
+
+    #[test]
+    fn did_serde_roundtrip() {
+        let d = Did::new("did:exo:test123").expect("valid");
+        let json = serde_json::to_string(&d).expect("ser");
+        let d2: Did = serde_json::from_str(&json).expect("de");
+        assert_eq!(d, d2);
+    }
+
+    // -- CorrelationId -----------------------------------------------------
+
+    #[test]
+    fn correlation_id_new() {
+        let c1 = CorrelationId::new();
+        let c2 = CorrelationId::new();
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn correlation_id_default() {
+        let _c = CorrelationId::default();
+    }
+
+    #[test]
+    fn correlation_id_from_uuid() {
+        let uuid = Uuid::new_v4();
+        let c = CorrelationId::from_uuid(uuid);
+        assert_eq!(*c.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn correlation_id_display_debug() {
+        let c = CorrelationId::new();
+        let disp = c.to_string();
+        assert!(!disp.is_empty());
+        let dbg = format!("{c:?}");
+        assert!(dbg.starts_with("CorrelationId("));
+    }
+
+    #[test]
+    fn correlation_id_ord() {
+        let a = CorrelationId::from_uuid(Uuid::nil());
+        let b = CorrelationId::from_uuid(Uuid::max());
+        assert!(a < b);
+    }
+
+    #[test]
+    fn correlation_id_serde() {
+        let c = CorrelationId::new();
+        let json = serde_json::to_string(&c).expect("ser");
+        let c2: CorrelationId = serde_json::from_str(&json).expect("de");
+        assert_eq!(c, c2);
+    }
+
+    // -- Timestamp ---------------------------------------------------------
+
+    #[test]
+    fn timestamp_zero() {
+        let t = Timestamp::ZERO;
+        assert_eq!(t.physical_ms, 0);
+        assert_eq!(t.logical, 0);
+    }
+
+    #[test]
+    fn timestamp_new() {
+        let t = Timestamp::new(1000, 5);
+        assert_eq!(t.physical_ms, 1000);
+        assert_eq!(t.logical, 5);
+    }
+
+    #[test]
+    fn timestamp_ordering() {
+        let t1 = Timestamp::new(100, 0);
+        let t2 = Timestamp::new(100, 1);
+        let t3 = Timestamp::new(101, 0);
+        assert!(t1 < t2);
+        assert!(t2 < t3);
+        assert!(t1 < t3);
+        assert_eq!(t1, t1);
+    }
+
+    #[test]
+    fn timestamp_partial_ord_consistent() {
+        let a = Timestamp::new(1, 2);
+        let b = Timestamp::new(1, 3);
+        assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Less));
+    }
+
+    #[test]
+    fn timestamp_display_debug() {
+        let t = Timestamp::new(42, 7);
+        assert_eq!(t.to_string(), "42:7");
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn timestamp_serde() {
+        let t = Timestamp::new(123456, 78);
+        let json = serde_json::to_string(&t).expect("ser");
+        let t2: Timestamp = serde_json::from_str(&json).expect("de");
+        assert_eq!(t, t2);
+    }
+
+    #[test]
+    fn timestamp_hash() {
+        use std::hash::{Hash, Hasher};
+        let t = Timestamp::new(1, 1);
+        let mut h = std::hash::DefaultHasher::new();
+        t.hash(&mut h);
+        let _ = h.finish();
+    }
+
+    // -- Version -----------------------------------------------------------
+
+    #[test]
+    fn version_zero() {
+        assert_eq!(Version::ZERO.value(), 0);
+    }
+
+    #[test]
+    fn version_next() {
+        let v = Version::ZERO.next().next().next();
+        assert_eq!(v.value(), 3);
+    }
+
+    #[test]
+    fn version_display() {
+        assert_eq!(Version(5).to_string(), "v5");
+    }
+
+    #[test]
+    fn version_ord() {
+        assert!(Version(1) < Version(2));
+        assert_eq!(Version(3), Version(3));
+    }
+
+    #[test]
+    fn version_serde() {
+        let v = Version(99);
+        let json = serde_json::to_string(&v).expect("ser");
+        let v2: Version = serde_json::from_str(&json).expect("de");
+        assert_eq!(v, v2);
+    }
+
+    // -- hex_prefix helper -------------------------------------------------
+
+    #[test]
+    fn hex_prefix_helper() {
+        let result = hex_prefix(&[0xab, 0xcd, 0xef, 0x01, 0x99]);
+        assert_eq!(result, "abcdef01");
+    }
+
+    #[test]
+    fn hex_prefix_short_input() {
+        let result = hex_prefix(&[0xff]);
+        assert_eq!(result, "ff");
+    }
+}

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6a0c2d5a75062b93d39d4e0ebd4109811c7a8c3960d938f07a9272ea9178f51c # shrinks to leaves = [Hash256(0000000000000000000000000000000000000000000000000000000000000000), Hash256(0000000000000000000000000000000000000000000000000000000000000000), Hash256(0000000000000000000000000000000000000000000000000000000000000000), Hash256(0000000000000000000000000000000000000000000000000000000000000000)]

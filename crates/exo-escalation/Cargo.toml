@@ -1,0 +1,22 @@
+[package]
+name = "exo-escalation"
+description = "EXOCHAIN constitutional trust fabric — operational nervous system: detection, triage, kanban, HITL, Sybil adjudication"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
+exo-governance = { path = "../exo-governance" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

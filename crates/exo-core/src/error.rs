@@ -1,0 +1,167 @@
+//! Error types for the EXOCHAIN constitutional trust fabric.
+//!
+//! Every failure mode in the system has a dedicated variant ensuring
+//! exhaustive error handling at compile time.
+
+use core::fmt;
+use thiserror::Error;
+
+/// Unified error type for all `exo-core` operations.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ExoError {
+    /// A BCTS state transition was requested that violates the state machine rules.
+    #[error("invalid transition from {from} to {to}")]
+    InvalidTransition { from: String, to: String },
+
+    /// A cryptographic signature failed verification.
+    #[error("invalid signature: {reason}")]
+    InvalidSignature { reason: String },
+
+    /// A DID string did not conform to the required format.
+    #[error("invalid DID: {value}")]
+    InvalidDid { value: String },
+
+    /// The HLC detected backward drift beyond acceptable tolerance.
+    #[error("clock drift detected: physical={physical_ms}ms, tolerance={tolerance_ms}ms")]
+    ClockDrift { physical_ms: u64, tolerance_ms: u64 },
+
+    /// A hash did not match the expected value.
+    #[error("hash mismatch: expected {expected}, got {actual}")]
+    HashMismatch { expected: String, actual: String },
+
+    /// The actor does not have authority for the requested operation.
+    #[error("unauthorized: {reason}")]
+    Unauthorized { reason: String },
+
+    /// An operation requires consent that has not been granted.
+    #[error("consent required: {scope}")]
+    ConsentRequired { scope: String },
+
+    /// A system invariant was violated.
+    #[error("invariant violation: {description}")]
+    InvariantViolation { description: String },
+
+    /// Sybil-resistant identity verification failed.
+    #[error("sybil detected: {evidence}")]
+    SybilDetected { evidence: String },
+
+    /// Serialization / deserialization failure.
+    #[error("serialization error: {reason}")]
+    SerializationError { reason: String },
+
+    /// Cryptographic key generation or usage error.
+    #[error("crypto error: {reason}")]
+    CryptoError { reason: String },
+
+    /// Merkle proof verification failed.
+    #[error("invalid merkle proof")]
+    InvalidMerkleProof,
+
+    /// Receipt chain integrity check failed.
+    #[error("receipt chain integrity failure at index {index}")]
+    ReceiptChainBroken { index: usize },
+
+    /// Entity not found.
+    #[error("not found: {entity}")]
+    NotFound { entity: String },
+}
+
+/// Convenient Result alias used throughout `exo-core`.
+pub type Result<T> = std::result::Result<T, ExoError>;
+
+impl ExoError {
+    /// Returns `true` when this error indicates a security-relevant failure.
+    #[must_use]
+    pub fn is_security_relevant(&self) -> bool {
+        matches!(
+            self,
+            ExoError::InvalidSignature { .. }
+                | ExoError::Unauthorized { .. }
+                | ExoError::SybilDetected { .. }
+                | ExoError::HashMismatch { .. }
+        )
+    }
+}
+
+impl<T: fmt::Debug> From<ciborium::ser::Error<T>> for ExoError {
+    fn from(e: ciborium::ser::Error<T>) -> Self {
+        ExoError::SerializationError {
+            reason: format!("{e:?}"),
+        }
+    }
+}
+
+impl<T: fmt::Debug> From<ciborium::de::Error<T>> for ExoError {
+    fn from(e: ciborium::de::Error<T>) -> Self {
+        ExoError::SerializationError {
+            reason: format!("{e:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_all_variants() {
+        let cases: Vec<(ExoError, &str)> = vec![
+            (ExoError::InvalidTransition { from: "Draft".into(), to: "Closed".into() }, "Draft"),
+            (ExoError::InvalidSignature { reason: "bad bytes".into() }, "bad bytes"),
+            (ExoError::InvalidDid { value: "garbage".into() }, "garbage"),
+            (ExoError::ClockDrift { physical_ms: 5000, tolerance_ms: 1000 }, "5000"),
+            (ExoError::HashMismatch { expected: "aaa".into(), actual: "bbb".into() }, "aaa"),
+            (ExoError::Unauthorized { reason: "no role".into() }, "no role"),
+            (ExoError::ConsentRequired { scope: "data-share".into() }, "data-share"),
+            (ExoError::InvariantViolation { description: "bad state".into() }, "bad state"),
+            (ExoError::SybilDetected { evidence: "dup key".into() }, "dup key"),
+            (ExoError::SerializationError { reason: "cbor fail".into() }, "cbor fail"),
+            (ExoError::CryptoError { reason: "rng fail".into() }, "rng fail"),
+            (ExoError::InvalidMerkleProof, "invalid merkle proof"),
+            (ExoError::ReceiptChainBroken { index: 3 }, "3"),
+            (ExoError::NotFound { entity: "item".into() }, "item"),
+        ];
+        for (e, expected_substr) in cases {
+            assert!(e.to_string().contains(expected_substr), "failed for: {e:?}");
+        }
+    }
+
+    #[test]
+    fn is_security_relevant_positive() {
+        assert!(ExoError::InvalidSignature { reason: "x".into() }.is_security_relevant());
+        assert!(ExoError::Unauthorized { reason: "x".into() }.is_security_relevant());
+        assert!(ExoError::SybilDetected { evidence: "x".into() }.is_security_relevant());
+        assert!(ExoError::HashMismatch { expected: "a".into(), actual: "b".into() }.is_security_relevant());
+    }
+
+    #[test]
+    fn is_security_relevant_negative() {
+        assert!(!ExoError::InvalidDid { value: "x".into() }.is_security_relevant());
+        assert!(!ExoError::ClockDrift { physical_ms: 1, tolerance_ms: 1 }.is_security_relevant());
+        assert!(!ExoError::InvalidMerkleProof.is_security_relevant());
+        assert!(!ExoError::InvariantViolation { description: "x".into() }.is_security_relevant());
+        assert!(!ExoError::NotFound { entity: "x".into() }.is_security_relevant());
+    }
+
+    #[test]
+    fn clone_eq_debug() {
+        let e1 = ExoError::InvalidMerkleProof;
+        let e2 = e1.clone();
+        assert_eq!(e1, e2);
+        let dbg = format!("{e1:?}");
+        assert!(dbg.contains("InvalidMerkleProof"));
+    }
+
+    #[test]
+    fn result_alias() {
+        let ok: Result<u32> = Ok(42);
+        assert_eq!(ok.unwrap(), 42);
+    }
+
+    #[test]
+    fn error_trait_source_is_none() {
+        use std::error::Error;
+        let e = ExoError::InvalidMerkleProof;
+        assert!(e.source().is_none());
+    }
+}
