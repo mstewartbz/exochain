@@ -22,7 +22,8 @@ pub fn process_request(request: &Request, route: Route, consent: bool, verdict: 
     consent_middleware(&actor.did, &request.action, consent)?;
     governance_middleware(&actor.did, &request.action, verdict)?;
     let result = RouteResult { route: route.clone(), status: "ok".into(), correlation_id: Uuid::new_v4() };
-    audit_middleware(&actor.did, &request.action, "success", log);
+    let now = exo_core::Timestamp::now_utc();
+    audit_middleware(&actor.did, &request.action, "success", &now, log)?;
     Ok(result)
 }
 

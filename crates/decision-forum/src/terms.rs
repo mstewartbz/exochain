@@ -1,50 +1,103 @@
-//! Terms & Conditions enforcement.
-use exo_core::{Did, Signature, Timestamp};
+//! Terms and conditions management.
+
+use exo_core::types::{Did, Hash256, Timestamp};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use exo_core::Hash256;
+
 use crate::error::{ForumError, Result};
 
+/// A terms-and-conditions document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Terms {
+pub struct TermsDocument {
+    pub id: String,
     pub version: u64,
-    pub hash: Hash256,
-    pub acceptance_required: bool,
-    pub accepted_by: BTreeMap<Did, Timestamp>,
+    pub text_hash: Hash256,
+    pub effective_at: Timestamp,
 }
 
-impl Terms {
-    #[must_use] pub fn new(content: &[u8], acceptance_required: bool) -> Self {
-        Terms { version: 1, hash: Hash256::digest(content), acceptance_required, accepted_by: BTreeMap::new() }
+/// An acceptance record for terms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermsAcceptance {
+    pub terms_id: String,
+    pub terms_version: u64,
+    pub accepted_by: Did,
+    pub accepted_at: Timestamp,
+    pub signature_hash: Hash256,
+}
+
+/// Registry of terms acceptances.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TermsRegistry {
+    pub acceptances: Vec<TermsAcceptance>,
+}
+
+impl TermsRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self { Self { acceptances: Vec::new() } }
+
+    /// Record an acceptance.
+    pub fn accept(&mut self, acceptance: TermsAcceptance) {
+        self.acceptances.push(acceptance);
     }
-}
 
-#[must_use]
-pub fn require_acceptance(terms: &Terms, actor: &Did) -> bool {
-    terms.acceptance_required && !terms.accepted_by.contains_key(actor)
-}
-
-pub fn accept(terms: &mut Terms, actor: &Did, signature: &Signature) -> Result<()> {
-    if *signature.as_bytes() == [0u8; 64] {
-        return Err(ForumError::TermsNotAccepted(format!("{actor}: empty signature")));
+    /// Check if a given DID has accepted a specific terms document version.
+    #[must_use]
+    pub fn has_accepted(&self, did: &Did, terms_id: &str, version: u64) -> bool {
+        self.acceptances.iter().any(|a| {
+            a.accepted_by == *did && a.terms_id == terms_id && a.terms_version == version
+        })
     }
-    terms.accepted_by.insert(actor.clone(), Timestamp::ZERO);
-    Ok(())
+
+    /// Require acceptance, returning an error if not found.
+    pub fn require_acceptance(&self, did: &Did, terms_id: &str, version: u64) -> Result<()> {
+        if self.has_accepted(did, terms_id, version) {
+            Ok(())
+        } else {
+            Err(ForumError::TermsNotAccepted(did.to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).unwrap() }
-    fn sig() -> Signature { let mut s = [0u8; 64]; s[0] = 1; Signature::from_bytes(s) }
 
-    #[test] fn new_terms() { let t = Terms::new(b"content", true); assert!(t.acceptance_required); assert!(t.accepted_by.is_empty()); }
-    #[test] fn require_before_accept() { let t = Terms::new(b"c", true); assert!(require_acceptance(&t, &did("a"))); }
-    #[test] fn not_required() { let t = Terms::new(b"c", false); assert!(!require_acceptance(&t, &did("a"))); }
-    #[test] fn accept_ok() { let mut t = Terms::new(b"c", true); accept(&mut t, &did("a"), &sig()).unwrap(); assert!(!require_acceptance(&t, &did("a"))); }
-    #[test] fn accept_empty_sig() { let mut t = Terms::new(b"c", true); assert!(accept(&mut t, &did("a"), &Signature::from_bytes([0u8; 64])).is_err()); }
-    #[test] fn accept_multiple() { let mut t = Terms::new(b"c", true); accept(&mut t, &did("a"), &sig()).unwrap(); accept(&mut t, &did("b"), &sig()).unwrap(); assert_eq!(t.accepted_by.len(), 2); }
-    #[test] fn hash_deterministic() { assert_eq!(Terms::new(b"c", true).hash, Terms::new(b"c", true).hash); }
-    #[test] fn hash_differs() { assert_ne!(Terms::new(b"a", true).hash, Terms::new(b"b", true).hash); }
-    #[test] fn terms_serde() { let t = Terms::new(b"c", true); let j = serde_json::to_string(&t).unwrap(); let r: Terms = serde_json::from_str(&j).unwrap(); assert_eq!(r.version, 1); }
+    fn did() -> Did { Did::new("did:exo:alice").expect("ok") }
+    fn ts() -> Timestamp { Timestamp::new(1000, 0) }
+
+    #[test]
+    fn accept_and_check() {
+        let mut reg = TermsRegistry::new();
+        reg.accept(TermsAcceptance {
+            terms_id: "tos".into(), terms_version: 1,
+            accepted_by: did(), accepted_at: ts(),
+            signature_hash: Hash256::digest(b"sig"),
+        });
+        assert!(reg.has_accepted(&did(), "tos", 1));
+        assert!(!reg.has_accepted(&did(), "tos", 2));
+    }
+
+    #[test]
+    fn require_acceptance_ok() {
+        let mut reg = TermsRegistry::new();
+        reg.accept(TermsAcceptance {
+            terms_id: "tos".into(), terms_version: 1,
+            accepted_by: did(), accepted_at: ts(),
+            signature_hash: Hash256::ZERO,
+        });
+        assert!(reg.require_acceptance(&did(), "tos", 1).is_ok());
+    }
+
+    #[test]
+    fn require_acceptance_missing() {
+        let reg = TermsRegistry::new();
+        let err = reg.require_acceptance(&did(), "tos", 1).unwrap_err();
+        assert!(matches!(err, ForumError::TermsNotAccepted(_)));
+    }
+
+    #[test]
+    fn default_empty() {
+        let reg = TermsRegistry::default();
+        assert!(reg.acceptances.is_empty());
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "decision-forum"
-description = "EXOCHAIN constitutional trust fabric — decision objects, constitutional enforcement, T&C, CLI"
+description = "EXOCHAIN decision.forum — constitutional governance application layer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,9 @@ exo-core = { path = "../exo-core" }
 exo-identity = { path = "../exo-identity" }
 exo-governance = { path = "../exo-governance" }
 exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-authority = { path = "../exo-authority" }
+exo-consent = { path = "../exo-consent" }
+exo-legal = { path = "../exo-legal" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }

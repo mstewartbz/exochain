@@ -43,11 +43,28 @@ pub fn governance_middleware(_actor: &Did, _action: &str, verdict: &Verdict) -> 
 }
 
 /// Record an audit entry for every request.
-pub fn audit_middleware(actor: &Did, action: &str, outcome: &str, log: &mut AuditLog) {
+///
+/// Requires a real HLC timestamp — `Timestamp::ZERO` is rejected as invalid.
+///
+/// # Errors
+/// Returns `GatewayError::BadRequest` if `timestamp` is `Timestamp::ZERO`.
+pub fn audit_middleware(
+    actor: &Did,
+    action: &str,
+    outcome: &str,
+    timestamp: &Timestamp,
+    log: &mut AuditLog,
+) -> Result<()> {
+    if *timestamp == Timestamp::ZERO {
+        return Err(GatewayError::BadRequest(
+            "audit timestamp must not be Timestamp::ZERO; provide a real HLC timestamp".into(),
+        ));
+    }
     log.record(AuditEntry {
         actor: actor.clone(), action: action.into(),
-        timestamp: Timestamp::ZERO, outcome: outcome.into(),
+        timestamp: *timestamp, outcome: outcome.into(),
     });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -60,7 +77,18 @@ mod tests {
     #[test] fn governance_allow() { assert!(governance_middleware(&did("a"), "r", &Verdict::Allow).is_ok()); }
     #[test] fn governance_deny() { assert!(governance_middleware(&did("a"), "r", &Verdict::Deny{reason:"no".into()}).is_err()); }
     #[test] fn governance_escalate() { assert!(governance_middleware(&did("a"), "r", &Verdict::Escalate{reason:"y".into()}).is_err()); }
-    #[test] fn audit_records() { let mut log = AuditLog::new(); audit_middleware(&did("a"), "read", "ok", &mut log); assert_eq!(log.len(), 1); }
+    #[test] fn audit_records() {
+        let mut log = AuditLog::new();
+        let ts = Timestamp::new(1000, 0);
+        audit_middleware(&did("a"), "read", "ok", &ts, &mut log).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.entries[0].timestamp, ts);
+    }
+    #[test] fn audit_rejects_zero_timestamp() {
+        let mut log = AuditLog::new();
+        assert!(audit_middleware(&did("a"), "read", "ok", &Timestamp::ZERO, &mut log).is_err());
+        assert!(log.is_empty());
+    }
     #[test] fn audit_empty() { assert!(AuditLog::new().is_empty()); }
     #[test] fn audit_default() { assert!(AuditLog::default().is_empty()); }
     #[test] fn verdict_serde() {

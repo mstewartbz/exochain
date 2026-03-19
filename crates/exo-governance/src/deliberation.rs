@@ -62,11 +62,11 @@ pub fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> Delibera
         .filter(|v| v.position == Position::For)
         .map(|v| Approval {
             approver_did: v.voter_did.clone(), role: Role::Contributor,
-            timestamp: delib.created, signature: v.signature,
+            timestamp: delib.created, signature: v.signature.clone(),
             independence_attestation: Some(IndependenceAttestation {
                 attester_did: v.voter_did.clone(),
                 no_common_control: true, no_coordination: true, identity_verified: true,
-                signature: v.signature,
+                signature: v.signature.clone(),
             }),
         }).collect();
 

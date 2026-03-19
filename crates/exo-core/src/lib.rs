@@ -22,6 +22,6 @@ pub mod types;
 // Re-export the most commonly used items at crate root for ergonomics.
 pub use error::{ExoError, Result};
 pub use types::{
-    CorrelationId, DeterministicMap, Did, Hash256, PublicKey, SecretKey, Signature, Timestamp,
-    Version,
+    CorrelationId, DeterministicMap, Did, Hash256, PublicKey, SecretKey, Signature, SignerType,
+    Timestamp, Version, SIGNER_PREFIX_AI, SIGNER_PREFIX_HUMAN,
 };

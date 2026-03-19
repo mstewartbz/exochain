@@ -2,8 +2,13 @@
 //!
 //! Ensures AI systems operating within the EXOCHAIN fabric respect
 //! constitutional boundaries on autonomy, identity, and consent.
+//!
+//! **Key design**: The `SignerType` enum is part of the signed payload,
+//! not a caller-set flag. An AI key uses prefix `0x02` in all signed
+//! payloads, so even if an AI has valid key material, it cannot produce
+//! a signature that could be mistaken for a human (`0x01`) signature.
 
-use exo_core::Did;
+use exo_core::{Did, Hash256, SignerType};
 use serde::{Deserialize, Serialize};
 
 use crate::types::PermissionSet;
@@ -46,13 +51,16 @@ impl McpRule {
 }
 
 // ---------------------------------------------------------------------------
-// MCP context
+// MCP context — uses cryptographic SignerType, not a bool flag
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct McpContext {
     pub actor_did: Did,
-    pub is_ai: bool,
+    /// Cryptographic signer type — embedded in the signed payload.
+    /// Replaces the old `is_ai: bool` with a type that is part of the
+    /// signature itself, preventing AI impersonation of human signers.
+    pub signer_type: SignerType,
     pub bcts_scope: Option<String>,
     pub capabilities: PermissionSet,
     pub action: String,
@@ -61,6 +69,14 @@ pub struct McpContext {
     pub output_marked_ai: bool,
     pub consent_active: bool,
     pub self_escalation: bool,
+}
+
+impl McpContext {
+    /// Whether this actor is an AI (derived from the cryptographic signer type).
+    #[must_use]
+    pub fn is_ai(&self) -> bool {
+        self.signer_type.is_ai()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +96,7 @@ pub struct McpViolation {
 // ---------------------------------------------------------------------------
 
 pub fn enforce(rules: &[McpRule], context: &McpContext) -> Result<(), McpViolation> {
-    if !context.is_ai { return Ok(()); }
+    if !context.is_ai() { return Ok(()); }
     for rule in rules { check_rule(*rule, context)?; }
     Ok(())
 }
@@ -126,6 +142,28 @@ fn check_rule(rule: McpRule, ctx: &McpContext) -> Result<(), McpViolation> {
     }
 }
 
+/// Build a signable message that embeds the signer type.
+/// This ensures the signer type is cryptographically bound to the signature.
+#[must_use]
+pub fn build_signed_payload(signer_type: &SignerType, message: &[u8]) -> Vec<u8> {
+    let mut payload = signer_type.to_payload_prefix();
+    payload.extend_from_slice(message);
+    payload
+}
+
+/// Verify that a signature was produced with the claimed signer type.
+/// The signer type prefix is prepended to the message before verification.
+#[must_use]
+pub fn verify_typed_signature(
+    signer_type: &SignerType,
+    message: &[u8],
+    signature: &exo_core::Signature,
+    public_key: &exo_core::PublicKey,
+) -> bool {
+    let payload = build_signed_payload(signer_type, message);
+    exo_core::crypto::verify(&payload, signature, public_key)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -134,13 +172,14 @@ fn check_rule(rule: McpRule, ctx: &McpContext) -> Result<(), McpViolation> {
 mod tests {
     use super::*;
     use crate::types::Permission;
+    use exo_core::crypto::KeyPair;
 
     fn did(s: &str) -> Did { Did::new(s).expect("valid DID") }
 
     fn valid_ai() -> McpContext {
         McpContext {
             actor_did: did("did:exo:ai-agent-1"),
-            is_ai: true,
+            signer_type: SignerType::Ai { delegation_id: Hash256::digest(b"delegation-1") },
             bcts_scope: Some("data:medical".into()),
             capabilities: PermissionSet::new(vec![Permission::new("read")]),
             action: "summarize".into(),
@@ -154,7 +193,9 @@ mod tests {
 
     fn human() -> McpContext {
         McpContext {
-            actor_did: did("did:exo:human-1"), is_ai: false, bcts_scope: None,
+            actor_did: did("did:exo:human-1"),
+            signer_type: SignerType::Human,
+            bcts_scope: None,
             capabilities: PermissionSet::default(), action: "anything".into(),
             has_provenance: false, forging_identity: false, output_marked_ai: false,
             consent_active: false, self_escalation: false,
@@ -186,4 +227,83 @@ mod tests {
     #[test] fn empty_rules_pass() { assert!(enforce(&[], &valid_ai()).is_ok()); }
     #[test] fn all_six_rules() { assert_eq!(McpRule::all().len(), 6); }
     #[test] fn descriptions_non_empty() { for r in McpRule::all() { assert!(!r.description().is_empty()); } }
+
+    // -- Cryptographic AI identity binding tests --
+
+    #[test]
+    fn ai_cannot_impersonate_human() {
+        // An AI signs a message with the AI prefix, then tries to verify
+        // it as a human-signed message. This MUST fail.
+        let kp = KeyPair::generate();
+        let message = b"important governance vote";
+
+        // AI signs with AI prefix
+        let ai_type = SignerType::Ai { delegation_id: Hash256::digest(b"session-1") };
+        let ai_payload = build_signed_payload(&ai_type, message);
+        let ai_sig = kp.sign(&ai_payload);
+
+        // Verify as AI — should succeed
+        assert!(verify_typed_signature(&ai_type, message, &ai_sig, kp.public_key()));
+
+        // Try to verify same signature as human — MUST fail
+        assert!(!verify_typed_signature(&SignerType::Human, message, &ai_sig, kp.public_key()));
+    }
+
+    #[test]
+    fn human_signature_cannot_be_replayed_as_ai() {
+        let kp = KeyPair::generate();
+        let message = b"budget approval";
+
+        // Human signs
+        let human_payload = build_signed_payload(&SignerType::Human, message);
+        let human_sig = kp.sign(&human_payload);
+
+        // Verify as human — should succeed
+        assert!(verify_typed_signature(&SignerType::Human, message, &human_sig, kp.public_key()));
+
+        // Try to verify as AI — MUST fail
+        let ai_type = SignerType::Ai { delegation_id: Hash256::digest(b"d") };
+        assert!(!verify_typed_signature(&ai_type, message, &human_sig, kp.public_key()));
+    }
+
+    #[test]
+    fn different_delegation_ids_produce_different_signatures() {
+        let kp = KeyPair::generate();
+        let message = b"action";
+
+        let ai1 = SignerType::Ai { delegation_id: Hash256::digest(b"delegation-A") };
+        let ai2 = SignerType::Ai { delegation_id: Hash256::digest(b"delegation-B") };
+
+        let payload1 = build_signed_payload(&ai1, message);
+        let payload2 = build_signed_payload(&ai2, message);
+        assert_ne!(payload1, payload2);
+
+        let sig1 = kp.sign(&payload1);
+        // sig1 verifies under ai1 but NOT under ai2
+        assert!(verify_typed_signature(&ai1, message, &sig1, kp.public_key()));
+        assert!(!verify_typed_signature(&ai2, message, &sig1, kp.public_key()));
+    }
+
+    #[test]
+    fn signer_type_prefix_bytes() {
+        assert_eq!(SignerType::Human.prefix_byte(), 0x01);
+        let ai = SignerType::Ai { delegation_id: Hash256::ZERO };
+        assert_eq!(ai.prefix_byte(), 0x02);
+        assert_eq!(ai.to_payload_prefix().len(), 33); // 1 prefix + 32 hash
+    }
+
+    #[test]
+    fn signer_type_is_checks() {
+        assert!(SignerType::Human.is_human());
+        assert!(!SignerType::Human.is_ai());
+        let ai = SignerType::Ai { delegation_id: Hash256::ZERO };
+        assert!(ai.is_ai());
+        assert!(!ai.is_human());
+    }
+
+    #[test]
+    fn context_is_ai_derived() {
+        assert!(valid_ai().is_ai());
+        assert!(!human().is_ai());
+    }
 }

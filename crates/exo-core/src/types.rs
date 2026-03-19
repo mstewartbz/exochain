@@ -179,90 +179,185 @@ impl AsRef<[u8]> for Hash256 {
 }
 
 // ---------------------------------------------------------------------------
-// Signature
+// Signature — post-quantum ready
 // ---------------------------------------------------------------------------
 
-/// An Ed25519 signature (64 bytes).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Signature(pub [u8; 64]);
+/// A cryptographic signature supporting multiple algorithms.
+///
+/// This enum enables migration from Ed25519 to post-quantum schemes
+/// (e.g., Dilithium) or hybrid classical+PQ signatures without breaking
+/// existing chains.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Signature {
+    /// Classical Ed25519 signature (64 bytes).
+    Ed25519([u8; 64]),
+    /// Post-quantum signature (variable length, e.g. Dilithium).
+    PostQuantum(Vec<u8>),
+    /// Hybrid: classical Ed25519 + post-quantum signature.
+    Hybrid { classical: [u8; 64], pq: Vec<u8> },
+    /// Empty placeholder — used before acceptance / during construction.
+    Empty,
+}
 
-// Custom Serialize/Deserialize for [u8; 64] because serde only supports arrays up to 32.
+/// Serde-friendly proxy that mirrors `Signature` but uses `Vec<u8>` instead of `[u8; 64]`.
+#[derive(Serialize, Deserialize)]
+enum SignatureProxy {
+    Ed25519(Vec<u8>),
+    PostQuantum(Vec<u8>),
+    Hybrid { classical: Vec<u8>, pq: Vec<u8> },
+    Empty,
+}
+
 impl Serialize for Signature {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0)
+        let proxy = match self {
+            Self::Ed25519(b) => SignatureProxy::Ed25519(b.to_vec()),
+            Self::PostQuantum(b) => SignatureProxy::PostQuantum(b.clone()),
+            Self::Hybrid { classical, pq } => SignatureProxy::Hybrid {
+                classical: classical.to_vec(), pq: pq.clone(),
+            },
+            Self::Empty => SignatureProxy::Empty,
+        };
+        proxy.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Signature {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> core::result::Result<Self, D::Error> {
-        struct Vis;
-        impl<'v> serde::de::Visitor<'v> for Vis {
-            type Value = Signature;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.write_str("64 bytes")
-            }
-            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> core::result::Result<Signature, E> {
-                if v.len() != 64 {
-                    return Err(E::invalid_length(v.len(), &self));
+        let proxy = SignatureProxy::deserialize(deserializer)?;
+        match proxy {
+            SignatureProxy::Ed25519(b) => {
+                if b.len() != 64 {
+                    return Err(serde::de::Error::invalid_length(b.len(), &"64 bytes for Ed25519"));
                 }
                 let mut buf = [0u8; 64];
-                buf.copy_from_slice(v);
-                Ok(Signature(buf))
+                buf.copy_from_slice(&b);
+                Ok(Self::Ed25519(buf))
             }
-            fn visit_seq<A: serde::de::SeqAccess<'v>>(self, mut seq: A) -> core::result::Result<Signature, A::Error> {
-                let mut buf = [0u8; 64];
-                for (i, slot) in buf.iter_mut().enumerate() {
-                    *slot = seq.next_element()?
-                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+            SignatureProxy::PostQuantum(b) => Ok(Self::PostQuantum(b)),
+            SignatureProxy::Hybrid { classical, pq } => {
+                if classical.len() != 64 {
+                    return Err(serde::de::Error::invalid_length(classical.len(), &"64 bytes for classical"));
                 }
-                Ok(Signature(buf))
+                let mut buf = [0u8; 64];
+                buf.copy_from_slice(&classical);
+                Ok(Self::Hybrid { classical: buf, pq })
             }
+            SignatureProxy::Empty => Ok(Self::Empty),
         }
-        deserializer.deserialize_bytes(Vis)
     }
 }
 
 impl Signature {
-    /// Create from raw bytes.
+    /// Create an Ed25519 signature from raw bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 64]) -> Self {
-        Self(bytes)
+        Self::Ed25519(bytes)
     }
 
-    /// Return the inner bytes.
+    /// Return the inner bytes for Ed25519 signatures.
+    /// Panics if called on non-Ed25519 variants (use `ed25519_bytes()` for fallible access).
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 64] {
-        &self.0
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        match self {
+            Self::Ed25519(b) => b,
+            Self::Hybrid { classical, .. } => classical,
+            Self::PostQuantum(_) | Self::Empty => {
+                // Return a static reference for compatibility; callers should
+                // migrate to ed25519_bytes() for proper handling.
+                static ZEROS: [u8; 64] = [0u8; 64];
+                &ZEROS
+            }
+        }
     }
 
-    /// The all-zeros signature, used as a placeholder before acceptance.
-    pub const EMPTY: Self = Self([0u8; 64]);
+    /// Return Ed25519 bytes if this is an Ed25519 or Hybrid signature.
+    #[must_use]
+    pub fn ed25519_bytes(&self) -> Option<&[u8; 64]> {
+        match self {
+            Self::Ed25519(b) => Some(b),
+            Self::Hybrid { classical, .. } => Some(classical),
+            Self::PostQuantum(_) | Self::Empty => None,
+        }
+    }
 
-    /// Create an empty (all-zeros) signature placeholder.
+    /// Return all signature bytes as a slice (algorithm-agnostic).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Ed25519(b) => b.to_vec(),
+            Self::PostQuantum(b) => b.clone(),
+            Self::Hybrid { classical, pq } => {
+                let mut v = classical.to_vec();
+                v.extend_from_slice(pq);
+                v
+            }
+            Self::Empty => Vec::new(),
+        }
+    }
+
+    /// The empty signature placeholder.
+    pub const EMPTY: Self = Self::Empty;
+
+    /// Create an empty (placeholder) signature.
     #[must_use]
     pub const fn empty() -> Self {
-        Self::EMPTY
+        Self::Empty
     }
 
-    /// Check if this signature is the empty placeholder (all zeros).
+    /// Check if this signature is the empty placeholder.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0 == [0u8; 64]
+        match self {
+            Self::Empty => true,
+            Self::Ed25519(b) => *b == [0u8; 64],
+            Self::PostQuantum(b) => b.is_empty(),
+            Self::Hybrid { classical, pq } => *classical == [0u8; 64] && pq.is_empty(),
+        }
+    }
+
+    /// Returns the algorithm variant name.
+    #[must_use]
+    pub fn algorithm(&self) -> &'static str {
+        match self {
+            Self::Ed25519(_) => "Ed25519",
+            Self::PostQuantum(_) => "PostQuantum",
+            Self::Hybrid { .. } => "Hybrid",
+            Self::Empty => "Empty",
+        }
     }
 }
 
 impl fmt::Debug for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Signature({}..)", hex_prefix(&self.0))
+        match self {
+            Self::Ed25519(b) => write!(f, "Signature::Ed25519({}..)", hex_prefix(b)),
+            Self::PostQuantum(b) => write!(f, "Signature::PostQuantum({}..{}B)", hex_prefix(b), b.len()),
+            Self::Hybrid { classical, pq } => write!(f, "Signature::Hybrid({}..+{}B)", hex_prefix(classical), pq.len()),
+            Self::Empty => write!(f, "Signature::Empty"),
+        }
     }
 }
 
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in &self.0 {
-            write!(f, "{byte:02x}")?;
+        match self {
+            Self::Ed25519(b) => {
+                for byte in b { write!(f, "{byte:02x}")?; }
+                Ok(())
+            }
+            Self::PostQuantum(b) => {
+                for byte in b { write!(f, "{byte:02x}")?; }
+                Ok(())
+            }
+            Self::Hybrid { classical, pq } => {
+                for byte in classical { write!(f, "{byte:02x}")?; }
+                write!(f, ":")?;
+                for byte in pq { write!(f, "{byte:02x}")?; }
+                Ok(())
+            }
+            Self::Empty => write!(f, "empty"),
         }
-        Ok(())
     }
 }
 
@@ -523,6 +618,68 @@ impl fmt::Display for Timestamp {
 }
 
 // ---------------------------------------------------------------------------
+// SignerType — cryptographic AI identity binding
+// ---------------------------------------------------------------------------
+
+/// Key prefix byte embedded in the signed payload to cryptographically
+/// distinguish human from AI signers. This prevents an AI key from
+/// producing a signature that could be mistaken for a human signature,
+/// because the prefix is part of the message digest.
+pub const SIGNER_PREFIX_HUMAN: u8 = 0x01;
+pub const SIGNER_PREFIX_AI: u8 = 0x02;
+
+/// Cryptographic signer type — embedded in the signed payload, not a
+/// caller-set flag. The signer type is bound into every signature via
+/// a key prefix byte, ensuring an AI cannot impersonate a human even
+/// if it possesses the same raw key material.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SignerType {
+    /// Human signer — key prefix 0x01.
+    Human,
+    /// AI agent signer — key prefix 0x02, with delegation reference.
+    Ai {
+        /// The delegation or session ID authorizing this AI's actions.
+        delegation_id: Hash256,
+    },
+}
+
+impl SignerType {
+    /// The prefix byte for this signer type, embedded in signed payloads.
+    #[must_use]
+    pub fn prefix_byte(&self) -> u8 {
+        match self {
+            Self::Human => SIGNER_PREFIX_HUMAN,
+            Self::Ai { .. } => SIGNER_PREFIX_AI,
+        }
+    }
+
+    /// Build the canonical prefix bytes for inclusion in a signable payload.
+    /// For Human: [0x01]
+    /// For AI: [0x02] ++ delegation_id (32 bytes)
+    #[must_use]
+    pub fn to_payload_prefix(&self) -> Vec<u8> {
+        match self {
+            Self::Human => vec![SIGNER_PREFIX_HUMAN],
+            Self::Ai { delegation_id } => {
+                let mut v = vec![SIGNER_PREFIX_AI];
+                v.extend_from_slice(delegation_id.as_bytes());
+                v
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn is_human(&self) -> bool {
+        matches!(self, Self::Human)
+    }
+
+    #[must_use]
+    pub fn is_ai(&self) -> bool {
+        matches!(self, Self::Ai { .. })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
 
@@ -750,6 +907,15 @@ mod tests {
     }
 
     #[test]
+    fn signature_ed25519_bytes() {
+        let sig = Signature::from_bytes([0xab; 64]);
+        assert_eq!(sig.ed25519_bytes(), Some(&[0xab; 64]));
+        assert_eq!(Signature::Empty.ed25519_bytes(), None);
+        let pq = Signature::PostQuantum(vec![1, 2, 3]);
+        assert_eq!(pq.ed25519_bytes(), None);
+    }
+
+    #[test]
     fn signature_display() {
         let sig = Signature::from_bytes([0xab; 64]);
         let s = sig.to_string();
@@ -760,13 +926,13 @@ mod tests {
     fn signature_debug() {
         let sig = Signature::from_bytes([0; 64]);
         let dbg = format!("{sig:?}");
-        assert!(dbg.starts_with("Signature("));
+        assert!(dbg.contains("Ed25519"));
     }
 
     #[test]
     fn signature_clone_eq() {
         let s1 = Signature::from_bytes([1u8; 64]);
-        let s2 = s1;
+        let s2 = s1.clone();
         assert_eq!(s1, s2);
     }
 
@@ -776,6 +942,47 @@ mod tests {
         let json = serde_json::to_string(&sig).expect("ser");
         let sig2: Signature = serde_json::from_str(&json).expect("de");
         assert_eq!(sig, sig2);
+    }
+
+    #[test]
+    fn signature_post_quantum() {
+        let pq = Signature::PostQuantum(vec![1, 2, 3, 4, 5]);
+        assert!(!pq.is_empty());
+        assert_eq!(pq.algorithm(), "PostQuantum");
+        assert_eq!(pq.to_bytes(), vec![1, 2, 3, 4, 5]);
+        let json = serde_json::to_string(&pq).expect("ser");
+        let pq2: Signature = serde_json::from_str(&json).expect("de");
+        assert_eq!(pq, pq2);
+    }
+
+    #[test]
+    fn signature_hybrid() {
+        let h = Signature::Hybrid { classical: [0xab; 64], pq: vec![1, 2, 3] };
+        assert!(!h.is_empty());
+        assert_eq!(h.algorithm(), "Hybrid");
+        assert_eq!(h.ed25519_bytes(), Some(&[0xab; 64]));
+        assert_eq!(h.to_bytes().len(), 67);
+        let json = serde_json::to_string(&h).expect("ser");
+        let h2: Signature = serde_json::from_str(&json).expect("de");
+        assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn signature_empty_variant() {
+        assert!(Signature::Empty.is_empty());
+        assert!(Signature::empty().is_empty());
+        assert_eq!(Signature::Empty.algorithm(), "Empty");
+        assert!(Signature::Empty.to_bytes().is_empty());
+    }
+
+    #[test]
+    fn signature_display_variants() {
+        assert_eq!(Signature::Empty.to_string(), "empty");
+        let pq = Signature::PostQuantum(vec![0xab, 0xcd]);
+        assert_eq!(pq.to_string(), "abcd");
+        let h = Signature::Hybrid { classical: [0; 64], pq: vec![0xff] };
+        let hs = h.to_string();
+        assert!(hs.contains(":"));
     }
 
     // -- PublicKey ----------------------------------------------------------

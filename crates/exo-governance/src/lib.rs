@@ -13,3 +13,4 @@ pub mod crosscheck;
 pub mod deliberation;
 pub mod error;
 pub mod quorum;
+pub mod succession;

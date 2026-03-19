@@ -92,24 +92,31 @@ pub fn generate_keypair() -> (PublicKey, SecretKey) {
     )
 }
 
-/// Sign `message` with the given secret key.
+/// Sign `message` with the given secret key (Ed25519).
 #[must_use]
 pub fn sign(message: &[u8], secret: &SecretKey) -> Signature {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(secret.as_bytes());
     let sig = signing_key.sign(message);
-    Signature::from_bytes(sig.to_bytes())
+    Signature::Ed25519(sig.to_bytes())
 }
 
-/// Verify an Ed25519 signature.
+/// Verify a signature against a public key.
 ///
-/// Returns `true` if the signature is valid for the given message and
-/// public key.
+/// For Ed25519 and Hybrid signatures, verifies the classical Ed25519 component.
+/// PostQuantum-only signatures return `false` (no PQ verifier yet).
+/// Empty signatures always return `false`.
 #[must_use]
 pub fn verify(message: &[u8], signature: &Signature, public: &PublicKey) -> bool {
+    let sig_bytes = match signature {
+        Signature::Ed25519(b) => b,
+        Signature::Hybrid { classical, .. } => classical,
+        Signature::PostQuantum(_) => return false, // PQ verifier not yet implemented
+        Signature::Empty => return false,
+    };
     let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(public.as_bytes()) else {
         return false;
     };
-    let Ok(sig) = ed25519_dalek::Signature::from_slice(signature.as_bytes()) else {
+    let Ok(sig) = ed25519_dalek::Signature::from_slice(sig_bytes) else {
         return false;
     };
     verifying_key.verify(message, &sig).is_ok()
@@ -158,9 +165,25 @@ mod tests {
     #[test]
     fn verify_fails_corrupt_signature() {
         let (pk, sk) = generate_keypair();
-        let mut sig = sign(b"msg", &sk);
-        sig.0[0] ^= 0xff; // flip bits
-        assert!(!verify(b"msg", &sig, &pk));
+        let sig = sign(b"msg", &sk);
+        // Corrupt the Ed25519 bytes
+        let corrupted = match sig {
+            Signature::Ed25519(mut b) => { b[0] ^= 0xff; Signature::Ed25519(b) }
+            _ => panic!("expected Ed25519"),
+        };
+        assert!(!verify(b"msg", &corrupted, &pk));
+    }
+
+    #[test]
+    fn verify_rejects_empty_signature() {
+        let (pk, _) = generate_keypair();
+        assert!(!verify(b"msg", &Signature::Empty, &pk));
+    }
+
+    #[test]
+    fn verify_rejects_pq_signature() {
+        let (pk, _) = generate_keypair();
+        assert!(!verify(b"msg", &Signature::PostQuantum(vec![1, 2, 3]), &pk));
     }
 
     #[test]

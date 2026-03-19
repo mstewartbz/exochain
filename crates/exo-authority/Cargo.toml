@@ -16,3 +16,4 @@ exo-identity = { path = "../exo-identity" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }

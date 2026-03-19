@@ -3,7 +3,7 @@
 //! Authority flows from root to leaf. Scope can only narrow at each link.
 //! Max delegation depth: 5 (configurable).
 
-use exo_core::{Did, Hash256, Signature, Timestamp};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AuthorityError;
@@ -28,6 +28,14 @@ impl AuthorityLink {
     /// Compute a deterministic ID for this link.
     #[must_use]
     pub fn id(&self) -> Hash256 {
+        Hash256::digest(&self.signable_payload())
+    }
+
+    /// The canonical payload that must be signed by the delegator.
+    /// This is the deterministic byte representation of the link's content
+    /// (excluding the signature itself).
+    #[must_use]
+    pub fn signable_payload(&self) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(self.delegator_did.as_str().as_bytes());
         data.extend_from_slice(self.delegate_did.as_str().as_bytes());
@@ -35,7 +43,13 @@ impl AuthorityLink {
             data.extend_from_slice(format!("{p:?}").as_bytes());
         }
         data.extend_from_slice(&self.created.physical_ms.to_le_bytes());
-        Hash256::digest(&data)
+        data.extend_from_slice(&self.created.logical.to_le_bytes());
+        data.extend_from_slice(&self.depth.to_le_bytes());
+        if let Some(exp) = &self.expires {
+            data.extend_from_slice(&exp.physical_ms.to_le_bytes());
+            data.extend_from_slice(&exp.logical.to_le_bytes());
+        }
+        data
     }
 }
 
@@ -128,11 +142,23 @@ pub fn build_chain_with_depth(
     })
 }
 
-/// Verify an authority chain: signatures non-empty, no expired links, scope narrows.
+/// Verify an authority chain with cryptographic signature verification.
+///
+/// `resolve_key` maps a DID to a `PublicKey`. Each link's signature is verified
+/// against the delegator's public key and the link's canonical signable payload.
 ///
 /// # Errors
-/// Returns `AuthorityError` on any verification failure.
-pub fn verify_chain(chain: &AuthorityChain, now: &Timestamp) -> Result<(), AuthorityError> {
+/// Returns `AuthorityError` on any verification failure:
+/// - Empty chain, depth exceeded, expired links, scope widening
+/// - Invalid or forged Ed25519 signatures
+pub fn verify_chain<F>(
+    chain: &AuthorityChain,
+    now: &Timestamp,
+    resolve_key: F,
+) -> Result<(), AuthorityError>
+where
+    F: Fn(&Did) -> Option<PublicKey>,
+{
     if chain.links.is_empty() {
         return Err(AuthorityError::EmptyChain);
     }
@@ -149,6 +175,14 @@ pub fn verify_chain(chain: &AuthorityChain, now: &Timestamp) -> Result<(), Autho
     for (i, link) in chain.links.iter().enumerate() {
         // Check signature is non-empty
         if link.signature.is_empty() {
+            return Err(AuthorityError::InvalidSignature { index: i });
+        }
+
+        // Real Ed25519 signature verification
+        let pub_key = resolve_key(&link.delegator_did)
+            .ok_or(AuthorityError::InvalidSignature { index: i })?;
+        let payload = link.signable_payload();
+        if !exo_core::crypto::verify(&payload, &link.signature, &pub_key) {
             return Err(AuthorityError::InvalidSignature { index: i });
         }
 
@@ -185,12 +219,61 @@ pub fn has_permission(chain: &AuthorityChain, permission: &Permission) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exo_core::crypto::KeyPair;
+    use std::collections::HashMap;
 
     fn did(name: &str) -> Did { Did::new(&format!("did:exo:{name}")).unwrap() }
     fn ts(ms: u64) -> Timestamp { Timestamp::new(ms, 0) }
     fn now() -> Timestamp { ts(5000) }
 
-    fn link(from: &str, to: &str, scope: Vec<Permission>, depth: usize, exp: Option<Timestamp>) -> AuthorityLink {
+    /// A test key registry mapping DIDs to keypairs.
+    struct KeyRegistry {
+        keys: HashMap<String, KeyPair>,
+    }
+
+    impl KeyRegistry {
+        fn new() -> Self { Self { keys: HashMap::new() } }
+
+        fn register(&mut self, name: &str) -> PublicKey {
+            let kp = KeyPair::generate();
+            let pk = *kp.public_key();
+            self.keys.insert(format!("did:exo:{name}"), kp);
+            pk
+        }
+
+        fn resolve(&self, did: &Did) -> Option<PublicKey> {
+            self.keys.get(did.as_str()).map(|kp| *kp.public_key())
+        }
+
+        fn resolver(&self) -> impl Fn(&Did) -> Option<PublicKey> + '_ {
+            |did| self.resolve(did)
+        }
+    }
+
+    /// Create a properly-signed authority link.
+    fn signed_link(
+        registry: &KeyRegistry,
+        from: &str, to: &str,
+        scope: Vec<Permission>, depth: usize,
+        exp: Option<Timestamp>,
+    ) -> AuthorityLink {
+        let mut link = AuthorityLink {
+            delegator_did: did(from),
+            delegate_did: did(to),
+            scope,
+            created: ts(1000),
+            expires: exp,
+            signature: Signature::empty(),
+            depth,
+        };
+        let payload = link.signable_payload();
+        let kp = registry.keys.get(&format!("did:exo:{from}")).expect("key not registered");
+        link.signature = kp.sign(&payload);
+        link
+    }
+
+    /// Create a link with a fake (non-verified) signature for structural tests.
+    fn fake_link(from: &str, to: &str, scope: Vec<Permission>, depth: usize, exp: Option<Timestamp>) -> AuthorityLink {
         AuthorityLink {
             delegator_did: did(from),
             delegate_did: did(to),
@@ -202,9 +285,11 @@ mod tests {
         }
     }
 
+    // -- build_chain tests (structural only, no sig verification) --
+
     #[test]
     fn build_single_link() {
-        let links = vec![link("root", "alice", vec![Permission::Read, Permission::Write], 0, None)];
+        let links = vec![fake_link("root", "alice", vec![Permission::Read, Permission::Write], 0, None)];
         let chain = build_chain(&links);
         assert!(chain.is_ok());
         let c = chain.unwrap();
@@ -216,9 +301,9 @@ mod tests {
     #[test]
     fn build_multi_link() {
         let links = vec![
-            link("root", "alice", vec![Permission::Read, Permission::Write, Permission::Delegate], 0, None),
-            link("alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
-            link("bob", "charlie", vec![Permission::Read], 2, None),
+            fake_link("root", "alice", vec![Permission::Read, Permission::Write, Permission::Delegate], 0, None),
+            fake_link("alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
+            fake_link("bob", "charlie", vec![Permission::Read], 2, None),
         ];
         let chain = build_chain(&links).unwrap();
         assert_eq!(chain.depth(), 3);
@@ -232,7 +317,7 @@ mod tests {
     #[test]
     fn build_rejects_depth_exceeded() {
         let links: Vec<AuthorityLink> = (0..6)
-            .map(|i| link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
+            .map(|i| fake_link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
             .collect();
         let result = build_chain(&links);
         assert!(matches!(result, Err(AuthorityError::DepthExceeded { .. })));
@@ -241,7 +326,7 @@ mod tests {
     #[test]
     fn build_custom_depth() {
         let links: Vec<AuthorityLink> = (0..3)
-            .map(|i| link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
+            .map(|i| fake_link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
             .collect();
         assert!(build_chain_with_depth(&links, 2).is_err());
         assert!(build_chain_with_depth(&links, 3).is_ok());
@@ -250,8 +335,8 @@ mod tests {
     #[test]
     fn build_rejects_gap() {
         let links = vec![
-            link("root", "alice", vec![Permission::Read], 0, None),
-            link("bob", "charlie", vec![Permission::Read], 1, None), // gap: alice != bob
+            fake_link("root", "alice", vec![Permission::Read], 0, None),
+            fake_link("bob", "charlie", vec![Permission::Read], 1, None),
         ];
         assert!(matches!(build_chain(&links), Err(AuthorityError::ChainBroken { .. })));
     }
@@ -259,81 +344,176 @@ mod tests {
     #[test]
     fn build_rejects_wrong_depth() {
         let links = vec![
-            link("root", "alice", vec![Permission::Read], 0, None),
-            link("alice", "bob", vec![Permission::Read], 5, None), // wrong depth
+            fake_link("root", "alice", vec![Permission::Read], 0, None),
+            fake_link("alice", "bob", vec![Permission::Read], 5, None),
         ];
         assert!(matches!(build_chain(&links), Err(AuthorityError::ChainBroken { .. })));
     }
 
+    // -- verify_chain tests with REAL Ed25519 verification --
+
     #[test]
-    fn verify_valid_chain() {
+    fn verify_valid_chain_real_signatures() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+        reg.register("alice");
+
         let links = vec![
-            link("root", "alice", vec![Permission::Read, Permission::Write], 0, None),
-            link("alice", "bob", vec![Permission::Read], 1, None),
+            signed_link(&reg, "root", "alice", vec![Permission::Read, Permission::Write], 0, None),
+            signed_link(&reg, "alice", "bob", vec![Permission::Read], 1, None),
         ];
         let chain = build_chain(&links).unwrap();
-        assert!(verify_chain(&chain, &now()).is_ok());
+        assert!(verify_chain(&chain, &now(), reg.resolver()).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_forged_signature() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+
+        let mut link = signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None);
+        // Forge: replace signature with random bytes
+        link.signature = Signature::from_bytes([0xDE; 64]);
+        let chain = build_chain(&[link]).unwrap();
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::InvalidSignature { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key_signature() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+        reg.register("alice");
+
+        // Sign with alice's key but claim root is delegator
+        let mut link = AuthorityLink {
+            delegator_did: did("root"),
+            delegate_did: did("alice"),
+            scope: vec![Permission::Read],
+            created: ts(1000),
+            expires: None,
+            signature: Signature::empty(),
+            depth: 0,
+        };
+        let payload = link.signable_payload();
+        // Sign with alice's key (wrong key for root)
+        let alice_kp = reg.keys.get("did:exo:alice").unwrap();
+        link.signature = alice_kp.sign(&payload);
+
+        let chain = build_chain(&[link]).unwrap();
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::InvalidSignature { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_payload() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+
+        let mut link = signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None);
+        // Tamper: change the delegate after signing
+        link.delegate_did = did("mallory");
+        let chain = build_chain(&[link]).unwrap();
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::InvalidSignature { index: 0 })
+        ));
     }
 
     #[test]
     fn verify_rejects_empty_signature() {
-        let mut links = vec![link("root", "alice", vec![Permission::Read], 0, None)];
-        links[0].signature = Signature::empty();
-        let chain = build_chain(&links).unwrap();
-        assert!(matches!(verify_chain(&chain, &now()), Err(AuthorityError::InvalidSignature { .. })));
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+
+        let mut link = signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None);
+        link.signature = Signature::empty();
+        let chain = build_chain(&[link]).unwrap();
+        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::InvalidSignature { .. })));
     }
 
     #[test]
     fn verify_rejects_expired_link() {
-        let links = vec![link("root", "alice", vec![Permission::Read], 0, Some(ts(1000)))];
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+
+        let links = vec![signed_link(&reg, "root", "alice", vec![Permission::Read], 0, Some(ts(1000)))];
         let chain = build_chain(&links).unwrap();
-        assert!(matches!(verify_chain(&chain, &now()), Err(AuthorityError::ExpiredLink { .. })));
+        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::ExpiredLink { .. })));
     }
 
     #[test]
     fn verify_rejects_scope_widening() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+        reg.register("alice");
+
         let links = vec![
-            link("root", "alice", vec![Permission::Read], 0, None),
-            link("alice", "bob", vec![Permission::Read, Permission::Write], 1, None), // wider!
+            signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None),
+            signed_link(&reg, "alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
         ];
         let chain = build_chain(&links).unwrap();
-        assert!(matches!(verify_chain(&chain, &now()), Err(AuthorityError::ScopeWidening { .. })));
+        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::ScopeWidening { .. })));
     }
 
     #[test]
     fn verify_accepts_equal_scope() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+        reg.register("alice");
+
         let links = vec![
-            link("root", "alice", vec![Permission::Read, Permission::Write], 0, None),
-            link("alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
+            signed_link(&reg, "root", "alice", vec![Permission::Read, Permission::Write], 0, None),
+            signed_link(&reg, "alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
         ];
         let chain = build_chain(&links).unwrap();
-        assert!(verify_chain(&chain, &now()).is_ok());
+        assert!(verify_chain(&chain, &now(), reg.resolver()).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_unknown_delegator() {
+        let mut reg = KeyRegistry::new();
+        // Don't register "root" — key resolution will fail
+        let link = fake_link("root", "alice", vec![Permission::Read], 0, None);
+        let chain = build_chain(&[link]).unwrap();
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::InvalidSignature { index: 0 })
+        ));
     }
 
     #[test]
     fn has_permission_present() {
         let links = vec![
-            link("root", "alice", vec![Permission::Read, Permission::Write], 0, None),
-            link("alice", "bob", vec![Permission::Read], 1, None),
+            fake_link("root", "alice", vec![Permission::Read, Permission::Write], 0, None),
+            fake_link("alice", "bob", vec![Permission::Read], 1, None),
         ];
         let chain = build_chain(&links).unwrap();
         assert!(has_permission(&chain, &Permission::Read));
-        assert!(!has_permission(&chain, &Permission::Write)); // bob doesn't have it
+        assert!(!has_permission(&chain, &Permission::Write));
     }
 
     #[test]
     fn has_permission_empty_chain() {
         let chain = AuthorityChain { links: vec![], max_depth: 5 };
-        // all() on empty iterator returns true, but that's fine — empty chain has "all" permissions vacuously
         assert!(has_permission(&chain, &Permission::Read));
     }
 
     #[test]
     fn link_id_deterministic() {
-        let l = link("root", "alice", vec![Permission::Read], 0, None);
+        let l = fake_link("root", "alice", vec![Permission::Read], 0, None);
         let id1 = l.id();
         let id2 = l.id();
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn signable_payload_deterministic() {
+        let l = fake_link("root", "alice", vec![Permission::Read], 0, None);
+        assert_eq!(l.signable_payload(), l.signable_payload());
     }
 
     #[test]
@@ -346,24 +526,47 @@ mod tests {
 
     #[test]
     fn verify_chain_rejects_over_depth() {
+        let mut reg = KeyRegistry::new();
+        for i in 0..3 { reg.register(&format!("n{i}")); }
+
         let links: Vec<AuthorityLink> = (0..3)
-            .map(|i| link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
+            .map(|i| signed_link(&reg, &format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
             .collect();
         let mut chain = build_chain(&links).unwrap();
-        chain.max_depth = 2; // artificially reduce
-        assert!(matches!(verify_chain(&chain, &now()), Err(AuthorityError::DepthExceeded { .. })));
+        chain.max_depth = 2;
+        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::DepthExceeded { .. })));
     }
 
     #[test]
     fn verify_empty_chain_errors() {
         let chain = AuthorityChain { links: vec![], max_depth: 5 };
-        assert_eq!(verify_chain(&chain, &now()), Err(AuthorityError::EmptyChain));
+        let reg = KeyRegistry::new();
+        assert_eq!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::EmptyChain));
     }
 
     #[test]
     fn verify_non_expired_link() {
-        let links = vec![link("root", "alice", vec![Permission::Read], 0, Some(ts(10000)))];
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+
+        let links = vec![signed_link(&reg, "root", "alice", vec![Permission::Read], 0, Some(ts(10000)))];
         let chain = build_chain(&links).unwrap();
-        assert!(verify_chain(&chain, &now()).is_ok());
+        assert!(verify_chain(&chain, &now(), reg.resolver()).is_ok());
+    }
+
+    #[test]
+    fn verify_three_link_chain_real_crypto() {
+        let mut reg = KeyRegistry::new();
+        reg.register("ceo");
+        reg.register("vp");
+        reg.register("manager");
+
+        let links = vec![
+            signed_link(&reg, "ceo", "vp", vec![Permission::Read, Permission::Write, Permission::Delegate], 0, None),
+            signed_link(&reg, "vp", "manager", vec![Permission::Read, Permission::Write], 1, None),
+            signed_link(&reg, "manager", "analyst", vec![Permission::Read], 2, None),
+        ];
+        let chain = build_chain(&links).unwrap();
+        assert!(verify_chain(&chain, &now(), reg.resolver()).is_ok());
     }
 }

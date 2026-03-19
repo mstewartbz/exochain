@@ -89,7 +89,7 @@ pub fn accept(bailment: &mut Bailment, bailee_signature: &Signature) -> Result<(
     if bailee_signature.is_empty() {
         return Err(ConsentError::InvalidSignature);
     }
-    bailment.signature = *bailee_signature;
+    bailment.signature = bailee_signature.clone();
     bailment.status = BailmentStatus::Active;
     Ok(())
 }

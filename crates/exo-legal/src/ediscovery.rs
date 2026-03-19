@@ -46,9 +46,9 @@ mod tests {
     fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).unwrap() }
     fn corpus() -> Vec<Evidence> {
         let (a, b) = (did("alice"), did("bob"));
-        let mut e1 = create_evidence(b"contract", &a, "contract"); e1.timestamp = Timestamp::new(100, 0);
-        let mut e2 = create_evidence(b"email", &b, "email"); e2.timestamp = Timestamp::new(200, 0);
-        let mut e3 = create_evidence(b"memo", &a, "memo"); e3.timestamp = Timestamp::new(300, 0);
+        let e1 = create_evidence(b"contract", &a, "contract", Timestamp::new(100, 0)).unwrap();
+        let e2 = create_evidence(b"email", &b, "email", Timestamp::new(200, 0)).unwrap();
+        let e3 = create_evidence(b"memo", &a, "memo", Timestamp::new(300, 0)).unwrap();
         vec![e1, e2, e3]
     }
     fn req(custodians: Vec<Did>, terms: Vec<String>, range: (u64, u64)) -> DiscoveryRequest {

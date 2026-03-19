@@ -1,20 +1,36 @@
-use super::*;
-use crate::advanced_policy::{
-    AdvancedReasoningPolicy, BayesianAssessment, EscalationReason, HumanReviewStatus,
-};
-use sha2::{Digest, Sha256};
+//! The Decision Object — core domain type of the decision.forum.
+//!
+//! A Decision Object is:
+//! - Storable, diffable, transferable, auditable, contestable (Axiom 2)
+//! - Bound to constitutional version at creation (GOV-002)
+//! - 14-state lifecycle matching BCTS (`exo_core::bcts`)
+//! - Immutable after terminal status (TNC-08)
+
+use exo_core::bcts::BctsState;
+use exo_core::hash::hash_structured;
+use exo_core::hlc::HybridClock;
+use exo_core::types::{DeterministicMap, Did, Hash256, Timestamp};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+use crate::error::{ForumError, Result};
+
+/// Classification of a decision, determining quorum, authority, and gate requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DecisionClass {
+    /// Day-to-day operational decisions.
     Routine,
+    /// Decisions affecting operations or resources.
     Operational,
+    /// Long-term or high-impact decisions.
     Strategic,
+    /// Decisions that modify the constitutional corpus itself.
     Constitutional,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum SignerType {
+/// Distinguishes human vs AI actors for human-gate enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActorKind {
     Human,
     AiAgent {
         delegation_id: String,
@@ -22,406 +38,396 @@ pub enum SignerType {
     },
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DelegationRecord {
-    pub delegator: String,
-    pub delegate: String,
-    pub scope: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub allows_sub_delegation: bool,
+/// A single vote cast on a decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vote {
+    pub voter_did: Did,
+    pub choice: VoteChoice,
+    pub actor_kind: ActorKind,
+    pub timestamp: Timestamp,
+    pub signature_hash: Hash256,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConflictDisclosure {
-    pub discloser: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Vote choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VoteChoice {
     Approve,
     Reject,
     Abstain,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Vote {
-    pub voter_did: String,
-    pub choice: VoteChoice,
-    pub signer_type: SignerType,
+/// A link in the authority chain attesting to delegation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityLink {
+    pub actor_did: Did,
+    pub actor_kind: ActorKind,
+    pub delegation_hash: Hash256,
+    pub timestamp: Timestamp,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DecisionObject {
-    pub id: String,
-    pub title: String,
-    pub constitution_hash: String,
-    pub authority_chain: Vec<authority::AuthorityLink>,
-    pub merkle_root: String,
-    pub status: Status,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub required_quorum: usize,
-    pub decision_class: DecisionClass,
-    pub sync_version: u64,
-    pub expected_sync_version: Option<u64>,
-    pub ratified_by: Option<String>,
-    pub ratified_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub human_review: HumanReviewStatus,
-    pub evidence: Vec<Evidence>,
-    pub advanced_reasoning: Option<AdvancedReasoningPolicy>,
-    pub audit_log: Vec<AuditEvent>,
-    pub decision_class: DecisionClass,
-    pub signer_type: SignerType,
-    pub delegation_chain: Vec<DelegationRecord>,
-    pub conflicts_disclosed: Vec<ConflictDisclosure>,
-    pub votes: Vec<Vote>,
-    pub quorum_required: u32,
-    pub quorum_threshold_pct: f64,
-    pub audit_sequence: u64,
-    pub prev_audit_hash: String,
-    pub requires_ratification: bool,
-    pub ratification_deadline: Option<chrono::DateTime<chrono::Utc>>,
-    pub constitution_version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum DecisionClass {
-    Operational,
-    Policy,
-    Sovereignty,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Status {
-    Draft,
-    Pending,
-    Approved,
-    Rejected,
-    Contested,
-    Void,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Evidence {
-    pub hash: String,
+/// A piece of evidence attached to a decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceItem {
+    pub hash: Hash256,
     pub description: String,
+    pub attached_at: Timestamp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AuditEventType {
-    SealAttempt,
-    EscalationRejection,
-    TncEnforcementFailed,
-    SealApproved,
+/// A receipt recording a lifecycle transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleReceipt {
+    pub from_state: BctsState,
+    pub to_state: BctsState,
+    pub actor_did: Did,
+    pub timestamp: Timestamp,
+    pub receipt_hash: Hash256,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AuditEvent {
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub event_type: AuditEventType,
-    pub reason: String,
-    pub escalation_reason: Option<EscalationReason>,
-    pub assessment_snapshot: Option<BayesianAssessment>,
+/// The core Decision Object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionObject {
+    pub id: Uuid,
+    pub title: String,
+    pub class: DecisionClass,
+    pub constitutional_hash: Hash256,
+    pub state: BctsState,
+    pub authority_chain: Vec<AuthorityLink>,
+    pub votes: Vec<Vote>,
+    pub evidence_bundle: Vec<EvidenceItem>,
+    pub receipt_chain: Vec<LifecycleReceipt>,
+    pub created_at: Timestamp,
+    pub metadata: DeterministicMap<String, String>,
 }
 
 impl DecisionObject {
-    pub fn new(title: &str) -> Self {
-        #[cfg(test)]
-        crate::requirements::Requirement::DecisionObjectCreation.mark_covered();
-
-        let id = Uuid::new_v4().to_string();
-        let constitution_hash = crate::constitution::constitution_hash();
-
-        let mut obj = Self {
-            id,
-            title: title.to_string(),
-            constitution_hash,
-            authority_chain: vec![],
-            merkle_root: String::new(),
-            constitution_hash: "genesis-constitution-hash".to_string(),
-            authority_chain: vec![authority::AuthorityLink {
-                pubkey: "genesis-pubkey".to_string(),
-                signature: "genesis-signature".to_string(),
-            }],
-            merkle_root,
-            status: Status::Draft,
-            created_at: chrono::Utc::now(),
-            required_quorum: 1,
-            decision_class: DecisionClass::Operational,
-            sync_version: 0,
-            expected_sync_version: None,
-            ratified_by: None,
-            ratified_at: None,
-            human_review: HumanReviewStatus::default(),
-            evidence: vec![],
-            advanced_reasoning: None,
-            audit_log: vec![],
-        };
-        obj.recompute_merkle_root();
-        obj
-    }
-
-    pub fn recompute_merkle_root(&mut self) {
-        self.merkle_root = compute_merkle_root(self);
-            decision_class: DecisionClass::Routine,
-            signer_type: SignerType::Human,
-            delegation_chain: vec![],
-            conflicts_disclosed: vec![],
-            votes: vec![],
-            quorum_required: 0,
-            quorum_threshold_pct: 0.0,
-            audit_sequence: 1,
-            prev_audit_hash: "genesis-audit-hash".to_string(),
-            requires_ratification: false,
-            ratification_deadline: None,
-            constitution_version: "1.0.0".to_string(),
+    /// Create a new Decision Object in the Draft state, bound to the given
+    /// constitutional hash.
+    #[must_use]
+    pub fn new(
+        title: &str,
+        class: DecisionClass,
+        constitutional_hash: Hash256,
+        clock: &mut HybridClock,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            title: title.to_owned(),
+            class,
+            constitutional_hash,
+            state: BctsState::Draft,
+            authority_chain: Vec::new(),
+            votes: Vec::new(),
+            evidence_bundle: Vec::new(),
+            receipt_chain: Vec::new(),
+            created_at: clock.now(),
+            metadata: DeterministicMap::new(),
         }
     }
 
-    pub fn seal(&mut self) -> Result<(), String> {
-        #[cfg(test)]
-        crate::requirements::Requirement::DecisionObjectSealing.mark_covered();
+    /// Returns true if this decision is in a terminal state (Closed or
+    /// Denied with no remediation pending).
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        self.state == BctsState::Closed
+    }
 
-        self.audit_log.push(AuditEvent {
-            timestamp: chrono::Utc::now(),
-            event_type: AuditEventType::SealAttempt,
-            reason: "Seal requested".to_string(),
-            escalation_reason: None,
-            assessment_snapshot: None,
-        });
-
-        if let Some(adv) = self.advanced_reasoning.clone() {
-            if let Err(reason) = adv.validate_thresholds() {
-                self.audit_log.push(AuditEvent {
-                    timestamp: chrono::Utc::now(),
-                    event_type: AuditEventType::EscalationRejection,
-                    reason: format!("Advanced reasoning threshold violated: {:?}", reason),
-                    escalation_reason: Some(reason.clone()),
-                    assessment_snapshot: Some(adv.assessment.clone()),
-                });
-                return Err(format!(
-                    "Advanced Reasoning Threshold Violated: {:?}",
-                    reason
-                ));
-            }
+    /// Transition the decision to a new BCTS state, recording a receipt.
+    pub fn transition(
+        &mut self,
+        to: BctsState,
+        actor: &Did,
+        clock: &mut HybridClock,
+    ) -> Result<()> {
+        if self.is_terminal() {
+            return Err(ForumError::DecisionImmutable);
         }
-
-        self.recompute_merkle_root();
-
-        let original_status = self.status.clone();
-        self.status = Status::Approved;
-
-        if let Err(error) = TNCEnforcer::enforce_all(self) {
-            self.status = original_status;
-            self.audit_log.push(AuditEvent {
-                timestamp: chrono::Utc::now(),
-                event_type: AuditEventType::TncEnforcementFailed,
-                reason: error.clone(),
-                escalation_reason: None,
-                assessment_snapshot: None,
+        if !self.state.can_transition_to(to) {
+            return Err(ForumError::InvalidTransition {
+                from: format!("{:?}", self.state),
+                to: format!("{to:?}"),
             });
-            return Err(error);
         }
 
-        self.audit_log.push(AuditEvent {
-            timestamp: chrono::Utc::now(),
-            event_type: AuditEventType::SealApproved,
-            reason: "Decision approved".to_string(),
-            escalation_reason: None,
-            assessment_snapshot: None,
-        });
+        let timestamp = clock.now();
+        let receipt_hash = self.compute_receipt_hash(self.state, to, &timestamp, actor)?;
 
+        self.receipt_chain.push(LifecycleReceipt {
+            from_state: self.state,
+            to_state: to,
+            actor_did: actor.clone(),
+            timestamp,
+            receipt_hash,
+        });
+        self.state = to;
         Ok(())
     }
-}
 
-fn compute_merkle_root(obj: &DecisionObject) -> String {
-    let mut leaves = Vec::new();
-    leaves.push(hash_leaf(format!("title:{}", obj.title)));
-    leaves.push(hash_leaf(format!("constitution:{}", obj.constitution_hash)));
-    leaves.push(hash_leaf(format!("class:{:?}", obj.decision_class)));
-
-    for evidence in &obj.evidence {
-        leaves.push(hash_leaf(format!(
-            "evidence:{}:{}",
-            evidence.hash, evidence.description
-        )));
-    }
-
-    for link in &obj.authority_chain {
-        leaves.push(hash_leaf(format!(
-            "authority:{}:{}:{:?}",
-            link.pubkey, link.signature, link.actor_kind
-        )));
-    }
-
-    merkle_reduce(leaves)
-}
-
-fn hash_leaf(value: impl AsRef<[u8]>) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_ref());
-    format!("{:x}", hasher.finalize())
-}
-
-fn merkle_reduce(mut nodes: Vec<String>) -> String {
-    if nodes.is_empty() {
-        return hash_leaf("empty");
-    }
-
-    while nodes.len() > 1 {
-        let mut next = Vec::new();
-        let mut idx = 0;
-        while idx < nodes.len() {
-            let left = &nodes[idx];
-            let right = nodes.get(idx + 1).unwrap_or(left);
-            next.push(hash_leaf(format!("{}{}", left, right)));
-            idx += 2;
+    /// Add a vote to this decision.
+    pub fn add_vote(&mut self, vote: Vote) -> Result<()> {
+        if self.is_terminal() {
+            return Err(ForumError::DecisionImmutable);
         }
-        nodes = next;
+        // Prevent duplicate votes from the same DID.
+        if self.votes.iter().any(|v| v.voter_did == vote.voter_did) {
+            return Err(ForumError::EnactmentFailed {
+                reason: format!("duplicate vote from {}", vote.voter_did),
+            });
+        }
+        self.votes.push(vote);
+        Ok(())
     }
 
-    nodes.pop().unwrap_or_else(|| hash_leaf("empty"))
+    /// Add evidence to this decision.
+    pub fn add_evidence(&mut self, item: EvidenceItem) -> Result<()> {
+        if self.is_terminal() {
+            return Err(ForumError::DecisionImmutable);
+        }
+        self.evidence_bundle.push(item);
+        Ok(())
+    }
+
+    /// Add an authority link to the chain.
+    pub fn add_authority_link(&mut self, link: AuthorityLink) -> Result<()> {
+        if self.is_terminal() {
+            return Err(ForumError::DecisionImmutable);
+        }
+        self.authority_chain.push(link);
+        Ok(())
+    }
+
+    /// Compute a content hash over the full decision object for auditing.
+    pub fn content_hash(&self) -> Result<Hash256> {
+        #[derive(Serialize)]
+        struct HashInput<'a> {
+            id: &'a Uuid,
+            title: &'a str,
+            class: &'a DecisionClass,
+            constitutional_hash: &'a Hash256,
+            state: &'a BctsState,
+            vote_count: usize,
+            evidence_count: usize,
+            receipt_count: usize,
+        }
+        let input = HashInput {
+            id: &self.id,
+            title: &self.title,
+            class: &self.class,
+            constitutional_hash: &self.constitutional_hash,
+            state: &self.state,
+            vote_count: self.votes.len(),
+            evidence_count: self.evidence_bundle.len(),
+            receipt_count: self.receipt_chain.len(),
+        };
+        hash_structured(&input).map_err(ForumError::from)
+    }
+
+    /// Compute a chained receipt hash.
+    fn compute_receipt_hash(
+        &self,
+        from: BctsState,
+        to: BctsState,
+        timestamp: &Timestamp,
+        actor: &Did,
+    ) -> Result<Hash256> {
+        #[derive(Serialize)]
+        struct ReceiptInput<'a> {
+            from: BctsState,
+            to: BctsState,
+            timestamp: &'a Timestamp,
+            actor: &'a str,
+            prev_hash: Hash256,
+        }
+        let prev = self
+            .receipt_chain
+            .last()
+            .map(|r| r.receipt_hash)
+            .unwrap_or(Hash256::ZERO);
+        let input = ReceiptInput {
+            from,
+            to,
+            timestamp,
+            actor: actor.as_str(),
+            prev_hash: prev,
+        };
+        hash_structured(&input).map_err(ForumError::from)
+    }
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use crate::advanced_policy::AdvancedThresholds;
-    use crate::authority::{ActorKind, AuthorityLink, ConflictDisclosure};
-    use crate::requirements::Requirement;
+    use exo_core::hlc::HybridClock;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn no_conflict() -> ConflictDisclosure {
-        ConflictDisclosure {
-            has_conflict: false,
-            description: None,
-            disclosed_at: chrono::Utc::now(),
-        }
+    fn test_clock() -> HybridClock {
+        let counter = AtomicU64::new(1000);
+        HybridClock::with_wall_clock(move || counter.fetch_add(1, Ordering::Relaxed))
     }
 
-    fn human_link(pubkey: &str, signature: &str) -> AuthorityLink {
-        AuthorityLink {
-            pubkey: pubkey.to_string(),
-            signature: signature.to_string(),
+    fn test_did() -> Did {
+        Did::new("did:exo:test-actor").expect("valid")
+    }
+
+    fn make_decision(clock: &mut HybridClock) -> DecisionObject {
+        DecisionObject::new("Test Decision", DecisionClass::Operational, Hash256::digest(b"const-v1"), clock)
+    }
+
+    #[test]
+    fn new_decision_is_draft() {
+        let mut clock = test_clock();
+        let d = make_decision(&mut clock);
+        assert_eq!(d.state, BctsState::Draft);
+        assert_eq!(d.class, DecisionClass::Operational);
+        assert!(d.votes.is_empty());
+        assert!(d.evidence_bundle.is_empty());
+        assert!(d.receipt_chain.is_empty());
+        assert!(d.authority_chain.is_empty());
+    }
+
+    #[test]
+    fn transition_draft_to_submitted() {
+        let mut clock = test_clock();
+        let mut d = make_decision(&mut clock);
+        d.transition(BctsState::Submitted, &test_did(), &mut clock).expect("ok");
+        assert_eq!(d.state, BctsState::Submitted);
+        assert_eq!(d.receipt_chain.len(), 1);
+    }
+
+    #[test]
+    fn transition_invalid_rejects() {
+        let mut clock = test_clock();
+        let mut d = make_decision(&mut clock);
+        let err = d.transition(BctsState::Closed, &test_did(), &mut clock).unwrap_err();
+        assert!(matches!(err, ForumError::InvalidTransition { .. }));
+    }
+
+    #[test]
+    fn full_lifecycle() {
+        let mut clock = test_clock();
+        let actor = test_did();
+        let mut d = make_decision(&mut clock);
+        let steps = [
+            BctsState::Submitted, BctsState::IdentityResolved,
+            BctsState::ConsentValidated, BctsState::Deliberated,
+            BctsState::Verified, BctsState::Governed,
+            BctsState::Approved, BctsState::Executed,
+            BctsState::Recorded, BctsState::Closed,
+        ];
+        for s in steps {
+            d.transition(s, &actor, &mut clock).expect("ok");
+        }
+        assert!(d.is_terminal());
+        assert_eq!(d.receipt_chain.len(), 10);
+    }
+
+    #[test]
+    fn terminal_decision_is_immutable() {
+        let mut clock = test_clock();
+        let actor = test_did();
+        let mut d = make_decision(&mut clock);
+        for s in [BctsState::Submitted, BctsState::IdentityResolved,
+                   BctsState::ConsentValidated, BctsState::Deliberated,
+                   BctsState::Verified, BctsState::Governed,
+                   BctsState::Approved, BctsState::Executed,
+                   BctsState::Recorded, BctsState::Closed] {
+            d.transition(s, &actor, &mut clock).expect("ok");
+        }
+        assert!(d.transition(BctsState::Draft, &actor, &mut clock).is_err());
+        assert!(d.add_vote(Vote {
+            voter_did: actor.clone(), choice: VoteChoice::Approve,
             actor_kind: ActorKind::Human,
-            expires_at: None,
-            conflict_disclosure: Some(no_conflict()),
-        }
-    }
-
-    fn valid_advanced_policy() -> AdvancedReasoningPolicy {
-        let mut policy = AdvancedReasoningPolicy::new(BayesianAssessment {
-            prior: 0.5,
-            posterior: 0.9,
-            confidence_interval: 0.90,
-            sensitivity_instability: 0.05,
-            teacher_student_disagreement: 0.01,
-            symbolic_rule_trace_hash:
-                "0x1234567890123456789012345678901234567890123456789012345678901234".to_string(),
-            evidence_references: vec!["https://evidence.exochain.local/doc/1".to_string()],
-        });
-        policy.thresholds = AdvancedThresholds::default();
-        policy
+            timestamp: clock.now(), signature_hash: Hash256::ZERO,
+        }).is_err());
+        assert!(d.add_evidence(EvidenceItem {
+            hash: Hash256::ZERO, description: "x".into(),
+            attached_at: clock.now(),
+        }).is_err());
     }
 
     #[test]
-    pub fn test_decision_object_creation() {
-        let title = "Test Creation";
-        let obj = DecisionObject::new(title);
-        assert_eq!(obj.title, title);
-        assert_eq!(obj.status, Status::Draft);
-        assert!(!obj.id.is_empty());
-        assert!(!obj.constitution_hash.is_empty());
-        assert!(obj.authority_chain.is_empty());
-        assert!(obj.evidence.is_empty());
-        assert!(obj.advanced_reasoning.is_none());
-        assert!(obj.audit_log.is_empty());
-        assert_eq!(obj.required_quorum, 1);
-        assert_eq!(obj.decision_class, DecisionClass::Operational);
-        assert_eq!(obj.sync_version, 0);
-        assert!(obj.expected_sync_version.is_none());
-        assert!(!obj.merkle_root.is_empty());
-        Requirement::DecisionObjectCreation.mark_covered();
+    fn add_vote_prevents_duplicates() {
+        let mut clock = test_clock();
+        let actor = test_did();
+        let mut d = make_decision(&mut clock);
+        let ts = clock.now();
+        d.add_vote(Vote {
+            voter_did: actor.clone(), choice: VoteChoice::Approve,
+            actor_kind: ActorKind::Human, timestamp: ts,
+            signature_hash: Hash256::ZERO,
+        }).expect("ok");
+        let err = d.add_vote(Vote {
+            voter_did: actor.clone(), choice: VoteChoice::Reject,
+            actor_kind: ActorKind::Human, timestamp: ts,
+            signature_hash: Hash256::ZERO,
+        }).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
     }
 
     #[test]
-    pub fn test_decision_object_seal_success() {
-        let mut obj = DecisionObject::new("Test Seal");
-        obj.authority_chain
-            .push(human_link("human-pubkey-0001", "human-signature-0001"));
-        obj.human_review = HumanReviewStatus::approved_by("council:seal");
-
-        let res = obj.seal();
-        assert!(res.is_ok());
-        assert_eq!(obj.status, Status::Approved);
-        assert!(obj
-            .audit_log
-            .iter()
-            .any(|event| event.event_type == AuditEventType::SealApproved));
-        Requirement::DecisionObjectSealing.mark_covered();
+    fn content_hash_deterministic() {
+        let mut clock = test_clock();
+        let d = make_decision(&mut clock);
+        let h1 = d.content_hash().expect("ok");
+        let h2 = d.content_hash().expect("ok");
+        assert_eq!(h1, h2);
     }
 
     #[test]
-    pub fn test_decision_object_seal_failure_records_tnc_audit_event() {
-        let mut obj = DecisionObject::new("Test Seal Failure");
-        let res = obj.seal();
-        assert!(res.is_err());
-        assert_eq!(obj.status, Status::Draft);
-        assert!(obj
-            .audit_log
-            .iter()
-            .any(|event| event.event_type == AuditEventType::TncEnforcementFailed));
+    fn content_hash_changes_with_state() {
+        let mut clock = test_clock();
+        let actor = test_did();
+        let mut d = make_decision(&mut clock);
+        let h1 = d.content_hash().expect("ok");
+        d.transition(BctsState::Submitted, &actor, &mut clock).expect("ok");
+        let h2 = d.content_hash().expect("ok");
+        assert_ne!(h1, h2);
     }
 
     #[test]
-    pub fn test_decision_object_advanced_seal_rejection_records_snapshot() {
-        let mut obj = DecisionObject::new("Test Advanced Seal Failure");
-        obj.authority_chain
-            .push(human_link("human-pubkey-0002", "human-signature-0002"));
-        obj.human_review = HumanReviewStatus::approved_by("council:advanced");
-
-        let mut policy = valid_advanced_policy();
-        policy.assessment.sensitivity_instability = 0.20;
-        obj.advanced_reasoning = Some(policy);
-
-        let res = obj.seal();
-        assert!(res.is_err());
-        assert_eq!(obj.status, Status::Draft);
-        let event = obj
-            .audit_log
-            .iter()
-            .find(|event| event.event_type == AuditEventType::EscalationRejection)
-            .expect("expected escalation rejection audit event");
-        assert_eq!(
-            event.escalation_reason,
-            Some(EscalationReason::HighInstability)
-        );
-        assert!(event.assessment_snapshot.is_some());
+    fn receipt_chain_hashes_differ() {
+        let mut clock = test_clock();
+        let actor = test_did();
+        let mut d = make_decision(&mut clock);
+        d.transition(BctsState::Submitted, &actor, &mut clock).expect("ok");
+        d.transition(BctsState::IdentityResolved, &actor, &mut clock).expect("ok");
+        assert_ne!(d.receipt_chain[0].receipt_hash, d.receipt_chain[1].receipt_hash);
     }
 
     #[test]
-    pub fn test_decision_object_advanced_seal_success() {
-        let mut obj = DecisionObject::new("Test Advanced Seal Success");
-        obj.authority_chain
-            .push(human_link("human-pubkey-0003", "human-signature-0003"));
-        obj.human_review = HumanReviewStatus::approved_by("council-member-1");
-        obj.advanced_reasoning = Some(valid_advanced_policy());
-
-        let res = obj.seal();
-        assert!(res.is_ok());
-        assert_eq!(obj.status, Status::Approved);
+    fn decision_class_ordering() {
+        assert!(DecisionClass::Routine < DecisionClass::Operational);
+        assert!(DecisionClass::Operational < DecisionClass::Strategic);
+        assert!(DecisionClass::Strategic < DecisionClass::Constitutional);
     }
 
     #[test]
-    pub fn test_merkle_root_changes_when_evidence_changes() {
-        let mut obj = DecisionObject::new("Merkle Test");
-        let original = obj.merkle_root.clone();
-        obj.evidence.push(Evidence {
-            hash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-                .to_string(),
-            description: "supporting exhibit".to_string(),
-        });
-        obj.recompute_merkle_root();
-        assert_ne!(original, obj.merkle_root);
+    fn constitutional_hash_bound_at_creation() {
+        let mut clock = test_clock();
+        let hash = Hash256::digest(b"test-constitution");
+        let d = DecisionObject::new("test", DecisionClass::Routine, hash, &mut clock);
+        assert_eq!(d.constitutional_hash, hash);
+    }
+
+    #[test]
+    fn add_authority_link() {
+        let mut clock = test_clock();
+        let mut d = make_decision(&mut clock);
+        let ts = clock.now();
+        d.add_authority_link(AuthorityLink {
+            actor_did: test_did(), actor_kind: ActorKind::Human,
+            delegation_hash: Hash256::ZERO, timestamp: ts,
+        }).expect("ok");
+        assert_eq!(d.authority_chain.len(), 1);
+    }
+
+    #[test]
+    fn serde_roundtrip() {
+        let mut clock = test_clock();
+        let d = make_decision(&mut clock);
+        let json = serde_json::to_string(&d).expect("ser");
+        let d2: DecisionObject = serde_json::from_str(&json).expect("de");
+        assert_eq!(d.id, d2.id);
+        assert_eq!(d.title, d2.title);
+        assert_eq!(d.state, d2.state);
     }
 }
