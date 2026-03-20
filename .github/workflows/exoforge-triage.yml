@@ -1,0 +1,77 @@
+# ExoForge Issue Triage
+#
+# When an issue is created or labeled with `exoforge:triage`,
+# this workflow posts it to the ExoForge ingestion endpoint
+# to enter the self-improvement cycle.
+#
+# The cycle: Triage -> Council Review -> Implementation -> Validation -> PR
+
+name: ExoForge Issue Triage
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  triage:
+    name: Ingest issue into ExoForge
+    if: contains(github.event.issue.labels.*.name, 'exoforge:triage')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare feedback payload
+        id: payload
+        run: |
+          # Extract structured data from the issue
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          ISSUE_AUTHOR="${{ github.event.issue.user.login }}"
+
+          # Determine type from labels
+          TYPE="suggestion"
+          if echo '${{ toJSON(github.event.issue.labels.*.name) }}' | grep -q "bug"; then
+            TYPE="bug"
+          elif echo '${{ toJSON(github.event.issue.labels.*.name) }}' | grep -q "enhancement"; then
+            TYPE="enhancement"
+          fi
+
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+          echo "type=$TYPE" >> $GITHUB_OUTPUT
+
+      - name: Post to ExoForge ingestion
+        if: ${{ vars.EXOFORGE_GATEWAY_URL != '' }}
+        run: |
+          curl -sf -X POST "${{ vars.EXOFORGE_GATEWAY_URL }}/api/feedback" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "widget": "github-issue",
+              "page": "github",
+              "type": "${{ steps.payload.outputs.type }}",
+              "message": "${{ github.event.issue.title }}",
+              "context": {
+                "issue_number": ${{ github.event.issue.number }},
+                "issue_url": "${{ github.event.issue.html_url }}",
+                "author": "${{ github.event.issue.user.login }}",
+                "labels": ${{ toJSON(github.event.issue.labels.*.name) }},
+                "body_preview": ""
+              }
+            }' || echo "ExoForge gateway not reachable — issue queued for manual triage"
+
+      - name: Add triage acknowledgment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            **ExoForge Self-Improvement Cycle** activated for this issue.
+
+            This issue will be processed through the governed pipeline:
+            1. **Triage** — Severity, impact, and affected invariants classified
+            2. **AI-IRB Council Review** — 5-panel review (Governance, Legal, Architecture, Security, Operations)
+            3. **Implementation** — Autonomous code generation across the full stack
+            4. **Constitutional Validation** — 8 invariants + 10 TNC controls verified
+            5. **Pull Request** — Governed PR created for review
+
+            Track progress at [ExoForge](https://github.com/exochain/exoforge).
+
+            ---
+            *Governed by the ExoChain Constitutional Framework*

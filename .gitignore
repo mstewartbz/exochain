@@ -3,7 +3,18 @@
 *.pdb
 .DS_Store
 
-# Demo platform
+# Python
+**/__pycache__/
+*.pyc
+
+# Node.js
 **/node_modules/
+
+# Build artifacts
 demo/packages/exochain-wasm/wasm/
 demo/web/dist/
+web/dist/
+
+# Environment
+.env
+*.env.local

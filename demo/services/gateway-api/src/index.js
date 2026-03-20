@@ -220,6 +220,76 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { shares, threshold: body.threshold || 2, total: body.shares || 3 });
     }
 
+    // ── ExoForge Self-Improvement Cycle: Feedback Ingestion ──
+    if (url.pathname === '/api/feedback' && req.method === 'POST') {
+      const body = await parseBody(req);
+      const feedbackId = `FB-${Date.now().toString(36).toUpperCase()}`;
+      const item = {
+        id: feedbackId,
+        widget: body.widget || 'unknown',
+        page: body.page || 'unknown',
+        type: body.type || 'suggestion',
+        message: body.message || '',
+        context: body.context || {},
+        timestamp: new Date().toISOString(),
+        status: 'ingested',
+        exoforge_workflow: 'exochain-self-improvement-cycle',
+        council_review: null,
+        disposition: 'pending',
+      };
+      if (!global._backlog) global._backlog = [];
+      global._backlog.unshift(item);
+      const hash = wasm.wasm_hash_bytes(Buffer.from(JSON.stringify(item)));
+      return json(res, 201, {
+        feedback_id: feedbackId,
+        hash,
+        status: 'ingested',
+        exoforge_workflow: 'exochain-self-improvement-cycle',
+        message: 'Feedback ingested into ExoForge self-improvement cycle',
+      });
+    }
+
+    // ── ExoForge: Backlog Listing ──
+    if (url.pathname === '/api/backlog' && req.method === 'GET') {
+      return json(res, 200, global._backlog || []);
+    }
+
+    // ── ExoForge: Council Vote on Backlog Item ──
+    if (url.pathname === '/api/backlog/vote' && req.method === 'POST') {
+      const body = await parseBody(req);
+      if (!global._backlog || global._backlog.length === 0) {
+        return json(res, 404, { error: 'No backlog items' });
+      }
+      const item = global._backlog.find(i => i.id === body.id);
+      if (!item) return json(res, 404, { error: 'Item not found' });
+      if (!item.votes) item.votes = { approve: 0, reject: 0, defer: 0 };
+      const vote = body.vote || 'approve';
+      item.votes[vote] = (item.votes[vote] || 0) + 1;
+      if (body.panel) {
+        if (!item.panel_votes) item.panel_votes = {};
+        item.panel_votes[body.panel] = { vote, rationale: body.rationale || '', timestamp: new Date().toISOString() };
+      }
+      // Auto-disposition: 3+ approvals = approved, 3+ rejects = rejected
+      const totalApprove = item.votes.approve || 0;
+      const totalReject = item.votes.reject || 0;
+      if (totalApprove >= 3) item.disposition = 'approved';
+      else if (totalReject >= 3) item.disposition = 'rejected';
+      return json(res, 200, item);
+    }
+
+    // ── ExoForge: Backlog Item Status Update ──
+    if (url.pathname === '/api/backlog/status' && req.method === 'POST') {
+      const body = await parseBody(req);
+      if (!global._backlog) return json(res, 404, { error: 'No backlog items' });
+      const item = global._backlog.find(i => i.id === body.id);
+      if (!item) return json(res, 404, { error: 'Item not found' });
+      item.status = body.status;
+      if (body.exoforge_run_id) item.exoforge_run_id = body.exoforge_run_id;
+      if (body.pr_url) item.pr_url = body.pr_url;
+      return json(res, 200, item);
+    }
+
+    // ── 404 ──
     json(res, 404, { error: 'Not found', available_endpoints: [
       'GET  /health', 'GET  /api/system', 'GET  /api/users', 'GET  /api/identity/scores',
       'GET  /api/decisions', 'POST /api/decisions', 'POST /api/decisions/vote',
@@ -227,6 +297,8 @@ const server = http.createServer(async (req, res) => {
       'GET  /api/audit', 'POST /api/crypto/hash', 'POST /api/crypto/keypair',
       'POST /api/crypto/sign', 'POST /api/crypto/verify', 'GET  /api/consent',
       'GET  /api/bcts/transitions?state=Draft', 'POST /api/identity/shamir/split',
+      'POST /api/feedback', 'GET  /api/backlog', 'POST /api/backlog/vote',
+      'POST /api/backlog/status',
     ]});
   } catch (e) {
     console.error('Request error:', e);

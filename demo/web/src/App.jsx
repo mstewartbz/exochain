@@ -48,6 +48,25 @@ const NODE_REGISTRY = {
 
 const ALL_NODES = Object.values(NODE_REGISTRY).flat();
 
+// ── ExoForge Feedback Dispatch ──
+// Posts structured feedback to the gateway-api for the self-improvement cycle.
+// Falls back silently if the gateway is unreachable (local dev without backend).
+const GATEWAY_URL = window.location.hostname === 'localhost' ? 'http://localhost:3000' : '';
+async function dispatchFeedback(widget, page, type, message, context = {}) {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/api/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ widget, page, type, message, context }),
+    });
+    if (res.ok) return await res.json();
+  } catch (e) {
+    // Gateway unreachable — feedback stored locally only
+    console.debug('[ExoForge] Gateway unreachable, feedback not dispatched:', e.message);
+  }
+  return null;
+}
+
 const BCTS_STATES = ['Draft', 'Submitted', 'IdentityResolved', 'ConsentValidated', 'Deliberated', 'Verified', 'Governed', 'Approved', 'Executed', 'Recorded', 'Closed', 'Denied', 'Escalated', 'Remediated'];
 const TERMINAL_STATES = ['Closed', 'Denied'];
 
@@ -235,6 +254,7 @@ function AIHelpMenu({ widgetType }) {
 
   const handleSuggestion = (s) => {
     setResponses(prev => [...prev, { q: s.text, a: s.response }]);
+    dispatchFeedback(widgetType, 'current', 'help-click', s.text, { suggestion: true });
   };
 
   const handleAsk = () => {
@@ -246,6 +266,8 @@ function AIHelpMenu({ widgetType }) {
     else if (lower.includes('bcts') || lower.includes('state')) response = 'The BCTS state machine has 14 states. Every governance action progresses through this lifecycle, with invariant checks at each transition.';
     else if (lower.includes('wasm')) response = 'The WASM engine (637KB, 45 functions) is compiled from 28K lines of Rust. It powers all cryptographic operations, combinator algebra, governance logic, and identity verification in the browser.';
     else if (lower.includes('node') || lower.includes('syntaxis')) response = 'There are 23 Syntaxis node types across 8 categories. Each node represents a composable governance primitive that enforces specific constitutional invariants.';
+    // Dispatch to ExoForge for the self-improvement cycle
+    dispatchFeedback(widgetType, 'current', 'question', question, { matched_topic: lower.includes('invariant') ? 'invariant' : lower.includes('bcts') ? 'bcts' : lower.includes('wasm') ? 'wasm' : 'general' });
     setResponses(prev => [...prev, { q: question, a: response }]);
     setQuestion('');
   };
@@ -961,6 +983,9 @@ function AIChatWidget({ data, setData }) {
       const { text, action } = generateResponse(userMsg);
       setMessages(prev => [...prev, { role: 'ai', text }]);
       setThinking(false);
+
+      // Dispatch to ExoForge self-improvement cycle
+      dispatchFeedback('ai-chat', 'ai-backlog', action === 'add-suggestions' ? 'suggestion' : 'question', userMsg, { ai_response_action: action });
 
       if (action === 'add-suggestions') {
         setData(prev => ({

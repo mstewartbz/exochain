@@ -74,6 +74,38 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 * [Decision Forum User Manual](docs/decision-forum/USER-MANUAL.md)
 * [ASI Report](docs/ASI-REPORT-FEATURE.md)
 
+## Demo Platform
+
+The `demo/` directory contains a full-stack governance-conditioned execution platform:
+
+- **7 Node.js microservices** — Identity, consent, governance, decision-making, auditing, provenance, and API gateway
+- **React web UI** — 12-column configurable drag-and-drop widget grid across 6 pages with context-sensitive AI help menus
+- **Rust→WASM engine** — 637KB compiled binary, 45 exported governance functions
+- **PostgreSQL** — Persistent governance state, audit trails, and provenance records
+
+```bash
+cd demo && npm install && npm run dev
+# Web UI: http://localhost:5173
+# API:    http://localhost:3000
+```
+
+See [demo/README.md](demo/README.md) for full setup instructions.
+
+## ExoForge (Autonomous Implementation Engine)
+
+[ExoForge](https://github.com/exochain/exoforge) is the autonomous implementation engine that establishes a **perpetual self-improvement cycle** for ExoChain:
+
+```
+Widget AI Help → Feedback Ingestion → Triage → AI-IRB Council Review → Implementation → Constitutional Validation → PR → Deploy
+```
+
+- **7 Archon commands** — Triage, council review, Syntaxis generation, PRD generation, implementation, bug fixing, constitutional validation
+- **4 DAG workflows** — Self-improvement cycle, client onboarding, issue fixing, continuous governance monitoring
+- **5×5 discipline matrix** — 5 council panels × 5 artifact properties (Storable, Diffable, Transferable, Auditable, Contestable)
+- **GitHub Issues integration** — Issues labeled `exoforge:triage` automatically enter the self-improvement cycle
+
+See [docs/guides/ARCHON-INTEGRATION.md](docs/guides/ARCHON-INTEGRATION.md) for setup and usage.
+
 ## Syntaxis Builder & Self-Development Kernel
 
 EXOCHAIN operates through the **Syntaxis Builder** pipeline: a council-driven process where a 5-panel council (Governance, Legal, Architecture, Security, Operations) assesses all changes before implementation. This enables EXOCHAIN to function as a **self-developing system** — a system that develops systems, including itself.

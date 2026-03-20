@@ -107,6 +107,43 @@ This executes **25 tests** covering all **9 binding modules**:
 - Syntaxis workflow compilation
 - Kernel invariant checks
 
+## ExoForge Integration
+
+The demo platform integrates with [ExoForge](https://github.com/exochain/exoforge) for autonomous self-improvement:
+
+### Feedback Loop
+
+Every widget includes an AI help menu (`?` button). User interactions generate structured feedback that enters the ExoForge self-improvement cycle:
+
+```bash
+# Submit feedback from the UI
+POST /api/feedback
+{
+  "widget": "bcts-machine",
+  "page": "dashboard",
+  "type": "suggestion",
+  "message": "Add real-time state transition animation",
+  "context": { "current_state": "Deliberated" }
+}
+
+# View backlog
+GET /api/backlog
+
+# Council vote on item
+POST /api/backlog/vote
+{ "id": "FB-xxx", "vote": "approve", "panel": "Architecture" }
+
+# Update item status (ExoForge callback)
+POST /api/backlog/status
+{ "id": "FB-xxx", "status": "implementing", "exoforge_run_id": "run-123" }
+```
+
+### GitHub Issues
+
+Issues on [exochain/exochain](https://github.com/exochain/exochain/issues) labeled `exoforge:triage` are automatically ingested into the same pipeline via the `exoforge-triage.yml` GitHub Action.
+
+See [docs/guides/ARCHON-INTEGRATION.md](../docs/guides/ARCHON-INTEGRATION.md) for full ExoForge documentation.
+
 ## Environment Variables
 
 | Variable | Description | Default |
