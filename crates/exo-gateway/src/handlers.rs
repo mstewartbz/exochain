@@ -5,12 +5,7 @@
 //!   2. Vote handler MUST call `Kernel::adjudicate` and gate on `Verdict::Permitted` (TNC-01)
 //!   3. `write_audit` MUST use `ciborium::into_writer` before blake3, not serde_json (TransparencyAccountability)
 
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use exo_gatekeeper::{
     kernel::{ActionRequest as GatekeeperActionRequest, Verdict},
     types::{Permission, PermissionSet},
@@ -44,6 +39,7 @@ async fn write_audit(
     payload: &Value,
 ) -> Result<(), String> {
     let event_hash = canonical_hash(payload)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
     sqlx::query(
         "INSERT INTO audit_entries (event_type, actor, event_hash, payload, created_at_ms) \
          VALUES ($1, $2, $3, $4, $5)",
@@ -52,10 +48,7 @@ async fn write_audit(
     .bind(actor)
     .bind(event_hash.to_hex().as_str())
     .bind(payload)
-    .bind(i64::try_from(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()).unwrap_or(i64::MAX))
+    .bind(now_ms)
     .execute(&state.db)
     .await
     .map_err(|e| e.to_string())?;
@@ -83,7 +76,7 @@ pub async fn vote_handler(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid voter DID"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -152,7 +145,7 @@ pub async fn vote_handler(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": e.to_string()})),
                 )
-                    .into_response()
+                    .into_response();
             }
         },
         Ok(None) => {
@@ -160,26 +153,24 @@ pub async fn vote_handler(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": "decision not found"})),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e.to_string()})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
     // Append vote
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let vote_entry = serde_json::json!({
         "voter": body.voter_did,
         "choice": body.choice,
         "rationale": body.rationale,
-        "timestamp_ms": i64::try_from(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()).unwrap_or(i64::MAX),
+        "timestamp_ms": now_ms,
     });
     match payload["votes"].as_array_mut() {
         Some(arr) => arr.push(vote_entry),
@@ -188,7 +179,7 @@ pub async fn vote_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "decision payload missing 'votes' array"})),
             )
-                .into_response()
+                .into_response();
         }
     }
 
@@ -249,6 +240,7 @@ pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -259,6 +251,18 @@ mod tests {
         let h1 = canonical_hash(&payload).expect("hash ok");
         let h2 = canonical_hash(&payload).expect("hash ok");
         assert_eq!(h1, h2, "CBOR hash must be deterministic");
+    }
+
+    // Violation 3: canonical_hash must be field-order independent
+    #[test]
+    fn canonical_hash_is_field_order_independent() {
+        // serde_json::Map uses BTreeMap by default — inserts are always alphabetical.
+        // This test ensures that remains true and CBOR output is key-order stable.
+        let p1 = serde_json::json!({"b": 2, "a": 1}); // stored as {a:1, b:2}
+        let p2 = serde_json::json!({"a": 1, "b": 2}); // stored as {a:1, b:2}
+        let h1 = canonical_hash(&p1).expect("hash ok");
+        let h2 = canonical_hash(&p2).expect("hash ok");
+        assert_eq!(h1, h2, "CBOR hash must be field-order independent");
     }
 
     // Violation 3: JSON and CBOR hashes must differ to confirm CBOR is used
@@ -275,10 +279,10 @@ mod tests {
     #[test]
     fn financial_conflict_blocks_vote() {
         use exo_core::Did;
+        use exo_core::Timestamp;
         use exo_governance::conflict::{
             ActionRequest, ConflictDeclaration, check_conflicts, must_recuse,
         };
-        use exo_core::Timestamp;
         let voter = Did::new("did:exo:alice").expect("valid did");
         let decl = ConflictDeclaration {
             declarant_did: voter.clone(),

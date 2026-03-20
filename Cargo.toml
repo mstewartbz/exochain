@@ -71,7 +71,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Time (no std::time — use HLC only)
-chrono = { version = "0.4", default-features = false, features = ["serde", "wasmbind"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "wasmbind", "clock"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 # UUID for correlation IDs
