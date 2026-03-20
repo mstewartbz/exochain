@@ -4,9 +4,12 @@
 //! distinguishes human vs AI signatures cryptographically, blocks AI
 //! from satisfying HUMAN_GATE_REQUIRED, and enforces AI delegation ceilings.
 
-use crate::decision_object::{ActorKind, DecisionClass, DecisionObject, Vote};
-use crate::error::{ForumError, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    decision_object::{ActorKind, DecisionClass, DecisionObject, Vote},
+    error::{ForumError, Result},
+};
 
 /// Policy defining which decision classes require human approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,10 +23,7 @@ pub struct HumanGatePolicy {
 impl Default for HumanGatePolicy {
     fn default() -> Self {
         Self {
-            human_required_classes: vec![
-                DecisionClass::Strategic,
-                DecisionClass::Constitutional,
-            ],
+            human_required_classes: vec![DecisionClass::Strategic, DecisionClass::Constitutional],
             ai_ceiling: DecisionClass::Operational,
         }
     }
@@ -43,14 +43,11 @@ pub fn ai_within_ceiling(policy: &HumanGatePolicy, class: DecisionClass) -> bool
 
 /// Validate that a decision's votes satisfy the human gate policy.
 /// Returns Ok(()) if the gate is satisfied, or an error if not.
-pub fn enforce_human_gate(
-    policy: &HumanGatePolicy,
-    decision: &DecisionObject,
-) -> Result<()> {
+pub fn enforce_human_gate(policy: &HumanGatePolicy, decision: &DecisionObject) -> Result<()> {
     // Check AI ceiling: if decision class exceeds AI ceiling, AI votes alone
     // are not sufficient.
     if decision.class > policy.ai_ceiling {
-        let has_human_vote = decision.votes.iter().any(|v| is_human_vote(v));
+        let has_human_vote = decision.votes.iter().any(is_human_vote);
         if !has_human_vote && !decision.votes.is_empty() {
             return Err(ForumError::AiCeilingExceeded {
                 reason: format!(
@@ -87,11 +84,15 @@ pub fn is_ai_vote(vote: &Vote) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use exo_core::{
+        hlc::HybridClock,
+        types::{Did, Hash256},
+    };
+
     use super::*;
     use crate::decision_object::VoteChoice;
-    use exo_core::hlc::HybridClock;
-    use exo_core::types::{Did, Hash256};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn test_clock() -> HybridClock {
         let counter = AtomicU64::new(1000);
@@ -134,17 +135,22 @@ mod tests {
     fn strategic_requires_human() {
         let mut clock = test_clock();
         let policy = HumanGatePolicy::default();
-        let mut d = DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
+        let mut d =
+            DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
         d.add_vote(ai_vote(&mut clock)).expect("ok");
         let err = enforce_human_gate(&policy, &d).unwrap_err();
-        assert!(matches!(err, ForumError::HumanGateRequired | ForumError::AiCeilingExceeded { .. }));
+        assert!(matches!(
+            err,
+            ForumError::HumanGateRequired | ForumError::AiCeilingExceeded { .. }
+        ));
     }
 
     #[test]
     fn strategic_passes_with_human() {
         let mut clock = test_clock();
         let policy = HumanGatePolicy::default();
-        let mut d = DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
+        let mut d =
+            DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
         d.add_vote(human_vote(&mut clock)).expect("ok");
         assert!(enforce_human_gate(&policy, &d).is_ok());
     }
@@ -153,7 +159,12 @@ mod tests {
     fn constitutional_requires_human() {
         let mut clock = test_clock();
         let policy = HumanGatePolicy::default();
-        let mut d = DecisionObject::new("test", DecisionClass::Constitutional, Hash256::ZERO, &mut clock);
+        let mut d = DecisionObject::new(
+            "test",
+            DecisionClass::Constitutional,
+            Hash256::ZERO,
+            &mut clock,
+        );
         d.add_vote(ai_vote(&mut clock)).expect("ok");
         assert!(enforce_human_gate(&policy, &d).is_err());
     }
@@ -195,6 +206,9 @@ mod tests {
         let p = HumanGatePolicy::default();
         assert_eq!(p.ai_ceiling, DecisionClass::Operational);
         assert!(p.human_required_classes.contains(&DecisionClass::Strategic));
-        assert!(p.human_required_classes.contains(&DecisionClass::Constitutional));
+        assert!(
+            p.human_required_classes
+                .contains(&DecisionClass::Constitutional)
+        );
     }
 }

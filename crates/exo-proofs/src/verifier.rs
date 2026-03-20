@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ProofError, Result};
-use crate::snark;
-use crate::stark;
-use crate::zkml;
+use crate::{
+    error::{ProofError, Result},
+    snark, stark, zkml,
+};
 
 // ---------------------------------------------------------------------------
 // ProofType
@@ -99,12 +99,14 @@ fn verify_zkml(proof_bytes: &[u8]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::{
-        allocate, allocate_public, enforce, Circuit, ConstraintSystem, LinearCombination,
+    use crate::{
+        circuit::{
+            Circuit, ConstraintSystem, LinearCombination, allocate, allocate_public, enforce,
+        },
+        snark,
+        stark::StarkConfig,
+        zkml::{self, ModelCommitment},
     };
-    use crate::snark;
-    use crate::stark::StarkConfig;
-    use crate::zkml::{self, ModelCommitment};
 
     /// x * y = z
     #[derive(Debug)]

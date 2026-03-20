@@ -8,8 +8,10 @@
 use exo_core::types::{DeterministicMap, Did, Hash256, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::decision_object::DecisionClass;
-use crate::error::{ForumError, Result};
+use crate::{
+    decision_object::DecisionClass,
+    error::{ForumError, Result},
+};
 
 /// Scope of a delegation — what actions the delegate can perform.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +72,9 @@ impl AuthorityMatrix {
     /// Create an empty authority matrix.
     #[must_use]
     pub fn new() -> Self {
-        Self { delegations: DeterministicMap::new() }
+        Self {
+            delegations: DeterministicMap::new(),
+        }
     }
 
     /// Grant a new delegation.
@@ -111,7 +115,11 @@ impl AuthorityMatrix {
 
     /// Get all active delegations for a delegate at a given time.
     #[must_use]
-    pub fn active_delegations(&self, delegate_did: &Did, now: &Timestamp) -> Vec<&DelegatedAuthority> {
+    pub fn active_delegations(
+        &self,
+        delegate_did: &Did,
+        now: &Timestamp,
+    ) -> Vec<&DelegatedAuthority> {
         let key = delegate_did.as_str().to_owned();
         self.delegations
             .get(&key)
@@ -205,17 +213,27 @@ impl AuthorityMatrix {
 }
 
 impl Default for AuthorityMatrix {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).expect("valid") }
-    fn now() -> Timestamp { Timestamp::new(1_000_000_000, 0) }
-    fn future() -> Timestamp { Timestamp::new(1_100_000_000, 0) } // ~1.16 days from now
-    fn past() -> Timestamp { Timestamp::new(500_000_000, 0) }
+    fn did(n: &str) -> Did {
+        Did::new(&format!("did:exo:{n}")).expect("valid")
+    }
+    fn now() -> Timestamp {
+        Timestamp::new(1_000_000_000, 0)
+    }
+    fn future() -> Timestamp {
+        Timestamp::new(1_100_000_000, 0)
+    } // ~1.16 days from now
+    fn past() -> Timestamp {
+        Timestamp::new(500_000_000, 0)
+    }
 
     fn make_delegation(id: &str, delegator: &str, delegate: &str, sub: bool) -> DelegatedAuthority {
         DelegatedAuthority {
@@ -237,7 +255,8 @@ mod tests {
     #[test]
     fn grant_and_query() {
         let mut m = AuthorityMatrix::new();
-        m.grant(make_delegation("d1", "root", "alice", false)).expect("ok");
+        m.grant(make_delegation("d1", "root", "alice", false))
+            .expect("ok");
         assert!(m.has_authority(&did("alice"), DecisionClass::Routine, &now()));
         assert!(!m.has_authority(&did("alice"), DecisionClass::Strategic, &now()));
         assert!(!m.has_authority(&did("bob"), DecisionClass::Routine, &now()));
@@ -246,7 +265,8 @@ mod tests {
     #[test]
     fn revoke() {
         let mut m = AuthorityMatrix::new();
-        m.grant(make_delegation("d1", "root", "alice", false)).expect("ok");
+        m.grant(make_delegation("d1", "root", "alice", false))
+            .expect("ok");
         m.revoke(&did("alice"), "d1").expect("ok");
         assert!(!m.has_authority(&did("alice"), DecisionClass::Routine, &now()));
     }
@@ -254,7 +274,8 @@ mod tests {
     #[test]
     fn revoke_not_found() {
         let mut m = AuthorityMatrix::new();
-        m.grant(make_delegation("d1", "root", "alice", false)).expect("ok");
+        m.grant(make_delegation("d1", "root", "alice", false))
+            .expect("ok");
         assert!(m.revoke(&did("alice"), "d99").is_err());
     }
 
@@ -271,7 +292,8 @@ mod tests {
         let mut d = make_delegation("d1", "root", "alice", false);
         d.expires_at = past();
         m.grant(d).expect("ok");
-        m.grant(make_delegation("d2", "root", "alice", false)).expect("ok");
+        m.grant(make_delegation("d2", "root", "alice", false))
+            .expect("ok");
         let purged = m.purge_expired(&now());
         assert_eq!(purged, 1);
         assert_eq!(m.active_delegations(&did("alice"), &now()).len(), 1);
@@ -280,7 +302,8 @@ mod tests {
     #[test]
     fn sub_delegation_ok() {
         let mut m = AuthorityMatrix::new();
-        m.grant(make_delegation("d1", "root", "alice", true)).expect("ok");
+        m.grant(make_delegation("d1", "root", "alice", true))
+            .expect("ok");
         let sub = DelegatedAuthority {
             id: "d2".into(),
             delegator: did("alice"),
@@ -295,26 +318,33 @@ mod tests {
             allows_sub_delegation: false,
             signature_hash: Hash256::digest(b"d2"),
         };
-        m.sub_delegate(&did("alice"), "d1", sub, &now()).expect("ok");
+        m.sub_delegate(&did("alice"), "d1", sub, &now())
+            .expect("ok");
         assert!(m.has_authority(&did("bob"), DecisionClass::Routine, &now()));
     }
 
     #[test]
     fn sub_delegation_not_permitted() {
         let mut m = AuthorityMatrix::new();
-        m.grant(make_delegation("d1", "root", "alice", false)).expect("ok");
+        m.grant(make_delegation("d1", "root", "alice", false))
+            .expect("ok");
         let sub = make_delegation("d2", "alice", "bob", false);
-        let err = m.sub_delegate(&did("alice"), "d1", sub, &now()).unwrap_err();
+        let err = m
+            .sub_delegate(&did("alice"), "d1", sub, &now())
+            .unwrap_err();
         assert!(matches!(err, ForumError::SubDelegationNotPermitted));
     }
 
     #[test]
     fn sub_delegation_scope_exceeded() {
         let mut m = AuthorityMatrix::new();
-        m.grant(make_delegation("d1", "root", "alice", true)).expect("ok");
+        m.grant(make_delegation("d1", "root", "alice", true))
+            .expect("ok");
         let mut sub = make_delegation("d2", "alice", "bob", false);
         sub.scope.decision_classes = vec![DecisionClass::Strategic];
-        let err = m.sub_delegate(&did("alice"), "d1", sub, &now()).unwrap_err();
+        let err = m
+            .sub_delegate(&did("alice"), "d1", sub, &now())
+            .unwrap_err();
         assert!(matches!(err, ForumError::DelegationScopeExceeded { .. }));
     }
 

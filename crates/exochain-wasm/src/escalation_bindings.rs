@@ -1,6 +1,7 @@
 //! Escalation bindings: anomaly detection, triage, Sybil adjudication, kanban
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 /// Evaluate detection signals and produce threat assessment
@@ -23,7 +24,8 @@ pub fn wasm_escalate(signal_json: &str, path_json: &str) -> Result<JsValue, JsVa
 /// Record feedback on an escalation case (learning loop)
 #[wasm_bindgen]
 pub fn wasm_record_feedback(entries_json: &str, entry_json: &str) -> Result<JsValue, JsValue> {
-    let existing_entries: Vec<exo_escalation::feedback::FeedbackEntry> = from_json_str(entries_json)?;
+    let existing_entries: Vec<exo_escalation::feedback::FeedbackEntry> =
+        from_json_str(entries_json)?;
     let entry: exo_escalation::feedback::FeedbackEntry = from_json_str(entry_json)?;
     let mut log = exo_escalation::feedback::FeedbackLog::default();
     for e in existing_entries {

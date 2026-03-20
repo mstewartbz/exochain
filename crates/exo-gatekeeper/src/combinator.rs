@@ -3,8 +3,9 @@
 //! Provides a deterministic algebra for composing governance operations.
 //! Every reduction is pure: same input always produces same output.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::GatekeeperError;
 
@@ -227,10 +228,7 @@ pub fn reduce(
 
         Combinator::Transform(inner, transform) => {
             let mut output = reduce(inner, input)?;
-            output.set(
-                transform.output_key.clone(),
-                transform.output_value.clone(),
-            );
+            output.set(transform.output_key.clone(), transform.output_value.clone());
             Ok(output)
         }
 
@@ -247,9 +245,8 @@ pub fn reduce(
                     }
                 }
             }
-            Err(last_err.unwrap_or_else(|| {
-                GatekeeperError::CombinatorError("Retry exhausted".into())
-            }))
+            Err(last_err
+                .unwrap_or_else(|| GatekeeperError::CombinatorError("Retry exhausted".into())))
         }
 
         Combinator::Timeout(inner, duration) => {
@@ -426,14 +423,16 @@ mod tests {
     #[test]
     fn choice_fails_if_all_alternatives_fail() {
         let input = sample_input();
-        let guard = |key: &str| Combinator::Guard(
-            Box::new(Combinator::Identity),
-            Predicate {
-                name: "fail".into(),
-                required_key: key.into(),
-                expected_value: None,
-            },
-        );
+        let guard = |key: &str| {
+            Combinator::Guard(
+                Box::new(Combinator::Identity),
+                Predicate {
+                    name: "fail".into(),
+                    required_key: key.into(),
+                    expected_value: None,
+                },
+            )
+        };
         let choice = Combinator::Choice(vec![guard("x"), guard("y"), guard("z")]);
         assert!(reduce(&choice, &input).is_err());
     }
@@ -518,7 +517,10 @@ mod tests {
         let input = sample_input();
         let retried = Combinator::Retry(
             Box::new(Combinator::Identity),
-            RetryPolicy { max_retries: 3, current_attempt: 0 },
+            RetryPolicy {
+                max_retries: 3,
+                current_attempt: 0,
+            },
         );
         let output = reduce(&retried, &input).unwrap();
         assert_eq!(output.fields.get("retry_attempts"), Some(&"0".to_string()));
@@ -536,7 +538,10 @@ mod tests {
                     expected_value: None,
                 },
             )),
-            RetryPolicy { max_retries: 2, current_attempt: 0 },
+            RetryPolicy {
+                max_retries: 2,
+                current_attempt: 0,
+            },
         );
         assert!(reduce(&retried, &input).is_err());
     }
@@ -546,12 +551,12 @@ mod tests {
     #[test]
     fn timeout_runs_inner_and_records_budget() {
         let input = sample_input();
-        let timed = Combinator::Timeout(
-            Box::new(Combinator::Identity),
-            Duration(5000),
-        );
+        let timed = Combinator::Timeout(Box::new(Combinator::Identity), Duration(5000));
         let output = reduce(&timed, &input).unwrap();
-        assert_eq!(output.fields.get("timeout_budget_ms"), Some(&"5000".to_string()));
+        assert_eq!(
+            output.fields.get("timeout_budget_ms"),
+            Some(&"5000".to_string())
+        );
     }
 
     // --- Checkpoint ---
@@ -581,10 +586,7 @@ mod tests {
                     output_value: "1".into(),
                 },
             ),
-            Combinator::Checkpoint(
-                Box::new(Combinator::Identity),
-                CheckpointId("cp".into()),
-            ),
+            Combinator::Checkpoint(Box::new(Combinator::Identity), CheckpointId("cp".into())),
         ]);
 
         let output1 = reduce(&combinator, &input).unwrap();
@@ -628,10 +630,7 @@ mod tests {
                     },
                 ),
             ]),
-            Combinator::Checkpoint(
-                Box::new(Combinator::Identity),
-                CheckpointId("final".into()),
-            ),
+            Combinator::Checkpoint(Box::new(Combinator::Identity), CheckpointId("final".into())),
         ]);
 
         let output = reduce(&program, &input).unwrap();

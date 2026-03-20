@@ -1,6 +1,7 @@
 //! Independence verification (anti-Sybil).
 
 use std::collections::{HashMap, HashSet};
+
 use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,7 @@ pub struct Cluster {
 
 #[derive(Debug, Clone)]
 pub struct IndependenceResult {
-    pub independent_count: u32,
+    pub independent_count: usize,
     pub clusters: Vec<Cluster>,
     pub suspicious_pairs: Vec<(Did, Did)>,
 }
@@ -48,7 +49,10 @@ pub fn verify_independence(actors: &[Did], registry: &IdentityRegistry) -> Indep
     let mut key_groups: HashMap<&str, Vec<Did>> = HashMap::new();
     for actor in actors {
         if let Some(key) = registry.signing_keys.get(actor) {
-            key_groups.entry(key.as_str()).or_default().push(actor.clone());
+            key_groups
+                .entry(key.as_str())
+                .or_default()
+                .push(actor.clone());
         }
     }
     for (key, members) in &key_groups {
@@ -67,7 +71,10 @@ pub fn verify_independence(actors: &[Did], registry: &IdentityRegistry) -> Indep
     let mut root_groups: HashMap<Did, Vec<Did>> = HashMap::new();
     for actor in actors {
         if let Some(root) = registry.attestation_roots.get(actor) {
-            root_groups.entry(root.clone()).or_default().push(actor.clone());
+            root_groups
+                .entry(root.clone())
+                .or_default()
+                .push(actor.clone());
         }
     }
     for (_root, members) in &root_groups {
@@ -86,14 +93,19 @@ pub fn verify_independence(actors: &[Did], registry: &IdentityRegistry) -> Indep
     let mut control_groups: HashMap<&str, Vec<Did>> = HashMap::new();
     for actor in actors {
         if let Some(meta) = registry.control_metadata.get(actor) {
-            control_groups.entry(meta.as_str()).or_default().push(actor.clone());
+            control_groups
+                .entry(meta.as_str())
+                .or_default()
+                .push(actor.clone());
         }
     }
     for (meta, members) in &control_groups {
         if members.len() > 1 {
             for i in 0..members.len() {
                 for j in (i + 1)..members.len() {
-                    if !clustered_dids.contains(&members[i]) || !clustered_dids.contains(&members[j]) {
+                    if !clustered_dids.contains(&members[i])
+                        || !clustered_dids.contains(&members[j])
+                    {
                         suspicious_pairs.push((members[i].clone(), members[j].clone()));
                     }
                 }
@@ -109,9 +121,13 @@ pub fn verify_independence(actors: &[Did], registry: &IdentityRegistry) -> Indep
     }
 
     let actor_set: HashSet<Did> = actors.iter().cloned().collect();
-    let independent_count = actor_set.difference(&clustered_dids).count() as u32;
+    let independent_count = actor_set.difference(&clustered_dids).count();
 
-    IndependenceResult { independent_count, clusters, suspicious_pairs }
+    IndependenceResult {
+        independent_count,
+        clusters,
+        suspicious_pairs,
+    }
 }
 
 #[must_use]
@@ -121,7 +137,9 @@ pub fn detect_coordination(actions: &[TimestampedAction]) -> Vec<CoordinationSig
 
     for i in 0..actions.len() {
         for j in (i + 1)..actions.len() {
-            if actions[i].actor == actions[j].actor { continue; }
+            if actions[i].actor == actions[j].actor {
+                continue;
+            }
             let t1 = actions[i].timestamp.physical_ms;
             let t2 = actions[j].timestamp.physical_ms;
             let diff = if t1 > t2 { t1 - t2 } else { t2 - t1 };
@@ -164,7 +182,11 @@ mod tests {
         reg.signing_keys.insert(did("carol"), "key_c".into());
         let r = verify_independence(&[did("alice"), did("bob"), did("carol")], &reg);
         assert_eq!(r.independent_count, 1);
-        assert!(r.clusters.iter().any(|c| c.reason.contains("shared signing key")));
+        assert!(
+            r.clusters
+                .iter()
+                .any(|c| c.reason.contains("shared signing key"))
+        );
     }
 
     #[test]
@@ -186,15 +208,27 @@ mod tests {
         reg.control_metadata.insert(did("alice"), "org:acme".into());
         reg.control_metadata.insert(did("bob"), "org:acme".into());
         let r = verify_independence(&[did("alice"), did("bob")], &reg);
-        assert!(r.clusters.iter().any(|c| c.reason.contains("shared control metadata")));
+        assert!(
+            r.clusters
+                .iter()
+                .any(|c| c.reason.contains("shared control metadata"))
+        );
     }
 
     #[test]
     fn detect_coordination_near_simultaneous() {
         let hash = [0u8; 32];
         let actions = vec![
-            TimestampedAction { actor: did("alice"), action_hash: hash, timestamp: Timestamp::new(1000, 0) },
-            TimestampedAction { actor: did("bob"), action_hash: hash, timestamp: Timestamp::new(1050, 0) },
+            TimestampedAction {
+                actor: did("alice"),
+                action_hash: hash,
+                timestamp: Timestamp::new(1000, 0),
+            },
+            TimestampedAction {
+                actor: did("bob"),
+                action_hash: hash,
+                timestamp: Timestamp::new(1050, 0),
+            },
         ];
         let signals = detect_coordination(&actions);
         assert_eq!(signals.len(), 1);
@@ -205,8 +239,16 @@ mod tests {
     fn detect_coordination_no_signal_for_distant_actions() {
         let hash = [0u8; 32];
         let actions = vec![
-            TimestampedAction { actor: did("alice"), action_hash: hash, timestamp: Timestamp::new(1000, 0) },
-            TimestampedAction { actor: did("bob"), action_hash: hash, timestamp: Timestamp::new(5000, 0) },
+            TimestampedAction {
+                actor: did("alice"),
+                action_hash: hash,
+                timestamp: Timestamp::new(1000, 0),
+            },
+            TimestampedAction {
+                actor: did("bob"),
+                action_hash: hash,
+                timestamp: Timestamp::new(5000, 0),
+            },
         ];
         assert!(detect_coordination(&actions).is_empty());
     }
@@ -215,8 +257,16 @@ mod tests {
     fn detect_coordination_ignores_same_actor() {
         let hash = [0u8; 32];
         let actions = vec![
-            TimestampedAction { actor: did("alice"), action_hash: hash, timestamp: Timestamp::new(1000, 0) },
-            TimestampedAction { actor: did("alice"), action_hash: hash, timestamp: Timestamp::new(1010, 0) },
+            TimestampedAction {
+                actor: did("alice"),
+                action_hash: hash,
+                timestamp: Timestamp::new(1000, 0),
+            },
+            TimestampedAction {
+                actor: did("alice"),
+                action_hash: hash,
+                timestamp: Timestamp::new(1010, 0),
+            },
         ];
         assert!(detect_coordination(&actions).is_empty());
     }
@@ -224,8 +274,16 @@ mod tests {
     #[test]
     fn detect_coordination_different_actions_no_signal() {
         let actions = vec![
-            TimestampedAction { actor: did("alice"), action_hash: [0u8; 32], timestamp: Timestamp::new(1000, 0) },
-            TimestampedAction { actor: did("bob"), action_hash: [1u8; 32], timestamp: Timestamp::new(1010, 0) },
+            TimestampedAction {
+                actor: did("alice"),
+                action_hash: [0u8; 32],
+                timestamp: Timestamp::new(1000, 0),
+            },
+            TimestampedAction {
+                actor: did("bob"),
+                action_hash: [1u8; 32],
+                timestamp: Timestamp::new(1010, 0),
+            },
         ];
         assert!(detect_coordination(&actions).is_empty());
     }
@@ -240,7 +298,10 @@ mod tests {
     fn single_actor_is_independent() {
         let mut reg = IdentityRegistry::default();
         reg.signing_keys.insert(did("alice"), "key_a".into());
-        assert_eq!(verify_independence(&[did("alice")], &reg).independent_count, 1);
+        assert_eq!(
+            verify_independence(&[did("alice")], &reg).independent_count,
+            1
+        );
     }
 
     #[test]

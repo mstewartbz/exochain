@@ -1,6 +1,7 @@
 //! Authority bindings: delegation chain verification, permission checking
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 /// Build and validate an authority chain from delegation links
@@ -14,7 +15,10 @@ pub fn wasm_build_authority_chain(links_json: &str) -> Result<JsValue, JsValue> 
 
 /// Build authority chain with depth limit
 #[wasm_bindgen]
-pub fn wasm_build_authority_chain_with_depth(links_json: &str, max_depth: usize) -> Result<JsValue, JsValue> {
+pub fn wasm_build_authority_chain_with_depth(
+    links_json: &str,
+    max_depth: usize,
+) -> Result<JsValue, JsValue> {
     let links: Vec<exo_authority::AuthorityLink> = from_json_str(links_json)?;
     let chain = exo_authority::chain::build_chain_with_depth(&links, max_depth)
         .map_err(|e| JsValue::from_str(&format!("Chain error: {e}")))?;

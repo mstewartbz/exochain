@@ -7,8 +7,10 @@
 use ed25519_dalek::{Signer, Verifier};
 use zeroize::Zeroize;
 
-use crate::error::Result;
-use crate::types::{PublicKey, SecretKey, Signature};
+use crate::{
+    error::Result,
+    types::{PublicKey, SecretKey, Signature},
+};
 
 /// An Ed25519 key pair.  The secret key is zeroized when this struct is
 /// dropped.
@@ -168,7 +170,10 @@ mod tests {
         let sig = sign(b"msg", &sk);
         // Corrupt the Ed25519 bytes
         let corrupted = match sig {
-            Signature::Ed25519(mut b) => { b[0] ^= 0xff; Signature::Ed25519(b) }
+            Signature::Ed25519(mut b) => {
+                b[0] ^= 0xff;
+                Signature::Ed25519(b)
+            }
             _ => panic!("expected Ed25519"),
         };
         assert!(!verify(b"msg", &corrupted, &pk));

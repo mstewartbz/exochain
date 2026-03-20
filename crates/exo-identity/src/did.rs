@@ -2,8 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use exo_core::{Did, PublicKey, Signature, Timestamp};
-use exo_core::crypto;
+use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IdentityError;
@@ -104,7 +103,10 @@ impl DidRegistry {
         }
 
         let msg = new_key.as_bytes();
-        let valid = doc.public_keys.iter().any(|pk| crypto::verify(msg, proof, pk));
+        let valid = doc
+            .public_keys
+            .iter()
+            .any(|pk| crypto::verify(msg, proof, pk));
 
         if !valid {
             return Err(IdentityError::InvalidSignature);
@@ -128,8 +130,9 @@ impl DidRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::crypto::{generate_keypair, sign};
+
+    use super::*;
 
     fn make_did(label: &str) -> Did {
         Did::new(&format!("did:exo:{label}")).expect("valid did")
@@ -326,6 +329,9 @@ mod tests {
         assert_eq!(resolved.authentication.len(), 1);
         assert_eq!(resolved.authentication[0].id, "auth-1");
         assert_eq!(resolved.service_endpoints.len(), 1);
-        assert_eq!(resolved.service_endpoints[0].endpoint, "https://example.com/msg");
+        assert_eq!(
+            resolved.service_endpoints[0].endpoint,
+            "https://example.com/msg"
+        );
     }
 }

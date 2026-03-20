@@ -6,12 +6,12 @@
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
 
-use crate::combinator::{
-    reduce, CheckpointId, Combinator, CombinatorInput, CombinatorOutput,
+use crate::{
+    combinator::{CheckpointId, Combinator, CombinatorInput, CombinatorOutput, reduce},
+    error::GatekeeperError,
+    kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
+    types::PermissionSet,
 };
-use crate::error::GatekeeperError;
-use crate::kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict};
-use crate::types::PermissionSet;
 
 // ---------------------------------------------------------------------------
 // Holon state
@@ -52,7 +52,13 @@ pub struct Holon {
 
 #[must_use]
 pub fn spawn(id: Did, capabilities: PermissionSet, program: Combinator) -> Holon {
-    Holon { id, capabilities, state: HolonState::Idle, combinator_chain: program, last_output: None }
+    Holon {
+        id,
+        capabilities,
+        state: HolonState::Idle,
+        combinator_chain: program,
+        last_output: None,
+    }
 }
 
 pub fn step(
@@ -62,8 +68,16 @@ pub fn step(
     adjudication_context: &AdjudicationContext,
 ) -> Result<CombinatorOutput, GatekeeperError> {
     match holon.state {
-        HolonState::Terminated => return Err(GatekeeperError::HolonError("Cannot step a terminated holon".into())),
-        HolonState::Suspended => return Err(GatekeeperError::HolonError("Cannot step a suspended holon — resume first".into())),
+        HolonState::Terminated => {
+            return Err(GatekeeperError::HolonError(
+                "Cannot step a terminated holon".into(),
+            ));
+        }
+        HolonState::Suspended => {
+            return Err(GatekeeperError::HolonError(
+                "Cannot step a suspended holon — resume first".into(),
+            ));
+        }
         _ => {}
     }
 
@@ -84,7 +98,10 @@ pub fn step(
         }
         Verdict::Escalated { reason } => {
             holon.state = HolonState::Suspended;
-            return Err(GatekeeperError::HolonError(format!("Step escalated: {}", reason)));
+            return Err(GatekeeperError::HolonError(format!(
+                "Step escalated: {}",
+                reason
+            )));
         }
     }
 
@@ -97,7 +114,9 @@ pub fn step(
 
 pub fn suspend(holon: &mut Holon) -> Result<Checkpoint, GatekeeperError> {
     if holon.state == HolonState::Terminated {
-        return Err(GatekeeperError::HolonError("Cannot suspend a terminated holon".into()));
+        return Err(GatekeeperError::HolonError(
+            "Cannot suspend a terminated holon".into(),
+        ));
     }
     holon.state = HolonState::Suspended;
     Ok(Checkpoint {
@@ -110,10 +129,14 @@ pub fn suspend(holon: &mut Holon) -> Result<Checkpoint, GatekeeperError> {
 
 pub fn resume(holon: &mut Holon, checkpoint: &Checkpoint) -> Result<(), GatekeeperError> {
     if holon.state != HolonState::Suspended {
-        return Err(GatekeeperError::HolonError("Can only resume a suspended holon".into()));
+        return Err(GatekeeperError::HolonError(
+            "Can only resume a suspended holon".into(),
+        ));
     }
     if checkpoint.holon_id != holon.id {
-        return Err(GatekeeperError::CheckpointError("Checkpoint holon ID does not match".into()));
+        return Err(GatekeeperError::CheckpointError(
+            "Checkpoint holon ID does not match".into(),
+        ));
     }
     holon.last_output.clone_from(&checkpoint.last_output);
     holon.state = HolonState::Idle;
@@ -127,33 +150,60 @@ pub fn resume(holon: &mut Holon, checkpoint: &Checkpoint) -> Result<(), Gatekeep
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combinator::{Predicate, TransformFn};
-    use crate::invariants::InvariantSet;
-    use crate::types::*;
+    use crate::{
+        combinator::{Predicate, TransformFn},
+        invariants::InvariantSet,
+        types::*,
+    };
 
-    fn did(s: &str) -> Did { Did::new(s).expect("valid DID") }
-    fn test_kernel() -> Kernel { Kernel::new(b"constitution", InvariantSet::all()) }
+    fn did(s: &str) -> Did {
+        Did::new(s).expect("valid DID")
+    }
+    fn test_kernel() -> Kernel {
+        Kernel::new(b"constitution", InvariantSet::all())
+    }
 
     fn test_holon() -> Holon {
-        spawn(did("did:exo:holon1"), PermissionSet::new(vec![Permission::new("read")]), Combinator::Identity)
+        spawn(
+            did("did:exo:holon1"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Identity,
+        )
     }
 
     fn valid_adj(actor: &Did) -> AdjudicationContext {
         AdjudicationContext {
-            actor_roles: vec![Role { name: "worker".into(), branch: GovernmentBranch::Executive }],
+            actor_roles: vec![Role {
+                name: "worker".into(),
+                branch: GovernmentBranch::Executive,
+            }],
             authority_chain: AuthorityChain {
                 links: vec![AuthorityLink {
-                    grantor: did("did:exo:root"), grantee: actor.clone(),
-                    permissions: PermissionSet::new(vec![Permission::new("read")]), signature: vec![1, 2, 3],
+                    grantor: did("did:exo:root"),
+                    grantee: actor.clone(),
+                    permissions: PermissionSet::new(vec![Permission::new("read")]),
+                    signature: vec![1, 2, 3],
                 }],
             },
             consent_records: vec![ConsentRecord {
-                subject: did("did:exo:owner"), granted_to: actor.clone(), scope: "data".into(), active: true,
+                subject: did("did:exo:owner"),
+                granted_to: actor.clone(),
+                scope: "data".into(),
+                active: true,
             }],
-            bailment_state: BailmentState::Active { bailor: did("did:exo:owner"), bailee: actor.clone(), scope: "data".into() },
+            bailment_state: BailmentState::Active {
+                bailor: did("did:exo:owner"),
+                bailee: actor.clone(),
+                scope: "data".into(),
+            },
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
-            provenance: Some(Provenance { actor: actor.clone(), timestamp: "t".into(), action_hash: vec![1], signature: vec![4, 5, 6] }),
+            provenance: Some(Provenance {
+                actor: actor.clone(),
+                timestamp: "t".into(),
+                action_hash: vec![1],
+                signature: vec![4, 5, 6],
+            }),
             quorum_evidence: None,
         }
     }
@@ -170,7 +220,13 @@ mod tests {
         let kernel = test_kernel();
         let mut h = test_holon();
         let ctx = valid_adj(&h.id);
-        let out = step(&mut h, &CombinatorInput::new().with("x", "1"), &kernel, &ctx).unwrap();
+        let out = step(
+            &mut h,
+            &CombinatorInput::new().with("x", "1"),
+            &kernel,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(out.fields.get("x"), Some(&"1".to_string()));
         assert_eq!(h.state, HolonState::Idle);
     }
@@ -209,8 +265,14 @@ mod tests {
         let mut h = test_holon();
         let mut ctx = valid_adj(&h.id);
         ctx.actor_roles = vec![
-            Role { name: "j".into(), branch: GovernmentBranch::Judicial },
-            Role { name: "s".into(), branch: GovernmentBranch::Legislative },
+            Role {
+                name: "j".into(),
+                branch: GovernmentBranch::Judicial,
+            },
+            Role {
+                name: "s".into(),
+                branch: GovernmentBranch::Legislative,
+            },
         ];
         assert!(step(&mut h, &CombinatorInput::new(), &kernel, &ctx).is_err());
         assert_eq!(h.state, HolonState::Terminated);
@@ -235,7 +297,12 @@ mod tests {
     #[test]
     fn resume_fails_not_suspended() {
         let mut h = test_holon();
-        let cp = Checkpoint { id: CheckpointId("t".into()), holon_id: h.id.clone(), state: HolonState::Idle, last_output: None };
+        let cp = Checkpoint {
+            id: CheckpointId("t".into()),
+            holon_id: h.id.clone(),
+            state: HolonState::Idle,
+            last_output: None,
+        };
         assert!(resume(&mut h, &cp).is_err());
     }
 
@@ -243,17 +310,38 @@ mod tests {
     fn resume_fails_mismatch() {
         let mut h = test_holon();
         h.state = HolonState::Suspended;
-        let cp = Checkpoint { id: CheckpointId("t".into()), holon_id: did("did:exo:wrong"), state: HolonState::Suspended, last_output: None };
+        let cp = Checkpoint {
+            id: CheckpointId("t".into()),
+            holon_id: did("did:exo:wrong"),
+            state: HolonState::Suspended,
+            last_output: None,
+        };
         assert!(resume(&mut h, &cp).is_err());
     }
 
     #[test]
     fn step_with_transform() {
         let kernel = test_kernel();
-        let mut h = spawn(did("did:exo:holon1"), PermissionSet::new(vec![Permission::new("read")]),
-            Combinator::Transform(Box::new(Combinator::Identity), TransformFn { name: "e".into(), output_key: "enriched".into(), output_value: "true".into() }));
+        let mut h = spawn(
+            did("did:exo:holon1"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Transform(
+                Box::new(Combinator::Identity),
+                TransformFn {
+                    name: "e".into(),
+                    output_key: "enriched".into(),
+                    output_value: "true".into(),
+                },
+            ),
+        );
         let ctx = valid_adj(&h.id);
-        let out = step(&mut h, &CombinatorInput::new().with("d", "r"), &kernel, &ctx).unwrap();
+        let out = step(
+            &mut h,
+            &CombinatorInput::new().with("d", "r"),
+            &kernel,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(out.fields.get("enriched"), Some(&"true".to_string()));
     }
 
@@ -273,17 +361,45 @@ mod tests {
     #[test]
     fn step_guard_success() {
         let kernel = test_kernel();
-        let mut h = spawn(did("did:exo:holon1"), PermissionSet::new(vec![Permission::new("read")]),
-            Combinator::Guard(Box::new(Combinator::Identity), Predicate { name: "t".into(), required_key: "token".into(), expected_value: None }));
+        let mut h = spawn(
+            did("did:exo:holon1"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Guard(
+                Box::new(Combinator::Identity),
+                Predicate {
+                    name: "t".into(),
+                    required_key: "token".into(),
+                    expected_value: None,
+                },
+            ),
+        );
         let ctx = valid_adj(&h.id);
-        assert!(step(&mut h, &CombinatorInput::new().with("token", "abc"), &kernel, &ctx).is_ok());
+        assert!(
+            step(
+                &mut h,
+                &CombinatorInput::new().with("token", "abc"),
+                &kernel,
+                &ctx
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn step_guard_failure() {
         let kernel = test_kernel();
-        let mut h = spawn(did("did:exo:holon1"), PermissionSet::new(vec![Permission::new("read")]),
-            Combinator::Guard(Box::new(Combinator::Identity), Predicate { name: "t".into(), required_key: "token".into(), expected_value: None }));
+        let mut h = spawn(
+            did("did:exo:holon1"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Guard(
+                Box::new(Combinator::Identity),
+                Predicate {
+                    name: "t".into(),
+                    required_key: "token".into(),
+                    expected_value: None,
+                },
+            ),
+        );
         let ctx = valid_adj(&h.id);
         assert!(step(&mut h, &CombinatorInput::new(), &kernel, &ctx).is_err());
     }

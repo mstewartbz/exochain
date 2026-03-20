@@ -7,8 +7,10 @@
 
 use serde::Serialize;
 
-use crate::error::{ExoError, Result};
-use crate::types::Hash256;
+use crate::{
+    error::{ExoError, Result},
+    types::Hash256,
+};
 
 /// Compute the blake3 hash of raw bytes.
 #[must_use]
@@ -45,7 +47,7 @@ pub fn merkle_root(leaves: &[Hash256]) -> Hash256 {
 
     let mut current: Vec<Hash256> = leaves.to_vec();
     while current.len() > 1 {
-        let mut next = Vec::with_capacity((current.len() + 1) / 2);
+        let mut next = Vec::with_capacity(current.len().div_ceil(2));
         let mut i = 0;
         while i < current.len() {
             let left = &current[i];

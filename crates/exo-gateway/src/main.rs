@@ -1,24 +1,19 @@
-//! decision.forum API server binary.
+//! EXOCHAIN Gateway server binary.
+//!
+//! This binary is a placeholder for the full HTTP gateway server.
+//! The gateway library (`exo_gateway`) provides configuration, routing,
+//! and middleware types. The actual server runtime (tokio, database pool)
+//! is not yet integrated. See docs/guides/DEPLOYMENT.md for the current
+//! deployment approach using the Node.js demo platform.
+//!
+//! TODO: Integrate tokio runtime, database pool, and HTTP listener
+//! once the gateway API surface is stabilized.
 
-#[tokio::main]
-async fn main() {
-    dotenvy::dotenv().ok();
-
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
-
-    // Use DATABASE_URL if set, otherwise fall back to in-memory mode
-    match std::env::var("DATABASE_URL") {
-        Ok(database_url) => {
-            println!("[EXOCHAIN] Starting with PostgreSQL persistence");
-            let pool = exo_gateway::db::init_pool(&database_url).await;
-            exo_gateway::server::run_server_with_db(port, pool).await;
-        }
-        Err(_) => {
-            println!("[EXOCHAIN] Starting in memory-only mode (no DATABASE_URL)");
-            exo_gateway::server::run_server(port).await;
-        }
-    }
+fn main() {
+    let config = exo_gateway::server::GatewayConfig::default();
+    println!("[EXOCHAIN] Gateway configured: {}", config.bind_address);
+    println!(
+        "[EXOCHAIN] Gateway binary not yet implemented — use demo/services/gateway-api for the current API server."
+    );
+    println!("[EXOCHAIN] See docs/guides/DEPLOYMENT.md for deployment instructions.");
 }

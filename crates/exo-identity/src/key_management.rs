@@ -1,9 +1,10 @@
 //! Key lifecycle management for EXOCHAIN identities.
 
 use std::collections::BTreeMap;
-use exo_core::{Did, PublicKey, SecretKey, Timestamp};
-use exo_core::crypto::generate_keypair;
+
+use exo_core::{Did, PublicKey, SecretKey, Timestamp, crypto::generate_keypair};
 use serde::{Deserialize, Serialize};
+
 use crate::error::IdentityError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +74,9 @@ impl KeyStore {
         match old_record.status {
             KeyStatus::Active => {}
             KeyStatus::Rotated => return Err(IdentityError::KeyAlreadyRotated),
-            KeyStatus::Revoked | KeyStatus::Expired => return Err(IdentityError::KeyAlreadyRevoked),
+            KeyStatus::Revoked | KeyStatus::Expired => {
+                return Err(IdentityError::KeyAlreadyRevoked);
+            }
         }
 
         let (new_pk, new_sk) = generate_keypair();
@@ -185,7 +188,10 @@ mod tests {
         let did = make_did("unknown");
         let (pk, _) = generate_keypair();
         let mut store = KeyStore::new();
-        assert!(matches!(store.rotate_key(&did, &pk).unwrap_err(), IdentityError::DidNotFound(_)));
+        assert!(matches!(
+            store.rotate_key(&did, &pk).unwrap_err(),
+            IdentityError::DidNotFound(_)
+        ));
     }
 
     #[test]
@@ -194,7 +200,10 @@ mod tests {
         let mut store = KeyStore::new();
         store.create_key(&did).unwrap();
         let (other_pk, _) = generate_keypair();
-        assert!(matches!(store.rotate_key(&did, &other_pk).unwrap_err(), IdentityError::KeyNotFound(_)));
+        assert!(matches!(
+            store.rotate_key(&did, &other_pk).unwrap_err(),
+            IdentityError::KeyNotFound(_)
+        ));
     }
 
     #[test]
@@ -203,7 +212,10 @@ mod tests {
         let mut store = KeyStore::new();
         let (pk1, _) = store.create_key(&did).unwrap();
         store.rotate_key(&did, &pk1).unwrap();
-        assert!(matches!(store.rotate_key(&did, &pk1).unwrap_err(), IdentityError::KeyAlreadyRotated));
+        assert!(matches!(
+            store.rotate_key(&did, &pk1).unwrap_err(),
+            IdentityError::KeyAlreadyRotated
+        ));
     }
 
     #[test]
@@ -212,7 +224,10 @@ mod tests {
         let mut store = KeyStore::new();
         let (pk1, _) = store.create_key(&did).unwrap();
         store.revoke_key(&did, &pk1, "compromised").unwrap();
-        assert!(matches!(store.rotate_key(&did, &pk1).unwrap_err(), IdentityError::KeyAlreadyRevoked));
+        assert!(matches!(
+            store.rotate_key(&did, &pk1).unwrap_err(),
+            IdentityError::KeyAlreadyRevoked
+        ));
     }
 
     #[test]
@@ -233,7 +248,10 @@ mod tests {
         let did = make_did("unknown2");
         let (pk, _) = generate_keypair();
         let mut store = KeyStore::new();
-        assert!(matches!(store.revoke_key(&did, &pk, "reason").unwrap_err(), IdentityError::DidNotFound(_)));
+        assert!(matches!(
+            store.revoke_key(&did, &pk, "reason").unwrap_err(),
+            IdentityError::DidNotFound(_)
+        ));
     }
 
     #[test]
@@ -242,7 +260,10 @@ mod tests {
         let mut store = KeyStore::new();
         store.create_key(&did).unwrap();
         let (other_pk, _) = generate_keypair();
-        assert!(matches!(store.revoke_key(&did, &other_pk, "reason").unwrap_err(), IdentityError::KeyNotFound(_)));
+        assert!(matches!(
+            store.revoke_key(&did, &other_pk, "reason").unwrap_err(),
+            IdentityError::KeyNotFound(_)
+        ));
     }
 
     #[test]
@@ -251,7 +272,10 @@ mod tests {
         let mut store = KeyStore::new();
         let (pk, _) = store.create_key(&did).unwrap();
         store.revoke_key(&did, &pk, "first").unwrap();
-        assert!(matches!(store.revoke_key(&did, &pk, "second").unwrap_err(), IdentityError::KeyAlreadyRevoked));
+        assert!(matches!(
+            store.revoke_key(&did, &pk, "second").unwrap_err(),
+            IdentityError::KeyAlreadyRevoked
+        ));
     }
 
     #[test]

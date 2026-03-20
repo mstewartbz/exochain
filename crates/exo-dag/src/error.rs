@@ -1,6 +1,5 @@
-use thiserror::Error;
-
 use exo_core::types::Hash256;
+use thiserror::Error;
 
 /// Errors for the DAG, consensus, and Merkle modules.
 #[derive(Debug, Error)]

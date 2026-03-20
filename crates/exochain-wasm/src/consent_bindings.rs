@@ -1,6 +1,7 @@
 //! Consent bindings: bailment lifecycle, consent enforcement
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 /// Propose a new bailment (consent-conditioned data sharing)

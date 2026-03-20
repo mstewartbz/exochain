@@ -4,24 +4,44 @@ use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::detector::DetectionSignal;
-use crate::error::EscalationError;
+use crate::{detector::DetectionSignal, error::EscalationError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EscalationPath { Standard, SybilAdjudication, Emergency, Constitutional }
+pub enum EscalationPath {
+    Standard,
+    SybilAdjudication,
+    Emergency,
+    Constitutional,
+}
 
 /// Stages of the Sybil adjudication path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SybilStage {
-    Detection, Triage, Quarantine, EvidentaryReview,
-    ClearanceDowngrade, Reinstatement, AuditLog,
+    Detection,
+    Triage,
+    Quarantine,
+    EvidentaryReview,
+    ClearanceDowngrade,
+    Reinstatement,
+    AuditLog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CaseStatus { Open, InProgress, PendingReview, Resolved, Closed }
+pub enum CaseStatus {
+    Open,
+    InProgress,
+    PendingReview,
+    Resolved,
+    Closed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum CasePriority { Low, Medium, High, Critical }
+pub enum CasePriority {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EscalationCase {
@@ -65,7 +85,10 @@ pub fn escalate(signal: &DetectionSignal, path: &EscalationPath) -> EscalationCa
 }
 
 /// Advance a Sybil adjudication case to the next stage.
-pub fn advance_sybil_stage(case: &mut EscalationCase, stage: SybilStage) -> Result<(), EscalationError> {
+pub fn advance_sybil_stage(
+    case: &mut EscalationCase,
+    stage: SybilStage,
+) -> Result<(), EscalationError> {
     if case.path != EscalationPath::SybilAdjudication {
         return Err(EscalationError::InvalidStateTransition {
             from: format!("{:?}", case.path),
@@ -94,12 +117,16 @@ mod tests {
 
     fn signal(confidence: u8, st: SignalType) -> DetectionSignal {
         DetectionSignal {
-            source: "test".into(), signal_type: st, confidence,
-            evidence_hash: [1u8; 32], timestamp: Timestamp::new(1000, 0),
+            source: "test".into(),
+            signal_type: st,
+            confidence,
+            evidence_hash: [1u8; 32],
+            timestamp: Timestamp::new(1000, 0),
         }
     }
 
-    #[test] fn escalate_standard() {
+    #[test]
+    fn escalate_standard() {
         let s = signal(40, SignalType::AnomalousPattern);
         let c = escalate(&s, &EscalationPath::Standard);
         assert_eq!(c.path, EscalationPath::Standard);
@@ -108,30 +135,66 @@ mod tests {
         assert!(c.stages_completed.contains(&"intake".to_string()));
         assert_eq!(c.evidence, vec![[1u8; 32]]);
     }
-    #[test] fn escalate_sybil() {
+    #[test]
+    fn escalate_sybil() {
         let s = signal(75, SignalType::SybilSuspicion);
         let c = escalate(&s, &EscalationPath::SybilAdjudication);
         assert_eq!(c.path, EscalationPath::SybilAdjudication);
         assert_eq!(c.priority, CasePriority::High);
         assert!(c.stages_completed.contains(&"Detection".to_string()));
     }
-    #[test] fn escalate_emergency() {
+    #[test]
+    fn escalate_emergency() {
         let s = signal(95, SignalType::EmergencyCondition);
         let c = escalate(&s, &EscalationPath::Emergency);
         assert_eq!(c.priority, CasePriority::Critical);
     }
-    #[test] fn escalate_constitutional() {
+    #[test]
+    fn escalate_constitutional() {
         let s = signal(60, SignalType::ConsentViolation);
         let c = escalate(&s, &EscalationPath::Constitutional);
-        assert!(c.stages_completed.contains(&"constitutional_review".to_string()));
+        assert!(
+            c.stages_completed
+                .contains(&"constitutional_review".to_string())
+        );
     }
-    #[test] fn priority_from_confidence() {
-        assert_eq!(escalate(&signal(20, SignalType::AnomalousPattern), &EscalationPath::Standard).priority, CasePriority::Low);
-        assert_eq!(escalate(&signal(50, SignalType::AnomalousPattern), &EscalationPath::Standard).priority, CasePriority::Medium);
-        assert_eq!(escalate(&signal(70, SignalType::AnomalousPattern), &EscalationPath::Standard).priority, CasePriority::High);
-        assert_eq!(escalate(&signal(90, SignalType::AnomalousPattern), &EscalationPath::Standard).priority, CasePriority::Critical);
+    #[test]
+    fn priority_from_confidence() {
+        assert_eq!(
+            escalate(
+                &signal(20, SignalType::AnomalousPattern),
+                &EscalationPath::Standard
+            )
+            .priority,
+            CasePriority::Low
+        );
+        assert_eq!(
+            escalate(
+                &signal(50, SignalType::AnomalousPattern),
+                &EscalationPath::Standard
+            )
+            .priority,
+            CasePriority::Medium
+        );
+        assert_eq!(
+            escalate(
+                &signal(70, SignalType::AnomalousPattern),
+                &EscalationPath::Standard
+            )
+            .priority,
+            CasePriority::High
+        );
+        assert_eq!(
+            escalate(
+                &signal(90, SignalType::AnomalousPattern),
+                &EscalationPath::Standard
+            )
+            .priority,
+            CasePriority::Critical
+        );
     }
-    #[test] fn advance_sybil_stages() {
+    #[test]
+    fn advance_sybil_stages() {
         let s = signal(75, SignalType::SybilSuspicion);
         let mut c = escalate(&s, &EscalationPath::SybilAdjudication);
         assert!(advance_sybil_stage(&mut c, SybilStage::Triage).is_ok());
@@ -144,12 +207,14 @@ mod tests {
         assert_eq!(c.status, CaseStatus::Resolved);
         assert_eq!(c.stages_completed.len(), 7); // Detection + 6 stages
     }
-    #[test] fn advance_non_sybil_fails() {
+    #[test]
+    fn advance_non_sybil_fails() {
         let s = signal(50, SignalType::AnomalousPattern);
         let mut c = escalate(&s, &EscalationPath::Standard);
         assert!(advance_sybil_stage(&mut c, SybilStage::Triage).is_err());
     }
-    #[test] fn sybil_stage_display() {
+    #[test]
+    fn sybil_stage_display() {
         assert_eq!(SybilStage::Detection.to_string(), "Detection");
         assert_eq!(SybilStage::AuditLog.to_string(), "AuditLog");
     }

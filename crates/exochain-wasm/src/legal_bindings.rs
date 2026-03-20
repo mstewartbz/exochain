@@ -1,11 +1,16 @@
 //! Legal bindings: evidence chain of custody, fiduciary duty, eDiscovery
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 /// Create a new piece of evidence with chain of custody
 #[wasm_bindgen]
-pub fn wasm_create_evidence(content: &[u8], type_tag: &str, creator_did: &str) -> Result<JsValue, JsValue> {
+pub fn wasm_create_evidence(
+    content: &[u8],
+    type_tag: &str,
+    creator_did: &str,
+) -> Result<JsValue, JsValue> {
     let creator = exo_core::Did::new(creator_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let mut clock = exo_core::hlc::HybridClock::new();

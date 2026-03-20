@@ -50,8 +50,8 @@ pub struct Approval {
 /// Policy defining what constitutes a valid quorum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuorumPolicy {
-    pub min_approvals: u32,
-    pub min_independent: u32,
+    pub min_approvals: usize,
+    pub min_independent: usize,
     pub required_roles: Vec<Role>,
     pub timeout: Timestamp,
 }
@@ -59,15 +59,22 @@ pub struct QuorumPolicy {
 /// The result of a quorum computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuorumResult {
-    Met { independent_count: u32, total_count: u32 },
-    NotMet { reason: String },
-    Contested { challenge: String },
+    Met {
+        independent_count: usize,
+        total_count: usize,
+    },
+    NotMet {
+        reason: String,
+    },
+    Contested {
+        challenge: String,
+    },
 }
 
 /// Compute whether a quorum is met given a set of approvals and a policy.
 #[must_use]
 pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumResult {
-    let total_count = approvals.len() as u32;
+    let total_count = approvals.len();
 
     if total_count < policy.min_approvals {
         return QuorumResult::NotMet {
@@ -88,8 +95,12 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
 
     let independent_count = approvals
         .iter()
-        .filter(|a| a.independence_attestation.as_ref().is_some_and(|att| att.is_valid()))
-        .count() as u32;
+        .filter(|a| {
+            a.independence_attestation
+                .as_ref()
+                .is_some_and(|att| att.is_valid())
+        })
+        .count();
 
     if independent_count < policy.min_independent {
         return QuorumResult::NotMet {
@@ -101,7 +112,10 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
         };
     }
 
-    QuorumResult::Met { independent_count, total_count }
+    QuorumResult::Met {
+        independent_count,
+        total_count,
+    }
 }
 
 /// Validate a single approval's basic structure.
@@ -116,8 +130,9 @@ pub fn validate_approval(approval: &Approval) -> Result<(), GovernanceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::crypto;
+
+    use super::*;
 
     fn test_sig() -> Signature {
         let (_pk, sk) = crypto::generate_keypair();
@@ -155,7 +170,11 @@ mod tests {
             role,
             timestamp: Timestamp::new(1000, 0),
             signature: test_sig(),
-            independence_attestation: if independent { Some(valid_attestation(&d)) } else { None },
+            independence_attestation: if independent {
+                Some(valid_attestation(&d))
+            } else {
+                None
+            },
         }
     }
 
@@ -177,7 +196,10 @@ mod tests {
         ];
         assert_eq!(
             compute_quorum(&approvals, &default_policy()),
-            QuorumResult::Met { independent_count: 3, total_count: 3 }
+            QuorumResult::Met {
+                independent_count: 3,
+                total_count: 3
+            }
         );
     }
 
@@ -224,7 +246,10 @@ mod tests {
 
     #[test]
     fn quorum_fails_with_no_approvals() {
-        assert!(matches!(compute_quorum(&[], &default_policy()), QuorumResult::NotMet { .. }));
+        assert!(matches!(
+            compute_quorum(&[], &default_policy()),
+            QuorumResult::NotMet { .. }
+        ));
     }
 
     #[test]
@@ -243,7 +268,10 @@ mod tests {
         ];
         assert_eq!(
             compute_quorum(&approvals, &default_policy()),
-            QuorumResult::Met { independent_count: 2, total_count: 3 }
+            QuorumResult::Met {
+                independent_count: 2,
+                total_count: 3
+            }
         );
     }
 
@@ -271,15 +299,23 @@ mod tests {
     #[test]
     fn quorum_policy_with_no_required_roles() {
         let policy = QuorumPolicy {
-            min_approvals: 1, min_independent: 1, required_roles: vec![], timeout: Timestamp::new(999_999, 0),
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![],
+            timeout: Timestamp::new(999_999, 0),
         };
         let approvals = vec![make_approval("alice", Role::Contributor, true)];
-        assert!(matches!(compute_quorum(&approvals, &policy), QuorumResult::Met { .. }));
+        assert!(matches!(
+            compute_quorum(&approvals, &policy),
+            QuorumResult::Met { .. }
+        ));
     }
 
     #[test]
     fn contested_variant_exists() {
-        let contested = QuorumResult::Contested { challenge: "test".to_string() };
+        let contested = QuorumResult::Contested {
+            challenge: "test".to_string(),
+        };
         assert!(matches!(contested, QuorumResult::Contested { .. }));
     }
 }

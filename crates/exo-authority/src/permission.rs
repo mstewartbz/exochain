@@ -110,7 +110,11 @@ mod tests {
 
     #[test]
     fn dedup_on_from() {
-        let s = PermissionSet::from_permissions(&[Permission::Read, Permission::Read, Permission::Read]);
+        let s = PermissionSet::from_permissions(&[
+            Permission::Read,
+            Permission::Read,
+            Permission::Read,
+        ]);
         assert_eq!(s.len(), 1);
     }
 
@@ -144,7 +148,11 @@ mod tests {
 
     #[test]
     fn intersect() {
-        let a = PermissionSet::from_permissions(&[Permission::Read, Permission::Write, Permission::Execute]);
+        let a = PermissionSet::from_permissions(&[
+            Permission::Read,
+            Permission::Write,
+            Permission::Execute,
+        ]);
         let b = PermissionSet::from_permissions(&[Permission::Read, Permission::Delegate]);
         let i = PermissionSet::intersect(&a, &b);
         assert_eq!(i.len(), 1);
@@ -161,7 +169,11 @@ mod tests {
 
     #[test]
     fn iter_deterministic() {
-        let s = PermissionSet::from_permissions(&[Permission::Write, Permission::Read, Permission::Execute]);
+        let s = PermissionSet::from_permissions(&[
+            Permission::Write,
+            Permission::Read,
+            Permission::Execute,
+        ]);
         let collected: Vec<&Permission> = s.iter().collect();
         // BTreeSet gives deterministic order
         assert_eq!(collected.len(), 3);
@@ -185,7 +197,7 @@ mod tests {
     #[test]
     fn permission_ord() {
         // Just verify Ord works
-        let mut v = vec![Permission::Write, Permission::Read, Permission::Execute];
+        let mut v = [Permission::Write, Permission::Read, Permission::Execute];
         v.sort();
         assert_eq!(v[0], v[0]); // deterministic
     }

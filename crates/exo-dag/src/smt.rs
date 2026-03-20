@@ -4,9 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
 use exo_core::types::Hash256;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{DagError, Result};
 
@@ -423,11 +422,12 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::*;
     use proptest::prelude::*;
 
+    use super::*;
+
     fn arb_hash256() -> impl Strategy<Value = Hash256> {
-        prop::array::uniform32(any::<u8>()).prop_map(|b| Hash256::from_bytes(b))
+        prop::array::uniform32(any::<u8>()).prop_map(Hash256::from_bytes)
     }
 
     fn arb_value() -> impl Strategy<Value = Vec<u8>> {

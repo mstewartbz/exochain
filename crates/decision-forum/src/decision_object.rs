@@ -6,10 +6,12 @@
 //! - 14-state lifecycle matching BCTS (`exo_core::bcts`)
 //! - Immutable after terminal status (TNC-08)
 
-use exo_core::bcts::BctsState;
-use exo_core::hash::hash_structured;
-use exo_core::hlc::HybridClock;
-use exo_core::types::{DeterministicMap, Did, Hash256, Timestamp};
+use exo_core::{
+    bcts::BctsState,
+    hash::hash_structured,
+    hlc::HybridClock,
+    types::{DeterministicMap, Did, Hash256, Timestamp},
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -255,9 +257,11 @@ impl DecisionObject {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use exo_core::hlc::HybridClock;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use exo_core::hlc::HybridClock;
+
+    use super::*;
 
     fn test_clock() -> HybridClock {
         let counter = AtomicU64::new(1000);
@@ -269,7 +273,12 @@ mod tests {
     }
 
     fn make_decision(clock: &mut HybridClock) -> DecisionObject {
-        DecisionObject::new("Test Decision", DecisionClass::Operational, Hash256::digest(b"const-v1"), clock)
+        DecisionObject::new(
+            "Test Decision",
+            DecisionClass::Operational,
+            Hash256::digest(b"const-v1"),
+            clock,
+        )
     }
 
     #[test]
@@ -288,7 +297,8 @@ mod tests {
     fn transition_draft_to_submitted() {
         let mut clock = test_clock();
         let mut d = make_decision(&mut clock);
-        d.transition(BctsState::Submitted, &test_did(), &mut clock).expect("ok");
+        d.transition(BctsState::Submitted, &test_did(), &mut clock)
+            .expect("ok");
         assert_eq!(d.state, BctsState::Submitted);
         assert_eq!(d.receipt_chain.len(), 1);
     }
@@ -297,7 +307,9 @@ mod tests {
     fn transition_invalid_rejects() {
         let mut clock = test_clock();
         let mut d = make_decision(&mut clock);
-        let err = d.transition(BctsState::Closed, &test_did(), &mut clock).unwrap_err();
+        let err = d
+            .transition(BctsState::Closed, &test_did(), &mut clock)
+            .unwrap_err();
         assert!(matches!(err, ForumError::InvalidTransition { .. }));
     }
 
@@ -307,11 +319,16 @@ mod tests {
         let actor = test_did();
         let mut d = make_decision(&mut clock);
         let steps = [
-            BctsState::Submitted, BctsState::IdentityResolved,
-            BctsState::ConsentValidated, BctsState::Deliberated,
-            BctsState::Verified, BctsState::Governed,
-            BctsState::Approved, BctsState::Executed,
-            BctsState::Recorded, BctsState::Closed,
+            BctsState::Submitted,
+            BctsState::IdentityResolved,
+            BctsState::ConsentValidated,
+            BctsState::Deliberated,
+            BctsState::Verified,
+            BctsState::Governed,
+            BctsState::Approved,
+            BctsState::Executed,
+            BctsState::Recorded,
+            BctsState::Closed,
         ];
         for s in steps {
             d.transition(s, &actor, &mut clock).expect("ok");
@@ -325,23 +342,39 @@ mod tests {
         let mut clock = test_clock();
         let actor = test_did();
         let mut d = make_decision(&mut clock);
-        for s in [BctsState::Submitted, BctsState::IdentityResolved,
-                   BctsState::ConsentValidated, BctsState::Deliberated,
-                   BctsState::Verified, BctsState::Governed,
-                   BctsState::Approved, BctsState::Executed,
-                   BctsState::Recorded, BctsState::Closed] {
+        for s in [
+            BctsState::Submitted,
+            BctsState::IdentityResolved,
+            BctsState::ConsentValidated,
+            BctsState::Deliberated,
+            BctsState::Verified,
+            BctsState::Governed,
+            BctsState::Approved,
+            BctsState::Executed,
+            BctsState::Recorded,
+            BctsState::Closed,
+        ] {
             d.transition(s, &actor, &mut clock).expect("ok");
         }
         assert!(d.transition(BctsState::Draft, &actor, &mut clock).is_err());
-        assert!(d.add_vote(Vote {
-            voter_did: actor.clone(), choice: VoteChoice::Approve,
-            actor_kind: ActorKind::Human,
-            timestamp: clock.now(), signature_hash: Hash256::ZERO,
-        }).is_err());
-        assert!(d.add_evidence(EvidenceItem {
-            hash: Hash256::ZERO, description: "x".into(),
-            attached_at: clock.now(),
-        }).is_err());
+        assert!(
+            d.add_vote(Vote {
+                voter_did: actor.clone(),
+                choice: VoteChoice::Approve,
+                actor_kind: ActorKind::Human,
+                timestamp: clock.now(),
+                signature_hash: Hash256::ZERO,
+            })
+            .is_err()
+        );
+        assert!(
+            d.add_evidence(EvidenceItem {
+                hash: Hash256::ZERO,
+                description: "x".into(),
+                attached_at: clock.now(),
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -351,15 +384,22 @@ mod tests {
         let mut d = make_decision(&mut clock);
         let ts = clock.now();
         d.add_vote(Vote {
-            voter_did: actor.clone(), choice: VoteChoice::Approve,
-            actor_kind: ActorKind::Human, timestamp: ts,
+            voter_did: actor.clone(),
+            choice: VoteChoice::Approve,
+            actor_kind: ActorKind::Human,
+            timestamp: ts,
             signature_hash: Hash256::ZERO,
-        }).expect("ok");
-        let err = d.add_vote(Vote {
-            voter_did: actor.clone(), choice: VoteChoice::Reject,
-            actor_kind: ActorKind::Human, timestamp: ts,
-            signature_hash: Hash256::ZERO,
-        }).unwrap_err();
+        })
+        .expect("ok");
+        let err = d
+            .add_vote(Vote {
+                voter_did: actor.clone(),
+                choice: VoteChoice::Reject,
+                actor_kind: ActorKind::Human,
+                timestamp: ts,
+                signature_hash: Hash256::ZERO,
+            })
+            .unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
 
@@ -378,7 +418,8 @@ mod tests {
         let actor = test_did();
         let mut d = make_decision(&mut clock);
         let h1 = d.content_hash().expect("ok");
-        d.transition(BctsState::Submitted, &actor, &mut clock).expect("ok");
+        d.transition(BctsState::Submitted, &actor, &mut clock)
+            .expect("ok");
         let h2 = d.content_hash().expect("ok");
         assert_ne!(h1, h2);
     }
@@ -388,9 +429,14 @@ mod tests {
         let mut clock = test_clock();
         let actor = test_did();
         let mut d = make_decision(&mut clock);
-        d.transition(BctsState::Submitted, &actor, &mut clock).expect("ok");
-        d.transition(BctsState::IdentityResolved, &actor, &mut clock).expect("ok");
-        assert_ne!(d.receipt_chain[0].receipt_hash, d.receipt_chain[1].receipt_hash);
+        d.transition(BctsState::Submitted, &actor, &mut clock)
+            .expect("ok");
+        d.transition(BctsState::IdentityResolved, &actor, &mut clock)
+            .expect("ok");
+        assert_ne!(
+            d.receipt_chain[0].receipt_hash,
+            d.receipt_chain[1].receipt_hash
+        );
     }
 
     #[test]
@@ -414,9 +460,12 @@ mod tests {
         let mut d = make_decision(&mut clock);
         let ts = clock.now();
         d.add_authority_link(AuthorityLink {
-            actor_did: test_did(), actor_kind: ActorKind::Human,
-            delegation_hash: Hash256::ZERO, timestamp: ts,
-        }).expect("ok");
+            actor_did: test_did(),
+            actor_kind: ActorKind::Human,
+            delegation_hash: Hash256::ZERO,
+            timestamp: ts,
+        })
+        .expect("ok");
         assert_eq!(d.authority_chain.len(), 1);
     }
 

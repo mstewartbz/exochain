@@ -4,9 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::{Deserialize, Serialize};
-
 use exo_core::types::{Did, Hash256, Signature, Timestamp};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{DagError, Result};
 
@@ -281,7 +280,7 @@ pub fn tips(dag: &Dag) -> Vec<Hash256> {
         .filter(|h| {
             dag.children
                 .get(*h)
-                .map_or(true, std::collections::BTreeSet::is_empty)
+                .is_none_or(std::collections::BTreeSet::is_empty)
         })
         .copied()
         .collect();
@@ -290,7 +289,11 @@ pub fn tips(dag: &Dag) -> Vec<Hash256> {
 }
 
 /// Verify a node: check hash, parent existence, and signature.
-pub fn verify_node(dag: &Dag, node: &DagNode, verify_fn: &dyn Fn(&[u8], &Signature) -> bool) -> Result<()> {
+pub fn verify_node(
+    dag: &Dag,
+    node: &DagNode,
+    verify_fn: &dyn Fn(&[u8], &Signature) -> bool,
+) -> Result<()> {
     // Verify parents are sorted and deduplicated
     let mut sorted = node.parents.clone();
     sorted.sort();
@@ -341,11 +344,14 @@ pub fn verify_node(dag: &Dag, node: &DagNode, verify_fn: &dyn Fn(&[u8], &Signatu
 mod tests {
     use super::*;
 
+    type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
+    type VerifyFn = Box<dyn Fn(&[u8], &Signature) -> bool>;
+
     fn test_did(name: &str) -> Did {
         Did::new(name).expect("valid DID")
     }
 
-    fn make_sign_fn() -> Box<dyn Fn(&[u8]) -> Signature> {
+    fn make_sign_fn() -> SignFn {
         Box::new(|data: &[u8]| {
             // Deterministic "signature" for testing: blake3 hash padded to 64 bytes
             let h = blake3::hash(data);
@@ -355,7 +361,7 @@ mod tests {
         })
     }
 
-    fn make_verify_fn() -> Box<dyn Fn(&[u8], &Signature) -> bool> {
+    fn make_verify_fn() -> VerifyFn {
         Box::new(|data: &[u8], sig: &Signature| {
             let h = blake3::hash(data);
             sig.as_bytes()[..32] == *h.as_bytes()
@@ -547,11 +553,11 @@ mod tests {
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
-        let mut genesis = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
+        let mut genesis =
+            append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
         genesis.signature = Signature::from_bytes([0u8; 64]);
 
-        let verify_fn: Box<dyn Fn(&[u8], &Signature) -> bool> =
-            Box::new(|_data: &[u8], _sig: &Signature| false);
+        let verify_fn: VerifyFn = Box::new(|_data: &[u8], _sig: &Signature| false);
 
         let err = verify_node(&dag, &genesis, &*verify_fn).unwrap_err();
         assert!(matches!(err, DagError::InvalidSignature(_)));
@@ -565,7 +571,8 @@ mod tests {
         let sign_fn = make_sign_fn();
         let verify_fn = make_verify_fn();
 
-        let mut genesis = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
+        let mut genesis =
+            append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
         genesis.hash = Hash256::ZERO;
 
         let err = verify_node(&dag, &genesis, &*verify_fn).unwrap_err();

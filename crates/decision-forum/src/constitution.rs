@@ -86,7 +86,10 @@ impl ConstitutionCorpus {
     /// Returns the number of active articles.
     #[must_use]
     pub fn active_article_count(&self) -> usize {
-        self.articles.iter().filter(|a| a.status == ArticleStatus::Active).count()
+        self.articles
+            .iter()
+            .filter(|a| a.status == ArticleStatus::Active)
+            .count()
     }
 
     /// Resolve a conflict between two articles based on tier hierarchy.
@@ -105,7 +108,9 @@ pub fn ratify(
     timestamp: Timestamp,
 ) -> Result<()> {
     if corpus.is_ratified() {
-        return Err(ForumError::NotRatified { reason: "already ratified".into() });
+        return Err(ForumError::NotRatified {
+            reason: "already ratified".into(),
+        });
     }
     let valid = signatures.iter().filter(|(_, s)| !s.is_empty()).count();
     if valid < quorum.required_signatures {
@@ -126,11 +131,15 @@ pub fn amend(
     signatures: &[(Did, Signature)],
 ) -> Result<()> {
     if !corpus.is_ratified() {
-        return Err(ForumError::AmendmentFailed { reason: "not ratified".into() });
+        return Err(ForumError::AmendmentFailed {
+            reason: "not ratified".into(),
+        });
     }
     let valid = signatures.iter().filter(|(_, s)| !s.is_empty()).count();
     if valid == 0 {
-        return Err(ForumError::AmendmentFailed { reason: "no valid signatures".into() });
+        return Err(ForumError::AmendmentFailed {
+            reason: "no valid signatures".into(),
+        });
     }
     corpus.articles.push(amendment);
     corpus.version = corpus.version.next();
@@ -170,23 +179,37 @@ fn compute_corpus_hash(articles: &[Article]) -> Hash256 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::types::Signature;
 
-    fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).expect("valid") }
-    fn sig() -> Signature { let mut s = [0u8; 64]; s[0] = 1; Signature::from_bytes(s) }
-    fn empty_sig() -> Signature { Signature::from_bytes([0u8; 64]) }
+    use super::*;
+
+    fn did(n: &str) -> Did {
+        Did::new(&format!("did:exo:{n}")).expect("valid")
+    }
+    fn sig() -> Signature {
+        let mut s = [0u8; 64];
+        s[0] = 1;
+        Signature::from_bytes(s)
+    }
+    fn empty_sig() -> Signature {
+        Signature::from_bytes([0u8; 64])
+    }
 
     fn article(id: &str, tier: DocumentTier) -> Article {
         Article {
-            id: id.into(), title: id.into(), tier,
+            id: id.into(),
+            title: id.into(),
+            tier,
             text_hash: Hash256::digest(id.as_bytes()),
             status: ArticleStatus::Active,
         }
     }
 
     fn quorum() -> ConstitutionQuorum {
-        ConstitutionQuorum { required_signatures: 2, required_fraction_pct: 50 }
+        ConstitutionQuorum {
+            required_signatures: 2,
+            required_fraction_pct: 50,
+        }
     }
 
     #[test]
@@ -199,7 +222,13 @@ mod tests {
     #[test]
     fn ratify_ok() {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)]);
-        ratify(&mut c, &[(did("a"), sig()), (did("b"), sig())], &quorum(), Timestamp::ZERO).expect("ok");
+        ratify(
+            &mut c,
+            &[(did("a"), sig()), (did("b"), sig())],
+            &quorum(),
+            Timestamp::ZERO,
+        )
+        .expect("ok");
         assert!(c.is_ratified());
     }
 
@@ -213,22 +242,55 @@ mod tests {
     #[test]
     fn ratify_already() {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)]);
-        ratify(&mut c, &[(did("a"), sig()), (did("b"), sig())], &quorum(), Timestamp::ZERO).expect("ok");
-        assert!(ratify(&mut c, &[(did("a"), sig()), (did("b"), sig())], &quorum(), Timestamp::ZERO).is_err());
+        ratify(
+            &mut c,
+            &[(did("a"), sig()), (did("b"), sig())],
+            &quorum(),
+            Timestamp::ZERO,
+        )
+        .expect("ok");
+        assert!(
+            ratify(
+                &mut c,
+                &[(did("a"), sig()), (did("b"), sig())],
+                &quorum(),
+                Timestamp::ZERO
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn empty_sig_not_counted() {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)]);
-        assert!(ratify(&mut c, &[(did("a"), sig()), (did("b"), empty_sig())], &quorum(), Timestamp::ZERO).is_err());
+        assert!(
+            ratify(
+                &mut c,
+                &[(did("a"), sig()), (did("b"), empty_sig())],
+                &quorum(),
+                Timestamp::ZERO
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn amend_ok() {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)]);
-        ratify(&mut c, &[(did("a"), sig()), (did("b"), sig())], &quorum(), Timestamp::ZERO).expect("ok");
+        ratify(
+            &mut c,
+            &[(did("a"), sig()), (did("b"), sig())],
+            &quorum(),
+            Timestamp::ZERO,
+        )
+        .expect("ok");
         let old_hash = c.hash;
-        amend(&mut c, article("a2", DocumentTier::Bylaws), &[(did("a"), sig())]).expect("ok");
+        amend(
+            &mut c,
+            article("a2", DocumentTier::Bylaws),
+            &[(did("a"), sig())],
+        )
+        .expect("ok");
         assert_eq!(c.articles.len(), 2);
         assert_eq!(c.version, Version::ZERO.next().next());
         assert_ne!(c.hash, old_hash);
@@ -238,14 +300,34 @@ mod tests {
     #[test]
     fn amend_not_ratified() {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)]);
-        assert!(amend(&mut c, article("a2", DocumentTier::Bylaws), &[(did("a"), sig())]).is_err());
+        assert!(
+            amend(
+                &mut c,
+                article("a2", DocumentTier::Bylaws),
+                &[(did("a"), sig())]
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn amend_no_valid_sigs() {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)]);
-        ratify(&mut c, &[(did("a"), sig()), (did("b"), sig())], &quorum(), Timestamp::ZERO).expect("ok");
-        assert!(amend(&mut c, article("a2", DocumentTier::Bylaws), &[(did("a"), empty_sig())]).is_err());
+        ratify(
+            &mut c,
+            &[(did("a"), sig()), (did("b"), sig())],
+            &quorum(),
+            Timestamp::ZERO,
+        )
+        .expect("ok");
+        assert!(
+            amend(
+                &mut c,
+                article("a2", DocumentTier::Bylaws),
+                &[(did("a"), empty_sig())]
+            )
+            .is_err()
+        );
     }
 
     #[test]

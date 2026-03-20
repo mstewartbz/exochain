@@ -8,7 +8,7 @@
 //! payloads, so even if an AI has valid key material, it cannot produce
 //! a signature that could be mistaken for a human (`0x01`) signature.
 
-use exo_core::{Did, Hash256, SignerType};
+use exo_core::{Did, SignerType};
 use serde::{Deserialize, Serialize};
 
 use crate::types::PermissionSet;
@@ -31,9 +31,12 @@ impl McpRule {
     #[must_use]
     pub fn all() -> Vec<McpRule> {
         vec![
-            McpRule::Mcp001BctsScope, McpRule::Mcp002NoSelfEscalation,
-            McpRule::Mcp003ProvenanceRequired, McpRule::Mcp004NoIdentityForge,
-            McpRule::Mcp005Distinguishable, McpRule::Mcp006ConsentBoundaries,
+            McpRule::Mcp001BctsScope,
+            McpRule::Mcp002NoSelfEscalation,
+            McpRule::Mcp003ProvenanceRequired,
+            McpRule::Mcp004NoIdentityForge,
+            McpRule::Mcp005Distinguishable,
+            McpRule::Mcp006ConsentBoundaries,
         ]
     }
 
@@ -96,8 +99,12 @@ pub struct McpViolation {
 // ---------------------------------------------------------------------------
 
 pub fn enforce(rules: &[McpRule], context: &McpContext) -> Result<(), McpViolation> {
-    if !context.is_ai() { return Ok(()); }
-    for rule in rules { check_rule(*rule, context)?; }
+    if !context.is_ai() {
+        return Ok(());
+    }
+    for rule in rules {
+        check_rule(*rule, context)?;
+    }
     Ok(())
 }
 
@@ -105,37 +112,70 @@ fn check_rule(rule: McpRule, ctx: &McpContext) -> Result<(), McpViolation> {
     match rule {
         McpRule::Mcp001BctsScope => {
             if ctx.bcts_scope.is_none() {
-                return Err(McpViolation { rule, description: "AI operating outside BCTS scope".into(), evidence: vec![format!("actor: {}", ctx.actor_did)], severity: 5 });
+                return Err(McpViolation {
+                    rule,
+                    description: "AI operating outside BCTS scope".into(),
+                    evidence: vec![format!("actor: {}", ctx.actor_did)],
+                    severity: 5,
+                });
             }
             Ok(())
         }
         McpRule::Mcp002NoSelfEscalation => {
             if ctx.self_escalation {
-                return Err(McpViolation { rule, description: "AI attempted self-escalation".into(), evidence: vec![format!("actor: {}", ctx.actor_did), format!("action: {}", ctx.action)], severity: 5 });
+                return Err(McpViolation {
+                    rule,
+                    description: "AI attempted self-escalation".into(),
+                    evidence: vec![
+                        format!("actor: {}", ctx.actor_did),
+                        format!("action: {}", ctx.action),
+                    ],
+                    severity: 5,
+                });
             }
             Ok(())
         }
         McpRule::Mcp003ProvenanceRequired => {
             if !ctx.has_provenance {
-                return Err(McpViolation { rule, description: "AI action lacks provenance".into(), evidence: vec![format!("action: {}", ctx.action)], severity: 4 });
+                return Err(McpViolation {
+                    rule,
+                    description: "AI action lacks provenance".into(),
+                    evidence: vec![format!("action: {}", ctx.action)],
+                    severity: 4,
+                });
             }
             Ok(())
         }
         McpRule::Mcp004NoIdentityForge => {
             if ctx.forging_identity {
-                return Err(McpViolation { rule, description: "AI attempted identity forge".into(), evidence: vec![format!("actor: {}", ctx.actor_did)], severity: 5 });
+                return Err(McpViolation {
+                    rule,
+                    description: "AI attempted identity forge".into(),
+                    evidence: vec![format!("actor: {}", ctx.actor_did)],
+                    severity: 5,
+                });
             }
             Ok(())
         }
         McpRule::Mcp005Distinguishable => {
             if !ctx.output_marked_ai {
-                return Err(McpViolation { rule, description: "AI output not marked".into(), evidence: vec![format!("action: {}", ctx.action)], severity: 3 });
+                return Err(McpViolation {
+                    rule,
+                    description: "AI output not marked".into(),
+                    evidence: vec![format!("action: {}", ctx.action)],
+                    severity: 3,
+                });
             }
             Ok(())
         }
         McpRule::Mcp006ConsentBoundaries => {
             if !ctx.consent_active {
-                return Err(McpViolation { rule, description: "AI operating without consent".into(), evidence: vec![format!("actor: {}", ctx.actor_did)], severity: 5 });
+                return Err(McpViolation {
+                    rule,
+                    description: "AI operating without consent".into(),
+                    evidence: vec![format!("actor: {}", ctx.actor_did)],
+                    severity: 5,
+                });
             }
             Ok(())
         }
@@ -170,16 +210,21 @@ pub fn verify_typed_signature(
 
 #[cfg(test)]
 mod tests {
+    use exo_core::{Hash256, crypto::KeyPair};
+
     use super::*;
     use crate::types::Permission;
-    use exo_core::crypto::KeyPair;
 
-    fn did(s: &str) -> Did { Did::new(s).expect("valid DID") }
+    fn did(s: &str) -> Did {
+        Did::new(s).expect("valid DID")
+    }
 
     fn valid_ai() -> McpContext {
         McpContext {
             actor_did: did("did:exo:ai-agent-1"),
-            signer_type: SignerType::Ai { delegation_id: Hash256::digest(b"delegation-1") },
+            signer_type: SignerType::Ai {
+                delegation_id: Hash256::digest(b"delegation-1"),
+            },
             bcts_scope: Some("data:medical".into()),
             capabilities: PermissionSet::new(vec![Permission::new("read")]),
             action: "summarize".into(),
@@ -196,37 +241,141 @@ mod tests {
             actor_did: did("did:exo:human-1"),
             signer_type: SignerType::Human,
             bcts_scope: None,
-            capabilities: PermissionSet::default(), action: "anything".into(),
-            has_provenance: false, forging_identity: false, output_marked_ai: false,
-            consent_active: false, self_escalation: false,
+            capabilities: PermissionSet::default(),
+            action: "anything".into(),
+            has_provenance: false,
+            forging_identity: false,
+            output_marked_ai: false,
+            consent_active: false,
+            self_escalation: false,
         }
     }
 
-    #[test] fn all_pass_valid_ai() { assert!(enforce(&McpRule::all(), &valid_ai()).is_ok()); }
-    #[test] fn human_exempt() { assert!(enforce(&McpRule::all(), &human()).is_ok()); }
+    #[test]
+    fn all_pass_valid_ai() {
+        assert!(enforce(&McpRule::all(), &valid_ai()).is_ok());
+    }
+    #[test]
+    fn human_exempt() {
+        assert!(enforce(&McpRule::all(), &human()).is_ok());
+    }
 
-    #[test] fn mcp001_fail() { let mut c = valid_ai(); c.bcts_scope = None; let e = enforce(&[McpRule::Mcp001BctsScope], &c).unwrap_err(); assert_eq!(e.rule, McpRule::Mcp001BctsScope); assert_eq!(e.severity, 5); }
-    #[test] fn mcp001_pass() { assert!(enforce(&[McpRule::Mcp001BctsScope], &valid_ai()).is_ok()); }
+    #[test]
+    fn mcp001_fail() {
+        let mut c = valid_ai();
+        c.bcts_scope = None;
+        let e = enforce(&[McpRule::Mcp001BctsScope], &c).unwrap_err();
+        assert_eq!(e.rule, McpRule::Mcp001BctsScope);
+        assert_eq!(e.severity, 5);
+    }
+    #[test]
+    fn mcp001_pass() {
+        assert!(enforce(&[McpRule::Mcp001BctsScope], &valid_ai()).is_ok());
+    }
 
-    #[test] fn mcp002_fail() { let mut c = valid_ai(); c.self_escalation = true; assert_eq!(enforce(&[McpRule::Mcp002NoSelfEscalation], &c).unwrap_err().rule, McpRule::Mcp002NoSelfEscalation); }
-    #[test] fn mcp002_pass() { assert!(enforce(&[McpRule::Mcp002NoSelfEscalation], &valid_ai()).is_ok()); }
+    #[test]
+    fn mcp002_fail() {
+        let mut c = valid_ai();
+        c.self_escalation = true;
+        assert_eq!(
+            enforce(&[McpRule::Mcp002NoSelfEscalation], &c)
+                .unwrap_err()
+                .rule,
+            McpRule::Mcp002NoSelfEscalation
+        );
+    }
+    #[test]
+    fn mcp002_pass() {
+        assert!(enforce(&[McpRule::Mcp002NoSelfEscalation], &valid_ai()).is_ok());
+    }
 
-    #[test] fn mcp003_fail() { let mut c = valid_ai(); c.has_provenance = false; let e = enforce(&[McpRule::Mcp003ProvenanceRequired], &c).unwrap_err(); assert_eq!(e.rule, McpRule::Mcp003ProvenanceRequired); assert_eq!(e.severity, 4); }
-    #[test] fn mcp003_pass() { assert!(enforce(&[McpRule::Mcp003ProvenanceRequired], &valid_ai()).is_ok()); }
+    #[test]
+    fn mcp003_fail() {
+        let mut c = valid_ai();
+        c.has_provenance = false;
+        let e = enforce(&[McpRule::Mcp003ProvenanceRequired], &c).unwrap_err();
+        assert_eq!(e.rule, McpRule::Mcp003ProvenanceRequired);
+        assert_eq!(e.severity, 4);
+    }
+    #[test]
+    fn mcp003_pass() {
+        assert!(enforce(&[McpRule::Mcp003ProvenanceRequired], &valid_ai()).is_ok());
+    }
 
-    #[test] fn mcp004_fail() { let mut c = valid_ai(); c.forging_identity = true; assert_eq!(enforce(&[McpRule::Mcp004NoIdentityForge], &c).unwrap_err().rule, McpRule::Mcp004NoIdentityForge); }
-    #[test] fn mcp004_pass() { assert!(enforce(&[McpRule::Mcp004NoIdentityForge], &valid_ai()).is_ok()); }
+    #[test]
+    fn mcp004_fail() {
+        let mut c = valid_ai();
+        c.forging_identity = true;
+        assert_eq!(
+            enforce(&[McpRule::Mcp004NoIdentityForge], &c)
+                .unwrap_err()
+                .rule,
+            McpRule::Mcp004NoIdentityForge
+        );
+    }
+    #[test]
+    fn mcp004_pass() {
+        assert!(enforce(&[McpRule::Mcp004NoIdentityForge], &valid_ai()).is_ok());
+    }
 
-    #[test] fn mcp005_fail() { let mut c = valid_ai(); c.output_marked_ai = false; let e = enforce(&[McpRule::Mcp005Distinguishable], &c).unwrap_err(); assert_eq!(e.rule, McpRule::Mcp005Distinguishable); assert_eq!(e.severity, 3); }
-    #[test] fn mcp005_pass() { assert!(enforce(&[McpRule::Mcp005Distinguishable], &valid_ai()).is_ok()); }
+    #[test]
+    fn mcp005_fail() {
+        let mut c = valid_ai();
+        c.output_marked_ai = false;
+        let e = enforce(&[McpRule::Mcp005Distinguishable], &c).unwrap_err();
+        assert_eq!(e.rule, McpRule::Mcp005Distinguishable);
+        assert_eq!(e.severity, 3);
+    }
+    #[test]
+    fn mcp005_pass() {
+        assert!(enforce(&[McpRule::Mcp005Distinguishable], &valid_ai()).is_ok());
+    }
 
-    #[test] fn mcp006_fail() { let mut c = valid_ai(); c.consent_active = false; assert_eq!(enforce(&[McpRule::Mcp006ConsentBoundaries], &c).unwrap_err().rule, McpRule::Mcp006ConsentBoundaries); }
-    #[test] fn mcp006_pass() { assert!(enforce(&[McpRule::Mcp006ConsentBoundaries], &valid_ai()).is_ok()); }
+    #[test]
+    fn mcp006_fail() {
+        let mut c = valid_ai();
+        c.consent_active = false;
+        assert_eq!(
+            enforce(&[McpRule::Mcp006ConsentBoundaries], &c)
+                .unwrap_err()
+                .rule,
+            McpRule::Mcp006ConsentBoundaries
+        );
+    }
+    #[test]
+    fn mcp006_pass() {
+        assert!(enforce(&[McpRule::Mcp006ConsentBoundaries], &valid_ai()).is_ok());
+    }
 
-    #[test] fn first_violation_returned() { let mut c = valid_ai(); c.bcts_scope = None; c.has_provenance = false; assert_eq!(enforce(&[McpRule::Mcp001BctsScope, McpRule::Mcp003ProvenanceRequired], &c).unwrap_err().rule, McpRule::Mcp001BctsScope); }
-    #[test] fn empty_rules_pass() { assert!(enforce(&[], &valid_ai()).is_ok()); }
-    #[test] fn all_six_rules() { assert_eq!(McpRule::all().len(), 6); }
-    #[test] fn descriptions_non_empty() { for r in McpRule::all() { assert!(!r.description().is_empty()); } }
+    #[test]
+    fn first_violation_returned() {
+        let mut c = valid_ai();
+        c.bcts_scope = None;
+        c.has_provenance = false;
+        assert_eq!(
+            enforce(
+                &[McpRule::Mcp001BctsScope, McpRule::Mcp003ProvenanceRequired],
+                &c
+            )
+            .unwrap_err()
+            .rule,
+            McpRule::Mcp001BctsScope
+        );
+    }
+    #[test]
+    fn empty_rules_pass() {
+        assert!(enforce(&[], &valid_ai()).is_ok());
+    }
+    #[test]
+    fn all_six_rules() {
+        assert_eq!(McpRule::all().len(), 6);
+    }
+    #[test]
+    fn descriptions_non_empty() {
+        for r in McpRule::all() {
+            assert!(!r.description().is_empty());
+        }
+    }
 
     // -- Cryptographic AI identity binding tests --
 
@@ -238,15 +387,27 @@ mod tests {
         let message = b"important governance vote";
 
         // AI signs with AI prefix
-        let ai_type = SignerType::Ai { delegation_id: Hash256::digest(b"session-1") };
+        let ai_type = SignerType::Ai {
+            delegation_id: Hash256::digest(b"session-1"),
+        };
         let ai_payload = build_signed_payload(&ai_type, message);
         let ai_sig = kp.sign(&ai_payload);
 
         // Verify as AI — should succeed
-        assert!(verify_typed_signature(&ai_type, message, &ai_sig, kp.public_key()));
+        assert!(verify_typed_signature(
+            &ai_type,
+            message,
+            &ai_sig,
+            kp.public_key()
+        ));
 
         // Try to verify same signature as human — MUST fail
-        assert!(!verify_typed_signature(&SignerType::Human, message, &ai_sig, kp.public_key()));
+        assert!(!verify_typed_signature(
+            &SignerType::Human,
+            message,
+            &ai_sig,
+            kp.public_key()
+        ));
     }
 
     #[test]
@@ -259,11 +420,23 @@ mod tests {
         let human_sig = kp.sign(&human_payload);
 
         // Verify as human — should succeed
-        assert!(verify_typed_signature(&SignerType::Human, message, &human_sig, kp.public_key()));
+        assert!(verify_typed_signature(
+            &SignerType::Human,
+            message,
+            &human_sig,
+            kp.public_key()
+        ));
 
         // Try to verify as AI — MUST fail
-        let ai_type = SignerType::Ai { delegation_id: Hash256::digest(b"d") };
-        assert!(!verify_typed_signature(&ai_type, message, &human_sig, kp.public_key()));
+        let ai_type = SignerType::Ai {
+            delegation_id: Hash256::digest(b"d"),
+        };
+        assert!(!verify_typed_signature(
+            &ai_type,
+            message,
+            &human_sig,
+            kp.public_key()
+        ));
     }
 
     #[test]
@@ -271,8 +444,12 @@ mod tests {
         let kp = KeyPair::generate();
         let message = b"action";
 
-        let ai1 = SignerType::Ai { delegation_id: Hash256::digest(b"delegation-A") };
-        let ai2 = SignerType::Ai { delegation_id: Hash256::digest(b"delegation-B") };
+        let ai1 = SignerType::Ai {
+            delegation_id: Hash256::digest(b"delegation-A"),
+        };
+        let ai2 = SignerType::Ai {
+            delegation_id: Hash256::digest(b"delegation-B"),
+        };
 
         let payload1 = build_signed_payload(&ai1, message);
         let payload2 = build_signed_payload(&ai2, message);
@@ -280,14 +457,26 @@ mod tests {
 
         let sig1 = kp.sign(&payload1);
         // sig1 verifies under ai1 but NOT under ai2
-        assert!(verify_typed_signature(&ai1, message, &sig1, kp.public_key()));
-        assert!(!verify_typed_signature(&ai2, message, &sig1, kp.public_key()));
+        assert!(verify_typed_signature(
+            &ai1,
+            message,
+            &sig1,
+            kp.public_key()
+        ));
+        assert!(!verify_typed_signature(
+            &ai2,
+            message,
+            &sig1,
+            kp.public_key()
+        ));
     }
 
     #[test]
     fn signer_type_prefix_bytes() {
         assert_eq!(SignerType::Human.prefix_byte(), 0x01);
-        let ai = SignerType::Ai { delegation_id: Hash256::ZERO };
+        let ai = SignerType::Ai {
+            delegation_id: Hash256::ZERO,
+        };
         assert_eq!(ai.prefix_byte(), 0x02);
         assert_eq!(ai.to_payload_prefix().len(), 33); // 1 prefix + 32 hash
     }
@@ -296,7 +485,9 @@ mod tests {
     fn signer_type_is_checks() {
         assert!(SignerType::Human.is_human());
         assert!(!SignerType::Human.is_ai());
-        let ai = SignerType::Ai { delegation_id: Hash256::ZERO };
+        let ai = SignerType::Ai {
+            delegation_id: Hash256::ZERO,
+        };
         assert!(ai.is_ai());
         assert!(!ai.is_human());
     }

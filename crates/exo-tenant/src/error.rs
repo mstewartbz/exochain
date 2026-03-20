@@ -22,12 +22,18 @@ pub type Result<T> = std::result::Result<T, TenantError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn all_display() {
+    #[test]
+    fn all_display() {
         let es: Vec<TenantError> = vec![
-            TenantError::TenantNotFound(Uuid::nil()), TenantError::TenantAlreadyExists(Uuid::nil()),
-            TenantError::InvalidStateTransition{reason:"x".into()}, TenantError::ShardError{reason:"x".into()},
-            TenantError::StorageError{reason:"x".into()}, TenantError::MigrationError{reason:"x".into()},
+            TenantError::TenantNotFound(Uuid::nil()),
+            TenantError::TenantAlreadyExists(Uuid::nil()),
+            TenantError::InvalidStateTransition { reason: "x".into() },
+            TenantError::ShardError { reason: "x".into() },
+            TenantError::StorageError { reason: "x".into() },
+            TenantError::MigrationError { reason: "x".into() },
         ];
-        for e in &es { assert!(!e.to_string().is_empty()); }
+        for e in &es {
+            assert!(!e.to_string().is_empty());
+        }
     }
 }

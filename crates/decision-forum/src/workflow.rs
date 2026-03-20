@@ -3,8 +3,10 @@
 //! Maps each decision lifecycle phase to a workflow stage with receipt
 //! generation at each stage.
 
-use exo_core::bcts::BctsState;
-use exo_core::types::{Hash256, Timestamp};
+use exo_core::{
+    bcts::BctsState,
+    types::{Hash256, Timestamp},
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -31,48 +33,70 @@ impl WorkflowDefinition {
     pub fn standard_governance() -> Self {
         let stages = vec![
             WorkflowStage {
-                state: BctsState::Draft, name: "Draft".into(),
-                description: "Initial proposal creation".into(), requires_receipt: false,
+                state: BctsState::Draft,
+                name: "Draft".into(),
+                description: "Initial proposal creation".into(),
+                requires_receipt: false,
             },
             WorkflowStage {
-                state: BctsState::Submitted, name: "Submitted".into(),
-                description: "Proposal submitted for review".into(), requires_receipt: true,
+                state: BctsState::Submitted,
+                name: "Submitted".into(),
+                description: "Proposal submitted for review".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::IdentityResolved, name: "Identity Resolved".into(),
-                description: "Actor identities verified".into(), requires_receipt: true,
+                state: BctsState::IdentityResolved,
+                name: "Identity Resolved".into(),
+                description: "Actor identities verified".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::ConsentValidated, name: "Consent Validated".into(),
-                description: "All required consents collected".into(), requires_receipt: true,
+                state: BctsState::ConsentValidated,
+                name: "Consent Validated".into(),
+                description: "All required consents collected".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Deliberated, name: "Deliberated".into(),
-                description: "Discussion and debate completed".into(), requires_receipt: true,
+                state: BctsState::Deliberated,
+                name: "Deliberated".into(),
+                description: "Discussion and debate completed".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Verified, name: "Verified".into(),
-                description: "Evidence and authority verified".into(), requires_receipt: true,
+                state: BctsState::Verified,
+                name: "Verified".into(),
+                description: "Evidence and authority verified".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Governed, name: "Governed".into(),
-                description: "Constitutional compliance confirmed".into(), requires_receipt: true,
+                state: BctsState::Governed,
+                name: "Governed".into(),
+                description: "Constitutional compliance confirmed".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Approved, name: "Approved".into(),
-                description: "Decision approved by quorum".into(), requires_receipt: true,
+                state: BctsState::Approved,
+                name: "Approved".into(),
+                description: "Decision approved by quorum".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Executed, name: "Executed".into(),
-                description: "Decision enacted".into(), requires_receipt: true,
+                state: BctsState::Executed,
+                name: "Executed".into(),
+                description: "Decision enacted".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Recorded, name: "Recorded".into(),
-                description: "Decision recorded in permanent ledger".into(), requires_receipt: true,
+                state: BctsState::Recorded,
+                name: "Recorded".into(),
+                description: "Decision recorded in permanent ledger".into(),
+                requires_receipt: true,
             },
             WorkflowStage {
-                state: BctsState::Closed, name: "Closed".into(),
-                description: "Decision lifecycle complete".into(), requires_receipt: true,
+                state: BctsState::Closed,
+                name: "Closed".into(),
+                description: "Decision lifecycle complete".into(),
+                requires_receipt: true,
             },
         ];
         Self {
@@ -130,7 +154,7 @@ pub fn generate_receipt(
     hasher.update(workflow_id.as_bytes());
     hasher.update(decision_id.as_bytes());
     hasher.update(&timestamp.physical_ms.to_le_bytes());
-    hasher.update(&(timestamp.logical as u64).to_le_bytes());
+    hasher.update(&u64::from(timestamp.logical).to_le_bytes());
     hasher.update(format!("{stage:?}").as_bytes());
     WorkflowReceipt {
         workflow_id,

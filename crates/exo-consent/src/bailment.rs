@@ -131,11 +131,21 @@ pub fn is_active(bailment: &Bailment, now: &Timestamp) -> bool {
 mod tests {
     use super::*;
 
-    fn alice() -> Did { Did::new("did:exo:alice").unwrap() }
-    fn bob() -> Did { Did::new("did:exo:bob").unwrap() }
-    fn charlie() -> Did { Did::new("did:exo:charlie").unwrap() }
-    fn sig() -> Signature { Signature::from_bytes([1u8; 64]) }
-    fn ts(ms: u64) -> Timestamp { Timestamp::new(ms, 0) }
+    fn alice() -> Did {
+        Did::new("did:exo:alice").unwrap()
+    }
+    fn bob() -> Did {
+        Did::new("did:exo:bob").unwrap()
+    }
+    fn charlie() -> Did {
+        Did::new("did:exo:charlie").unwrap()
+    }
+    fn sig() -> Signature {
+        Signature::from_bytes([1u8; 64])
+    }
+    fn ts(ms: u64) -> Timestamp {
+        Timestamp::new(ms, 0)
+    }
 
     #[test]
     fn propose_creates_proposed() {
@@ -172,14 +182,20 @@ mod tests {
         b.status = BailmentStatus::Active;
         assert_eq!(
             accept(&mut b, &sig()),
-            Err(ConsentError::InvalidState { expected: "Proposed".into(), actual: "Active".into() })
+            Err(ConsentError::InvalidState {
+                expected: "Proposed".into(),
+                actual: "Active".into()
+            })
         );
     }
 
     #[test]
     fn accept_rejects_empty_signature() {
         let mut b = propose(&alice(), &bob(), b"t", BailmentType::Custody);
-        assert_eq!(accept(&mut b, &Signature::empty()), Err(ConsentError::InvalidSignature));
+        assert_eq!(
+            accept(&mut b, &Signature::empty()),
+            Err(ConsentError::InvalidSignature)
+        );
     }
 
     #[test]
@@ -202,7 +218,10 @@ mod tests {
     fn terminate_rejects_unauthorized() {
         let mut b = propose(&alice(), &bob(), b"t", BailmentType::Custody);
         accept(&mut b, &sig()).ok();
-        assert!(matches!(terminate(&mut b, &charlie()), Err(ConsentError::Unauthorized(_))));
+        assert!(matches!(
+            terminate(&mut b, &charlie()),
+            Err(ConsentError::Unauthorized(_))
+        ));
     }
 
     #[test]
@@ -210,14 +229,20 @@ mod tests {
         let mut b = propose(&alice(), &bob(), b"t", BailmentType::Custody);
         accept(&mut b, &sig()).ok();
         terminate(&mut b, &alice()).ok();
-        assert!(matches!(terminate(&mut b, &alice()), Err(ConsentError::InvalidState { .. })));
+        assert!(matches!(
+            terminate(&mut b, &alice()),
+            Err(ConsentError::InvalidState { .. })
+        ));
     }
 
     #[test]
     fn terminate_rejects_expired() {
         let mut b = propose(&alice(), &bob(), b"t", BailmentType::Custody);
         b.status = BailmentStatus::Expired;
-        assert!(matches!(terminate(&mut b, &alice()), Err(ConsentError::InvalidState { .. })));
+        assert!(matches!(
+            terminate(&mut b, &alice()),
+            Err(ConsentError::InvalidState { .. })
+        ));
     }
 
     #[test]

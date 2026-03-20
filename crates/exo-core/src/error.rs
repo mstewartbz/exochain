@@ -4,6 +4,7 @@
 //! exhaustive error handling at compile time.
 
 use core::fmt;
+
 use thiserror::Error;
 
 /// Unified error type for all `exo-core` operations.
@@ -106,20 +107,83 @@ mod tests {
     #[test]
     fn display_all_variants() {
         let cases: Vec<(ExoError, &str)> = vec![
-            (ExoError::InvalidTransition { from: "Draft".into(), to: "Closed".into() }, "Draft"),
-            (ExoError::InvalidSignature { reason: "bad bytes".into() }, "bad bytes"),
-            (ExoError::InvalidDid { value: "garbage".into() }, "garbage"),
-            (ExoError::ClockDrift { physical_ms: 5000, tolerance_ms: 1000 }, "5000"),
-            (ExoError::HashMismatch { expected: "aaa".into(), actual: "bbb".into() }, "aaa"),
-            (ExoError::Unauthorized { reason: "no role".into() }, "no role"),
-            (ExoError::ConsentRequired { scope: "data-share".into() }, "data-share"),
-            (ExoError::InvariantViolation { description: "bad state".into() }, "bad state"),
-            (ExoError::SybilDetected { evidence: "dup key".into() }, "dup key"),
-            (ExoError::SerializationError { reason: "cbor fail".into() }, "cbor fail"),
-            (ExoError::CryptoError { reason: "rng fail".into() }, "rng fail"),
+            (
+                ExoError::InvalidTransition {
+                    from: "Draft".into(),
+                    to: "Closed".into(),
+                },
+                "Draft",
+            ),
+            (
+                ExoError::InvalidSignature {
+                    reason: "bad bytes".into(),
+                },
+                "bad bytes",
+            ),
+            (
+                ExoError::InvalidDid {
+                    value: "garbage".into(),
+                },
+                "garbage",
+            ),
+            (
+                ExoError::ClockDrift {
+                    physical_ms: 5000,
+                    tolerance_ms: 1000,
+                },
+                "5000",
+            ),
+            (
+                ExoError::HashMismatch {
+                    expected: "aaa".into(),
+                    actual: "bbb".into(),
+                },
+                "aaa",
+            ),
+            (
+                ExoError::Unauthorized {
+                    reason: "no role".into(),
+                },
+                "no role",
+            ),
+            (
+                ExoError::ConsentRequired {
+                    scope: "data-share".into(),
+                },
+                "data-share",
+            ),
+            (
+                ExoError::InvariantViolation {
+                    description: "bad state".into(),
+                },
+                "bad state",
+            ),
+            (
+                ExoError::SybilDetected {
+                    evidence: "dup key".into(),
+                },
+                "dup key",
+            ),
+            (
+                ExoError::SerializationError {
+                    reason: "cbor fail".into(),
+                },
+                "cbor fail",
+            ),
+            (
+                ExoError::CryptoError {
+                    reason: "rng fail".into(),
+                },
+                "rng fail",
+            ),
             (ExoError::InvalidMerkleProof, "invalid merkle proof"),
             (ExoError::ReceiptChainBroken { index: 3 }, "3"),
-            (ExoError::NotFound { entity: "item".into() }, "item"),
+            (
+                ExoError::NotFound {
+                    entity: "item".into(),
+                },
+                "item",
+            ),
         ];
         for (e, expected_substr) in cases {
             assert!(e.to_string().contains(expected_substr), "failed for: {e:?}");
@@ -130,16 +194,38 @@ mod tests {
     fn is_security_relevant_positive() {
         assert!(ExoError::InvalidSignature { reason: "x".into() }.is_security_relevant());
         assert!(ExoError::Unauthorized { reason: "x".into() }.is_security_relevant());
-        assert!(ExoError::SybilDetected { evidence: "x".into() }.is_security_relevant());
-        assert!(ExoError::HashMismatch { expected: "a".into(), actual: "b".into() }.is_security_relevant());
+        assert!(
+            ExoError::SybilDetected {
+                evidence: "x".into()
+            }
+            .is_security_relevant()
+        );
+        assert!(
+            ExoError::HashMismatch {
+                expected: "a".into(),
+                actual: "b".into()
+            }
+            .is_security_relevant()
+        );
     }
 
     #[test]
     fn is_security_relevant_negative() {
         assert!(!ExoError::InvalidDid { value: "x".into() }.is_security_relevant());
-        assert!(!ExoError::ClockDrift { physical_ms: 1, tolerance_ms: 1 }.is_security_relevant());
+        assert!(
+            !ExoError::ClockDrift {
+                physical_ms: 1,
+                tolerance_ms: 1
+            }
+            .is_security_relevant()
+        );
         assert!(!ExoError::InvalidMerkleProof.is_security_relevant());
-        assert!(!ExoError::InvariantViolation { description: "x".into() }.is_security_relevant());
+        assert!(
+            !ExoError::InvariantViolation {
+                description: "x".into()
+            }
+            .is_security_relevant()
+        );
         assert!(!ExoError::NotFound { entity: "x".into() }.is_security_relevant());
     }
 
@@ -155,7 +241,10 @@ mod tests {
     #[test]
     fn result_alias() {
         let ok: Result<u32> = Ok(42);
-        assert_eq!(ok.unwrap(), 42);
+        assert!(ok.is_ok());
+        if let Ok(val) = ok {
+            assert_eq!(val, 42);
+        }
     }
 
     #[test]

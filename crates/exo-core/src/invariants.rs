@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ExoError, Result};
-use crate::types::{DeterministicMap, Did, Hash256, Timestamp};
+use crate::{
+    error::{ExoError, Result},
+    types::{DeterministicMap, Did, Hash256, Timestamp},
+};
 
 // ---------------------------------------------------------------------------
 // InvariantViolation
@@ -211,7 +213,10 @@ mod tests {
             "always_pass"
         }
 
-        fn check(&self, _context: &InvariantContext) -> core::result::Result<(), InvariantViolation> {
+        fn check(
+            &self,
+            _context: &InvariantContext,
+        ) -> core::result::Result<(), InvariantViolation> {
             Ok(())
         }
     }
@@ -227,7 +232,10 @@ mod tests {
             "always_fail"
         }
 
-        fn check(&self, _context: &InvariantContext) -> core::result::Result<(), InvariantViolation> {
+        fn check(
+            &self,
+            _context: &InvariantContext,
+        ) -> core::result::Result<(), InvariantViolation> {
             Err(InvariantViolation {
                 invariant_name: self.name().to_string(),
                 description: "this always fails".to_string(),
@@ -249,7 +257,10 @@ mod tests {
             "require_property"
         }
 
-        fn check(&self, context: &InvariantContext) -> core::result::Result<(), InvariantViolation> {
+        fn check(
+            &self,
+            context: &InvariantContext,
+        ) -> core::result::Result<(), InvariantViolation> {
             match context.get_property(&self.key) {
                 Some(v) if v == &self.expected => Ok(()),
                 Some(v) => {

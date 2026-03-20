@@ -61,9 +61,7 @@ pub enum SuccessionTrigger {
         last_active: Timestamp,
     },
     /// A designated DID (e.g., board chair) triggers the succession.
-    DesignatedActivator {
-        activator: Did,
-    },
+    DesignatedActivator { activator: Did },
 }
 
 /// The result of activating a succession.
@@ -88,10 +86,7 @@ pub fn activate_succession(
 ) -> Result<SuccessionResult, GovernanceError> {
     // Verify the plan has successors
     let new_holder = plan.next_successor().ok_or_else(|| {
-        GovernanceError::ActionNotFound(format!(
-            "no successors defined for role {}",
-            plan.role.0
-        ))
+        GovernanceError::ActionNotFound(format!("no successors defined for role {}", plan.role.0))
     })?;
 
     // Validate trigger conditions
@@ -177,7 +172,7 @@ mod tests {
     fn unresponsiveness_triggers_after_timeout() {
         let plan = sample_plan();
         let trigger = SuccessionTrigger::Unresponsiveness {
-            duration_ms: 3600_000, // 1 hour
+            duration_ms: 3_600_000, // 1 hour
             last_active: ts(1000),
         };
         // 2 hours later — should succeed
@@ -189,7 +184,7 @@ mod tests {
     fn unresponsiveness_rejects_too_early() {
         let plan = sample_plan();
         let trigger = SuccessionTrigger::Unresponsiveness {
-            duration_ms: 3600_000,
+            duration_ms: 3_600_000,
             last_active: ts(1000),
         };
         // Only 30 minutes later — should fail
@@ -271,7 +266,7 @@ mod tests {
         let triggers = vec![
             SuccessionTrigger::Declaration,
             SuccessionTrigger::Unresponsiveness {
-                duration_ms: 3600_000,
+                duration_ms: 3_600_000,
                 last_active: ts(1000),
             },
             SuccessionTrigger::DesignatedActivator {

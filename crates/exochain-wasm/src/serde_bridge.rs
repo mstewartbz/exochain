@@ -1,6 +1,6 @@
 //! Serde bridge: JSON string ↔ Rust types ↔ JsValue
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub fn from_json_str<T: DeserializeOwned>(json: &str) -> Result<T, JsValue> {
@@ -12,8 +12,4 @@ pub fn to_js_value<T: Serialize>(val: &T) -> Result<JsValue, JsValue> {
     let json = serde_json::to_string(val)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))?;
     js_sys::JSON::parse(&json)
-}
-
-pub fn to_json_string<T: Serialize>(val: &T) -> Result<String, JsValue> {
-    serde_json::to_string(val).map_err(|e| JsValue::from_str(&format!("JSON serialize error: {e}")))
 }

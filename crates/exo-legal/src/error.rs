@@ -52,7 +52,9 @@ mod tests {
             Box::new(LegalError::FiduciaryViolation { reason: "x".into() }),
             Box::new(LegalError::DiscoveryScopeTooBoard { reason: "x".into() }),
             Box::new(LegalError::RetentionViolation { reason: "x".into() }),
-            Box::new(LegalError::DisclosureRequired { action: "vote".into() }),
+            Box::new(LegalError::DisclosureRequired {
+                action: "vote".into(),
+            }),
             Box::new(LegalError::ConflictOfInterest { reason: "x".into() }),
             Box::new(LegalError::RecordNotFound(id)),
             Box::new(LegalError::InvalidStateTransition { reason: "x".into() }),
@@ -65,7 +67,9 @@ mod tests {
     #[test]
     fn result_alias() {
         let ok: Result<u32> = Ok(42);
-        assert_eq!(ok.unwrap(), 42);
+        if let Ok(val) = ok {
+            assert_eq!(val, 42);
+        }
         let err: Result<u32> = Err(LegalError::EvidenceNotFound(Uuid::nil()));
         assert!(err.is_err());
     }

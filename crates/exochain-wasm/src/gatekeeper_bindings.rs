@@ -1,6 +1,7 @@
 //! Gatekeeper bindings: CGR combinator algebra, kernel adjudication, invariants
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 /// Reduce a combinator expression with the given input
@@ -38,8 +39,8 @@ pub fn wasm_enforce_invariants(context_json: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_spawn_holon(did: &str, program_json: &str) -> Result<JsValue, JsValue> {
     let program: exo_gatekeeper::Combinator = from_json_str(program_json)?;
-    let holon_did = exo_core::Did::new(did)
-        .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+    let holon_did =
+        exo_core::Did::new(did).map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let permissions = exo_gatekeeper::types::PermissionSet::default();
     let holon = exo_gatekeeper::holon::spawn(holon_did, permissions, program);
     // Holon doesn't derive Serialize, return summary
@@ -63,11 +64,14 @@ pub fn wasm_step_combinator(combinator_json: &str, input_json: &str) -> Result<J
 #[wasm_bindgen]
 pub fn wasm_mcp_rules() -> Result<JsValue, JsValue> {
     let rules = exo_gatekeeper::McpRule::all();
-    let descriptions: Vec<serde_json::Value> = rules.iter().map(|r| {
-        serde_json::json!({
-            "rule": format!("{r:?}"),
-            "description": r.description(),
+    let descriptions: Vec<serde_json::Value> = rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "rule": format!("{r:?}"),
+                "description": r.description(),
+            })
         })
-    }).collect();
+        .collect();
     to_js_value(&descriptions)
 }

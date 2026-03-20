@@ -3,9 +3,8 @@
 //! Uses blake3 for all commitments (no elliptic curves).
 //! This is a pedagogical implementation demonstrating the STARK structure.
 
-use serde::{Deserialize, Serialize};
-
 use exo_core::types::Hash256;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ProofError, Result};
 
@@ -116,9 +115,7 @@ pub fn prove_stark(
     config: &StarkConfig,
 ) -> Result<StarkProof> {
     if trace.is_empty() {
-        return Err(ProofError::ProofGenerationFailed(
-            "empty trace".to_string(),
-        ));
+        return Err(ProofError::ProofGenerationFailed("empty trace".to_string()));
     }
     if trace.len() < 2 {
         return Err(ProofError::ProofGenerationFailed(
@@ -163,10 +160,16 @@ pub fn prove_stark(
         &constraint_commitment,
         config.num_queries,
         trace.len(),
-    );
+    )?;
 
     // Step 5: Build FRI proof
-    let fri_proof = build_fri_proof(trace, &query_indices, config, &trace_commitment, &constraint_commitment);
+    let fri_proof = build_fri_proof(
+        trace,
+        &query_indices,
+        config,
+        &trace_commitment,
+        &constraint_commitment,
+    );
 
     Ok(StarkProof {
         trace_commitment,
@@ -188,12 +191,15 @@ pub fn prove_stark(
 /// Public inputs are the first row of the trace.
 pub fn verify_stark(proof: &StarkProof, public_inputs: &[u64]) -> bool {
     // Step 1: Re-derive query indices from commitments (Fiat-Shamir)
-    let expected_queries = derive_queries(
+    let expected_queries = match derive_queries(
         &proof.trace_commitment,
         &proof.constraint_commitment,
         proof.config.num_queries,
         proof.trace_length,
-    );
+    ) {
+        Ok(q) => q,
+        Err(_) => return false,
+    };
 
     if expected_queries != proof.query_indices {
         return false;
@@ -212,10 +218,8 @@ pub fn verify_stark(proof: &StarkProof, public_inputs: &[u64]) -> bool {
 
     // Step 4: Verify consistency between trace commitment, constraint commitment,
     // and FRI proof.
-    let expected_fri_base = compute_fri_base_commitment(
-        &proof.trace_commitment,
-        &proof.constraint_commitment,
-    );
+    let expected_fri_base =
+        compute_fri_base_commitment(&proof.trace_commitment, &proof.constraint_commitment);
 
     if proof.fri_proof.layer_commitments[0] != expected_fri_base {
         return false;
@@ -285,7 +289,11 @@ fn commit_trace(trace: &[Vec<u64>]) -> Hash256 {
     Hash256::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn commit_constraints(trace: &[Vec<u64>], constraints: &[StarkConstraint], field_size: u64) -> Hash256 {
+fn commit_constraints(
+    trace: &[Vec<u64>],
+    constraints: &[StarkConstraint],
+    field_size: u64,
+) -> Hash256 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"stark:constraints:");
     for window in trace.windows(2) {
@@ -302,9 +310,9 @@ fn derive_queries(
     constraint_commitment: &Hash256,
     num_queries: usize,
     trace_len: usize,
-) -> Vec<usize> {
+) -> Result<Vec<usize>> {
     if trace_len == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"stark:queries:");
@@ -321,13 +329,19 @@ fn derive_queries(
             idx_bytes[j] = seed_bytes[(byte_offset + j) % 32];
         }
         let raw = u32::from_le_bytes(idx_bytes);
-        let idx = (raw as usize) % trace_len;
+        let raw_usize = usize::try_from(raw).map_err(|_| {
+            ProofError::ProofGenerationFailed(format!("query index {raw} overflows usize"))
+        })?;
+        let idx = raw_usize % trace_len;
         indices.push(idx);
     }
-    indices
+    Ok(indices)
 }
 
-fn compute_fri_base_commitment(trace_commitment: &Hash256, constraint_commitment: &Hash256) -> Hash256 {
+fn compute_fri_base_commitment(
+    trace_commitment: &Hash256,
+    constraint_commitment: &Hash256,
+) -> Hash256 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"stark:fri:base:");
     hasher.update(trace_commitment.as_bytes());
@@ -524,7 +538,10 @@ mod tests {
         let trace = make_fibonacci_trace(8, config.field_size);
         let proof = prove_stark(&trace, &[], &config).unwrap();
 
-        assert_eq!(proof.fri_proof.layer_commitments.len(), config.expansion_factor);
+        assert_eq!(
+            proof.fri_proof.layer_commitments.len(),
+            config.expansion_factor
+        );
         assert_eq!(proof.fri_proof.query_values.len(), config.num_queries);
     }
 }

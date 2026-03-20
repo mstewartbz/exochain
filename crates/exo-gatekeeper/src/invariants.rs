@@ -7,8 +7,8 @@ use exo_core::Did;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AuthorityChain, BailmentState, ConsentRecord, GovernmentBranch,
-    PermissionSet, Provenance, QuorumEvidence, Role,
+    AuthorityChain, BailmentState, ConsentRecord, GovernmentBranch, PermissionSet, Provenance,
+    QuorumEvidence, Role,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,7 +130,11 @@ pub fn enforce_all(
             violations.push(v);
         }
     }
-    if violations.is_empty() { Ok(()) } else { Err(violations) }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
 }
 
 fn check_invariant(
@@ -161,14 +165,20 @@ fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantVio
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::SeparationOfPowers,
             description: "Actor holds roles in all three branches of government".into(),
-            evidence: vec![format!("actor: {}", ctx.actor), format!("roles: {:?}", ctx.actor_roles)],
+            evidence: vec![
+                format!("actor: {}", ctx.actor),
+                format!("roles: {:?}", ctx.actor_roles),
+            ],
         });
     }
     if branches.len() > 1 {
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::SeparationOfPowers,
             description: "Actor holds roles in multiple branches of government".into(),
-            evidence: vec![format!("actor: {}", ctx.actor), format!("branches: {:?}", branches)],
+            evidence: vec![
+                format!("actor: {}", ctx.actor),
+                format!("branches: {:?}", branches),
+            ],
         });
     }
     Ok(())
@@ -182,12 +192,18 @@ fn check_consent_required(ctx: &InvariantContext) -> Result<(), InvariantViolati
             evidence: vec![format!("bailment_state: {:?}", ctx.bailment_state)],
         });
     }
-    let has_active = ctx.consent_records.iter().any(|c| c.granted_to == ctx.actor && c.active);
+    let has_active = ctx
+        .consent_records
+        .iter()
+        .any(|c| c.granted_to == ctx.actor && c.active);
     if !has_active {
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::ConsentRequired,
             description: "No active consent record for actor".into(),
-            evidence: vec![format!("actor: {}", ctx.actor), format!("records: {}", ctx.consent_records.len())],
+            evidence: vec![
+                format!("actor: {}", ctx.actor),
+                format!("records: {}", ctx.consent_records.len()),
+            ],
         });
     }
     Ok(())
@@ -252,7 +268,10 @@ fn check_authority_chain_valid(ctx: &InvariantContext) -> Result<(), InvariantVi
             return Err(InvariantViolation {
                 invariant: ConstitutionalInvariant::AuthorityChainValid,
                 description: "Authority chain does not terminate at actor".into(),
-                evidence: vec![format!("terminal: {}", last.grantee), format!("actor: {}", ctx.actor)],
+                evidence: vec![
+                    format!("terminal: {}", last.grantee),
+                    format!("actor: {}", ctx.actor),
+                ],
             });
         }
     }
@@ -299,7 +318,10 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
                 return Err(InvariantViolation {
                     invariant: ConstitutionalInvariant::ProvenanceVerifiable,
                     description: "Provenance actor does not match request actor".into(),
-                    evidence: vec![format!("provenance.actor: {}", prov.actor), format!("context.actor: {}", ctx.actor)],
+                    evidence: vec![
+                        format!("provenance.actor: {}", prov.actor),
+                        format!("context.actor: {}", ctx.actor),
+                    ],
                 });
             }
             Ok(())
@@ -316,13 +338,18 @@ mod tests {
     use super::*;
     use crate::types::{AuthorityLink, Permission, QuorumVote};
 
-    fn did(s: &str) -> Did { Did::new(s).expect("valid DID") }
+    fn did(s: &str) -> Did {
+        Did::new(s).expect("valid DID")
+    }
 
     fn passing_context() -> InvariantContext {
         let actor = did("did:exo:actor1");
         InvariantContext {
             actor: actor.clone(),
-            actor_roles: vec![Role { name: "judge".into(), branch: GovernmentBranch::Judicial }],
+            actor_roles: vec![Role {
+                name: "judge".into(),
+                branch: GovernmentBranch::Judicial,
+            }],
             bailment_state: BailmentState::Active {
                 bailor: did("did:exo:bailor"),
                 bailee: actor.clone(),
@@ -365,36 +392,59 @@ mod tests {
 
     #[test]
     fn separation_fails_multi_branch() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::SeparationOfPowers]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::SeparationOfPowers,
+        ]));
         let mut ctx = passing_context();
         ctx.actor_roles = vec![
-            Role { name: "senator".into(), branch: GovernmentBranch::Legislative },
-            Role { name: "judge".into(), branch: GovernmentBranch::Judicial },
+            Role {
+                name: "senator".into(),
+                branch: GovernmentBranch::Legislative,
+            },
+            Role {
+                name: "judge".into(),
+                branch: GovernmentBranch::Judicial,
+            },
         ];
         assert!(enforce_all(&engine, &ctx).is_err());
     }
 
     #[test]
     fn separation_fails_all_three() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::SeparationOfPowers]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::SeparationOfPowers,
+        ]));
         let mut ctx = passing_context();
         ctx.actor_roles = vec![
-            Role { name: "s".into(), branch: GovernmentBranch::Legislative },
-            Role { name: "g".into(), branch: GovernmentBranch::Executive },
-            Role { name: "j".into(), branch: GovernmentBranch::Judicial },
+            Role {
+                name: "s".into(),
+                branch: GovernmentBranch::Legislative,
+            },
+            Role {
+                name: "g".into(),
+                branch: GovernmentBranch::Executive,
+            },
+            Role {
+                name: "j".into(),
+                branch: GovernmentBranch::Judicial,
+            },
         ];
         assert!(enforce_all(&engine, &ctx).is_err());
     }
 
     #[test]
     fn separation_passes_single_branch() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::SeparationOfPowers]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::SeparationOfPowers,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn consent_fails_no_bailment() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ConsentRequired]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
         let mut ctx = passing_context();
         ctx.bailment_state = BailmentState::None;
         let err = enforce_all(&engine, &ctx).unwrap_err();
@@ -403,7 +453,9 @@ mod tests {
 
     #[test]
     fn consent_fails_inactive_record() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ConsentRequired]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
         let mut ctx = passing_context();
         ctx.consent_records[0].active = false;
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -411,7 +463,9 @@ mod tests {
 
     #[test]
     fn consent_fails_wrong_grantee() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ConsentRequired]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
         let mut ctx = passing_context();
         ctx.consent_records[0].granted_to = did("did:exo:other");
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -419,21 +473,29 @@ mod tests {
 
     #[test]
     fn consent_passes() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ConsentRequired]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn consent_fails_suspended() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ConsentRequired]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
         let mut ctx = passing_context();
-        ctx.bailment_state = BailmentState::Suspended { reason: "audit".into() };
+        ctx.bailment_state = BailmentState::Suspended {
+            reason: "audit".into(),
+        };
         assert!(enforce_all(&engine, &ctx).is_err());
     }
 
     #[test]
     fn consent_fails_terminated() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ConsentRequired]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
         let mut ctx = passing_context();
         ctx.bailment_state = BailmentState::Terminated;
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -441,7 +503,9 @@ mod tests {
 
     #[test]
     fn no_self_grant_fails() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::NoSelfGrant]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::NoSelfGrant,
+        ]));
         let mut ctx = passing_context();
         ctx.is_self_grant = true;
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -449,13 +513,17 @@ mod tests {
 
     #[test]
     fn no_self_grant_passes() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::NoSelfGrant]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::NoSelfGrant,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn human_override_fails() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::HumanOverride]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::HumanOverride,
+        ]));
         let mut ctx = passing_context();
         ctx.human_override_preserved = false;
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -463,13 +531,17 @@ mod tests {
 
     #[test]
     fn human_override_passes() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::HumanOverride]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::HumanOverride,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn kernel_immutability_fails() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::KernelImmutability]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::KernelImmutability,
+        ]));
         let mut ctx = passing_context();
         ctx.kernel_modification_attempted = true;
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -477,13 +549,17 @@ mod tests {
 
     #[test]
     fn kernel_immutability_passes() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::KernelImmutability]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::KernelImmutability,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn authority_chain_fails_empty() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::AuthorityChainValid]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
         let mut ctx = passing_context();
         ctx.authority_chain = AuthorityChain::default();
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -491,12 +567,24 @@ mod tests {
 
     #[test]
     fn authority_chain_fails_broken() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::AuthorityChainValid]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
         let mut ctx = passing_context();
         ctx.authority_chain = AuthorityChain {
             links: vec![
-                AuthorityLink { grantor: did("did:exo:root"), grantee: did("did:exo:mid"), permissions: PermissionSet::default(), signature: vec![1] },
-                AuthorityLink { grantor: did("did:exo:WRONG"), grantee: ctx.actor.clone(), permissions: PermissionSet::default(), signature: vec![2] },
+                AuthorityLink {
+                    grantor: did("did:exo:root"),
+                    grantee: did("did:exo:mid"),
+                    permissions: PermissionSet::default(),
+                    signature: vec![1],
+                },
+                AuthorityLink {
+                    grantor: did("did:exo:WRONG"),
+                    grantee: ctx.actor.clone(),
+                    permissions: PermissionSet::default(),
+                    signature: vec![2],
+                },
             ],
         };
         let err = enforce_all(&engine, &ctx).unwrap_err();
@@ -505,10 +593,17 @@ mod tests {
 
     #[test]
     fn authority_chain_fails_wrong_terminal() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::AuthorityChainValid]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
         let mut ctx = passing_context();
         ctx.authority_chain = AuthorityChain {
-            links: vec![AuthorityLink { grantor: did("did:exo:root"), grantee: did("did:exo:other"), permissions: PermissionSet::default(), signature: vec![1] }],
+            links: vec![AuthorityLink {
+                grantor: did("did:exo:root"),
+                grantee: did("did:exo:other"),
+                permissions: PermissionSet::default(),
+                signature: vec![1],
+            }],
         };
         let err = enforce_all(&engine, &ctx).unwrap_err();
         assert!(err[0].description.contains("terminate"));
@@ -516,18 +611,32 @@ mod tests {
 
     #[test]
     fn authority_chain_passes_valid() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::AuthorityChainValid]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn authority_chain_passes_multi_link() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::AuthorityChainValid]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
         let mut ctx = passing_context();
         ctx.authority_chain = AuthorityChain {
             links: vec![
-                AuthorityLink { grantor: did("did:exo:root"), grantee: did("did:exo:mid"), permissions: PermissionSet::default(), signature: vec![1] },
-                AuthorityLink { grantor: did("did:exo:mid"), grantee: ctx.actor.clone(), permissions: PermissionSet::default(), signature: vec![2] },
+                AuthorityLink {
+                    grantor: did("did:exo:root"),
+                    grantee: did("did:exo:mid"),
+                    permissions: PermissionSet::default(),
+                    signature: vec![1],
+                },
+                AuthorityLink {
+                    grantor: did("did:exo:mid"),
+                    grantee: ctx.actor.clone(),
+                    permissions: PermissionSet::default(),
+                    signature: vec![2],
+                },
             ],
         };
         assert!(enforce_all(&engine, &ctx).is_ok());
@@ -535,19 +644,31 @@ mod tests {
 
     #[test]
     fn quorum_passes_none() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::QuorumLegitimate]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
     #[test]
     fn quorum_fails_threshold() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::QuorumLegitimate]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
         let mut ctx = passing_context();
         ctx.quorum_evidence = Some(QuorumEvidence {
             threshold: 3,
             votes: vec![
-                QuorumVote { voter: did("did:exo:v1"), approved: true, signature: vec![1] },
-                QuorumVote { voter: did("did:exo:v2"), approved: false, signature: vec![2] },
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: false,
+                    signature: vec![2],
+                },
             ],
         });
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -555,13 +676,23 @@ mod tests {
 
     #[test]
     fn quorum_passes_met() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::QuorumLegitimate]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
         let mut ctx = passing_context();
         ctx.quorum_evidence = Some(QuorumEvidence {
             threshold: 2,
             votes: vec![
-                QuorumVote { voter: did("did:exo:v1"), approved: true, signature: vec![1] },
-                QuorumVote { voter: did("did:exo:v2"), approved: true, signature: vec![2] },
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: true,
+                    signature: vec![2],
+                },
             ],
         });
         assert!(enforce_all(&engine, &ctx).is_ok());
@@ -569,7 +700,9 @@ mod tests {
 
     #[test]
     fn provenance_fails_missing() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ProvenanceVerifiable]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
         let mut ctx = passing_context();
         ctx.provenance = None;
         assert!(enforce_all(&engine, &ctx).is_err());
@@ -577,23 +710,39 @@ mod tests {
 
     #[test]
     fn provenance_fails_unsigned() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ProvenanceVerifiable]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
         let mut ctx = passing_context();
-        ctx.provenance = Some(Provenance { actor: ctx.actor.clone(), timestamp: "t".into(), action_hash: vec![1], signature: vec![] });
+        ctx.provenance = Some(Provenance {
+            actor: ctx.actor.clone(),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![],
+        });
         assert!(enforce_all(&engine, &ctx).is_err());
     }
 
     #[test]
     fn provenance_fails_actor_mismatch() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ProvenanceVerifiable]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
         let mut ctx = passing_context();
-        ctx.provenance = Some(Provenance { actor: did("did:exo:wrong"), timestamp: "t".into(), action_hash: vec![1], signature: vec![1] });
+        ctx.provenance = Some(Provenance {
+            actor: did("did:exo:wrong"),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![1],
+        });
         assert!(enforce_all(&engine, &ctx).is_err());
     }
 
     #[test]
     fn provenance_passes() {
-        let engine = InvariantEngine::new(InvariantSet::with(vec![ConstitutionalInvariant::ProvenanceVerifiable]));
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
     }
 
@@ -609,11 +758,22 @@ mod tests {
     }
 
     #[test]
-    fn invariant_set_all_count() { assert_eq!(InvariantSet::all().invariants.len(), 8); }
+    fn invariant_set_all_count() {
+        assert_eq!(InvariantSet::all().invariants.len(), 8);
+    }
 
     #[test]
-    fn invariant_set_with_custom() { assert_eq!(InvariantSet::with(vec![ConstitutionalInvariant::NoSelfGrant]).invariants.len(), 1); }
+    fn invariant_set_with_custom() {
+        assert_eq!(
+            InvariantSet::with(vec![ConstitutionalInvariant::NoSelfGrant])
+                .invariants
+                .len(),
+            1
+        );
+    }
 
     #[test]
-    fn engine_all_constructor() { assert_eq!(InvariantEngine::all().invariant_set.invariants.len(), 8); }
+    fn engine_all_constructor() {
+        assert_eq!(InvariantEngine::all().invariant_set.invariants.len(), 8);
+    }
 }

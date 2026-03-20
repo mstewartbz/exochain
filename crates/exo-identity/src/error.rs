@@ -56,6 +56,9 @@ pub enum IdentityError {
     #[error("duplicate DID across PACE levels: {0}")]
     DuplicatePaceDid(Did),
 
+    #[error("vault key derivation failed: {0}")]
+    VaultKeyDerivationFailed(String),
+
     #[error("vault encryption failed: {0}")]
     VaultEncryptionFailed(String),
 

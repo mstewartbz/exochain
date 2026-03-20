@@ -33,7 +33,11 @@ pub struct TermsRegistry {
 impl TermsRegistry {
     /// Create an empty registry.
     #[must_use]
-    pub fn new() -> Self { Self { acceptances: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            acceptances: Vec::new(),
+        }
+    }
 
     /// Record an acceptance.
     pub fn accept(&mut self, acceptance: TermsAcceptance) {
@@ -43,9 +47,9 @@ impl TermsRegistry {
     /// Check if a given DID has accepted a specific terms document version.
     #[must_use]
     pub fn has_accepted(&self, did: &Did, terms_id: &str, version: u64) -> bool {
-        self.acceptances.iter().any(|a| {
-            a.accepted_by == *did && a.terms_id == terms_id && a.terms_version == version
-        })
+        self.acceptances
+            .iter()
+            .any(|a| a.accepted_by == *did && a.terms_id == terms_id && a.terms_version == version)
     }
 
     /// Require acceptance, returning an error if not found.
@@ -62,15 +66,21 @@ impl TermsRegistry {
 mod tests {
     use super::*;
 
-    fn did() -> Did { Did::new("did:exo:alice").expect("ok") }
-    fn ts() -> Timestamp { Timestamp::new(1000, 0) }
+    fn did() -> Did {
+        Did::new("did:exo:alice").expect("ok")
+    }
+    fn ts() -> Timestamp {
+        Timestamp::new(1000, 0)
+    }
 
     #[test]
     fn accept_and_check() {
         let mut reg = TermsRegistry::new();
         reg.accept(TermsAcceptance {
-            terms_id: "tos".into(), terms_version: 1,
-            accepted_by: did(), accepted_at: ts(),
+            terms_id: "tos".into(),
+            terms_version: 1,
+            accepted_by: did(),
+            accepted_at: ts(),
             signature_hash: Hash256::digest(b"sig"),
         });
         assert!(reg.has_accepted(&did(), "tos", 1));
@@ -81,8 +91,10 @@ mod tests {
     fn require_acceptance_ok() {
         let mut reg = TermsRegistry::new();
         reg.accept(TermsAcceptance {
-            terms_id: "tos".into(), terms_version: 1,
-            accepted_by: did(), accepted_at: ts(),
+            terms_id: "tos".into(),
+            terms_version: 1,
+            accepted_by: did(),
+            accepted_at: ts(),
             signature_hash: Hash256::ZERO,
         });
         assert!(reg.require_acceptance(&did(), "tos", 1).is_ok());

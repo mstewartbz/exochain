@@ -101,7 +101,9 @@ pub fn enact(
 
     // Suspension must be enacted within 60 seconds.
     if action.action_type == AccountabilityActionType::Suspension {
-        let elapsed_ms = timestamp.physical_ms.saturating_sub(action.proposed_at.physical_ms);
+        let elapsed_ms = timestamp
+            .physical_ms
+            .saturating_sub(action.proposed_at.physical_ms);
         if elapsed_ms > SUSPENSION_ENACT_LIMIT_MS {
             return Err(ForumError::AccountabilityFailed {
                 reason: format!(
@@ -132,22 +134,29 @@ pub fn reverse(action: &mut AccountabilityAction) -> Result<()> {
 /// Check if due process deadline has passed.
 #[must_use]
 pub fn is_due_process_expired(action: &AccountabilityAction, now: &Timestamp) -> bool {
-    action.status == AccountabilityStatus::DueProcess
-        && *now > action.due_process_deadline
+    action.status == AccountabilityStatus::DueProcess && *now > action.due_process_deadline
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).expect("ok") }
-    fn ts() -> Timestamp { Timestamp::new(1_000_000, 0) }
+    fn did(n: &str) -> Did {
+        Did::new(&format!("did:exo:{n}")).expect("ok")
+    }
+    fn ts() -> Timestamp {
+        Timestamp::new(1_000_000, 0)
+    }
 
     #[test]
     fn propose_censure() {
         let a = propose(
-            AccountabilityActionType::Censure, &did("target"), &did("proposer"),
-            "misconduct", Hash256::digest(b"evidence"), ts(),
+            AccountabilityActionType::Censure,
+            &did("target"),
+            &did("proposer"),
+            "misconduct",
+            Hash256::digest(b"evidence"),
+            ts(),
         );
         assert_eq!(a.status, AccountabilityStatus::Proposed);
         assert_eq!(a.action_type, AccountabilityActionType::Censure);
@@ -156,8 +165,12 @@ mod tests {
     #[test]
     fn due_process_flow() {
         let mut a = propose(
-            AccountabilityActionType::Recall, &did("target"), &did("proposer"),
-            "reason", Hash256::ZERO, ts(),
+            AccountabilityActionType::Recall,
+            &did("target"),
+            &did("proposer"),
+            "reason",
+            Hash256::ZERO,
+            ts(),
         );
         begin_due_process(&mut a).expect("ok");
         assert_eq!(a.status, AccountabilityStatus::DueProcess);
@@ -166,8 +179,12 @@ mod tests {
     #[test]
     fn enact_after_due_process() {
         let mut a = propose(
-            AccountabilityActionType::Revocation, &did("target"), &did("proposer"),
-            "reason", Hash256::ZERO, ts(),
+            AccountabilityActionType::Revocation,
+            &did("target"),
+            &did("proposer"),
+            "reason",
+            Hash256::ZERO,
+            ts(),
         );
         begin_due_process(&mut a).expect("ok");
         let enact_ts = Timestamp::new(ts().physical_ms + 1000, 0);
@@ -179,8 +196,12 @@ mod tests {
     #[test]
     fn suspension_must_be_immediate() {
         let mut a = propose(
-            AccountabilityActionType::Suspension, &did("target"), &did("proposer"),
-            "urgent", Hash256::ZERO, ts(),
+            AccountabilityActionType::Suspension,
+            &did("target"),
+            &did("proposer"),
+            "urgent",
+            Hash256::ZERO,
+            ts(),
         );
         // Enact within 60s — should work
         let fast_ts = Timestamp::new(ts().physical_ms + 30_000, 0);
@@ -190,8 +211,12 @@ mod tests {
     #[test]
     fn suspension_too_slow_fails() {
         let mut a = propose(
-            AccountabilityActionType::Suspension, &did("target"), &did("proposer"),
-            "urgent", Hash256::ZERO, ts(),
+            AccountabilityActionType::Suspension,
+            &did("target"),
+            &did("proposer"),
+            "urgent",
+            Hash256::ZERO,
+            ts(),
         );
         let slow_ts = Timestamp::new(ts().physical_ms + 120_000, 0);
         let err = enact(&mut a, Uuid::new_v4(), slow_ts).unwrap_err();
@@ -201,8 +226,12 @@ mod tests {
     #[test]
     fn reverse_enacted() {
         let mut a = propose(
-            AccountabilityActionType::Censure, &did("target"), &did("proposer"),
-            "reason", Hash256::ZERO, ts(),
+            AccountabilityActionType::Censure,
+            &did("target"),
+            &did("proposer"),
+            "reason",
+            Hash256::ZERO,
+            ts(),
         );
         let enact_ts = Timestamp::new(ts().physical_ms + 100, 0);
         enact(&mut a, Uuid::new_v4(), enact_ts).expect("ok");
@@ -213,8 +242,12 @@ mod tests {
     #[test]
     fn reverse_not_enacted_fails() {
         let mut a = propose(
-            AccountabilityActionType::Censure, &did("target"), &did("proposer"),
-            "reason", Hash256::ZERO, ts(),
+            AccountabilityActionType::Censure,
+            &did("target"),
+            &did("proposer"),
+            "reason",
+            Hash256::ZERO,
+            ts(),
         );
         assert!(reverse(&mut a).is_err());
     }
@@ -222,8 +255,12 @@ mod tests {
     #[test]
     fn due_process_expiry() {
         let mut a = propose(
-            AccountabilityActionType::Recall, &did("target"), &did("proposer"),
-            "reason", Hash256::ZERO, ts(),
+            AccountabilityActionType::Recall,
+            &did("target"),
+            &did("proposer"),
+            "reason",
+            Hash256::ZERO,
+            ts(),
         );
         begin_due_process(&mut a).expect("ok");
         let before = Timestamp::new(a.due_process_deadline.physical_ms - 1000, 0);
@@ -235,8 +272,12 @@ mod tests {
     #[test]
     fn double_due_process_fails() {
         let mut a = propose(
-            AccountabilityActionType::Censure, &did("target"), &did("proposer"),
-            "reason", Hash256::ZERO, ts(),
+            AccountabilityActionType::Censure,
+            &did("target"),
+            &did("proposer"),
+            "reason",
+            Hash256::ZERO,
+            ts(),
         );
         begin_due_process(&mut a).expect("ok");
         assert!(begin_due_process(&mut a).is_err());

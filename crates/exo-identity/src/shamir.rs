@@ -3,6 +3,7 @@
 //! Constant-time GF(256) field arithmetic to prevent timing side-channels.
 
 use serde::{Deserialize, Serialize};
+
 use crate::error::IdentityError;
 
 #[inline]
@@ -70,8 +71,8 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
     config.validate()?;
 
     let commitment: [u8; 32] = *blake3::hash(secret).as_bytes();
-    let k = config.threshold as usize;
-    let n = config.shares as usize;
+    let k: usize = config.threshold.into();
+    let n: usize = config.shares.into();
 
     let mut shares: Vec<Share> = (1..=n)
         .map(|i| Share {
@@ -109,9 +110,8 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
 pub fn reconstruct(shares: &[Share], config: &ShamirConfig) -> Result<Vec<u8>, IdentityError> {
     config.validate()?;
 
-    let k = config.threshold as usize;
-    #[allow(clippy::as_conversions)]
-    let got = shares.len() as u8;
+    let k: usize = config.threshold.into();
+    let got = u8::try_from(shares.len()).unwrap_or(u8::MAX);
     if shares.len() < k {
         return Err(IdentityError::InsufficientShares {
             need: config.threshold,
@@ -136,7 +136,7 @@ pub fn reconstruct(shares: &[Share], config: &ShamirConfig) -> Result<Vec<u8>, I
     let secret_len = used[0].data.len();
     let mut secret = vec![0u8; secret_len];
 
-    for byte_idx in 0..secret_len {
+    for (byte_idx, out_byte) in secret.iter_mut().enumerate().take(secret_len) {
         let mut value: u8 = 0;
 
         for (i, share_i) in used.iter().enumerate() {
@@ -157,7 +157,7 @@ pub fn reconstruct(shares: &[Share], config: &ShamirConfig) -> Result<Vec<u8>, I
             value ^= gf256_mul(yi, basis);
         }
 
-        secret[byte_idx] = value;
+        *out_byte = value;
     }
 
     Ok(secret)
@@ -198,7 +198,10 @@ mod tests {
     #[test]
     fn split_and_reconstruct_2_of_3() {
         let secret = b"hello shamir";
-        let config = ShamirConfig { threshold: 2, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
         let shares = split(secret, &config).unwrap();
         assert_eq!(shares.len(), 3);
 
@@ -212,7 +215,10 @@ mod tests {
     #[test]
     fn split_and_reconstruct_3_of_5() {
         let secret = b"constitutional trust fabric";
-        let config = ShamirConfig { threshold: 3, shares: 5 };
+        let config = ShamirConfig {
+            threshold: 3,
+            shares: 5,
+        };
         let shares = split(secret, &config).unwrap();
         assert_eq!(shares.len(), 5);
 
@@ -227,7 +233,10 @@ mod tests {
     #[test]
     fn one_of_one() {
         let secret = b"single share";
-        let config = ShamirConfig { threshold: 1, shares: 1 };
+        let config = ShamirConfig {
+            threshold: 1,
+            shares: 1,
+        };
         let shares = split(secret, &config).unwrap();
         assert_eq!(shares.len(), 1);
         let recovered = reconstruct(&shares, &config).unwrap();
@@ -237,7 +246,10 @@ mod tests {
     #[test]
     fn n_of_n() {
         let secret = b"all shares required";
-        let config = ShamirConfig { threshold: 5, shares: 5 };
+        let config = ShamirConfig {
+            threshold: 5,
+            shares: 5,
+        };
         let shares = split(secret, &config).unwrap();
         let recovered = reconstruct(&shares, &config).unwrap();
         assert_eq!(recovered, secret);
@@ -246,40 +258,66 @@ mod tests {
     #[test]
     fn insufficient_shares_fails() {
         let secret = b"need three";
-        let config = ShamirConfig { threshold: 3, shares: 5 };
+        let config = ShamirConfig {
+            threshold: 3,
+            shares: 5,
+        };
         let shares = split(secret, &config).unwrap();
         let subset = vec![shares[0].clone(), shares[1].clone()];
         let err = reconstruct(&subset, &config).unwrap_err();
-        assert!(matches!(err, IdentityError::InsufficientShares { need: 3, got: 2 }));
+        assert!(matches!(
+            err,
+            IdentityError::InsufficientShares { need: 3, got: 2 }
+        ));
     }
 
     #[test]
     fn invalid_config_zero_threshold() {
-        let config = ShamirConfig { threshold: 0, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 0,
+            shares: 3,
+        };
         let err = split(b"test", &config).unwrap_err();
         assert!(matches!(err, IdentityError::InvalidShamirConfig { .. }));
     }
 
     #[test]
     fn invalid_config_zero_shares() {
-        let config = ShamirConfig { threshold: 1, shares: 0 };
+        let config = ShamirConfig {
+            threshold: 1,
+            shares: 0,
+        };
         let err = split(b"test", &config).unwrap_err();
         assert!(matches!(err, IdentityError::InvalidShamirConfig { .. }));
     }
 
     #[test]
     fn invalid_config_threshold_exceeds_shares() {
-        let config = ShamirConfig { threshold: 5, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 5,
+            shares: 3,
+        };
         let err = split(b"test", &config).unwrap_err();
         assert!(matches!(err, IdentityError::InvalidShamirConfig { .. }));
     }
 
     #[test]
     fn invalid_share_index_zero() {
-        let config = ShamirConfig { threshold: 2, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
         let shares = vec![
-            Share { index: 0, data: vec![1], commitment: [0; 32] },
-            Share { index: 1, data: vec![2], commitment: [0; 32] },
+            Share {
+                index: 0,
+                data: vec![1],
+                commitment: [0; 32],
+            },
+            Share {
+                index: 1,
+                data: vec![2],
+                commitment: [0; 32],
+            },
         ];
         let err = reconstruct(&shares, &config).unwrap_err();
         assert!(matches!(err, IdentityError::InvalidShareIndex(0)));
@@ -287,10 +325,21 @@ mod tests {
 
     #[test]
     fn duplicate_share_indices_fail() {
-        let config = ShamirConfig { threshold: 2, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
         let shares = vec![
-            Share { index: 1, data: vec![1], commitment: [0; 32] },
-            Share { index: 1, data: vec![2], commitment: [0; 32] },
+            Share {
+                index: 1,
+                data: vec![1],
+                commitment: [0; 32],
+            },
+            Share {
+                index: 1,
+                data: vec![2],
+                commitment: [0; 32],
+            },
         ];
         let err = reconstruct(&shares, &config).unwrap_err();
         assert!(matches!(err, IdentityError::DuplicateShareIndices));
@@ -299,7 +348,10 @@ mod tests {
     #[test]
     fn commitment_matches_secret() {
         let secret = b"verify commitment";
-        let config = ShamirConfig { threshold: 2, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
         let shares = split(secret, &config).unwrap();
         let expected: [u8; 32] = *blake3::hash(secret).as_bytes();
         for share in &shares {
@@ -310,7 +362,10 @@ mod tests {
     #[test]
     fn empty_secret() {
         let secret = b"";
-        let config = ShamirConfig { threshold: 2, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
         let shares = split(secret, &config).unwrap();
         let recovered = reconstruct(&shares[..2], &config).unwrap();
         assert_eq!(recovered, secret);
@@ -319,7 +374,10 @@ mod tests {
     #[test]
     fn single_byte_secret() {
         let secret = &[42u8];
-        let config = ShamirConfig { threshold: 2, shares: 3 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
         let shares = split(secret, &config).unwrap();
         let recovered = reconstruct(&shares[..2], &config).unwrap();
         assert_eq!(recovered, secret);
@@ -328,7 +386,10 @@ mod tests {
     #[test]
     fn more_shares_than_threshold_still_works() {
         let secret = b"extra shares";
-        let config = ShamirConfig { threshold: 2, shares: 5 };
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 5,
+        };
         let shares = split(secret, &config).unwrap();
         let recovered = reconstruct(&shares, &config).unwrap();
         assert_eq!(recovered, secret);
@@ -337,8 +398,9 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::*;
     use proptest::prelude::*;
+
+    use super::*;
 
     proptest! {
         #[test]
@@ -353,7 +415,7 @@ mod proptests {
             }
             let config = ShamirConfig { threshold: k, shares: n };
             let shares = split(&secret, &config).unwrap();
-            let subset: Vec<Share> = shares.into_iter().take(k as usize).collect();
+            let subset: Vec<Share> = shares.into_iter().take(usize::from(k)).collect();
             let recovered = reconstruct(&subset, &config).unwrap();
             prop_assert_eq!(recovered, secret);
         }
@@ -363,10 +425,10 @@ mod proptests {
             secret in prop::collection::vec(any::<u8>(), 1..16),
             k in 2u8..6,
         ) {
-            let n = k.saturating_add(2).min(255);
+            let n = k.saturating_add(2);
             let config = ShamirConfig { threshold: k, shares: n };
             let shares = split(&secret, &config).unwrap();
-            let subset: Vec<Share> = shares.into_iter().take((k - 1) as usize).collect();
+            let subset: Vec<Share> = shares.into_iter().take(usize::from(k - 1)).collect();
             let result = reconstruct(&subset, &config);
             prop_assert!(result.is_err());
         }
