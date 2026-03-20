@@ -21,6 +21,7 @@ ciborium = { workspace = true }
 zeroize = { workspace = true }
 indexmap = { workspace = true }
 rand = { workspace = true }
+ml-dsa = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
