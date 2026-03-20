@@ -59,21 +59,21 @@ pub fn default_deny_check(actor: &Did, action: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use exo_core::{Hash256, Signature, Timestamp};
+    use exo_core::{Hash256, Timestamp, crypto::{generate_keypair, sign}};
 
     use super::*;
-    fn sig() -> Signature {
-        let mut s = [0u8; 64];
-        s[0] = 1;
-        Signature::from_bytes(s)
-    }
+
     fn req() -> Request {
+        let (pk, sk) = generate_keypair();
+        let body_hash = Hash256::digest(b"route-test");
+        let signature = sign(body_hash.as_ref(), &sk);
         Request {
             actor_did: "did:exo:alice".into(),
             action: "create".into(),
-            body_hash: Hash256::ZERO,
-            signature: sig(),
+            body_hash,
+            signature,
             timestamp: Timestamp::ZERO,
+            public_key: pk,
         }
     }
 
