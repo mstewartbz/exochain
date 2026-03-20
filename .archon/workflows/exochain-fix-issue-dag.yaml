@@ -1,0 +1,32 @@
+name: exochain-fix-issue-dag
+description: |
+  Fix a GitHub issue in the ExoChain repo with full governance gate.
+  Investigates the issue, classifies it, implements the fix, validates
+  against constitutional invariants, and creates a governed PR.
+
+nodes:
+  - id: investigate
+    command: exochain-investigate-feedback
+    description: Analyze the issue and classify severity/impact
+
+  - id: council-review
+    command: exochain-council-review
+    depends_on: [investigate]
+    description: Quick council review for bug fixes
+
+  - id: fix
+    command: exochain-fix-bug
+    depends_on: [council-review]
+    when: "$council-review.output.council_review.aggregate_disposition != 'Rejected'"
+    description: Implement the fix
+
+  - id: validate
+    command: exochain-validate-constitution
+    depends_on: [fix]
+    description: Validate fix against constitutional invariants
+
+  - id: create-pr
+    command: archon-finalize-pr
+    depends_on: [validate]
+    when: "$validate.output.validation.passed == true"
+    trigger_rule: all_success

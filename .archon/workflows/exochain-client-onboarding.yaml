@@ -1,0 +1,58 @@
+name: exochain-client-onboarding
+description: |
+  End-to-end client onboarding pipeline. Takes client requirements,
+  generates a governance-grade PRD, produces Syntaxis workflows,
+  implements the custom configuration, validates against the constitution,
+  and creates the deployment-ready PR.
+
+  This is the ExoChain Configurator's backend — turning the UI-driven
+  PRD use-cases into real, governed, deployable governance systems.
+
+nodes:
+  # ── Stage 1: PRD Generation ──────────────────────────────
+  - id: generate-prd
+    command: exochain-generate-prd
+    description: Translate client requirements into ExoChain PRD
+    output_format:
+      type: object
+      properties:
+        prd:
+          type: object
+          properties:
+            title: { type: string }
+            business_requirements: { type: array }
+            governance_requirements: { type: object }
+            implementation_plan: { type: object }
+
+  # ── Stage 2: Council PRD Review ───────────────────────────
+  - id: council-prd-review
+    command: exochain-council-review
+    depends_on: [generate-prd]
+    description: AI-IRB five-panel review of the generated PRD
+
+  # ── Stage 3: Generate Syntaxis Workflows (parallel per requirement)
+  - id: generate-workflows
+    command: exochain-generate-syntaxis
+    depends_on: [council-prd-review]
+    when: "$council-prd-review.output.council_review.aggregate_disposition == 'Approved'"
+    description: Generate Syntaxis workflows for each business requirement
+
+  # ── Stage 4: Implementation ───────────────────────────────
+  - id: implement-config
+    command: exochain-implement-feature
+    depends_on: [generate-workflows]
+    description: Implement client-specific configuration, schema, and UI widgets
+
+  # ── Stage 5: Constitutional Validation ────────────────────
+  - id: validate
+    command: exochain-validate-constitution
+    depends_on: [implement-config]
+    description: Full constitutional validation of client configuration
+
+  # ── Stage 6: Finalize ─────────────────────────────────────
+  - id: create-pr
+    command: archon-finalize-pr
+    depends_on: [validate]
+    when: "$validate.output.validation.passed == true"
+    description: Create deployment-ready PR with client configuration
+    trigger_rule: all_success
