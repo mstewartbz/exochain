@@ -52,10 +52,10 @@ async fn write_audit(
     .bind(actor)
     .bind(event_hash.to_hex().as_str())
     .bind(payload)
-    .bind(std::time::SystemTime::now()
+    .bind(i64::try_from(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64)
+        .as_millis()).unwrap_or(i64::MAX))
     .execute(&state.db)
     .await
     .map_err(|e| e.to_string())?;
@@ -176,21 +176,35 @@ pub async fn vote_handler(
         "voter": body.voter_did,
         "choice": body.choice,
         "rationale": body.rationale,
-        "timestamp_ms": std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64,
+        "timestamp_ms": i64::try_from(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()).unwrap_or(i64::MAX),
     });
-    if let Some(arr) = payload["votes"].as_array_mut() {
-        arr.push(vote_entry);
+    match payload["votes"].as_array_mut() {
+        Some(arr) => arr.push(vote_entry),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "decision payload missing 'votes' array"})),
+            )
+                .into_response()
+        }
     }
 
     // Persist updated decision
-    let _ = sqlx::query("UPDATE decisions SET payload = $1 WHERE id_hash = $2")
+    if let Err(e) = sqlx::query("UPDATE decisions SET payload = $1 WHERE id_hash = $2")
         .bind(&payload)
         .bind(&body.decision_id)
         .execute(&state.db)
-        .await;
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to persist vote: {e}")})),
+        )
+            .into_response();
+    }
 
     // ── VIOLATION 3 FIX: CBOR canonical audit hash ──────────────────────
     let audit_payload = serde_json::json!({
@@ -199,7 +213,14 @@ pub async fn vote_handler(
         "voter": body.voter_did,
         "choice": body.choice,
     });
-    let _ = write_audit(&state, "vote_recorded", &body.voter_did, &audit_payload).await;
+    if let Err(e) = write_audit(&state, "vote_recorded", &body.voter_did, &audit_payload).await {
+        tracing::error!("audit write failed for voter {}: {e}", body.voter_did);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("audit write failed: {e}")})),
+        )
+            .into_response();
+    }
 
     (
         StatusCode::OK,
