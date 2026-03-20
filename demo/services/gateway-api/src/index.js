@@ -22,7 +22,7 @@ function parseBody(req) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': '*', 'Access-Control-Allow-Headers': 'Content-Type' });
     return res.end();
@@ -306,7 +306,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[gateway-api] ExoChain Gateway running on :${PORT}`);
-  console.log(`[gateway-api] WASM loaded — 45 governance functions available`);
-});
+if (!process.env.VITEST) {
+  server.listen(PORT, () => {
+    console.log(`[gateway-api] ExoChain Gateway running on :${PORT}`);
+    console.log(`[gateway-api] WASM loaded — 45 governance functions available`);
+  });
+}

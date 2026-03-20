@@ -7,5 +7,9 @@
     "@exochain/exochain-wasm": "*",
     "@exochain/shared": "*",
     "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "supertest": "^7.0.0"
   }
 }
