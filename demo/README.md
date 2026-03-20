@@ -87,6 +87,33 @@ Every page uses a 12-column drag-and-drop widget grid:
 
 Each service exposes a `/health` endpoint for liveness and readiness checks.
 
+## Node.js & React Test Suite
+
+Run all tests for the 7 Node.js services and React UI:
+
+```bash
+cd demo
+npm run test              # run all 99 tests (services + React UI)
+npm run test:watch        # watch mode
+npm run test:coverage     # run with coverage report (enforced by CI Gate 10)
+npm run test:services     # services only
+npm run test:react        # React UI only
+```
+
+Tests use [Vitest 3](https://vitest.dev/) with a workspace configuration covering all 8 projects.
+
+**Coverage thresholds** (enforced in CI):
+| Project | Lines | Functions | Branches | Statements |
+|---------|-------|-----------|----------|------------|
+| Services (×7) | 80% | 80% | 70% | 80% |
+| React UI | 70% | 70% | 60% | 70% |
+
+Test results:
+```
+Test Files  8 passed (8)
+     Tests  99 passed (99)
+```
+
 ## WASM Test Suite
 
 Run the full WASM binding test suite:

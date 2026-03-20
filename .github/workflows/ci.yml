@@ -216,7 +216,7 @@ jobs:
           cache-dependency-path: demo/package-lock.json
       - name: Install demo dependencies
         working-directory: demo
-        run: npm install
+        run: npm ci
       - name: Run demo tests with coverage
         working-directory: demo
         run: npm run test:coverage
