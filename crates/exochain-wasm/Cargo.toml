@@ -1,0 +1,48 @@
+[package]
+name = "exochain-wasm"
+description = "ExoChain governance engine — WebAssembly bindings for Node.js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# ExoChain crates (13 of 14 — excludes exo-gateway which is server-only)
+exo-core       = { path = "../exo-core" }
+exo-identity   = { path = "../exo-identity" }
+exo-consent    = { path = "../exo-consent" }
+exo-authority  = { path = "../exo-authority" }
+exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-governance = { path = "../exo-governance" }
+exo-escalation = { path = "../exo-escalation" }
+exo-legal      = { path = "../exo-legal" }
+exo-dag        = { path = "../exo-dag" }
+exo-proofs     = { path = "../exo-proofs" }
+exo-api        = { path = "../exo-api" }
+exo-tenant     = { path = "../exo-tenant" }
+decision-forum = { path = "../decision-forum" }
+
+# WASM bindings
+wasm-bindgen = "=0.2.100"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+
+# Serialization (workspace)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# WASM-compatible RNG
+getrandom = { version = "0.2", features = ["js"] }
+
+# Crypto (for direct use in bindings)
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+
+# Hex encoding
+hex = "0.4"
+
+# UUID
+uuid = { workspace = true }

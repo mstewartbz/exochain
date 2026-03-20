@@ -2,4 +2,8 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
-Cargo.lock
+
+# Demo platform
+**/node_modules/
+demo/packages/exochain-wasm/wasm/
+demo/web/dist/

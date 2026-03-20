@@ -135,12 +135,19 @@ impl core::fmt::Debug for HybridClock {
 }
 
 /// Default wall-clock implementation.
+#[cfg(not(target_arch = "wasm32"))]
 fn system_time_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// WASM wall-clock: route through js_sys::Date::now().
+#[cfg(target_arch = "wasm32")]
+fn system_time_millis() -> u64 {
+    js_sys::Date::now() as u64
 }
 
 // ===========================================================================
