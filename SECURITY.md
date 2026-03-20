@@ -2,11 +2,10 @@
 
 ## Supported Versions
 
-EXOCHAIN has not yet published a versioned release. All code on the `main` branch is considered pre-release.
-
 | Version | Status |
 |---------|--------|
-| `main` branch | Pre-release, actively developed |
+| `0.1.0` | Current release — supported |
+| `main` branch | Development — may contain unreleased changes |
 
 ## Reporting a Vulnerability
 
@@ -64,4 +63,30 @@ The following are out of scope:
 
 - **Source-only dependencies** from crates.io (no git dependencies allowed)
 - **`deny.toml`** enforces allowed licenses and bans problematic crates
-- **Release workflow** includes provenance attestation and SHA-256 checksums (not yet exercised; first release pending)
+- **Release workflow** produces provenance attestation (`provenance.json`) with SHA-256 hashes for every release artifact
+- **GPG-signed tags** — every release tag is cryptographically signed; verify with `git tag -v v<version>`
+
+### Release Signing Key Policy
+
+All release tags are signed with a GPG key held by an EXOCHAIN maintainer.
+
+| Field | Value |
+|-------|-------|
+| Key type | Ed25519 or RSA-4096 |
+| Key storage | Offline hardware token or secrets manager; never on CI runners |
+| Rotation cadence | Annually or on suspected compromise |
+| Compromise response | Immediately rotate key, yank affected releases, open `exochain:council-review` issue |
+
+To verify a release tag:
+
+```bash
+# Import the maintainer public key (published at https://exochain.org/pgp-key.asc)
+gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
+
+# Verify the tag
+git tag -v v0.1.0
+```
+
+The key fingerprint for the current signing key will be published in the GitHub
+release notes and on the project website. If a tag cannot be verified, **do not use
+the release** — contact security@exochain.org.
