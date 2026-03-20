@@ -164,7 +164,10 @@ mod tests {
             RestRoute::GetConstitution.path(),
             "/api/v1/tenants/:id/constitution"
         );
-        assert_eq!(RestRoute::EDiscoveryExport.path(), "/api/v1/ediscovery/export");
+        assert_eq!(
+            RestRoute::EDiscoveryExport.path(),
+            "/api/v1/ediscovery/export"
+        );
         assert_eq!(RestRoute::AuditTrail.path(), "/api/v1/audit/:decision_id");
         assert_eq!(RestRoute::AuthRegister.path(), "/api/v1/auth/register");
         assert_eq!(RestRoute::AuthLogin.path(), "/api/v1/auth/login");
@@ -197,6 +200,7 @@ mod tests {
             uptime_seconds: 42,
         };
         assert_eq!(r.status, "ok");
+        assert_eq!(r.version, "0.1.0");
         assert_eq!(r.uptime_seconds, 42);
     }
 
