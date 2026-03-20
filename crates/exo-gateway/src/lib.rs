@@ -2,5 +2,6 @@
 pub mod auth;
 pub mod error;
 pub mod middleware;
+pub mod rest;
 pub mod routes;
 pub mod server;

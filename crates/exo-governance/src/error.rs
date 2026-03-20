@@ -37,3 +37,43 @@ pub enum GovernanceError {
     #[error("invalid state transition: {from} -> {to}")]
     InvalidStateTransition { from: String, to: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_all_variants() {
+        let cases: Vec<(GovernanceError, &str)> = vec![
+            (
+                GovernanceError::QuorumNotMet { reason: "short".into() },
+                "short",
+            ),
+            (
+                GovernanceError::InsufficientIndependence { details: "overlap".into() },
+                "overlap",
+            ),
+            (
+                GovernanceError::ClearanceDenied { required: "L3".into() },
+                "L3",
+            ),
+            (GovernanceError::ChallengeError("ch".into()), "ch"),
+            (GovernanceError::DeliberationError("delib".into()), "delib"),
+            (GovernanceError::AuditChainBroken { index: 7 }, "7"),
+            (GovernanceError::DuplicateVote("did:exo:x".into()), "did:exo:x"),
+            (GovernanceError::DeliberationNotOpen, "not open"),
+            (GovernanceError::ActionNotFound("act".into()), "act"),
+            (GovernanceError::CaseNotFound("case".into()), "case"),
+            (
+                GovernanceError::InvalidStateTransition {
+                    from: "Open".into(),
+                    to: "Draft".into(),
+                },
+                "Open",
+            ),
+        ];
+        for (err, fragment) in cases {
+            assert!(err.to_string().contains(fragment), "{err}");
+        }
+    }
+}
