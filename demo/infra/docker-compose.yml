@@ -1,0 +1,138 @@
+version: "3.9"
+
+networks:
+  exochain:
+    driver: bridge
+
+volumes:
+  pgdata:
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: exochain
+      POSTGRES_USER: exochain
+      POSTGRES_PASSWORD: exochain_dev
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exochain"]
+      interval: 5s
+      retries: 10
+    networks: [exochain]
+
+  # ── Gateway API (3000) — orchestrator ──────────────────────────
+  gateway-api:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: gateway-api
+    ports: ["3000:3000"]
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: gateway-api
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]
+
+  # ── Identity Service (3001) ────────────────────────────────────
+  identity-service:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: identity-service
+    ports: ["3001:3001"]
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: identity-service
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]
+
+  # ── Consent Service (3002) ─────────────────────────────────────
+  consent-service:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: consent-service
+    ports: ["3002:3002"]
+    environment:
+      PORT: 3002
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: consent-service
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]
+
+  # ── Governance Engine (3003) ───────────────────────────────────
+  governance-engine:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: governance-engine
+    ports: ["3003:3003"]
+    environment:
+      PORT: 3003
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: governance-engine
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]
+
+  # ── Decision Forge (3004) ──────────────────────────────────────
+  decision-forge:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: decision-forge
+    ports: ["3004:3004"]
+    environment:
+      PORT: 3004
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: decision-forge
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]
+
+  # ── Audit API (3007) ───────────────────────────────────────────
+  audit-api:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: audit-api
+    ports: ["3007:3007"]
+    environment:
+      PORT: 3007
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: audit-api
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]
+
+  # ── Provenance Writer (3006) ───────────────────────────────────
+  provenance-writer:
+    build:
+      context: ../
+      dockerfile: demo/infra/Dockerfile.service
+      args:
+        SERVICE: provenance-writer
+    ports: ["3006:3006"]
+    environment:
+      PORT: 3006
+      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
+      SERVICE_NAME: provenance-writer
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [exochain]

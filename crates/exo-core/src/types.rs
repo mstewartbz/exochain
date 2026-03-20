@@ -571,12 +571,19 @@ impl Timestamp {
     /// Create a timestamp from the current system clock (non-deterministic).
     #[must_use]
     pub fn now_utc() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        #[allow(clippy::unwrap_used)]
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        #[cfg(not(target_arch = "wasm32"))]
+        let millis = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            #[allow(clippy::unwrap_used)]
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            ms
+        };
+        #[cfg(target_arch = "wasm32")]
+        let millis = js_sys::Date::now() as u64;
+
         Self {
             physical_ms: millis,
             logical: 0,

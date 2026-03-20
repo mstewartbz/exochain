@@ -15,6 +15,7 @@ members = [
     "crates/exo-gateway",
     "crates/exo-tenant",
     "crates/decision-forum",
+    "crates/exochain-wasm",
 ]
 
 [workspace.package]
@@ -55,10 +56,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Time (no std::time — use HLC only)
-chrono = { version = "0.4", default-features = false, features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "wasmbind"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 # UUID for correlation IDs
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
 
 # Testing
 proptest = "1"

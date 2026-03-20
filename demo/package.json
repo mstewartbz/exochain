@@ -1,0 +1,15 @@
+{
+  "name": "exochain-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "test:wasm": "node packages/exochain-wasm/test.mjs",
+    "build:wasm": "cd .. && wasm-pack build crates/exochain-wasm --target nodejs --release --out-dir demo/packages/exochain-wasm/wasm",
+    "dev": "docker compose -f infra/docker-compose.yml up --build"
+  }
+}

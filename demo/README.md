@@ -1,0 +1,118 @@
+# ExoChain Demo
+
+## Overview
+
+The ExoChain demo is a full-stack governance-conditioned execution platform comprising:
+
+- **7 Node.js microservices** handling identity, consent, governance, decision-making, auditing, and provenance
+- **React web UI** with a 12-column configurable widget grid across 6 pages
+- **Rust-to-WASM engine** (637KB compiled, 45 exported functions) powering the core governance kernel
+- **PostgreSQL** for persistent storage of governance state, audit trails, and provenance records
+
+## Prerequisites
+
+| Dependency | Version |
+|---|---|
+| Node.js | 20+ |
+| Rust + wasm-pack | Latest stable |
+| Docker | 24+ |
+| Docker Compose | v2+ |
+
+## Quick Start
+
+Build the WASM engine and launch all services with Docker Compose:
+
+```bash
+npm run build:wasm
+npm run dev
+```
+
+This runs `docker compose up` under the hood, starting all 7 services, the PostgreSQL database, and the web UI.
+
+## Local Development (without Docker)
+
+For iterative development without Docker:
+
+```bash
+cd demo
+npm install
+bash scripts/dev.sh
+```
+
+The `dev.sh` script starts each service in the background with file watching enabled.
+
+## Web UI
+
+```bash
+cd demo/web
+npm install
+npm run dev
+```
+
+The dev server starts at **http://localhost:5173**.
+
+## Architecture
+
+### Pages
+
+The web UI is organized into 6 pages:
+
+1. **Dashboard** -- Top-level overview of system health, recent governance decisions, and active workflows.
+2. **System Explorer** -- Deep inspection of services, WASM module state, and runtime metrics.
+3. **Board of Directors** -- Council management interface for reviewing and voting on proposals.
+4. **Class Action** -- Batch governance actions across multiple entities or policies.
+5. **Syntaxis Builder** -- Visual workflow editor for composing Syntaxis governance programs.
+6. **AI + Backlog** -- AI-assisted suggestion pipeline and council-approved backlog management.
+
+### Widget System
+
+Every page uses a 12-column drag-and-drop widget grid:
+
+- **Edit Mode** -- Toggle edit mode to rearrange, resize, add, or remove widgets.
+- **Widget Catalog** -- Browse available widgets and drop them onto the grid.
+- **localStorage Persistence** -- Layout configurations are saved per-user in the browser.
+- **AI Help** -- Each widget includes a context-sensitive `?` menu providing inline documentation and usage guidance.
+
+## Services
+
+| Service | Port | Description |
+|---|---|---|
+| gateway-api | 3000 | API gateway and request router |
+| identity-service | 3001 | Identity management and authentication |
+| consent-service | 3002 | Consent collection and verification |
+| governance-engine | 3003 | Core governance rule evaluation |
+| decision-forge | 3004 | Decision aggregation and quorum logic |
+| provenance-writer | 3006 | Immutable provenance record writer |
+| audit-api | 3007 | Audit trail query and reporting |
+
+Each service exposes a `/health` endpoint for liveness and readiness checks.
+
+## WASM Test Suite
+
+Run the full WASM binding test suite:
+
+```bash
+npm run test:wasm
+```
+
+This executes **25 tests** covering all **9 binding modules**:
+
+- Constitution loader and validator
+- Governance state machine transitions
+- Decision quorum calculations
+- Consent verification logic
+- Provenance hashing
+- Audit event serialization
+- Policy distribution encoding
+- Syntaxis workflow compilation
+- Kernel invariant checks
+
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | `postgres://exochain:exochain@localhost:5432/exochain` |
+| `PORT` | Service listen port | Varies per service (see table above) |
+| `NODE_ENV` | Runtime environment | `development` |
+
+Each service reads its own `PORT` from the environment. In Docker Compose, these are pre-configured in the compose file.
