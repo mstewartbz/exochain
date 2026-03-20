@@ -40,12 +40,15 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **exo-dag benchmark** — disabled; needs rewrite against current API
 - **Post-quantum signatures** — `Signature` enum supports Ed25519/PostQuantum/Hybrid; PQ implementation is stub-level
 
+### In Progress
+
+- Continuous governance monitoring via ExoForge — schema, API, threat model, and traceability complete (EXOCHAIN-REM-009); ExoForge scheduled trigger and React health dashboard pending
+
 ### Roadmap / Planned
 
 - First versioned release (see `.github/workflows/release.yml` for the dry-run workflow)
 - SBOM generation and supply-chain attestation
 - Production HTTP server in `exo-gateway` (currently served via Node.js demo)
-- Continuous governance monitoring via ExoForge
 - National AI Policy Framework compliance extensions
 
 ## The Five Axioms

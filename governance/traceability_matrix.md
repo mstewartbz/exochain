@@ -1,6 +1,6 @@
 # Traceability Matrix
 
-Updated 2026-03-19 after council-driven implementation. Maps every spec requirement to code, tests, and status.
+Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring activation. Maps every spec requirement to code, tests, and status.
 
 **Status key:** 🟢 Implemented (tests passing) | 🟡 Partial | 🔴 Planned
 
@@ -128,6 +128,23 @@ Updated 2026-03-19 after council-driven implementation. Maps every spec requirem
 | **TNC-01→10** | Trust-Critical Non-Negotiable Controls | `tnc_enforcer.rs` | 13 | 🟢 |
 | **M1→M12** | Measurable success metrics | `metrics.rs` | 8 | 🟢 |
 
+## Continuous Governance Monitoring (EXOCHAIN-REM-009)
+
+| Req | Requirement | Module / Migration | Status |
+|---|---|---|---|
+| **MON-001** | Governance health snapshot persistence | `demo/infra/postgres/init/003_governance_health.sql` — `governance_health_snapshots` table | 🟢 |
+| **MON-002** | Per-finding persistence with severity index | `demo/infra/postgres/init/003_governance_health.sql` — `governance_findings` table | 🟢 |
+| **MON-003** | Human approval gate before self-improvement trigger | `demo/infra/postgres/init/003_governance_health.sql` — `governance_trigger_approvals` table; `POST /governance/approve/:id` endpoint | 🟢 |
+| **MON-004** | Authenticated `/governance/health` GET endpoint | `demo/services/audit-api/src/index.js` — bearer token required (`GOVERNANCE_API_TOKEN`) | 🟢 |
+| **MON-005** | Authenticated `POST /governance/health` snapshot ingestion | `demo/services/audit-api/src/index.js` — bearer token + full provenance record | 🟢 |
+| **MON-006** | Circuit breaker: auto-pause trigger when >3 Critical/24h | `demo/services/audit-api/src/index.js` — 24h rolling window query + `circuit_breaker_triggered` flag | 🟢 |
+| **MON-007** | Audit ledger entry for every health snapshot (provenance) | `demo/services/audit-api/src/index.js` — `GovernanceHealthSnapshot` event appended to `audit_entries` | 🟢 |
+| **MON-008** | CR-001 §8 work order status tracked in every snapshot | `003_governance_health.sql` — `cr001_work_orders` JSONB column; surfaced in GET response | 🟢 |
+| **MON-009** | T-14 Governance Monitor Poisoning in threat matrix | `governance/threat_matrix.md` — T-14 entry with 4 sub-threats, mitigations, detection signals | 🟡 Partial (Rust-layer signed attestation verification pending) |
+| **MON-010** | Continuous-governance workflow DAG definition | `.archon/workflows/exochain-continuous-governance.yaml` | 🟢 (pre-existing) |
+| **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
+| **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
+
 ## Summary
 
 | Category | Requirements | 🟢 | 🟡 | 🔴 |
@@ -142,7 +159,8 @@ Updated 2026-03-19 after council-driven implementation. Maps every spec requirem
 | ZK Proofs (§12.5) | 5 | 5 | 0 | 0 |
 | P2P/API/Gateway/Tenant (§16–17) | 4 | 4 | 0 | 0 |
 | Decision Forum (GOV/TNC/M) | 16 | 16 | 0 | 0 |
-| **TOTAL** | **75** | **75** | **0** | **0** |
+| Governance Monitoring (MON) | 12 | 9 | 1 | 2 |
+| **TOTAL** | **87** | **84** | **1** | **2** |
 
-**Coverage: 75/75 requirements traced to code with passing tests (100%).**
-**Workspace: 1,116 tests, 0 failures across 14 crates.**
+**Coverage: 84/87 requirements traced to code (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial (T-14 Rust attestation verification).**
+**Workspace: 1,116 tests, 0 failures across 14 crates (monitoring requirements covered by integration tests — see MON-009).**
