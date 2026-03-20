@@ -7,15 +7,17 @@
 use exo_core::types::DeterministicMap;
 use serde::{Deserialize, Serialize};
 
-use crate::decision_object::{DecisionClass, DecisionObject, VoteChoice};
-use crate::error::{ForumError, Result};
+use crate::{
+    decision_object::{DecisionClass, DecisionObject, VoteChoice},
+    error::{ForumError, Result},
+};
 
 /// Quorum policy for a specific decision class.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuorumRequirement {
-    pub min_votes: u32,
-    pub min_approve_pct: u32,
-    pub min_human_votes: u32,
+    pub min_votes: usize,
+    pub min_approve_pct: usize,
+    pub min_human_votes: usize,
 }
 
 /// Registry of quorum policies per decision class.
@@ -29,18 +31,38 @@ impl QuorumRegistry {
     #[must_use]
     pub fn with_defaults() -> Self {
         let mut policies = DeterministicMap::new();
-        policies.insert("Routine".into(), QuorumRequirement {
-            min_votes: 1, min_approve_pct: 51, min_human_votes: 0,
-        });
-        policies.insert("Operational".into(), QuorumRequirement {
-            min_votes: 3, min_approve_pct: 51, min_human_votes: 1,
-        });
-        policies.insert("Strategic".into(), QuorumRequirement {
-            min_votes: 5, min_approve_pct: 67, min_human_votes: 3,
-        });
-        policies.insert("Constitutional".into(), QuorumRequirement {
-            min_votes: 7, min_approve_pct: 75, min_human_votes: 5,
-        });
+        policies.insert(
+            "Routine".into(),
+            QuorumRequirement {
+                min_votes: 1,
+                min_approve_pct: 51,
+                min_human_votes: 0,
+            },
+        );
+        policies.insert(
+            "Operational".into(),
+            QuorumRequirement {
+                min_votes: 3,
+                min_approve_pct: 51,
+                min_human_votes: 1,
+            },
+        );
+        policies.insert(
+            "Strategic".into(),
+            QuorumRequirement {
+                min_votes: 5,
+                min_approve_pct: 67,
+                min_human_votes: 3,
+            },
+        );
+        policies.insert(
+            "Constitutional".into(),
+            QuorumRequirement {
+                min_votes: 7,
+                min_approve_pct: 75,
+                min_human_votes: 5,
+            },
+        );
         Self { policies }
     }
 
@@ -57,14 +79,18 @@ impl QuorumRegistry {
 pub enum QuorumCheckResult {
     /// Quorum met with the given counts.
     Met {
-        total_votes: u32,
-        approve_count: u32,
-        approve_pct: u32,
+        total_votes: usize,
+        approve_count: usize,
+        approve_pct: usize,
     },
     /// Quorum not met.
     NotMet { reason: String },
     /// Graceful degradation: partial quorum available.
-    Degraded { reason: String, available: u32, required: u32 },
+    Degraded {
+        reason: String,
+        available: usize,
+        required: usize,
+    },
 }
 
 /// Check if quorum is met for a decision based on its class and votes.
@@ -72,16 +98,21 @@ pub fn check_quorum(
     registry: &QuorumRegistry,
     decision: &DecisionObject,
 ) -> Result<QuorumCheckResult> {
-    let req = registry.requirement_for(decision.class)
+    let req = registry
+        .requirement_for(decision.class)
         .ok_or(ForumError::QuorumPolicyMissing)?;
 
-    let total_votes = decision.votes.len() as u32;
-    let approve_count = decision.votes.iter()
+    let total_votes = decision.votes.len();
+    let approve_count = decision
+        .votes
+        .iter()
         .filter(|v| v.choice == VoteChoice::Approve)
-        .count() as u32;
-    let human_count = decision.votes.iter()
+        .count();
+    let human_count = decision
+        .votes
+        .iter()
         .filter(|v| matches!(v.actor_kind, crate::decision_object::ActorKind::Human))
-        .count() as u32;
+        .count();
 
     if total_votes < req.min_votes {
         return Ok(QuorumCheckResult::Degraded {
@@ -127,20 +158,25 @@ pub fn check_quorum(
 pub fn verify_quorum_precondition(
     registry: &QuorumRegistry,
     class: DecisionClass,
-    eligible_voters: u32,
+    eligible_voters: usize,
 ) -> Result<bool> {
-    let req = registry.requirement_for(class)
+    let req = registry
+        .requirement_for(class)
         .ok_or(ForumError::QuorumPolicyMissing)?;
     Ok(eligible_voters >= req.min_votes)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use exo_core::{
+        hlc::HybridClock,
+        types::{Did, Hash256},
+    };
+
     use super::*;
     use crate::decision_object::*;
-    use exo_core::hlc::HybridClock;
-    use exo_core::types::{Did, Hash256};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn test_clock() -> HybridClock {
         let counter = AtomicU64::new(1000);
@@ -185,7 +221,8 @@ mod tests {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
         let mut d = DecisionObject::new("test", DecisionClass::Routine, Hash256::ZERO, &mut clock);
-        d.add_vote(human_approve_vote("alice", &mut clock)).expect("ok");
+        d.add_vote(human_approve_vote("alice", &mut clock))
+            .expect("ok");
         match check_quorum(&reg, &d).expect("ok") {
             QuorumCheckResult::Met { total_votes, .. } => assert_eq!(total_votes, 1),
             other => panic!("expected Met, got {other:?}"),
@@ -196,10 +233,20 @@ mod tests {
     fn operational_needs_three_votes() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new("test", DecisionClass::Operational, Hash256::ZERO, &mut clock);
-        d.add_vote(human_approve_vote("alice", &mut clock)).expect("ok");
+        let mut d = DecisionObject::new(
+            "test",
+            DecisionClass::Operational,
+            Hash256::ZERO,
+            &mut clock,
+        );
+        d.add_vote(human_approve_vote("alice", &mut clock))
+            .expect("ok");
         match check_quorum(&reg, &d).expect("ok") {
-            QuorumCheckResult::Degraded { available, required, .. } => {
+            QuorumCheckResult::Degraded {
+                available,
+                required,
+                ..
+            } => {
                 assert_eq!(available, 1);
                 assert_eq!(required, 3);
             }
@@ -211,12 +258,22 @@ mod tests {
     fn operational_quorum_met() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new("test", DecisionClass::Operational, Hash256::ZERO, &mut clock);
-        d.add_vote(human_approve_vote("alice", &mut clock)).expect("ok");
+        let mut d = DecisionObject::new(
+            "test",
+            DecisionClass::Operational,
+            Hash256::ZERO,
+            &mut clock,
+        );
+        d.add_vote(human_approve_vote("alice", &mut clock))
+            .expect("ok");
         d.add_vote(ai_approve_vote("bot1", &mut clock)).expect("ok");
         d.add_vote(ai_approve_vote("bot2", &mut clock)).expect("ok");
         match check_quorum(&reg, &d).expect("ok") {
-            QuorumCheckResult::Met { total_votes, approve_count, .. } => {
+            QuorumCheckResult::Met {
+                total_votes,
+                approve_count,
+                ..
+            } => {
                 assert_eq!(total_votes, 3);
                 assert_eq!(approve_count, 3);
             }
@@ -228,8 +285,14 @@ mod tests {
     fn insufficient_approval_pct() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new("test", DecisionClass::Operational, Hash256::ZERO, &mut clock);
-        d.add_vote(human_approve_vote("alice", &mut clock)).expect("ok");
+        let mut d = DecisionObject::new(
+            "test",
+            DecisionClass::Operational,
+            Hash256::ZERO,
+            &mut clock,
+        );
+        d.add_vote(human_approve_vote("alice", &mut clock))
+            .expect("ok");
         d.add_vote(reject_vote("bob", &mut clock)).expect("ok");
         d.add_vote(reject_vote("carol", &mut clock)).expect("ok");
         match check_quorum(&reg, &d).expect("ok") {
@@ -244,9 +307,11 @@ mod tests {
     fn strategic_needs_human_votes() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
+        let mut d =
+            DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
         for i in 0..5 {
-            d.add_vote(ai_approve_vote(&format!("bot{i}"), &mut clock)).expect("ok");
+            d.add_vote(ai_approve_vote(&format!("bot{i}"), &mut clock))
+                .expect("ok");
         }
         match check_quorum(&reg, &d).expect("ok") {
             QuorumCheckResult::NotMet { reason } => {

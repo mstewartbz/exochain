@@ -1,6 +1,7 @@
 //! Identity bindings: DID management, PACE continuity, risk assessment, Shamir
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 /// Split a secret using Shamir's Secret Sharing
@@ -14,9 +15,16 @@ pub fn wasm_shamir_split(secret: &[u8], threshold: u8, shares: u8) -> Result<JsV
 
 /// Reconstruct a secret from Shamir shares
 #[wasm_bindgen]
-pub fn wasm_shamir_reconstruct(shares_json: &str, threshold: u8, total_shares: u8) -> Result<JsValue, JsValue> {
+pub fn wasm_shamir_reconstruct(
+    shares_json: &str,
+    threshold: u8,
+    total_shares: u8,
+) -> Result<JsValue, JsValue> {
     let shares: Vec<exo_identity::shamir::Share> = from_json_str(shares_json)?;
-    let config = exo_identity::shamir::ShamirConfig { threshold, shares: total_shares };
+    let config = exo_identity::shamir::ShamirConfig {
+        threshold,
+        shares: total_shares,
+    };
     let secret = exo_identity::shamir::reconstruct(&shares, &config)
         .map_err(|e| JsValue::from_str(&format!("Shamir reconstruct error: {e}")))?;
     to_js_value(&serde_json::json!({
@@ -47,7 +55,13 @@ pub fn wasm_pace_escalate(state_json: &str) -> Result<JsValue, JsValue> {
 
 /// Assess risk for an identity (creates a signed risk attestation)
 #[wasm_bindgen]
-pub fn wasm_assess_risk(subject_did: &str, attester_did: &str, evidence: &[u8], level_json: &str, validity_ms: u64) -> Result<JsValue, JsValue> {
+pub fn wasm_assess_risk(
+    subject_did: &str,
+    attester_did: &str,
+    evidence: &[u8],
+    level_json: &str,
+    validity_ms: u64,
+) -> Result<JsValue, JsValue> {
     let subject = exo_core::Did::new(subject_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let attester = exo_core::Did::new(attester_did)

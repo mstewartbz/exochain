@@ -8,7 +8,7 @@
 #   - Clippy float_arithmetic = deny (workspace lint)
 #   - 90%+ line coverage
 #   - Zero dependency vulnerabilities
-#   - License compliance (no copyleft contamination of AGPL boundary)
+#   - License compliance (Apache-2.0; no copyleft contamination)
 
 name: EXOCHAIN Constitutional CI
 on: [push, pull_request]
@@ -92,8 +92,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy (all targets, deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (library and binary code, deny all warnings)
+        run: cargo clippy --workspace --lib --bins -- -D warnings
+      - name: Clippy (test code, allow expect/unwrap in tests)
+        run: cargo clippy --workspace --tests --benches -- -D warnings -A clippy::expect_used -A clippy::unwrap_used
 
   # -----------------------------------------------------------------------
   # Gate 5: Format
@@ -150,6 +152,55 @@ jobs:
         run: cargo doc --workspace --no-deps
 
   # -----------------------------------------------------------------------
+  # Gate 9: Repo Hygiene (no generated dirs, no secrets)
+  # -----------------------------------------------------------------------
+  hygiene:
+    name: "Gate 9 — Repo Hygiene"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No tracked node_modules
+        run: |
+          if git ls-files --error-unmatch node_modules/ 2>/dev/null; then
+            echo "::error::node_modules/ is tracked in git"
+            exit 1
+          fi
+          echo "✓ node_modules not tracked"
+      - name: No tracked __pycache__
+        run: |
+          if git ls-files --error-unmatch '**/__pycache__/' 2>/dev/null; then
+            echo "::error::__pycache__/ is tracked in git"
+            exit 1
+          fi
+          echo "✓ __pycache__ not tracked"
+      - name: No tracked build artifacts
+        run: |
+          if git ls-files --error-unmatch 'web/dist/' 'demo/web/dist/' 2>/dev/null; then
+            echo "::error::build artifacts are tracked in git"
+            exit 1
+          fi
+          echo "✓ build artifacts not tracked"
+      - name: No .env files tracked
+        run: |
+          if git ls-files '*.env' '.env*' | grep -q .; then
+            echo "::error::.env files are tracked in git"
+            exit 1
+          fi
+          echo "✓ no .env files tracked"
+      - name: License consistency check
+        run: |
+          CARGO_LICENSE=$(grep '^license' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ "$CARGO_LICENSE" != "Apache-2.0" ]; then
+            echo "::error::Cargo.toml license is '$CARGO_LICENSE', expected 'Apache-2.0'"
+            exit 1
+          fi
+          if ! head -1 LICENSE | grep -qi "apache"; then
+            echo "::error::LICENSE file does not appear to be Apache-2.0"
+            exit 1
+          fi
+          echo "✓ License consistent: Apache-2.0"
+
+  # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
   # -----------------------------------------------------------------------
   all-gates:
@@ -164,6 +215,7 @@ jobs:
       - audit
       - deny
       - doc
+      - hygiene
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."

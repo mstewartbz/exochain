@@ -6,8 +6,10 @@
 use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::AuthorityError;
-use crate::permission::{Permission, PermissionSet};
+use crate::{
+    error::AuthorityError,
+    permission::{Permission, PermissionSet},
+};
 
 /// Default maximum delegation depth.
 pub const DEFAULT_MAX_DEPTH: usize = 5;
@@ -213,18 +215,29 @@ where
 #[must_use]
 pub fn has_permission(chain: &AuthorityChain, permission: &Permission) -> bool {
     // All links must contain the permission (scope narrows but must include it)
-    chain.links.iter().all(|link| link.scope.contains(permission))
+    chain
+        .links
+        .iter()
+        .all(|link| link.scope.contains(permission))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use exo_core::crypto::KeyPair;
     use std::collections::HashMap;
 
-    fn did(name: &str) -> Did { Did::new(&format!("did:exo:{name}")).unwrap() }
-    fn ts(ms: u64) -> Timestamp { Timestamp::new(ms, 0) }
-    fn now() -> Timestamp { ts(5000) }
+    use exo_core::crypto::KeyPair;
+
+    use super::*;
+
+    fn did(name: &str) -> Did {
+        Did::new(&format!("did:exo:{name}")).unwrap()
+    }
+    fn ts(ms: u64) -> Timestamp {
+        Timestamp::new(ms, 0)
+    }
+    fn now() -> Timestamp {
+        ts(5000)
+    }
 
     /// A test key registry mapping DIDs to keypairs.
     struct KeyRegistry {
@@ -232,7 +245,11 @@ mod tests {
     }
 
     impl KeyRegistry {
-        fn new() -> Self { Self { keys: HashMap::new() } }
+        fn new() -> Self {
+            Self {
+                keys: HashMap::new(),
+            }
+        }
 
         fn register(&mut self, name: &str) -> PublicKey {
             let kp = KeyPair::generate();
@@ -253,8 +270,10 @@ mod tests {
     /// Create a properly-signed authority link.
     fn signed_link(
         registry: &KeyRegistry,
-        from: &str, to: &str,
-        scope: Vec<Permission>, depth: usize,
+        from: &str,
+        to: &str,
+        scope: Vec<Permission>,
+        depth: usize,
         exp: Option<Timestamp>,
     ) -> AuthorityLink {
         let mut link = AuthorityLink {
@@ -267,13 +286,22 @@ mod tests {
             depth,
         };
         let payload = link.signable_payload();
-        let kp = registry.keys.get(&format!("did:exo:{from}")).expect("key not registered");
+        let kp = registry
+            .keys
+            .get(&format!("did:exo:{from}"))
+            .expect("key not registered");
         link.signature = kp.sign(&payload);
         link
     }
 
     /// Create a link with a fake (non-verified) signature for structural tests.
-    fn fake_link(from: &str, to: &str, scope: Vec<Permission>, depth: usize, exp: Option<Timestamp>) -> AuthorityLink {
+    fn fake_link(
+        from: &str,
+        to: &str,
+        scope: Vec<Permission>,
+        depth: usize,
+        exp: Option<Timestamp>,
+    ) -> AuthorityLink {
         AuthorityLink {
             delegator_did: did(from),
             delegate_did: did(to),
@@ -289,7 +317,13 @@ mod tests {
 
     #[test]
     fn build_single_link() {
-        let links = vec![fake_link("root", "alice", vec![Permission::Read, Permission::Write], 0, None)];
+        let links = vec![fake_link(
+            "root",
+            "alice",
+            vec![Permission::Read, Permission::Write],
+            0,
+            None,
+        )];
         let chain = build_chain(&links);
         assert!(chain.is_ok());
         let c = chain.unwrap();
@@ -301,8 +335,20 @@ mod tests {
     #[test]
     fn build_multi_link() {
         let links = vec![
-            fake_link("root", "alice", vec![Permission::Read, Permission::Write, Permission::Delegate], 0, None),
-            fake_link("alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
+            fake_link(
+                "root",
+                "alice",
+                vec![Permission::Read, Permission::Write, Permission::Delegate],
+                0,
+                None,
+            ),
+            fake_link(
+                "alice",
+                "bob",
+                vec![Permission::Read, Permission::Write],
+                1,
+                None,
+            ),
             fake_link("bob", "charlie", vec![Permission::Read], 2, None),
         ];
         let chain = build_chain(&links).unwrap();
@@ -317,7 +363,15 @@ mod tests {
     #[test]
     fn build_rejects_depth_exceeded() {
         let links: Vec<AuthorityLink> = (0..6)
-            .map(|i| fake_link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
+            .map(|i| {
+                fake_link(
+                    &format!("n{i}"),
+                    &format!("n{}", i + 1),
+                    vec![Permission::Read],
+                    i,
+                    None,
+                )
+            })
             .collect();
         let result = build_chain(&links);
         assert!(matches!(result, Err(AuthorityError::DepthExceeded { .. })));
@@ -326,7 +380,15 @@ mod tests {
     #[test]
     fn build_custom_depth() {
         let links: Vec<AuthorityLink> = (0..3)
-            .map(|i| fake_link(&format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
+            .map(|i| {
+                fake_link(
+                    &format!("n{i}"),
+                    &format!("n{}", i + 1),
+                    vec![Permission::Read],
+                    i,
+                    None,
+                )
+            })
             .collect();
         assert!(build_chain_with_depth(&links, 2).is_err());
         assert!(build_chain_with_depth(&links, 3).is_ok());
@@ -338,7 +400,10 @@ mod tests {
             fake_link("root", "alice", vec![Permission::Read], 0, None),
             fake_link("bob", "charlie", vec![Permission::Read], 1, None),
         ];
-        assert!(matches!(build_chain(&links), Err(AuthorityError::ChainBroken { .. })));
+        assert!(matches!(
+            build_chain(&links),
+            Err(AuthorityError::ChainBroken { .. })
+        ));
     }
 
     #[test]
@@ -347,7 +412,10 @@ mod tests {
             fake_link("root", "alice", vec![Permission::Read], 0, None),
             fake_link("alice", "bob", vec![Permission::Read], 5, None),
         ];
-        assert!(matches!(build_chain(&links), Err(AuthorityError::ChainBroken { .. })));
+        assert!(matches!(
+            build_chain(&links),
+            Err(AuthorityError::ChainBroken { .. })
+        ));
     }
 
     // -- verify_chain tests with REAL Ed25519 verification --
@@ -359,7 +427,14 @@ mod tests {
         reg.register("alice");
 
         let links = vec![
-            signed_link(&reg, "root", "alice", vec![Permission::Read, Permission::Write], 0, None),
+            signed_link(
+                &reg,
+                "root",
+                "alice",
+                vec![Permission::Read, Permission::Write],
+                0,
+                None,
+            ),
             signed_link(&reg, "alice", "bob", vec![Permission::Read], 1, None),
         ];
         let chain = build_chain(&links).unwrap();
@@ -432,7 +507,10 @@ mod tests {
         let mut link = signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None);
         link.signature = Signature::empty();
         let chain = build_chain(&[link]).unwrap();
-        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::InvalidSignature { .. })));
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::InvalidSignature { .. })
+        ));
     }
 
     #[test]
@@ -440,9 +518,19 @@ mod tests {
         let mut reg = KeyRegistry::new();
         reg.register("root");
 
-        let links = vec![signed_link(&reg, "root", "alice", vec![Permission::Read], 0, Some(ts(1000)))];
+        let links = vec![signed_link(
+            &reg,
+            "root",
+            "alice",
+            vec![Permission::Read],
+            0,
+            Some(ts(1000)),
+        )];
         let chain = build_chain(&links).unwrap();
-        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::ExpiredLink { .. })));
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::ExpiredLink { .. })
+        ));
     }
 
     #[test]
@@ -453,10 +541,20 @@ mod tests {
 
         let links = vec![
             signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None),
-            signed_link(&reg, "alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
+            signed_link(
+                &reg,
+                "alice",
+                "bob",
+                vec![Permission::Read, Permission::Write],
+                1,
+                None,
+            ),
         ];
         let chain = build_chain(&links).unwrap();
-        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::ScopeWidening { .. })));
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::ScopeWidening { .. })
+        ));
     }
 
     #[test]
@@ -466,8 +564,22 @@ mod tests {
         reg.register("alice");
 
         let links = vec![
-            signed_link(&reg, "root", "alice", vec![Permission::Read, Permission::Write], 0, None),
-            signed_link(&reg, "alice", "bob", vec![Permission::Read, Permission::Write], 1, None),
+            signed_link(
+                &reg,
+                "root",
+                "alice",
+                vec![Permission::Read, Permission::Write],
+                0,
+                None,
+            ),
+            signed_link(
+                &reg,
+                "alice",
+                "bob",
+                vec![Permission::Read, Permission::Write],
+                1,
+                None,
+            ),
         ];
         let chain = build_chain(&links).unwrap();
         assert!(verify_chain(&chain, &now(), reg.resolver()).is_ok());
@@ -475,7 +587,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_unknown_delegator() {
-        let mut reg = KeyRegistry::new();
+        let reg = KeyRegistry::new();
         // Don't register "root" — key resolution will fail
         let link = fake_link("root", "alice", vec![Permission::Read], 0, None);
         let chain = build_chain(&[link]).unwrap();
@@ -488,7 +600,13 @@ mod tests {
     #[test]
     fn has_permission_present() {
         let links = vec![
-            fake_link("root", "alice", vec![Permission::Read, Permission::Write], 0, None),
+            fake_link(
+                "root",
+                "alice",
+                vec![Permission::Read, Permission::Write],
+                0,
+                None,
+            ),
             fake_link("alice", "bob", vec![Permission::Read], 1, None),
         ];
         let chain = build_chain(&links).unwrap();
@@ -498,7 +616,10 @@ mod tests {
 
     #[test]
     fn has_permission_empty_chain() {
-        let chain = AuthorityChain { links: vec![], max_depth: 5 };
+        let chain = AuthorityChain {
+            links: vec![],
+            max_depth: 5,
+        };
         assert!(has_permission(&chain, &Permission::Read));
     }
 
@@ -518,7 +639,10 @@ mod tests {
 
     #[test]
     fn chain_is_empty() {
-        let chain = AuthorityChain { links: vec![], max_depth: 5 };
+        let chain = AuthorityChain {
+            links: vec![],
+            max_depth: 5,
+        };
         assert!(chain.is_empty());
         assert!(chain.root().is_none());
         assert!(chain.leaf().is_none());
@@ -527,21 +651,41 @@ mod tests {
     #[test]
     fn verify_chain_rejects_over_depth() {
         let mut reg = KeyRegistry::new();
-        for i in 0..3 { reg.register(&format!("n{i}")); }
+        for i in 0..3 {
+            reg.register(&format!("n{i}"));
+        }
 
         let links: Vec<AuthorityLink> = (0..3)
-            .map(|i| signed_link(&reg, &format!("n{i}"), &format!("n{}", i + 1), vec![Permission::Read], i, None))
+            .map(|i| {
+                signed_link(
+                    &reg,
+                    &format!("n{i}"),
+                    &format!("n{}", i + 1),
+                    vec![Permission::Read],
+                    i,
+                    None,
+                )
+            })
             .collect();
         let mut chain = build_chain(&links).unwrap();
         chain.max_depth = 2;
-        assert!(matches!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::DepthExceeded { .. })));
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::DepthExceeded { .. })
+        ));
     }
 
     #[test]
     fn verify_empty_chain_errors() {
-        let chain = AuthorityChain { links: vec![], max_depth: 5 };
+        let chain = AuthorityChain {
+            links: vec![],
+            max_depth: 5,
+        };
         let reg = KeyRegistry::new();
-        assert_eq!(verify_chain(&chain, &now(), reg.resolver()), Err(AuthorityError::EmptyChain));
+        assert_eq!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::EmptyChain)
+        );
     }
 
     #[test]
@@ -549,7 +693,14 @@ mod tests {
         let mut reg = KeyRegistry::new();
         reg.register("root");
 
-        let links = vec![signed_link(&reg, "root", "alice", vec![Permission::Read], 0, Some(ts(10000)))];
+        let links = vec![signed_link(
+            &reg,
+            "root",
+            "alice",
+            vec![Permission::Read],
+            0,
+            Some(ts(10000)),
+        )];
         let chain = build_chain(&links).unwrap();
         assert!(verify_chain(&chain, &now(), reg.resolver()).is_ok());
     }
@@ -562,8 +713,22 @@ mod tests {
         reg.register("manager");
 
         let links = vec![
-            signed_link(&reg, "ceo", "vp", vec![Permission::Read, Permission::Write, Permission::Delegate], 0, None),
-            signed_link(&reg, "vp", "manager", vec![Permission::Read, Permission::Write], 1, None),
+            signed_link(
+                &reg,
+                "ceo",
+                "vp",
+                vec![Permission::Read, Permission::Write, Permission::Delegate],
+                0,
+                None,
+            ),
+            signed_link(
+                &reg,
+                "vp",
+                "manager",
+                vec![Permission::Read, Permission::Write],
+                1,
+                None,
+            ),
             signed_link(&reg, "manager", "analyst", vec![Permission::Read], 2, None),
         ];
         let chain = build_chain(&links).unwrap();

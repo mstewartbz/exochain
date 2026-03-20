@@ -53,7 +53,9 @@ pub struct PolicyEngine;
 
 impl PolicyEngine {
     #[must_use]
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Evaluate a policy against current consents.
     #[must_use]
@@ -73,7 +75,10 @@ impl PolicyEngine {
         if applicable.is_empty() {
             return if policy.deny_by_default {
                 ConsentDecision::Denied {
-                    reason: format!("no policy covers action '{}' and deny_by_default is true", action.action_type),
+                    reason: format!(
+                        "no policy covers action '{}' and deny_by_default is true",
+                        action.action_type
+                    ),
                 }
             } else {
                 ConsentDecision::Granted { expires: None }
@@ -98,7 +103,9 @@ impl PolicyEngine {
                         && bailment::is_active(&c.bailment, now)
                 });
                 if let Some(e) = esc {
-                    return ConsentDecision::Escalated { to: e.bailment.bailor_did.clone() };
+                    return ConsentDecision::Escalated {
+                        to: e.bailment.bailor_did.clone(),
+                    };
                 }
                 return ConsentDecision::Denied {
                     reason: format!(
@@ -126,22 +133,38 @@ impl PolicyEngine {
             }
         }
 
-        ConsentDecision::Granted { expires: earliest_expiry }
+        ConsentDecision::Granted {
+            expires: earliest_expiry,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::bailment;
     use exo_core::Signature;
 
-    fn alice() -> Did { Did::new("did:exo:alice").unwrap() }
-    fn bob() -> Did { Did::new("did:exo:bob").unwrap() }
-    fn ts(ms: u64) -> Timestamp { Timestamp::new(ms, 0) }
-    fn now() -> Timestamp { ts(5000) }
+    use super::*;
+    use crate::bailment;
 
-    fn make_bailment(bailor: &Did, bailee: &Did, btype: BailmentType, exp: Option<Timestamp>) -> Bailment {
+    fn alice() -> Did {
+        Did::new("did:exo:alice").unwrap()
+    }
+    fn bob() -> Did {
+        Did::new("did:exo:bob").unwrap()
+    }
+    fn ts(ms: u64) -> Timestamp {
+        Timestamp::new(ms, 0)
+    }
+    fn now() -> Timestamp {
+        ts(5000)
+    }
+
+    fn make_bailment(
+        bailor: &Did,
+        bailee: &Did,
+        btype: BailmentType,
+        exp: Option<Timestamp>,
+    ) -> Bailment {
         let mut b = bailment::propose(bailor, bailee, b"terms", btype);
         bailment::accept(&mut b, &Signature::from_bytes([1u8; 64])).ok();
         b.expires = exp;
@@ -149,13 +172,25 @@ mod tests {
     }
 
     fn consent(grantor: &Did, action: &str, role: &str, cl: u32, b: Bailment) -> ActiveConsent {
-        ActiveConsent { grantor: grantor.clone(), action_type: action.into(), role: role.into(), clearance_level: cl, bailment: b }
+        ActiveConsent {
+            grantor: grantor.clone(),
+            action_type: action.into(),
+            role: role.into(),
+            clearance_level: cl,
+            bailment: b,
+        }
     }
 
     fn read_policy() -> ConsentPolicy {
         ConsentPolicy {
-            id: "pol-1".into(), name: "read-policy".into(), deny_by_default: true,
-            required_consents: vec![ConsentRequirement { action_type: "read".into(), required_role: "data-owner".into(), min_clearance_level: 1 }],
+            id: "pol-1".into(),
+            name: "read-policy".into(),
+            deny_by_default: true,
+            required_consents: vec![ConsentRequirement {
+                action_type: "read".into(),
+                required_role: "data-owner".into(),
+                min_clearance_level: 1,
+            }],
         }
     }
 
@@ -164,7 +199,15 @@ mod tests {
         let e = PolicyEngine::new();
         let b = make_bailment(&alice(), &bob(), BailmentType::Custody, None);
         let c = vec![consent(&alice(), "read", "data-owner", 1, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert_eq!(d, ConsentDecision::Granted { expires: None });
     }
 
@@ -174,14 +217,30 @@ mod tests {
         let exp = ts(10000);
         let b = make_bailment(&alice(), &bob(), BailmentType::Custody, Some(exp));
         let c = vec![consent(&alice(), "read", "data-owner", 1, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert_eq!(d, ConsentDecision::Granted { expires: Some(exp) });
     }
 
     #[test]
     fn deny_no_consent() {
         let e = PolicyEngine::new();
-        let d = e.evaluate(&read_policy(), &[], &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &[],
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
@@ -190,7 +249,15 @@ mod tests {
         let e = PolicyEngine::new();
         let b = make_bailment(&alice(), &bob(), BailmentType::Custody, None);
         let c = vec![consent(&alice(), "read", "data-owner", 0, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
@@ -199,7 +266,15 @@ mod tests {
         let e = PolicyEngine::new();
         let b = make_bailment(&alice(), &bob(), BailmentType::Custody, None);
         let c = vec![consent(&alice(), "read", "viewer", 5, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
@@ -208,7 +283,15 @@ mod tests {
         let e = PolicyEngine::new();
         let b = make_bailment(&alice(), &bob(), BailmentType::Custody, Some(ts(1000)));
         let c = vec![consent(&alice(), "read", "data-owner", 1, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
@@ -217,9 +300,19 @@ mod tests {
         let e = PolicyEngine::new();
         let b = make_bailment(&alice(), &bob(), BailmentType::Delegation, None);
         let c = vec![consent(&alice(), "read", "viewer", 0, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Escalated { .. }));
-        if let ConsentDecision::Escalated { to } = d { assert_eq!(to, alice()); }
+        if let ConsentDecision::Escalated { to } = d {
+            assert_eq!(to, alice());
+        }
     }
 
     #[test]
@@ -227,30 +320,72 @@ mod tests {
         let e = PolicyEngine::new();
         let b = make_bailment(&alice(), &bob(), BailmentType::Delegation, Some(ts(1000)));
         let c = vec![consent(&alice(), "read", "viewer", 0, b)];
-        let d = e.evaluate(&read_policy(), &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
     #[test]
     fn grant_no_requirements_permissive() {
         let e = PolicyEngine::new();
-        let p = ConsentPolicy { id: "p".into(), name: "p".into(), required_consents: vec![], deny_by_default: false };
-        let d = e.evaluate(&p, &[], &ActionRequest { actor: bob(), action_type: "x".into() }, &now());
+        let p = ConsentPolicy {
+            id: "p".into(),
+            name: "p".into(),
+            required_consents: vec![],
+            deny_by_default: false,
+        };
+        let d = e.evaluate(
+            &p,
+            &[],
+            &ActionRequest {
+                actor: bob(),
+                action_type: "x".into(),
+            },
+            &now(),
+        );
         assert_eq!(d, ConsentDecision::Granted { expires: None });
     }
 
     #[test]
     fn deny_no_requirements_strict() {
         let e = PolicyEngine::new();
-        let p = ConsentPolicy { id: "p".into(), name: "p".into(), required_consents: vec![], deny_by_default: true };
-        let d = e.evaluate(&p, &[], &ActionRequest { actor: bob(), action_type: "x".into() }, &now());
+        let p = ConsentPolicy {
+            id: "p".into(),
+            name: "p".into(),
+            required_consents: vec![],
+            deny_by_default: true,
+        };
+        let d = e.evaluate(
+            &p,
+            &[],
+            &ActionRequest {
+                actor: bob(),
+                action_type: "x".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
     #[test]
     fn deny_unmatched_action() {
         let e = PolicyEngine::new();
-        let d = e.evaluate(&read_policy(), &[], &ActionRequest { actor: bob(), action_type: "write".into() }, &now());
+        let d = e.evaluate(
+            &read_policy(),
+            &[],
+            &ActionRequest {
+                actor: bob(),
+                action_type: "write".into(),
+            },
+            &now(),
+        );
         assert!(matches!(d, ConsentDecision::Denied { .. }));
     }
 
@@ -258,17 +393,43 @@ mod tests {
     fn earliest_expiry_wins() {
         let e = PolicyEngine::new();
         let p = ConsentPolicy {
-            id: "m".into(), name: "m".into(), deny_by_default: true,
+            id: "m".into(),
+            name: "m".into(),
+            deny_by_default: true,
             required_consents: vec![
-                ConsentRequirement { action_type: "read".into(), required_role: "owner".into(), min_clearance_level: 1 },
-                ConsentRequirement { action_type: "read".into(), required_role: "auditor".into(), min_clearance_level: 1 },
+                ConsentRequirement {
+                    action_type: "read".into(),
+                    required_role: "owner".into(),
+                    min_clearance_level: 1,
+                },
+                ConsentRequirement {
+                    action_type: "read".into(),
+                    required_role: "auditor".into(),
+                    min_clearance_level: 1,
+                },
             ],
         };
         let b1 = make_bailment(&alice(), &bob(), BailmentType::Custody, Some(ts(8000)));
         let b2 = make_bailment(&alice(), &bob(), BailmentType::Custody, Some(ts(12000)));
-        let c = vec![consent(&alice(), "read", "owner", 2, b1), consent(&alice(), "read", "auditor", 1, b2)];
-        let d = e.evaluate(&p, &c, &ActionRequest { actor: bob(), action_type: "read".into() }, &now());
-        assert_eq!(d, ConsentDecision::Granted { expires: Some(ts(8000)) });
+        let c = vec![
+            consent(&alice(), "read", "owner", 2, b1),
+            consent(&alice(), "read", "auditor", 1, b2),
+        ];
+        let d = e.evaluate(
+            &p,
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
+        assert_eq!(
+            d,
+            ConsentDecision::Granted {
+                expires: Some(ts(8000))
+            }
+        );
     }
 
     #[test]

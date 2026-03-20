@@ -38,14 +38,20 @@ mod tests {
 
     #[test]
     fn error_display_chain_broken() {
-        let e = AuthorityError::ChainBroken { index: 2, reason: "gap".into() };
+        let e = AuthorityError::ChainBroken {
+            index: 2,
+            reason: "gap".into(),
+        };
         assert!(e.to_string().contains("2"));
         assert!(e.to_string().contains("gap"));
     }
 
     #[test]
     fn error_display_depth_exceeded() {
-        let e = AuthorityError::DepthExceeded { depth: 6, max_depth: 5 };
+        let e = AuthorityError::DepthExceeded {
+            depth: 6,
+            max_depth: 5,
+        };
         assert!(e.to_string().contains("6"));
     }
 

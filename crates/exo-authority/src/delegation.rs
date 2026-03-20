@@ -4,9 +4,11 @@ use std::collections::BTreeMap;
 
 use exo_core::{Did, Hash256, Signature, Timestamp};
 
-use crate::chain::{self, AuthorityChain, AuthorityLink, DEFAULT_MAX_DEPTH};
-use crate::error::AuthorityError;
-use crate::permission::Permission;
+use crate::{
+    chain::{self, AuthorityChain, AuthorityLink, DEFAULT_MAX_DEPTH},
+    error::AuthorityError,
+    permission::Permission,
+};
 
 /// Registry of all active delegations.
 #[derive(Debug, Default)]
@@ -58,11 +60,11 @@ impl DelegationRegistry {
         };
 
         let id = link.id();
-        self.links.insert(id.clone(), link.clone());
+        self.links.insert(id, link.clone());
         self.by_delegator
             .entry(from.as_str().to_owned())
             .or_default()
-            .push(id.clone());
+            .push(id);
         self.by_delegate
             .entry(to.as_str().to_owned())
             .or_default()
@@ -194,14 +196,26 @@ impl DelegationRegistry {
 mod tests {
     use super::*;
 
-    fn did(name: &str) -> Did { Did::new(&format!("did:exo:{name}")).unwrap() }
-    fn ts(ms: u64) -> Timestamp { Timestamp::new(ms, 0) }
-    fn now() -> Timestamp { ts(5000) }
+    fn did(name: &str) -> Did {
+        Did::new(&format!("did:exo:{name}")).unwrap()
+    }
+    fn ts(ms: u64) -> Timestamp {
+        Timestamp::new(ms, 0)
+    }
+    fn now() -> Timestamp {
+        ts(5000)
+    }
 
     #[test]
     fn delegate_creates_link() {
         let mut reg = DelegationRegistry::new();
-        let link = reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now());
+        let link = reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        );
         assert!(link.is_ok());
         let l = link.unwrap();
         assert_eq!(l.delegator_did, did("alice"));
@@ -212,24 +226,65 @@ mod tests {
     #[test]
     fn delegate_detects_circular() {
         let mut reg = DelegationRegistry::new();
-        reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).ok();
-        let result = reg.delegate(&did("bob"), &did("alice"), &[Permission::Read], ts(10000), &now());
+        reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
+        let result = reg.delegate(
+            &did("bob"),
+            &did("alice"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
     }
 
     #[test]
     fn delegate_detects_transitive_circular() {
         let mut reg = DelegationRegistry::new();
-        reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).ok();
-        reg.delegate(&did("bob"), &did("charlie"), &[Permission::Read], ts(10000), &now()).ok();
-        let result = reg.delegate(&did("charlie"), &did("alice"), &[Permission::Read], ts(10000), &now());
+        reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
+        reg.delegate(
+            &did("bob"),
+            &did("charlie"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
+        let result = reg.delegate(
+            &did("charlie"),
+            &did("alice"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
     }
 
     #[test]
     fn revoke_delegation() {
         let mut reg = DelegationRegistry::new();
-        let link = reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).unwrap();
+        let link = reg
+            .delegate(
+                &did("alice"),
+                &did("bob"),
+                &[Permission::Read],
+                ts(10000),
+                &now(),
+            )
+            .unwrap();
         let id = link.id();
         assert!(reg.revoke_delegation(&id).is_ok());
         assert_eq!(reg.len(), 0);
@@ -239,13 +294,23 @@ mod tests {
     fn revoke_nonexistent() {
         let mut reg = DelegationRegistry::new();
         let fake = Hash256::digest(b"fake");
-        assert!(matches!(reg.revoke_delegation(&fake), Err(AuthorityError::NotFound(_))));
+        assert!(matches!(
+            reg.revoke_delegation(&fake),
+            Err(AuthorityError::NotFound(_))
+        ));
     }
 
     #[test]
     fn find_chain_direct() {
         let mut reg = DelegationRegistry::new();
-        reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).ok();
+        reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
         let chain = reg.find_chain(&did("alice"), &did("bob"));
         assert!(chain.is_some());
         assert_eq!(chain.unwrap().depth(), 1);
@@ -254,8 +319,22 @@ mod tests {
     #[test]
     fn find_chain_transitive() {
         let mut reg = DelegationRegistry::new();
-        reg.delegate(&did("alice"), &did("bob"), &[Permission::Read, Permission::Write], ts(10000), &now()).ok();
-        reg.delegate(&did("bob"), &did("charlie"), &[Permission::Read], ts(10000), &now()).ok();
+        reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read, Permission::Write],
+            ts(10000),
+            &now(),
+        )
+        .ok();
+        reg.delegate(
+            &did("bob"),
+            &did("charlie"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
         let chain = reg.find_chain(&did("alice"), &did("charlie"));
         assert!(chain.is_some());
         assert_eq!(chain.unwrap().depth(), 2);
@@ -270,7 +349,14 @@ mod tests {
     #[test]
     fn find_chain_no_path() {
         let mut reg = DelegationRegistry::new();
-        reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).ok();
+        reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
         assert!(reg.find_chain(&did("alice"), &did("charlie")).is_none());
     }
 
@@ -284,7 +370,15 @@ mod tests {
     #[test]
     fn revoke_cleans_indexes() {
         let mut reg = DelegationRegistry::new();
-        let l = reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).unwrap();
+        let l = reg
+            .delegate(
+                &did("alice"),
+                &did("bob"),
+                &[Permission::Read],
+                ts(10000),
+                &now(),
+            )
+            .unwrap();
         reg.revoke_delegation(&l.id()).ok();
         // After revocation, chain should not be found
         assert!(reg.find_chain(&did("alice"), &did("bob")).is_none());
@@ -293,8 +387,22 @@ mod tests {
     #[test]
     fn multiple_delegations_from_same_source() {
         let mut reg = DelegationRegistry::new();
-        reg.delegate(&did("alice"), &did("bob"), &[Permission::Read], ts(10000), &now()).ok();
-        reg.delegate(&did("alice"), &did("charlie"), &[Permission::Write], ts(10000), &now()).ok();
+        reg.delegate(
+            &did("alice"),
+            &did("bob"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        )
+        .ok();
+        reg.delegate(
+            &did("alice"),
+            &did("charlie"),
+            &[Permission::Write],
+            ts(10000),
+            &now(),
+        )
+        .ok();
         assert_eq!(reg.len(), 2);
         assert!(reg.find_chain(&did("alice"), &did("bob")).is_some());
         assert!(reg.find_chain(&did("alice"), &did("charlie")).is_some());
@@ -303,7 +411,13 @@ mod tests {
     #[test]
     fn self_delegation_detected_as_circular() {
         let mut reg = DelegationRegistry::new();
-        let result = reg.delegate(&did("alice"), &did("alice"), &[Permission::Read], ts(10000), &now());
+        let result = reg.delegate(
+            &did("alice"),
+            &did("alice"),
+            &[Permission::Read],
+            ts(10000),
+            &now(),
+        );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
     }
 }

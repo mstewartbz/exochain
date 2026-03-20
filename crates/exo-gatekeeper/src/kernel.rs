@@ -6,12 +6,15 @@
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
 
-use crate::invariants::{
-    enforce_all, ConstitutionalInvariant, InvariantContext, InvariantEngine, InvariantSet,
-    InvariantViolation,
-};
-use crate::types::{
-    AuthorityChain, BailmentState, ConsentRecord, PermissionSet, Provenance, QuorumEvidence, Role,
+use crate::{
+    invariants::{
+        ConstitutionalInvariant, InvariantContext, InvariantEngine, InvariantSet,
+        InvariantViolation, enforce_all,
+    },
+    types::{
+        AuthorityChain, BailmentState, ConsentRecord, PermissionSet, Provenance, QuorumEvidence,
+        Role,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -26,8 +29,12 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    pub fn is_permitted(&self) -> bool { matches!(self, Verdict::Permitted) }
-    pub fn is_denied(&self) -> bool { matches!(self, Verdict::Denied { .. }) }
+    pub fn is_permitted(&self) -> bool {
+        matches!(self, Verdict::Permitted)
+    }
+    pub fn is_denied(&self) -> bool {
+        matches!(self, Verdict::Denied { .. })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +110,9 @@ impl Kernel {
                         || v.invariant == ConstitutionalInvariant::AuthorityChainValid
                 });
                 if needs_escalation && violations.len() == 1 {
-                    Verdict::Escalated { reason: violations[0].description.clone() }
+                    Verdict::Escalated {
+                        reason: violations[0].description.clone(),
+                    }
                 } else {
                     Verdict::Denied { violations }
                 }
@@ -116,10 +125,14 @@ impl Kernel {
     }
 
     #[must_use]
-    pub fn constitution_hash(&self) -> &[u8; 32] { &self.constitution_hash }
+    pub fn constitution_hash(&self) -> &[u8; 32] {
+        &self.constitution_hash
+    }
 
     #[must_use]
-    pub fn invariant_engine(&self) -> &InvariantEngine { &self.invariant_engine }
+    pub fn invariant_engine(&self) -> &InvariantEngine {
+        &self.invariant_engine
+    }
 }
 
 // ===========================================================================
@@ -133,8 +146,12 @@ mod tests {
 
     const CONSTITUTION: &[u8] = b"We the people of the EXOCHAIN...";
 
-    fn did(s: &str) -> Did { Did::new(s).expect("valid DID") }
-    fn test_kernel() -> Kernel { Kernel::new(CONSTITUTION, InvariantSet::all()) }
+    fn did(s: &str) -> Did {
+        Did::new(s).expect("valid DID")
+    }
+    fn test_kernel() -> Kernel {
+        Kernel::new(CONSTITUTION, InvariantSet::all())
+    }
 
     fn valid_action(actor: &Did) -> ActionRequest {
         ActionRequest {
@@ -148,7 +165,10 @@ mod tests {
 
     fn valid_context(actor: &Did) -> AdjudicationContext {
         AdjudicationContext {
-            actor_roles: vec![Role { name: "judge".into(), branch: GovernmentBranch::Judicial }],
+            actor_roles: vec![Role {
+                name: "judge".into(),
+                branch: GovernmentBranch::Judicial,
+            }],
             authority_chain: AuthorityChain {
                 links: vec![AuthorityLink {
                     grantor: did("did:exo:root"),
@@ -183,7 +203,10 @@ mod tests {
     #[test]
     fn kernel_hashes_constitution() {
         let kernel = test_kernel();
-        assert_eq!(kernel.constitution_hash(), blake3::hash(CONSTITUTION).as_bytes());
+        assert_eq!(
+            kernel.constitution_hash(),
+            blake3::hash(CONSTITUTION).as_bytes()
+        );
     }
 
     #[test]
@@ -202,8 +225,14 @@ mod tests {
         let actor = did("did:exo:actor1");
         let mut ctx = valid_context(&actor);
         ctx.actor_roles = vec![
-            Role { name: "s".into(), branch: GovernmentBranch::Legislative },
-            Role { name: "j".into(), branch: GovernmentBranch::Judicial },
+            Role {
+                name: "s".into(),
+                branch: GovernmentBranch::Legislative,
+            },
+            Role {
+                name: "j".into(),
+                branch: GovernmentBranch::Judicial,
+            },
         ];
         assert!(kernel.adjudicate(&valid_action(&actor), &ctx).is_denied());
     }
@@ -212,7 +241,11 @@ mod tests {
     fn cp1_separation_permits_single_branch() {
         let kernel = test_kernel();
         let actor = did("did:exo:actor1");
-        assert!(kernel.adjudicate(&valid_action(&actor), &valid_context(&actor)).is_permitted());
+        assert!(
+            kernel
+                .adjudicate(&valid_action(&actor), &valid_context(&actor))
+                .is_permitted()
+        );
     }
 
     #[test]
@@ -228,7 +261,11 @@ mod tests {
     fn cp2_consent_permits_active() {
         let kernel = test_kernel();
         let actor = did("did:exo:actor1");
-        assert!(kernel.adjudicate(&valid_action(&actor), &valid_context(&actor)).is_permitted());
+        assert!(
+            kernel
+                .adjudicate(&valid_action(&actor), &valid_context(&actor))
+                .is_permitted()
+        );
     }
 
     #[test]
@@ -237,14 +274,22 @@ mod tests {
         let actor = did("did:exo:actor1");
         let mut action = valid_action(&actor);
         action.is_self_grant = true;
-        assert!(kernel.adjudicate(&action, &valid_context(&actor)).is_denied());
+        assert!(
+            kernel
+                .adjudicate(&action, &valid_context(&actor))
+                .is_denied()
+        );
     }
 
     #[test]
     fn cp3_no_self_grant_permits() {
         let kernel = test_kernel();
         let actor = did("did:exo:actor1");
-        assert!(kernel.adjudicate(&valid_action(&actor), &valid_context(&actor)).is_permitted());
+        assert!(
+            kernel
+                .adjudicate(&valid_action(&actor), &valid_context(&actor))
+                .is_permitted()
+        );
     }
 
     #[test]
@@ -260,7 +305,11 @@ mod tests {
     fn cp4_human_override_permits() {
         let kernel = test_kernel();
         let actor = did("did:exo:actor1");
-        assert!(kernel.adjudicate(&valid_action(&actor), &valid_context(&actor)).is_permitted());
+        assert!(
+            kernel
+                .adjudicate(&valid_action(&actor), &valid_context(&actor))
+                .is_permitted()
+        );
     }
 
     #[test]
@@ -269,14 +318,22 @@ mod tests {
         let actor = did("did:exo:actor1");
         let mut action = valid_action(&actor);
         action.modifies_kernel = true;
-        assert!(kernel.adjudicate(&action, &valid_context(&actor)).is_denied());
+        assert!(
+            kernel
+                .adjudicate(&action, &valid_context(&actor))
+                .is_denied()
+        );
     }
 
     #[test]
     fn cp5_kernel_immutability_permits() {
         let kernel = test_kernel();
         let actor = did("did:exo:actor1");
-        assert!(kernel.adjudicate(&valid_action(&actor), &valid_context(&actor)).is_permitted());
+        assert!(
+            kernel
+                .adjudicate(&valid_action(&actor), &valid_context(&actor))
+                .is_permitted()
+        );
     }
 
     #[test]
@@ -287,8 +344,16 @@ mod tests {
         ctx.quorum_evidence = Some(QuorumEvidence {
             threshold: 3,
             votes: vec![
-                QuorumVote { voter: did("did:exo:v1"), approved: true, signature: vec![1] },
-                QuorumVote { voter: did("did:exo:v2"), approved: false, signature: vec![2] },
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: false,
+                    signature: vec![2],
+                },
             ],
         });
         match kernel.adjudicate(&valid_action(&actor), &ctx) {
@@ -308,6 +373,13 @@ mod tests {
 
     #[test]
     fn kernel_engine_accessor() {
-        assert_eq!(test_kernel().invariant_engine().invariant_set.invariants.len(), 8);
+        assert_eq!(
+            test_kernel()
+                .invariant_engine()
+                .invariant_set
+                .invariants
+                .len(),
+            8
+        );
     }
 }

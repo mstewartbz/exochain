@@ -87,8 +87,11 @@ impl MetricsCollector {
 
     /// M1: Authority verification coverage percentage (0–100).
     #[must_use]
-    pub fn m1_authority_pct(&self) -> u32 {
-        pct(self.authority_verification_passed, self.authority_verification_total)
+    pub fn m1_authority_pct(&self) -> u64 {
+        pct(
+            self.authority_verification_passed,
+            self.authority_verification_total,
+        )
     }
 
     /// M2: Revocation latency P95 in milliseconds.
@@ -99,26 +102,32 @@ impl MetricsCollector {
 
     /// M3: Evidence completeness percentage.
     #[must_use]
-    pub fn m3_evidence_pct(&self) -> u32 {
+    pub fn m3_evidence_pct(&self) -> u64 {
         pct(self.evidence_checks_complete, self.evidence_checks_total)
     }
 
     /// M4: Quorum compliance percentage.
     #[must_use]
-    pub fn m4_quorum_pct(&self) -> u32 {
+    pub fn m4_quorum_pct(&self) -> u64 {
         pct(self.quorum_checks_met, self.quorum_checks_total)
     }
 
     /// M5: Human gate satisfaction percentage.
     #[must_use]
-    pub fn m5_human_gate_pct(&self) -> u32 {
-        pct(self.human_gate_checks_satisfied, self.human_gate_checks_total)
+    pub fn m5_human_gate_pct(&self) -> u64 {
+        pct(
+            self.human_gate_checks_satisfied,
+            self.human_gate_checks_total,
+        )
     }
 
     /// M6: Constitutional binding validity percentage.
     #[must_use]
-    pub fn m6_constitutional_pct(&self) -> u32 {
-        pct(self.constitutional_binding_valid, self.constitutional_binding_total)
+    pub fn m6_constitutional_pct(&self) -> u64 {
+        pct(
+            self.constitutional_binding_valid,
+            self.constitutional_binding_total,
+        )
     }
 
     /// M7: Challenge resolution time P95 in milliseconds.
@@ -129,31 +138,31 @@ impl MetricsCollector {
 
     /// M8: Emergency ratification percentage.
     #[must_use]
-    pub fn m8_emergency_pct(&self) -> u32 {
+    pub fn m8_emergency_pct(&self) -> u64 {
         pct(self.emergency_ratified, self.emergency_total)
     }
 
     /// M9: Accountability completion percentage.
     #[must_use]
-    pub fn m9_accountability_pct(&self) -> u32 {
+    pub fn m9_accountability_pct(&self) -> u64 {
         pct(self.accountability_completed, self.accountability_total)
     }
 
     /// M10: Consent verification percentage.
     #[must_use]
-    pub fn m10_consent_pct(&self) -> u32 {
+    pub fn m10_consent_pct(&self) -> u64 {
         pct(self.consent_checks_verified, self.consent_checks_total)
     }
 
     /// M11: Identity verification percentage.
     #[must_use]
-    pub fn m11_identity_pct(&self) -> u32 {
+    pub fn m11_identity_pct(&self) -> u64 {
         pct(self.identity_checks_verified, self.identity_checks_total)
     }
 
     /// M12: Self-modification compliance percentage.
     #[must_use]
-    pub fn m12_self_mod_pct(&self) -> u32 {
+    pub fn m12_self_mod_pct(&self) -> u64 {
         pct(self.self_mod_compliant, self.self_mod_total)
     }
 
@@ -162,7 +171,9 @@ impl MetricsCollector {
     /// Record an authority verification result.
     pub fn record_authority_check(&mut self, passed: bool) {
         self.authority_verification_total += 1;
-        if passed { self.authority_verification_passed += 1; }
+        if passed {
+            self.authority_verification_passed += 1;
+        }
     }
 
     /// Record a revocation latency measurement.
@@ -173,25 +184,33 @@ impl MetricsCollector {
     /// Record an evidence completeness check.
     pub fn record_evidence_check(&mut self, complete: bool) {
         self.evidence_checks_total += 1;
-        if complete { self.evidence_checks_complete += 1; }
+        if complete {
+            self.evidence_checks_complete += 1;
+        }
     }
 
     /// Record a quorum check.
     pub fn record_quorum_check(&mut self, met: bool) {
         self.quorum_checks_total += 1;
-        if met { self.quorum_checks_met += 1; }
+        if met {
+            self.quorum_checks_met += 1;
+        }
     }
 
     /// Record a human gate check.
     pub fn record_human_gate_check(&mut self, satisfied: bool) {
         self.human_gate_checks_total += 1;
-        if satisfied { self.human_gate_checks_satisfied += 1; }
+        if satisfied {
+            self.human_gate_checks_satisfied += 1;
+        }
     }
 
     /// Record a constitutional binding check.
     pub fn record_constitutional_check(&mut self, valid: bool) {
         self.constitutional_binding_total += 1;
-        if valid { self.constitutional_binding_valid += 1; }
+        if valid {
+            self.constitutional_binding_valid += 1;
+        }
     }
 
     /// Record a challenge resolution time.
@@ -202,51 +221,67 @@ impl MetricsCollector {
     /// Record an emergency action.
     pub fn record_emergency(&mut self, ratified: bool) {
         self.emergency_total += 1;
-        if ratified { self.emergency_ratified += 1; }
+        if ratified {
+            self.emergency_ratified += 1;
+        }
     }
 
     /// Record an accountability action.
     pub fn record_accountability(&mut self, completed: bool) {
         self.accountability_total += 1;
-        if completed { self.accountability_completed += 1; }
+        if completed {
+            self.accountability_completed += 1;
+        }
     }
 
     /// Record a consent check.
     pub fn record_consent_check(&mut self, verified: bool) {
         self.consent_checks_total += 1;
-        if verified { self.consent_checks_verified += 1; }
+        if verified {
+            self.consent_checks_verified += 1;
+        }
     }
 
     /// Record an identity check.
     pub fn record_identity_check(&mut self, verified: bool) {
         self.identity_checks_total += 1;
-        if verified { self.identity_checks_verified += 1; }
+        if verified {
+            self.identity_checks_verified += 1;
+        }
     }
 
     /// Record a self-modification check.
     pub fn record_self_mod(&mut self, compliant: bool) {
         self.self_mod_total += 1;
-        if compliant { self.self_mod_compliant += 1; }
+        if compliant {
+            self.self_mod_compliant += 1;
+        }
     }
 }
 
 impl Default for MetricsCollector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Compute a percentage (0–100), returning 100 if total is 0.
-fn pct(numerator: u64, denominator: u64) -> u32 {
-    if denominator == 0 { return 100; }
-    ((numerator * 100) / denominator) as u32
+fn pct(numerator: u64, denominator: u64) -> u64 {
+    if denominator == 0 {
+        return 100;
+    }
+    (numerator * 100) / denominator
 }
 
 /// Compute the 95th percentile of a latency distribution.
 fn percentile_95(values: &[u64]) -> u64 {
-    if values.is_empty() { return 0; }
+    if values.is_empty() {
+        return 0;
+    }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
-    let idx = ((sorted.len() as f64) * 0.95).ceil() as usize;
-    let idx = idx.min(sorted.len()) - 1;
+    // Integer 95th-percentile: index = ceil(len * 95 / 100) - 1, clamped to last element.
+    let idx = ((sorted.len() * 95).div_ceil(100)).min(sorted.len()) - 1;
     sorted[idx]
 }
 
@@ -319,7 +354,9 @@ mod tests {
     #[test]
     fn mixed_results() {
         let mut m = MetricsCollector::new();
-        for _ in 0..99 { m.record_evidence_check(true); }
+        for _ in 0..99 {
+            m.record_evidence_check(true);
+        }
         m.record_evidence_check(false);
         assert_eq!(m.m3_evidence_pct(), 99);
     }

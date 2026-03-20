@@ -21,13 +21,23 @@ pub type Result<T> = std::result::Result<T, GatewayError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn all_display() {
+    #[test]
+    fn all_display() {
         let es: Vec<GatewayError> = vec![
-            GatewayError::AuthenticationFailed{reason:"x".into()}, GatewayError::ConsentDenied{reason:"x".into()},
-            GatewayError::GovernanceDenied{reason:"x".into()}, GatewayError::NotFound("x".into()),
-            GatewayError::Internal("x".into()), GatewayError::BadRequest("x".into()),
+            GatewayError::AuthenticationFailed { reason: "x".into() },
+            GatewayError::ConsentDenied { reason: "x".into() },
+            GatewayError::GovernanceDenied { reason: "x".into() },
+            GatewayError::NotFound("x".into()),
+            GatewayError::Internal("x".into()),
+            GatewayError::BadRequest("x".into()),
         ];
-        for e in &es { assert!(!e.to_string().is_empty()); }
+        for e in &es {
+            assert!(!e.to_string().is_empty());
+        }
     }
-    #[test] fn result_alias() { let ok: Result<u32> = Ok(1); assert!(ok.is_ok()); }
+    #[test]
+    fn result_alias() {
+        let ok: Result<u32> = Ok(1);
+        assert!(ok.is_ok());
+    }
 }

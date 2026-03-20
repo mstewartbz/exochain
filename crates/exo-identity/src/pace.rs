@@ -1,8 +1,10 @@
 //! PACE — Primary / Alternate / Contingency / Emergency operator continuity.
 
 use std::collections::BTreeSet;
+
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
+
 use crate::error::IdentityError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,13 +18,19 @@ pub struct PaceConfig {
 impl PaceConfig {
     pub fn validate(&self) -> Result<(), IdentityError> {
         if self.alternates.is_empty() {
-            return Err(IdentityError::InvalidPaceConfig("alternates must not be empty".into()));
+            return Err(IdentityError::InvalidPaceConfig(
+                "alternates must not be empty".into(),
+            ));
         }
         if self.contingency.is_empty() {
-            return Err(IdentityError::InvalidPaceConfig("contingency must not be empty".into()));
+            return Err(IdentityError::InvalidPaceConfig(
+                "contingency must not be empty".into(),
+            ));
         }
         if self.emergency.is_empty() {
-            return Err(IdentityError::InvalidPaceConfig("emergency must not be empty".into()));
+            return Err(IdentityError::InvalidPaceConfig(
+                "emergency must not be empty".into(),
+            ));
         }
 
         let mut all = BTreeSet::new();
@@ -107,21 +115,30 @@ mod tests {
     fn validate_empty_alternates() {
         let mut config = make_config();
         config.alternates.clear();
-        assert!(matches!(config.validate().unwrap_err(), IdentityError::InvalidPaceConfig(_)));
+        assert!(matches!(
+            config.validate().unwrap_err(),
+            IdentityError::InvalidPaceConfig(_)
+        ));
     }
 
     #[test]
     fn validate_empty_contingency() {
         let mut config = make_config();
         config.contingency.clear();
-        assert!(matches!(config.validate().unwrap_err(), IdentityError::InvalidPaceConfig(_)));
+        assert!(matches!(
+            config.validate().unwrap_err(),
+            IdentityError::InvalidPaceConfig(_)
+        ));
     }
 
     #[test]
     fn validate_empty_emergency() {
         let mut config = make_config();
         config.emergency.clear();
-        assert!(matches!(config.validate().unwrap_err(), IdentityError::InvalidPaceConfig(_)));
+        assert!(matches!(
+            config.validate().unwrap_err(),
+            IdentityError::InvalidPaceConfig(_)
+        ));
     }
 
     #[test]
@@ -132,7 +149,10 @@ mod tests {
             contingency: vec![make_did("primary")],
             emergency: vec![make_did("emerg1")],
         };
-        assert!(matches!(config.validate().unwrap_err(), IdentityError::DuplicatePaceDid(_)));
+        assert!(matches!(
+            config.validate().unwrap_err(),
+            IdentityError::DuplicatePaceDid(_)
+        ));
     }
 
     #[test]
@@ -143,31 +163,46 @@ mod tests {
             contingency: vec![make_did("cont1")],
             emergency: vec![make_did("emerg1")],
         };
-        assert!(matches!(config.validate().unwrap_err(), IdentityError::DuplicatePaceDid(_)));
+        assert!(matches!(
+            config.validate().unwrap_err(),
+            IdentityError::DuplicatePaceDid(_)
+        ));
     }
 
     #[test]
     fn resolve_operator_normal() {
         let config = make_config();
-        assert_eq!(resolve_operator(&config, &PaceState::Normal), &config.primary);
+        assert_eq!(
+            resolve_operator(&config, &PaceState::Normal),
+            &config.primary
+        );
     }
 
     #[test]
     fn resolve_operator_alternate() {
         let config = make_config();
-        assert_eq!(resolve_operator(&config, &PaceState::AlternateActive), &config.alternates[0]);
+        assert_eq!(
+            resolve_operator(&config, &PaceState::AlternateActive),
+            &config.alternates[0]
+        );
     }
 
     #[test]
     fn resolve_operator_contingency() {
         let config = make_config();
-        assert_eq!(resolve_operator(&config, &PaceState::ContingencyActive), &config.contingency[0]);
+        assert_eq!(
+            resolve_operator(&config, &PaceState::ContingencyActive),
+            &config.contingency[0]
+        );
     }
 
     #[test]
     fn resolve_operator_emergency() {
         let config = make_config();
-        assert_eq!(resolve_operator(&config, &PaceState::EmergencyActive), &config.emergency[0]);
+        assert_eq!(
+            resolve_operator(&config, &PaceState::EmergencyActive),
+            &config.emergency[0]
+        );
     }
 
     #[test]
@@ -176,16 +211,25 @@ mod tests {
         assert_eq!(escalate(&mut state).unwrap(), PaceState::AlternateActive);
         assert_eq!(escalate(&mut state).unwrap(), PaceState::ContingencyActive);
         assert_eq!(escalate(&mut state).unwrap(), PaceState::EmergencyActive);
-        assert!(matches!(escalate(&mut state).unwrap_err(), IdentityError::CannotEscalate));
+        assert!(matches!(
+            escalate(&mut state).unwrap_err(),
+            IdentityError::CannotEscalate
+        ));
     }
 
     #[test]
     fn deescalate_full_path() {
         let mut state = PaceState::EmergencyActive;
-        assert_eq!(deescalate(&mut state).unwrap(), PaceState::ContingencyActive);
+        assert_eq!(
+            deescalate(&mut state).unwrap(),
+            PaceState::ContingencyActive
+        );
         assert_eq!(deescalate(&mut state).unwrap(), PaceState::AlternateActive);
         assert_eq!(deescalate(&mut state).unwrap(), PaceState::Normal);
-        assert!(matches!(deescalate(&mut state).unwrap_err(), IdentityError::CannotDeescalate));
+        assert!(matches!(
+            deescalate(&mut state).unwrap_err(),
+            IdentityError::CannotDeescalate
+        ));
     }
 
     #[test]
@@ -205,7 +249,10 @@ mod tests {
         let config = make_config();
         let mut state = PaceState::Normal;
 
-        assert_eq!(resolve_operator(&config, &state).as_str(), "did:exo:primary");
+        assert_eq!(
+            resolve_operator(&config, &state).as_str(),
+            "did:exo:primary"
+        );
         escalate(&mut state).unwrap();
         assert_eq!(resolve_operator(&config, &state).as_str(), "did:exo:alt1");
         escalate(&mut state).unwrap();

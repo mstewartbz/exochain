@@ -8,8 +8,10 @@
 //! 2. Causally-related events are always ordered correctly.
 //! 3. No floating-point arithmetic is involved.
 
-use crate::error::{ExoError, Result};
-use crate::types::Timestamp;
+use crate::{
+    error::{ExoError, Result},
+    types::Timestamp,
+};
 
 /// Maximum tolerable forward drift in milliseconds.
 /// If a remote timestamp is more than this far ahead of our wall clock
@@ -140,14 +142,17 @@ fn system_time_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 
 /// WASM wall-clock: route through js_sys::Date::now().
 #[cfg(target_arch = "wasm32")]
 fn system_time_millis() -> u64 {
-    js_sys::Date::now() as u64
+    #[allow(clippy::as_conversions)] // js_sys::Date::now() returns f64; safe truncation to u64
+    {
+        js_sys::Date::now() as u64
+    }
 }
 
 // ===========================================================================
@@ -156,9 +161,12 @@ fn system_time_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
 
     /// Helper: create a clock with a controllable wall time.
     fn test_clock(initial: u64) -> (HybridClock, Arc<AtomicU64>) {

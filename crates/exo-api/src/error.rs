@@ -19,13 +19,24 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn all_variants_display() {
+    #[test]
+    fn all_variants_display() {
         let es: Vec<ApiError> = vec![
-            ApiError::PeerNotFound("x".into()), ApiError::VerificationFailed{reason:"x".into()},
-            ApiError::RateLimited{peer_id:"x".into()}, ApiError::InvalidSchema{reason:"x".into()},
+            ApiError::PeerNotFound("x".into()),
+            ApiError::VerificationFailed { reason: "x".into() },
+            ApiError::RateLimited {
+                peer_id: "x".into(),
+            },
+            ApiError::InvalidSchema { reason: "x".into() },
             ApiError::SerializationError("x".into()),
         ];
-        for e in &es { assert!(!e.to_string().is_empty()); }
+        for e in &es {
+            assert!(!e.to_string().is_empty());
+        }
     }
-    #[test] fn result_alias() { let ok: Result<u32> = Ok(1); assert!(ok.is_ok()); }
+    #[test]
+    fn result_alias() {
+        let ok: Result<u32> = Ok(1);
+        assert!(ok.is_ok());
+    }
 }

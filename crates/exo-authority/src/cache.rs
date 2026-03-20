@@ -74,16 +74,20 @@ impl ChainCache {
             from: from.as_str().to_owned(),
             to: to.as_str().to_owned(),
         };
-        self.entries.insert(key, CacheEntry {
-            chain,
-            last_accessed: *now,
-        });
+        self.entries.insert(
+            key,
+            CacheEntry {
+                chain,
+                last_accessed: *now,
+            },
+        );
     }
 
     /// Invalidate all chains involving a specific DID.
     pub fn invalidate(&mut self, did: &Did) {
         let did_str = did.as_str();
-        self.entries.retain(|key, _| key.from != did_str && key.to != did_str);
+        self.entries
+            .retain(|key, _| key.from != did_str && key.to != did_str);
     }
 
     /// Number of cached entries.
@@ -124,13 +128,20 @@ impl Default for ChainCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::chain::{AuthorityLink, AuthorityChain};
-    use crate::permission::Permission;
     use exo_core::Signature;
 
-    fn did(name: &str) -> Did { Did::new(&format!("did:exo:{name}")).unwrap() }
-    fn ts(ms: u64) -> Timestamp { Timestamp::new(ms, 0) }
+    use super::*;
+    use crate::{
+        chain::{AuthorityChain, AuthorityLink},
+        permission::Permission,
+    };
+
+    fn did(name: &str) -> Did {
+        Did::new(&format!("did:exo:{name}")).unwrap()
+    }
+    fn ts(ms: u64) -> Timestamp {
+        Timestamp::new(ms, 0)
+    }
 
     fn make_chain(from: &str, to: &str) -> AuthorityChain {
         AuthorityChain {
@@ -160,7 +171,12 @@ mod tests {
     #[test]
     fn get_updates_access_time() {
         let mut cache = ChainCache::new();
-        cache.insert(&did("alice"), &did("bob"), make_chain("alice", "bob"), &ts(1000));
+        cache.insert(
+            &did("alice"),
+            &did("bob"),
+            make_chain("alice", "bob"),
+            &ts(1000),
+        );
         cache.get(&did("alice"), &did("bob"), &ts(5000));
         // Access updated — won't be evicted first
         cache.insert(&did("x"), &did("y"), make_chain("x", "y"), &ts(2000));
@@ -177,9 +193,24 @@ mod tests {
     #[test]
     fn invalidate_removes_related() {
         let mut cache = ChainCache::new();
-        cache.insert(&did("alice"), &did("bob"), make_chain("alice", "bob"), &ts(1000));
-        cache.insert(&did("alice"), &did("charlie"), make_chain("alice", "charlie"), &ts(1000));
-        cache.insert(&did("dave"), &did("eve"), make_chain("dave", "eve"), &ts(1000));
+        cache.insert(
+            &did("alice"),
+            &did("bob"),
+            make_chain("alice", "bob"),
+            &ts(1000),
+        );
+        cache.insert(
+            &did("alice"),
+            &did("charlie"),
+            make_chain("alice", "charlie"),
+            &ts(1000),
+        );
+        cache.insert(
+            &did("dave"),
+            &did("eve"),
+            make_chain("dave", "eve"),
+            &ts(1000),
+        );
         assert_eq!(cache.len(), 3);
 
         cache.invalidate(&did("alice"));
@@ -190,7 +221,12 @@ mod tests {
     #[test]
     fn invalidate_as_target() {
         let mut cache = ChainCache::new();
-        cache.insert(&did("alice"), &did("bob"), make_chain("alice", "bob"), &ts(1000));
+        cache.insert(
+            &did("alice"),
+            &did("bob"),
+            make_chain("alice", "bob"),
+            &ts(1000),
+        );
         cache.invalidate(&did("bob"));
         assert!(cache.is_empty());
     }

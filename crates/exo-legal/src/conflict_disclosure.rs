@@ -12,7 +12,14 @@ pub struct Disclosure {
     pub verified: bool,
 }
 
-const REQUIRED_ACTIONS: &[&str] = &["vote", "approve", "fund", "transfer", "delegate", "adjudicate"];
+const REQUIRED_ACTIONS: &[&str] = &[
+    "vote",
+    "approve",
+    "fund",
+    "transfer",
+    "delegate",
+    "adjudicate",
+];
 
 #[must_use]
 pub fn require_disclosure(_actor: &Did, action: &str) -> bool {
@@ -22,27 +29,84 @@ pub fn require_disclosure(_actor: &Did, action: &str) -> bool {
 
 #[must_use]
 pub fn file_disclosure(actor: &Did, nature: &str, related: &[Did]) -> Disclosure {
-    Disclosure { declarant: actor.clone(), nature: nature.into(), related_parties: related.to_vec(), timestamp: Timestamp::ZERO, verified: false }
+    Disclosure {
+        declarant: actor.clone(),
+        nature: nature.into(),
+        related_parties: related.to_vec(),
+        timestamp: Timestamp::ZERO,
+        verified: false,
+    }
 }
 
-pub fn verify_disclosure(d: &mut Disclosure) { d.verified = true; }
+pub fn verify_disclosure(d: &mut Disclosure) {
+    d.verified = true;
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).unwrap() }
+    fn did(n: &str) -> Did {
+        Did::new(&format!("did:exo:{n}")).unwrap()
+    }
 
-    #[test] fn require_vote() { assert!(require_disclosure(&did("a"), "vote on proposal")); }
-    #[test] fn require_approve() { assert!(require_disclosure(&did("a"), "approve budget")); }
-    #[test] fn require_fund() { assert!(require_disclosure(&did("a"), "fund project")); }
-    #[test] fn require_transfer() { assert!(require_disclosure(&did("a"), "transfer assets")); }
-    #[test] fn require_delegate() { assert!(require_disclosure(&did("a"), "delegate authority")); }
-    #[test] fn require_adjudicate() { assert!(require_disclosure(&did("a"), "adjudicate dispute")); }
-    #[test] fn no_require_read() { assert!(!require_disclosure(&did("a"), "read document")); }
-    #[test] fn case_insensitive() { assert!(require_disclosure(&did("a"), "VOTE")); }
-    #[test] fn file_basic() { let d = file_disclosure(&did("a"), "financial", &[did("b")]); assert_eq!(d.related_parties.len(), 1); assert!(!d.verified); }
-    #[test] fn file_empty() { let d = file_disclosure(&did("a"), "x", &[]); assert!(d.related_parties.is_empty()); }
-    #[test] fn verify_sets_flag() { let mut d = file_disclosure(&did("a"), "x", &[]); verify_disclosure(&mut d); assert!(d.verified); }
-    #[test] fn serde() { let d = file_disclosure(&did("a"), "x", &[did("b")]); let j = serde_json::to_string(&d).unwrap(); let r: Disclosure = serde_json::from_str(&j).unwrap(); assert_eq!(r.declarant, did("a")); }
-    #[test] fn required_count() { assert_eq!(REQUIRED_ACTIONS.len(), 6); }
+    #[test]
+    fn require_vote() {
+        assert!(require_disclosure(&did("a"), "vote on proposal"));
+    }
+    #[test]
+    fn require_approve() {
+        assert!(require_disclosure(&did("a"), "approve budget"));
+    }
+    #[test]
+    fn require_fund() {
+        assert!(require_disclosure(&did("a"), "fund project"));
+    }
+    #[test]
+    fn require_transfer() {
+        assert!(require_disclosure(&did("a"), "transfer assets"));
+    }
+    #[test]
+    fn require_delegate() {
+        assert!(require_disclosure(&did("a"), "delegate authority"));
+    }
+    #[test]
+    fn require_adjudicate() {
+        assert!(require_disclosure(&did("a"), "adjudicate dispute"));
+    }
+    #[test]
+    fn no_require_read() {
+        assert!(!require_disclosure(&did("a"), "read document"));
+    }
+    #[test]
+    fn case_insensitive() {
+        assert!(require_disclosure(&did("a"), "VOTE"));
+    }
+    #[test]
+    fn file_basic() {
+        let d = file_disclosure(&did("a"), "financial", &[did("b")]);
+        assert_eq!(d.related_parties.len(), 1);
+        assert!(!d.verified);
+    }
+    #[test]
+    fn file_empty() {
+        let d = file_disclosure(&did("a"), "x", &[]);
+        assert!(d.related_parties.is_empty());
+    }
+    #[test]
+    fn verify_sets_flag() {
+        let mut d = file_disclosure(&did("a"), "x", &[]);
+        verify_disclosure(&mut d);
+        assert!(d.verified);
+    }
+    #[test]
+    fn serde() {
+        let d = file_disclosure(&did("a"), "x", &[did("b")]);
+        let j = serde_json::to_string(&d).unwrap();
+        let r: Disclosure = serde_json::from_str(&j).unwrap();
+        assert_eq!(r.declarant, did("a"));
+    }
+    #[test]
+    fn required_count() {
+        assert_eq!(REQUIRED_ACTIONS.len(), 6);
+    }
 }

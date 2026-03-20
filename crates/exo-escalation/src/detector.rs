@@ -5,8 +5,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalType {
-    SybilSuspicion, UnauthorizedAccess, ConsentViolation,
-    InvariantBreach, AnomalousPattern, EmergencyCondition,
+    SybilSuspicion,
+    UnauthorizedAccess,
+    ConsentViolation,
+    InvariantBreach,
+    AnomalousPattern,
+    EmergencyCondition,
 }
 
 /// confidence is u8 0-100, NOT float — deterministic.
@@ -20,10 +24,20 @@ pub struct DetectionSignal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Severity { Low, Medium, High, Critical }
+pub enum Severity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RecommendedAction { Monitor, Investigate, Quarantine, EmergencyShutdown }
+pub enum RecommendedAction {
+    Monitor,
+    Investigate,
+    Quarantine,
+    EmergencyShutdown,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatAssessment {
@@ -45,8 +59,12 @@ pub fn evaluate_signals(signals: &[DetectionSignal]) -> ThreatAssessment {
 
     // Find max confidence and check for emergency signals
     let max_confidence = signals.iter().map(|s| s.confidence).max().unwrap_or(0);
-    let has_emergency = signals.iter().any(|s| s.signal_type == SignalType::EmergencyCondition);
-    let has_sybil = signals.iter().any(|s| s.signal_type == SignalType::SybilSuspicion);
+    let has_emergency = signals
+        .iter()
+        .any(|s| s.signal_type == SignalType::EmergencyCondition);
+    let has_sybil = signals
+        .iter()
+        .any(|s| s.signal_type == SignalType::SybilSuspicion);
     let signal_count = signals.len();
 
     let (severity, action) = if has_emergency || max_confidence >= 90 {
@@ -72,41 +90,51 @@ mod tests {
 
     fn signal(st: SignalType, confidence: u8) -> DetectionSignal {
         DetectionSignal {
-            source: "test".into(), signal_type: st, confidence,
-            evidence_hash: [0u8; 32], timestamp: Timestamp::new(1000, 0),
+            source: "test".into(),
+            signal_type: st,
+            confidence,
+            evidence_hash: [0u8; 32],
+            timestamp: Timestamp::new(1000, 0),
         }
     }
 
-    #[test] fn empty_signals_low() {
+    #[test]
+    fn empty_signals_low() {
         let a = evaluate_signals(&[]);
         assert_eq!(a.overall_severity, Severity::Low);
         assert_eq!(a.recommended_action, RecommendedAction::Monitor);
     }
-    #[test] fn low_confidence_low_severity() {
+    #[test]
+    fn low_confidence_low_severity() {
         let a = evaluate_signals(&[signal(SignalType::AnomalousPattern, 20)]);
         assert_eq!(a.overall_severity, Severity::Low);
     }
-    #[test] fn medium_confidence_investigate() {
+    #[test]
+    fn medium_confidence_investigate() {
         let a = evaluate_signals(&[signal(SignalType::AnomalousPattern, 55)]);
         assert_eq!(a.overall_severity, Severity::Medium);
         assert_eq!(a.recommended_action, RecommendedAction::Investigate);
     }
-    #[test] fn high_confidence_quarantine() {
+    #[test]
+    fn high_confidence_quarantine() {
         let a = evaluate_signals(&[signal(SignalType::UnauthorizedAccess, 85)]);
         assert_eq!(a.overall_severity, Severity::High);
         assert_eq!(a.recommended_action, RecommendedAction::Quarantine);
     }
-    #[test] fn emergency_is_critical() {
+    #[test]
+    fn emergency_is_critical() {
         let a = evaluate_signals(&[signal(SignalType::EmergencyCondition, 50)]);
         assert_eq!(a.overall_severity, Severity::Critical);
         assert_eq!(a.recommended_action, RecommendedAction::EmergencyShutdown);
     }
-    #[test] fn sybil_high_confidence_quarantine() {
+    #[test]
+    fn sybil_high_confidence_quarantine() {
         let a = evaluate_signals(&[signal(SignalType::SybilSuspicion, 75)]);
         assert_eq!(a.overall_severity, Severity::High);
         assert_eq!(a.recommended_action, RecommendedAction::Quarantine);
     }
-    #[test] fn multiple_low_signals_escalate() {
+    #[test]
+    fn multiple_low_signals_escalate() {
         let a = evaluate_signals(&[
             signal(SignalType::AnomalousPattern, 30),
             signal(SignalType::AnomalousPattern, 35),
@@ -114,19 +142,27 @@ mod tests {
         ]);
         assert_eq!(a.overall_severity, Severity::Medium);
     }
-    #[test] fn very_high_confidence_critical() {
+    #[test]
+    fn very_high_confidence_critical() {
         let a = evaluate_signals(&[signal(SignalType::InvariantBreach, 95)]);
         assert_eq!(a.overall_severity, Severity::Critical);
     }
-    #[test] fn signals_preserved_in_assessment() {
+    #[test]
+    fn signals_preserved_in_assessment() {
         let sigs = vec![signal(SignalType::AnomalousPattern, 20)];
         let a = evaluate_signals(&sigs);
         assert_eq!(a.signals.len(), 1);
     }
-    #[test] fn all_signal_types() {
-        for st in [SignalType::SybilSuspicion, SignalType::UnauthorizedAccess,
-                    SignalType::ConsentViolation, SignalType::InvariantBreach,
-                    SignalType::AnomalousPattern, SignalType::EmergencyCondition] {
+    #[test]
+    fn all_signal_types() {
+        for st in [
+            SignalType::SybilSuspicion,
+            SignalType::UnauthorizedAccess,
+            SignalType::ConsentViolation,
+            SignalType::InvariantBreach,
+            SignalType::AnomalousPattern,
+            SignalType::EmergencyCondition,
+        ] {
             let s = signal(st, 50);
             assert_eq!(s.confidence, 50);
         }

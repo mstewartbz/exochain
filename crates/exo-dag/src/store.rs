@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 
 use exo_core::types::Hash256;
 
-use crate::dag::DagNode;
-use crate::error::{DagError, Result};
+use crate::{
+    dag::DagNode,
+    error::{DagError, Result},
+};
 
 // ---------------------------------------------------------------------------
 // DagStore trait
@@ -83,11 +85,7 @@ impl DagStore for MemoryStore {
         let mut result: Vec<Hash256> = self
             .nodes
             .keys()
-            .filter(|h| {
-                self.children
-                    .get(*h)
-                    .map_or(true, std::vec::Vec::is_empty)
-            })
+            .filter(|h| self.children.get(*h).is_none_or(std::vec::Vec::is_empty))
             .copied()
             .collect();
         result.sort();
@@ -116,11 +114,14 @@ impl DagStore for MemoryStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::dag::{append, Dag, HybridClock};
     use exo_core::types::{Did, Signature};
 
-    fn make_sign_fn() -> Box<dyn Fn(&[u8]) -> Signature> {
+    use super::*;
+    use crate::dag::{Dag, HybridClock, append};
+
+    type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
+
+    fn make_sign_fn() -> SignFn {
         Box::new(|data: &[u8]| {
             let h = blake3::hash(data);
             let mut sig = [0u8; 64];
@@ -201,7 +202,15 @@ mod tests {
         let sign_fn = make_sign_fn();
 
         let genesis = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
-        let child = append(&mut dag, &[genesis.hash], b"child", &creator, &*sign_fn, &mut clock).unwrap();
+        let child = append(
+            &mut dag,
+            &[genesis.hash],
+            b"child",
+            &creator,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
 
         let mut store = MemoryStore::new();
         store.put(genesis).unwrap();
@@ -247,8 +256,24 @@ mod tests {
         let sign_fn = make_sign_fn();
 
         let genesis = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
-        let c1 = append(&mut dag, &[genesis.hash], b"c1", &creator, &*sign_fn, &mut clock).unwrap();
-        let c2 = append(&mut dag, &[genesis.hash], b"c2", &creator, &*sign_fn, &mut clock).unwrap();
+        let c1 = append(
+            &mut dag,
+            &[genesis.hash],
+            b"c1",
+            &creator,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        let c2 = append(
+            &mut dag,
+            &[genesis.hash],
+            b"c2",
+            &creator,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
 
         let mut store = MemoryStore::new();
         store.put(genesis).unwrap();

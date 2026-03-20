@@ -48,20 +48,31 @@ pub fn verify_forum_authority(authority: &ForumAuthority) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn did() -> Did { Did::new("did:exo:root").expect("ok") }
-    fn sig() -> Signature { let mut s = [0u8; 64]; s[0] = 1; Signature::from_bytes(s) }
+    fn did() -> Did {
+        Did::new("did:exo:root").expect("ok")
+    }
+    fn sig() -> Signature {
+        let mut s = [0u8; 64];
+        s[0] = 1;
+        Signature::from_bytes(s)
+    }
 
     fn auth() -> ForumAuthority {
         ForumAuthority {
             root_did: did(),
             constitution_hash: Hash256::digest(b"const"),
-            rules: vec![ForumRule { name: "r1".into(), hash: Hash256::digest(b"r1") }],
+            rules: vec![ForumRule {
+                name: "r1".into(),
+                hash: Hash256::digest(b"r1"),
+            }],
             signature: sig(),
         }
     }
 
     #[test]
-    fn valid_authority() { verify_forum_authority(&auth()).expect("ok"); }
+    fn valid_authority() {
+        verify_forum_authority(&auth()).expect("ok");
+    }
 
     #[test]
     fn empty_sig() {

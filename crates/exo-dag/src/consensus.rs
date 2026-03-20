@@ -5,12 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use exo_core::types::{Did, Hash256, Signature};
 use serde::{Deserialize, Serialize};
 
-use exo_core::types::{Did, Hash256, Signature};
-
-use crate::dag::DagNode;
-use crate::error::{DagError, Result};
+use crate::{
+    dag::DagNode,
+    error::{DagError, Result},
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -134,11 +135,7 @@ impl ConsensusState {
 }
 
 /// Propose a node for commitment.
-pub fn propose(
-    state: &mut ConsensusState,
-    node: &DagNode,
-    proposer: &Did,
-) -> Result<Proposal> {
+pub fn propose(state: &mut ConsensusState, node: &DagNode, proposer: &Did) -> Result<Proposal> {
     if !state.config.validators.contains(proposer) {
         return Err(DagError::NotAValidator(proposer.to_string()));
     }
@@ -236,7 +233,9 @@ pub fn is_finalized(state: &ConsensusState, hash: &Hash256) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{append, Dag, HybridClock};
+    use crate::dag::{Dag, HybridClock, append};
+
+    type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
 
     fn make_validators(n: usize) -> BTreeSet<Did> {
         (0..n)
@@ -244,7 +243,7 @@ mod tests {
             .collect()
     }
 
-    fn make_sign_fn() -> Box<dyn Fn(&[u8]) -> Signature> {
+    fn make_sign_fn() -> SignFn {
         Box::new(|data: &[u8]| {
             let h = blake3::hash(data);
             let mut sig = [0u8; 64];

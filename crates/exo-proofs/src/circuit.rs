@@ -132,7 +132,11 @@ impl ConstraintSystem {
 
     /// Check if all constraints are satisfied by the current variable assignments.
     pub fn is_satisfied(&self) -> bool {
-        let vals: Vec<u64> = self.variables.iter().map(|v| v.value.unwrap_or(0)).collect();
+        let vals: Vec<u64> = self
+            .variables
+            .iter()
+            .map(|v| v.value.unwrap_or(0))
+            .collect();
         for c in &self.constraints {
             let a = c.a_terms.evaluate(&vals);
             let b = c.b_terms.evaluate(&vals);

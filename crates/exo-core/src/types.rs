@@ -209,12 +209,16 @@ enum SignatureProxy {
 }
 
 impl Serialize for Signature {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> core::result::Result<S::Ok, S::Error> {
         let proxy = match self {
             Self::Ed25519(b) => SignatureProxy::Ed25519(b.to_vec()),
             Self::PostQuantum(b) => SignatureProxy::PostQuantum(b.clone()),
             Self::Hybrid { classical, pq } => SignatureProxy::Hybrid {
-                classical: classical.to_vec(), pq: pq.clone(),
+                classical: classical.to_vec(),
+                pq: pq.clone(),
             },
             Self::Empty => SignatureProxy::Empty,
         };
@@ -223,12 +227,17 @@ impl Serialize for Signature {
 }
 
 impl<'de> Deserialize<'de> for Signature {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> core::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> core::result::Result<Self, D::Error> {
         let proxy = SignatureProxy::deserialize(deserializer)?;
         match proxy {
             SignatureProxy::Ed25519(b) => {
                 if b.len() != 64 {
-                    return Err(serde::de::Error::invalid_length(b.len(), &"64 bytes for Ed25519"));
+                    return Err(serde::de::Error::invalid_length(
+                        b.len(),
+                        &"64 bytes for Ed25519",
+                    ));
                 }
                 let mut buf = [0u8; 64];
                 buf.copy_from_slice(&b);
@@ -237,7 +246,10 @@ impl<'de> Deserialize<'de> for Signature {
             SignatureProxy::PostQuantum(b) => Ok(Self::PostQuantum(b)),
             SignatureProxy::Hybrid { classical, pq } => {
                 if classical.len() != 64 {
-                    return Err(serde::de::Error::invalid_length(classical.len(), &"64 bytes for classical"));
+                    return Err(serde::de::Error::invalid_length(
+                        classical.len(),
+                        &"64 bytes for classical",
+                    ));
                 }
                 let mut buf = [0u8; 64];
                 buf.copy_from_slice(&classical);
@@ -332,8 +344,15 @@ impl fmt::Debug for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ed25519(b) => write!(f, "Signature::Ed25519({}..)", hex_prefix(b)),
-            Self::PostQuantum(b) => write!(f, "Signature::PostQuantum({}..{}B)", hex_prefix(b), b.len()),
-            Self::Hybrid { classical, pq } => write!(f, "Signature::Hybrid({}..+{}B)", hex_prefix(classical), pq.len()),
+            Self::PostQuantum(b) => {
+                write!(f, "Signature::PostQuantum({}..{}B)", hex_prefix(b), b.len())
+            }
+            Self::Hybrid { classical, pq } => write!(
+                f,
+                "Signature::Hybrid({}..+{}B)",
+                hex_prefix(classical),
+                pq.len()
+            ),
             Self::Empty => write!(f, "Signature::Empty"),
         }
     }
@@ -343,17 +362,25 @@ impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ed25519(b) => {
-                for byte in b { write!(f, "{byte:02x}")?; }
+                for byte in b {
+                    write!(f, "{byte:02x}")?;
+                }
                 Ok(())
             }
             Self::PostQuantum(b) => {
-                for byte in b { write!(f, "{byte:02x}")?; }
+                for byte in b {
+                    write!(f, "{byte:02x}")?;
+                }
                 Ok(())
             }
             Self::Hybrid { classical, pq } => {
-                for byte in classical { write!(f, "{byte:02x}")?; }
+                for byte in classical {
+                    write!(f, "{byte:02x}")?;
+                }
                 write!(f, ":")?;
-                for byte in pq { write!(f, "{byte:02x}")?; }
+                for byte in pq {
+                    write!(f, "{byte:02x}")?;
+                }
                 Ok(())
             }
             Self::Empty => write!(f, "empty"),
@@ -451,9 +478,11 @@ impl Did {
 
     fn validate(value: &str) -> Result<()> {
         // Must start with "did:exo:"
-        let rest = value.strip_prefix("did:exo:").ok_or_else(|| ExoError::InvalidDid {
-            value: value.to_owned(),
-        })?;
+        let rest = value
+            .strip_prefix("did:exo:")
+            .ok_or_else(|| ExoError::InvalidDid {
+                value: value.to_owned(),
+            })?;
         if rest.is_empty() {
             return Err(ExoError::InvalidDid {
                 value: value.to_owned(),
@@ -574,14 +603,14 @@ impl Timestamp {
         #[cfg(not(target_arch = "wasm32"))]
         let millis = {
             use std::time::{SystemTime, UNIX_EPOCH};
-            #[allow(clippy::unwrap_used)]
             let ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis() as u64;
-            ms
+                .as_millis();
+            u64::try_from(ms).unwrap_or(u64::MAX)
         };
         #[cfg(target_arch = "wasm32")]
+        #[allow(clippy::as_conversions)] // js_sys::Date::now() returns f64; safe truncation
         let millis = js_sys::Date::now() as u64;
 
         Self {
@@ -736,8 +765,9 @@ fn hex_prefix(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::BTreeMap;
+
+    use super::*;
 
     // -- DeterministicMap --------------------------------------------------
 
@@ -964,7 +994,10 @@ mod tests {
 
     #[test]
     fn signature_hybrid() {
-        let h = Signature::Hybrid { classical: [0xab; 64], pq: vec![1, 2, 3] };
+        let h = Signature::Hybrid {
+            classical: [0xab; 64],
+            pq: vec![1, 2, 3],
+        };
         assert!(!h.is_empty());
         assert_eq!(h.algorithm(), "Hybrid");
         assert_eq!(h.ed25519_bytes(), Some(&[0xab; 64]));
@@ -987,7 +1020,10 @@ mod tests {
         assert_eq!(Signature::Empty.to_string(), "empty");
         let pq = Signature::PostQuantum(vec![0xab, 0xcd]);
         assert_eq!(pq.to_string(), "abcd");
-        let h = Signature::Hybrid { classical: [0; 64], pq: vec![0xff] };
+        let h = Signature::Hybrid {
+            classical: [0; 64],
+            pq: vec![0xff],
+        };
         let hs = h.to_string();
         assert!(hs.contains(":"));
     }

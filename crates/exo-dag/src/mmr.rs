@@ -3,9 +3,8 @@
 //! An MMR is a collection of perfect binary Merkle trees (peaks) that grows
 //! by appending leaves. The root is the "bag of peaks" hash.
 
-use serde::{Deserialize, Serialize};
-
 use exo_core::types::Hash256;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -195,12 +194,15 @@ pub fn append(mmr: &mut MerkleMountainRange, leaf: Hash256) -> usize {
     let mut new_peak = Peak::from_leaf(leaf_hash);
 
     // Merge with any trailing peaks of the same height
-    while let Some(last) = mmr.peaks.last() {
-        if last.height == new_peak.height {
-            let left = mmr.peaks.pop().unwrap();
-            new_peak = Peak::merge(&left, &new_peak);
-        } else {
-            break;
+    loop {
+        match mmr.peaks.last() {
+            Some(last) if last.height == new_peak.height => {
+                // Safety: last() just confirmed the vec is non-empty, so pop() always yields Some.
+                if let Some(left) = mmr.peaks.pop() {
+                    new_peak = Peak::merge(&left, &new_peak);
+                }
+            }
+            _ => break,
         }
     }
 
@@ -248,12 +250,7 @@ pub fn prove(mmr: &MerkleMountainRange, position: usize) -> MmrProof {
 }
 
 /// Verify an MMR proof.
-pub fn verify_proof(
-    mmr_root: &Hash256,
-    leaf: &Hash256,
-    position: usize,
-    proof: &MmrProof,
-) -> bool {
+pub fn verify_proof(mmr_root: &Hash256, leaf: &Hash256, position: usize, proof: &MmrProof) -> bool {
     if proof.peaks.is_empty() {
         return false;
     }
@@ -430,9 +427,9 @@ mod tests {
 
     #[test]
     fn prove_and_verify_odd_count() {
-        for count in [3, 5, 6, 7, 9, 10, 11, 13, 15] {
+        for count in [3u8, 5, 6, 7, 9, 10, 11, 13, 15] {
             let mut mmr = MerkleMountainRange::new();
-            let leaves: Vec<Hash256> = (0..count).map(|i| Hash256::digest(&[i as u8])).collect();
+            let leaves: Vec<Hash256> = (0..count).map(|i| Hash256::digest(&[i])).collect();
             for leaf in &leaves {
                 append(&mut mmr, *leaf);
             }
@@ -520,11 +517,12 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::*;
     use proptest::prelude::*;
 
+    use super::*;
+
     fn arb_hash256() -> impl Strategy<Value = Hash256> {
-        prop::array::uniform32(any::<u8>()).prop_map(|b| Hash256::from_bytes(b))
+        prop::array::uniform32(any::<u8>()).prop_map(Hash256::from_bytes)
     }
 
     proptest! {

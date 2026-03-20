@@ -114,27 +114,58 @@ mod tests {
     #[test]
     fn all_variants_display() {
         let errors: Vec<ForumError> = vec![
-            ForumError::AuthorityInvalid { reason: "bad sig".into() },
+            ForumError::AuthorityInvalid {
+                reason: "bad sig".into(),
+            },
             ForumError::DelegationExpired,
-            ForumError::DelegationScopeExceeded { reason: "too wide".into() },
+            ForumError::DelegationScopeExceeded {
+                reason: "too wide".into(),
+            },
             ForumError::SubDelegationNotPermitted,
-            ForumError::NotRatified { reason: "pending".into() },
-            ForumError::AmendmentFailed { reason: "no quorum".into() },
-            ForumError::ConstitutionalConflict { reason: "overlap".into() },
-            ForumError::QuorumNotMet { required: 3, actual: 1 },
+            ForumError::NotRatified {
+                reason: "pending".into(),
+            },
+            ForumError::AmendmentFailed {
+                reason: "no quorum".into(),
+            },
+            ForumError::ConstitutionalConflict {
+                reason: "overlap".into(),
+            },
+            ForumError::QuorumNotMet {
+                required: 3,
+                actual: 1,
+            },
             ForumError::QuorumPolicyMissing,
             ForumError::DecisionNotFound("abc".into()),
-            ForumError::EnactmentFailed { reason: "rejected".into() },
+            ForumError::EnactmentFailed {
+                reason: "rejected".into(),
+            },
             ForumError::DecisionImmutable,
-            ForumError::InvalidTransition { from: "Draft".into(), to: "Closed".into() },
+            ForumError::InvalidTransition {
+                from: "Draft".into(),
+                to: "Closed".into(),
+            },
             ForumError::HumanGateRequired,
-            ForumError::AiCeilingExceeded { reason: "Strategic".into() },
-            ForumError::TncViolation { tnc_id: 1, reason: "no auth".into() },
-            ForumError::ChallengeError { reason: "invalid".into() },
+            ForumError::AiCeilingExceeded {
+                reason: "Strategic".into(),
+            },
+            ForumError::TncViolation {
+                tnc_id: 1,
+                reason: "no auth".into(),
+            },
+            ForumError::ChallengeError {
+                reason: "invalid".into(),
+            },
             ForumError::ExecutionPaused,
-            ForumError::EmergencyInvalid { reason: "no scope".into() },
-            ForumError::EmergencyCapExceeded { reason: "over limit".into() },
-            ForumError::AccountabilityFailed { reason: "no due process".into() },
+            ForumError::EmergencyInvalid {
+                reason: "no scope".into(),
+            },
+            ForumError::EmergencyCapExceeded {
+                reason: "over limit".into(),
+            },
+            ForumError::AccountabilityFailed {
+                reason: "no due process".into(),
+            },
             ForumError::TermsNotAccepted("alice".into()),
             ForumError::Core("oops".into()),
             ForumError::Governance("quorum fail".into()),
@@ -146,7 +177,10 @@ mod tests {
 
     #[test]
     fn tnc_violation_formats_id() {
-        let e = ForumError::TncViolation { tnc_id: 7, reason: "test".into() };
+        let e = ForumError::TncViolation {
+            tnc_id: 7,
+            reason: "test".into(),
+        };
         assert!(e.to_string().contains("TNC-07"));
     }
 

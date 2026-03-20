@@ -3,9 +3,8 @@
 //! Verifies that a given output was produced by a committed model on a
 //! committed input, without revealing the model weights or input data.
 
-use serde::{Deserialize, Serialize};
-
 use exo_core::types::Hash256;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // ModelCommitment
@@ -70,11 +69,7 @@ pub struct InferenceProof {
 
 /// Generate a proof that a specific output was produced by a committed model
 /// on a specific input.
-pub fn prove_inference(
-    model: &ModelCommitment,
-    input: &[u8],
-    output: &[u8],
-) -> InferenceProof {
+pub fn prove_inference(model: &ModelCommitment, input: &[u8], output: &[u8]) -> InferenceProof {
     let input_hash = Hash256::digest(input);
     let output_hash = Hash256::digest(output);
     let model_hash = model.commitment_hash();
@@ -104,7 +99,8 @@ pub fn verify_inference(proof: &InferenceProof) -> bool {
     let model_hash = proof.model_commitment.commitment_hash();
 
     // Recompute the expected proof
-    let expected_proof = compute_inference_proof(&model_hash, &proof.input_hash, &proof.output_hash);
+    let expected_proof =
+        compute_inference_proof(&model_hash, &proof.input_hash, &proof.output_hash);
 
     if expected_proof != proof.proof {
         return false;
@@ -273,7 +269,10 @@ mod tests {
         assert_eq!(proof.input_hash, Hash256::digest(b"secret input"));
         assert_eq!(proof.output_hash, Hash256::digest(b"secret output"));
         // Model commitment hashes the architecture and weights
-        assert_eq!(proof.model_commitment.architecture_hash, Hash256::digest(b"transformer-v1"));
+        assert_eq!(
+            proof.model_commitment.architecture_hash,
+            Hash256::digest(b"transformer-v1")
+        );
     }
 
     #[test]

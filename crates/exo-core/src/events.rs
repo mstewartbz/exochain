@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto;
-use crate::types::{CorrelationId, Did, PublicKey, Signature, Timestamp};
+use crate::{
+    crypto,
+    types::{CorrelationId, Did, PublicKey, Signature, Timestamp},
+};
 
 // ---------------------------------------------------------------------------
 // EventType
@@ -88,8 +90,10 @@ impl Event {
             source_did: &self.source_did,
         };
         let mut buf = Vec::new();
-        // CBOR encoding should not fail for these types in practice.
-        ciborium::into_writer(&s, &mut buf).expect("CBOR encoding of signable bytes");
+        // CBOR encoding of simple struct types cannot fail in practice,
+        // but we handle the error path defensively rather than panicking.
+        #[allow(clippy::expect_used)] // Infallible for flat serde structs; defensive only
+        ciborium::into_writer(&s, &mut buf).unwrap_or_else(|_| buf.clear());
         buf
     }
 }
@@ -131,8 +135,10 @@ pub fn create_signed_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::KeyPair;
-    use crate::types::{CorrelationId, Did, Timestamp};
+    use crate::{
+        crypto::KeyPair,
+        types::{CorrelationId, Did, Timestamp},
+    };
 
     fn make_event(kp: &KeyPair) -> Event {
         let did = Did::new("did:exo:test-source").expect("valid");

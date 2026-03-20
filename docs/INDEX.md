@@ -10,9 +10,26 @@ tags: [exochain, documentation, index]
 
 **Constitutional Trust Fabric for Safe Superintelligence Governance**
 
-29,587 lines of Rust · 14 crates · 1,116 tests · 0 failures
+~31,000 lines of Rust · 15 crates · 1,116 tests · 0 failures
 
 ---
+
+## Project Meta
+
+- [CHANGELOG](../CHANGELOG.md) — All notable changes (Keep a Changelog format)
+- [SECURITY](../SECURITY.md) — Vulnerability reporting, scope, security measures
+- [SUPPORT](../SUPPORT.md) — How to get help, report issues, contribute
+- [VERSIONING](../VERSIONING.md) — Semantic versioning policy, release process, constitutional constraint
+
+## Legal & Compliance
+
+- [Licensing Position](legal/LICENSING-POSITION.md) — Apache-2.0 rationale, dependency screening, downstream guidance
+- [National AI Policy Crosswalk](policy/NATIONAL-POLICY-FRAMEWORK-CROSSWALK-2026.md) — Mapping to March 2026 National Policy Framework
+
+## Audit & Truth
+
+- [Repo Truth Baseline](audit/REPO-TRUTH-BASELINE.md) — Audited metrics, build status, claim verification
+- [`tools/repo_truth.sh`](../tools/repo_truth.sh) — Regenerate truth baseline from source
 
 ## Architecture
 
@@ -25,7 +42,7 @@ tags: [exochain, documentation, index]
 
 ## Reference
 
-- [[CRATE-REFERENCE]] — Complete API reference for all 14 crates (types, traits, functions, invariants)
+- [[CRATE-REFERENCE]] — Complete API reference for all 15 crates (types, traits, functions, invariants)
 
 ## Guides
 
@@ -75,7 +92,7 @@ tags: [exochain, documentation, index]
 
 ## CI/CD
 
-- `.github/workflows/ci.yml` — 8 quality gates per CR-001 §8.8
+- `.github/workflows/ci.yml` — 9 quality gates per CR-001 §8.8
 - `.github/workflows/release.yml` — Release with manual approval + provenance attestation
 - `.github/workflows/exoforge-triage.yml` — Automatic ExoForge triage for GitHub issues
 - `.github/ISSUE_TEMPLATE/` — Structured issue templates (bug report, feature request)

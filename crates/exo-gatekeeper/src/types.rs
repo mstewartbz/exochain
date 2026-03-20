@@ -70,7 +70,11 @@ pub enum BailmentState {
     /// No bailment established.
     None,
     /// Active bailment with consent.
-    Active { bailor: Did, bailee: Did, scope: String },
+    Active {
+        bailor: Did,
+        bailee: Did,
+        scope: String,
+    },
     /// Bailment suspended.
     Suspended { reason: String },
     /// Bailment terminated.
@@ -138,7 +142,8 @@ pub struct QuorumEvidence {
 
 impl QuorumEvidence {
     pub fn is_met(&self) -> bool {
-        let approvals = u32::try_from(self.votes.iter().filter(|v| v.approved).count()).unwrap_or(u32::MAX);
+        let approvals =
+            u32::try_from(self.votes.iter().filter(|v| v.approved).count()).unwrap_or(u32::MAX);
         approvals >= self.threshold
     }
 }
@@ -205,7 +210,9 @@ mod tests {
         assert!(active.is_active());
         assert!(!BailmentState::None.is_active());
         assert!(!BailmentState::Terminated.is_active());
-        let suspended = BailmentState::Suspended { reason: "audit".into() };
+        let suspended = BailmentState::Suspended {
+            reason: "audit".into(),
+        };
         assert!(!suspended.is_active());
     }
 
@@ -243,9 +250,21 @@ mod tests {
         let ev = QuorumEvidence {
             threshold: 2,
             votes: vec![
-                QuorumVote { voter: did("did:exo:v1"), approved: true, signature: vec![1] },
-                QuorumVote { voter: did("did:exo:v2"), approved: true, signature: vec![2] },
-                QuorumVote { voter: did("did:exo:v3"), approved: false, signature: vec![3] },
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: true,
+                    signature: vec![2],
+                },
+                QuorumVote {
+                    voter: did("did:exo:v3"),
+                    approved: false,
+                    signature: vec![3],
+                },
             ],
         };
         assert!(ev.is_met());
@@ -256,8 +275,16 @@ mod tests {
         let ev = QuorumEvidence {
             threshold: 3,
             votes: vec![
-                QuorumVote { voter: did("did:exo:v1"), approved: true, signature: vec![1] },
-                QuorumVote { voter: did("did:exo:v2"), approved: false, signature: vec![2] },
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: false,
+                    signature: vec![2],
+                },
             ],
         };
         assert!(!ev.is_met());

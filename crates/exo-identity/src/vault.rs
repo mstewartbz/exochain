@@ -8,13 +8,14 @@
 //!
 //! Ciphertext format: `[24-byte nonce][encrypted payload][16-byte Poly1305 tag]`
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::XChaCha20Poly1305;
+use chacha20poly1305::{
+    XChaCha20Poly1305,
+    aead::{Aead, KeyInit, Payload},
+};
+use exo_core::SecretKey;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroize;
-
-use exo_core::SecretKey;
 
 use crate::error::IdentityError;
 
@@ -48,14 +49,17 @@ impl VaultEncryptor {
     /// The `context` bytes are used as the HKDF info parameter, allowing
     /// the same secret key to produce different vault keys for different
     /// purposes.
-    #[must_use]
-    pub fn derive_key(secret: &SecretKey, context: &[u8]) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `IdentityError::VaultKeyDerivationFailed` if HKDF expand
+    /// fails (in practice this cannot occur for a 32-byte output).
+    pub fn derive_key(secret: &SecretKey, context: &[u8]) -> Result<Self, IdentityError> {
         let hk = Hkdf::<Sha256>::new(None, secret.as_bytes());
         let mut okm = [0u8; 32];
-        // HKDF-Expand cannot fail when output length <= 255 * HashLen
         hk.expand(context, &mut okm)
-            .expect("HKDF-SHA256 expand for 32 bytes cannot fail");
-        Self { key: okm }
+            .map_err(|e| IdentityError::VaultKeyDerivationFailed(e.to_string()))?;
+        Ok(Self { key: okm })
     }
 
     /// Encrypt `plaintext` with XChaCha20-Poly1305.
@@ -182,8 +186,9 @@ impl core::fmt::Debug for VaultEncryptor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::crypto::generate_keypair;
+
+    use super::*;
 
     /// Helper: create a VaultEncryptor from a fresh random key.
     fn random_encryptor() -> VaultEncryptor {
@@ -257,7 +262,11 @@ mod tests {
         let ad = b"did:exo:empty";
 
         let ct = enc.encrypt(b"", ad).expect("encrypt");
-        assert_eq!(ct.len(), NONCE_SIZE + TAG_SIZE, "empty plaintext produces nonce + tag only");
+        assert_eq!(
+            ct.len(),
+            NONCE_SIZE + TAG_SIZE,
+            "empty plaintext produces nonce + tag only"
+        );
 
         let pt = enc.decrypt(&ct, ad).expect("decrypt");
         assert!(pt.is_empty());
@@ -279,8 +288,8 @@ mod tests {
         let (_, sk) = generate_keypair();
         let context = b"vault-test-context";
 
-        let enc1 = VaultEncryptor::derive_key(&sk, context);
-        let enc2 = VaultEncryptor::derive_key(&sk, context);
+        let enc1 = VaultEncryptor::derive_key(&sk, context).expect("derive_key");
+        let enc2 = VaultEncryptor::derive_key(&sk, context).expect("derive_key");
 
         assert_eq!(enc1.key_bytes(), enc2.key_bytes());
     }
@@ -289,8 +298,8 @@ mod tests {
     fn derive_key_different_contexts() {
         let (_, sk) = generate_keypair();
 
-        let enc1 = VaultEncryptor::derive_key(&sk, b"context-alpha");
-        let enc2 = VaultEncryptor::derive_key(&sk, b"context-beta");
+        let enc1 = VaultEncryptor::derive_key(&sk, b"context-alpha").expect("derive_key");
+        let enc2 = VaultEncryptor::derive_key(&sk, b"context-beta").expect("derive_key");
 
         assert_ne!(enc1.key_bytes(), enc2.key_bytes());
     }

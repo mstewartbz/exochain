@@ -25,9 +25,9 @@ notice = "warn"
 ignore = []
 
 # ---------------------------------------------------------------------------
-# Licenses — AGPL-3.0-or-later is the workspace license.
-# We deny copyleft licenses that would force relicensing of the fabric,
-# and explicitly allow permissive licenses used by our dependencies.
+# Licenses — Apache-2.0 is the workspace license.
+# We allow permissive licenses compatible with Apache-2.0.
+# We deny copyleft licenses that would impose additional restrictions.
 # ---------------------------------------------------------------------------
 [licenses]
 unlicensed = "deny"
@@ -47,11 +47,10 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "BSL-1.0",
-    "AGPL-3.0",
     "OpenSSL",
 ]
 
-# Copyleft licenses that would contaminate the AGPL boundary
+# Copyleft licenses incompatible with Apache-2.0
 deny = [
     "GPL-2.0",
     "GPL-3.0",

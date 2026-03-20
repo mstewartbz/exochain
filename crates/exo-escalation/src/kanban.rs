@@ -1,14 +1,20 @@
 //! Kanban board for escalation cases.
 
 use std::collections::BTreeMap;
-use uuid::Uuid;
-use serde::{Deserialize, Serialize};
 
-use crate::escalation::EscalationCase;
-use crate::error::EscalationError;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{error::EscalationError, escalation::EscalationCase};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum KanbanColumn { Backlog, InProgress, Review, Resolved, Archived }
+pub enum KanbanColumn {
+    Backlog,
+    InProgress,
+    Review,
+    Resolved,
+    Archived,
+}
 
 impl std::fmt::Display for KanbanColumn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,7 +41,10 @@ impl KanbanBoard {
 
     /// Add a case to the backlog.
     pub fn add_case(&mut self, case: EscalationCase) {
-        self.columns.entry(KanbanColumn::Backlog).or_default().push(case);
+        self.columns
+            .entry(KanbanColumn::Backlog)
+            .or_default()
+            .push(case);
     }
 
     /// Total cases across all columns.
@@ -46,7 +55,11 @@ impl KanbanBoard {
 }
 
 /// Move a case from its current column to a target column.
-pub fn move_case(board: &mut KanbanBoard, case_id: &Uuid, to: KanbanColumn) -> Result<(), EscalationError> {
+pub fn move_case(
+    board: &mut KanbanBoard,
+    case_id: &Uuid,
+    to: KanbanColumn,
+) -> Result<(), EscalationError> {
     // Find and remove the case from its current column
     let mut found_case: Option<EscalationCase> = None;
     for (_col, cases) in board.columns.iter_mut() {
@@ -71,31 +84,37 @@ pub fn cases_by_priority(board: &KanbanBoard) -> Vec<&EscalationCase> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::detector::*;
-    use crate::escalation::*;
     use exo_core::Timestamp;
+
+    use super::*;
+    use crate::{detector::*, escalation::*};
 
     fn signal(confidence: u8) -> DetectionSignal {
         DetectionSignal {
-            source: "test".into(), signal_type: SignalType::AnomalousPattern, confidence,
-            evidence_hash: [0u8; 32], timestamp: Timestamp::new(1000, 0),
+            source: "test".into(),
+            signal_type: SignalType::AnomalousPattern,
+            confidence,
+            evidence_hash: [0u8; 32],
+            timestamp: Timestamp::new(1000, 0),
         }
     }
 
-    #[test] fn new_board_is_empty() {
+    #[test]
+    fn new_board_is_empty() {
         let b = KanbanBoard::new();
         assert_eq!(b.total_cases(), 0);
         assert_eq!(b.columns.len(), 5);
     }
-    #[test] fn add_case_to_backlog() {
+    #[test]
+    fn add_case_to_backlog() {
         let mut b = KanbanBoard::new();
         let c = escalate(&signal(50), &EscalationPath::Standard);
         b.add_case(c);
         assert_eq!(b.total_cases(), 1);
         assert_eq!(b.columns[&KanbanColumn::Backlog].len(), 1);
     }
-    #[test] fn move_case_between_columns() {
+    #[test]
+    fn move_case_between_columns() {
         let mut b = KanbanBoard::new();
         let c = escalate(&signal(50), &EscalationPath::Standard);
         let id = c.id;
@@ -104,11 +123,13 @@ mod tests {
         assert_eq!(b.columns[&KanbanColumn::Backlog].len(), 0);
         assert_eq!(b.columns[&KanbanColumn::InProgress].len(), 1);
     }
-    #[test] fn move_nonexistent_case_fails() {
+    #[test]
+    fn move_nonexistent_case_fails() {
         let mut b = KanbanBoard::new();
         assert!(move_case(&mut b, &Uuid::new_v4(), KanbanColumn::InProgress).is_err());
     }
-    #[test] fn move_through_all_columns() {
+    #[test]
+    fn move_through_all_columns() {
         let mut b = KanbanBoard::new();
         let c = escalate(&signal(50), &EscalationPath::Standard);
         let id = c.id;
@@ -119,7 +140,8 @@ mod tests {
         assert!(move_case(&mut b, &id, KanbanColumn::Archived).is_ok());
         assert_eq!(b.columns[&KanbanColumn::Archived].len(), 1);
     }
-    #[test] fn cases_by_priority_sorted() {
+    #[test]
+    fn cases_by_priority_sorted() {
         let mut b = KanbanBoard::new();
         b.add_case(escalate(&signal(20), &EscalationPath::Standard)); // Low
         b.add_case(escalate(&signal(90), &EscalationPath::Standard)); // Critical
@@ -129,7 +151,8 @@ mod tests {
         assert_eq!(sorted[0].priority, CasePriority::Critical);
         assert_eq!(sorted[2].priority, CasePriority::Low);
     }
-    #[test] fn column_display() {
+    #[test]
+    fn column_display() {
         assert_eq!(KanbanColumn::Backlog.to_string(), "Backlog");
         assert_eq!(KanbanColumn::Archived.to_string(), "Archived");
     }

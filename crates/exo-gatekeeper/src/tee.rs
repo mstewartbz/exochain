@@ -86,11 +86,7 @@ impl TeePolicy {
     #[must_use]
     pub fn production() -> Self {
         Self {
-            accepted_platforms: vec![
-                TeePlatform::Sgx,
-                TeePlatform::TrustZone,
-                TeePlatform::Sev,
-            ],
+            accepted_platforms: vec![TeePlatform::Sgx, TeePlatform::TrustZone, TeePlatform::Sev],
             required_measurements: vec![],
             max_age_ms: 0,
             current_time_ms: 0,
@@ -386,8 +382,8 @@ mod tests {
         let policy = TeePolicy {
             accepted_platforms: vec![TeePlatform::Simulated],
             required_measurements: vec![],
-            max_age_ms: 1000,                         // 1 second max
-            current_time_ms: TIMESTAMP + 5000,        // 5 seconds later
+            max_age_ms: 1000,                  // 1 second max
+            current_time_ms: TIMESTAMP + 5000, // 5 seconds later
             environment: TeeEnvironment::Testing,
         };
         let result = verify_attestation(&att, &policy);

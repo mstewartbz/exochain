@@ -201,9 +201,12 @@ pub fn verify_safe_harbor(txn: &mut InterestedTransaction) -> Result<()> {
         });
     }
 
-    let path = txn.path.as_ref().ok_or_else(|| LegalError::InvalidStateTransition {
-        reason: "no safe-harbor path specified".into(),
-    })?;
+    let path = txn
+        .path
+        .as_ref()
+        .ok_or_else(|| LegalError::InvalidStateTransition {
+            reason: "no safe-harbor path specified".into(),
+        })?;
 
     match path {
         SafeHarborPath::BoardApproval | SafeHarborPath::ShareholderApproval => {
@@ -213,7 +216,11 @@ pub fn verify_safe_harbor(txn: &mut InterestedTransaction) -> Result<()> {
                     reason: "no disinterested votes recorded".into(),
                 });
             }
-            let approvals = txn.disinterested_votes.iter().filter(|v| v.approved).count();
+            let approvals = txn
+                .disinterested_votes
+                .iter()
+                .filter(|v| v.approved)
+                .count();
             let total = txn.disinterested_votes.len();
             // Majority of disinterested voters must approve
             if approvals * 2 <= total {
@@ -276,7 +283,13 @@ mod tests {
         let mut txn = create_txn(SafeHarborPath::BoardApproval);
         assert_eq!(txn.status, SafeHarborStatus::PendingDisclosure);
 
-        complete_disclosure(&mut txn, &did("director-alice"), "I own 30% of counterparty", ts(2000)).unwrap();
+        complete_disclosure(
+            &mut txn,
+            &did("director-alice"),
+            "I own 30% of counterparty",
+            ts(2000),
+        )
+        .unwrap();
         assert_eq!(txn.status, SafeHarborStatus::DisclosureMade);
 
         record_disinterested_vote(&mut txn, &did("director-bob"), true, ts(3000)).unwrap();
@@ -304,7 +317,13 @@ mod tests {
     #[test]
     fn shareholder_approval_full_workflow() {
         let mut txn = create_txn(SafeHarborPath::ShareholderApproval);
-        complete_disclosure(&mut txn, &did("director-alice"), "interest in deal", ts(2000)).unwrap();
+        complete_disclosure(
+            &mut txn,
+            &did("director-alice"),
+            "interest in deal",
+            ts(2000),
+        )
+        .unwrap();
         record_disinterested_vote(&mut txn, &did("shareholder-1"), true, ts(3000)).unwrap();
         record_disinterested_vote(&mut txn, &did("shareholder-2"), true, ts(3001)).unwrap();
         verify_safe_harbor(&mut txn).unwrap();
@@ -399,9 +418,7 @@ mod tests {
             SafeHarborStatus::DisclosureMade,
             SafeHarborStatus::VotingInProgress,
             SafeHarborStatus::Verified,
-            SafeHarborStatus::Failed {
-                reason: "x".into(),
-            },
+            SafeHarborStatus::Failed { reason: "x".into() },
         ];
         for s in &statuses {
             let json = serde_json::to_string(s).unwrap();

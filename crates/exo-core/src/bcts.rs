@@ -7,10 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ExoError, Result};
-use crate::hash::{hash_structured};
-use crate::hlc::HybridClock;
-use crate::types::{CorrelationId, Did, Hash256, Timestamp};
+use crate::{
+    error::{ExoError, Result},
+    hash::hash_structured,
+    hlc::HybridClock,
+    types::{CorrelationId, Did, Hash256, Timestamp},
+};
 
 // ---------------------------------------------------------------------------
 // BctsState
@@ -428,7 +430,9 @@ mod tests {
         ];
 
         for (i, &target) in steps.iter().enumerate() {
-            let t = tx.transition(target, &actor, &mut clock).expect("transition ok");
+            let t = tx
+                .transition(target, &actor, &mut clock)
+                .expect("transition ok");
             assert_eq!(t.to_state, target);
             assert_eq!(tx.state(), target);
             assert_eq!(tx.receipt_chain().len(), i + 1);

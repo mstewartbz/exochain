@@ -3,15 +3,17 @@
 //! These tests exercise cross-module interactions that unit tests in
 //! individual modules don't cover.
 
-use exo_core::bcts::{BailmentTransaction, BctsState, Transaction};
-use exo_core::crypto::KeyPair;
-use exo_core::events::{create_signed_event, verify_event, EventType};
-use exo_core::hash::{canonical_hash, hash_structured, merkle_proof, merkle_root, verify_merkle_proof};
-use exo_core::hlc::HybridClock;
-use exo_core::invariants::{
-    check_all, Invariant, InvariantContext, InvariantSet, InvariantViolation, ViolationSeverity,
+use exo_core::{
+    bcts::{BailmentTransaction, BctsState, Transaction},
+    crypto::KeyPair,
+    events::{EventType, create_signed_event, verify_event},
+    hash::{canonical_hash, hash_structured, merkle_proof, merkle_root, verify_merkle_proof},
+    hlc::HybridClock,
+    invariants::{
+        Invariant, InvariantContext, InvariantSet, InvariantViolation, ViolationSeverity, check_all,
+    },
+    types::{CorrelationId, DeterministicMap, Did, Hash256, Timestamp, Version},
 };
-use exo_core::types::{CorrelationId, DeterministicMap, Did, Hash256, Timestamp, Version};
 
 // ---------------------------------------------------------------------------
 // Full BCTS lifecycle with crypto + events
@@ -145,10 +147,7 @@ impl Invariant for TransactionNotClosed {
         "transaction_not_closed"
     }
 
-    fn check(
-        &self,
-        _context: &InvariantContext,
-    ) -> core::result::Result<(), InvariantViolation> {
+    fn check(&self, _context: &InvariantContext) -> core::result::Result<(), InvariantViolation> {
         if self.state == BctsState::Closed {
             Err(InvariantViolation {
                 invariant_name: self.name().to_string(),

@@ -1,7 +1,6 @@
 //! Risk attestation for identity adjudication.
 
-use exo_core::{Did, PublicKey, SecretKey, Signature, Timestamp};
-use exo_core::crypto;
+use exo_core::{Did, PublicKey, SecretKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -25,6 +24,19 @@ pub struct RiskAttestation {
     pub signature: Signature,
 }
 
+impl From<RiskLevel> for u8 {
+    fn from(level: RiskLevel) -> Self {
+        match level {
+            RiskLevel::Minimal => 0,
+            RiskLevel::Low => 1,
+            RiskLevel::Medium => 2,
+            RiskLevel::High => 3,
+            RiskLevel::Critical => 4,
+            RiskLevel::Unassessed => 5,
+        }
+    }
+}
+
 impl RiskAttestation {
     #[must_use]
     fn signing_payload(
@@ -38,7 +50,7 @@ impl RiskAttestation {
         let mut payload = Vec::new();
         payload.extend_from_slice(subject_did.as_str().as_bytes());
         payload.extend_from_slice(attester_did.as_str().as_bytes());
-        payload.extend_from_slice(&[level as u8]);
+        payload.extend_from_slice(&[u8::from(level)]);
         payload.extend_from_slice(evidence_hash);
         payload.extend_from_slice(&timestamp.physical_ms.to_le_bytes());
         payload.extend_from_slice(&expiry.physical_ms.to_le_bytes());
@@ -130,8 +142,9 @@ pub fn is_expired(attestation: &RiskAttestation, now: &Timestamp) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::crypto::generate_keypair;
+
+    use super::*;
 
     fn make_did(label: &str) -> Did {
         Did::new(&format!("did:exo:{label}")).expect("valid did")
@@ -218,8 +231,12 @@ mod tests {
         let attester_did = make_did("attester4");
 
         for level in [
-            RiskLevel::Minimal, RiskLevel::Low, RiskLevel::Medium,
-            RiskLevel::High, RiskLevel::Critical, RiskLevel::Unassessed,
+            RiskLevel::Minimal,
+            RiskLevel::Low,
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+            RiskLevel::Unassessed,
         ] {
             let subject = make_did("target");
             let ctx = make_context(attester_did.clone(), level);

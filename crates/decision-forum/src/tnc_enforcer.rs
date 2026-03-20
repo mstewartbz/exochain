@@ -4,8 +4,10 @@
 //! `enforce_tnc_XX(context) -> Result<(), ForumError>`.
 //! Called on every state transition. No bypass, no override.
 
-use crate::decision_object::{ActorKind, DecisionObject};
-use crate::error::{ForumError, Result};
+use crate::{
+    decision_object::{ActorKind, DecisionObject},
+    error::{ForumError, Result},
+};
 
 /// Context for TNC enforcement checks.
 pub struct TncContext<'a> {
@@ -162,21 +164,32 @@ pub fn enforce_all(ctx: &TncContext<'_>) -> Result<()> {
 /// Collect ALL TNC violations (does not short-circuit).
 pub fn collect_violations(ctx: &TncContext<'_>) -> Vec<ForumError> {
     let checks: Vec<fn(&TncContext<'_>) -> Result<()>> = vec![
-        enforce_tnc_01, enforce_tnc_02, enforce_tnc_03, enforce_tnc_04,
-        enforce_tnc_05, enforce_tnc_06, enforce_tnc_07, enforce_tnc_08,
-        enforce_tnc_09, enforce_tnc_10,
+        enforce_tnc_01,
+        enforce_tnc_02,
+        enforce_tnc_03,
+        enforce_tnc_04,
+        enforce_tnc_05,
+        enforce_tnc_06,
+        enforce_tnc_07,
+        enforce_tnc_08,
+        enforce_tnc_09,
+        enforce_tnc_10,
     ];
     checks.iter().filter_map(|check| check(ctx).err()).collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use exo_core::{
+        bcts::BctsState,
+        hlc::HybridClock,
+        types::{Did, Hash256},
+    };
+
     use super::*;
     use crate::decision_object::*;
-    use exo_core::bcts::BctsState;
-    use exo_core::hlc::HybridClock;
-    use exo_core::types::{Did, Hash256};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn test_clock() -> HybridClock {
         let counter = AtomicU64::new(1000);
@@ -204,7 +217,8 @@ mod tests {
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::digest(b"d1"),
             timestamp: ts,
-        }).expect("ok");
+        })
+        .expect("ok");
         d
     }
 
@@ -285,11 +299,18 @@ mod tests {
         let mut clock = test_clock();
         let actor = Did::new("did:exo:root").expect("ok");
         let mut d = decision_with_authority(&mut clock);
-        for s in [BctsState::Submitted, BctsState::IdentityResolved,
-                   BctsState::ConsentValidated, BctsState::Deliberated,
-                   BctsState::Verified, BctsState::Governed,
-                   BctsState::Approved, BctsState::Executed,
-                   BctsState::Recorded, BctsState::Closed] {
+        for s in [
+            BctsState::Submitted,
+            BctsState::IdentityResolved,
+            BctsState::ConsentValidated,
+            BctsState::Deliberated,
+            BctsState::Verified,
+            BctsState::Governed,
+            BctsState::Approved,
+            BctsState::Executed,
+            BctsState::Recorded,
+            BctsState::Closed,
+        ] {
             d.transition(s, &actor, &mut clock).expect("ok");
         }
         let ctx = passing_ctx(&d);
@@ -300,13 +321,15 @@ mod tests {
     #[test]
     fn tnc_09_ai_ceiling() {
         let mut clock = test_clock();
-        let mut d = DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
+        let mut d =
+            DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
         d.add_authority_link(AuthorityLink {
             actor_did: Did::new("did:exo:root").expect("ok"),
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::ZERO,
             timestamp: clock.now(),
-        }).expect("ok");
+        })
+        .expect("ok");
         let ts = clock.now();
         d.add_vote(Vote {
             voter_did: Did::new("did:exo:ai-bot").expect("ok"),
@@ -317,7 +340,8 @@ mod tests {
             },
             timestamp: ts,
             signature_hash: Hash256::ZERO,
-        }).expect("ok");
+        })
+        .expect("ok");
         let ctx = passing_ctx(&d);
         let err = enforce_tnc_09(&ctx).unwrap_err();
         assert!(matches!(err, ForumError::TncViolation { tnc_id: 9, .. }));

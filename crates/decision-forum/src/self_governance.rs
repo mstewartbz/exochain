@@ -7,7 +7,6 @@ use exo_core::types::{Hash256, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-
 /// A proposed governance change tracked as a self-governance item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceProposal {
@@ -54,10 +53,10 @@ impl GovernanceSimulator {
         let mut issues = Vec::new();
 
         // Constitutional amendments must be class Constitutional
-        if proposal.change_type == GovernanceChangeType::ConstitutionalAmendment {
-            if proposal.decision_id.is_none() {
-                issues.push("constitutional amendment requires backing decision".into());
-            }
+        if proposal.change_type == GovernanceChangeType::ConstitutionalAmendment
+            && proposal.decision_id.is_none()
+        {
+            issues.push("constitutional amendment requires backing decision".into());
         }
 
         // All changes need a title
@@ -87,7 +86,10 @@ impl ComplianceTracker {
     /// Create a new tracker.
     #[must_use]
     pub fn new() -> Self {
-        Self { total_modifications: 0, compliant_modifications: 0 }
+        Self {
+            total_modifications: 0,
+            compliant_modifications: 0,
+        }
     }
 
     /// Record a modification.
@@ -100,16 +102,18 @@ impl ComplianceTracker {
 
     /// Compliance rate as a percentage (0-100).
     #[must_use]
-    pub fn compliance_rate_pct(&self) -> u32 {
+    pub fn compliance_rate_pct(&self) -> u64 {
         if self.total_modifications == 0 {
             return 100;
         }
-        ((self.compliant_modifications * 100) / self.total_modifications) as u32
+        (self.compliant_modifications * 100) / self.total_modifications
     }
 }
 
 impl Default for ComplianceTracker {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Create a governance proposal.
@@ -135,11 +139,18 @@ pub fn create_proposal(
 mod tests {
     use super::*;
 
-    fn ts() -> Timestamp { Timestamp::new(1_000_000, 0) }
+    fn ts() -> Timestamp {
+        Timestamp::new(1_000_000, 0)
+    }
 
     #[test]
     fn create_proposal_basic() {
-        let p = create_proposal("Update quorum", "Change thresholds", GovernanceChangeType::QuorumPolicyChange, ts());
+        let p = create_proposal(
+            "Update quorum",
+            "Change thresholds",
+            GovernanceChangeType::QuorumPolicyChange,
+            ts(),
+        );
         assert_eq!(p.title, "Update quorum");
         assert!(p.decision_id.is_none());
         assert!(p.simulation_result.is_none());
@@ -147,7 +158,12 @@ mod tests {
 
     #[test]
     fn simulate_valid_proposal() {
-        let p = create_proposal("Test", "desc", GovernanceChangeType::QuorumPolicyChange, ts());
+        let p = create_proposal(
+            "Test",
+            "desc",
+            GovernanceChangeType::QuorumPolicyChange,
+            ts(),
+        );
         let result = GovernanceSimulator::simulate(&p, Hash256::ZERO, ts());
         assert!(result.passed);
         assert!(result.issues.is_empty());
@@ -155,7 +171,12 @@ mod tests {
 
     #[test]
     fn simulate_amendment_without_decision() {
-        let p = create_proposal("Amend", "desc", GovernanceChangeType::ConstitutionalAmendment, ts());
+        let p = create_proposal(
+            "Amend",
+            "desc",
+            GovernanceChangeType::ConstitutionalAmendment,
+            ts(),
+        );
         let result = GovernanceSimulator::simulate(&p, Hash256::ZERO, ts());
         assert!(!result.passed);
         assert!(result.issues.iter().any(|i| i.contains("backing decision")));

@@ -1,7 +1,9 @@
 //! Peer-to-peer mesh networking.
+use std::collections::{BTreeMap, BTreeSet};
+
 use exo_core::{Did, Hash256, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+
 use crate::error::{ApiError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -17,14 +19,32 @@ pub struct PeerInfo {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PeerRegistry { pub peers: BTreeMap<PeerId, PeerInfo> }
+pub struct PeerRegistry {
+    pub peers: BTreeMap<PeerId, PeerInfo>,
+}
 
 impl PeerRegistry {
-    #[must_use] pub fn new() -> Self { Self { peers: BTreeMap::new() } }
-    pub fn register(&mut self, info: PeerInfo) { self.peers.insert(info.id.clone(), info); }
-    #[must_use] pub fn get(&self, id: &PeerId) -> Option<&PeerInfo> { self.peers.get(id) }
-    #[must_use] pub fn len(&self) -> usize { self.peers.len() }
-    #[must_use] pub fn is_empty(&self) -> bool { self.peers.is_empty() }
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            peers: BTreeMap::new(),
+        }
+    }
+    pub fn register(&mut self, info: PeerInfo) {
+        self.peers.insert(info.id.clone(), info);
+    }
+    #[must_use]
+    pub fn get(&self, id: &PeerId) -> Option<&PeerInfo> {
+        self.peers.get(id)
+    }
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,19 +58,30 @@ pub struct Message {
 
 /// Rate-limit tracking per peer.
 #[derive(Debug, Default)]
-pub struct RateLimiter { counts: BTreeMap<PeerId, u32> }
+pub struct RateLimiter {
+    counts: BTreeMap<PeerId, u32>,
+}
 impl RateLimiter {
     const MAX_PER_WINDOW: u32 = 100;
-    #[must_use] pub fn new() -> Self { Self { counts: BTreeMap::new() } }
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            counts: BTreeMap::new(),
+        }
+    }
     pub fn check_and_increment(&mut self, peer: &PeerId) -> Result<()> {
         let c = self.counts.entry(peer.clone()).or_insert(0);
         if *c >= Self::MAX_PER_WINDOW {
-            return Err(ApiError::RateLimited { peer_id: format!("{:?}", peer) });
+            return Err(ApiError::RateLimited {
+                peer_id: format!("{:?}", peer),
+            });
         }
         *c += 1;
         Ok(())
     }
-    pub fn reset(&mut self) { self.counts.clear(); }
+    pub fn reset(&mut self) {
+        self.counts.clear();
+    }
 }
 
 pub fn send(registry: &PeerRegistry, msg: &Message) -> Result<()> {
@@ -65,7 +96,9 @@ pub fn send(registry: &PeerRegistry, msg: &Message) -> Result<()> {
 pub fn verify_message(msg: &Message) -> Result<()> {
     // Verify signature is non-zero (placeholder for real crypto verification)
     if *msg.signature.as_bytes() == [0u8; 64] {
-        return Err(ApiError::VerificationFailed { reason: "empty signature".into() });
+        return Err(ApiError::VerificationFailed {
+            reason: "empty signature".into(),
+        });
     }
     Ok(())
 }
@@ -73,13 +106,21 @@ pub fn verify_message(msg: &Message) -> Result<()> {
 pub fn discover_peers(registry: &mut PeerRegistry, bootstrap: &[String]) -> Result<Vec<PeerId>> {
     let mut discovered = Vec::new();
     for addr in bootstrap {
-        let did = Did::new(&format!("did:exo:peer-{}", blake3::hash(addr.as_bytes()).to_hex())).unwrap();
+        let did = Did::new(&format!(
+            "did:exo:peer-{}",
+            blake3::hash(addr.as_bytes()).to_hex()
+        ))
+        .map_err(|e| ApiError::InvalidSchema {
+            reason: e.to_string(),
+        })?;
         let pid = PeerId(did);
         if !registry.peers.contains_key(&pid) {
             registry.register(PeerInfo {
-                id: pid.clone(), addresses: vec![addr.clone()],
+                id: pid.clone(),
+                addresses: vec![addr.clone()],
                 public_key_hash: Hash256::digest(addr.as_bytes()),
-                last_seen: Timestamp::ZERO, reputation_score: 50,
+                last_seen: Timestamp::ZERO,
+                reputation_score: 50,
             });
             discovered.push(pid);
         }
@@ -144,7 +185,7 @@ fn effective_asn(peer: &PeerMetadata) -> Asn {
 /// Check whether the peer set meets the ASN diversity threshold.
 #[must_use]
 pub fn check_asn_diversity(peers: &[PeerMetadata], policy: &AsnPolicy) -> DiversityResult {
-    let unique: BTreeSet<Asn> = peers.iter().map(|p| effective_asn(p)).collect();
+    let unique: BTreeSet<Asn> = peers.iter().map(effective_asn).collect();
     if unique.len() >= policy.min_unique_asns {
         DiversityResult::Sufficient
     } else {
@@ -183,7 +224,7 @@ pub fn select_diverse_peers(
             break;
         }
         let mut added_this_round = false;
-        for (_asn, bucket) in &by_asn {
+        for bucket in by_asn.values() {
             if selected.len() >= max_peers {
                 break;
             }
@@ -258,30 +299,119 @@ pub fn rotate_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn pid(n: &str) -> PeerId { PeerId(Did::new(&format!("did:exo:{n}")).unwrap()) }
-    fn info(n: &str) -> PeerInfo { PeerInfo { id: pid(n), addresses: vec!["addr".into()], public_key_hash: Hash256::ZERO, last_seen: Timestamp::ZERO, reputation_score: 50 } }
+    fn pid(n: &str) -> PeerId {
+        PeerId(Did::new(&format!("did:exo:{n}")).unwrap())
+    }
+    fn info(n: &str) -> PeerInfo {
+        PeerInfo {
+            id: pid(n),
+            addresses: vec!["addr".into()],
+            public_key_hash: Hash256::ZERO,
+            last_seen: Timestamp::ZERO,
+            reputation_score: 50,
+        }
+    }
     fn msg(from: &str, to: Option<&str>) -> Message {
-        let mut sig = [0u8; 64]; sig[0] = 1;
-        Message { from: pid(from), to: to.map(pid), payload: b"hello".to_vec(), signature: Signature::from_bytes(sig), nonce: 1 }
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        Message {
+            from: pid(from),
+            to: to.map(pid),
+            payload: b"hello".to_vec(),
+            signature: Signature::from_bytes(sig),
+            nonce: 1,
+        }
     }
 
-    #[test] fn registry_empty() { let r = PeerRegistry::new(); assert!(r.is_empty()); assert_eq!(r.len(), 0); }
-    #[test] fn registry_register() { let mut r = PeerRegistry::new(); r.register(info("a")); assert_eq!(r.len(), 1); assert!(r.get(&pid("a")).is_some()); }
-    #[test] fn registry_default() { assert!(PeerRegistry::default().is_empty()); }
-    #[test] fn send_known_peer() { let mut r = PeerRegistry::new(); r.register(info("b")); assert!(send(&r, &msg("a", Some("b"))).is_ok()); }
-    #[test] fn send_unknown_peer() { let r = PeerRegistry::new(); assert!(send(&r, &msg("a", Some("b"))).is_err()); }
-    #[test] fn send_broadcast() { let r = PeerRegistry::new(); assert!(send(&r, &msg("a", None)).is_ok()); }
-    #[test] fn verify_ok() { assert!(verify_message(&msg("a", None)).is_ok()); }
-    #[test] fn verify_empty_sig() {
-        let m = Message { from: pid("a"), to: None, payload: vec![], signature: Signature::from_bytes([0u8; 64]), nonce: 0 };
+    #[test]
+    fn registry_empty() {
+        let r = PeerRegistry::new();
+        assert!(r.is_empty());
+        assert_eq!(r.len(), 0);
+    }
+    #[test]
+    fn registry_register() {
+        let mut r = PeerRegistry::new();
+        r.register(info("a"));
+        assert_eq!(r.len(), 1);
+        assert!(r.get(&pid("a")).is_some());
+    }
+    #[test]
+    fn registry_default() {
+        assert!(PeerRegistry::default().is_empty());
+    }
+    #[test]
+    fn send_known_peer() {
+        let mut r = PeerRegistry::new();
+        r.register(info("b"));
+        assert!(send(&r, &msg("a", Some("b"))).is_ok());
+    }
+    #[test]
+    fn send_unknown_peer() {
+        let r = PeerRegistry::new();
+        assert!(send(&r, &msg("a", Some("b"))).is_err());
+    }
+    #[test]
+    fn send_broadcast() {
+        let r = PeerRegistry::new();
+        assert!(send(&r, &msg("a", None)).is_ok());
+    }
+    #[test]
+    fn verify_ok() {
+        assert!(verify_message(&msg("a", None)).is_ok());
+    }
+    #[test]
+    fn verify_empty_sig() {
+        let m = Message {
+            from: pid("a"),
+            to: None,
+            payload: vec![],
+            signature: Signature::from_bytes([0u8; 64]),
+            nonce: 0,
+        };
         assert!(verify_message(&m).is_err());
     }
-    #[test] fn discover() { let mut r = PeerRegistry::new(); let d = discover_peers(&mut r, &["addr1".into(), "addr2".into()]).unwrap(); assert_eq!(d.len(), 2); assert_eq!(r.len(), 2); }
-    #[test] fn discover_no_dupes() { let mut r = PeerRegistry::new(); discover_peers(&mut r, &["a".into()]).unwrap(); let d = discover_peers(&mut r, &["a".into()]).unwrap(); assert!(d.is_empty()); }
-    #[test] fn rate_limiter() { let mut rl = RateLimiter::new(); for _ in 0..100 { rl.check_and_increment(&pid("a")).unwrap(); } assert!(rl.check_and_increment(&pid("a")).is_err()); }
-    #[test] fn rate_limiter_reset() { let mut rl = RateLimiter::new(); for _ in 0..100 { rl.check_and_increment(&pid("a")).unwrap(); } rl.reset(); assert!(rl.check_and_increment(&pid("a")).is_ok()); }
-    #[test] fn peer_id_ord() { assert!(pid("a") < pid("b")); }
-    #[test] fn message_serde() { let m = msg("a", Some("b")); let j = serde_json::to_string(&m).unwrap(); assert!(!j.is_empty()); }
+    #[test]
+    fn discover() {
+        let mut r = PeerRegistry::new();
+        let d = discover_peers(&mut r, &["addr1".into(), "addr2".into()]).unwrap();
+        assert_eq!(d.len(), 2);
+        assert_eq!(r.len(), 2);
+    }
+    #[test]
+    fn discover_no_dupes() {
+        let mut r = PeerRegistry::new();
+        discover_peers(&mut r, &["a".into()]).unwrap();
+        let d = discover_peers(&mut r, &["a".into()]).unwrap();
+        assert!(d.is_empty());
+    }
+    #[test]
+    fn rate_limiter() {
+        let mut rl = RateLimiter::new();
+        for _ in 0..100 {
+            rl.check_and_increment(&pid("a")).unwrap();
+        }
+        assert!(rl.check_and_increment(&pid("a")).is_err());
+    }
+    #[test]
+    fn rate_limiter_reset() {
+        let mut rl = RateLimiter::new();
+        for _ in 0..100 {
+            rl.check_and_increment(&pid("a")).unwrap();
+        }
+        rl.reset();
+        assert!(rl.check_and_increment(&pid("a")).is_ok());
+    }
+    #[test]
+    fn peer_id_ord() {
+        assert!(pid("a") < pid("b"));
+    }
+    #[test]
+    fn message_serde() {
+        let m = msg("a", Some("b"));
+        let j = serde_json::to_string(&m).unwrap();
+        assert!(!j.is_empty());
+    }
 
     // -- ASN diversity helpers -----------------------------------------------
 
@@ -303,7 +433,10 @@ mod tests {
         let policy = AsnPolicy::default();
         assert_eq!(
             check_asn_diversity(&peers, &policy),
-            DiversityResult::Insufficient { unique_asns: 1, required: 3 }
+            DiversityResult::Insufficient {
+                unique_asns: 1,
+                required: 3
+            }
         );
     }
 
@@ -316,7 +449,10 @@ mod tests {
             peer_meta("c", Some(300), 1000),
         ];
         let policy = AsnPolicy::default();
-        assert_eq!(check_asn_diversity(&peers, &policy), DiversityResult::Sufficient);
+        assert_eq!(
+            check_asn_diversity(&peers, &policy),
+            DiversityResult::Sufficient
+        );
     }
 
     // 3. 10 peers from same ASN, max_peers_per_asn=5 → only 5 selected
@@ -325,7 +461,10 @@ mod tests {
         let candidates: Vec<PeerMetadata> = (0..10)
             .map(|i| peer_meta(&format!("p{i}"), Some(64512), 1000))
             .collect();
-        let policy = AsnPolicy { max_peers_per_asn: 5, ..AsnPolicy::default() };
+        let policy = AsnPolicy {
+            max_peers_per_asn: 5,
+            ..AsnPolicy::default()
+        };
         let selected = select_diverse_peers(&candidates, &policy, 20);
         assert_eq!(selected.len(), 5);
     }
@@ -358,9 +497,9 @@ mod tests {
         let now = Timestamp::new(10_000_000, 0);
         let max_age_ms = 7_200_000; // 2 hours
         let peers = vec![
-            peer_meta("fresh", Some(1), 9_000_000),   // seen 1 s ago, not stale
-            peer_meta("stale1", Some(2), 1_000_000),   // seen 9000 s ago, stale
-            peer_meta("stale2", Some(3), 2_000_000),   // seen 8000 s ago, stale
+            peer_meta("fresh", Some(1), 9_000_000), // seen 1 s ago, not stale
+            peer_meta("stale1", Some(2), 1_000_000), // seen 9000 s ago, stale
+            peer_meta("stale2", Some(3), 2_000_000), // seen 8000 s ago, stale
         ];
         let stale = identify_stale_peers(&peers, &now, max_age_ms);
         assert_eq!(stale.len(), 2);
@@ -377,9 +516,9 @@ mod tests {
             ..AsnPolicy::default()
         };
         let mut current = vec![
-            peer_meta("keep", Some(100), 9_000_000),   // fresh
-            peer_meta("old1", Some(100), 1_000_000),   // stale
-            peer_meta("old2", Some(100), 2_000_000),   // stale
+            peer_meta("keep", Some(100), 9_000_000), // fresh
+            peer_meta("old1", Some(100), 1_000_000), // stale
+            peer_meta("old2", Some(100), 2_000_000), // stale
         ];
         let candidates = vec![
             peer_meta("new1", Some(200), 9_500_000),
@@ -416,10 +555,16 @@ mod tests {
         // All None → single effective ASN group → 1 unique ASN
         assert_eq!(
             check_asn_diversity(&peers, &policy),
-            DiversityResult::Insufficient { unique_asns: 1, required: 3 }
+            DiversityResult::Insufficient {
+                unique_asns: 1,
+                required: 3
+            }
         );
         // select_diverse_peers respects max_peers_per_asn for the None group
-        let policy2 = AsnPolicy { max_peers_per_asn: 2, ..AsnPolicy::default() };
+        let policy2 = AsnPolicy {
+            max_peers_per_asn: 2,
+            ..AsnPolicy::default()
+        };
         let selected = select_diverse_peers(&peers, &policy2, 10);
         assert_eq!(selected.len(), 2);
     }

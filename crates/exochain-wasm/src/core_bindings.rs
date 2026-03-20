@@ -1,6 +1,7 @@
 //! Core bindings: crypto, hashing, BCTS state machine, events, HLC
 
 use wasm_bindgen::prelude::*;
+
 use crate::serde_bridge::*;
 
 // ── Hashing ──────────────────────────────────────────────────────
@@ -51,23 +52,28 @@ pub fn wasm_generate_keypair() -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub fn wasm_sign(message: &[u8], secret_hex: &str) -> Result<String, JsValue> {
-    let secret_bytes = hex::decode(secret_hex)
-        .map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = secret_bytes.try_into()
+    let secret_bytes =
+        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+    let arr: [u8; 32] = secret_bytes
+        .try_into()
         .map_err(|_| JsValue::from_str("secret key must be 32 bytes"))?;
     let secret = exo_core::SecretKey::from_bytes(arr);
     let sig = exo_core::crypto::sign(message, &secret);
-    let sig_json = serde_json::to_string(&sig)
-        .map_err(|e| JsValue::from_str(&format!("serialize: {e}")))?;
+    let sig_json =
+        serde_json::to_string(&sig).map_err(|e| JsValue::from_str(&format!("serialize: {e}")))?;
     Ok(sig_json)
 }
 
 #[wasm_bindgen]
-pub fn wasm_verify(message: &[u8], signature_json: &str, public_hex: &str) -> Result<bool, JsValue> {
+pub fn wasm_verify(
+    message: &[u8],
+    signature_json: &str,
+    public_hex: &str,
+) -> Result<bool, JsValue> {
     let sig: exo_core::Signature = from_json_str(signature_json)?;
-    let pub_bytes = hex::decode(public_hex)
-        .map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = pub_bytes.try_into()
+    let pub_bytes = hex::decode(public_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+    let arr: [u8; 32] = pub_bytes
+        .try_into()
         .map_err(|_| JsValue::from_str("public key must be 32 bytes"))?;
     let pubkey = exo_core::PublicKey::from_bytes(arr);
     Ok(exo_core::crypto::verify(message, &sig, &pubkey))
@@ -85,7 +91,10 @@ pub fn wasm_bcts_valid_transitions(state_json: &str) -> Result<JsValue, JsValue>
 #[wasm_bindgen]
 pub fn wasm_bcts_is_terminal(state_json: &str) -> Result<bool, JsValue> {
     let state: exo_core::bcts::BctsState = from_json_str(state_json)?;
-    Ok(matches!(state, exo_core::bcts::BctsState::Closed | exo_core::bcts::BctsState::Denied))
+    Ok(matches!(
+        state,
+        exo_core::bcts::BctsState::Closed | exo_core::bcts::BctsState::Denied
+    ))
 }
 
 // ── Events ───────────────────────────────────────────────────────
@@ -100,9 +109,10 @@ pub fn wasm_create_signed_event(
     let event_type: exo_core::events::EventType = from_json_str(event_type_json)?;
     let did = exo_core::Did::new(source_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-    let secret_bytes = hex::decode(secret_hex)
-        .map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = secret_bytes.try_into()
+    let secret_bytes =
+        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+    let arr: [u8; 32] = secret_bytes
+        .try_into()
         .map_err(|_| JsValue::from_str("secret key must be 32 bytes"))?;
     let secret = exo_core::SecretKey::from_bytes(arr);
 
@@ -110,6 +120,7 @@ pub fn wasm_create_signed_event(
     let ts = clock.now();
     let corr = exo_core::CorrelationId::new();
 
-    let event = exo_core::events::create_signed_event(corr, ts, event_type, payload.to_vec(), did, &secret);
+    let event =
+        exo_core::events::create_signed_event(corr, ts, event_type, payload.to_vec(), did, &secret);
     to_js_value(&event)
 }

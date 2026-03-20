@@ -1,11 +1,16 @@
 //! Governance middleware chain — consent, governance, and audit middleware.
 use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
+
 use crate::error::{GatewayError, Result};
 
 /// Verdict from governance adjudication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Verdict { Allow, Deny { reason: String }, Escalate { reason: String } }
+pub enum Verdict {
+    Allow,
+    Deny { reason: String },
+    Escalate { reason: String },
+}
 
 /// Audit log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,18 +23,37 @@ pub struct AuditEntry {
 
 /// Audit log.
 #[derive(Debug, Clone, Default)]
-pub struct AuditLog { pub entries: Vec<AuditEntry> }
+pub struct AuditLog {
+    pub entries: Vec<AuditEntry>,
+}
 impl AuditLog {
-    #[must_use] pub fn new() -> Self { Self { entries: Vec::new() } }
-    pub fn record(&mut self, entry: AuditEntry) { self.entries.push(entry); }
-    #[must_use] pub fn len(&self) -> usize { self.entries.len() }
-    #[must_use] pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+    pub fn record(&mut self, entry: AuditEntry) {
+        self.entries.push(entry);
+    }
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Consent check — default-deny. Returns Ok if consent is explicitly granted.
 pub fn consent_middleware(actor: &Did, _action: &str, consent_granted: bool) -> Result<()> {
-    if consent_granted { Ok(()) } else {
-        Err(GatewayError::ConsentDenied { reason: format!("no consent for {actor}") })
+    if consent_granted {
+        Ok(())
+    } else {
+        Err(GatewayError::ConsentDenied {
+            reason: format!("no consent for {actor}"),
+        })
     }
 }
 
@@ -37,8 +61,12 @@ pub fn consent_middleware(actor: &Did, _action: &str, consent_granted: bool) -> 
 pub fn governance_middleware(_actor: &Did, _action: &str, verdict: &Verdict) -> Result<()> {
     match verdict {
         Verdict::Allow => Ok(()),
-        Verdict::Deny { reason } => Err(GatewayError::GovernanceDenied { reason: reason.clone() }),
-        Verdict::Escalate { reason } => Err(GatewayError::GovernanceDenied { reason: format!("escalated: {reason}") }),
+        Verdict::Deny { reason } => Err(GatewayError::GovernanceDenied {
+            reason: reason.clone(),
+        }),
+        Verdict::Escalate { reason } => Err(GatewayError::GovernanceDenied {
+            reason: format!("escalated: {reason}"),
+        }),
     }
 }
 
@@ -61,8 +89,10 @@ pub fn audit_middleware(
         ));
     }
     log.record(AuditEntry {
-        actor: actor.clone(), action: action.into(),
-        timestamp: *timestamp, outcome: outcome.into(),
+        actor: actor.clone(),
+        action: action.into(),
+        timestamp: *timestamp,
+        outcome: outcome.into(),
     });
     Ok(())
 }
@@ -70,30 +100,74 @@ pub fn audit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn did(n: &str) -> Did { Did::new(&format!("did:exo:{n}")).unwrap() }
+    fn did(n: &str) -> Did {
+        Did::new(&format!("did:exo:{n}")).unwrap()
+    }
 
-    #[test] fn consent_granted() { assert!(consent_middleware(&did("a"), "read", true).is_ok()); }
-    #[test] fn consent_denied() { assert!(consent_middleware(&did("a"), "read", false).is_err()); }
-    #[test] fn governance_allow() { assert!(governance_middleware(&did("a"), "r", &Verdict::Allow).is_ok()); }
-    #[test] fn governance_deny() { assert!(governance_middleware(&did("a"), "r", &Verdict::Deny{reason:"no".into()}).is_err()); }
-    #[test] fn governance_escalate() { assert!(governance_middleware(&did("a"), "r", &Verdict::Escalate{reason:"y".into()}).is_err()); }
-    #[test] fn audit_records() {
+    #[test]
+    fn consent_granted() {
+        assert!(consent_middleware(&did("a"), "read", true).is_ok());
+    }
+    #[test]
+    fn consent_denied() {
+        assert!(consent_middleware(&did("a"), "read", false).is_err());
+    }
+    #[test]
+    fn governance_allow() {
+        assert!(governance_middleware(&did("a"), "r", &Verdict::Allow).is_ok());
+    }
+    #[test]
+    fn governance_deny() {
+        assert!(
+            governance_middleware(
+                &did("a"),
+                "r",
+                &Verdict::Deny {
+                    reason: "no".into()
+                }
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn governance_escalate() {
+        assert!(
+            governance_middleware(&did("a"), "r", &Verdict::Escalate { reason: "y".into() })
+                .is_err()
+        );
+    }
+    #[test]
+    fn audit_records() {
         let mut log = AuditLog::new();
         let ts = Timestamp::new(1000, 0);
         audit_middleware(&did("a"), "read", "ok", &ts, &mut log).unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log.entries[0].timestamp, ts);
     }
-    #[test] fn audit_rejects_zero_timestamp() {
+    #[test]
+    fn audit_rejects_zero_timestamp() {
         let mut log = AuditLog::new();
         assert!(audit_middleware(&did("a"), "read", "ok", &Timestamp::ZERO, &mut log).is_err());
         assert!(log.is_empty());
     }
-    #[test] fn audit_empty() { assert!(AuditLog::new().is_empty()); }
-    #[test] fn audit_default() { assert!(AuditLog::default().is_empty()); }
-    #[test] fn verdict_serde() {
-        for v in [Verdict::Allow, Verdict::Deny{reason:"x".into()}, Verdict::Escalate{reason:"y".into()}] {
-            let j = serde_json::to_string(&v).unwrap(); let r: Verdict = serde_json::from_str(&j).unwrap(); assert_eq!(r, v);
+    #[test]
+    fn audit_empty() {
+        assert!(AuditLog::new().is_empty());
+    }
+    #[test]
+    fn audit_default() {
+        assert!(AuditLog::default().is_empty());
+    }
+    #[test]
+    fn verdict_serde() {
+        for v in [
+            Verdict::Allow,
+            Verdict::Deny { reason: "x".into() },
+            Verdict::Escalate { reason: "y".into() },
+        ] {
+            let j = serde_json::to_string(&v).unwrap();
+            let r: Verdict = serde_json::from_str(&j).unwrap();
+            assert_eq!(r, v);
         }
     }
 }

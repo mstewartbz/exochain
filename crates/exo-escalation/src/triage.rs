@@ -6,13 +6,27 @@ use serde::{Deserialize, Serialize};
 use crate::detector::{Severity, ThreatAssessment};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TriageLevel { Automatic, Supervised, ManualRequired, EmergencyHuman }
+pub enum TriageLevel {
+    Automatic,
+    Supervised,
+    ManualRequired,
+    EmergencyHuman,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TriageAction { Log, Alert, Quarantine, Suspend, Escalate, Shutdown }
+pub enum TriageAction {
+    Log,
+    Alert,
+    Quarantine,
+    Suspend,
+    Escalate,
+    Shutdown,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EscalationPathSpec { pub name: String }
+pub struct EscalationPathSpec {
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriageDecision {
@@ -36,19 +50,29 @@ pub fn triage(assessment: &ThreatAssessment) -> TriageDecision {
             level: TriageLevel::Supervised,
             actions: vec![TriageAction::Log, TriageAction::Alert],
             timeout: Timestamp::new(1_800_000, 0), // 30 min
-            escalation_path: Some(EscalationPathSpec { name: "standard".into() }),
+            escalation_path: Some(EscalationPathSpec {
+                name: "standard".into(),
+            }),
         },
         Severity::High => TriageDecision {
             level: TriageLevel::ManualRequired,
             actions: vec![TriageAction::Alert, TriageAction::Quarantine],
             timeout: Timestamp::new(900_000, 0), // 15 min
-            escalation_path: Some(EscalationPathSpec { name: "sybil_adjudication".into() }),
+            escalation_path: Some(EscalationPathSpec {
+                name: "sybil_adjudication".into(),
+            }),
         },
         Severity::Critical => TriageDecision {
             level: TriageLevel::EmergencyHuman,
-            actions: vec![TriageAction::Suspend, TriageAction::Escalate, TriageAction::Shutdown],
+            actions: vec![
+                TriageAction::Suspend,
+                TriageAction::Escalate,
+                TriageAction::Shutdown,
+            ],
             timeout: Timestamp::new(300_000, 0), // 5 min
-            escalation_path: Some(EscalationPathSpec { name: "emergency".into() }),
+            escalation_path: Some(EscalationPathSpec {
+                name: "emergency".into(),
+            }),
         },
     }
 }
@@ -66,31 +90,41 @@ mod tests {
         }
     }
 
-    #[test] fn low_automatic() {
+    #[test]
+    fn low_automatic() {
         let d = triage(&assessment(Severity::Low));
         assert_eq!(d.level, TriageLevel::Automatic);
         assert!(d.actions.contains(&TriageAction::Log));
         assert!(d.escalation_path.is_none());
     }
-    #[test] fn medium_supervised() {
+    #[test]
+    fn medium_supervised() {
         let d = triage(&assessment(Severity::Medium));
         assert_eq!(d.level, TriageLevel::Supervised);
         assert!(d.actions.contains(&TriageAction::Alert));
         assert!(d.escalation_path.is_some());
     }
-    #[test] fn high_manual() {
+    #[test]
+    fn high_manual() {
         let d = triage(&assessment(Severity::High));
         assert_eq!(d.level, TriageLevel::ManualRequired);
         assert!(d.actions.contains(&TriageAction::Quarantine));
     }
-    #[test] fn critical_emergency() {
+    #[test]
+    fn critical_emergency() {
         let d = triage(&assessment(Severity::Critical));
         assert_eq!(d.level, TriageLevel::EmergencyHuman);
         assert!(d.actions.contains(&TriageAction::Shutdown));
         assert!(d.actions.contains(&TriageAction::Escalate));
     }
-    #[test] fn all_levels_constructible() {
-        for l in [TriageLevel::Automatic, TriageLevel::Supervised, TriageLevel::ManualRequired, TriageLevel::EmergencyHuman] {
+    #[test]
+    fn all_levels_constructible() {
+        for l in [
+            TriageLevel::Automatic,
+            TriageLevel::Supervised,
+            TriageLevel::ManualRequired,
+            TriageLevel::EmergencyHuman,
+        ] {
             assert_eq!(l, l.clone());
         }
     }
