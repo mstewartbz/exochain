@@ -30,6 +30,7 @@ pub mod contestation;
 pub mod decision_object;
 pub mod emergency;
 pub mod error;
+pub mod fiduciary_package;
 pub mod human_gate;
 pub mod metrics;
 pub mod quorum;
