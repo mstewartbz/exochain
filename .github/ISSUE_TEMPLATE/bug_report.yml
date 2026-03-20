@@ -1,0 +1,87 @@
+name: Bug Report
+description: Report a bug in ExoChain. ExoForge will triage automatically.
+title: "[Bug]: "
+labels: ["bug", "exoforge:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **ExoForge Integration**: Issues labeled `exoforge:triage` are automatically picked up by the [ExoForge](https://github.com/exochain/exoforge) self-improvement cycle for investigation, council review, and governed implementation.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of ExoChain is affected?
+      options:
+        - Rust Core (crates/)
+        - WASM Bindings (demo/packages/exochain-wasm/)
+        - Gateway API (demo/services/gateway-api/)
+        - Web UI (demo/web/)
+        - Identity Service
+        - Consent Service
+        - Governance Engine
+        - Decision Forge
+        - Audit API
+        - Provenance Writer
+        - Documentation
+        - CI/CD
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what the bug is.
+      placeholder: When I click X, Y happens instead of Z.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this?
+      value: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should happen instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical (system down, data loss, security breach)
+        - High (major feature broken, no workaround)
+        - Medium (feature degraded, workaround exists)
+        - Low (cosmetic, minor inconvenience)
+    validations:
+      required: true
+  - type: dropdown
+    id: invariants
+    attributes:
+      label: Constitutional Invariants Affected
+      description: Select any invariants this bug may violate.
+      multiple: true
+      options:
+        - DemocraticLegitimacy
+        - DelegationGovernance
+        - DualControl
+        - HumanOversight
+        - TransparencyAccountability
+        - ConflictAdjudication
+        - TechnologicalHumility
+        - ExistentialSafeguard
+        - None / Unknown
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Environment, screenshots, logs, etc.

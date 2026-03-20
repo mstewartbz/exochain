@@ -29,7 +29,7 @@ sudo apt install -y certbot python3-certbot-nginx
 ## Build and Deploy
 
 ```bash
-git clone https://github.com/your-org/exochain.git
+git clone https://github.com/exochain/exochain.git
 cd exochain
 
 # Build the WASM engine

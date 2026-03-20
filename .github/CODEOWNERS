@@ -1,0 +1,41 @@
+# ExoChain CODEOWNERS
+# Maps code areas to council panel reviewers.
+# All changes require at least one approval from the relevant panel.
+
+# Default: Architecture panel
+* @exochain/architecture
+
+# Rust core — Architecture + Security panels
+/crates/ @exochain/architecture @exochain/security
+
+# Cryptographic code — Security panel required
+/crates/exo-core/src/crypto.rs @exochain/security
+/crates/exo-identity/ @exochain/security
+/crates/exo-proofs/ @exochain/security
+
+# Governance and constitutional code — Governance panel required
+/crates/exo-governance/ @exochain/governance
+/crates/decision-forum/ @exochain/governance
+/governance/ @exochain/governance
+
+# Legal compliance — Legal panel required
+/crates/exo-legal/ @exochain/legal
+/crates/exo-consent/ @exochain/legal
+/TERMS-CONDITIONS-AND-PRIVACY.md @exochain/legal
+
+# Demo platform — Operations panel
+/demo/ @exochain/operations
+/demo/infra/ @exochain/operations
+
+# CI/CD and deployment — Operations panel
+/.github/workflows/ @exochain/operations
+/Dockerfile @exochain/operations
+/docker-compose.yml @exochain/operations
+
+# Documentation — all panels for their respective areas
+/docs/ @exochain/architecture
+/docs/council/ @exochain/governance
+
+# Constitutional documents — require Governance + Legal
+/EXOCHAIN_Specification_v2.2.pdf @exochain/governance @exochain/legal
+/CONTRIBUTING.md @exochain/governance

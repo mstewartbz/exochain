@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ExoForge Self-Improvement
+    url: https://github.com/exochain/exoforge
+    about: ExoForge autonomously implements approved changes via the governed self-improvement cycle.
+  - name: ExoChain Specification
+    url: https://github.com/exochain/exochain/blob/main/EXOCHAIN_Specification_v2.2.pdf
+    about: The authoritative ExoChain specification document.

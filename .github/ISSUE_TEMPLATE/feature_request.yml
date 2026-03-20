@@ -1,0 +1,74 @@
+name: Feature Request
+description: Propose a new feature or enhancement. ExoForge will triage automatically.
+title: "[Feature]: "
+labels: ["enhancement", "exoforge:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **ExoForge Integration**: Feature requests labeled `exoforge:triage` enter the [ExoForge](https://github.com/exochain/exoforge) self-improvement cycle: triage, AI-IRB council review (5 panels), Syntaxis workflow generation, governed implementation, constitutional validation, and PR creation.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of ExoChain does this affect?
+      options:
+        - Rust Core (crates/)
+        - WASM Bindings
+        - Gateway API
+        - Web UI
+        - Identity Service
+        - Consent Service
+        - Governance Engine
+        - Decision Forge
+        - Audit / Provenance
+        - ExoForge Integration
+        - Documentation
+        - New Component
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature Description
+      description: Describe the feature you'd like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case
+      description: Why is this feature needed? What problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How will we know this feature is complete?
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+  - type: dropdown
+    id: council_panels
+    attributes:
+      label: Council Panels Required
+      description: Which AI-IRB panels should review this?
+      multiple: true
+      options:
+        - Governance (constitutional alignment)
+        - Legal (jurisdictional compliance)
+        - Architecture (technical design)
+        - Security (threat surface)
+        - Operations (deployability)
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Critical (blocks other work)
+        - High (needed soon)
+        - Medium (planned)
+        - Low (nice to have)

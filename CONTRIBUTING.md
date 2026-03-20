@@ -76,6 +76,17 @@ For a complete setup walkthrough, see [docs/guides/GETTING-STARTED.md](docs/guid
 
 If contributing with AI assistance, see [AGENTS.md](AGENTS.md) for sub-agent charters, instructions, and the Syntaxis Builder workflow.
 
+### ExoForge Self-Improvement Cycle
+
+[ExoForge](https://github.com/exochain/exoforge) is the autonomous implementation engine for ExoChain. It picks up work items from two sources:
+
+1. **GitHub Issues** — Issues labeled `exoforge:triage` are automatically ingested via the `exoforge-triage.yml` GitHub Action
+2. **Widget Feedback** — User suggestions from the demo UI's AI help menus are posted to `POST /api/feedback`
+
+Both routes enter the governed pipeline: triage → AI-IRB council review (5 panels) → implementation → constitutional validation (8 invariants, 10 TNCs) → PR creation.
+
+See [docs/guides/ARCHON-INTEGRATION.md](docs/guides/ARCHON-INTEGRATION.md) for details.
+
 ### Pre-commit Verification
 
 ```bash
