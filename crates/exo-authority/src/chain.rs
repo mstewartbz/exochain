@@ -14,6 +14,30 @@ use crate::{
 /// Default maximum delegation depth.
 pub const DEFAULT_MAX_DEPTH: usize = 5;
 
+/// Distinguishes human delegatees from AI agent delegatees.
+///
+/// This field is part of the signed payload in [`AuthorityLink`], making
+/// the delegatee kind cryptographically bound to the delegation grant.
+/// AI-agent delegations are distinguishable in compliance reports without
+/// relying on caller-supplied flags.
+///
+/// Uses `#[serde(default)]` on the containing field so existing serialised
+/// delegation records without this field deserialise as `Unknown` rather
+/// than failing — preserving backward compatibility across CBOR round-trips.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DelegateeKind {
+    /// A human principal authenticated through the identity layer.
+    Human,
+    /// An AI agent operating under a constitutional delegation.
+    ///
+    /// `model_id` identifies the AI model. In redacted compliance reports
+    /// this is replaced with `BLAKE3(tenant_id || model_id || redaction_salt)`.
+    AiAgent { model_id: String },
+    /// Kind was not specified at delegation creation time (legacy records).
+    #[default]
+    Unknown,
+}
+
 /// A single link in an authority chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityLink {
@@ -24,6 +48,10 @@ pub struct AuthorityLink {
     pub expires: Option<Timestamp>,
     pub signature: Signature,
     pub depth: usize,
+    /// Kind of delegatee — Human, AiAgent, or Unknown for legacy records.
+    /// Defaults to `Unknown` when deserialising records that predate this field.
+    #[serde(default)]
+    pub delegatee_kind: DelegateeKind,
 }
 
 impl AuthorityLink {
@@ -51,6 +79,8 @@ impl AuthorityLink {
             data.extend_from_slice(&exp.physical_ms.to_le_bytes());
             data.extend_from_slice(&exp.logical.to_le_bytes());
         }
+        // Include delegatee kind so it is cryptographically bound to the grant.
+        data.extend_from_slice(format!("{:?}", self.delegatee_kind).as_bytes());
         data
     }
 }
@@ -284,6 +314,7 @@ mod tests {
             expires: exp,
             signature: Signature::empty(),
             depth,
+            delegatee_kind: DelegateeKind::Human,
         };
         let payload = link.signable_payload();
         let kp = registry
@@ -310,6 +341,7 @@ mod tests {
             expires: exp,
             signature: Signature::from_bytes([1u8; 64]),
             depth,
+            delegatee_kind: DelegateeKind::Human,
         }
     }
 
@@ -471,6 +503,7 @@ mod tests {
             expires: None,
             signature: Signature::empty(),
             depth: 0,
+            delegatee_kind: DelegateeKind::Human,
         };
         let payload = link.signable_payload();
         // Sign with alice's key (wrong key for root)

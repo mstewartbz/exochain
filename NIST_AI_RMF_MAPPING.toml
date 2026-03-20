@@ -1,0 +1,282 @@
+# NIST AI Risk Management Framework (AI RMF 1.0) Mapping
+#
+# Maps each ExoChain ConstitutionalInvariant to its corresponding NIST AI RMF
+# function and subcategory. This document is the authoritative cross-reference
+# between code-enforced invariants and regulatory compliance frameworks.
+#
+# IMPORTANT: This file must be ratified as a ConstitutionalDocument with
+# Articles precedence level in each tenant's Constitution corpus. Changes
+# require constitutional amendment process (supermajority vote).
+#
+# References:
+#   NIST AI RMF 1.0: https://doi.org/10.6028/NIST.AI.100-1
+#   EU AI Act: Regulation (EU) 2024/1689
+#   GDPR: Regulation (EU) 2016/679
+#   ExoChain Specification v2.2
+
+schema_version = "1.0.0"
+generated_for  = "ExoChain v0.1.0"
+mapping_date   = "2026-03-20"
+
+# ---------------------------------------------------------------------------
+# NIST AI RMF Function definitions (informational)
+# ---------------------------------------------------------------------------
+
+[functions.Govern]
+description = "Cultivate and implement practices to manage AI risk throughout the AI lifecycle"
+
+[functions.Map]
+description = "Categorize and frame AI risk, identifying context, actors, and potential harms"
+
+[functions.Measure]
+description = "Analyze, assess, and track AI risks using quantitative and qualitative tools"
+
+[functions.Manage]
+description = "Allocate resources and apply treatments to identified AI risks"
+
+# ---------------------------------------------------------------------------
+# Invariant → NIST AI RMF mappings
+# ---------------------------------------------------------------------------
+
+[[mappings]]
+invariant          = "HumanOverride"
+exochain_labels    = ["HumanOversight"]
+nist_functions     = ["Govern", "Manage"]
+nist_subcategories = ["GV.1", "GV.6", "MG.2"]
+description        = """
+The HumanOverride invariant guarantees that emergency human intervention is
+always possible (TNC-02). This satisfies NIST AI RMF GV.1 (organizational
+risk policies include human oversight) and GV.6 (AI risk management is
+integrated into organizational governance). MG.2 covers treatment of AI risks
+including the ability to override, disable, or shut down AI systems.
+"""
+regulatory_refs = [
+  "EU AI Act Art. 14 (Human oversight)",
+  "EU AI Act Art. 26(5) (Fundamental rights impact assessment — human review)",
+  "GDPR Art. 22 (Automated decision-making — right to human review)",
+  "GDPR Art. 22(3) (Suitable safeguards including human intervention)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::HumanOverride",
+  "crates/exo-gatekeeper/src/invariants.rs::check_human_override()",
+  "crates/exo-governance/src/types.rs::DecisionClass (Strategic|Constitutional require human gate)",
+  "crates/exo-governance/src/constitution.rs::human_gate_classes",
+]
+
+[[mappings]]
+invariant          = "ProvenanceVerifiable"
+exochain_labels    = ["TransparencyAccountability"]
+nist_functions     = ["Govern", "Measure"]
+nist_subcategories = ["GV.1", "MS.2", "MS.4"]
+description        = """
+The ProvenanceVerifiable invariant requires all actions to carry verifiable
+provenance metadata (TNC-03). Combined with the hash-chained AuditLog
+(exo-governance/audit.rs) and litigation-grade Evidence tracking
+(exo-legal/evidence.rs), this satisfies NIST AI RMF MS.2 (AI risk
+measurement via documentation and logging) and MS.4 (trustworthy AI
+measurement practices). GV.1 is satisfied by the governance policy requiring
+provenance on all AI actions.
+"""
+regulatory_refs = [
+  "EU AI Act Art. 13 (Transparency and provision of information — high-risk AI)",
+  "EU AI Act Art. 12 (Record-keeping — automatic logging)",
+  "GDPR Art. 5(1)(f) (Integrity and confidentiality — tamper-evident processing records)",
+  "GDPR Art. 30 (Records of processing activities)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::ProvenanceVerifiable",
+  "crates/exo-gatekeeper/src/invariants.rs::check_provenance_verifiable()",
+  "crates/exo-governance/src/audit.rs::AuditLog (BLAKE3 hash-chained)",
+  "crates/exo-legal/src/evidence.rs::Evidence::chain_of_custody",
+  "crates/exo-gatekeeper/src/mcp_audit.rs::McpAuditLog (MCP enforcement chain)",
+]
+
+[[mappings]]
+invariant          = "AuthorityChainValid"
+exochain_labels    = ["DelegationGovernance"]
+nist_functions     = ["Govern", "Map"]
+nist_subcategories = ["GV.6", "MP.2", "MP.5"]
+description        = """
+The AuthorityChainValid invariant ensures that every AI action is authorised
+by an unbroken, signed delegation chain from a constitutional root. DelegateeKind
+tagging (Human|AiAgent) in AuthorityLink makes AI-originated delegations
+distinguishable in the chain. This satisfies NIST AI RMF GV.6 (AI risk
+management integrated into organisational governance/authority structures),
+MP.2 (identification of beneficial and harmful impacts by AI actors), and
+MP.5 (organisational risk tolerances are established for AI systems).
+"""
+regulatory_refs = [
+  "EU AI Act Art. 16 (Obligations of providers of high-risk AI — including accountability chain)",
+  "EU AI Act Art. 26 (Obligations of deployers — instructions for use and supervision)",
+  "GDPR Art. 5(2) (Accountability — controller demonstrates compliance)",
+  "GDPR Art. 28 (Processor obligations — binding authority chain for sub-processors)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::AuthorityChainValid",
+  "crates/exo-gatekeeper/src/invariants.rs::check_authority_chain_valid()",
+  "crates/exo-authority/src/chain.rs::AuthorityLink::delegatee_kind",
+  "crates/exo-authority/src/delegation.rs::DelegationRegistry",
+  "crates/exo-legal/src/ai_transparency.rs::AiTransparencyReport::ai_delegation_grants",
+]
+
+[[mappings]]
+invariant          = "SeparationOfPowers"
+exochain_labels    = ["DemocraticLegitimacy"]
+nist_functions     = ["Govern"]
+nist_subcategories = ["GV.1", "GV.4"]
+description        = """
+SeparationOfPowers prevents any single actor from holding legislative,
+executive, and judicial authority simultaneously. This maps to NIST AI RMF
+GV.1 (policies, processes, and procedures for AI risk management are
+established and maintained) and GV.4 (organizational teams are committed to
+governance and risk management).
+"""
+regulatory_refs = [
+  "EU AI Act Art. 9 (Risk management system — separation of roles)",
+  "EU AI Act Art. 17 (Quality management system)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::SeparationOfPowers",
+  "crates/exo-gatekeeper/src/invariants.rs::check_separation_of_powers()",
+]
+
+[[mappings]]
+invariant          = "ConsentRequired"
+exochain_labels    = ["DataSovereignty"]
+nist_functions     = ["Map", "Manage"]
+nist_subcategories = ["MP.5", "MG.3"]
+description        = """
+ConsentRequired blocks all AI actions without an active bailment consent
+record. This satisfies NIST AI RMF MP.5 (risk tolerances established —
+consent as a hard boundary) and MG.3 (response plans for AI risks —
+consent revocation triggers immediate denial). GDPR lawful basis for AI
+processing is enforced at the kernel level.
+"""
+regulatory_refs = [
+  "GDPR Art. 6 (Lawfulness of processing)",
+  "GDPR Art. 7 (Conditions for consent)",
+  "GDPR Art. 22 (Automated decision-making — explicit consent required)",
+  "EU AI Act Art. 10 (Data governance — consent for training/inference data)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::ConsentRequired",
+  "crates/exo-gatekeeper/src/invariants.rs::check_consent_required()",
+  "crates/exo-consent/src/",
+]
+
+[[mappings]]
+invariant          = "NoSelfGrant"
+exochain_labels    = ["PrivilegeEscalationPrevention"]
+nist_functions     = ["Govern", "Manage"]
+nist_subcategories = ["GV.1", "MG.2"]
+description        = """
+NoSelfGrant prevents any actor (human or AI) from expanding its own
+permission set. This directly blocks the most common AI privilege escalation
+attack pattern and satisfies GV.1 (policies include prohibition on
+self-authorisation) and MG.2 (AI risks are treated including capability
+containment).
+"""
+regulatory_refs = [
+  "EU AI Act Art. 9(7) (Risk management — containment measures)",
+  "EU AI Act Art. 14(4) (Human oversight — ability to stop the system)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::NoSelfGrant",
+  "crates/exo-gatekeeper/src/invariants.rs::check_no_self_grant()",
+]
+
+[[mappings]]
+invariant          = "KernelImmutability"
+exochain_labels    = ["ExistentialSafeguard"]
+nist_functions     = ["Govern", "Manage"]
+nist_subcategories = ["GV.1", "MG.4"]
+description        = """
+KernelImmutability prevents modification of the kernel configuration after
+creation — analogous to a constitutional lock. This satisfies MG.4 (risk
+treatments are monitored and reviewed; kernel changes would require
+re-evaluation of all downstream risk treatments).
+"""
+regulatory_refs = [
+  "EU AI Act Art. 9 (Risk management system — systemic integrity)",
+  "EU AI Act Annex IV (Technical documentation — immutable system record)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::KernelImmutability",
+  "crates/exo-gatekeeper/src/invariants.rs::check_kernel_immutability()",
+  "crates/exo-gatekeeper/src/kernel.rs",
+]
+
+[[mappings]]
+invariant          = "QuorumLegitimate"
+exochain_labels    = ["DemocraticLegitimacy", "DualControl"]
+nist_functions     = ["Govern", "Measure"]
+nist_subcategories = ["GV.1", "GV.4", "MS.2"]
+description        = """
+QuorumLegitimate ensures that multi-actor decisions meet constitutional
+thresholds and independence requirements. This maps to GV.4 (teams committed
+to AI governance) and MS.2 (AI risk measurement through governance
+processes).
+"""
+regulatory_refs = [
+  "EU AI Act Art. 17 (Quality management — governance processes)",
+  "EU AI Act Art. 9 (Risk management — multi-actor verification)",
+]
+implementation_refs = [
+  "crates/exo-gatekeeper/src/invariants.rs::ConstitutionalInvariant::QuorumLegitimate",
+  "crates/exo-gatekeeper/src/invariants.rs::check_quorum_legitimate()",
+  "crates/exo-governance/src/quorum.rs",
+]
+
+# ---------------------------------------------------------------------------
+# GDPR Article 22 specific mapping
+# (Automated decision-making with legal or similarly significant effects)
+# ---------------------------------------------------------------------------
+
+[gdpr_art22]
+description = """
+GDPR Article 22 applies when AI agents make or materially influence decisions
+with legal or similarly significant effects on data subjects. ExoChain
+mitigates this risk through three complementary mechanisms:
+
+1. HumanOverride invariant (ConstitutionalInvariant::HumanOverride) — ensures
+   human intervention is always available to review or reverse AI decisions.
+2. SignerType discrimination — all AI-signed payloads use the 0x02 prefix,
+   making AI-originated decisions distinguishable from human decisions in
+   the audit record (exo-gatekeeper/src/mcp.rs::build_signed_payload).
+3. DecisionClass human gates — Strategic and Constitutional decisions
+   require human approval regardless of AI involvement
+   (exo-governance/src/types.rs::DecisionClass).
+"""
+applicable_decision_classes = [
+  "Strategic",
+  "Constitutional",
+  "Emergency",
+]
+art22_safeguards = [
+  "HumanOverride invariant enforcement at kernel level",
+  "Human-gate requirement on Strategic/Constitutional DecisionClass",
+  "AiTransparencyReport.ai_agent_action_count provides Article 22(4) profiling records",
+  "DelegateeKind::AiAgent tagging enables Art. 22(1) scope determination",
+]
+
+# ---------------------------------------------------------------------------
+# GDPR Article 5(1)(f) specific mapping
+# (Integrity and confidentiality of processing)
+# ---------------------------------------------------------------------------
+
+[gdpr_art5_1_f]
+description = """
+GDPR Article 5(1)(f) requires that personal data be processed in a manner
+that ensures appropriate security, including protection against unauthorised
+or unlawful processing and against accidental loss, destruction or damage.
+
+ExoChain satisfies this through the ProvenanceVerifiable invariant and the
+BLAKE3 hash-chained AuditLog. Any tampering with processing records is
+detectable via AuditLog::verify_chain(). The ComplianceReport BLAKE3
+output hash provides an integrity anchor for regulatory submissions.
+"""
+implementation_refs = [
+  "crates/exo-governance/src/audit.rs::verify_chain() — tamper detection",
+  "crates/exo-gatekeeper/src/mcp_audit.rs::McpAuditLog::verify_chain() — MCP integrity",
+  "crates/exo-legal/src/compliance_report.rs::ComplianceReport::report_hash — integrity anchor",
+]

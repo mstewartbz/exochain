@@ -153,6 +153,7 @@ mod tests {
                 expires: None,
                 signature: Signature::from_bytes([1u8; 64]),
                 depth: 0,
+                delegatee_kind: crate::chain::DelegateeKind::Human,
             }],
             max_depth: 5,
         }

@@ -14,6 +14,7 @@ pub mod holon;
 pub mod invariants;
 pub mod kernel;
 pub mod mcp;
+pub mod mcp_audit;
 pub mod tee;
 pub mod types;
 
@@ -24,4 +25,5 @@ pub use holon::{Holon, HolonState};
 pub use invariants::{ConstitutionalInvariant, InvariantEngine, InvariantSet};
 pub use kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict};
 pub use mcp::{McpContext, McpRule, McpViolation};
+pub use mcp_audit::{McpAuditLog, McpAuditRecord, McpEnforcementOutcome};
 pub use tee::{TeeAttestation, TeePlatform, TeePolicy};

@@ -34,6 +34,9 @@ pub enum GatekeeperError {
 
     #[error("core error: {0}")]
     Core(String),
+
+    #[error("MCP audit chain broken at index {index}")]
+    McpAuditChainBroken { index: usize },
 }
 
 impl From<exo_core::ExoError> for GatekeeperError {
