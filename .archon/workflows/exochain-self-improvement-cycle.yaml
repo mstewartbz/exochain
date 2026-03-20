@@ -10,81 +10,126 @@ description: |
 
 nodes:
   # ── Stage 1: Feedback Ingestion & Triage ──────────────────
-  - id: ingest-feedback
+  - id: ingest_feedback
     command: exochain-investigate-feedback
     description: Classify and triage incoming feedback from UI widgets
     output_format:
       type: object
       properties:
-        backlog_item:
-          type: object
-          properties:
-            title: { type: string }
-            category: { type: string, enum: [bug, enhancement, governance-gap, compliance-risk, ux] }
-            severity: { type: string, enum: [Critical, High, Medium, Low] }
-            affected_invariants: { type: array, items: { type: string } }
-            proposed_solution: { type: string }
-            council_panels_required: { type: array, items: { type: string } }
+        title:
+          type: string
+        category:
+          type: string
+          enum: [bug, enhancement, governance-gap, compliance-risk, ux]
+        severity:
+          type: string
+          enum: [Critical, High, Medium, Low]
+        affected_invariants:
+          type: array
+          items: { type: string }
+        proposed_solution:
+          type: string
+        council_panels_required:
+          type: array
+          items: { type: string }
 
   # ── Stage 2: AI-IRB Council Review (5 panels in parallel) ─
-  - id: council-review
+  - id: council_review
     command: exochain-council-review
-    depends_on: [ingest-feedback]
+    depends_on: [ingest_feedback]
     description: Five-panel council review across all governance disciplines
     output_format:
       type: object
       properties:
-        council_review:
-          type: object
-          properties:
-            aggregate_disposition: { type: string, enum: [Approved, Rejected, Deferred, Requires-Amendment] }
-            implementation_priority: { type: string }
-            archon_workflow: { type: string }
+        aggregate_disposition:
+          type: string
+          enum: [Approved, Rejected, Deferred, Requires-Amendment]
+        implementation_priority:
+          type: string
+        blocking_concerns:
+          type: string
 
   # ── Stage 3: Route by disposition ─────────────────────────
-  - id: generate-syntaxis
+  - id: generate_syntaxis
     command: exochain-generate-syntaxis
-    depends_on: [council-review]
-    when: "$council-review.output.council_review.aggregate_disposition == 'Approved'"
+    depends_on: [council_review]
+    when: "$council_review.output.aggregate_disposition == 'Approved'"
     description: Generate Syntaxis workflow for approved items
 
-  - id: request-amendment
+  - id: request_amendment
     command: exochain-investigate-feedback
-    depends_on: [council-review]
-    when: "$council-review.output.council_review.aggregate_disposition == 'Requires-Amendment'"
+    depends_on: [council_review]
+    when: "$council_review.output.aggregate_disposition == 'Requires-Amendment'"
     description: Re-investigate with amendment requirements
 
   # ── Stage 4: Implementation ───────────────────────────────
   - id: implement
     command: exochain-implement-feature
-    depends_on: [generate-syntaxis]
+    depends_on: [generate_syntaxis]
     trigger_rule: none_failed_min_one_success
     description: Implement the approved feature across the full stack
 
   # ── Stage 5: Constitutional Validation (Governance Gate) ──
-  - id: validate-constitution
+  - id: validate_constitution
     command: exochain-validate-constitution
     depends_on: [implement]
     description: Validate implementation against all 8 invariants and 10 TNCs
     output_format:
       type: object
       properties:
-        validation:
-          type: object
-          properties:
-            passed: { type: boolean }
-            governance_disposition: { type: string, enum: [APPROVE, BLOCK, REQUIRE_AMENDMENT] }
+        passed:
+          type: boolean
+        governance_disposition:
+          type: string
+          enum: [APPROVE, BLOCK, REQUIRE_AMENDMENT]
+        violations:
+          type: string
 
   # ── Stage 6: Finalize or Remediate ────────────────────────
-  - id: create-pr
+  - id: create_pr
     command: archon-finalize-pr
-    depends_on: [validate-constitution]
-    when: "$validate-constitution.output.validation.passed == true"
+    depends_on: [validate_constitution]
+    when: "$validate_constitution.output.passed == 'true'"
     description: Create governance-approved PR with full audit trail
     trigger_rule: all_success
 
   - id: remediate
     command: exochain-fix-bug
-    depends_on: [validate-constitution]
-    when: "$validate-constitution.output.validation.passed == false"
+    depends_on: [validate_constitution]
+    when: "$validate_constitution.output.passed == 'false'"
     description: Fix constitutional violations and re-validate
+
+  # ── Escalation: auto-report blocking issues to council ──
+  - id: escalate_blocked
+    prompt: |
+      A workflow node was blocked or failed during the ExoChain self-improvement cycle.
+
+      ## Workflow Context
+      - **Workflow**: exochain-self-improvement-cycle
+      - **User request**: $ARGUMENTS
+      - **Feedback triage**: $ingest_feedback.output
+      - **Council review**: $council_review.output
+      - **Syntaxis generation**: $generate_syntaxis.output
+      - **Implementation**: $implement.output
+      - **Validation**: $validate_constitution.output
+
+      ## Your Task
+
+      First, check if the PR was successfully created. If `$create_pr.output` contains
+      a PR URL, the workflow succeeded — output "No escalation needed" and stop.
+
+      If the PR was NOT created (empty output or node was skipped/failed):
+
+      1. Identify which node failed or was skipped and why
+      2. Create a GitHub issue on exochain/exochain with label `council:escalation` documenting:
+         - The feedback item being processed
+         - Which pipeline stage blocked
+         - The council review disposition (if reached)
+         - Any validation violations found
+         - Recommended remediation approach
+      3. Output a summary of what was escalated
+
+      Use `gh issue create` for GitHub operations.
+    depends_on: [council_review, generate_syntaxis, implement, validate_constitution, create_pr]
+    trigger_rule: all_done
+    description: Auto-escalate blocking failures to council via GitHub issue

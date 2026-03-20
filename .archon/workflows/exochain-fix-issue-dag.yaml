@@ -4,29 +4,88 @@ description: |
   Investigates the issue, classifies it, implements the fix, validates
   against constitutional invariants, and creates a governed PR.
 
+  On failure at any stage, automatically escalates details to the council
+  for review and remediation guidance.
+
 nodes:
   - id: investigate
     command: exochain-investigate-feedback
     description: Analyze the issue and classify severity/impact
 
-  - id: council-review
+  - id: council_review
     command: exochain-council-review
     depends_on: [investigate]
     description: Quick council review for bug fixes
+    output_format:
+      type: object
+      properties:
+        aggregate_disposition:
+          type: string
+          enum: [Approved, Rejected, Deferred, Requires-Amendment]
+        implementation_priority:
+          type: string
+        blocking_concerns:
+          type: string
 
   - id: fix
     command: exochain-fix-bug
-    depends_on: [council-review]
-    when: "$council-review.output.council_review.aggregate_disposition != 'Rejected'"
+    depends_on: [council_review]
+    when: "$council_review.output.aggregate_disposition != 'Rejected'"
     description: Implement the fix
 
   - id: validate
     command: exochain-validate-constitution
     depends_on: [fix]
     description: Validate fix against constitutional invariants
+    output_format:
+      type: object
+      properties:
+        passed:
+          type: boolean
+        governance_disposition:
+          type: string
+          enum: [APPROVE, BLOCK, REQUIRE_AMENDMENT]
+        violations:
+          type: string
 
-  - id: create-pr
+  - id: create_pr
     command: archon-finalize-pr
     depends_on: [validate]
-    when: "$validate.output.validation.passed == true"
+    when: "$validate.output.passed == 'true'"
     trigger_rule: all_success
+    description: Create governance-approved PR
+
+  # ── Escalation: auto-report blocking issues to council ──
+  - id: escalate_blocked
+    prompt: |
+      A workflow node was blocked or failed during ExoChain issue remediation.
+
+      ## Workflow Context
+      - **Workflow**: exochain-fix-issue-dag
+      - **User request**: $ARGUMENTS
+      - **Investigation output**: $investigate.output
+      - **Council review output**: $council_review.output
+      - **Fix output**: $fix.output
+      - **Validation output**: $validate.output
+
+      ## Your Task
+
+      First, check if the PR was successfully created. If `$create_pr.output` contains
+      a PR URL, the workflow succeeded — output "No escalation needed" and stop.
+
+      If the PR was NOT created (empty output or node was skipped/failed):
+
+      1. Identify which node failed or was skipped and why
+      2. Create a GitHub issue on exochain/exochain with label `council:escalation` documenting:
+         - The original issue being remediated
+         - Which pipeline stage blocked
+         - The council review disposition (if reached)
+         - Any validation violations found
+         - Recommended remediation approach
+      3. Comment on the original issue linking to the escalation issue
+      4. Output a summary of what was escalated
+
+      Use `gh issue create` and `gh issue comment` for GitHub operations.
+    depends_on: [council_review, fix, validate, create_pr]
+    trigger_rule: all_done
+    description: Auto-escalate blocking failures to council via GitHub issue

@@ -10,49 +10,106 @@ description: |
 
 nodes:
   # ── Stage 1: PRD Generation ──────────────────────────────
-  - id: generate-prd
+  - id: generate_prd
     command: exochain-generate-prd
     description: Translate client requirements into ExoChain PRD
     output_format:
       type: object
       properties:
-        prd:
-          type: object
-          properties:
-            title: { type: string }
-            business_requirements: { type: array }
-            governance_requirements: { type: object }
-            implementation_plan: { type: object }
+        title:
+          type: string
+        business_requirements:
+          type: array
+          items: { type: string }
+        governance_requirements:
+          type: string
+        implementation_plan:
+          type: string
 
   # ── Stage 2: Council PRD Review ───────────────────────────
-  - id: council-prd-review
+  - id: council_prd_review
     command: exochain-council-review
-    depends_on: [generate-prd]
+    depends_on: [generate_prd]
     description: AI-IRB five-panel review of the generated PRD
+    output_format:
+      type: object
+      properties:
+        aggregate_disposition:
+          type: string
+          enum: [Approved, Rejected, Deferred, Requires-Amendment]
+        implementation_priority:
+          type: string
+        blocking_concerns:
+          type: string
 
-  # ── Stage 3: Generate Syntaxis Workflows (parallel per requirement)
-  - id: generate-workflows
+  # ── Stage 3: Generate Syntaxis Workflows ──────────────────
+  - id: generate_workflows
     command: exochain-generate-syntaxis
-    depends_on: [council-prd-review]
-    when: "$council-prd-review.output.council_review.aggregate_disposition == 'Approved'"
+    depends_on: [council_prd_review]
+    when: "$council_prd_review.output.aggregate_disposition == 'Approved'"
     description: Generate Syntaxis workflows for each business requirement
 
   # ── Stage 4: Implementation ───────────────────────────────
-  - id: implement-config
+  - id: implement_config
     command: exochain-implement-feature
-    depends_on: [generate-workflows]
+    depends_on: [generate_workflows]
     description: Implement client-specific configuration, schema, and UI widgets
 
   # ── Stage 5: Constitutional Validation ────────────────────
   - id: validate
     command: exochain-validate-constitution
-    depends_on: [implement-config]
+    depends_on: [implement_config]
     description: Full constitutional validation of client configuration
+    output_format:
+      type: object
+      properties:
+        passed:
+          type: boolean
+        governance_disposition:
+          type: string
+          enum: [APPROVE, BLOCK, REQUIRE_AMENDMENT]
+        violations:
+          type: string
 
   # ── Stage 6: Finalize ─────────────────────────────────────
-  - id: create-pr
+  - id: create_pr
     command: archon-finalize-pr
     depends_on: [validate]
-    when: "$validate.output.validation.passed == true"
+    when: "$validate.output.passed == 'true'"
     description: Create deployment-ready PR with client configuration
     trigger_rule: all_success
+
+  # ── Escalation: auto-report blocking issues to council ──
+  - id: escalate_blocked
+    prompt: |
+      A workflow node was blocked or failed during client onboarding.
+
+      ## Workflow Context
+      - **Workflow**: exochain-client-onboarding
+      - **User request**: $ARGUMENTS
+      - **PRD generation**: $generate_prd.output
+      - **Council review**: $council_prd_review.output
+      - **Syntaxis generation**: $generate_workflows.output
+      - **Implementation**: $implement_config.output
+      - **Validation**: $validate.output
+
+      ## Your Task
+
+      First, check if the PR was successfully created. If `$create_pr.output` contains
+      a PR URL, the workflow succeeded — output "No escalation needed" and stop.
+
+      If the PR was NOT created (empty output or node was skipped/failed):
+
+      1. Identify which node failed or was skipped and why
+      2. Create a GitHub issue on exochain/exochain with label `council:escalation` documenting:
+         - The client onboarding request
+         - Which pipeline stage blocked
+         - The council review disposition (if reached)
+         - Any validation violations
+         - Recommended remediation approach
+      3. Output a summary of what was escalated
+
+      Use `gh issue create` for GitHub operations.
+    depends_on: [council_prd_review, generate_workflows, implement_config, validate, create_pr]
+    trigger_rule: all_done
+    description: Auto-escalate blocking failures to council via GitHub issue
