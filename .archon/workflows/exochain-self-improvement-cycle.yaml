@@ -1,0 +1,90 @@
+name: exochain-self-improvement-cycle
+description: |
+  Perpetual self-improvement cycle for ExoChain. This DAG workflow
+  implements the full feedback → triage → council review → implement →
+  validate → deploy pipeline, governed by the AI-IRB council of five
+  panels across five disciplines.
+
+  Trigger: Widget AI feedback from the ExoChain configurator UI
+  Output: Council-reviewed, constitutionally-validated PR ready for merge
+
+nodes:
+  # ── Stage 1: Feedback Ingestion & Triage ──────────────────
+  - id: ingest-feedback
+    command: exochain-investigate-feedback
+    description: Classify and triage incoming feedback from UI widgets
+    output_format:
+      type: object
+      properties:
+        backlog_item:
+          type: object
+          properties:
+            title: { type: string }
+            category: { type: string, enum: [bug, enhancement, governance-gap, compliance-risk, ux] }
+            severity: { type: string, enum: [Critical, High, Medium, Low] }
+            affected_invariants: { type: array, items: { type: string } }
+            proposed_solution: { type: string }
+            council_panels_required: { type: array, items: { type: string } }
+
+  # ── Stage 2: AI-IRB Council Review (5 panels in parallel) ─
+  - id: council-review
+    command: exochain-council-review
+    depends_on: [ingest-feedback]
+    description: Five-panel council review across all governance disciplines
+    output_format:
+      type: object
+      properties:
+        council_review:
+          type: object
+          properties:
+            aggregate_disposition: { type: string, enum: [Approved, Rejected, Deferred, Requires-Amendment] }
+            implementation_priority: { type: string }
+            archon_workflow: { type: string }
+
+  # ── Stage 3: Route by disposition ─────────────────────────
+  - id: generate-syntaxis
+    command: exochain-generate-syntaxis
+    depends_on: [council-review]
+    when: "$council-review.output.council_review.aggregate_disposition == 'Approved'"
+    description: Generate Syntaxis workflow for approved items
+
+  - id: request-amendment
+    command: exochain-investigate-feedback
+    depends_on: [council-review]
+    when: "$council-review.output.council_review.aggregate_disposition == 'Requires-Amendment'"
+    description: Re-investigate with amendment requirements
+
+  # ── Stage 4: Implementation ───────────────────────────────
+  - id: implement
+    command: exochain-implement-feature
+    depends_on: [generate-syntaxis]
+    trigger_rule: none_failed_min_one_success
+    description: Implement the approved feature across the full stack
+
+  # ── Stage 5: Constitutional Validation (Governance Gate) ──
+  - id: validate-constitution
+    command: exochain-validate-constitution
+    depends_on: [implement]
+    description: Validate implementation against all 8 invariants and 10 TNCs
+    output_format:
+      type: object
+      properties:
+        validation:
+          type: object
+          properties:
+            passed: { type: boolean }
+            governance_disposition: { type: string, enum: [APPROVE, BLOCK, REQUIRE_AMENDMENT] }
+
+  # ── Stage 6: Finalize or Remediate ────────────────────────
+  - id: create-pr
+    command: archon-finalize-pr
+    depends_on: [validate-constitution]
+    when: "$validate-constitution.output.validation.passed == true"
+    description: Create governance-approved PR with full audit trail
+    trigger_rule: all_success
+
+  - id: remediate
+    command: exochain-fix-bug
+    depends_on: [validate-constitution]
+    when: "$validate-constitution.output.validation.passed == false"
+    description: Fix constitutional violations and re-validate
