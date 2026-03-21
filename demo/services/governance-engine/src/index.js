@@ -21,7 +21,7 @@ function parseBody(req) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': '*', 'Access-Control-Allow-Headers': 'Content-Type' });
     return res.end();
@@ -112,4 +112,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`[governance-engine] Running on :${PORT}`));
+if (!process.env.VITEST) {
+  server.listen(PORT, () => console.log(`[governance-engine] Running on :${PORT}`));
+}

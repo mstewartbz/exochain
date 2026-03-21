@@ -16,7 +16,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Rust source files | 148 | `find crates -name '*.rs'` |
 | Rust LOC | ~31,000 | `wc -l` |
 | Library tests | 1,116 passing, 0 failing | `cargo test --workspace --lib` |
-| CI quality gates | 9 | `.github/workflows/ci.yml` |
+| CI quality gates | 10 | `.github/workflows/ci.yml` |
 | Published releases | None (pre-release) | `git tag -l` |
 | License | Apache-2.0 | `LICENSE`, `Cargo.toml` |
 
@@ -26,7 +26,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for production code
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **9 CI quality gates** defined and enforced (build, test, coverage, lint, format, audit, deny, doc, hygiene)
+- **10 CI quality gates** defined and enforced (build, test, coverage, lint, format, audit, deny, doc, hygiene, demo-coverage)
 - **Traceability matrix** maps 80 requirements: 76 implemented, 2 partial, 2 planned
 - **Threat model** covers 19 threats: 15 mitigated, 2 partial, 2 planned
 - **Constitutional invariants** enforced via the CGR kernel in all governance paths

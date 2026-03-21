@@ -202,6 +202,32 @@ jobs:
           echo "✓ License consistent: Apache-2.0"
 
   # -----------------------------------------------------------------------
+  # Gate 10: Demo Platform Coverage (Node.js + React >= 80%)
+  # -----------------------------------------------------------------------
+  demo-coverage:
+    name: "Gate 10 — Demo Coverage (services >= 80%, React >= 70%)"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: demo/package-lock.json
+      - name: Install demo dependencies
+        working-directory: demo
+        run: npm ci
+      - name: Run demo tests with coverage
+        working-directory: demo
+        run: npm run test:coverage
+      - name: Upload demo coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-coverage-report
+          path: demo/coverage/
+
+  # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
   # -----------------------------------------------------------------------
   all-gates:
@@ -217,6 +243,7 @@ jobs:
       - deny
       - doc
       - hygiene
+      - demo-coverage
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."
