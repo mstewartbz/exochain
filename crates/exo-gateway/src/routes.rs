@@ -59,12 +59,15 @@ pub fn default_deny_check(actor: &Did, action: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use exo_core::{Hash256, Timestamp, crypto::{generate_keypair, sign}};
+    use exo_core::{
+        Hash256, Timestamp,
+        crypto::{generate_keypair, sign},
+    };
 
     use super::*;
 
     fn req() -> Request {
-        let (pk, sk) = generate_keypair();
+        let (_pk, sk) = generate_keypair();
         let body_hash = Hash256::digest(b"route-test");
         let signature = sign(body_hash.as_ref(), &sk);
         Request {
@@ -73,7 +76,6 @@ mod tests {
             body_hash,
             signature,
             timestamp: Timestamp::ZERO,
-            public_key: pk,
         }
     }
 
