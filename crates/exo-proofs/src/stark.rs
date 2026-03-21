@@ -563,13 +563,13 @@ mod tests {
     #[test]
     fn evaluate_constraint_fewer_coefficients_than_columns() {
         // column_indices has more entries than coefficients — the extra column index is skipped.
-        // One coefficient covers column 0 (i=0 passes the inner if), column 1 is skipped (i=1 fails it).
+        // Non-zero coefficient (1,1) verifies the loop body executes for i=0; column 1 is skipped (i=1 fails the inner if).
         let config = StarkConfig::default_config();
         let trace = vec![vec![0u64, 0u64], vec![0u64, 0u64]];
         let constraint = StarkConstraint {
             name: "partial".to_string(),
             column_indices: vec![0, 1], // two indices
-            coefficients: vec![(0, 0)], // only one entry — index 1 is silently skipped
+            coefficients: vec![(1, 1)], // non-zero, one entry — index 1 is silently skipped
         };
         let proof = prove_stark(&trace, &[constraint], &config).unwrap();
         assert!(verify_stark(&proof, &trace[0]));
