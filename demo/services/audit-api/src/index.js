@@ -7,6 +7,9 @@ import pg from 'pg';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const PORT = process.env.PORT || 3007;
+// Governance health endpoint requires a bearer token (Security panel condition — CR-001 amendment).
+// Set GOVERNANCE_API_TOKEN in the secrets manager; never in env files or Compose.
+const GOVERNANCE_API_TOKEN = process.env.GOVERNANCE_API_TOKEN || null;
 
 function json(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type' });
@@ -53,6 +56,188 @@ const server = http.createServer(async (req, res) => {
       );
 
       return json(res, 201, { entry_count: auditResult.entries, head_hash: auditResult.head_hash });
+    }
+
+    // ── Governance Health (authenticated — Security panel: CR-001 amendment) ──
+    if (url.pathname === '/governance/health' && req.method === 'GET') {
+      const authHeader = req.headers['authorization'] || '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      if (!GOVERNANCE_API_TOKEN || token !== GOVERNANCE_API_TOKEN) {
+        return json(res, 401, { error: 'Unauthorized: valid Bearer token required' });
+      }
+
+      const { rows: snapshots } = await pool.query(
+        'SELECT * FROM governance_health_snapshots ORDER BY scanned_at_ms DESC LIMIT 1'
+      );
+      if (snapshots.length === 0) {
+        return json(res, 200, { status: 'no_data', message: 'No governance health snapshots recorded yet' });
+      }
+      const snap = snapshots[0];
+
+      const { rows: findings } = await pool.query(
+        'SELECT finding_id, title, category, severity, file_path, description FROM governance_findings WHERE run_id = $1 ORDER BY severity ASC',
+        [snap.run_id]
+      );
+
+      // Pending human approval gates (DualControl — Security panel condition)
+      const { rows: pendingApprovals } = await pool.query(
+        "SELECT approval_id, requested_at_ms FROM governance_trigger_approvals WHERE run_id = $1 AND status = 'Pending'",
+        [snap.run_id]
+      );
+
+      return json(res, 200, {
+        run_id: snap.run_id,
+        commit_sha: snap.commit_sha,
+        scanned_at_ms: snap.scanned_at_ms,
+        system_health: {
+          invariant_coverage: snap.invariant_coverage,
+          tnc_coverage: snap.tnc_coverage,
+          bcts_integrity: snap.bcts_integrity,
+          governance_score: snap.governance_score,
+        },
+        finding_counts: {
+          critical: snap.findings_count_critical,
+          high: snap.findings_count_high,
+          medium: snap.findings_count_medium,
+          low: snap.findings_count_low,
+        },
+        findings_digest: snap.findings_digest,
+        findings,
+        cr001_work_orders: snap.cr001_work_orders,
+        attestation: snap.attestation_signature
+          ? { signature: snap.attestation_signature, signer_did: snap.attestation_signer_did }
+          : null,
+        pending_trigger_approvals: pendingApprovals.length,
+      });
+    }
+
+    // ── Record Governance Health Snapshot ──
+    if (url.pathname === '/governance/health' && req.method === 'POST') {
+      const authHeader = req.headers['authorization'] || '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      if (!GOVERNANCE_API_TOKEN || token !== GOVERNANCE_API_TOKEN) {
+        return json(res, 401, { error: 'Unauthorized: valid Bearer token required' });
+      }
+
+      const body = await parseBody(req);
+      const {
+        run_id, commit_sha, system_health, findings = [],
+        findings_digest, attestation_signature, attestation_signer_did,
+        cr001_work_orders = {},
+      } = body;
+
+      if (!run_id || !commit_sha || !system_health || !findings_digest) {
+        return json(res, 400, { error: 'run_id, commit_sha, system_health, and findings_digest are required' });
+      }
+
+      const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+      for (const f of findings) {
+        const sev = (f.severity || '').toLowerCase();
+        if (sev in counts) counts[sev]++;
+      }
+
+      await pool.query(
+        `INSERT INTO governance_health_snapshots
+           (run_id, commit_sha, scanned_at_ms, invariant_coverage, tnc_coverage,
+            bcts_integrity, governance_score, findings_digest,
+            findings_count_critical, findings_count_high, findings_count_medium, findings_count_low,
+            attestation_signature, attestation_signer_did, cr001_work_orders)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         ON CONFLICT (run_id) DO NOTHING`,
+        [
+          run_id, commit_sha, Date.now(),
+          system_health.invariant_coverage, system_health.tnc_coverage,
+          system_health.bcts_integrity, system_health.governance_score,
+          findings_digest, counts.critical, counts.high, counts.medium, counts.low,
+          attestation_signature || null, attestation_signer_did || null,
+          JSON.stringify(cr001_work_orders),
+        ]
+      );
+
+      for (const f of findings) {
+        await pool.query(
+          `INSERT INTO governance_findings
+             (run_id, finding_id, title, category, severity, file_path, line_number,
+              description, remediation, invariants_affected, scanned_at_ms)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [
+            run_id, f.id, f.title, f.category, f.severity,
+            f.file || null, f.line || null, f.description, f.remediation,
+            JSON.stringify(f.invariants_affected || []), Date.now(),
+          ]
+        );
+      }
+
+      // Circuit breaker: if >3 Critical findings in last 24h, flag for ops team
+      const since = Date.now() - 86_400_000;
+      const { rows: [{ total }] } = await pool.query(
+        'SELECT COALESCE(SUM(findings_count_critical), 0) AS total FROM governance_health_snapshots WHERE scanned_at_ms >= $1',
+        [since]
+      );
+      const circuitBreaker = parseInt(total, 10) > 3;
+
+      // Record human-approval gate if Critical/High findings require self-improvement trigger
+      let approvalGateId = null;
+      if (counts.critical > 0 || counts.high > 0) {
+        approvalGateId = `approval-${run_id}`;
+        await pool.query(
+          `INSERT INTO governance_trigger_approvals (approval_id, run_id, requested_at_ms, status)
+           VALUES ($1, $2, $3, 'Pending') ON CONFLICT (approval_id) DO NOTHING`,
+          [approvalGateId, run_id, Date.now()]
+        );
+      }
+
+      // Record in audit ledger with full provenance
+      const { rows: [last] } = await pool.query(
+        'SELECT COALESCE(MAX(sequence), -1) AS seq, COALESCE(MAX(entry_hash), $1) AS prev FROM audit_entries',
+        ['0'.repeat(64)]
+      );
+      const eventHash = wasm.wasm_hash_bytes(new Uint8Array(Buffer.from(`governance-health:${run_id}:${findings_digest}`)));
+      await pool.query(
+        'INSERT INTO audit_entries (sequence, prev_hash, event_hash, event_type, actor, tenant_id, timestamp_physical_ms, entry_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        [last.seq + 1, last.prev, eventHash, 'GovernanceHealthSnapshot', attestation_signer_did || 'did:exo:exoforge', 'exochain-foundation', Date.now(), eventHash]
+      );
+
+      return json(res, 201, {
+        run_id,
+        governance_score: system_health.governance_score,
+        circuit_breaker_triggered: circuitBreaker,
+        approval_gate_id: approvalGateId,
+        message: circuitBreaker
+          ? 'Circuit breaker triggered: >3 Critical findings in 24h. Auto-trigger paused. Ops team alerted.'
+          : approvalGateId
+            ? 'Critical/High findings recorded. Human approval required before self-improvement cycle may begin.'
+            : 'Snapshot recorded.',
+      });
+    }
+
+    // ── Approve Governance Trigger ──
+    if (url.pathname.startsWith('/governance/approve/') && req.method === 'POST') {
+      const authHeader = req.headers['authorization'] || '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      if (!GOVERNANCE_API_TOKEN || token !== GOVERNANCE_API_TOKEN) {
+        return json(res, 401, { error: 'Unauthorized: valid Bearer token required' });
+      }
+
+      const approvalId = url.pathname.replace('/governance/approve/', '');
+      const { approved_by_did, notes } = await parseBody(req);
+
+      if (!approved_by_did) {
+        return json(res, 400, { error: 'approved_by_did is required (must be a human DID)' });
+      }
+
+      const { rowCount } = await pool.query(
+        `UPDATE governance_trigger_approvals
+         SET status = 'Approved', approved_at_ms = $1, approved_by_did = $2, notes = $3
+         WHERE approval_id = $4 AND status = 'Pending'`,
+        [Date.now(), approved_by_did, notes || null, approvalId]
+      );
+
+      if (rowCount === 0) {
+        return json(res, 404, { error: 'Approval gate not found or already resolved' });
+      }
+
+      return json(res, 200, { approval_id: approvalId, status: 'Approved', approved_by_did });
     }
 
     // ── Verify Chain Integrity ──
