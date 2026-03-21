@@ -45,7 +45,7 @@ pub fn wasm_reduce_combinator(combinator_json: &str, input_json: &str) -> Result
 
 /// Enforce all constitutional invariants against the provided context.
 ///
-/// Accepts a JSON object matching [`WasmInvariantRequest`] and delegates
+/// Accepts a JSON object matching `WasmInvariantRequest` and delegates
 /// to `exo_gatekeeper::invariants::enforce_all`. Returns a JSON object:
 /// `{ "passed": bool, "violations": [...] }`.
 #[wasm_bindgen]
@@ -161,6 +161,7 @@ mod tests {
                 grantee: actor(),
                 permissions: PermissionSet::default(),
                 signature: vec![0u8; 64], // placeholder — not cryptographically verified here
+                grantor_public_key: None,
             }],
         };
 
@@ -304,8 +305,10 @@ mod tests {
             }],
             "authority_chain": { "links": [] }
         });
-        let result: Result<super::WasmInvariantRequest, _> =
-            serde_json::from_value(json);
-        assert!(result.is_ok(), "WasmInvariantRequest must deserialize from valid JSON");
+        let result: Result<super::WasmInvariantRequest, _> = serde_json::from_value(json);
+        assert!(
+            result.is_ok(),
+            "WasmInvariantRequest must deserialize from valid JSON"
+        );
     }
 }

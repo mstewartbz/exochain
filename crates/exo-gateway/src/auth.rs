@@ -70,11 +70,7 @@ pub fn authenticate(request: &Request) -> Result<AuthenticatedActor> {
 fn check_freshness(ts: &Timestamp) -> Result<()> {
     let now_ms = Timestamp::now_utc().physical_ms;
     let req_ms = ts.physical_ms;
-    let skew_ms = if now_ms >= req_ms {
-        now_ms - req_ms
-    } else {
-        req_ms - now_ms
-    };
+    let skew_ms = now_ms.abs_diff(req_ms);
     if skew_ms > FRESHNESS_WINDOW_MS {
         return Err(GatewayError::AuthenticationFailed {
             reason: format!(

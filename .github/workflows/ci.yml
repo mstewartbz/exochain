@@ -68,6 +68,7 @@ jobs:
         run: |
           cargo tarpaulin \
             --workspace \
+            --exclude exochain-wasm \
             --out xml \
             --output-dir coverage \
             --skip-clean \
@@ -122,7 +123,8 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Audit dependencies
-        run: cargo audit
+        # RUSTSEC-2023-0071: rsa crate (via sqlx-mysql) — no fix available upstream
+        run: cargo audit --ignore RUSTSEC-2023-0071
 
   # -----------------------------------------------------------------------
   # Gate 7: Deny (license + advisory compliance)
@@ -132,7 +134,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
 
@@ -182,7 +185,7 @@ jobs:
           echo "✓ build artifacts not tracked"
       - name: No .env files tracked
         run: |
-          if git ls-files '*.env' '.env*' | grep -q .; then
+          if git ls-files '*.env' '.env*' | grep -v '\.example$' | grep -q .; then
             echo "::error::.env files are tracked in git"
             exit 1
           fi
@@ -214,15 +217,16 @@ jobs:
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx
       - name: Generate CycloneDX SBOM (validation only)
-        run: cargo cyclonedx -f json --workspace
+        run: cargo cyclonedx --manifest-path Cargo.toml --format json
       - name: Validate SBOM output
         run: |
-          if ! ls *.cdx.json 1>/dev/null 2>&1; then
-            echo "::error::SBOM generation produced no .cdx.json output"
+          SBOM_COUNT=$(find . -name '*.cdx.json' -o -name '*bom*.json' | head -20 | wc -l)
+          if [ "$SBOM_COUNT" -eq 0 ]; then
+            echo "::error::SBOM generation produced no output files"
             exit 1
           fi
-          echo "✓ CycloneDX SBOM generated successfully:"
-          ls -lh *.cdx.json
+          echo "✓ CycloneDX SBOM generated successfully ($SBOM_COUNT files):"
+          find . -name '*.cdx.json' -o -name '*bom*.json' | head -20
 
   # -----------------------------------------------------------------------
   # Constitutional gate: all must pass

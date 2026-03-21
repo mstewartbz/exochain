@@ -1,85 +1,269 @@
-use crate::store::{DagStore, StoreError};
-use exo_core::LedgerEvent;
-use thiserror::Error;
+//! Validated persistent-store DAG append with Byzantine clock defense.
+//!
+//! Extends the in-memory [`dag::append`](crate::dag::append) with:
+//! - Wall-clock skew enforcement (±500ms tolerance)
+//! - HLC causality validation (node timestamp must strictly exceed all parents)
+//! - Stored-node integrity verification (hash recomputation)
+//!
+//! These checks implement the normative HLC check: event > parent,
+//! preventing Byzantine clock manipulation in the trust fabric.
 
-#[derive(Error, Debug)]
-pub enum AppendError {
-    #[error("Store Error: {0}")]
-    Store(#[from] StoreError),
-    #[error("Parent not found: {0:?}")]
-    ParentNotFound(exo_core::Blake3Hash),
-    #[error("Invalid Signature")]
-    InvalidSignature,
-    #[error("Causality Violation: Event time {0:?} <= Parent time")]
-    CausalityViolation(exo_core::HybridLogicalClock),
-    #[error("Crypto Error")]
-    CryptoError,
-}
+use crate::{
+    dag::compute_node_hash,
+    error::{DagError, Result},
+    store::DagStore,
+};
+use exo_core::types::Hash256;
 
 /// Maximum allowed clock skew between nodes (500ms).
+///
+/// Nodes claiming timestamps more than this far ahead of the wall clock
+/// are rejected as potential Byzantine clock manipulation.
 const MAX_CLOCK_SKEW_MS: u64 = 500;
 
-/// Append an event to the DAG with full validation.
-pub async fn append_event(store: &impl DagStore, event: LedgerEvent) -> Result<(), AppendError> {
-    // 1. Verify Signature is well-formed (64 bytes for Ed25519)
-    if event.signature.to_bytes().len() != 64 {
-        return Err(AppendError::InvalidSignature);
-    }
-
-    // 2. HLC physical skew check: reject events claiming to be too far in the future.
-    // Only apply when physical_ms > 0 (non-zero timestamps indicate real clock values).
-    if event.envelope.logical_time.physical_ms > 0 {
+/// Validate and append a DAG node to persistent storage.
+///
+/// Performs three checks beyond basic structure:
+/// 1. **Wall-clock skew**: reject nodes with timestamps too far in the future
+/// 2. **HLC causality**: node timestamp must strictly exceed all parent timestamps
+/// 3. **Parent existence**: all parents must exist in the store
+///
+/// This is the normative append path for persistent deployments.
+/// The in-memory [`dag::append`](crate::dag::append) handles local construction;
+/// this function handles validation for nodes received from external sources.
+pub fn validated_append(
+    store: &mut impl DagStore,
+    node: crate::dag::DagNode,
+) -> Result<()> {
+    // 1. Wall-clock skew check: reject future-dated nodes
+    if node.timestamp.physical_ms > 0 {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if event.envelope.logical_time.physical_ms > now_ms + MAX_CLOCK_SKEW_MS {
-            return Err(AppendError::CausalityViolation(
-                event.envelope.logical_time,
-            ));
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        if node.timestamp.physical_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
+            return Err(DagError::StoreError(format!(
+                "clock skew: node timestamp {} exceeds wall clock {} + {}ms tolerance",
+                node.timestamp.physical_ms, now_ms, MAX_CLOCK_SKEW_MS
+            )));
         }
     }
 
-    // 3. Parent Existence & Causality
-    for parent_id in &event.envelope.parents {
+    // 2. Parent existence & HLC causality
+    for parent_hash in &node.parents {
         let parent = store
-            .get_event(parent_id)
-            .await
-            .map_err(|_| AppendError::ParentNotFound(*parent_id))?;
+            .get(parent_hash)?
+            .ok_or(DagError::ParentNotFound(*parent_hash))?;
 
-        // Normative HLC Check: event > parent
-        if event.envelope.logical_time <= parent.envelope.logical_time {
-            return Err(AppendError::CausalityViolation(event.envelope.logical_time));
+        // Normative HLC Check: node timestamp must strictly exceed parent
+        if node.timestamp <= parent.timestamp {
+            return Err(DagError::StoreError(format!(
+                "causality violation: node timestamp {:?} <= parent timestamp {:?}",
+                node.timestamp, parent.timestamp
+            )));
         }
     }
 
-    // 4. Persist
-    store.insert_event(event).await?;
-
-    Ok(())
+    // 3. Persist
+    store.put(node)
 }
 
-/// Verify integrity of an event's hash chain (recursive).
-pub async fn verify_integrity(
-    store: &impl DagStore,
-    event_id: &exo_core::Blake3Hash,
-) -> Result<bool, AppendError> {
-    let event = store.get_event(event_id).await?;
+/// Verify integrity of a stored node: check that its hash is correctly
+/// computed and all parents exist in the store.
+///
+/// Returns `Ok(true)` if the node passes all integrity checks,
+/// `Ok(false)` if any check fails (hash mismatch or missing parent),
+/// and `Err` if the node itself is not found.
+pub fn verify_stored_integrity(store: &impl DagStore, hash: &Hash256) -> Result<bool> {
+    let node = match store.get(hash)? {
+        Some(n) => n,
+        None => return Err(DagError::NodeNotFound(*hash)),
+    };
 
-    // Check parents exist
-    for parent in &event.envelope.parents {
-        if !store.contains_event(parent).await? {
+    // Check all parents exist
+    for parent in &node.parents {
+        if !store.contains(parent)? {
             return Ok(false);
         }
     }
 
-    // Check hash correctness (re-compute)
-    let recomputed =
-        exo_core::compute_event_id(&event.envelope).map_err(|_| AppendError::CryptoError)?;
+    // Recompute hash and compare
+    let recomputed = compute_node_hash(
+        &node.parents,
+        &node.payload_hash,
+        &node.creator_did,
+        &node.timestamp,
+    );
 
-    if recomputed != event.event_id {
-        return Ok(false);
+    Ok(recomputed == node.hash)
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        dag::{Dag, DagNode, HybridClock, append},
+        store::MemoryStore,
+    };
+    use exo_core::types::{Did, Signature, Timestamp};
+
+    fn test_did() -> Did {
+        Did::new("did:exo:test").expect("valid")
     }
 
-    Ok(true)
+    type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
+
+    fn make_sign_fn() -> SignFn {
+        Box::new(|data: &[u8]| {
+            let h = blake3::hash(data);
+            let mut sig = [0u8; 64];
+            sig[..32].copy_from_slice(h.as_bytes());
+            Signature::from_bytes(sig)
+        })
+    }
+
+    fn make_test_node() -> DagNode {
+        let mut dag = Dag::new();
+        let mut clock = HybridClock::new();
+        let creator = test_did();
+        let sign_fn = make_sign_fn();
+        append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock)
+            .expect("genesis")
+    }
+
+    fn make_child_node(parent: &DagNode) -> DagNode {
+        let mut dag = Dag::new();
+        let mut clock = HybridClock::new();
+        let creator = test_did();
+        let sign_fn = make_sign_fn();
+
+        // Insert parent first so we can create a child
+        let _g = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock)
+            .expect("genesis");
+
+        // Build child manually with proper parent reference
+        let payload_hash = Hash256::digest(b"child-payload");
+        let timestamp = Timestamp::new(
+            parent.timestamp.physical_ms + 1,
+            parent.timestamp.logical + 1,
+        );
+        let hash = compute_node_hash(
+            &[parent.hash],
+            &payload_hash,
+            &creator,
+            &timestamp,
+        );
+        let signature = (*sign_fn)(hash.as_bytes());
+
+        DagNode {
+            hash,
+            parents: vec![parent.hash],
+            payload_hash,
+            creator_did: creator,
+            timestamp,
+            signature,
+        }
+    }
+
+    #[test]
+    fn validated_append_success() {
+        let mut store = MemoryStore::new();
+        let genesis = make_test_node();
+        store.put(genesis.clone()).expect("put genesis");
+
+        let child = make_child_node(&genesis);
+        validated_append(&mut store, child.clone()).expect("validated append");
+
+        assert!(store.contains(&child.hash).expect("contains"));
+    }
+
+    #[test]
+    fn validated_append_missing_parent() {
+        let mut store = MemoryStore::new();
+        // Don't put the parent in the store
+        let genesis = make_test_node();
+        let child = make_child_node(&genesis);
+
+        let err = validated_append(&mut store, child).unwrap_err();
+        assert!(matches!(err, DagError::ParentNotFound(_)));
+    }
+
+    #[test]
+    fn validated_append_causality_violation() {
+        let mut store = MemoryStore::new();
+        let genesis = make_test_node();
+        store.put(genesis.clone()).expect("put genesis");
+
+        // Create a child with timestamp <= parent (causality violation)
+        let creator = test_did();
+        let payload_hash = Hash256::digest(b"bad-child");
+        let timestamp = Timestamp::new(0, 0); // Before genesis
+        let hash = compute_node_hash(
+            &[genesis.hash],
+            &payload_hash,
+            &creator,
+            &timestamp,
+        );
+        let sign_fn = make_sign_fn();
+        let signature = (*sign_fn)(hash.as_bytes());
+
+        let bad_child = DagNode {
+            hash,
+            parents: vec![genesis.hash],
+            payload_hash,
+            creator_did: creator,
+            timestamp,
+            signature,
+        };
+
+        let err = validated_append(&mut store, bad_child).unwrap_err();
+        assert!(
+            matches!(err, DagError::StoreError(ref msg) if msg.contains("causality")),
+            "expected causality violation, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_stored_integrity_valid() {
+        let mut store = MemoryStore::new();
+        let node = make_test_node();
+        store.put(node.clone()).expect("put");
+
+        assert!(verify_stored_integrity(&store, &node.hash).expect("verify"));
+    }
+
+    #[test]
+    fn verify_stored_integrity_tampered_hash() {
+        let mut store = MemoryStore::new();
+        let mut node = make_test_node();
+        let original_hash = node.hash;
+        // Tamper: modify payload hash but keep the original node hash
+        node.payload_hash = Hash256::digest(b"tampered");
+        // Re-insert with original hash (simulating store corruption)
+        node.hash = original_hash;
+        store.put(node).expect("put");
+
+        // Integrity check should detect the hash mismatch
+        assert!(!verify_stored_integrity(&store, &original_hash).expect("verify"));
+    }
+
+    #[test]
+    fn verify_stored_integrity_not_found() {
+        let store = MemoryStore::new();
+        let err = verify_stored_integrity(&store, &Hash256::ZERO).unwrap_err();
+        assert!(matches!(err, DagError::NodeNotFound(_)));
+    }
+
+    #[test]
+    fn genesis_node_validated_append() {
+        let mut store = MemoryStore::new();
+        let genesis = make_test_node();
+        // Genesis has no parents — should pass validation
+        validated_append(&mut store, genesis.clone()).expect("genesis append");
+        assert!(store.contains(&genesis.hash).expect("contains"));
+    }
 }

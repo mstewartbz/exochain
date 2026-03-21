@@ -40,7 +40,7 @@ fn linear_dag(depth: usize) -> (Dag, Hash256) {
     let genesis = append(&mut dag, &[], b"genesis", &c, &sign_fn, &mut clock).expect("genesis");
     let mut tip = genesis.hash;
     for i in 0..depth {
-        let payload = (i as u64).to_le_bytes();
+        let payload = (u64::try_from(i).unwrap()).to_le_bytes();
         let node = append(&mut dag, &[tip], &payload, &c, &sign_fn, &mut clock).expect("append");
         tip = node.hash;
     }
@@ -70,15 +70,13 @@ fn bench_dag_append(c: &mut Criterion) {
                 b.iter(|| {
                     let mut dag = Dag::new();
                     let mut clock = HybridClock::new();
-                    let genesis =
-                        append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock)
-                            .expect("genesis");
+                    let genesis = append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock)
+                        .expect("genesis");
                     let mut tip = genesis.hash;
                     for i in 0..n {
-                        let payload = (i as u64).to_le_bytes();
-                        let node =
-                            append(&mut dag, &[tip], &payload, &cr, &sign_fn, &mut clock)
-                                .expect("append");
+                        let payload = (u64::try_from(i).unwrap()).to_le_bytes();
+                        let node = append(&mut dag, &[tip], &payload, &cr, &sign_fn, &mut clock)
+                            .expect("append");
                         tip = node.hash;
                     }
                     black_box(dag.len())
@@ -134,16 +132,12 @@ fn bench_dag_traversal(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("tips", depth),
-            &dag,
-            |b, d| {
-                b.iter(|| {
-                    let t = tips(d);
-                    black_box(t.len())
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("tips", depth), &dag, |b, d| {
+            b.iter(|| {
+                let t = tips(d);
+                black_box(t.len())
+            });
+        });
     }
 
     group.finish();
@@ -167,7 +161,7 @@ fn bench_store_checkpoint(c: &mut Criterion) {
             let mut tip = genesis.hash;
             let mut out = vec![genesis];
             for i in 0..batch {
-                let payload = (i as u64).to_le_bytes();
+                let payload = (u64::try_from(i).unwrap()).to_le_bytes();
                 let node =
                     append(&mut dag, &[tip], &payload, &cr, &sign_fn, &mut clock).expect("node");
                 tip = node.hash;
@@ -185,7 +179,7 @@ fn bench_store_checkpoint(c: &mut Criterion) {
                     for (height, node) in ns.iter().enumerate() {
                         store.put(node.clone()).expect("put");
                         store
-                            .mark_committed(&node.hash, height as u64)
+                            .mark_committed(&node.hash, u64::try_from(height).unwrap())
                             .expect("mark_committed");
                     }
                     black_box(store.committed_height().expect("height"))
@@ -193,27 +187,23 @@ fn bench_store_checkpoint(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("store_get", batch),
-            &nodes,
-            |b, ns| {
-                // Pre-populated store — only measure read throughput.
-                let mut store = MemoryStore::new();
-                for node in ns {
-                    store.put(node.clone()).expect("put");
-                }
-                let hashes: Vec<Hash256> = ns.iter().map(|n| n.hash).collect();
-                b.iter(|| {
-                    let mut found = 0usize;
-                    for h in &hashes {
-                        if store.get(h).expect("get").is_some() {
-                            found += 1;
-                        }
+        group.bench_with_input(BenchmarkId::new("store_get", batch), &nodes, |b, ns| {
+            // Pre-populated store — only measure read throughput.
+            let mut store = MemoryStore::new();
+            for node in ns {
+                store.put(node.clone()).expect("put");
+            }
+            let hashes: Vec<Hash256> = ns.iter().map(|n| n.hash).collect();
+            b.iter(|| {
+                let mut found = 0usize;
+                for h in &hashes {
+                    if store.get(h).expect("get").is_some() {
+                        found += 1;
                     }
-                    black_box(found)
-                });
-            },
-        );
+                }
+                black_box(found)
+            });
+        });
     }
 
     group.finish();
@@ -234,8 +224,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
         let cr = creator();
         let mut dag = Dag::new();
         let mut clock = HybridClock::new();
-        let node =
-            append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock).expect("genesis");
+        let node = append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock).expect("genesis");
 
         group.bench_with_input(
             BenchmarkId::new("propose_vote_commit", n_validators),
@@ -269,7 +258,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
             let mut tip = g.hash;
             let mut out = vec![g];
             for i in 1..10usize {
-                let payload = (i as u64).to_le_bytes();
+                let payload = (u64::try_from(i).unwrap()).to_le_bytes();
                 let nd = append(&mut d, &[tip], &payload, &cr, &sign_fn, &mut clk).expect("nd");
                 tip = nd.hash;
                 out.push(nd);
