@@ -17,8 +17,12 @@
 //!
 //! # Scoring
 //!
-//! Each prong is scored 0.0–1.0.  `bjr_defensibility_score()` returns the mean.
-//! A score ≥ 0.8 suggests strong defensibility; < 0.5 suggests exposure.
+//! Each prong is scored in basis points (0–10,000 ≡ 0.00%–100.00%).
+//! `bjr_defensibility_score_bps()` returns the mean.
+//! A score ≥ 8,000 bps suggests strong defensibility; < 5,000 bps suggests exposure.
+//!
+//! All scoring uses integer arithmetic only — no floating-point — per
+//! constitutional determinism requirement (`float_arithmetic = "deny"`).
 
 use exo_core::types::Hash256;
 use serde::{Deserialize, Serialize};
@@ -45,14 +49,19 @@ pub struct ProngDisinterestedness {
 }
 
 impl ProngDisinterestedness {
-    /// Score: ratio of disinterested voters to total eligible voters (0.0–1.0).
+    /// Score in basis points (0–10_000 ≡ 0.00%–100.00%).
+    ///
+    /// Uses integer arithmetic only — no floats — per constitutional determinism
+    /// requirement (`float_arithmetic = "deny"` in workspace lints).
     #[must_use]
-    pub fn score(&self) -> f64 {
+    pub fn score_bps(&self) -> u64 {
         let eligible = self.total_members.saturating_sub(self.recused_count);
         if eligible == 0 {
-            return 0.0;
+            return 0;
         }
-        (self.disinterested_voters as f64 / eligible as f64).clamp(0.0, 1.0)
+        let numer = u64::try_from(self.disinterested_voters).unwrap_or(0);
+        let denom = u64::try_from(eligible).unwrap_or(1);
+        (numer * 10_000 / denom).min(10_000)
     }
 }
 
@@ -72,13 +81,18 @@ pub struct ProngInformedBasis {
 }
 
 impl ProngInformedBasis {
-    /// Score: fraction of voters who reviewed materials (0.0–1.0).
+    /// Score in basis points (0–10_000 ≡ 0.00%–100.00%).
+    ///
+    /// Uses integer arithmetic only — no floats — per constitutional determinism
+    /// requirement (`float_arithmetic = "deny"` in workspace lints).
     #[must_use]
-    pub fn score(&self) -> f64 {
+    pub fn score_bps(&self) -> u64 {
         if self.total_voters == 0 {
-            return 0.0;
+            return 0;
         }
-        (self.voters_who_reviewed as f64 / self.total_voters as f64).clamp(0.0, 1.0)
+        let numer = u64::try_from(self.voters_who_reviewed).unwrap_or(0);
+        let denom = u64::try_from(self.total_voters).unwrap_or(1);
+        (numer * 10_000 / denom).min(10_000)
     }
 }
 
@@ -98,19 +112,27 @@ pub struct ProngGoodFaith {
 }
 
 impl ProngGoodFaith {
-    /// Score: composite of alternatives (≥2 = full credit), process compliance, and
-    /// dissent capture (any dissent captured = full credit for that element).
+    /// Score in basis points (0–10_000 ≡ 0.00%–100.00%).
+    ///
+    /// Composite of alternatives (≥2 = full credit), process compliance, and
+    /// dissent capture.  Uses integer arithmetic only — no floats — per
+    /// constitutional determinism requirement.
     #[must_use]
-    pub fn score(&self) -> f64 {
-        let alt_score = if self.alternatives_count >= 2 { 1.0 } else { self.alternatives_count as f64 / 2.0 };
-        let process_score = if self.process_compliant { 1.0 } else { 0.0 };
-        // Dissent: presence of captured dissent is a good-faith signal.
-        let dissent_score = if self.dissent_records > 0 || self.deliberation_hashes.len() > 1 {
-            1.0
+    pub fn score_bps(&self) -> u64 {
+        // Each sub-score is 0–10_000 bps.
+        let alt_bps: u64 = if self.alternatives_count >= 2 {
+            10_000
         } else {
-            0.5
+            u64::try_from(self.alternatives_count).unwrap_or(0) * 5_000 // 0→0, 1→5000
         };
-        ((alt_score + process_score + dissent_score) / 3.0).clamp(0.0, 1.0)
+        let process_bps: u64 = if self.process_compliant { 10_000 } else { 0 };
+        let dissent_bps: u64 = if self.dissent_records > 0 || self.deliberation_hashes.len() > 1 {
+            10_000
+        } else {
+            5_000
+        };
+        // Mean of three sub-scores, clamped to 10_000.
+        ((alt_bps + process_bps + dissent_bps) / 3).min(10_000)
     }
 }
 
@@ -128,15 +150,18 @@ pub struct ProngRationalBasis {
 }
 
 impl ProngRationalBasis {
-    /// Score: 1.0 if both rationale and risk assessment are present; 0.5 if one; 0.0 if neither.
+    /// Score in basis points (0–10_000 ≡ 0.00%–100.00%).
+    ///
+    /// 10_000 if both rationale and risk assessment present; 5_000 if one; 0 if neither.
+    /// Uses integer arithmetic only — no floats.
     #[must_use]
-    pub fn score(&self) -> f64 {
+    pub fn score_bps(&self) -> u64 {
         let has_rationale = self.selected_rationale_hash.is_some();
         let has_risk = self.risk_assessment_hash.is_some();
         match (has_rationale, has_risk) {
-            (true, true) => 1.0,
-            (true, false) | (false, true) => 0.5,
-            (false, false) => 0.0,
+            (true, true) => 10_000,
+            (true, false) | (false, true) => 5_000,
+            (false, false) => 0,
         }
     }
 }
@@ -174,8 +199,7 @@ pub struct FiduciaryDefensePackage {
 
 impl FiduciaryDefensePackage {
     /// Legal disclaimer text included in every package.
-    pub const DISCLAIMER: &'static str =
-        "This package is a structured evidentiary aid, not a legal opinion. \
+    pub const DISCLAIMER: &'static str = "This package is a structured evidentiary aid, not a legal opinion. \
          Review by qualified counsel is required before use in litigation.";
 
     /// Generate a FiduciaryDefensePackage for a decision.
@@ -208,19 +232,21 @@ impl FiduciaryDefensePackage {
         }
     }
 
-    /// Overall BJR defensibility score (mean of four prong scores), 0.0–1.0.
+    /// Overall BJR defensibility score in basis points (0–10_000 ≡ 0.00%–100.00%).
+    ///
+    /// Mean of four prong scores.  Uses integer arithmetic only — no floats.
     ///
     /// Interpretation:
-    /// - ≥ 0.8 : strong BJR defensibility
-    /// - 0.5–0.8 : moderate — counsel should review gaps
-    /// - < 0.5 : significant exposure
+    /// - ≥ 8_000 bps : strong BJR defensibility
+    /// - 5_000–8_000 bps : moderate — counsel should review gaps
+    /// - < 5_000 bps : significant exposure
     #[must_use]
-    pub fn bjr_defensibility_score(&self) -> f64 {
-        let sum = self.prong_disinterestedness.score()
-            + self.prong_informed_basis.score()
-            + self.prong_good_faith.score()
-            + self.prong_rational_basis.score();
-        (sum / 4.0).clamp(0.0, 1.0)
+    pub fn bjr_defensibility_score_bps(&self) -> u64 {
+        let sum = self.prong_disinterestedness.score_bps()
+            + self.prong_informed_basis.score_bps()
+            + self.prong_good_faith.score_bps()
+            + self.prong_rational_basis.score_bps();
+        (sum / 4).min(10_000)
     }
 
     /// Verify the package has not been tampered with since generation.
@@ -359,9 +385,12 @@ mod tests {
             full_prong3(),
             full_prong4(),
         );
-        let score = pkg.bjr_defensibility_score();
-        assert!((0.0..=1.0).contains(&score), "score must be in [0.0, 1.0]");
-        assert!(score >= 0.8, "fully-evidenced decision must score ≥ 0.8, got {score}");
+        let score = pkg.bjr_defensibility_score_bps();
+        assert!(score <= 10_000, "score must be in [0, 10_000] bps");
+        assert!(
+            score >= 8_000,
+            "fully-evidenced decision must score ≥ 8_000 bps, got {score}"
+        );
     }
 
     #[test]
@@ -373,7 +402,10 @@ mod tests {
             full_prong3(),
             full_prong4(),
         );
-        assert!(pkg.verify(), "package must verify immediately after generation");
+        assert!(
+            pkg.verify(),
+            "package must verify immediately after generation"
+        );
     }
 
     #[test]
@@ -406,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn prong_scores_clamped_to_unit_interval() {
+    fn prong_scores_clamped_to_basis_points() {
         // Edge: all zeros — scores must not underflow.
         let p1 = ProngDisinterestedness {
             total_members: 0,
@@ -432,15 +464,30 @@ mod tests {
             risk_assessment_hash: None,
             supporting_evidence_hashes: vec![],
         };
-        assert!((0.0..=1.0).contains(&p1.score()));
-        assert!((0.0..=1.0).contains(&p2.score()));
-        assert!((0.0..=1.0).contains(&p3.score()));
-        assert!((0.0..=1.0).contains(&p4.score()));
+        assert!(
+            p1.score_bps() <= 10_000,
+            "p1 score must be in [0, 10_000] bps"
+        );
+        assert!(
+            p2.score_bps() <= 10_000,
+            "p2 score must be in [0, 10_000] bps"
+        );
+        assert!(
+            p3.score_bps() <= 10_000,
+            "p3 score must be in [0, 10_000] bps"
+        );
+        assert!(
+            p4.score_bps() <= 10_000,
+            "p4 score must be in [0, 10_000] bps"
+        );
+        // All-zero inputs should produce 0 bps
+        assert_eq!(p1.score_bps(), 0);
+        assert_eq!(p2.score_bps(), 0);
     }
 
     #[test]
     fn bjr_disinterestedness_score_two_thirds() {
-        // 2 out of 3 disinterested voters → score ≈ 0.67
+        // 2 out of 3 disinterested voters → 6_666 bps (integer truncation of 20000/3)
         let p1 = ProngDisinterestedness {
             total_members: 3,
             recused_count: 0,
@@ -448,8 +495,9 @@ mod tests {
             majority_disinterested: true,
             disclosure_record_hashes: vec![],
         };
-        let score = p1.score();
-        assert!((score - 2.0 / 3.0).abs() < 1e-9);
+        let score = p1.score_bps();
+        // 2 * 10_000 / 3 = 6_666 (integer division)
+        assert_eq!(score, 6_666);
     }
 
     #[test]
@@ -460,6 +508,7 @@ mod tests {
             evidence_manifest_hashes: vec![],
             materials_complete_before_vote: true,
         };
-        assert!((p2.score() - 1.0).abs() < 1e-9);
+        // 5/5 = 10_000 bps (100%)
+        assert_eq!(p2.score_bps(), 10_000);
     }
 }
