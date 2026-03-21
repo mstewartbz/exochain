@@ -5,9 +5,6 @@
 #
 # Reference: CR-001 Section 8.8 — Dependency Governance
 
-# cargo-deny 0.19+ configuration version
-version = 2
-
 [graph]
 targets = [
     "x86_64-unknown-linux-gnu",

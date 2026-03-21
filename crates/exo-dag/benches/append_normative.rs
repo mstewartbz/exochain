@@ -40,7 +40,7 @@ fn linear_dag(depth: usize) -> (Dag, Hash256) {
     let genesis = append(&mut dag, &[], b"genesis", &c, &sign_fn, &mut clock).expect("genesis");
     let mut tip = genesis.hash;
     for i in 0..depth {
-        let payload = (i as u64).to_le_bytes();
+        let payload = (u64::try_from(i).unwrap()).to_le_bytes();
         let node = append(&mut dag, &[tip], &payload, &c, &sign_fn, &mut clock).expect("append");
         tip = node.hash;
     }
@@ -74,7 +74,7 @@ fn bench_dag_append(c: &mut Criterion) {
                         .expect("genesis");
                     let mut tip = genesis.hash;
                     for i in 0..n {
-                        let payload = (i as u64).to_le_bytes();
+                        let payload = (u64::try_from(i).unwrap()).to_le_bytes();
                         let node = append(&mut dag, &[tip], &payload, &cr, &sign_fn, &mut clock)
                             .expect("append");
                         tip = node.hash;
@@ -161,7 +161,7 @@ fn bench_store_checkpoint(c: &mut Criterion) {
             let mut tip = genesis.hash;
             let mut out = vec![genesis];
             for i in 0..batch {
-                let payload = (i as u64).to_le_bytes();
+                let payload = (u64::try_from(i).unwrap()).to_le_bytes();
                 let node =
                     append(&mut dag, &[tip], &payload, &cr, &sign_fn, &mut clock).expect("node");
                 tip = node.hash;
@@ -179,7 +179,7 @@ fn bench_store_checkpoint(c: &mut Criterion) {
                     for (height, node) in ns.iter().enumerate() {
                         store.put(node.clone()).expect("put");
                         store
-                            .mark_committed(&node.hash, height as u64)
+                            .mark_committed(&node.hash, u64::try_from(height).unwrap())
                             .expect("mark_committed");
                     }
                     black_box(store.committed_height().expect("height"))
@@ -258,7 +258,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
             let mut tip = g.hash;
             let mut out = vec![g];
             for i in 1..10usize {
-                let payload = (i as u64).to_le_bytes();
+                let payload = (u64::try_from(i).unwrap()).to_le_bytes();
                 let nd = append(&mut d, &[tip], &payload, &cr, &sign_fn, &mut clk).expect("nd");
                 tip = nd.hash;
                 out.push(nd);
