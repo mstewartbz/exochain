@@ -19,9 +19,9 @@ all-features = true
 # ---------------------------------------------------------------------------
 [advisories]
 vulnerability = "deny"
-unmaintained = "warn"
-yanked = "deny"
-notice = "warn"
+unmaintained = "all"
+yanked = "all"
+notice = "all"
 ignore = []
 
 # ---------------------------------------------------------------------------

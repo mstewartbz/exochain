@@ -1,6 +1,6 @@
 //! Real-time delegated authority matrix (GOV-003, GOV-004).
 //!
-//! Maps Actor -> Vec<DelegatedAuthority>. Each delegation is signed,
+//! Maps Actor -> `Vec<DelegatedAuthority>`. Each delegation is signed,
 //! scoped, time-bound, and revocable. Auto-expiry enforcement (TNC-05),
 //! sub-delegation control, and sunset/renewal tracking with 90/60/30/14/7-day
 //! expiry warnings.
