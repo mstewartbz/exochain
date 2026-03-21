@@ -357,3 +357,25 @@ pub fn wasm_file_governance_challenge(
     let challenge = exo_governance::challenge::file_challenge(&challenger, &arr, ground, evidence);
     to_js_value(&challenge)
 }
+
+/// Enforcing conflict gate — returns an error if the actor is blocked from voting.
+///
+/// Unlike `wasm_check_conflicts` (which is advisory), this function returns an
+/// Err when `check_and_block()` determines the actor must recuse.  Use this
+/// at the vote-submission boundary to enforce recusal at the kernel level.
+#[wasm_bindgen]
+pub fn wasm_conflict_enforce(
+    actor_did: &str,
+    action_json: &str,
+    declarations_json: &str,
+) -> Result<JsValue, JsValue> {
+    let actor =
+        exo_core::Did::new(actor_did).map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+    let action: exo_governance::conflict::ActionRequest = from_json_str(action_json)?;
+    let declarations: Vec<exo_governance::conflict::ConflictDeclaration> =
+        from_json_str(declarations_json)?;
+    let conflicts = exo_governance::conflict::check_conflicts(&actor, &action, &declarations);
+    exo_governance::conflict::check_and_block(&actor, &conflicts)
+        .map_err(|e| JsValue::from_str(&format!("ConflictBlocked: {e}")))?;
+    to_js_value(&serde_json::json!({ "allowed": true }))
+}
