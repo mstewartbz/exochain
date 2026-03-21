@@ -10,7 +10,7 @@ pub mod error;
 pub mod permission;
 
 pub use cache::ChainCache;
-pub use chain::{AuthorityChain, AuthorityLink};
+pub use chain::{AuthorityChain, AuthorityLink, DelegateeKind};
 pub use delegation::DelegationRegistry;
 pub use error::AuthorityError;
 pub use permission::{Permission, PermissionSet};

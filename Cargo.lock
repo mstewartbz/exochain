@@ -607,7 +607,9 @@ name = "exo-legal"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "exo-authority",
  "exo-core",
+ "exo-gatekeeper",
  "exo-governance",
  "exo-identity",
  "proptest",

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use exo_core::{Did, Hash256, Signature, Timestamp};
 
 use crate::{
-    chain::{self, AuthorityChain, AuthorityLink, DEFAULT_MAX_DEPTH},
+    chain::{self, AuthorityChain, AuthorityLink, DelegateeKind, DEFAULT_MAX_DEPTH},
     error::AuthorityError,
     permission::Permission,
 };
@@ -38,6 +38,7 @@ impl DelegationRegistry {
         scope: &[Permission],
         expires: Timestamp,
         now: &Timestamp,
+        delegatee_kind: DelegateeKind,
     ) -> Result<AuthorityLink, AuthorityError> {
         // Detect circular: if `to` already delegates (directly or transitively) to `from`
         if self.has_path(to, from) {
@@ -57,6 +58,7 @@ impl DelegationRegistry {
             expires: Some(expires),
             signature: Signature::from_bytes([1u8; 64]), // placeholder
             depth,
+            delegatee_kind,
         };
 
         let id = link.id();
@@ -215,6 +217,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         );
         assert!(link.is_ok());
         let l = link.unwrap();
@@ -232,6 +235,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         let result = reg.delegate(
@@ -240,6 +244,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
     }
@@ -253,6 +258,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         reg.delegate(
@@ -261,6 +267,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         let result = reg.delegate(
@@ -269,6 +276,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
     }
@@ -283,6 +291,7 @@ mod tests {
                 &[Permission::Read],
                 ts(10000),
                 &now(),
+                DelegateeKind::Human,
             )
             .unwrap();
         let id = link.id();
@@ -309,6 +318,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         let chain = reg.find_chain(&did("alice"), &did("bob"));
@@ -325,6 +335,7 @@ mod tests {
             &[Permission::Read, Permission::Write],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         reg.delegate(
@@ -333,6 +344,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         let chain = reg.find_chain(&did("alice"), &did("charlie"));
@@ -355,6 +367,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         assert!(reg.find_chain(&did("alice"), &did("charlie")).is_none());
@@ -377,6 +390,7 @@ mod tests {
                 &[Permission::Read],
                 ts(10000),
                 &now(),
+                DelegateeKind::Human,
             )
             .unwrap();
         reg.revoke_delegation(&l.id()).ok();
@@ -393,6 +407,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         reg.delegate(
@@ -401,6 +416,7 @@ mod tests {
             &[Permission::Write],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         )
         .ok();
         assert_eq!(reg.len(), 2);
@@ -417,6 +433,7 @@ mod tests {
             &[Permission::Read],
             ts(10000),
             &now(),
+            DelegateeKind::Human,
         );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
     }
