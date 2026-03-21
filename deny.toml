@@ -42,6 +42,10 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
     "OpenSSL",
+    "CDLA-Permissive-2.0",
+    # MPL-2.0 is file-level copyleft, compatible with Apache-2.0 for combined works
+    # Required by: ascii_utils (via async-graphql), fast_chemail (via async-graphql)
+    "MPL-2.0",
 ]
 
 # Some crates have non-standard license expressions
