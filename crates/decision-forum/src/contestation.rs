@@ -275,7 +275,7 @@ mod tests {
             Hash256::ZERO,
             ts(),
         );
-        assert!(is_contested(&[c.clone()], did));
+        assert!(is_contested(std::slice::from_ref(&c), did));
         let mut c2 = c;
         adjudicate(&mut c2, ChallengeVerdict::Overrule, Timestamp::new(2000, 0)).expect("ok");
         assert!(!is_contested(&[c2], did));

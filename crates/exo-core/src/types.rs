@@ -690,8 +690,8 @@ impl SignerType {
     }
 
     /// Build the canonical prefix bytes for inclusion in a signable payload.
-    /// For Human: [0x01]
-    /// For AI: [0x02] ++ delegation_id (32 bytes)
+    /// For Human: `[0x01]`
+    /// For AI: `[0x02]` ++ delegation_id (32 bytes)
     #[must_use]
     pub fn to_payload_prefix(&self) -> Vec<u8> {
         match self {
