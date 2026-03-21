@@ -12,16 +12,12 @@ targets = [
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
-features = "all"
+all-features = true
 
 # ---------------------------------------------------------------------------
 # Advisories — reject any crate with a known security advisory
 # ---------------------------------------------------------------------------
 [advisories]
-vulnerability = "deny"
-unmaintained = "deny"
-yanked = "deny"
-notice = "warn"
 ignore = []
 
 # ---------------------------------------------------------------------------
