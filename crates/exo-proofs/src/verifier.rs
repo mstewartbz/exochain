@@ -245,4 +245,27 @@ mod tests {
         assert_ne!(ProofType::Snark, ProofType::Stark);
         assert_ne!(ProofType::Stark, ProofType::Zkml);
     }
+
+    #[test]
+    fn verify_any_stark_bad_proof_bytes() {
+        let err = verify_any(ProofType::Stark, b"not json", b"[]").unwrap_err();
+        assert!(matches!(err, ProofError::DeserializationError(_)));
+    }
+
+    #[test]
+    fn verify_any_stark_bad_public_inputs_bytes() {
+        let config = StarkConfig::default_config();
+        let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4]];
+        let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
+        let bundle = StarkBundle { proof };
+        let proof_bytes = serde_json::to_vec(&bundle).unwrap();
+        let err = verify_any(ProofType::Stark, &proof_bytes, b"not json").unwrap_err();
+        assert!(matches!(err, ProofError::DeserializationError(_)));
+    }
+
+    #[test]
+    fn verify_any_zkml_bad_proof_bytes() {
+        let err = verify_any(ProofType::Zkml, b"not json", b"[]").unwrap_err();
+        assert!(matches!(err, ProofError::DeserializationError(_)));
+    }
 }

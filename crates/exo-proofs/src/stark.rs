@@ -41,7 +41,7 @@ impl StarkConfig {
 
 /// A STARK constraint over the execution trace.
 ///
-/// Constraints are transition rules: given row[i] and row[i+1],
+/// Constraints are transition rules: given `row[i]` and `row[i+1]`,
 /// the constraint function must evaluate to 0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StarkConstraint {
@@ -51,7 +51,7 @@ pub struct StarkConstraint {
     pub column_indices: Vec<usize>,
     /// Coefficients for a polynomial constraint.
     /// Format: pairs of (current_row_coeff, next_row_coeff) per column.
-    /// The constraint is: sum(current_coeff[i] * trace[row][col_i] + next_coeff[i] * trace[row+1][col_i]) == 0
+    /// The constraint is: `sum(current_coeff[i] * trace[row][col_i] + next_coeff[i] * trace[row+1][col_i]) == 0`
     pub coefficients: Vec<(u64, u64)>,
 }
 
@@ -543,5 +543,33 @@ mod tests {
             config.expansion_factor
         );
         assert_eq!(proof.fri_proof.query_values.len(), config.num_queries);
+    }
+
+    #[test]
+    fn evaluate_constraint_oob_column() {
+        // col_idx beyond trace width — the else branches that return 0 must be exercised
+        let config = StarkConfig::default_config();
+        let trace = vec![vec![0u64], vec![0u64]]; // 1-column trace
+        let constraint = StarkConstraint {
+            name: "oob".to_string(),
+            column_indices: vec![5], // beyond trace width
+            coefficients: vec![(0, 0)],
+        };
+        let proof = prove_stark(&trace, &[constraint], &config).unwrap();
+        assert!(verify_stark(&proof, &trace[0]));
+    }
+
+    #[test]
+    fn evaluate_constraint_fewer_coefficients_than_columns() {
+        // column_indices has more entries than coefficients — extras are silently skipped
+        let config = StarkConfig::default_config();
+        let trace = vec![vec![1u64, 2u64], vec![3u64, 4u64]];
+        let constraint = StarkConstraint {
+            name: "partial".to_string(),
+            column_indices: vec![0, 1],
+            coefficients: vec![], // empty — inner loop body never executes
+        };
+        let proof = prove_stark(&trace, &[constraint], &config).unwrap();
+        assert!(verify_stark(&proof, &trace[0]));
     }
 }
