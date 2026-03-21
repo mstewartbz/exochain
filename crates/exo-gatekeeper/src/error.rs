@@ -41,3 +41,40 @@ impl From<exo_core::ExoError> for GatekeeperError {
         GatekeeperError::Core(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_all_variants() {
+        let cases: Vec<(GatekeeperError, &str)> = vec![
+            (
+                GatekeeperError::KernelIntegrityFailure {
+                    expected: "abc".into(),
+                    actual: "def".into(),
+                },
+                "abc",
+            ),
+            (GatekeeperError::InvariantViolation("bad".into()), "bad"),
+            (GatekeeperError::CombinatorError("fail".into()), "fail"),
+            (GatekeeperError::HolonError("holon".into()), "holon"),
+            (GatekeeperError::McpViolation("mcp".into()), "mcp"),
+            (GatekeeperError::TeeError("tee".into()), "tee"),
+            (GatekeeperError::CapabilityDenied("cap".into()), "cap"),
+            (GatekeeperError::Timeout(500), "500"),
+            (GatekeeperError::CheckpointError("ckpt".into()), "ckpt"),
+            (GatekeeperError::Core("core".into()), "core"),
+        ];
+        for (err, fragment) in cases {
+            assert!(err.to_string().contains(fragment), "{err}");
+        }
+    }
+
+    #[test]
+    fn from_exo_error() {
+        let exo = exo_core::ExoError::InvalidDid { value: "x".into() };
+        let gk = GatekeeperError::from(exo);
+        assert!(matches!(gk, GatekeeperError::Core(_)));
+    }
+}

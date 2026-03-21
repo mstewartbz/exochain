@@ -156,14 +156,52 @@ mod tests {
     #[test]
     fn test_route_paths() {
         assert_eq!(RestRoute::Health.path(), "/health");
-        assert!(RestRoute::GetDecision.path().contains(":id"));
+        assert_eq!(RestRoute::GetDecision.path(), "/api/v1/decisions/:id");
+        assert_eq!(RestRoute::CreateDecision.path(), "/api/v1/decisions");
+        assert_eq!(RestRoute::AuthToken.path(), "/api/v1/auth/token");
+        assert_eq!(RestRoute::SamlCallback.path(), "/api/v1/auth/saml/callback");
+        assert_eq!(
+            RestRoute::GetConstitution.path(),
+            "/api/v1/tenants/:id/constitution"
+        );
+        assert_eq!(
+            RestRoute::EDiscoveryExport.path(),
+            "/api/v1/ediscovery/export"
+        );
+        assert_eq!(RestRoute::AuditTrail.path(), "/api/v1/audit/:decision_id");
         assert_eq!(RestRoute::AuthRegister.path(), "/api/v1/auth/register");
         assert_eq!(RestRoute::AuthLogin.path(), "/api/v1/auth/login");
+        assert_eq!(RestRoute::AuthRefresh.path(), "/api/v1/auth/refresh");
+        assert_eq!(RestRoute::AuthMe.path(), "/api/v1/auth/me");
+        assert_eq!(RestRoute::AuthLogout.path(), "/api/v1/auth/logout");
+        assert_eq!(RestRoute::AgentEnroll.path(), "/api/v1/agents/enroll");
+        assert_eq!(RestRoute::ListAgents.path(), "/api/v1/agents");
         assert_eq!(RestRoute::GetAgent.path(), "/api/v1/agents/:did");
+        assert_eq!(
+            RestRoute::AdvanceAgentPace.path(),
+            "/api/v1/agents/:did/advance-pace"
+        );
         assert_eq!(
             RestRoute::GetIdentityScore.path(),
             "/api/v1/identity/:did/score"
         );
+        assert_eq!(RestRoute::ListUsers.path(), "/api/v1/users");
+        assert_eq!(
+            RestRoute::AdvanceUserPace.path(),
+            "/api/v1/users/:did/advance-pace"
+        );
+    }
+
+    #[test]
+    fn health_response_fields() {
+        let r = HealthResponse {
+            status: "ok".into(),
+            version: "0.1.0".into(),
+            uptime_seconds: 42,
+        };
+        assert_eq!(r.status, "ok");
+        assert_eq!(r.version, "0.1.0");
+        assert_eq!(r.uptime_seconds, 42);
     }
 
     #[test]
