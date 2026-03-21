@@ -9,7 +9,7 @@ export default defineWorkspace([
       coverage: {
         provider: 'v8',
         include: ['services/*/src/index.js'],
-        thresholds: { lines: 80, functions: 80, branches: 70, statements: 80 },
+        thresholds: { perFile: true, lines: 80, functions: 80, branches: 70, statements: 80 },
       },
     },
   },

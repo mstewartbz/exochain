@@ -204,7 +204,7 @@ jobs:
   # Gate 10: Demo Platform Coverage (Node.js + React >= 80%)
   # -----------------------------------------------------------------------
   demo-coverage:
-    name: "Gate 10 — Demo Coverage (>= 80%)"
+    name: "Gate 10 — Demo Coverage (services >= 80%, React >= 70%)"
     runs-on: ubuntu-latest
     needs: build
     steps:

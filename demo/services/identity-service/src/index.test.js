@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import supertest from 'supertest';
 
 const mockWasm = vi.hoisted(() => ({
@@ -24,9 +24,14 @@ let request;
 beforeAll(async () => {
   await new Promise((r) => server.listen(0, r));
   request = supertest(server);
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
   const pool = new pg.Pool();
   pool.query.mockResolvedValue({ rows: [] });
 });
+
 afterAll(async () => { await new Promise((r) => server.close(r)); });
 
 describe('GET /health', () => {

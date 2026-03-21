@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import supertest from 'supertest';
 
 const mockWasm = vi.hoisted(() => ({
@@ -26,6 +26,7 @@ import { server } from './index.js';
 
 let request;
 beforeAll(async () => { await new Promise((r) => server.listen(0, r)); request = supertest(server); });
+beforeEach(() => { vi.clearAllMocks(); });
 afterAll(async () => { await new Promise((r) => server.close(r)); });
 
 describe('GET /health', () => {
