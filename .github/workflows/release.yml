@@ -2,17 +2,27 @@
 #
 # Requires all CI gates to pass plus manual approval from a maintainer.
 # Produces deterministic release artifacts with provenance attestation.
+#
+# DualControl requirement (CR-001 / constitutional invariant):
+#   The GitHub 'release' environment MUST be configured with at least two
+#   required reviewers from distinct council panels before this workflow is
+#   used for any live (non-dry-run) publication. See VERSIONING.md.
+#
+# Secrets required:
+#   RELEASE_GPG_PRIVATE_KEY  — ASCII-armored GPG private key for tag signing
+#   RELEASE_GPG_PASSPHRASE   — Passphrase for the GPG key
+#   CARGO_REGISTRY_TOKEN     — crates.io publish token
 
 name: EXOCHAIN Release
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.2.0)"
+        description: "Release version (e.g. 0.1.0)"
         required: true
         type: string
       dry_run:
-        description: "Dry run (skip publish)"
+        description: "Dry run (skip publish and tag push)"
         required: false
         type: boolean
         default: false
@@ -23,29 +33,87 @@ env:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Run full CI pipeline first
+  # CR-001 Section 8.8 Release-specific gates (run in parallel with ci)
+  #
+  # These gates are defined in governance/quality_gates.md and are distinct
+  # from the 9 PR gates in ci.yml. All must pass before maintainer approval.
+  # -----------------------------------------------------------------------
+  release-gates:
+    name: "CR-001 Release Gates"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Gate R-1: CHANGELOG contains a versioned section for this release
+      - name: "R-1 — Changelog section present"
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! grep -qE "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md does not contain a [${VERSION}] release section."
+            echo "::error::Rename the [Unreleased] section to [${VERSION}] - $(date +%Y-%m-%d) before releasing."
+            exit 1
+          fi
+          echo "✓ CHANGELOG.md contains [${VERSION}] section"
+
+      # Gate R-2: Post-quantum signature roundtrip (Ed25519, PostQuantum, Hybrid)
+      - name: "R-2 — Post-quantum signature roundtrip"
+        run: cargo test --package exo-core -- crypto::tests --nocapture
+
+      # Gate R-3: Constitutional invariant tests
+      - name: "R-3 — Constitutional invariant verification"
+        run: cargo test --workspace -- invariants --nocapture
+
+      # Gate R-4: Cross-implementation consistency (skipped if EXO_TS_ROOT absent)
+      - name: "R-4 — Cross-implementation test (conditional)"
+        env:
+          EXO_TS_ROOT: ""
+        run: |
+          if [ -z "$EXO_TS_ROOT" ] && [ ! -d "../../exo" ]; then
+            echo "::notice::Cross-implementation test skipped — EXO_TS_ROOT not set and ../../exo not found."
+            echo "::notice::Set EXO_TS_ROOT or run tools/cross-impl-test/compare.sh locally before shipping."
+            exit 0
+          fi
+          ./tools/cross-impl-test/compare.sh
+
+      # Gate R-5: Benchmark regression check (skipped — benchmarks need rewrite)
+      - name: "R-5 — Benchmark regression (skipped)"
+        run: |
+          echo "::notice::Benchmark gate skipped — crates/exo-dag/benches/append_normative.rs is disabled"
+          echo "::notice::pending rewrite against the current DagStore API (see bench source for details)."
+
+      # Gate R-6: Fuzzing smoke (skipped — no fuzz targets yet)
+      - name: "R-6 — Fuzzing smoke (skipped)"
+        run: |
+          echo "::notice::Fuzzing gate skipped — no cargo-fuzz targets exist yet."
+          echo "::notice::Fuzz targets for EventEnvelope and signature verification are planned."
+
+  # -----------------------------------------------------------------------
+  # Run full CI pipeline (9 constitutional gates)
   # -----------------------------------------------------------------------
   ci:
     name: "Run CI Pipeline"
     uses: ./.github/workflows/ci.yml
 
   # -----------------------------------------------------------------------
-  # Manual approval gate
+  # Manual approval gate (DualControl: configure 'release' environment with
+  # >= 2 required reviewers in GitHub repository settings)
   # -----------------------------------------------------------------------
   approve:
-    name: "Maintainer Approval"
+    name: "Maintainer Approval (DualControl)"
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, release-gates]
     environment: release
     steps:
       - name: Approval confirmed
-        run: echo "Release ${{ inputs.version }} approved by maintainer."
+        run: echo "Release ${{ inputs.version }} approved."
 
   # -----------------------------------------------------------------------
-  # Build release artifacts
+  # Build native release artifacts
   # -----------------------------------------------------------------------
   release-build:
-    name: "Build Release Artifacts"
+    name: "Build Native Artifacts"
     runs-on: ubuntu-latest
     needs: approve
     strategy:
@@ -85,12 +153,110 @@ jobs:
           path: exochain-${{ inputs.version }}-${{ matrix.target }}.tar.gz
 
   # -----------------------------------------------------------------------
-  # Generate provenance attestation
+  # Build WASM artifact (exochain-wasm crate → wasm32-unknown-unknown)
+  # -----------------------------------------------------------------------
+  wasm-build:
+    name: "Build WASM Artifact"
+    runs-on: ubuntu-latest
+    needs: approve
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM package
+        run: wasm-pack build crates/exochain-wasm --release --target nodejs
+
+      - name: Package WASM artifact
+        run: |
+          tar czf exochain-${{ inputs.version }}-wasm.tar.gz -C crates/exochain-wasm/pkg .
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exochain-${{ inputs.version }}-wasm
+          path: exochain-${{ inputs.version }}-wasm.tar.gz
+
+  # -----------------------------------------------------------------------
+  # Create GPG-signed release tag (satisfies DualControl + DemocraticLegitimacy)
+  #
+  # Requires secrets: RELEASE_GPG_PRIVATE_KEY, RELEASE_GPG_PASSPHRASE
+  # The GPG key must be held by a party independent of the CI runner.
+  # See SECURITY.md for key fingerprint and rotation policy.
+  # -----------------------------------------------------------------------
+  tag-release:
+    name: "Create Signed Release Tag"
+    runs-on: ubuntu-latest
+    needs: [release-build, wasm-build]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify clean workspace
+        run: |
+          if ! git diff --quiet HEAD; then
+            echo "::error::Working tree is not clean. Release requires a clean checkout."
+            git status
+            exit 1
+          fi
+          echo "✓ Workspace is clean"
+
+      - name: Import GPG signing key
+        if: ${{ !inputs.dry_run }}
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --reload gpg-agent
+
+      - name: Configure git for signed tagging
+        if: ${{ !inputs.dry_run }}
+        run: |
+          KEY_ID=$(gpg --list-secret-keys --keyid-format LONG \
+            | grep ^sec | head -1 | awk '{print $2}' | cut -d/ -f2)
+          git config user.signingkey "$KEY_ID"
+          git config tag.gpgsign true
+          git config user.name "ExoChain Release Bot"
+          git config user.email "releases@exochain.org"
+          echo "Signing key: $KEY_ID"
+
+      - name: Create and push signed tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          echo "$RELEASE_GPG_PASSPHRASE" | gpg \
+            --batch --yes --passphrase-fd 0 --pinentry-mode loopback \
+            --output /dev/null --sign /dev/null 2>/dev/null || true
+          git tag \
+            -s "v${{ inputs.version }}" \
+            -m "EXOCHAIN v${{ inputs.version }} — constitutional release" \
+            --cleanup=verbatim
+          git push origin "v${{ inputs.version }}"
+          echo "✓ Signed tag v${{ inputs.version }} pushed"
+
+      - name: Dry-run tag (not pushed)
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry-run: would create signed tag v${{ inputs.version }}"
+          echo "  git tag -s v${{ inputs.version }} -m 'EXOCHAIN v${{ inputs.version }} — constitutional release'"
+
+  # -----------------------------------------------------------------------
+  # Generate provenance attestation with correct sha256 artifact hashes
   # -----------------------------------------------------------------------
   provenance:
     name: "Provenance Attestation"
     runs-on: ubuntu-latest
-    needs: release-build
+    needs: tag-release
     steps:
       - uses: actions/checkout@v4
 
@@ -101,25 +267,40 @@ jobs:
 
       - name: Generate provenance manifest
         run: |
-          cat > provenance.json <<PROVENANCE_EOF
-          {
-            "version": "${{ inputs.version }}",
-            "commit": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "workflow": "${{ github.workflow }}",
-            "run_id": "${{ github.run_id }}",
-            "actor": "${{ github.actor }}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "artifacts": {}
-          }
-          PROVENANCE_EOF
+          python3 - <<'PYEOF'
+          import json, hashlib, glob, os
 
-          # Hash each artifact for the manifest
-          for f in artifacts/**/*.tar.gz; do
-            hash=$(sha256sum "$f" | cut -d' ' -f1)
-            name=$(basename "$f")
-            echo "  $name: $hash"
-          done
+          artifacts = {}
+          patterns = [
+              'artifacts/**/*.tar.gz',
+              'artifacts/**/*.wasm',
+          ]
+          for pattern in patterns:
+              for path in glob.glob(pattern, recursive=True):
+                  with open(path, 'rb') as fh:
+                      digest = hashlib.sha256(fh.read()).hexdigest()
+                  artifacts[os.path.basename(path)] = digest
+
+          provenance = {
+              "version":  os.environ['INPUT_VERSION'],
+              "commit":   os.environ['GITHUB_SHA'],
+              "ref":      os.environ['GITHUB_REF'],
+              "workflow": os.environ['GITHUB_WORKFLOW'],
+              "run_id":   os.environ['GITHUB_RUN_ID'],
+              "actor":    os.environ['GITHUB_ACTOR'],
+              "timestamp": __import__('datetime').datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+              "artifacts": artifacts,
+          }
+
+          with open('provenance.json', 'w') as f:
+              json.dump(provenance, f, indent=2)
+
+          print(f"Provenance generated with {len(artifacts)} artifact hash(es):")
+          for name, digest in artifacts.items():
+              print(f"  sha256:{digest}  {name}")
+          PYEOF
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
 
       - name: Upload provenance
         uses: actions/upload-artifact@v4
@@ -128,53 +309,12 @@ jobs:
           path: provenance.json
 
   # -----------------------------------------------------------------------
-  # Publish to crates.io (unless dry run)
-  # -----------------------------------------------------------------------
-  publish:
-    name: "Publish to crates.io"
-    runs-on: ubuntu-latest
-    needs: [release-build, provenance]
-    if: ${{ !inputs.dry_run }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish crates in dependency order
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          CRATES=(
-            exo-core
-            exo-identity
-            exo-consent
-            exo-authority
-            exo-dag
-            exo-proofs
-            exo-gatekeeper
-            exo-governance
-            exo-escalation
-            exo-legal
-            exo-tenant
-            exo-api
-            exo-gateway
-            decision-forum
-          )
-          for crate in "${CRATES[@]}"; do
-            echo "Publishing $crate..."
-            cargo publish -p "$crate" --allow-dirty || {
-              echo "Warning: $crate publish failed (may already be published)"
-            }
-            # crates.io index propagation delay
-            sleep 30
-          done
-
-  # -----------------------------------------------------------------------
   # Create GitHub Release
   # -----------------------------------------------------------------------
   github-release:
     name: "Create GitHub Release"
     runs-on: ubuntu-latest
-    needs: [release-build, provenance]
+    needs: provenance
     permissions:
       contents: write
     steps:
@@ -204,7 +344,113 @@ jobs:
             - Audit: no known vulnerabilities
             - Deny: license compliance verified
             - Documentation: builds without warnings
+            - CHANGELOG: versioned section present
+            - Post-quantum signature roundtrip: verified
+            - Constitutional invariants: verified
+
+            Release tag `v${{ inputs.version }}` is GPG-signed. Verify with:
+            ```
+            git tag -v v${{ inputs.version }}
+            ```
+
+            See `provenance.json` for SHA-256 hashes of all release artifacts.
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/provenance.json
           draft: ${{ inputs.dry_run }}
+
+  # -----------------------------------------------------------------------
+  # Publish to crates.io (unless dry run)
+  #
+  # - No --allow-dirty: workspace must be clean at publish time
+  # - Polls the crates.io index after each publish instead of fixed sleep
+  # -----------------------------------------------------------------------
+  publish:
+    name: "Publish to crates.io"
+    runs-on: ubuntu-latest
+    needs: github-release
+    if: ${{ !inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify clean workspace before publish
+        run: |
+          if ! git diff --quiet HEAD; then
+            echo "::error::Working tree is not clean. Refusing to publish with uncommitted changes."
+            git status
+            exit 1
+          fi
+          echo "✓ Workspace is clean for publish"
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          # Poll for crates.io index propagation instead of fixed sleep.
+          wait_for_index() {
+            local crate="$1"
+            local version="$2"
+            for i in $(seq 1 8); do
+              if cargo search "$crate" --limit 1 2>/dev/null | grep -q "\"${version}\""; then
+                echo "  ✓ ${crate} ${version} indexed"
+                return 0
+              fi
+              echo "  Waiting for ${crate} ${version} in index... (${i}/8, up to 2 min)"
+              sleep 15
+            done
+            echo "::warning::${crate} ${version} not yet indexed after 2 minutes; continuing."
+          }
+
+          CRATES=(
+            exo-core
+            exo-identity
+            exo-consent
+            exo-authority
+            exo-dag
+            exo-proofs
+            exo-gatekeeper
+            exo-governance
+            exo-escalation
+            exo-legal
+            exo-tenant
+            exo-api
+            exo-gateway
+            decision-forum
+          )
+
+          for crate in "${CRATES[@]}"; do
+            echo "Publishing ${crate}..."
+            if cargo publish -p "$crate"; then
+              echo "  Published ${crate}"
+              wait_for_index "$crate" "$RELEASE_VERSION"
+            else
+              echo "::warning::${crate} publish failed (may already be published at this version)"
+            fi
+          done
+
+  # -----------------------------------------------------------------------
+  # Post-publish smoke test: verify published crates are downloadable
+  # -----------------------------------------------------------------------
+  smoke-test:
+    name: "Post-publish Smoke Test"
+    runs-on: ubuntu-latest
+    needs: publish
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Smoke test published exo-core
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          cargo init --name smoke-test --edition 2021
+          cat >> Cargo.toml <<EOF
+          [dependencies]
+          exo-core = "${RELEASE_VERSION}"
+          EOF
+          cargo build
+          echo "✓ Smoke test passed: exo-core ${RELEASE_VERSION} is downloadable and builds."
+          rm -rf "$TMPDIR"

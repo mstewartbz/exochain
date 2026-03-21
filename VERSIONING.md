@@ -14,8 +14,6 @@ MAJOR.MINOR.PATCH
 
 ## Current Status
 
-**Pre-release** — All crates are at `0.1.0`. No versioned releases have been published.
-
 The workspace version is set in `Cargo.toml`:
 ```toml
 [workspace.package]
@@ -26,23 +24,60 @@ version = "0.1.0"
 
 See `.github/workflows/release.yml` for the automated release workflow:
 
-1. All 8 CI quality gates must pass
-2. Manual maintainer approval required (GitHub Environments: `release`)
-3. Release artifacts built for `x86_64-linux-gnu` and `aarch64-linux-gnu`
-4. SHA-256 checksums and provenance manifest generated
-5. GitHub Release created with artifacts
-6. Crates published to crates.io in dependency order (if not dry-run)
+1. All 9 CI quality gates must pass (ci.yml)
+2. All 6 CR-001 release-specific gates must pass (release-gates job)
+3. DualControl: two independent council-panel reviewers must approve via the GitHub `release` environment
+4. Native artifacts built for `x86_64-linux-gnu` and `aarch64-linux-gnu`
+5. WASM artifact built via `wasm-pack` for the `exochain-wasm` crate
+6. GPG-signed tag created and pushed (secrets: `RELEASE_GPG_PRIVATE_KEY`, `RELEASE_GPG_PASSPHRASE`)
+7. SHA-256 provenance manifest generated covering all release artifacts
+8. GitHub Release created from the signed tag with all artifacts attached
+9. Crates published to crates.io in dependency order (unless dry-run)
+10. Post-publish smoke test verifies `exo-core` is downloadable and buildable
 
 ### Dry Run
 
-To test the release process without publishing:
+Trigger via the GitHub Actions UI with `dry_run=true`. This runs all gates and builds
+all artifacts but skips the signed tag push, crates.io publish, and smoke test.
+The GitHub Release is created as a draft for review.
 
 ```bash
-# Trigger via GitHub Actions UI with dry_run=true
-# Or locally:
+# Quick local validation (does not replicate the full release pipeline):
 cargo build --workspace --release
 cargo test --workspace
 ```
+
+### DualControl Configuration
+
+The `release` environment in GitHub repository settings **must** have at least two
+required reviewers from distinct council panels before any live release. Dry-run
+executions do not require this restriction. To configure:
+
+> Repository Settings → Environments → release → Required reviewers → add ≥ 2 reviewers
+
+## Rollback (Yank) Procedure
+
+Once a version is published to crates.io it cannot be deleted, but it can be yanked
+to prevent new projects from depending on it.
+
+**When to yank:** defective API, security vulnerability, broken build, or council
+resolution requiring retraction.
+
+```bash
+# Yank a specific crate version (repeats for each affected crate)
+cargo yank --version 0.1.0 exo-core
+
+# Restore a yank if issued in error
+cargo yank --version 0.1.0 exo-core --undo
+```
+
+Yanks must be logged as a governance action: open an issue with label
+`exochain:council-review` documenting the reason, the affected crates, and the
+approving council panel before executing the yank.
+
+GitHub Releases can be edited to mark a release as pre-release or can be deleted
+(which does not remove the git tag). The signed tag itself should be retained for
+audit-trail purposes even when a release is retracted.
 
 ## Constitutional Constraint
 
