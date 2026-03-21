@@ -5,6 +5,9 @@
 #
 # Reference: CR-001 Section 8.8 — Dependency Governance
 
+# cargo-deny 0.19+ configuration version
+version = 2
+
 [graph]
 targets = [
     "x86_64-unknown-linux-gnu",
@@ -23,11 +26,9 @@ ignore = []
 # ---------------------------------------------------------------------------
 # Licenses — Apache-2.0 is the workspace license.
 # We allow permissive licenses compatible with Apache-2.0.
-# We deny copyleft licenses that would impose additional restrictions.
+# All non-listed licenses are denied by default (v2 behavior).
 # ---------------------------------------------------------------------------
 [licenses]
-unlicensed = "deny"
-default = "deny"
 # Confidence threshold for license detection
 confidence-threshold = 0.8
 
@@ -46,25 +47,11 @@ allow = [
     "OpenSSL",
 ]
 
-# Copyleft licenses incompatible with Apache-2.0
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
-    "MPL-2.0",
-    "EUPL-1.1",
-    "EUPL-1.2",
-    "CPAL-1.0",
-    "SSPL-1.0",
-]
-
 # Some crates have non-standard license expressions
 exceptions = []
 
 [[licenses.clarify]]
-name = "ring"
+crate = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
@@ -78,12 +65,9 @@ highlight = "all"
 
 deny = [
     # No OpenSSL — we use pure-Rust crypto (ed25519-dalek, blake3)
-    { name = "openssl-sys", wrappers = [] },
-    { name = "openssl", wrappers = [] },
+    { crate = "openssl-sys", wrappers = [] },
+    { crate = "openssl", wrappers = [] },
 ]
-
-# Allow specific duplicates that are common in the ecosystem
-allow-wildcard-paths = false
 
 # ---------------------------------------------------------------------------
 # Sources — only allow crates.io and our own git repos
