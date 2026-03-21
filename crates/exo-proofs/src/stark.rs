@@ -565,9 +565,12 @@ mod tests {
     #[test]
     fn evaluate_constraint_fewer_coefficients_than_columns() {
         // column_indices has more entries than coefficients — the extra column index is skipped.
-        // Column 1 has non-zero values (5, 7) so that if it were erroneously included in the
-        // sum with coefficient (1,1), the constraint would evaluate to 5+7=12 ≠ 0 and the test
-        // would fail. Column 0 stays 0 so the constraint sum == 0 (test passes correctly).
+        // Column 1 has non-zero values (5, 7) to catch regressions in the loop guard
+        // (if i < constraint.coefficients.len()):
+        //   - Removing the guard would panic at coefficients[1] (index out of bounds).
+        //   - A wrap-around regression (coefficients[i % len]) would silently produce
+        //     sum = 1*5 + 1*7 = 12 ≠ 0, causing prove_stark to return Err.
+        // Column 0 stays 0 so the constraint sum == 0 (test passes correctly).
         let config = StarkConfig::default_config();
         let trace = vec![vec![0u64, 5u64], vec![0u64, 7u64]];
         let constraint = StarkConstraint {
