@@ -82,7 +82,7 @@ fn hash_record(r: &McpAuditRecord) -> [u8; 32] {
 
 /// Append-only, BLAKE3 hash-chained log of MCP enforcement events.
 ///
-/// Structurally mirrors [`exo_governance::audit::AuditLog`] but is
+/// Structurally mirrors `exo_governance::audit::AuditLog` but is
 /// self-contained within exo-gatekeeper to preserve branch separation.
 #[derive(Debug, Clone, Default)]
 pub struct McpAuditLog {
