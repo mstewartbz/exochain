@@ -457,6 +457,73 @@ impl PartialEq for SecretKey {
 impl Eq for SecretKey {}
 
 // ---------------------------------------------------------------------------
+// PqPublicKey / PqSecretKey — ML-DSA-65 post-quantum keys
+// ---------------------------------------------------------------------------
+
+/// An ML-DSA-65 (NIST FIPS 204) public verification key.
+///
+/// Stored as raw encoded bytes (1952 bytes for ML-DSA-65). Heap-allocated
+/// for WASM32 compatibility — large fixed-size arrays are unreliable on the
+/// wasm32 stack.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PqPublicKey(pub Vec<u8>);
+
+impl PqPublicKey {
+    /// Create from raw encoded key bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the raw encoded key bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PqPublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PqPublicKey({}..{}B)", hex_prefix(&self.0), self.0.len())
+    }
+}
+
+impl fmt::Display for PqPublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PqPublicKey({}..)", hex_prefix(&self.0))
+    }
+}
+
+/// An ML-DSA-65 secret (signing) key. Zeroized on drop.
+///
+/// Stored as raw encoded bytes (4032 bytes for ML-DSA-65). The `Zeroize`
+/// derive ensures key material is cleared from memory when this value is
+/// dropped.
+#[derive(Clone, Zeroize)]
+#[zeroize(drop)]
+pub struct PqSecretKey(pub Vec<u8>);
+
+impl PqSecretKey {
+    /// Create from raw encoded key bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the raw encoded key bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PqSecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PqSecretKey(***)")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Did — Decentralized Identifier
 // ---------------------------------------------------------------------------
 
