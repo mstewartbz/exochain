@@ -28,7 +28,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **Format clean** under `cargo +nightly fmt --all -- --check`
 - **10 CI quality gates** defined and enforced (build, test, coverage, lint, format, audit, deny, doc, hygiene, demo-coverage)
 - **Traceability matrix** maps 80 requirements: 76 implemented, 2 partial, 2 planned
-- **Threat model** covers 17 threats tracked: 16 mitigated, 1 partial (T-17 post-quantum ML-DSA), 0 planned — see `governance/threat_matrix.md`
+- **Threat model** covers 14 threats tracked: 14 mitigated, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** enforced via the CGR kernel in all governance paths
 - **No floating-point arithmetic** — denied workspace-wide via `#[deny(clippy::float_arithmetic)]`
 
@@ -94,7 +94,7 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 ### Key Governance Artifacts
 
 * [Traceability Matrix](governance/traceability_matrix.md) — 76 implemented, 2 partial, 2 planned
-* [Threat Model](governance/threat_matrix.md) — 15 mitigated, 2 partial, 2 planned
+* [Threat Model](governance/threat_matrix.md) — 14 mitigated, 0 partial, 0 planned
 * [Quality Gates](governance/quality_gates.md) — 8 CI-enforced gates
 * [Sub-Agent Charters](governance/sub_agents.md) — 11 agent charters documented
 * [Council Resolutions](governance/resolutions/INDEX.md) — CR-001 RATIFIED
