@@ -246,4 +246,3 @@ jobs:
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."
-isfied."
