@@ -128,6 +128,157 @@ pub fn create_signed_event(
     event
 }
 
+// ---------------------------------------------------------------------------
+// Typed Event Payloads — merged from orphan event.rs per council review
+// ---------------------------------------------------------------------------
+
+/// Typed event payload variants for structured governance, identity, and
+/// Holon lifecycle events.
+///
+/// These typed variants provide compile-time enforcement of payload structure,
+/// complementing the opaque `payload: Vec<u8>` on [`Event`] for cases that
+/// require structured payloads with DAG linkage.
+///
+/// Per spec v2.1 Section 3A (Holon lifecycle) and decision.forum governance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventPayload {
+    /// Genesis event for a new network.
+    Genesis {
+        network_id: String,
+    },
+    /// A new DID document was created.
+    IdentityCreated {
+        did_doc_cid: String,
+    },
+    // --- decision.forum governance events ---
+    /// A new decision record was created.
+    DecisionCreated {
+        decision_id: crate::Hash256,
+        title: String,
+        decision_class: String,
+        constitution_hash: crate::Hash256,
+    },
+    /// A decision was advanced to a new status.
+    DecisionAdvanced {
+        decision_id: crate::Hash256,
+        from_status: String,
+        to_status: String,
+    },
+    /// A vote was cast on a decision.
+    VoteCast {
+        decision_id: crate::Hash256,
+        voter: Did,
+        choice: String,
+    },
+    /// Delegation authority was granted.
+    DelegationGranted {
+        delegation_id: crate::Hash256,
+        delegator: Did,
+        delegatee: Did,
+        expires_at: u64,
+    },
+    /// Delegation authority was revoked.
+    DelegationRevoked {
+        delegation_id: crate::Hash256,
+        revoked_at: u64,
+    },
+    /// The constitution was amended.
+    ConstitutionAmended {
+        from_version: String,
+        to_version: String,
+        amendment_hash: crate::Hash256,
+    },
+    /// A challenge was raised against a decision.
+    ChallengeRaised {
+        challenge_id: crate::Hash256,
+        contested_decision_id: crate::Hash256,
+        grounds: String,
+    },
+    /// An emergency action was taken.
+    EmergencyActionTaken {
+        emergency_id: crate::Hash256,
+        decision_id: crate::Hash256,
+        ratification_deadline: u64,
+    },
+    /// A conflict of interest was disclosed.
+    ConflictDisclosed {
+        decision_id: crate::Hash256,
+        discloser: Did,
+    },
+    // --- Holon lifecycle events (per spec v2.1 Section 3A) ---
+    /// A new Holon was created.
+    HolonCreated {
+        holon_did: Did,
+        sponsor_did: Did,
+        genesis_model_cid: crate::Hash256,
+    },
+    /// A Holon was activated.
+    HolonActivated {
+        holon_did: Did,
+        approver_did: Did,
+        approval_level: u32,
+    },
+    /// A Holon action was proposed.
+    HolonActionProposed {
+        holon_did: Did,
+        action_hash: crate::Hash256,
+        reasoning_trace_cid: crate::Hash256,
+    },
+    /// A Holon action was verified.
+    HolonActionVerified {
+        holon_did: Did,
+        action_hash: crate::Hash256,
+        cgr_proof_hash: crate::Hash256,
+    },
+    /// A Holon action was executed.
+    HolonActionExecuted {
+        holon_did: Did,
+        action_hash: crate::Hash256,
+        outcome_hash: crate::Hash256,
+    },
+    /// A Holon was suspended.
+    HolonSuspended {
+        holon_did: Did,
+        reason: String,
+        suspended_by: Did,
+    },
+    /// A Holon was reinstated after suspension.
+    HolonReinstated {
+        holon_did: Did,
+        reinstated_by: Did,
+        remediation_evidence_cid: crate::Hash256,
+    },
+    /// A Holon was permanently retired.
+    HolonSunset {
+        holon_did: Did,
+        reason: String,
+        initiated_by: Did,
+    },
+    // --- CGR Kernel events ---
+    /// A Compact Governance Representation proof was issued.
+    CgrProofIssued {
+        proof_id: u64,
+        invariants_checked: u32,
+        registry_hash: crate::Hash256,
+    },
+    /// Opaque payload — extension point for domain-specific events.
+    Opaque(Vec<u8>),
+}
+
+/// Compute a canonical event identifier by hashing the CBOR-encoded
+/// representation with blake3.
+///
+/// Any serializable event structure can be identified this way, ensuring
+/// that identical logical events produce identical IDs regardless of
+/// serialization context.
+///
+/// # Errors
+///
+/// Returns `ExoError::SerializationError` if CBOR encoding fails.
+pub fn compute_event_id<T: serde::Serialize>(envelope: &T) -> crate::Result<crate::Hash256> {
+    crate::hash::hash_structured(envelope)
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -289,5 +440,163 @@ mod tests {
         let event = make_event(&kp);
         let dbg = format!("{event:?}");
         assert!(dbg.contains("Event"));
+    }
+
+    // -----------------------------------------------------------------------
+    // EventPayload tests (merged from orphan event.rs)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn event_payload_serde_roundtrip() {
+        let payloads = vec![
+            EventPayload::Genesis {
+                network_id: "exochain-mainnet".into(),
+            },
+            EventPayload::IdentityCreated {
+                did_doc_cid: "bafy...".into(),
+            },
+            EventPayload::DecisionCreated {
+                decision_id: crate::Hash256::digest(b"decision-1"),
+                title: "Governance Reform".into(),
+                decision_class: "Constitutional".into(),
+                constitution_hash: crate::Hash256::digest(b"constitution"),
+            },
+            EventPayload::VoteCast {
+                decision_id: crate::Hash256::digest(b"decision-1"),
+                voter: Did::new("did:exo:voter").expect("valid"),
+                choice: "approve".into(),
+            },
+            EventPayload::HolonCreated {
+                holon_did: Did::new("did:exo:holon-1").expect("valid"),
+                sponsor_did: Did::new("did:exo:sponsor").expect("valid"),
+                genesis_model_cid: crate::Hash256::digest(b"model"),
+            },
+            EventPayload::CgrProofIssued {
+                proof_id: 42,
+                invariants_checked: 8,
+                registry_hash: crate::Hash256::digest(b"registry"),
+            },
+            EventPayload::Opaque(vec![1, 2, 3]),
+        ];
+        for payload in &payloads {
+            let json = serde_json::to_string(payload).expect("serialize");
+            let deserialized: EventPayload = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(payload, &deserialized);
+        }
+    }
+
+    #[test]
+    fn compute_event_id_deterministic() {
+        let payload = EventPayload::Genesis {
+            network_id: "test-net".into(),
+        };
+        let id1 = compute_event_id(&payload).expect("compute");
+        let id2 = compute_event_id(&payload).expect("compute");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn compute_event_id_different_payloads() {
+        let p1 = EventPayload::Genesis {
+            network_id: "net-a".into(),
+        };
+        let p2 = EventPayload::Genesis {
+            network_id: "net-b".into(),
+        };
+        let id1 = compute_event_id(&p1).expect("compute");
+        let id2 = compute_event_id(&p2).expect("compute");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn event_payload_all_governance_variants() {
+        // Ensure all governance variants can be created and serialized
+        let variants: Vec<EventPayload> = vec![
+            EventPayload::DecisionAdvanced {
+                decision_id: crate::Hash256::ZERO,
+                from_status: "Draft".into(),
+                to_status: "Submitted".into(),
+            },
+            EventPayload::DelegationGranted {
+                delegation_id: crate::Hash256::ZERO,
+                delegator: Did::new("did:exo:alice").expect("valid"),
+                delegatee: Did::new("did:exo:bob").expect("valid"),
+                expires_at: 1_000_000,
+            },
+            EventPayload::DelegationRevoked {
+                delegation_id: crate::Hash256::ZERO,
+                revoked_at: 2_000_000,
+            },
+            EventPayload::ConstitutionAmended {
+                from_version: "1.0.0".into(),
+                to_version: "1.1.0".into(),
+                amendment_hash: crate::Hash256::ZERO,
+            },
+            EventPayload::ChallengeRaised {
+                challenge_id: crate::Hash256::ZERO,
+                contested_decision_id: crate::Hash256::ZERO,
+                grounds: "Procedural violation".into(),
+            },
+            EventPayload::EmergencyActionTaken {
+                emergency_id: crate::Hash256::ZERO,
+                decision_id: crate::Hash256::ZERO,
+                ratification_deadline: 86400,
+            },
+            EventPayload::ConflictDisclosed {
+                decision_id: crate::Hash256::ZERO,
+                discloser: Did::new("did:exo:discloser").expect("valid"),
+            },
+        ];
+        for v in &variants {
+            let json = serde_json::to_string(v).expect("ser");
+            let _: EventPayload = serde_json::from_str(&json).expect("de");
+        }
+    }
+
+    #[test]
+    fn event_payload_all_holon_variants() {
+        let holon = Did::new("did:exo:holon").expect("valid");
+        let actor = Did::new("did:exo:actor").expect("valid");
+        let variants: Vec<EventPayload> = vec![
+            EventPayload::HolonActivated {
+                holon_did: holon.clone(),
+                approver_did: actor.clone(),
+                approval_level: 3,
+            },
+            EventPayload::HolonActionProposed {
+                holon_did: holon.clone(),
+                action_hash: crate::Hash256::ZERO,
+                reasoning_trace_cid: crate::Hash256::ZERO,
+            },
+            EventPayload::HolonActionVerified {
+                holon_did: holon.clone(),
+                action_hash: crate::Hash256::ZERO,
+                cgr_proof_hash: crate::Hash256::ZERO,
+            },
+            EventPayload::HolonActionExecuted {
+                holon_did: holon.clone(),
+                action_hash: crate::Hash256::ZERO,
+                outcome_hash: crate::Hash256::ZERO,
+            },
+            EventPayload::HolonSuspended {
+                holon_did: holon.clone(),
+                reason: "anomaly detected".into(),
+                suspended_by: actor.clone(),
+            },
+            EventPayload::HolonReinstated {
+                holon_did: holon.clone(),
+                reinstated_by: actor.clone(),
+                remediation_evidence_cid: crate::Hash256::ZERO,
+            },
+            EventPayload::HolonSunset {
+                holon_did: holon,
+                reason: "end of lifecycle".into(),
+                initiated_by: actor,
+            },
+        ];
+        for v in &variants {
+            let json = serde_json::to_string(v).expect("ser");
+            let _: EventPayload = serde_json::from_str(&json).expect("de");
+        }
     }
 }

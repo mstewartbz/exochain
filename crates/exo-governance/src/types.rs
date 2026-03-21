@@ -1,14 +1,19 @@
 //! Shared governance types used across the decision.forum domain.
+//!
+//! Provides the constitutional type vocabulary for governance policies:
+//! - [`DecisionClass`] taxonomy with [`requires_human_gate`](DecisionClass::requires_human_gate) (TNC-02)
+//! - [`SignerType`] distinguishing human vs AI signatures
+//! - [`GovernanceSignature`] with signer identity and role metadata
+//! - [`AuthorizedAction`] enumeration of governable operations
+//! - [`SemVer`] for constitutional document versioning
+//! - [`EvidenceRef`] for legal evidence attachment (LEG-004, LEG-006)
+//! - [`FailureAction`] for constitutional constraint violation responses
 
-use exo_core::crypto::Blake3Hash;
-use exo_core::hlc::HybridLogicalClock;
+use exo_core::{Did, Hash256, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Tenant identifier — opaque string, unique per organization.
 pub type TenantId = String;
-
-/// DID identifier — reuses exo-core's Did type.
-pub type Did = exo_core::event::Did;
 
 /// Semantic version for constitutional documents.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -19,6 +24,7 @@ pub struct SemVer {
 }
 
 impl SemVer {
+    #[must_use]
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
             major,
@@ -28,6 +34,7 @@ impl SemVer {
     }
 
     /// Returns true if this version is compatible with (>=) `other`.
+    #[must_use]
     pub fn is_compatible_with(&self, other: &SemVer) -> bool {
         self.major == other.major
             && (self.minor > other.minor
@@ -60,6 +67,10 @@ pub enum DecisionClass {
 
 impl DecisionClass {
     /// Returns true if this class requires a human gate (TNC-02).
+    ///
+    /// Constitutional, Strategic, and Emergency decisions MUST have human
+    /// approval — AI agents alone cannot authorize these decision classes.
+    #[must_use]
     pub fn requires_human_gate(&self) -> bool {
         matches!(
             self,
@@ -75,24 +86,29 @@ pub enum SignerType {
     Human,
     /// AI agent signer — acting under a specific delegation with expiry.
     AiAgent {
-        delegation_id: Blake3Hash,
+        /// Hash of the delegation authorization.
+        delegation_id: Hash256,
+        /// Expiry timestamp in milliseconds.
         expires_at: u64,
     },
 }
 
 /// Governance-aware signature that includes signer type metadata.
+///
+/// Extends a bare cryptographic signature with identity and role context,
+/// enabling audit trails to distinguish human from AI attestations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GovernanceSignature {
     /// DID of the signer.
     pub signer: Did,
     /// Whether this is a human or AI agent signature.
     pub signer_type: SignerType,
-    /// Ed25519 signature bytes.
-    pub signature: ed25519_dalek::Signature,
+    /// Cryptographic signature bytes.
+    pub signature: Signature,
     /// Key version used for signing.
     pub key_version: u64,
     /// Timestamp of signature.
-    pub timestamp: HybridLogicalClock,
+    pub timestamp: Timestamp,
 }
 
 /// Actions that can be authorized via delegation.
@@ -116,8 +132,8 @@ pub struct EvidenceRef {
     pub id: String,
     pub description: String,
     /// Hash of the evidence content for integrity verification.
-    pub content_hash: Blake3Hash,
-    pub timestamp: HybridLogicalClock,
+    pub content_hash: Hash256,
+    pub timestamp: Timestamp,
     pub author: Did,
 }
 
@@ -131,6 +147,10 @@ pub enum FailureAction {
     /// Escalate to a higher authority for review.
     Escalate { escalation_target: Did },
 }
+
+// ===========================================================================
+// Tests
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -162,5 +182,38 @@ mod tests {
             threshold_cents: 1000
         }
         .requires_human_gate());
+    }
+
+    #[test]
+    fn test_custom_decision_class_no_human_gate() {
+        assert!(!DecisionClass::Custom("routine".to_string()).requires_human_gate());
+    }
+
+    #[test]
+    fn test_signer_type_variants() {
+        let human = SignerType::Human;
+        let ai = SignerType::AiAgent {
+            delegation_id: Hash256::ZERO,
+            expires_at: 9999,
+        };
+        assert_ne!(human, ai);
+    }
+
+    #[test]
+    fn test_authorized_action_equality() {
+        assert_eq!(AuthorizedAction::CastVote, AuthorizedAction::CastVote);
+        assert_ne!(AuthorizedAction::CastVote, AuthorizedAction::CreateDecision);
+    }
+
+    #[test]
+    fn test_evidence_ref() {
+        let evidence = EvidenceRef {
+            id: "ev-001".to_string(),
+            description: "Board minutes".to_string(),
+            content_hash: Hash256::digest(b"board-minutes-2024"),
+            timestamp: Timestamp::new(1000, 0),
+            author: Did::new("did:exo:secretary").expect("valid"),
+        };
+        assert_eq!(evidence.id, "ev-001");
     }
 }

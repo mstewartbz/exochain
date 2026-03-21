@@ -23,6 +23,31 @@ pub struct ServiceEndpoint {
     pub endpoint: String,
 }
 
+/// A W3C DID Core verification method.
+///
+/// Represents a cryptographic public key associated with a DID, supporting
+/// key versioning, lifecycle management (active/revoked), and multibase-encoded
+/// public key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationMethod {
+    /// Unique identifier, typically `did:exo:<id>#key-<version>`.
+    pub id: String,
+    /// Key type, e.g. `"Ed25519VerificationKey2020"`.
+    pub key_type: String,
+    /// DID of the entity that controls this key.
+    pub controller: Did,
+    /// Multibase-encoded public key (prefix `z` for base58btc).
+    pub public_key_multibase: String,
+    /// Key version (monotonically increasing per DID).
+    pub version: u64,
+    /// Whether this key is currently active.
+    pub active: bool,
+    /// Timestamp (physical_ms) from which this key is valid.
+    pub valid_from: u64,
+    /// Timestamp (physical_ms) at which this key was revoked, if any.
+    pub revoked_at: Option<u64>,
+}
+
 /// Proof that a DID holder authorized a revocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationProof {
@@ -36,6 +61,9 @@ pub struct DidDocument {
     pub id: Did,
     pub public_keys: Vec<PublicKey>,
     pub authentication: Vec<AuthenticationMethod>,
+    /// W3C DID Core verification methods with lifecycle management.
+    #[serde(default)]
+    pub verification_methods: Vec<VerificationMethod>,
     pub service_endpoints: Vec<ServiceEndpoint>,
     pub created: Timestamp,
     pub updated: Timestamp,
@@ -143,6 +171,7 @@ mod tests {
             id: did,
             public_keys: vec![pk],
             authentication: vec![],
+            verification_methods: vec![],
             service_endpoints: vec![],
             created: Timestamp::new(1000, 0),
             updated: Timestamp::new(1000, 0),
@@ -313,6 +342,7 @@ mod tests {
                 method_type: "Ed25519VerificationKey2020".into(),
                 public_key: pk,
             }],
+            verification_methods: vec![],
             service_endpoints: vec![ServiceEndpoint {
                 id: "svc-1".into(),
                 service_type: "ExochainMessaging".into(),

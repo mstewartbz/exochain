@@ -68,6 +68,7 @@ jobs:
         run: |
           cargo tarpaulin \
             --workspace \
+            --exclude exochain-wasm \
             --out xml \
             --output-dir coverage \
             --skip-clean \
