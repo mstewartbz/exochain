@@ -547,13 +547,14 @@ mod tests {
 
     #[test]
     fn evaluate_constraint_oob_column() {
-        // col_idx beyond trace width — the else branches that return 0 must be exercised
+        // col_idx beyond trace width — the else branches return 0; use non-zero coefficients
+        // so the OOB-to-zero substitution is what makes the sum remain 0 (not zero coefficients)
         let config = StarkConfig::default_config();
         let trace = vec![vec![0u64], vec![0u64]]; // 1-column trace
         let constraint = StarkConstraint {
             name: "oob".to_string(),
-            column_indices: vec![5], // beyond trace width
-            coefficients: vec![(0, 0)],
+            column_indices: vec![5], // beyond trace width → curr_val and next_val both become 0
+            coefficients: vec![(1, 1)], // non-zero: verifies that 1*0 + 1*0 == 0
         };
         let proof = prove_stark(&trace, &[constraint], &config).unwrap();
         assert!(verify_stark(&proof, &trace[0]));
@@ -561,13 +562,14 @@ mod tests {
 
     #[test]
     fn evaluate_constraint_fewer_coefficients_than_columns() {
-        // column_indices has more entries than coefficients — extras are silently skipped
+        // column_indices has more entries than coefficients — the extra column index is skipped.
+        // One coefficient covers column 0 (i=0 passes the inner if), column 1 is skipped (i=1 fails it).
         let config = StarkConfig::default_config();
-        let trace = vec![vec![1u64, 2u64], vec![3u64, 4u64]];
+        let trace = vec![vec![0u64, 0u64], vec![0u64, 0u64]];
         let constraint = StarkConstraint {
             name: "partial".to_string(),
-            column_indices: vec![0, 1],
-            coefficients: vec![], // empty — inner loop body never executes
+            column_indices: vec![0, 1], // two indices
+            coefficients: vec![(0, 0)], // only one entry — index 1 is silently skipped
         };
         let proof = prove_stark(&trace, &[constraint], &config).unwrap();
         assert!(verify_stark(&proof, &trace[0]));
