@@ -547,14 +547,16 @@ mod tests {
 
     #[test]
     fn evaluate_constraint_oob_column() {
-        // col_idx beyond trace width — the else branches return 0; use non-zero coefficients
-        // so the OOB-to-zero substitution is what makes the sum remain 0 (not zero coefficients)
+        // col_idx beyond trace width — the else branches return 0.
+        // Non-zero trace values (7, 11) ensure the test catches regressions where the OOB
+        // branch returns a wrong non-zero value (e.g. current[col_idx % len]): that would
+        // give sum = 1*7 + 1*11 = 18 ≠ 0, causing prove_stark to return Err.
         let config = StarkConfig::default_config();
-        let trace = vec![vec![0u64], vec![0u64]]; // 1-column trace
+        let trace = vec![vec![7u64], vec![11u64]]; // 1-column trace, non-zero values
         let constraint = StarkConstraint {
             name: "oob".to_string(),
             column_indices: vec![5], // beyond trace width → curr_val and next_val both become 0
-            coefficients: vec![(1, 1)], // non-zero: verifies that 1*0 + 1*0 == 0
+            coefficients: vec![(1, 1)], // non-zero: 1*0 + 1*0 == 0, but would be non-zero if OOB returned column data
         };
         let proof = prove_stark(&trace, &[constraint], &config).unwrap();
         assert!(verify_stark(&proof, &trace[0]));
@@ -563,9 +565,11 @@ mod tests {
     #[test]
     fn evaluate_constraint_fewer_coefficients_than_columns() {
         // column_indices has more entries than coefficients — the extra column index is skipped.
-        // Non-zero coefficient (1,1) verifies the loop body executes for i=0; column 1 is skipped (i=1 fails the inner if).
+        // Column 1 has non-zero values (5, 7) so that if it were erroneously included in the
+        // sum with coefficient (1,1), the constraint would evaluate to 5+7=12 ≠ 0 and the test
+        // would fail. Column 0 stays 0 so the constraint sum == 0 (test passes correctly).
         let config = StarkConfig::default_config();
-        let trace = vec![vec![0u64, 0u64], vec![0u64, 0u64]];
+        let trace = vec![vec![0u64, 5u64], vec![0u64, 7u64]];
         let constraint = StarkConstraint {
             name: "partial".to_string(),
             column_indices: vec![0, 1], // two indices
