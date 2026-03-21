@@ -46,6 +46,11 @@ TAG_COUNT=$(git tag -l | wc -l | tr -d ' ')
 HAS_CHANGELOG=$([[ -f CHANGELOG.md ]] && echo "true" || echo "false")
 HAS_SECURITY=$([[ -f SECURITY.md ]] && echo "true" || echo "false")
 
+# ── Supply chain integrity ──
+HAS_SBOM_GATE=$(grep -c 'cargo-cyclonedx\|cargo cyclonedx' .github/workflows/ci.yml 2>/dev/null || echo 0)
+HAS_SLSA_ATTEST=$(grep -c 'attest-build-provenance' .github/workflows/release.yml 2>/dev/null || echo 0)
+HAS_DENY_CONFIG=$([[ -f deny.toml ]] && echo "true" || echo "false")
+
 # ── Governance artifacts ──
 RESOLUTION_COUNT=$(ls governance/resolutions/*.md 2>/dev/null | grep -v INDEX | wc -l | tr -d ' ')
 GOVERNANCE_DOCS=$(ls governance/*.md 2>/dev/null | wc -l | tr -d ' ')
@@ -73,6 +78,7 @@ cat <<JEOF
   "license": { "cargo_toml": "$CARGO_LICENSE", "license_file": "$LICENSE_FILE", "readme": "$README_LICENSE" },
   "releases": { "tag_count": $TAG_COUNT, "has_changelog": $HAS_CHANGELOG, "has_security_md": $HAS_SECURITY },
   "governance": { "resolutions": $RESOLUTION_COUNT, "governance_docs": $GOVERNANCE_DOCS },
+  "supply_chain": { "sbom_gate_configured": $HAS_SBOM_GATE, "slsa_attestation_configured": $HAS_SLSA_ATTEST, "deny_config_present": $HAS_DENY_CONFIG },
   "fmt_clean": $FMT_OK
 }
 JEOF
@@ -99,6 +105,11 @@ License (README):       $README_LICENSE
 Git tags:            $TAG_COUNT
 CHANGELOG.md:        $HAS_CHANGELOG
 SECURITY.md:         $HAS_SECURITY
+
+Supply chain:
+  SBOM gate (Gate 10):    $HAS_SBOM_GATE reference(s) in ci.yml
+  SLSA attestation:       $HAS_SLSA_ATTEST reference(s) in release.yml
+  deny.toml present:      $HAS_DENY_CONFIG
 
 Resolutions:         $RESOLUTION_COUNT
 Governance docs:     $GOVERNANCE_DOCS

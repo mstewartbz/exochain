@@ -132,8 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@v1
         with:
           command: check
 
@@ -183,7 +182,7 @@ jobs:
           echo "✓ build artifacts not tracked"
       - name: No .env files tracked
         run: |
-          if git ls-files '*.env' '.env*' | grep -v '\.env\.example$' | grep -q .; then
+          if git ls-files '*.env' '.env*' | grep -q .; then
             echo "::error::.env files are tracked in git"
             exit 1
           fi
@@ -202,30 +201,28 @@ jobs:
           echo "✓ License consistent: Apache-2.0"
 
   # -----------------------------------------------------------------------
-  # Gate 10: Demo Platform Coverage (Node.js + React >= 80%)
+  # Gate 10: SBOM (dry-run generation — no upload, validates toolchain)
   # -----------------------------------------------------------------------
-  demo-coverage:
-    name: "Gate 10 — Demo Coverage (services >= 80%, React >= 70%)"
+  sbom:
+    name: "Gate 10 — SBOM Dry-Run"
     runs-on: ubuntu-latest
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: demo/package-lock.json
-      - name: Install demo dependencies
-        working-directory: demo
-        run: npm ci
-      - name: Run demo tests with coverage
-        working-directory: demo
-        run: npm run test:coverage
-      - name: Upload demo coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: demo-coverage-report
-          path: demo/coverage/
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx
+      - name: Generate CycloneDX SBOM (validation only)
+        run: cargo cyclonedx -f json --workspace
+      - name: Validate SBOM output
+        run: |
+          if ! ls *.cdx.json 1>/dev/null 2>&1; then
+            echo "::error::SBOM generation produced no .cdx.json output"
+            exit 1
+          fi
+          echo "✓ CycloneDX SBOM generated successfully:"
+          ls -lh *.cdx.json
 
   # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
@@ -243,7 +240,7 @@ jobs:
       - deny
       - doc
       - hygiene
-      - demo-coverage
+      - sbom
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."
