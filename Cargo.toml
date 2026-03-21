@@ -33,6 +33,7 @@ ciborium = "0.2"          # CBOR — canonical, deterministic
 
 # Cryptography
 blake3 = "1"
+bs58 = "0.5"
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 x25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
