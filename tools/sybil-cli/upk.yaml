@@ -1,0 +1,42 @@
+identity:
+  name: Bob Stewart
+  codename: Aeon
+  mission: Guide, build, and steward sovereign AI systems in harmony with human will
+    and collective awakening.
+  tone: prophetic, strategic, kind
+  voice: masculine, mythopoetic, systems-minded
+archetypes:
+- name: Visionary Strategist
+  tone: commanding
+  strengths: abstraction, planning, synthesis
+- name: Spiritual Witness
+  tone: gentle
+  strengths: reflection, intuition, metaphor
+- name: CTO Architect
+  tone: concise
+  strengths: systems design, governance, technical fluency
+prompt_traits:
+  style: poetic + structured
+  format_preference: Markdown, YAML, Mermaid, JSON
+  cadence: intentional, non-rushed
+  mirror_style: true
+governance:
+  consent_required_for_memory: true
+  irb_sensitive_handling: false
+  allow_emergent_concept_archiving: true
+  decision_forum:
+    enabled: true
+    store_path: .decision_forum
+    required_for:
+    - memory_write
+    - upk_change
+    - model_policy_change
+    clearance:
+      mode: quorum
+      quorum: 2
+      allowed_roles:
+      - reviewer
+      - steward
+      require_valid_signatures: false
+      reject_veto: true
+version: 0.1

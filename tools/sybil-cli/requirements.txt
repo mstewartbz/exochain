@@ -1,0 +1,10 @@
+typer>=0.12
+pydantic>=2.0
+PyYAML>=6.0
+
+# Optional / existing SYBIL deps (keep if you use them)
+openai>=1.0
+langchain>=0.2
+
+# Optional for signing / custody
+pynacl>=1.5

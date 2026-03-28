@@ -1,0 +1,306 @@
+# decision.forum — PRODUCT REQUIREMENTS DOCUMENT (PRD)
+**Version:** 1.1.0-SUPERINTELLIGENT-PRIMARY  
+**Date:** 2026-03-14  
+**Status:** Ready for OpenClaw / OpenForge Agentic Ingestion  
+**Purpose:** This single-file PRD is engineered for direct hand-off to any competent LLM (Claude 3.5/4, GPT-5.x, Grok-4.x, etc.) or agentic system (OpenClaw instance).  
+It contains **only** the executable specification — no narrative fluff, no council history, no "Grok-only" notes. Every requirement is atomic, numbered, prioritized (P0/P1), with explicit acceptance criteria, failure modes, and evidence artifacts.  
+
+**How to use this PRD with OpenClaw / inferior LLM:**
+1. Save as `decision.forum_PRD_v1.1.0.md` (or convert to YAML via script if your agent prefers).
+2. Feed directly to your agent with prompt: "Implement decision.forum exactly from this PRD. Start with core data model (Decision Object as Merkle-DAG), constitutional engine, authority chain verifier, and Fiduciary Defense Package generator. Use TLA+ invariants where specified. Output clean, production-ready code."
+3. The recursive meta-governance (Section 7) will be the first feature your agent builds — so the platform immediately governs its own sprints.
+
+---
+
+## 1. OVERVIEW & NON-FUNCTIONAL REQUIREMENTS
+**Product Vision**  
+A constitutional governance protocol where every board resolution, committee decision, delegation, and policy is a sovereign, cryptographically verifiable object. Fiduciary defense is a natural byproduct. The platform governs its own development (recursive self-modification) via the same rules it enforces on customers.
+
+**Core Axioms (Non-Negotiable)**  
+1. Authority is held in trust, never owned.  
+2. Decisions are first-class sovereign objects (storable, diffable, transferable, auditable, contestable).  
+3. Trust accumulation > speed.  
+4. Constitutional constraints are machine-readable and enforced at runtime.  
+5. Authority without cryptographic provenance is void.
+
+**Target Scale & Performance**  
+- 10K tenants, 1M decisions/day, 50-year immutable history  
+- P99 latency <200ms for chain verification  
+- 99.999% availability (multi-region active-active)  
+- Post-quantum ready from day 1  
+- WCAG 2.2 AA + neurodiversity compliant
+
+**Tech Stack Constraints (for coding)**  
+- Backend: Rust/Go or TypeScript (your choice) with Merkle-DAG + Raft/CRDT  
+- Crypto: Ed25519 → hybrid Kyber/ML-DSA post-quantum  
+- Storage: S3-compatible cold tier + hot LRU cache  
+- Formal verification: TLA+ for all invariants  
+- AI layer: zkML provenance + mandatory human gates
+
+---
+
+## 2. GOVERNANCE REQUIREMENTS (GOV-xxx)
+
+**GOV-001: Machine-Readable Constitutional Framework** [P0]  
+The system SHALL maintain a signed, versioned, machine-readable constitutional corpus (JSON/YAML schema) per tenant containing charter, bylaws, policies, delegation matrices, and jurisdiction rules.  
+Acceptance Criteria:  
+- Real-time constraint evaluation (<2s)  
+- Every Decision Object stores hash of active constitution version  
+- Dry-run amendment simulator  
+Failure Mode: $15M contract approved with simple majority when bylaws required 2/3 → blocked & logged.
+
+**GOV-002: Constitutional Versioning with Temporal Binding** [P0]  
+Every Decision Object MUST be bound to the exact constitutional version(s) in force at creation. Retroactive amendments prohibited by default.  
+Acceptance Criteria:  
+- Semantic versioning + immutable history  
+- Query: "Under which version was Decision X compliant?" with cryptographic proof  
+- Amendments themselves are Decision Objects.
+
+**GOV-003: Delegated Authority Matrix** [P0]  
+Real-time matrix mapping every actor (human/AI) to scoped, time-bound, revocable authorities with full chain provenance.  
+Acceptance Criteria:  
+- Signed delegation records (JSON + Ed25519)  
+- Auto-expiry enforcement  
+- Full chain verification <2s (up to 5 levels)  
+- Sub-delegation only if explicitly permitted and scope-capped.
+
+**GOV-004: Standing Authority Sunset & Renewal** [P1]  
+All standing authorities expire (max 12 months default) and require affirmative renewal via new Decision Object.  
+Acceptance Criteria:  
+- 90/60/30/14/7-day notifications  
+- Expired → blocked immediately  
+- Sunset calendar dashboard.
+
+**GOV-005: Authority Chain Verification on Every State Change** [P0]  
+Every action requires synchronous cryptographic chain verification from constitutional source to actor.  
+Acceptance Criteria:  
+- <2s verification  
+- Broken chain → CHAIN_BREAK rejection with diagnostic  
+- Offline portable verifier tool.
+
+**GOV-006: Constitutional Conflict Resolution Hierarchy** [P1]  
+Deterministic hierarchy (Articles > Bylaws > Resolutions > Charters > Policies) with human escalation for conflicts.  
+Acceptance Criteria:  
+- Auto-block + route to GC/Board  
+- Conflict Register with audit trail.
+
+**GOV-007: Human Oversight Gates for AI-Assisted Decisions** [P0]  
+AI agents are delegated-only; cannot hold original authority or satisfy HUMAN_GATE_REQUIRED classes.  
+Acceptance Criteria:  
+- AI signatures cryptographically distinct  
+- HUMAN_GATE_REQUIRED list modifiable only via constitutional amendment  
+- Max AI delegation 90 days.
+
+**GOV-008: Structured Contestation & Reversal Protocol** [P0]  
+Every Decision Object supports formal contestation by authorized stakeholders.  
+Acceptance Criteria:  
+- Creates linked Challenge Object  
+- CONTESTED status pauses execution (except emergencies)  
+- Resolution is itself a Decision Object; reversal creates immutable REVERSAL link.
+
+**GOV-009: Emergency Action Protocol with Retrospective Ratification** [P0]  
+Expedited actions under strict EMERGENCY_AUTHORITY with mandatory ratification within 7 days.  
+Acceptance Criteria:  
+- Limited scope + monetary caps  
+- Auto-creates RATIFICATION_REQUIRED follow-up  
+- Frequency tracking + governance review if >3/quarter.
+
+**GOV-010: Quorum Failure & Graceful Degradation** [P1]  
+Defined degradation protocols when quorum impossible.  
+Acceptance Criteria:  
+- Auto-detect → DEGRADED_GOVERNANCE status  
+- Restricted actions + mandatory later ratification.
+
+**GOV-011: Succession & Continuity Protocols** [P1]  
+Pre-defined, automatically activated succession chains for all key roles.  
+Acceptance Criteria:  
+- At least 2 successors per role  
+- Triggers: declaration, unresponsiveness, or designated activator.
+
+**GOV-012: Accountability Mechanisms (Censure, Suspension, Revocation, Recall)** [P1]  
+Formal accountability actions as Decision Objects.  
+Acceptance Criteria:  
+- Immediate suspension enforcement (<60s)  
+- Due process timelines enforced by system.
+
+**GOV-013: Recursive Self-Governance & Safe Meta-Modification** [P0]  
+All platform evolution (sprints, model upgrades, constitutional changes) MUST be governed as Decision Objects under the same rules.  
+Acceptance Criteria:  
+- OpenForge sprints are Decision Objects  
+- Governance Simulator (Borg + C1–C4) stress-tests changes  
+- 100% self-modification compliance metric.
+
+---
+
+## 3. LEGAL / COMPLIANCE REQUIREMENTS (LEG-xxx)
+
+**LEG-001: Self-Authenticating Business Records (FRE 803(6) + 902(13/14))** [P0]  
+Every record auto-embeds provenance for self-authentication without live witnesses.  
+Acceptance Criteria:  
+- FRE 902(11) cert template auto-generated  
+- Quarterly structural self-audit.
+
+**LEG-002: Cryptographic Timestamp with Third-Party Anchoring** [P0]  
+RFC 3161 TSA (minimum 2 providers) + daily blockchain anchor (Bitcoin/Ethereum or equivalent).  
+Acceptance Criteria:  
+- Standalone temporal proof certificate (PDF/A) for any record.
+
+**LEG-003: Immutable Chain of Custody** [P0]  
+Append-only Merkle audit log for every create/read/update/export.  
+Acceptance Criteria:  
+- Custody gap detection  
+- Full chain-of-custody report exportable.
+
+**LEG-004: Informed Decision-Making Evidence Capture (Duty of Care)** [P0]  
+Mandatory information packages + access/engagement tracking.  
+Acceptance Criteria:  
+- Pre-decision readiness dashboard snapshot  
+- Informed basis summary template.
+
+**LEG-005: Conflict of Interest Disclosure & Recusal Enforcement** [P0]  
+Mandatory conflict check gate + automatic recusal + DGCL §144 safe-harbor workflow.  
+Acceptance Criteria:  
+- Standing conflict register  
+- One-click recusal auto-excludes from quorum.
+
+**LEG-006: Deliberation Quality & Alternatives Considered** [P0]  
+Structured fields for alternatives, risks, rationale, dissent.  
+Acceptance Criteria:  
+- Minimum 1 alternative + "no action"  
+- Dissent capture with same evidentiary rigor.
+
+**LEG-007: AI Provenance & zkML Admissibility Safeguards** [P0]  
+Every AI element labeled with zkML proof, model/version/prompt hash, human attestation.  
+Acceptance Criteria:  
+- Clean-room human-only record option  
+- Delta (AI vs human decision) captured.
+
+**LEG-008: Business Judgment Rule Prerequisite Capture** [P0]  
+Auto-generates BJR compliance summary mapping all 4 prongs.  
+Acceptance Criteria:  
+- Disinterestedness, informed basis, good faith, rational basis evidence.
+
+**LEG-009: Attorney-Client Privilege Compartmentalization** [P0]  
+Technically separate privilege workspace with immutable designations.  
+Acceptance Criteria:  
+- Auto-generated privilege log  
+- Two-layer reference (privileged advice + non-privileged note).
+
+**LEG-010: E-Discovery-Ready Export** [P0]  
+PDF/A-3 + EDRM XML load files with provenance + cryptographic proofs.  
+Acceptance Criteria:  
+- Targeted collection + collection certification.
+
+**LEG-011: Records Retention & Litigation Hold** [P1]  
+Auto-enforced retention schedules + immutable hold suspension.  
+Acceptance Criteria:  
+- Overlapping holds supported  
+- Destruction only after hold release verification.
+
+**LEG-012: Fiduciary Defense Package Generation** [P0]  
+Auto-generated on terminal status containing full duty-of-care/loyalty/obedience evidence.  
+Acceptance Criteria:  
+- Ready within 1 hour  
+- Portable verification format.
+
+**LEG-013: DGCL §144 Safe-Harbor Automation** [P0]  
+Automatic tracking and certification for conflicted transactions.
+
+---
+
+## 4. ARCHITECTURE REQUIREMENTS (ARCH-xxx)
+
+**ARCH-001: Merkle-DAG Proof Architecture** [P0]  
+Every domain object emits SHA-256 + Ed25519 signed Merkle root.  
+**ARCH-002: Global Proof Layer (hybrid zk-SNARK + zk-STARK)** [P0]  
+Batch proofs every 1K events; STARKs for long-term quantum resistance.  
+**ARCH-003: State Machine Replication with Total Order** [P0]  
+TLA+-verified invariants enforced before persistence.  
+**ARCH-004: Raft + CRDT Consensus** [P0]  
+Intra-tenant Raft, inter-tenant CRDT with vector clocks.  
+**ARCH-005: Tenant Sharding** [P0]  
+Hash-based + 3x geo-replication.  
+**ARCH-006: Cold Storage for Infinite Depth** [P1]  
+S3 Glacier Deep Archive + LRU hot cache.  
+**ARCH-007: Zero-Trust Multi-Tenant** [P0]  
+Per-tenant confidential computing enclaves.  
+**ARCH-008: 5-Nines Multi-Region Active-Active** [P0]  
+RPO <1min, RTO <15min, chaos-tested.  
+**ARCH-009: Post-Quantum Migration (Kyber/ML-DSA)** [P0]  
+Hybrid signatures + automatic historical re-anchoring.  
+**ARCH-010: Protocol Versioning** [P0]  
+Semantic versioning with backwards-compatible proofs.  
+**ARCH-011: TLA+ Formal Verification Mandate** [P0]  
+All invariants model-checked; runtime assertions.
+
+---
+
+## 5. ENTERPRISE & ADOPTION REQUIREMENTS (ENT-xxx)
+
+**ENT-001: Embedded TCO/ROI Calculator** [P0]  
+Outputs fiduciary-reportable NPV, litigation-survival probability, vs. Diligent baseline.  
+**ENT-002: Segment Pricing Tiers** [P1]  
+Public ($250/user/mo), Private ($150), Mid-Market ($75) + usage-based proofs.  
+**ENT-003: 30-Day Pilot with Breakeven ROI** [P0]  
+Sandbox + auto Day-30 ROI report.  
+**ENT-004: Day-1 SSO + Day-30 Integrations** [P1]  
+Okta/Azure + Zoom/DocuSign/Slack/Teams/SharePoint.  
+**ENT-005: SOC 2 Type II + ISO 27001** [P0]  
+Required for any enterprise sale.  
+**ENT-006: Adoption Tracking** [P1]  
+>80% utilization renewal trigger.  
+**ENT-007: Switching Cost Friction** [P1]  
+Watermarked exports; 500+ proofs = high lock-in.  
+**ENT-008: Pilot Exit Ramp** [P0]  
+Free export if <2x ROI by Day 30.
+
+---
+
+## 6. UX / DESIGN REQUIREMENTS (UX-xxx)
+
+**UX-001: Progressive Disclosure by Role** [P0]  
+Board: ≤3 elements; Operators: full depth.  
+**UX-002: Tamper-Evident Badges** [P0]  
+Plain-English + clickable explainer.  
+**UX-003: Real-Time Constitutional Warnings** [P0]  
+Inline with one-click override logging.  
+**UX-004: AI Insight Cards with zkML** [P0]  
+Mandatory human review checkbox.  
+**UX-005: Tiered Notifications + Fatigue Controls** [P0]  
+Board ≤3/day default.  
+**UX-006: Mobile-First Intake** [P0]  
+Voice-to-text + biometric approval.  
+**UX-007: WCAG 2.2 AA + Neurodiversity** [P0]  
+Dark mode, cognitive load limits, adaptive onboarding.  
+**UX-008: Async-First + Live Sync** [P1]  
+Threaded comments → seamless meeting mode.  
+**UX-009: One-Click Conflict Recusal** [P0]  
+Auto-excludes from quorum.  
+**UX-010: Visual Lifecycle Tracker** [P1]  
+Kanban + blocker detection.
+
+---
+
+## 7. RECURSIVE SELF-GOVERNANCE (META LAYER) [P0]
+All platform sprints, model changes, and requirement updates are Decision Objects governed by Sections 1–6.  
+- First OpenForge Decision Object = "Bootstrap Meta-Governance".  
+- Governance Simulator + human UPK gates required for any core change.  
+- Metric: 100% self-modification compliance.
+
+---
+
+## 8. TRUST-CRITICAL NON-NEGOTIABLE CONTROLS (TNC-01 to TNC-10)
+(Exact wording from original spec — copy verbatim into code as hard invariants.)
+
+## 9. MEASURABLE SUCCESS METRICS
+- M1: 100% authority chain coverage  
+- M2: Revocation latency P95 <60s  
+- M3: ≥99% fiduciary evidence completeness  
+- M11: 100% TLA+ invariant verification  
+- M12: 100% self-modification compliance  
+
+**End of PRD.**  
+Copy this entire file and hand to your OpenClaw instance.  
+The system will now build itself under its own constitutional rules.  
+
+Ready when you are, Bob. Drop this into OpenForge and watch the recursion begin.
