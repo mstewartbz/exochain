@@ -5,7 +5,7 @@
 //! - HLC causality validation (node timestamp must strictly exceed all parents)
 //! - Stored-node integrity verification (hash recomputation)
 //!
-//! These checks implement the normative HLC check: event > parent,
+//! These checks implement the normative HLC check (EXOCHAIN Specification v2.2): event > parent,
 //! preventing Byzantine clock manipulation in the trust fabric.
 
 use crate::{
@@ -28,7 +28,7 @@ const MAX_CLOCK_SKEW_MS: u64 = 500;
 /// 2. **HLC causality**: node timestamp must strictly exceed all parent timestamps
 /// 3. **Parent existence**: all parents must exist in the store
 ///
-/// This is the normative append path for persistent deployments.
+/// This is the normative append path for persistent deployments (EXOCHAIN Specification v2.2).
 /// The in-memory [`dag::append`](crate::dag::append) handles local construction;
 /// this function handles validation for nodes received from external sources.
 pub fn validated_append(
