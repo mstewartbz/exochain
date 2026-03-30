@@ -178,10 +178,12 @@ mod tests {
         assert!(DecisionClass::Strategic.requires_human_gate());
         assert!(DecisionClass::Emergency.requires_human_gate());
         assert!(!DecisionClass::Operational.requires_human_gate());
-        assert!(!DecisionClass::Financial {
-            threshold_cents: 1000
-        }
-        .requires_human_gate());
+        assert!(
+            !DecisionClass::Financial {
+                threshold_cents: 1000
+            }
+            .requires_human_gate()
+        );
     }
 
     #[test]

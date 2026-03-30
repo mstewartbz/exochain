@@ -157,6 +157,7 @@ fn valid_adj_context(actor: &Did) -> AdjudicationContext {
             review_order: None,
         }),
         quorum_evidence: None,
+        active_challenge_reason: None,
     }
 }
 

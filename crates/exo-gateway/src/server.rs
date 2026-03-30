@@ -160,6 +160,7 @@ impl AppState {
             actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
             provenance: None,
             quorum_evidence: None,
+            active_challenge_reason: None,
         }
     }
 }

@@ -42,7 +42,9 @@ pub enum GovernanceError {
     HumanGateViolation { class: DecisionClass, signer: Did },
 
     // --- AI ceiling errors (TNC-09) ---
-    #[error("AI agent delegation ceiling exceeded: action {action} not permitted for AI agents — TNC-09")]
+    #[error(
+        "AI agent delegation ceiling exceeded: action {action} not permitted for AI agents — TNC-09"
+    )]
     AiCeilingExceeded { action: String },
 
     // --- Constitutional errors ---
@@ -81,7 +83,9 @@ pub enum GovernanceError {
     EmergencyFrequencyExceeded { count: u32 },
 
     // --- Audit errors (TNC-03) ---
-    #[error("Audit chain integrity violation at sequence {sequence}: expected {expected:?}, got {actual:?} — TNC-03")]
+    #[error(
+        "Audit chain integrity violation at sequence {sequence}: expected {expected:?}, got {actual:?} — TNC-03"
+    )]
     AuditChainBroken {
         sequence: u64,
         expected: Hash256,

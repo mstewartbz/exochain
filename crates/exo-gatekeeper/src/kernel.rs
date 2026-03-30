@@ -64,6 +64,11 @@ pub struct AdjudicationContext {
     pub actor_permissions: PermissionSet,
     pub provenance: Option<Provenance>,
     pub quorum_evidence: Option<QuorumEvidence>,
+    /// When set, the action is under an active Sybil challenge hold.
+    /// The kernel short-circuits to `Verdict::Escalated` before running
+    /// invariant checks — the action is paused (not denied) pending review.
+    /// Populate from `ContestHold::escalation_reason()` in exo-escalation.
+    pub active_challenge_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +92,14 @@ impl Kernel {
     }
 
     pub fn adjudicate(&self, action: &ActionRequest, context: &AdjudicationContext) -> Verdict {
+        // Short-circuit: an active Sybil challenge hold pauses the action
+        // (Escalated, not Denied) so it can be reviewed rather than blocked.
+        if let Some(ref reason) = context.active_challenge_reason {
+            return Verdict::Escalated {
+                reason: reason.clone(),
+            };
+        }
+
         let inv_ctx = InvariantContext {
             actor: action.actor.clone(),
             actor_roles: context.actor_roles.clone(),
@@ -140,6 +153,7 @@ impl Kernel {
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::types::{AuthorityLink, GovernmentBranch, Permission, QuorumVote};
@@ -202,6 +216,7 @@ mod tests {
                 review_order: None,
             }),
             quorum_evidence: None,
+            active_challenge_reason: None,
         }
     }
 
@@ -421,6 +436,7 @@ mod tests {
                 actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
                 provenance: None,
                 quorum_evidence: None,
+                active_challenge_reason: None,
             };
             assert!(
                 kernel
@@ -526,6 +542,69 @@ mod tests {
                     .is_denied(),
                 "WO-009: modifies_kernel must always be denied by KernelImmutability"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // WO-005: Challenge paths — contested actions return Escalated, not Denied
+    // CR-001 §8.5 — any active Sybil challenge hold pauses the action.
+    // -----------------------------------------------------------------------
+    mod challenge_paths {
+        use super::*;
+
+        /// WO-005: An action under an active Sybil challenge returns
+        /// Verdict::Escalated so it is paused (not denied) pending review.
+        #[test]
+        fn active_challenge_escalates_not_denies() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:actor1");
+            let mut ctx = valid_context(&actor);
+            ctx.active_challenge_reason =
+                Some("SybilChallenge/CoordinatedManipulation: action under review".into());
+            match kernel.adjudicate(&valid_action(&actor), &ctx) {
+                Verdict::Escalated { reason } => {
+                    assert!(
+                        reason.contains("SybilChallenge"),
+                        "escalation reason must identify the challenge"
+                    );
+                }
+                other => panic!(
+                    "WO-005: active challenge must produce Escalated, got {:?}",
+                    other
+                ),
+            }
+        }
+
+        /// WO-005: Without a challenge, the same context produces Permitted.
+        #[test]
+        fn no_challenge_is_not_escalated() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:actor1");
+            let ctx = valid_context(&actor);
+            assert!(
+                kernel
+                    .adjudicate(&valid_action(&actor), &ctx)
+                    .is_permitted(),
+                "WO-005: no active challenge must not cause escalation"
+            );
+        }
+
+        /// WO-005: Challenge escalation takes priority over invariant checks —
+        /// even an otherwise-denied action is escalated (not denied) while
+        /// the challenge is pending.
+        #[test]
+        fn challenge_takes_priority_over_denial() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:actor1");
+            let mut ctx = valid_context(&actor);
+            // Would normally be denied (ConsentRequired: BailmentState::None)
+            ctx.bailment_state = BailmentState::None;
+            ctx.active_challenge_reason =
+                Some("SybilChallenge/QuorumContamination: pause-eligible".into());
+            match kernel.adjudicate(&valid_action(&actor), &ctx) {
+                Verdict::Escalated { .. } => {}
+                other => panic!("WO-005: challenge must pre-empt denial, got {:?}", other),
+            }
         }
     }
 }

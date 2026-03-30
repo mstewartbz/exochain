@@ -48,8 +48,8 @@ pub fn wasm_check_clearance(
     let decision = exo_governance::clearance::check_clearance(&actor, action, &policy, &registry);
     // ClearanceDecision doesn't derive Serialize, format manually
     let json = match decision {
-        exo_governance::clearance::ClearanceDecision::Granted => {
-            serde_json::json!({"status": "Granted"})
+        exo_governance::clearance::ClearanceDecision::Granted { policy_hash } => {
+            serde_json::json!({"status": "Granted", "policy_hash": hex::encode(policy_hash)})
         }
         exo_governance::clearance::ClearanceDecision::Denied { missing_level } => {
             serde_json::json!({"status": "Denied", "missing_level": format!("{missing_level}")})

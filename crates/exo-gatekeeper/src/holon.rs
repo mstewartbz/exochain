@@ -148,6 +148,7 @@ pub fn resume(holon: &mut Holon, checkpoint: &Checkpoint) -> Result<(), Gatekeep
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{
@@ -210,6 +211,7 @@ mod tests {
                 review_order: None,
             }),
             quorum_evidence: None,
+            active_challenge_reason: None,
         }
     }
 

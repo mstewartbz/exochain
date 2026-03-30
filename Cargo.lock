@@ -1035,6 +1035,7 @@ name = "exo-escalation"
 version = "0.1.0"
 dependencies = [
  "exo-core",
+ "exo-gatekeeper",
  "exo-governance",
  "exo-identity",
  "proptest",
