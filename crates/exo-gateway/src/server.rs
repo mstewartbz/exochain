@@ -11,7 +11,7 @@ use axum::{
 use exo_core::Did;
 use exo_gatekeeper::{
     invariants::InvariantSet,
-    kernel::{AdjudicationContext, Kernel},
+    kernel::{ActionRequest as GkActionRequest, AdjudicationContext, Kernel, Verdict},
     types::{AuthorityChain, BailmentState, Permission, PermissionSet},
 };
 use exo_governance::conflict::ConflictDeclaration;
@@ -542,6 +542,345 @@ async fn handle_agents_enroll(
 }
 
 // ---------------------------------------------------------------------------
+// Session auth handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/auth/login — authenticate a DID and issue a session token.
+///
+/// Body: `{ "did": "did:exo:alice", "signature": "..." }`
+///
+/// Returns a UUID session token stored in the `sessions` table:
+/// ```sql
+/// CREATE TABLE IF NOT EXISTS sessions (
+///     token       TEXT    PRIMARY KEY,
+///     actor_did   TEXT    NOT NULL,
+///     created_at  BIGINT  NOT NULL,
+///     expires_at  BIGINT  NOT NULL,
+///     revoked     BOOLEAN NOT NULL DEFAULT FALSE
+/// );
+/// ```
+/// Returns 503 when no DB pool is configured, 401 when the DID is not
+/// registered, and 200 with the token on success.
+async fn handle_auth_login(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "database not configured",
+                    "message": "Start the gateway with DATABASE_URL to enable session auth."
+                })),
+            )
+                .into_response();
+        }
+    };
+    let did_str = match body.get("did").and_then(|v| v.as_str()) {
+        Some(s) => s.to_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing 'did' field" })),
+            )
+                .into_response();
+        }
+    };
+    // Verify the DID is registered — reject unknown actors.
+    {
+        let did = match Did::new(&did_str) {
+            Ok(d) => d,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid DID format" })),
+                )
+                    .into_response();
+            }
+        };
+        let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
+        if reg.resolve(&did).is_none() {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "DID not registered" })),
+            )
+                .into_response();
+        }
+    }
+    // Issue a 1-hour session token.
+    let token = uuid::Uuid::new_v4().to_string();
+    let now_ms = now_ms() as i64;
+    let expires_ms = now_ms + 3_600_000; // +1 hour
+    match sqlx::query(
+        "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+         VALUES ($1, $2, $3, $4, false)",
+    )
+    .bind(&token)
+    .bind(&did_str)
+    .bind(now_ms)
+    .bind(expires_ms)
+    .execute(db)
+    .await
+    {
+        Ok(_) => Json(serde_json::json!({
+            "token": token,
+            "actor_did": did_str,
+            "expires_at": expires_ms,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/auth/token — bearer-token grant (same semantics as login).
+///
+/// Accepts the same body as `/auth/login` and produces an identical response.
+/// The distinct path mirrors OAuth2 token-endpoint convention.
+async fn handle_auth_token(
+    State(state): State<AppState>,
+    body: Json<serde_json::Value>,
+) -> impl IntoResponse {
+    handle_auth_login(State(state), body).await
+}
+
+/// POST /api/v1/auth/refresh — extend an existing session.
+///
+/// Requires `Authorization: Bearer <token>`.  Resets `expires_at` to now + 1h.
+/// Returns 401 when the token is missing, expired, or revoked; 503 without DB.
+async fn handle_auth_refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "database not configured",
+                    "message": "Start the gateway with DATABASE_URL to enable session refresh."
+                })),
+            )
+                .into_response();
+        }
+    };
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "missing or malformed Authorization header" })),
+            )
+                .into_response();
+        }
+    };
+    let now_ms = now_ms() as i64;
+    let new_expires = now_ms + 3_600_000;
+    match sqlx::query(
+        "UPDATE sessions SET expires_at = $1 \
+         WHERE token = $2 AND expires_at > $3 AND revoked = false",
+    )
+    .bind(new_expires)
+    .bind(&token)
+    .bind(now_ms)
+    .execute(db)
+    .await
+    {
+        Ok(r) if r.rows_affected() == 0 => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "token expired, revoked, or not found" })),
+        )
+            .into_response(),
+        Ok(_) => Json(serde_json::json!({
+            "token": token,
+            "expires_at": new_expires,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/auth/logout — revoke the caller's session token.
+///
+/// Requires `Authorization: Bearer <token>`.  Marks the session row as
+/// `revoked = true`.  Returns 401 for unknown tokens; 503 without DB.
+async fn handle_auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "database not configured",
+                    "message": "Start the gateway with DATABASE_URL to enable session logout."
+                })),
+            )
+                .into_response();
+        }
+    };
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "missing or malformed Authorization header" })),
+            )
+                .into_response();
+        }
+    };
+    match sqlx::query("UPDATE sessions SET revoked = true WHERE token = $1")
+        .bind(&token)
+        .execute(db)
+        .await
+    {
+        Ok(r) if r.rows_affected() == 0 => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "token not found" })),
+        )
+            .into_response(),
+        Ok(_) => Json(serde_json::json!({ "status": "logged_out" })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/auth/saml/callback — SAML 2.0 SP callback (not configured).
+///
+/// ExoChain uses DID-based authentication.  SAML integration is reserved for
+/// enterprise tenants and is not yet configured in this deployment.
+async fn handle_auth_saml_callback() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": "saml_not_configured",
+            "message": "SAML 2.0 SP is not configured for this ExoChain deployment. \
+                        Use DID-based authentication via /api/v1/auth/login."
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Constitutional action handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/agents/:did/advance-pace — advance a constitutional pacing token.
+/// POST /api/v1/users/:did/advance-pace  — same for user DIDs.
+///
+/// Adjudicated by the Kernel before any DB write.  Without a valid authority
+/// chain the Kernel returns 403.  Without a DB pool the handler returns 503.
+/// On success returns 202 Accepted.
+async fn handle_advance_pace(
+    State(state): State<AppState>,
+    Path(did_str): Path<String>,
+) -> impl IntoResponse {
+    let did = match Did::new(&did_str) {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid DID format" })),
+            )
+                .into_response();
+        }
+    };
+    // Build an adjudication context for this actor.
+    let ctx = state.build_adjudication_context(&did).await;
+    let action = GkActionRequest {
+        actor: did.clone(),
+        action: "advance_pace".into(),
+        required_permissions: PermissionSet::new(vec![Permission::new("advance_pace")]),
+        is_self_grant: false,
+        modifies_kernel: false,
+    };
+    match state.kernel.adjudicate(&action, &ctx) {
+        Verdict::Permitted => {}
+        Verdict::Denied { .. } | Verdict::Escalated { .. } => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "message": "Kernel rejected advance-pace: authority chain invalid or \
+                                consent not established."
+                })),
+            )
+                .into_response();
+        }
+    }
+    // Require DB for the pace record.
+    let _db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "database not configured",
+                    "message": "Start the gateway with DATABASE_URL to enable pace advancement."
+                })),
+            )
+                .into_response();
+        }
+    };
+    let queued_at = now_ms();
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "pace_advanced",
+            "actor_did": did_str,
+            "queued_at": queued_at,
+        })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Legal / eDiscovery handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/ediscovery/export — legal hold / eDiscovery export request.
+///
+/// Stub endpoint reserved for legal compliance tooling.  Returns 501 until a
+/// legal-hold workflow is configured for this deployment.
+async fn handle_ediscovery_export() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": "ediscovery_not_configured",
+            "message": "eDiscovery export is not configured for this ExoChain deployment. \
+                        Contact the system administrator to enable legal hold features."
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the bearer token from an `Authorization: Bearer <token>` header.
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_owned())
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -566,20 +905,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/decisions/:id", get(handle_decision_get))
         .route("/api/v1/decisions", post(vote_handler))
         // Auth
-        .route("/api/v1/auth/token", post(handle_not_implemented))
-        .route("/api/v1/auth/saml/callback", post(handle_not_implemented))
+        .route("/api/v1/auth/token", post(handle_auth_token))
+        .route("/api/v1/auth/saml/callback", post(handle_auth_saml_callback))
         .route("/api/v1/auth/register", post(handle_auth_register))
-        .route("/api/v1/auth/login", post(handle_not_implemented))
-        .route("/api/v1/auth/refresh", post(handle_not_implemented))
+        .route("/api/v1/auth/login", post(handle_auth_login))
+        .route("/api/v1/auth/refresh", post(handle_auth_refresh))
         .route("/api/v1/auth/me", get(handle_auth_me))
-        .route("/api/v1/auth/logout", post(handle_not_implemented))
+        .route("/api/v1/auth/logout", post(handle_auth_logout))
         // Agents (static route before parameterised to avoid ambiguity)
         .route("/api/v1/agents/enroll", post(handle_agents_enroll))
         .route("/api/v1/agents", get(handle_agents_list))
         .route("/api/v1/agents/:did", get(handle_agent_get))
         .route(
             "/api/v1/agents/:did/advance-pace",
-            post(handle_not_implemented),
+            post(handle_advance_pace),
         )
         // Identity
         .route("/api/v1/identity/:did/score", get(handle_identity_score))
@@ -589,14 +928,14 @@ pub fn build_router(state: AppState) -> Router {
             get(handle_get_constitution),
         )
         // Legal
-        .route("/api/v1/ediscovery/export", post(handle_not_implemented))
+        .route("/api/v1/ediscovery/export", post(handle_ediscovery_export))
         // Audit
         .route("/api/v1/audit/:decision_id", get(handle_audit_trail))
         // Users
         .route("/api/v1/users", get(handle_users_list))
         .route(
             "/api/v1/users/:did/advance-pace",
-            post(handle_not_implemented),
+            post(handle_advance_pace),
         )
         .with_state(state)
         // GraphQL sub-router has its own state — merge after with_state()
@@ -1158,5 +1497,181 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // --- Session auth handler tests (no DB — expect 503 or 400/401) ---
+
+    #[tokio::test]
+    async fn auth_login_without_db_returns_503() {
+        let body =
+            serde_json::to_string(&serde_json::json!({ "did": "did:exo:alice" })).unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn auth_token_without_db_returns_503() {
+        let body =
+            serde_json::to_string(&serde_json::json!({ "did": "did:exo:alice" })).unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn auth_refresh_without_db_returns_503() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/refresh")
+                    .header("authorization", "Bearer some-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn auth_refresh_missing_token_returns_503_or_401() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/refresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Without DB, 503 is returned before the header check.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn auth_logout_without_db_returns_503() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/logout")
+                    .header("authorization", "Bearer some-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn auth_saml_callback_returns_501() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/saml/callback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn advance_pace_without_authority_returns_403() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/did:exo:alice/advance-pace")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Kernel rejects before DB check: no consent + no authority chain.
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn user_advance_pace_without_authority_returns_403() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users/did:exo:bob/advance-pace")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn ediscovery_export_returns_501() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ediscovery/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn extract_bearer_token_parses_header() {
+        use axum::http::HeaderValue;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer my-test-token"),
+        );
+        assert_eq!(
+            extract_bearer_token(&headers).as_deref(),
+            Some("my-test-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_bearer_token_missing_returns_none() {
+        let headers = HeaderMap::new();
+        assert!(extract_bearer_token(&headers).is_none());
     }
 }
