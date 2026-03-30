@@ -1,6 +1,6 @@
 //! Clearance with independence enforcement.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
@@ -30,20 +30,35 @@ impl std::fmt::Display for ClearanceLevel {
     }
 }
 
+/// Per-action policy: required clearance level, optional quorum, and
+/// whether independent approvers are mandatory for multi-party actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionPolicy {
     pub required_level: ClearanceLevel,
     pub quorum_policy: Option<QuorumPolicy>,
+    /// When true, the action requires a quorum policy configured with
+    /// `min_independent > 0`.  `check_clearance` returns
+    /// `InsufficientIndependence` if this constraint is violated.
+    #[serde(default)]
+    pub independence_required: bool,
 }
 
+/// Governance clearance policy: maps action names to their requirements.
+///
+/// `policy_hash` is the canonical CBOR-SHA-256 digest of this policy at
+/// the time it was disclosed; embed it in every `Granted` decision so
+/// auditors can verify which policy governed the check.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClearancePolicy {
-    pub actions: HashMap<String, ActionPolicy>,
+    pub actions: BTreeMap<String, ActionPolicy>,
+    /// 32-byte disclosed policy hash (all-zeros when not yet set).
+    #[serde(default)]
+    pub policy_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ClearanceRegistry {
-    pub entries: HashMap<Did, ClearanceLevel>,
+    pub entries: BTreeMap<Did, ClearanceLevel>,
 }
 
 impl ClearanceRegistry {
@@ -61,11 +76,25 @@ impl ClearanceRegistry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClearanceDecision {
-    Granted,
-    Denied { missing_level: ClearanceLevel },
-    InsufficientIndependence { details: String },
+    /// Actor is cleared; `policy_hash` binds this decision to the disclosed policy.
+    Granted {
+        policy_hash: [u8; 32],
+    },
+    Denied {
+        missing_level: ClearanceLevel,
+    },
+    InsufficientIndependence {
+        details: String,
+    },
 }
 
+/// Check whether `actor` may perform `action` under `policy`.
+///
+/// When `independence_required` is set on the action, this function also
+/// validates that the action's quorum policy is configured with
+/// `min_independent > 0`.  If not, it returns `InsufficientIndependence`
+/// rather than a spurious `Granted`, ensuring the policy can never silently
+/// bypass independence enforcement.
 #[must_use]
 pub fn check_clearance(
     actor: &Did,
@@ -86,45 +115,57 @@ pub fn check_clearance(
             missing_level: ap.required_level,
         };
     }
-    ClearanceDecision::Granted
+    if ap.independence_required {
+        let min_independent = ap
+            .quorum_policy
+            .as_ref()
+            .map(|qp| qp.min_independent)
+            .unwrap_or(0);
+        if min_independent == 0 {
+            return ClearanceDecision::InsufficientIndependence {
+                details: format!(
+                    "action '{action}' requires independence but quorum policy has \
+                     min_independent=0 (or no quorum policy configured)"
+                ),
+            };
+        }
+    }
+    ClearanceDecision::Granted {
+        policy_hash: policy.policy_hash,
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     fn did(name: &str) -> Did {
         Did::new(&format!("did:exo:{name}")).expect("ok")
     }
 
+    fn make_action_policy(level: ClearanceLevel) -> ActionPolicy {
+        ActionPolicy {
+            required_level: level,
+            quorum_policy: None,
+            independence_required: false,
+        }
+    }
+
     fn setup() -> (ClearancePolicy, ClearanceRegistry) {
         let mut p = ClearancePolicy::default();
-        p.actions.insert(
-            "read".into(),
-            ActionPolicy {
-                required_level: ClearanceLevel::ReadOnly,
-                quorum_policy: None,
-            },
-        );
+        p.actions
+            .insert("read".into(), make_action_policy(ClearanceLevel::ReadOnly));
         p.actions.insert(
             "write".into(),
-            ActionPolicy {
-                required_level: ClearanceLevel::Contributor,
-                quorum_policy: None,
-            },
+            make_action_policy(ClearanceLevel::Contributor),
         );
         p.actions.insert(
             "review".into(),
-            ActionPolicy {
-                required_level: ClearanceLevel::Reviewer,
-                quorum_policy: None,
-            },
+            make_action_policy(ClearanceLevel::Reviewer),
         );
         p.actions.insert(
             "govern".into(),
-            ActionPolicy {
-                required_level: ClearanceLevel::Governor,
-                quorum_policy: None,
-            },
+            make_action_policy(ClearanceLevel::Governor),
         );
         let mut r = ClearanceRegistry::default();
         r.set_level(did("alice"), ClearanceLevel::Governor);
@@ -133,39 +174,27 @@ mod tests {
         (p, r)
     }
 
+    fn granted() -> ClearanceDecision {
+        ClearanceDecision::Granted {
+            policy_hash: [0u8; 32],
+        }
+    }
+
     #[test]
     fn governor_can_do_everything() {
         let (p, r) = setup();
         let a = did("alice");
-        assert_eq!(
-            check_clearance(&a, "read", &p, &r),
-            ClearanceDecision::Granted
-        );
-        assert_eq!(
-            check_clearance(&a, "write", &p, &r),
-            ClearanceDecision::Granted
-        );
-        assert_eq!(
-            check_clearance(&a, "review", &p, &r),
-            ClearanceDecision::Granted
-        );
-        assert_eq!(
-            check_clearance(&a, "govern", &p, &r),
-            ClearanceDecision::Granted
-        );
+        assert_eq!(check_clearance(&a, "read", &p, &r), granted());
+        assert_eq!(check_clearance(&a, "write", &p, &r), granted());
+        assert_eq!(check_clearance(&a, "review", &p, &r), granted());
+        assert_eq!(check_clearance(&a, "govern", &p, &r), granted());
     }
     #[test]
     fn contributor_cannot_review() {
         let (p, r) = setup();
         let b = did("bob");
-        assert_eq!(
-            check_clearance(&b, "read", &p, &r),
-            ClearanceDecision::Granted
-        );
-        assert_eq!(
-            check_clearance(&b, "write", &p, &r),
-            ClearanceDecision::Granted
-        );
+        assert_eq!(check_clearance(&b, "read", &p, &r), granted());
+        assert_eq!(check_clearance(&b, "write", &p, &r), granted());
         assert_eq!(
             check_clearance(&b, "review", &p, &r),
             ClearanceDecision::Denied {
@@ -183,10 +212,7 @@ mod tests {
     fn readonly_can_only_read() {
         let (p, r) = setup();
         let c = did("carol");
-        assert_eq!(
-            check_clearance(&c, "read", &p, &r),
-            ClearanceDecision::Granted
-        );
+        assert_eq!(check_clearance(&c, "read", &p, &r), granted());
         assert_eq!(
             check_clearance(&c, "write", &p, &r),
             ClearanceDecision::Denied {
@@ -250,5 +276,99 @@ mod tests {
             d,
             ClearanceDecision::InsufficientIndependence { .. }
         ));
+    }
+
+    // ── WO-004: independence_required enforcement ─────────────────────────────
+
+    #[test]
+    fn independence_required_without_quorum_policy_returns_insufficient() {
+        let mut p = ClearancePolicy::default();
+        p.actions.insert(
+            "critical".into(),
+            ActionPolicy {
+                required_level: ClearanceLevel::Reviewer,
+                quorum_policy: None,
+                independence_required: true,
+            },
+        );
+        let mut r = ClearanceRegistry::default();
+        r.set_level(did("alice"), ClearanceLevel::Governor);
+        assert!(matches!(
+            check_clearance(&did("alice"), "critical", &p, &r),
+            ClearanceDecision::InsufficientIndependence { .. }
+        ));
+    }
+
+    #[test]
+    fn independence_required_with_zero_min_independent_returns_insufficient() {
+        use crate::quorum::{QuorumPolicy, Role};
+        use exo_core::Timestamp;
+        let mut p = ClearancePolicy::default();
+        p.actions.insert(
+            "critical".into(),
+            ActionPolicy {
+                required_level: ClearanceLevel::Reviewer,
+                quorum_policy: Some(QuorumPolicy {
+                    min_approvals: 3,
+                    min_independent: 0, // misconfigured
+                    required_roles: vec![Role::Steward],
+                    timeout: Timestamp::new(999_999, 0),
+                }),
+                independence_required: true,
+            },
+        );
+        let mut r = ClearanceRegistry::default();
+        r.set_level(did("alice"), ClearanceLevel::Governor);
+        assert!(matches!(
+            check_clearance(&did("alice"), "critical", &p, &r),
+            ClearanceDecision::InsufficientIndependence { .. }
+        ));
+    }
+
+    #[test]
+    fn independence_required_with_valid_quorum_policy_grants() {
+        use crate::quorum::{QuorumPolicy, Role};
+        use exo_core::Timestamp;
+        let hash = [1u8; 32];
+        let mut p = ClearancePolicy {
+            actions: BTreeMap::new(),
+            policy_hash: hash,
+        };
+        p.actions.insert(
+            "critical".into(),
+            ActionPolicy {
+                required_level: ClearanceLevel::Reviewer,
+                quorum_policy: Some(QuorumPolicy {
+                    min_approvals: 3,
+                    min_independent: 2,
+                    required_roles: vec![Role::Steward],
+                    timeout: Timestamp::new(999_999, 0),
+                }),
+                independence_required: true,
+            },
+        );
+        let mut r = ClearanceRegistry::default();
+        r.set_level(did("alice"), ClearanceLevel::Governor);
+        assert_eq!(
+            check_clearance(&did("alice"), "critical", &p, &r),
+            ClearanceDecision::Granted { policy_hash: hash }
+        );
+    }
+
+    #[test]
+    fn policy_hash_embedded_in_granted() {
+        let hash = [42u8; 32];
+        let mut p = ClearancePolicy {
+            actions: BTreeMap::new(),
+            policy_hash: hash,
+        };
+        p.actions
+            .insert("read".into(), make_action_policy(ClearanceLevel::ReadOnly));
+        let mut r = ClearanceRegistry::default();
+        r.set_level(did("alice"), ClearanceLevel::Governor);
+        assert_eq!(
+            check_clearance(&did("alice"), "read", &p, &r),
+            ClearanceDecision::Granted { policy_hash: hash }
+        );
     }
 }

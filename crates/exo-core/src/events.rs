@@ -139,7 +139,7 @@ pub fn create_signed_event(
 /// complementing the opaque `payload: Vec<u8>` on [`Event`] for cases that
 /// require structured payloads with DAG linkage.
 ///
-/// Per spec v2.1 Section 3A (Holon lifecycle) and decision.forum governance.
+/// Per EXOCHAIN Specification v2.2 §3A (Holon lifecycle) and decision.forum governance.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventPayload {
     /// Genesis event for a new network.
@@ -205,7 +205,7 @@ pub enum EventPayload {
         decision_id: crate::Hash256,
         discloser: Did,
     },
-    // --- Holon lifecycle events (per spec v2.1 Section 3A) ---
+    // --- Holon lifecycle events (per EXOCHAIN Specification v2.2 §3A) ---
     /// A new Holon was created.
     HolonCreated {
         holon_did: Did,

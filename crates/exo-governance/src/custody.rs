@@ -293,8 +293,7 @@ impl CustodyChain {
         }
         hasher.update(actor_id.as_str().as_bytes());
         // Use CBOR canonical serialization for the action via exo_core
-        let action_hash = exo_core::hash::hash_structured(action)
-            .unwrap_or(Hash256::ZERO);
+        let action_hash = exo_core::hash::hash_structured(action).unwrap_or(Hash256::ZERO);
         hasher.update(action_hash.as_bytes());
         hasher.update(&timestamp.physical_ms.to_le_bytes());
         hasher.update(&timestamp.logical.to_le_bytes());
@@ -308,10 +307,7 @@ impl CustodyChain {
 #[derive(Debug, Clone)]
 pub enum CustodyChainError {
     /// Sequence number gap detected.
-    SequenceGap {
-        expected: u64,
-        actual: u64,
-    },
+    SequenceGap { expected: u64, actual: u64 },
     /// Genesis event should not have a previous event hash.
     InvalidGenesisLink,
     /// Chain link hash does not match expected previous event hash.
@@ -321,9 +317,7 @@ pub enum CustodyChainError {
         actual: Hash256,
     },
     /// Missing previous event hash on non-genesis event.
-    MissingLink {
-        sequence: u64,
-    },
+    MissingLink { sequence: u64 },
     /// Event hash does not match recomputed hash.
     HashMismatch {
         sequence: u64,
@@ -574,10 +568,7 @@ mod tests {
         );
 
         assert_eq!(chain.len(), 1);
-        assert!(matches!(
-            chain.events[0].role,
-            CustodyRole::AiAgent { .. }
-        ));
+        assert!(matches!(chain.events[0].role, CustodyRole::AiAgent { .. }));
     }
 
     #[test]

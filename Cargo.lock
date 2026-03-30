@@ -1035,6 +1035,7 @@ name = "exo-escalation"
 version = "0.1.0"
 dependencies = [
  "exo-core",
+ "exo-gatekeeper",
  "exo-governance",
  "exo-identity",
  "proptest",
@@ -1064,7 +1065,10 @@ dependencies = [
  "async-graphql-axum",
  "async-stream",
  "axum 0.7.9",
+ "blake3",
+ "bs58",
  "chrono",
+ "ciborium",
  "exo-consent",
  "exo-core",
  "exo-gatekeeper",

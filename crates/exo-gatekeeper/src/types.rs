@@ -46,7 +46,7 @@ impl PermissionSet {
 // ---------------------------------------------------------------------------
 
 /// Branch of government.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GovernmentBranch {
     Legislative,
     Executive,
@@ -149,10 +149,34 @@ pub struct QuorumEvidence {
 }
 
 impl QuorumEvidence {
+    /// Returns `true` if the raw approval count (all votes, regardless of
+    /// provenance) meets the threshold. Used for legacy/simple quorum checks.
     pub fn is_met(&self) -> bool {
         let approvals =
             u32::try_from(self.votes.iter().filter(|v| v.approved).count()).unwrap_or(u32::MAX);
         approvals >= self.threshold
+    }
+
+    /// Returns `true` if the threshold is met counting only non-synthetic
+    /// approved votes. A vote with `provenance.voice_kind = Synthetic` is
+    /// excluded from the human count per CR-001 §8.3.
+    pub fn is_met_authentic(&self) -> bool {
+        let authentic = u32::try_from(
+            self.votes
+                .iter()
+                .filter(|v| v.approved && !v.provenance.as_ref().is_some_and(|p| p.is_synthetic()))
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        authentic >= self.threshold
+    }
+
+    /// Count of votes where provenance explicitly marks the voter as synthetic.
+    pub fn synthetic_vote_count(&self) -> usize {
+        self.votes
+            .iter()
+            .filter(|v| v.provenance.as_ref().is_some_and(|p| p.is_synthetic()))
+            .count()
     }
 }
 
@@ -162,6 +186,55 @@ pub struct QuorumVote {
     pub voter: Did,
     pub approved: bool,
     pub signature: Vec<u8>,
+    /// Optional provenance for this vote.
+    ///
+    /// When `voice_kind` is `Synthetic`, this vote SHALL NOT count as a
+    /// distinct human approval in quorum (CR-001 §8.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
+}
+
+// ---------------------------------------------------------------------------
+// Provenance metadata — voice taxonomy (CR-001 §8.3)
+// ---------------------------------------------------------------------------
+
+/// Whether an actor is a human, synthetic (AI), or system process.
+///
+/// Used by governance surfaces accepting plural input to prevent synthetic
+/// voices from being counted as distinct humans (CR-001 §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum VoiceKind {
+    /// A natural human actor providing genuine review or approval.
+    Human,
+    /// A synthetic (AI-generated) opinion or action. SHALL NOT be counted as
+    /// a distinct human vote in any quorum or clearance computation.
+    Synthetic,
+    /// An automated system process (not human or AI opinion).
+    System,
+}
+
+/// Independence claim for a reviewer or voter.
+///
+/// Coordinated actors sharing common control SHALL NOT be double-counted in
+/// quorum (CR-001 §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum IndependenceClaim {
+    /// Actor claims independent judgment with no undisclosed common control.
+    Independent,
+    /// Actor discloses coordination with another entity.
+    Coordinated,
+}
+
+/// Order of review for a governance opinion.
+///
+/// Derivative or echoed reviews SHALL NOT be counted equivalently to
+/// first-order independent review (CR-001 §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ReviewOrder {
+    /// Direct, first-hand review of the original subject.
+    FirstOrder,
+    /// Derivative review — based on another review, summary, or echo.
+    Derivative,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,11 +248,50 @@ pub struct Provenance {
     pub timestamp: String,
     pub action_hash: Vec<u8>,
     pub signature: Vec<u8>,
+    /// Ed25519 public key (32 bytes) of the actor.
+    ///
+    /// When present, `check_provenance_verifiable` performs full cryptographic
+    /// Ed25519 signature verification over the canonical provenance payload:
+    /// `Hash256(actor_bytes || 0x00 || action_hash || 0x00 || timestamp_bytes)`.
+    /// When absent, only non-emptiness of `signature` is checked (legacy path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<Vec<u8>>,
+    /// Whether this actor is human, synthetic (AI), or a system process.
+    ///
+    /// Governance surfaces accepting plural input MUST use this field to
+    /// prevent synthetic voices from counting as distinct humans (CR-001 §8.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_kind: Option<VoiceKind>,
+    /// Whether the actor claims to act independently (no undisclosed common
+    /// control with other reviewers or voters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independence: Option<IndependenceClaim>,
+    /// Whether this is a first-order review or derivative (echo/summary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_order: Option<ReviewOrder>,
 }
 
 impl Provenance {
     pub fn is_signed(&self) -> bool {
         !self.signature.is_empty()
+    }
+
+    /// Returns `true` when provenance explicitly identifies this as a human
+    /// voice. `None` (unspecified) returns `false` — unattributed provenance
+    /// is never assumed to be authentic human judgment.
+    pub fn is_human_voice(&self) -> bool {
+        self.voice_kind == Some(VoiceKind::Human)
+    }
+
+    /// Returns `true` when provenance explicitly claims independence.
+    /// `None` (unspecified) is treated as non-independent.
+    pub fn is_independent(&self) -> bool {
+        self.independence == Some(IndependenceClaim::Independent)
+    }
+
+    /// Returns `true` when this is explicitly a synthetic (AI-generated) voice.
+    pub fn is_synthetic(&self) -> bool {
+        self.voice_kind == Some(VoiceKind::Synthetic)
     }
 }
 
@@ -255,6 +367,24 @@ mod tests {
         assert!(!chain.is_empty());
     }
 
+    fn make_vote(voter: &str, approved: bool, sig: u8, voice: Option<VoiceKind>) -> QuorumVote {
+        QuorumVote {
+            voter: did(voter),
+            approved,
+            signature: vec![sig],
+            provenance: voice.map(|vk| Provenance {
+                actor: did(voter),
+                timestamp: "t".into(),
+                action_hash: vec![1],
+                signature: vec![sig],
+                public_key: None,
+                voice_kind: Some(vk),
+                independence: None,
+                review_order: None,
+            }),
+        }
+    }
+
     #[test]
     fn quorum_evidence_met() {
         let ev = QuorumEvidence {
@@ -264,16 +394,19 @@ mod tests {
                     voter: did("did:exo:v1"),
                     approved: true,
                     signature: vec![1],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v2"),
                     approved: true,
                     signature: vec![2],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v3"),
                     approved: false,
                     signature: vec![3],
+                    provenance: None,
                 },
             ],
         };
@@ -289,15 +422,128 @@ mod tests {
                     voter: did("did:exo:v1"),
                     approved: true,
                     signature: vec![1],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v2"),
                     approved: false,
                     signature: vec![2],
+                    provenance: None,
                 },
             ],
         };
         assert!(!ev.is_met());
+    }
+
+    // ── CR-001 §8.3: authentic quorum counting ───────────────────────────────
+
+    #[test]
+    fn quorum_is_met_authentic_excludes_synthetic() {
+        // 2 humans approve, 1 synthetic approves — threshold 3 should fail authentic
+        let ev = QuorumEvidence {
+            threshold: 3,
+            votes: vec![
+                make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human)),
+                make_vote("did:exo:h2", true, 2, Some(VoiceKind::Human)),
+                make_vote("did:exo:ai1", true, 3, Some(VoiceKind::Synthetic)),
+            ],
+        };
+        assert!(ev.is_met(), "raw count should pass (3 approvals)");
+        assert!(
+            !ev.is_met_authentic(),
+            "authentic count should fail (only 2 human)"
+        );
+        assert_eq!(ev.synthetic_vote_count(), 1);
+    }
+
+    #[test]
+    fn quorum_is_met_authentic_passes_all_human() {
+        let ev = QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human)),
+                make_vote("did:exo:h2", true, 2, Some(VoiceKind::Human)),
+            ],
+        };
+        assert!(ev.is_met_authentic());
+        assert_eq!(ev.synthetic_vote_count(), 0);
+    }
+
+    #[test]
+    fn quorum_is_met_authentic_legacy_vote_counts() {
+        // Legacy votes (no provenance) are not excluded
+        let ev = QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                    provenance: None,
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: true,
+                    signature: vec![2],
+                    provenance: None,
+                },
+            ],
+        };
+        assert!(ev.is_met_authentic());
+    }
+
+    // ── Provenance voice/independence helpers ────────────────────────────────
+
+    #[test]
+    fn provenance_is_human_voice() {
+        let human_prov = Provenance {
+            actor: did("did:exo:h1"),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![1],
+            public_key: None,
+            voice_kind: Some(VoiceKind::Human),
+            independence: Some(IndependenceClaim::Independent),
+            review_order: Some(ReviewOrder::FirstOrder),
+        };
+        assert!(human_prov.is_human_voice());
+        assert!(human_prov.is_independent());
+        assert!(!human_prov.is_synthetic());
+    }
+
+    #[test]
+    fn provenance_synthetic_not_human() {
+        let ai_prov = Provenance {
+            actor: did("did:exo:ai1"),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![1],
+            public_key: None,
+            voice_kind: Some(VoiceKind::Synthetic),
+            independence: None,
+            review_order: None,
+        };
+        assert!(!ai_prov.is_human_voice());
+        assert!(ai_prov.is_synthetic());
+        assert!(!ai_prov.is_independent());
+    }
+
+    #[test]
+    fn provenance_unspecified_voice_not_human() {
+        // Unattributed provenance is never assumed to be authentic human judgment
+        let prov = Provenance {
+            actor: did("did:exo:unknown"),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![1],
+            public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        };
+        assert!(!prov.is_human_voice());
+        assert!(!prov.is_synthetic());
+        assert!(!prov.is_independent());
     }
 
     #[test]
@@ -307,6 +553,10 @@ mod tests {
             timestamp: "2025-01-01".into(),
             action_hash: vec![1],
             signature: vec![4, 5, 6],
+            public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
         };
         assert!(signed.is_signed());
 
@@ -315,6 +565,10 @@ mod tests {
             timestamp: "2025-01-01".into(),
             action_hash: vec![1],
             signature: vec![],
+            public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
         };
         assert!(!unsigned.is_signed());
     }

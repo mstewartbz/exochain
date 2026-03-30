@@ -154,7 +154,7 @@ fn check_invariant(
 }
 
 fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
-    let mut branches = std::collections::HashSet::new();
+    let mut branches = std::collections::BTreeSet::new();
     for role in &ctx.actor_roles {
         branches.insert(role.branch);
     }
@@ -359,14 +359,26 @@ fn check_quorum_legitimate(ctx: &InvariantContext) -> Result<(), InvariantViolat
     match &ctx.quorum_evidence {
         None => Ok(()),
         Some(evidence) => {
-            if !evidence.is_met() {
-                let approvals = evidence.votes.iter().filter(|v| v.approved).count();
+            // CR-001 §8.3: synthetic voices SHALL never be counted as distinct
+            // humans. Use is_met_authentic() which excludes Synthetic-voiced
+            // votes from the approval count.
+            if !evidence.is_met_authentic() {
+                let authentic_approvals = evidence
+                    .votes
+                    .iter()
+                    .filter(|v| {
+                        v.approved && !v.provenance.as_ref().is_some_and(|p| p.is_synthetic())
+                    })
+                    .count();
+                let synthetic_excluded = evidence.synthetic_vote_count();
                 Err(InvariantViolation {
                     invariant: ConstitutionalInvariant::QuorumLegitimate,
-                    description: "Quorum threshold not met".into(),
+                    description: "Quorum threshold not met by authentic (non-synthetic) votes"
+                        .into(),
                     evidence: vec![
                         format!("threshold: {}", evidence.threshold),
-                        format!("approvals: {}", approvals),
+                        format!("authentic_approvals: {}", authentic_approvals),
+                        format!("synthetic_votes_excluded: {}", synthetic_excluded),
                     ],
                 })
             } else {
@@ -384,13 +396,6 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
             evidence: vec!["provenance: None".into()],
         }),
         Some(prov) => {
-            if !prov.is_signed() {
-                return Err(InvariantViolation {
-                    invariant: ConstitutionalInvariant::ProvenanceVerifiable,
-                    description: "Provenance metadata is not signed".into(),
-                    evidence: vec![format!("actor: {}", prov.actor)],
-                });
-            }
             if prov.actor != ctx.actor {
                 return Err(InvariantViolation {
                     invariant: ConstitutionalInvariant::ProvenanceVerifiable,
@@ -400,6 +405,59 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
                         format!("context.actor: {}", ctx.actor),
                     ],
                 });
+            }
+            match &prov.public_key {
+                Some(pk_bytes) => {
+                    // Full Ed25519 verification path (closes GAP-02).
+                    let pk_arr: [u8; 32] =
+                        pk_bytes
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| InvariantViolation {
+                                invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                                description: "Provenance public_key is not 32 bytes".into(),
+                                evidence: vec![format!("key_len: {}", pk_bytes.len())],
+                            })?;
+                    let sig_arr: [u8; 64] =
+                        prov.signature
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| InvariantViolation {
+                                invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                                description:
+                                    "Provenance signature is not 64 bytes (required for Ed25519)"
+                                        .into(),
+                                evidence: vec![format!("sig_len: {}", prov.signature.len())],
+                            })?;
+                    // Canonical payload: actor || 0x00 || action_hash || 0x00 || timestamp
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(prov.actor.as_str().as_bytes());
+                    payload.push(0x00);
+                    payload.extend_from_slice(&prov.action_hash);
+                    payload.push(0x00);
+                    payload.extend_from_slice(prov.timestamp.as_bytes());
+                    let message = Hash256::digest(&payload);
+                    let pubkey = exo_core::PublicKey::from_bytes(pk_arr);
+                    let sig = exo_core::Signature::from_bytes(sig_arr);
+                    if !exo_core::crypto::verify(message.as_bytes(), &sig, &pubkey) {
+                        return Err(InvariantViolation {
+                            invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                            description:
+                                "Provenance Ed25519 signature is cryptographically invalid".into(),
+                            evidence: vec![format!("actor: {}", prov.actor)],
+                        });
+                    }
+                }
+                None => {
+                    // Legacy path: signature must be non-empty.
+                    if !prov.is_signed() {
+                        return Err(InvariantViolation {
+                            invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                            description: "Provenance metadata is not signed".into(),
+                            evidence: vec![format!("actor: {}", prov.actor)],
+                        });
+                    }
+                }
             }
             Ok(())
         }
@@ -415,7 +473,9 @@ mod tests {
     use exo_core::Hash256;
 
     use super::*;
-    use crate::types::{AuthorityLink, Permission, QuorumVote};
+    use crate::types::{
+        AuthorityLink, IndependenceClaim, Permission, QuorumVote, ReviewOrder, VoiceKind,
+    };
 
     fn did(s: &str) -> Did {
         Did::new(s).expect("valid DID")
@@ -458,6 +518,10 @@ mod tests {
                 timestamp: "2025-01-01T00:00:00Z".into(),
                 action_hash: vec![1, 2, 3],
                 signature: vec![4, 5, 6],
+                public_key: None,
+                voice_kind: None,
+                independence: None,
+                review_order: None,
             }),
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             requested_permissions: PermissionSet::default(),
@@ -748,11 +812,13 @@ mod tests {
                     voter: did("did:exo:v1"),
                     approved: true,
                     signature: vec![1],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v2"),
                     approved: false,
                     signature: vec![2],
+                    provenance: None,
                 },
             ],
         });
@@ -772,11 +838,13 @@ mod tests {
                     voter: did("did:exo:v1"),
                     approved: true,
                     signature: vec![1],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v2"),
                     approved: true,
                     signature: vec![2],
+                    provenance: None,
                 },
             ],
         });
@@ -804,6 +872,10 @@ mod tests {
             timestamp: "t".into(),
             action_hash: vec![1],
             signature: vec![],
+            public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
         });
         assert!(enforce_all(&engine, &ctx).is_err());
     }
@@ -819,6 +891,10 @@ mod tests {
             timestamp: "t".into(),
             action_hash: vec![1],
             signature: vec![1],
+            public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
         });
         assert!(enforce_all(&engine, &ctx).is_err());
     }
@@ -860,6 +936,225 @@ mod tests {
     #[test]
     fn engine_all_constructor() {
         assert_eq!(InvariantEngine::all().invariant_set.invariants.len(), 8);
+    }
+
+    // ── CR-001 §8.3: quorum synthetic-voice exclusion ───────────────────────
+
+    fn make_vote(voter: &str, approved: bool, sig: u8, voice: Option<VoiceKind>) -> QuorumVote {
+        QuorumVote {
+            voter: did(voter),
+            approved,
+            signature: vec![sig],
+            provenance: voice.map(|vk| Provenance {
+                actor: did(voter),
+                timestamp: "t".into(),
+                action_hash: vec![1],
+                signature: vec![sig],
+                public_key: None,
+                voice_kind: Some(vk),
+                independence: None,
+                review_order: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn quorum_fails_when_synthetic_makes_up_threshold() {
+        // 1 human + 2 synthetic approvals, threshold 3 → authentic count = 1 → fail
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 3,
+            votes: vec![
+                make_vote("did:exo:human1", true, 1, Some(VoiceKind::Human)),
+                make_vote("did:exo:ai1", true, 2, Some(VoiceKind::Synthetic)),
+                make_vote("did:exo:ai2", true, 3, Some(VoiceKind::Synthetic)),
+            ],
+        });
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(err[0].description.contains("authentic"));
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("synthetic_votes_excluded: 2"))
+        );
+    }
+
+    #[test]
+    fn quorum_passes_when_humans_meet_threshold_despite_synthetics() {
+        // 3 humans approve, 2 synthetics also approve, threshold 3 → passes
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 3,
+            votes: vec![
+                make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human)),
+                make_vote("did:exo:h2", true, 2, Some(VoiceKind::Human)),
+                make_vote("did:exo:h3", true, 3, Some(VoiceKind::Human)),
+                make_vote("did:exo:ai1", true, 4, Some(VoiceKind::Synthetic)),
+                make_vote("did:exo:ai2", true, 5, Some(VoiceKind::Synthetic)),
+            ],
+        });
+        assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn quorum_passes_legacy_votes_no_provenance() {
+        // Legacy votes (provenance=None) are not excluded
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                    provenance: None,
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: true,
+                    signature: vec![2],
+                    provenance: None,
+                },
+            ],
+        });
+        assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn quorum_fails_all_synthetic_votes() {
+        // All approvals are synthetic — threshold 1 → authentic count = 0 → fail
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 1,
+            votes: vec![
+                make_vote("did:exo:ai1", true, 1, Some(VoiceKind::Synthetic)),
+                make_vote("did:exo:ai2", true, 2, Some(VoiceKind::Synthetic)),
+            ],
+        });
+        assert!(enforce_all(&engine, &ctx).is_err());
+    }
+
+    // ── CR-001 §8.3: Ed25519 provenance verification (WO-003 / GAP-02) ──────
+
+    fn signed_provenance(
+        actor_str: &str,
+    ) -> (Provenance, exo_core::PublicKey, exo_core::SecretKey) {
+        let (pk, sk) = exo_core::crypto::generate_keypair();
+        let actor = did(actor_str);
+        let action_hash = vec![0xde, 0xad, 0xbe, 0xef];
+        let timestamp = "2026-01-01T00:00:00Z".to_string();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(actor.as_str().as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(&action_hash);
+        payload.push(0x00);
+        payload.extend_from_slice(timestamp.as_bytes());
+        let message = Hash256::digest(&payload);
+        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+        let prov = Provenance {
+            actor,
+            timestamp,
+            action_hash,
+            signature: sig.to_bytes().to_vec(),
+            public_key: Some(pk.as_bytes().to_vec()),
+            voice_kind: Some(VoiceKind::Human),
+            independence: Some(IndependenceClaim::Independent),
+            review_order: Some(ReviewOrder::FirstOrder),
+        };
+        (prov, pk, sk)
+    }
+
+    #[test]
+    fn provenance_passes_valid_ed25519_signature() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        ctx.provenance = Some(prov);
+        assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn provenance_fails_tampered_ed25519_signature() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (mut prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        prov.signature[0] ^= 0xFF; // corrupt
+        ctx.provenance = Some(prov);
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("cryptographically invalid"));
+    }
+
+    #[test]
+    fn provenance_fails_wrong_public_key() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (mut prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        let (other_pk, _) = exo_core::crypto::generate_keypair();
+        prov.public_key = Some(other_pk.as_bytes().to_vec());
+        ctx.provenance = Some(prov);
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("cryptographically invalid"));
+    }
+
+    #[test]
+    fn provenance_fails_malformed_public_key() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        ctx.provenance = Some(Provenance {
+            actor: ctx.actor.clone(),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![0u8; 64],
+            public_key: Some(vec![0u8; 16]), // wrong length
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        });
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("not 32 bytes"));
+    }
+
+    #[test]
+    fn provenance_fails_malformed_signature_with_key() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (pk, _sk) = exo_core::crypto::generate_keypair();
+        ctx.provenance = Some(Provenance {
+            actor: ctx.actor.clone(),
+            timestamp: "t".into(),
+            action_hash: vec![1],
+            signature: vec![0u8; 32], // wrong length for Ed25519 (need 64)
+            public_key: Some(pk.as_bytes().to_vec()),
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        });
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("not 64 bytes"));
     }
 
     // ── TNC-01: Ed25519 signature verification ───────────────────────────

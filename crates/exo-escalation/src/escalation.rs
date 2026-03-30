@@ -104,6 +104,33 @@ pub fn advance_sybil_stage(
     Ok(())
 }
 
+/// Reinstate a Sybil adjudication case with explicit clearance evidence.
+///
+/// A non-zero `clearance_evidence` hash is REQUIRED — CR-001 §8.6 mandates
+/// that reinstatement without evidence is rejected to prevent automatic or
+/// evidence-free restoration of contested actors.
+///
+/// On success, the evidence hash is appended to `case.evidence` and the case
+/// advances to `SybilStage::Reinstatement`.
+pub fn reinstate(
+    case: &mut EscalationCase,
+    clearance_evidence: [u8; 32],
+) -> Result<(), EscalationError> {
+    if case.path != EscalationPath::SybilAdjudication {
+        return Err(EscalationError::InvalidStateTransition {
+            from: format!("{:?}", case.path),
+            to: "Reinstatement".into(),
+        });
+    }
+    if clearance_evidence == [0u8; 32] {
+        return Err(EscalationError::IncompleteCase {
+            reason: "reinstatement requires explicit clearance evidence (non-zero hash)".into(),
+        });
+    }
+    case.evidence.push(clearance_evidence);
+    advance_sybil_stage(case, SybilStage::Reinstatement)
+}
+
 impl std::fmt::Display for SybilStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
@@ -111,6 +138,7 @@ impl std::fmt::Display for SybilStage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::detector::*;
@@ -212,6 +240,44 @@ mod tests {
         let s = signal(50, SignalType::AnomalousPattern);
         let mut c = escalate(&s, &EscalationPath::Standard);
         assert!(advance_sybil_stage(&mut c, SybilStage::Triage).is_err());
+    }
+
+    // ── reinstate() tests ──────────────────────────────────────────────────────
+
+    fn sybil_case_at_clearance_downgrade() -> EscalationCase {
+        let s = signal(80, SignalType::SybilSuspicion);
+        let mut c = escalate(&s, &EscalationPath::SybilAdjudication);
+        for stage in [
+            SybilStage::Triage,
+            SybilStage::Quarantine,
+            SybilStage::EvidentaryReview,
+            SybilStage::ClearanceDowngrade,
+        ] {
+            advance_sybil_stage(&mut c, stage).unwrap();
+        }
+        c
+    }
+
+    #[test]
+    fn reinstate_requires_nonzero_evidence() {
+        let mut c = sybil_case_at_clearance_downgrade();
+        assert!(reinstate(&mut c, [0u8; 32]).is_err());
+    }
+
+    #[test]
+    fn reinstate_with_valid_evidence_succeeds() {
+        let mut c = sybil_case_at_clearance_downgrade();
+        let evidence = [0xCEu8; 32];
+        assert!(reinstate(&mut c, evidence).is_ok());
+        assert!(c.stages_completed.contains(&"Reinstatement".to_string()));
+        assert!(c.evidence.contains(&evidence));
+    }
+
+    #[test]
+    fn reinstate_fails_on_non_sybil_path() {
+        let s = signal(50, SignalType::AnomalousPattern);
+        let mut c = escalate(&s, &EscalationPath::Standard);
+        assert!(reinstate(&mut c, [0xAAu8; 32]).is_err());
     }
     #[test]
     fn sybil_stage_display() {

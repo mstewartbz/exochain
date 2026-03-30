@@ -64,6 +64,11 @@ pub struct AdjudicationContext {
     pub actor_permissions: PermissionSet,
     pub provenance: Option<Provenance>,
     pub quorum_evidence: Option<QuorumEvidence>,
+    /// When set, the action is under an active Sybil challenge hold.
+    /// The kernel short-circuits to `Verdict::Escalated` before running
+    /// invariant checks — the action is paused (not denied) pending review.
+    /// Populate from `ContestHold::escalation_reason()` in exo-escalation.
+    pub active_challenge_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +92,14 @@ impl Kernel {
     }
 
     pub fn adjudicate(&self, action: &ActionRequest, context: &AdjudicationContext) -> Verdict {
+        // Short-circuit: an active Sybil challenge hold pauses the action
+        // (Escalated, not Denied) so it can be reviewed rather than blocked.
+        if let Some(ref reason) = context.active_challenge_reason {
+            return Verdict::Escalated {
+                reason: reason.clone(),
+            };
+        }
+
         let inv_ctx = InvariantContext {
             actor: action.actor.clone(),
             actor_roles: context.actor_roles.clone(),
@@ -140,6 +153,7 @@ impl Kernel {
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::types::{AuthorityLink, GovernmentBranch, Permission, QuorumVote};
@@ -196,8 +210,13 @@ mod tests {
                 timestamp: "2025-01-01T00:00:00Z".into(),
                 action_hash: vec![1, 2, 3],
                 signature: vec![4, 5, 6],
+                public_key: None,
+                voice_kind: None,
+                independence: None,
+                review_order: None,
             }),
             quorum_evidence: None,
+            active_challenge_reason: None,
         }
     }
 
@@ -349,11 +368,13 @@ mod tests {
                     voter: did("did:exo:v1"),
                     approved: true,
                     signature: vec![1],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v2"),
                     approved: false,
                     signature: vec![2],
+                    provenance: None,
                 },
             ],
         });
@@ -382,5 +403,208 @@ mod tests {
                 .len(),
             8
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WO-009: No-Admin Preservation
+    //
+    // CR-001 §8.9 — "No admins is ratified as a definitional guardrail."
+    // Any implementation shortcut creating a de facto admin bypass of AEGIS
+    // SHALL be prohibited.
+    //
+    // Audit finding (2026-03-30): no bypass paths found in any crate.
+    // Kernel::adjudicate is the single adjudication codepath.  The tests
+    // below explicitly verify that known escalation patterns — inflated
+    // permissions, multi-branch roles, empty authority chains, suppressed
+    // human oversight, and kernel modification attempts — are all denied.
+    // -----------------------------------------------------------------------
+    mod no_admin_bypass {
+        use super::*;
+
+        /// WO-009 §1: The gateway dev-scaffold context (BailmentState::None +
+        /// empty AuthorityChain) MUST be denied.  It is NOT a bypass path.
+        #[test]
+        fn dev_scaffold_context_is_deny_all() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:any-actor");
+            let scaffold_ctx = AdjudicationContext {
+                actor_roles: vec![],
+                authority_chain: AuthorityChain::default(),
+                consent_records: vec![],
+                bailment_state: BailmentState::None,
+                human_override_preserved: true,
+                actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+                provenance: None,
+                quorum_evidence: None,
+                active_challenge_reason: None,
+            };
+            assert!(
+                kernel
+                    .adjudicate(&valid_action(&actor), &scaffold_ctx)
+                    .is_denied(),
+                "WO-009: dev-scaffold context must be denied — BailmentState::None \
+                 fails ConsentRequired invariant"
+            );
+        }
+
+        /// WO-009 §2: Holding all three constitutional branches simultaneously
+        /// is denied by SeparationOfPowers.  No omnipotent admin role exists.
+        #[test]
+        fn all_government_branches_simultaneously_denied() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:multi-branch-admin");
+            let mut ctx = valid_context(&actor);
+            ctx.actor_roles = vec![
+                Role {
+                    name: "executive-admin".into(),
+                    branch: GovernmentBranch::Executive,
+                },
+                Role {
+                    name: "legislator".into(),
+                    branch: GovernmentBranch::Legislative,
+                },
+                Role {
+                    name: "judge".into(),
+                    branch: GovernmentBranch::Judicial,
+                },
+            ];
+            assert!(
+                kernel.adjudicate(&valid_action(&actor), &ctx).is_denied(),
+                "WO-009: omnipotent multi-branch actor must be denied by SeparationOfPowers"
+            );
+        }
+
+        /// WO-009 §3: Inflated permission sets cannot override ConsentRequired.
+        /// No permission label — including "admin" or "override" — bypasses
+        /// bailment enforcement.
+        #[test]
+        fn maximum_permissions_cannot_bypass_consent() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:permission-inflated");
+            let mut ctx = valid_context(&actor);
+            ctx.actor_permissions = PermissionSet::new(vec![
+                Permission::new("read"),
+                Permission::new("write"),
+                Permission::new("admin"),
+                Permission::new("execute"),
+                Permission::new("override"),
+            ]);
+            ctx.bailment_state = BailmentState::None;
+            assert!(
+                kernel.adjudicate(&valid_action(&actor), &ctx).is_denied(),
+                "WO-009: inflated permission set must not bypass ConsentRequired invariant"
+            );
+        }
+
+        /// WO-009 §4: An empty authority chain is never permitted, even when all
+        /// other context fields are valid.  Per kernel escalation rules, an
+        /// isolated AuthorityChainValid violation escalates (not denies) — the
+        /// important WO-009 guarantee is that it is NOT `Permitted`.
+        #[test]
+        fn empty_authority_chain_not_permitted() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:no-chain");
+            let mut ctx = valid_context(&actor);
+            ctx.authority_chain = AuthorityChain::default();
+            let verdict = kernel.adjudicate(&valid_action(&actor), &ctx);
+            assert!(
+                !verdict.is_permitted(),
+                "WO-009: empty authority chain must not be permitted \
+                 (escalated or denied, never Permitted)"
+            );
+        }
+
+        /// WO-009 §5: human_override_preserved = false is always denied.
+        /// No admin path can suppress human oversight of AEGIS.
+        #[test]
+        fn human_override_suppression_is_non_bypassable() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:override-suppressor");
+            let mut ctx = valid_context(&actor);
+            ctx.human_override_preserved = false;
+            assert!(
+                kernel.adjudicate(&valid_action(&actor), &ctx).is_denied(),
+                "WO-009: human override suppression must always be denied by HumanOverride"
+            );
+        }
+
+        /// WO-009 §6: modifies_kernel = true is always denied.
+        /// Kernel immutability is unconditional — no escalation path exists.
+        #[test]
+        fn kernel_modification_always_denied() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:kernel-patcher");
+            let mut action = valid_action(&actor);
+            action.modifies_kernel = true;
+            assert!(
+                kernel
+                    .adjudicate(&action, &valid_context(&actor))
+                    .is_denied(),
+                "WO-009: modifies_kernel must always be denied by KernelImmutability"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // WO-005: Challenge paths — contested actions return Escalated, not Denied
+    // CR-001 §8.5 — any active Sybil challenge hold pauses the action.
+    // -----------------------------------------------------------------------
+    mod challenge_paths {
+        use super::*;
+
+        /// WO-005: An action under an active Sybil challenge returns
+        /// Verdict::Escalated so it is paused (not denied) pending review.
+        #[test]
+        fn active_challenge_escalates_not_denies() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:actor1");
+            let mut ctx = valid_context(&actor);
+            ctx.active_challenge_reason =
+                Some("SybilChallenge/CoordinatedManipulation: action under review".into());
+            match kernel.adjudicate(&valid_action(&actor), &ctx) {
+                Verdict::Escalated { reason } => {
+                    assert!(
+                        reason.contains("SybilChallenge"),
+                        "escalation reason must identify the challenge"
+                    );
+                }
+                other => panic!(
+                    "WO-005: active challenge must produce Escalated, got {:?}",
+                    other
+                ),
+            }
+        }
+
+        /// WO-005: Without a challenge, the same context produces Permitted.
+        #[test]
+        fn no_challenge_is_not_escalated() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:actor1");
+            let ctx = valid_context(&actor);
+            assert!(
+                kernel
+                    .adjudicate(&valid_action(&actor), &ctx)
+                    .is_permitted(),
+                "WO-005: no active challenge must not cause escalation"
+            );
+        }
+
+        /// WO-005: Challenge escalation takes priority over invariant checks —
+        /// even an otherwise-denied action is escalated (not denied) while
+        /// the challenge is pending.
+        #[test]
+        fn challenge_takes_priority_over_denial() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:actor1");
+            let mut ctx = valid_context(&actor);
+            // Would normally be denied (ConsentRequired: BailmentState::None)
+            ctx.bailment_state = BailmentState::None;
+            ctx.active_challenge_reason =
+                Some("SybilChallenge/QuorumContamination: pause-eligible".into());
+            match kernel.adjudicate(&valid_action(&actor), &ctx) {
+                Verdict::Escalated { .. } => {}
+                other => panic!("WO-005: challenge must pre-empt denial, got {:?}", other),
+            }
+        }
     }
 }

@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sqlx::Row;
 
-use crate::AppState;
+use crate::server::AppState;
 
 // ── Violation 3 fix: CBOR canonical hashing ──────────────────────────────
 
@@ -38,6 +38,7 @@ async fn write_audit(
     actor: &str,
     payload: &Value,
 ) -> Result<(), String> {
+    let db = state.require_db().map_err(|e| e.to_string())?;
     let event_hash = canonical_hash(payload)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     sqlx::query(
@@ -49,7 +50,7 @@ async fn write_audit(
     .bind(event_hash.to_hex().as_str())
     .bind(payload)
     .bind(now_ms)
-    .execute(&state.db)
+    .execute(db)
     .await
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -132,10 +133,22 @@ pub async fn vote_handler(
         }
     }
 
+    // Require DB pool — return 503 if not configured.
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
     // Load decision
     let row = sqlx::query("SELECT payload FROM decisions WHERE id_hash = $1")
         .bind(&body.decision_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(db)
         .await;
     let mut payload: Value = match row {
         Ok(Some(r)) => match r.try_get::<Value, _>("payload") {
@@ -187,7 +200,7 @@ pub async fn vote_handler(
     if let Err(e) = sqlx::query("UPDATE decisions SET payload = $1 WHERE id_hash = $2")
         .bind(&payload)
         .bind(&body.decision_id)
-        .execute(&state.db)
+        .execute(db)
         .await
     {
         return (
@@ -223,15 +236,22 @@ pub async fn vote_handler(
 // ── Health handler ────────────────────────────────────────────────────────
 
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(&state.db).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "db": "connected"})),
-        )
-            .into_response(),
-        Err(e) => (
+    match state.require_db() {
+        Ok(pool) => match sqlx::query("SELECT 1").execute(pool).await {
+            Ok(_) => (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "db": "connected"})),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"status": "degraded", "error": e.to_string()})),
+            )
+                .into_response(),
+        },
+        Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"status": "degraded", "error": e.to_string()})),
+            Json(serde_json::json!({"status": "no_db_configured"})),
         )
             .into_response(),
     }

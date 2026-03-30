@@ -9,7 +9,7 @@
 use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::GovernanceError;
+use crate::errors::GovernanceError;
 
 /// A named role in the governance structure.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -78,7 +78,7 @@ pub struct SuccessionResult {
 ///
 /// # Errors
 /// - `GovernanceError::ActionNotFound` if the plan has no successors.
-/// - `GovernanceError::InvalidStateTransition` if the trigger conditions are not met.
+/// - `GovernanceError::InvalidTransition` if the trigger conditions are not met.
 pub fn activate_succession(
     plan: &SuccessionPlan,
     trigger: SuccessionTrigger,
@@ -101,7 +101,7 @@ pub fn activate_succession(
             // Check that enough time has elapsed
             let elapsed = now.physical_ms.saturating_sub(last_active.physical_ms);
             if elapsed < *duration_ms {
-                return Err(GovernanceError::InvalidStateTransition {
+                return Err(GovernanceError::InvalidTransition {
                     from: "active".into(),
                     to: format!(
                         "succession (need {}ms unresponsive, only {}ms elapsed)",
@@ -113,7 +113,7 @@ pub fn activate_succession(
         SuccessionTrigger::DesignatedActivator { activator } => {
             // The activator must not be the current holder (they should use Declaration)
             if *activator == plan.current_holder {
-                return Err(GovernanceError::InvalidStateTransition {
+                return Err(GovernanceError::InvalidTransition {
                     from: "self-activation".into(),
                     to: "use Declaration trigger for voluntary step-down".into(),
                 });
@@ -191,7 +191,7 @@ mod tests {
         let err = activate_succession(&plan, trigger, &ts(1_801_000));
         assert!(matches!(
             err,
-            Err(GovernanceError::InvalidStateTransition { .. })
+            Err(GovernanceError::InvalidTransition { .. })
         ));
     }
 
@@ -217,7 +217,7 @@ mod tests {
         let err = activate_succession(&plan, trigger, &ts(5000));
         assert!(matches!(
             err,
-            Err(GovernanceError::InvalidStateTransition { .. })
+            Err(GovernanceError::InvalidTransition { .. })
         ));
     }
 

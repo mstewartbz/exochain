@@ -78,7 +78,7 @@ pub enum EventPayload {
         decision_id: Blake3Hash,
         discloser: Did,
     },
-    // --- Holon lifecycle events (per spec v2.1 Section 3A) ---
+    // --- Holon lifecycle events (per EXOCHAIN Specification v2.2 §3A) ---
     HolonCreated {
         holon_did: Did,
         sponsor_did: Did,

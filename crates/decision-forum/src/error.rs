@@ -101,8 +101,8 @@ impl From<exo_core::ExoError> for ForumError {
     }
 }
 
-impl From<exo_governance::error::GovernanceError> for ForumError {
-    fn from(e: exo_governance::error::GovernanceError) -> Self {
+impl From<exo_governance::GovernanceError> for ForumError {
+    fn from(e: exo_governance::GovernanceError) -> Self {
         ForumError::Governance(e.to_string())
     }
 }

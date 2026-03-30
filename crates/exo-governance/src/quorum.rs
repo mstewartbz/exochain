@@ -6,7 +6,8 @@
 use exo_core::{Did, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::GovernanceError;
+use crate::challenge::{Challenge, ChallengeStatus};
+use crate::errors::GovernanceError;
 
 /// Roles that can participate in governance actions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,17 +119,48 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
     }
 }
 
+/// Compute quorum with active-challenge guard.
+///
+/// If any challenge in `open_challenges` is still `Filed` or `UnderReview`,
+/// the result is `Contested` — the unresolved independence challenge blocks
+/// quorum achievement per CR-001 §8.4.  Only when all challenges are
+/// resolved (Sustained, Overruled, or Withdrawn) does this delegate to the
+/// standard `compute_quorum`.
+#[must_use]
+pub fn compute_quorum_with_challenges(
+    approvals: &[Approval],
+    policy: &QuorumPolicy,
+    open_challenges: &[&Challenge],
+) -> QuorumResult {
+    if let Some(blocking) = open_challenges.iter().find(|c| {
+        matches!(
+            c.status,
+            ChallengeStatus::Filed | ChallengeStatus::UnderReview
+        )
+    }) {
+        return QuorumResult::Contested {
+            challenge: format!(
+                "unresolved independence challenge {} on ground {:?}",
+                blocking.id, blocking.ground
+            ),
+        };
+    }
+    compute_quorum(approvals, policy)
+}
+
 /// Validate a single approval's basic structure.
 pub fn validate_approval(approval: &Approval) -> Result<(), GovernanceError> {
     if approval.approver_did.as_str().is_empty() {
         return Err(GovernanceError::QuorumNotMet {
-            reason: "empty approver DID".to_string(),
+            required: 1,
+            present: 0,
         });
     }
     Ok(())
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use exo_core::crypto;
 
@@ -317,5 +349,108 @@ mod tests {
             challenge: "test".to_string(),
         };
         assert!(matches!(contested, QuorumResult::Contested { .. }));
+    }
+
+    // ── WO-004: challenge-blocked quorum ──────────────────────────────────────
+
+    use crate::challenge::{ChallengeGround, ChallengeStatus, file_challenge};
+
+    fn target() -> [u8; 32] {
+        [1u8; 32]
+    }
+    fn challenger_did() -> Did {
+        did("challenger")
+    }
+
+    #[test]
+    fn open_challenge_blocks_quorum() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let ch = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"coordinated approvers suspected",
+        );
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Contested { .. }
+        ));
+    }
+
+    #[test]
+    fn under_review_challenge_blocks_quorum() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let mut ch = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::QuorumViolation,
+            b"",
+        );
+        ch.status = ChallengeStatus::UnderReview;
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Contested { .. }
+        ));
+    }
+
+    #[test]
+    fn resolved_challenge_does_not_block_quorum() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let mut ch = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"",
+        );
+        ch.status = ChallengeStatus::Overruled;
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Met { .. }
+        ));
+    }
+
+    #[test]
+    fn no_challenges_delegates_to_compute_quorum() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        assert_eq!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[]),
+            compute_quorum(&approvals, &default_policy())
+        );
+    }
+
+    #[test]
+    fn withdrawn_challenge_does_not_block_quorum() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let mut ch = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"",
+        );
+        ch.status = ChallengeStatus::Withdrawn;
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Met { .. }
+        ));
     }
 }

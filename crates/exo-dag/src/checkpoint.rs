@@ -44,10 +44,10 @@ pub struct ValidatorSignature {
     pub signature: Signature,
 }
 
-/// Domain separation tag for checkpoint signing (Spec 9.4).
+/// Domain separation tag for checkpoint signing (EXOCHAIN Specification v2.2 §9.4).
 pub const CHECKPOINT_DOMAIN_SEP: &[u8] = b"EXOCHAIN-CHECKPOINT-v1";
 
-/// Compute the normative checkpoint signing preimage (Spec 9.4).
+/// Compute the normative checkpoint signing preimage (EXOCHAIN Specification v2.2 §9.4).
 ///
 /// The preimage layout is:
 /// `[domain_sep | event_root | state_root | height_le | finalized_events_le | frontier...]`

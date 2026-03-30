@@ -1,5 +1,6 @@
 //! API route definitions — BCTS lifecycle, identity, governance endpoints.
 use exo_core::Did;
+use exo_identity::did::DidRegistry;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -32,12 +33,13 @@ pub struct RouteResult {
 /// Process a request through the full middleware chain: auth -> consent -> governance -> execution.
 pub fn process_request(
     request: &Request,
+    registry: &DidRegistry,
     route: Route,
     consent: bool,
     verdict: &Verdict,
     log: &mut AuditLog,
 ) -> Result<RouteResult> {
-    let actor = authenticate(request)?;
+    let actor = authenticate(request, registry)?;
     consent_middleware(&actor.did, &request.action, consent)?;
     governance_middleware(&actor.did, &request.action, verdict)?;
     let result = RouteResult {
@@ -58,32 +60,63 @@ pub fn default_deny_check(actor: &Did, action: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::{
         Hash256, Timestamp,
         crypto::{generate_keypair, sign},
     };
+    use exo_identity::did::{DidDocument, DidRegistry, VerificationMethod};
 
     use super::*;
 
-    fn req() -> Request {
-        let (_pk, sk) = generate_keypair();
+    /// Create a registry with `did:exo:alice` and return the registry +
+    /// a signed request using alice's key.
+    fn alice_registry_and_req() -> (DidRegistry, Request) {
+        let did = Did::new("did:exo:alice").unwrap();
+        let (pk, sk) = generate_keypair();
+        let multibase = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
+        let doc = DidDocument {
+            id: did.clone(),
+            public_keys: vec![pk],
+            authentication: vec![],
+            verification_methods: vec![VerificationMethod {
+                id: "did:exo:alice#key-1".into(),
+                key_type: "Ed25519VerificationKey2020".into(),
+                controller: did,
+                public_key_multibase: multibase,
+                version: 1,
+                active: true,
+                valid_from: 0,
+                revoked_at: None,
+            }],
+            service_endpoints: vec![],
+            created: Timestamp::ZERO,
+            updated: Timestamp::ZERO,
+            revoked: false,
+        };
+        let mut reg = DidRegistry::new();
+        reg.register(doc).unwrap();
+
         let body_hash = Hash256::digest(b"route-test");
-        let signature = sign(body_hash.as_ref(), &sk);
-        Request {
+        let signature = sign(body_hash.as_bytes(), &sk);
+        let req = Request {
             actor_did: "did:exo:alice".into(),
             action: "create".into(),
             body_hash,
             signature,
             timestamp: Timestamp::ZERO,
-        }
+        };
+        (reg, req)
     }
 
     #[test]
     fn full_chain_ok() {
+        let (reg, req) = alice_registry_and_req();
         let mut log = AuditLog::new();
         let r = process_request(
-            &req(),
+            &req,
+            &reg,
             Route::CreateTransaction,
             true,
             &Verdict::Allow,
@@ -92,16 +125,19 @@ mod tests {
         assert!(r.is_ok());
         assert_eq!(log.len(), 1);
     }
+
     #[test]
     fn auth_fails() {
+        let (reg, req) = alice_registry_and_req();
         let mut log = AuditLog::new();
         let bad = Request {
             actor_did: "bad".into(),
-            ..req()
+            ..req
         };
         assert!(
             process_request(
                 &bad,
+                &reg,
                 Route::CreateTransaction,
                 true,
                 &Verdict::Allow,
@@ -110,12 +146,15 @@ mod tests {
             .is_err()
         );
     }
+
     #[test]
     fn consent_fails() {
+        let (reg, req) = alice_registry_and_req();
         let mut log = AuditLog::new();
         assert!(
             process_request(
-                &req(),
+                &req,
+                &reg,
                 Route::CreateTransaction,
                 false,
                 &Verdict::Allow,
@@ -124,12 +163,15 @@ mod tests {
             .is_err()
         );
     }
+
     #[test]
     fn governance_fails() {
+        let (reg, req) = alice_registry_and_req();
         let mut log = AuditLog::new();
         assert!(
             process_request(
-                &req(),
+                &req,
+                &reg,
                 Route::CreateTransaction,
                 true,
                 &Verdict::Deny {

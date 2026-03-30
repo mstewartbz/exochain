@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    error::GovernanceError,
+    errors::GovernanceError,
     quorum::{Approval, IndependenceAttestation, QuorumPolicy, QuorumResult, Role, compute_quorum},
 };
 
