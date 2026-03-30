@@ -1,0 +1,24 @@
+# CI-only Docker Compose — spins up a minimal Postgres instance for
+# integration-tests-db (Gate 13).  Not intended for local dev; use
+# docker-compose.yml for that.
+#
+# Credentials are intentionally hard-coded for CI isolation:
+#   POSTGRES_DB=exochain_test
+#   POSTGRES_USER=exochain
+#   POSTGRES_PASSWORD=test
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: exochain_test
+      POSTGRES_USER: exochain
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exochain -d exochain_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s

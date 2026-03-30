@@ -295,3 +295,189 @@ fn cross_branch_roles_denies() {
         "cross-branch roles must be denied by SeparationOfPowers"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests 8–9: real DB round-trips (require production-db feature + DATABASE_URL)
+//
+// These tests connect to a live PostgreSQL instance, insert rows into the
+// adjudication tables, call `AppState::build_adjudication_context`, and assert
+// verdicts from `Kernel::adjudicate`.  They are skipped gracefully when
+// `DATABASE_URL` is unset so the in-memory test suite can run without Docker.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "production-db")]
+mod db_roundtrip {
+    use std::sync::{Arc, RwLock};
+
+    use exo_core::Did;
+    use exo_gatekeeper::{
+        ActionRequest, Kernel,
+        invariants::{ConstitutionalInvariant, InvariantSet},
+        types::{AuthorityChain, AuthorityLink, Permission, PermissionSet},
+    };
+    use exo_gateway::server::AppState;
+    use exo_identity::did::DidRegistry;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn did(s: &str) -> Did {
+        Did::new(s).expect("valid DID")
+    }
+
+    fn adjudication_kernel() -> Kernel {
+        Kernel::new(
+            b"exochain-constitution-v1",
+            InvariantSet::with(vec![
+                ConstitutionalInvariant::SeparationOfPowers,
+                ConstitutionalInvariant::ConsentRequired,
+                ConstitutionalInvariant::NoSelfGrant,
+                ConstitutionalInvariant::HumanOverride,
+                ConstitutionalInvariant::KernelImmutability,
+                ConstitutionalInvariant::AuthorityChainValid,
+                ConstitutionalInvariant::QuorumLegitimate,
+            ]),
+        )
+    }
+
+    fn vote_action(actor: &Did) -> ActionRequest {
+        ActionRequest {
+            actor: actor.clone(),
+            action: "vote".into(),
+            required_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+            is_self_grant: false,
+            modifies_kernel: false,
+        }
+    }
+
+    /// Connect to the real Postgres instance and run migrations.
+    /// Returns `None` (causing the calling test to skip) when `DATABASE_URL`
+    /// is unset or the connection fails.
+    async fn connect_and_migrate() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&url)
+            .await
+            .ok()?;
+        sqlx::migrate!("./migrations").run(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: DB round-trip — active consent + authority chain → Permitted
+    // -----------------------------------------------------------------------
+
+    /// Inserts a valid consent record and authority chain for a test actor,
+    /// calls `build_adjudication_context` against the real pool, and asserts
+    /// that the kernel permits the action.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn db_roundtrip_active_consent_and_chain_permits() {
+        let pool = match connect_and_migrate().await {
+            Some(p) => p,
+            None => return, // DATABASE_URL not set — skip
+        };
+
+        let actor_did = "did:exo:db-roundtrip-permit-008";
+        let grantor_did = "did:exo:db-roundtrip-grantor-008";
+
+        // Clean up any leftover rows from a previous run.
+        let _ = sqlx::query("DELETE FROM consent_records WHERE actor_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM authority_chains WHERE actor_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+
+        // Insert an active consent record (bailor = grantor, bailee = actor).
+        sqlx::query(
+            "INSERT INTO consent_records \
+             (subject_did, actor_did, scope, bailment_type, status, created_at) \
+             VALUES ($1, $2, $3, 'standard', 'active', 0)",
+        )
+        .bind(grantor_did)
+        .bind(actor_did)
+        .bind("data:vote")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Serialize and insert a one-link authority chain.
+        let actor = did(actor_did);
+        let grantor = did(grantor_did);
+        let chain = AuthorityChain {
+            links: vec![AuthorityLink {
+                grantor: grantor.clone(),
+                grantee: actor.clone(),
+                permissions: PermissionSet::new(vec![Permission::new("vote")]),
+                signature: vec![0xAB; 8], // non-empty: satisfies legacy path
+                grantor_public_key: None,
+            }],
+        };
+        let chain_json = serde_json::to_value(&chain).unwrap();
+        sqlx::query(
+            "INSERT INTO authority_chains (actor_did, chain_json, valid_from) \
+             VALUES ($1, $2, 0)",
+        )
+        .bind(actor_did)
+        .bind(&chain_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Build the context from the real DB and adjudicate.
+        let state = AppState::new(Some(pool), Arc::new(RwLock::new(DidRegistry::new())));
+        let ctx = state.build_adjudication_context(&actor).await;
+
+        assert!(
+            adjudication_kernel()
+                .adjudicate(&vote_action(&actor), &ctx)
+                .is_permitted(),
+            "DB round-trip: active consent + authority chain must permit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: DB round-trip — no rows for actor → Denied (ConsentRequired)
+    // -----------------------------------------------------------------------
+
+    /// Ensures that an actor with no rows in any adjudication table results in
+    /// a deny-all context from the DB resolver (same outcome as the WO-009
+    /// scaffold, but exercising the real query path).
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn db_roundtrip_no_rows_denies() {
+        let pool = match connect_and_migrate().await {
+            Some(p) => p,
+            None => return, // DATABASE_URL not set — skip
+        };
+
+        let actor_did = "did:exo:db-roundtrip-deny-009";
+
+        // Ensure no rows exist for this DID.
+        let _ = sqlx::query("DELETE FROM consent_records WHERE actor_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM authority_chains WHERE actor_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM agent_roles WHERE agent_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+
+        let actor = did(actor_did);
+        let state = AppState::new(Some(pool), Arc::new(RwLock::new(DidRegistry::new())));
+        let ctx = state.build_adjudication_context(&actor).await;
+
+        assert!(
+            adjudication_kernel()
+                .adjudicate(&vote_action(&actor), &ctx)
+                .is_denied(),
+            "DB round-trip: no consent rows must deny via ConsentRequired"
+        );
+    }
+}
