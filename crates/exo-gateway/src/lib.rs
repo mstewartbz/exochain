@@ -3,6 +3,7 @@ pub mod auth;
 pub mod db;
 pub mod error;
 pub mod graphql;
+pub mod handlers;
 pub mod middleware;
 pub mod rest;
 pub mod routes;

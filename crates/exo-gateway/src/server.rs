@@ -9,6 +9,12 @@ use axum::{
     routing::{get, post},
 };
 use exo_core::Did;
+use exo_gatekeeper::{
+    invariants::InvariantSet,
+    kernel::{AdjudicationContext, Kernel},
+    types::{AuthorityChain, BailmentState, Permission, PermissionSet},
+};
+use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::did::{DidDocument, DidRegistry};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -86,21 +92,65 @@ pub struct AppState {
     pub pool: Option<sqlx::PgPool>,
     /// In-memory DID registry shared across all request handlers.
     pub registry: Arc<RwLock<DidRegistry>>,
+    /// Constitutional kernel — enforces the 8 invariants on every action.
+    pub kernel: Arc<Kernel>,
     /// Wall-clock milliseconds at server start, used to compute uptime.
     start_ms: u64,
 }
 
 impl AppState {
     pub fn new(pool: Option<sqlx::PgPool>, registry: Arc<RwLock<DidRegistry>>) -> Self {
+        // Bootstrap kernel with the all-invariants set.
+        // constitution bytes are hashed for immutability verification.
+        let kernel = Kernel::new(b"exochain-constitution-v1", InvariantSet::all());
         Self {
             pool,
             registry,
+            kernel: Arc::new(kernel),
             start_ms: now_ms(),
         }
     }
 
     fn uptime_seconds(&self) -> u64 {
         now_ms().saturating_sub(self.start_ms) / 1000
+    }
+
+    /// Return the DB pool or a 503 if none is configured.
+    pub fn require_db(&self) -> Result<&sqlx::PgPool> {
+        self.pool.as_ref().ok_or_else(|| {
+            GatewayError::Internal("no database configured — start with DATABASE_URL".into())
+        })
+    }
+
+    /// Load conflict declarations for an actor.
+    ///
+    /// Currently returns an empty list until the DB schema includes a
+    /// `conflict_declarations` table.  Handlers should call
+    /// `.await.unwrap_or_default()` for graceful degradation.
+    pub async fn load_conflict_declarations(
+        &self,
+        _actor: &Did,
+    ) -> std::result::Result<Vec<ConflictDeclaration>, GatewayError> {
+        // TODO: query `conflict_declarations` table when DB is available
+        Ok(vec![])
+    }
+
+    /// Build a minimal adjudication context for the given actor.
+    ///
+    /// For endpoints that are functional before full role/consent databases
+    /// are available.  Sets `human_override_preserved: true` and grants the
+    /// actor the `"vote"` permission so the Kernel can permit basic actions.
+    pub async fn build_adjudication_context(&self, _actor: &Did) -> AdjudicationContext {
+        AdjudicationContext {
+            actor_roles: vec![],
+            authority_chain: AuthorityChain::default(),
+            consent_records: vec![],
+            bailment_state: BailmentState::None,
+            human_override_preserved: true,
+            actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+            provenance: None,
+            quorum_evidence: None,
+        }
     }
 }
 
