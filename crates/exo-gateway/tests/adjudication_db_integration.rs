@@ -123,7 +123,11 @@ async fn scaffold_denies_all_requests() {
     let actor = did("did:exo:actor001");
     let ctx = state.build_adjudication_context(&actor).await;
 
-    assert_eq!(ctx.bailment_state, BailmentState::None, "WO-009: bailment must be None");
+    assert_eq!(
+        ctx.bailment_state,
+        BailmentState::None,
+        "WO-009: bailment must be None"
+    );
     assert!(ctx.actor_roles.is_empty(), "WO-009: no roles");
     assert!(ctx.authority_chain.is_empty(), "WO-009: no authority chain");
 
@@ -131,7 +135,10 @@ async fn scaffold_denies_all_requests() {
     // the scaffold truly denies even a complete Kernel.
     let kernel = Kernel::new(b"exochain-constitution-v1", InvariantSet::all());
     let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
-    assert!(verdict.is_denied(), "scaffold must always deny: {verdict:?}");
+    assert!(
+        verdict.is_denied(),
+        "scaffold must always deny: {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +212,10 @@ fn consent_and_authority_chain_permits() {
     let actor = did("did:exo:actor005");
     let ctx = full_db_context(&actor);
 
-    assert!(!ctx.authority_chain.is_empty(), "authority chain must be non-empty");
+    assert!(
+        !ctx.authority_chain.is_empty(),
+        "authority chain must be non-empty"
+    );
     assert!(ctx.bailment_state.is_active(), "bailment must be active");
 
     assert!(
@@ -226,7 +236,10 @@ fn revoked_consent_denies() {
     let actor = did("did:exo:actor006");
     let grantor = did("did:exo:root-grantor");
     let ctx = AdjudicationContext {
-        actor_roles: vec![Role { name: "voter".into(), branch: GovernmentBranch::Executive }],
+        actor_roles: vec![Role {
+            name: "voter".into(),
+            branch: GovernmentBranch::Executive,
+        }],
         authority_chain: AuthorityChain {
             links: vec![AuthorityLink {
                 grantor: grantor.clone(),
@@ -268,8 +281,14 @@ fn cross_branch_roles_denies() {
     let actor = did("did:exo:actor007");
     let mut ctx = full_db_context(&actor);
     ctx.actor_roles = vec![
-        Role { name: "voter".into(), branch: GovernmentBranch::Executive },
-        Role { name: "legislator".into(), branch: GovernmentBranch::Legislative },
+        Role {
+            name: "voter".into(),
+            branch: GovernmentBranch::Executive,
+        },
+        Role {
+            name: "legislator".into(),
+            branch: GovernmentBranch::Legislative,
+        },
     ];
     assert!(
         kernel.adjudicate(&vote_action(&actor), &ctx).is_denied(),

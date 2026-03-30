@@ -29,8 +29,10 @@ use async_stream::stream;
 use axum::{Router, routing::get};
 use exo_consent::{
     bailment::{self, BailmentStatus, BailmentType},
-    policy::{ActionRequest as ConsentActionRequest, ActiveConsent, ConsentDecision, ConsentPolicy,
-             ConsentRequirement, PolicyEngine},
+    policy::{
+        ActionRequest as ConsentActionRequest, ActiveConsent, ConsentDecision, ConsentPolicy,
+        ConsentRequirement, PolicyEngine,
+    },
 };
 use exo_core::{Did, Hash256, Timestamp};
 use exo_identity::did::DidRegistry;
@@ -442,11 +444,7 @@ impl QueryRoot {
     ///
     /// Returns the registration status and key counts for the given DID.
     /// Wired end-to-end to `exo-identity::DidRegistry` (APE-35 acceptance criterion).
-    async fn resolve_identity(
-        &self,
-        ctx: &Context<'_>,
-        did: ID,
-    ) -> GqlResult<GqlIdentity> {
+    async fn resolve_identity(&self, ctx: &Context<'_>, did: ID) -> GqlResult<GqlIdentity> {
         let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
         let guard = state.lock().await;
         let did_str = did.to_string();
@@ -536,17 +534,20 @@ impl QueryRoot {
             action_type: action_type.clone(),
         };
         let now = Timestamp::now_utc();
-        let decision = guard.consent_engine.evaluate(&policy, &consents, &action, &now);
+        let decision = guard
+            .consent_engine
+            .evaluate(&policy, &consents, &action, &now);
         let (granted, message) = match decision {
             ConsentDecision::Granted { .. } => (
                 true,
-                format!("Consent granted: {actor_str} may perform '{action_type}' on {subject_str} scope '{scope}'"),
+                format!(
+                    "Consent granted: {actor_str} may perform '{action_type}' on {subject_str} scope '{scope}'"
+                ),
             ),
             ConsentDecision::Denied { reason } => (false, reason),
-            ConsentDecision::Escalated { to } => (
-                false,
-                format!("Escalated to {to} for manual review"),
-            ),
+            ConsentDecision::Escalated { to } => {
+                (false, format!("Escalated to {to} for manual review"))
+            }
         };
         Ok(GqlConsentResult {
             subject: subject_str,
@@ -1331,7 +1332,9 @@ mod tests {
     async fn query_resolve_identity_unknown_did() {
         let schema = build_test_schema();
         let res = schema
-            .execute(r#"{ resolveIdentity(did: "did:exo:unknown") { did registered activeKeyCount } }"#)
+            .execute(
+                r#"{ resolveIdentity(did: "did:exo:unknown") { did registered activeKeyCount } }"#,
+            )
             .await;
         assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
         let data = res.data.into_json().expect("data");
@@ -1375,7 +1378,9 @@ mod tests {
         let state = AppState::new_arc_with_registry(registry);
         let schema = build_schema(state);
         let res = schema
-            .execute(r#"{ resolveIdentity(did: "did:exo:alice") { did registered activeKeyCount } }"#)
+            .execute(
+                r#"{ resolveIdentity(did: "did:exo:alice") { did registered activeKeyCount } }"#,
+            )
             .await;
         assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
         let data = res.data.into_json().expect("data");
@@ -1420,7 +1425,11 @@ mod tests {
     async fn schema_includes_identity_and_consent_types() {
         let schema = build_test_schema();
         let res = schema.execute(r#"{ __schema { types { name } } }"#).await;
-        assert!(res.errors.is_empty(), "introspection errors: {:?}", res.errors);
+        assert!(
+            res.errors.is_empty(),
+            "introspection errors: {:?}",
+            res.errors
+        );
         let data = res.data.into_json().expect("data");
         let type_names: Vec<String> = data["__schema"]["types"]
             .as_array()

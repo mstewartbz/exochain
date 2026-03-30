@@ -1813,7 +1813,9 @@ mod tests {
 
     use exo_gatekeeper::{
         invariants::ConstitutionalInvariant,
-        types::{AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Role},
+        types::{
+            AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Role,
+        },
     };
 
     /// Returns a `Kernel` that checks all invariants **except** ProvenanceVerifiable.
