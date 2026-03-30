@@ -21,6 +21,8 @@ use tokio::net::TcpListener;
 
 use crate::{
     error::{GatewayError, Result},
+    graphql,
+    handlers::{health_handler as db_health_handler, vote_handler},
     rest::HealthResponse,
 };
 
@@ -234,10 +236,7 @@ async fn handle_auth_register(
 /// GET /api/v1/auth/me — resolve the caller's DID document.
 ///
 /// Requires `X-Actor-Did: did:exo:<id>` request header.
-async fn handle_auth_me(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn handle_auth_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let did_str = match headers.get("x-actor-did").and_then(|v| v.to_str().ok()) {
         Some(s) => s.to_owned(),
         None => {
@@ -335,13 +334,21 @@ async fn handle_agents_enroll(
 /// All 20 `RestRoute` paths are registered.  Unimplemented handlers return
 /// 501 until the full handler stack lands in a follow-up PR.
 pub fn build_router(state: AppState) -> Router {
+    // GraphQL sub-router has its own in-memory AppState (separate from
+    // the gateway AppState).  Build once and merge into the main router.
+    let gql_state = graphql::AppState::new_arc();
+    let schema = graphql::build_schema(gql_state);
+    let gql_router = graphql::graphql_router(schema);
+
     Router::new()
         // Probes
         .route("/health", get(handle_health))
         .route("/ready", get(handle_ready))
-        // Decisions
+        // DB health deep probe (requires pool to be configured)
+        .route("/health/db", get(db_health_handler))
+        // Decisions — vote handler enforces ConflictAdjudication + TNC-01
         .route("/api/v1/decisions/:id", get(handle_not_implemented))
-        .route("/api/v1/decisions", post(handle_not_implemented))
+        .route("/api/v1/decisions", post(vote_handler))
         // Auth
         .route("/api/v1/auth/token", post(handle_not_implemented))
         .route("/api/v1/auth/saml/callback", post(handle_not_implemented))
@@ -376,6 +383,8 @@ pub fn build_router(state: AppState) -> Router {
             post(handle_not_implemented),
         )
         .with_state(state)
+        // GraphQL sub-router has its own state — merge after with_state()
+        .merge(gql_router)
 }
 
 // ---------------------------------------------------------------------------
@@ -639,7 +648,12 @@ mod tests {
     async fn auth_me_missing_header_returns_400() {
         let app = build_router(state());
         let resp = app
-            .oneshot(Request::builder().uri("/api/v1/auth/me").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -689,13 +703,25 @@ mod tests {
         let st = AppState::new(None, registry);
         let app = build_router(st);
         let resp = app
-            .oneshot(Request::builder().uri("/api/v1/agents").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(val["agents"].as_array().unwrap().contains(&serde_json::json!("did:exo:listed")));
+        assert!(
+            val["agents"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("did:exo:listed"))
+        );
     }
 
     #[tokio::test]
@@ -748,5 +774,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn health_db_without_pool_returns_503() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/db")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn graphql_playground_returns_200() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/graphql")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn vote_route_without_authority_returns_403() {
+        let body = serde_json::to_string(&serde_json::json!({
+            "decision_id": "d1",
+            "voter_did": "did:exo:alice",
+            "choice": "yes",
+            "rationale": null,
+        }))
+        .unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/decisions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The Kernel adjudicates before the DB check.  The dev-scaffold context
+        // has BailmentState::None (fails ConsentRequired) and an empty authority
+        // chain (fails AuthorityChainValid), so the Kernel correctly returns 403
+        // before we ever reach the DB-pool check.
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
