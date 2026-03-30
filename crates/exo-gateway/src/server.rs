@@ -301,6 +301,222 @@ async fn handle_agent_get(
     }
 }
 
+/// GET /api/v1/identity/:did/score — return a trust-score for a registered DID.
+///
+/// Computes a scaffold score from the DID document's key material:
+/// - 0.0  DID not registered
+/// - 0.5  Registered but revoked or has no active verification methods
+/// - 0.75 Registered with active verification methods
+/// - 1.0  (reserved for governance-attested DIDs — future work)
+async fn handle_identity_score(
+    State(state): State<AppState>,
+    Path(did_str): Path<String>,
+) -> impl IntoResponse {
+    let did = match Did::new(&did_str) {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid DID format" })),
+            )
+                .into_response();
+        }
+    };
+    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
+    match reg.resolve(&did) {
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "did": did_str,
+                "registered": false,
+                "score": 0.0,
+                "factors": { "registered": false }
+            })),
+        )
+            .into_response(),
+        Some(doc) => {
+            let has_active_keys = !doc.verification_methods.is_empty();
+            let score: f64 = if doc.revoked || !has_active_keys {
+                0.5
+            } else {
+                0.75
+            };
+            Json(serde_json::json!({
+                "did": did_str,
+                "registered": true,
+                "score": score,
+                "factors": {
+                    "registered": true,
+                    "has_active_verification_methods": has_active_keys,
+                    "revoked": doc.revoked,
+                }
+            }))
+            .into_response()
+        }
+    }
+}
+
+/// GET /api/v1/tenants/:id/constitution — return the ExoChain constitutional invariants.
+///
+/// The constitution is embedded at compile time from the `exo-gatekeeper` invariant
+/// definitions.  Every tenant in an ExoChain deployment shares the same constitutional
+/// fabric; the `:id` path is accepted for API compatibility but currently ignored.
+async fn handle_get_constitution(Path(_id): Path<String>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": "exochain-constitution-v1",
+        "invariants": [
+            {
+                "name": "SeparationOfPowers",
+                "description": "No single actor may hold legislative + executive + judicial power."
+            },
+            {
+                "name": "ConsentRequired",
+                "description": "Action denied without active bailment consent."
+            },
+            {
+                "name": "NoSelfGrant",
+                "description": "An actor cannot expand its own permissions."
+            },
+            {
+                "name": "HumanOverride",
+                "description": "Emergency human intervention must always be possible."
+            },
+            {
+                "name": "KernelImmutability",
+                "description": "Kernel configuration cannot be modified after creation."
+            },
+            {
+                "name": "AuthorityChainValid",
+                "description": "Authority chain must be valid and unbroken."
+            },
+            {
+                "name": "QuorumLegitimate",
+                "description": "Quorum decisions must meet threshold requirements."
+            },
+            {
+                "name": "ProvenanceVerifiable",
+                "description": "All actions must have verifiable provenance."
+            }
+        ]
+    }))
+}
+
+/// GET /api/v1/users — list all registered user DIDs.
+///
+/// Currently backed by the same DID registry as the agents list.  In a multi-tenant
+/// deployment the user and agent registries would be separated; for now they share
+/// the in-memory store.
+async fn handle_users_list(State(state): State<AppState>) -> impl IntoResponse {
+    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
+    let dids: Vec<String> = reg.list_dids().into_iter().map(|s| s.to_owned()).collect();
+    Json(serde_json::json!({ "users": dids }))
+}
+
+/// GET /api/v1/decisions/:id — retrieve a specific decision record.
+///
+/// Requires a DB pool; returns 503 when the gateway starts without `DATABASE_URL`.
+async fn handle_decision_get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "database not configured",
+                    "message": "Start the gateway with DATABASE_URL to enable decision queries."
+                })),
+            )
+                .into_response();
+        }
+    };
+    match sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
+        "SELECT id, voter_did, choice, rationale, created_at \
+         FROM votes WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some((did_id, voter_did, choice, rationale, created_at))) => Json(serde_json::json!({
+            "id": did_id,
+            "voter_did": voter_did,
+            "choice": choice,
+            "rationale": rationale,
+            "created_at": created_at,
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "decision not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/audit/:decision_id — retrieve the audit trail for a decision.
+///
+/// Queries the `audit_log` table populated by the vote handler.  Requires a DB pool.
+async fn handle_audit_trail(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "database not configured",
+                    "message": "Start the gateway with DATABASE_URL to enable audit queries."
+                })),
+            )
+                .into_response();
+        }
+    };
+    match sqlx::query_as::<_, (String, String, String, serde_json::Value, i64)>(
+        "SELECT id, event_type, actor, payload, created_at \
+         FROM audit_log WHERE actor = $1 OR payload->>'decision_id' = $1 \
+         ORDER BY created_at ASC",
+    )
+    .bind(&decision_id)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => {
+            let entries: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|(id, event_type, actor, payload, created_at)| {
+                    serde_json::json!({
+                        "id": id,
+                        "event_type": event_type,
+                        "actor": actor,
+                        "payload": payload,
+                        "created_at": created_at,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "decision_id": decision_id,
+                "audit_entries": entries,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// POST /api/v1/agents/enroll — enroll an agent by registering its DID document.
 ///
 /// Identical to `POST /api/v1/auth/register`; the distinct path expresses the
@@ -347,7 +563,7 @@ pub fn build_router(state: AppState) -> Router {
         // DB health deep probe (requires pool to be configured)
         .route("/health/db", get(db_health_handler))
         // Decisions — vote handler enforces ConflictAdjudication + TNC-01
-        .route("/api/v1/decisions/:id", get(handle_not_implemented))
+        .route("/api/v1/decisions/:id", get(handle_decision_get))
         .route("/api/v1/decisions", post(vote_handler))
         // Auth
         .route("/api/v1/auth/token", post(handle_not_implemented))
@@ -366,18 +582,18 @@ pub fn build_router(state: AppState) -> Router {
             post(handle_not_implemented),
         )
         // Identity
-        .route("/api/v1/identity/:did/score", get(handle_not_implemented))
+        .route("/api/v1/identity/:did/score", get(handle_identity_score))
         // Tenant
         .route(
             "/api/v1/tenants/:id/constitution",
-            get(handle_not_implemented),
+            get(handle_get_constitution),
         )
         // Legal
         .route("/api/v1/ediscovery/export", post(handle_not_implemented))
         // Audit
-        .route("/api/v1/audit/:decision_id", get(handle_not_implemented))
+        .route("/api/v1/audit/:decision_id", get(handle_audit_trail))
         // Users
-        .route("/api/v1/users", get(handle_not_implemented))
+        .route("/api/v1/users", get(handle_users_list))
         .route(
             "/api/v1/users/:did/advance-pace",
             post(handle_not_implemented),
@@ -580,11 +796,14 @@ mod tests {
         // NOTE: /api/v1/agents/:did is excluded here because it returns 404
         // when the DID is not registered — that behaviour is tested separately.
         let paths = [
+            // decisions GET returns 503 (no DB) not 404 — route exists
             "/api/v1/decisions/some-id",
             "/api/v1/auth/me",
             "/api/v1/agents",
-            "/api/v1/identity/did:exo:alice/score",
+            // identity score for unregistered DID returns 404 by design;
+            // excluded here — tested separately in identity_score_* tests
             "/api/v1/users",
+            // audit returns 503 (no DB) not 404 — route exists
             "/api/v1/audit/decision-123",
             "/api/v1/tenants/tenant-1/constitution",
         ];
@@ -832,5 +1051,112 @@ mod tests {
         // chain (fails AuthorityChainValid), so the Kernel correctly returns 403
         // before we ever reach the DB-pool check.
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // --- Identity score endpoint tests ---
+
+    #[tokio::test]
+    async fn identity_score_unregistered_did_returns_404() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/identity/did:exo:ghost/score")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn identity_score_registered_did_returns_200() {
+        let doc = minimal_doc("did:exo:scored");
+        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(None, registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/identity/did:exo:scored/score")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["registered"], true);
+        assert!(val["score"].as_f64().unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn constitution_returns_eight_invariants() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tenants/tenant-xyz/constitution")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["invariants"].as_array().unwrap().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn users_list_returns_200() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn decision_get_without_db_returns_503() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/decisions/some-decision-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn audit_trail_without_db_returns_503() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/decision-123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
