@@ -282,6 +282,39 @@ jobs:
         run: cargo test --workspace --test '*'
 
   # -----------------------------------------------------------------------
+  # Gate 13: DB-backed integration tests (production-db feature, live Postgres)
+  # -----------------------------------------------------------------------
+  integration-tests-db:
+    name: "Gate 13 — DB Integration Tests (production-db)"
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      DATABASE_URL: postgres://exochain:test@localhost:5432/exochain_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Postgres via docker compose
+        run: docker compose -f docker-compose.ci.yml up -d
+      - name: Wait for Postgres to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -U exochain -d exochain_test && break
+            echo "Waiting for postgres... ($i/30)"
+            sleep 3
+          done
+          pg_isready -h localhost -U exochain -d exochain_test
+      - name: Install sqlx-cli (postgres only, no default TLS)
+        run: cargo install sqlx-cli --no-default-features --features postgres,rustls
+      - name: Run migrations
+        run: sqlx migrate run --source crates/exo-gateway/migrations
+      - name: Run DB-backed integration tests
+        run: cargo test --workspace --test '*' --features exo-gateway/production-db
+      - name: Stop Postgres
+        if: always()
+        run: docker compose -f docker-compose.ci.yml down
+
+  # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
   # -----------------------------------------------------------------------
   all-gates:
@@ -300,6 +333,7 @@ jobs:
       - sbom
       - machete
       - integration-tests
+      - integration-tests-db
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."

@@ -17,6 +17,7 @@ use exo_gatekeeper::{
 use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::did::{DidDocument, DidRegistry};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
@@ -533,6 +534,7 @@ async fn handle_users_list(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /api/v1/decisions/:id — retrieve a specific decision record.
 ///
+/// Returns the full serialized `DecisionObject` stored in the `decisions` table.
 /// Requires a DB pool; returns 503 when the gateway starts without `DATABASE_URL`.
 async fn handle_decision_get(
     State(state): State<AppState>,
@@ -551,22 +553,19 @@ async fn handle_decision_get(
                 .into_response();
         }
     };
-    match sqlx::query_as::<_, (String, String, String, Option<String>, i64)>(
-        "SELECT id, voter_did, choice, rationale, created_at \
-         FROM votes WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(db)
-    .await
+    match sqlx::query("SELECT payload FROM decisions WHERE id_hash = $1")
+        .bind(&id)
+        .fetch_optional(db)
+        .await
     {
-        Ok(Some((did_id, voter_did, choice, rationale, created_at))) => Json(serde_json::json!({
-            "id": did_id,
-            "voter_did": voter_did,
-            "choice": choice,
-            "rationale": rationale,
-            "created_at": created_at,
-        }))
-        .into_response(),
+        Ok(Some(row)) => match row.try_get::<serde_json::Value, _>("payload") {
+            Ok(payload) => Json::<serde_json::Value>(payload).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "decision not found" })),
@@ -1492,7 +1491,8 @@ mod tests {
         let body = serde_json::to_string(&serde_json::json!({
             "decision_id": "d1",
             "voter_did": "did:exo:alice",
-            "choice": "yes",
+            "choice": "Approve",
+            "actor_kind": "Human",
             "rationale": null,
         }))
         .unwrap();
