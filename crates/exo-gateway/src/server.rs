@@ -157,11 +157,7 @@ impl AppState {
 }
 
 fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+    exo_core::Timestamp::now_utc().physical_ms
 }
 
 // ---------------------------------------------------------------------------
@@ -192,17 +188,6 @@ async fn handle_ready(State(state): State<AppState>) -> (StatusCode, Json<Health
         uptime_seconds: state.uptime_seconds(),
     };
     (http_status, Json(body))
-}
-
-/// Placeholder for endpoints that are defined but not yet fully implemented.
-async fn handle_not_implemented() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "not_implemented",
-            "message": "This endpoint is defined but not yet fully implemented. See EXOCHAIN-REM-001."
-        })),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -303,11 +288,11 @@ async fn handle_agent_get(
 
 /// GET /api/v1/identity/:did/score — return a trust-score for a registered DID.
 ///
-/// Computes a scaffold score from the DID document's key material:
-/// - 0.0  DID not registered
-/// - 0.5  Registered but revoked or has no active verification methods
-/// - 0.75 Registered with active verification methods
-/// - 1.0  (reserved for governance-attested DIDs — future work)
+/// Scores are expressed as basis points (integer, 0–10000 = 0%–100%):
+/// - 0     DID not registered
+/// - 5000  Registered but revoked or has no active verification methods
+/// - 7500  Registered with active verification methods
+/// - 10000 (reserved for governance-attested DIDs — future work)
 async fn handle_identity_score(
     State(state): State<AppState>,
     Path(did_str): Path<String>,
@@ -329,22 +314,22 @@ async fn handle_identity_score(
             Json(serde_json::json!({
                 "did": did_str,
                 "registered": false,
-                "score": 0.0,
+                "score_bps": 0u32,
                 "factors": { "registered": false }
             })),
         )
             .into_response(),
         Some(doc) => {
             let has_active_keys = !doc.verification_methods.is_empty();
-            let score: f64 = if doc.revoked || !has_active_keys {
-                0.5
+            let score_bps: u32 = if doc.revoked || !has_active_keys {
+                5000
             } else {
-                0.75
+                7500
             };
             Json(serde_json::json!({
                 "did": did_str,
                 "registered": true,
-                "score": score,
+                "score_bps": score_bps,
                 "factors": {
                     "registered": true,
                     "has_active_verification_methods": has_active_keys,
@@ -611,8 +596,8 @@ async fn handle_auth_login(
     }
     // Issue a 1-hour session token.
     let token = uuid::Uuid::new_v4().to_string();
-    let now_ms = now_ms() as i64;
-    let expires_ms = now_ms + 3_600_000; // +1 hour
+    let now_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    let expires_ms = now_ms.saturating_add(3_600_000); // +1 hour
     match sqlx::query(
         "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
          VALUES ($1, $2, $3, $4, false)",
@@ -680,8 +665,8 @@ async fn handle_auth_refresh(
                 .into_response();
         }
     };
-    let now_ms = now_ms() as i64;
-    let new_expires = now_ms + 3_600_000;
+    let now_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    let new_expires = now_ms.saturating_add(3_600_000);
     match sqlx::query(
         "UPDATE sessions SET expires_at = $1 \
          WHERE token = $2 AND expires_at > $3 AND revoked = false",
@@ -906,7 +891,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/decisions", post(vote_handler))
         // Auth
         .route("/api/v1/auth/token", post(handle_auth_token))
-        .route("/api/v1/auth/saml/callback", post(handle_auth_saml_callback))
+        .route(
+            "/api/v1/auth/saml/callback",
+            post(handle_auth_saml_callback),
+        )
         .route("/api/v1/auth/register", post(handle_auth_register))
         .route("/api/v1/auth/login", post(handle_auth_login))
         .route("/api/v1/auth/refresh", post(handle_auth_refresh))
@@ -933,10 +921,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/audit/:decision_id", get(handle_audit_trail))
         // Users
         .route("/api/v1/users", get(handle_users_list))
-        .route(
-            "/api/v1/users/:did/advance-pace",
-            post(handle_advance_pace),
-        )
+        .route("/api/v1/users/:did/advance-pace", post(handle_advance_pace))
         .with_state(state)
         // GraphQL sub-router has its own state — merge after with_state()
         .merge(gql_router)
@@ -1001,6 +986,7 @@ pub async fn serve(config: GatewayConfig, pool: Option<sqlx::PgPool>) -> Result<
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use axum::{body::Body, http::Request};
     use exo_core::Timestamp;
@@ -1431,7 +1417,7 @@ mod tests {
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["registered"], true);
-        assert!(val["score"].as_f64().unwrap() > 0.0);
+        assert!(val["score_bps"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]
@@ -1503,8 +1489,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_login_without_db_returns_503() {
-        let body =
-            serde_json::to_string(&serde_json::json!({ "did": "did:exo:alice" })).unwrap();
+        let body = serde_json::to_string(&serde_json::json!({ "did": "did:exo:alice" })).unwrap();
         let app = build_router(state());
         let resp = app
             .oneshot(
@@ -1522,8 +1507,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_token_without_db_returns_503() {
-        let body =
-            serde_json::to_string(&serde_json::json!({ "did": "did:exo:alice" })).unwrap();
+        let body = serde_json::to_string(&serde_json::json!({ "did": "did:exo:alice" })).unwrap();
         let app = build_router(state());
         let resp = app
             .oneshot(

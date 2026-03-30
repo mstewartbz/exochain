@@ -60,6 +60,7 @@ pub fn default_deny_check(actor: &Did, action: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::{
         Hash256, Timestamp,
