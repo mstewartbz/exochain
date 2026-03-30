@@ -154,7 +154,7 @@ fn check_invariant(
 }
 
 fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
-    let mut branches = std::collections::HashSet::new();
+    let mut branches = std::collections::BTreeSet::new();
     for role in &ctx.actor_roles {
         branches.insert(role.branch);
     }
@@ -384,13 +384,6 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
             evidence: vec!["provenance: None".into()],
         }),
         Some(prov) => {
-            if !prov.is_signed() {
-                return Err(InvariantViolation {
-                    invariant: ConstitutionalInvariant::ProvenanceVerifiable,
-                    description: "Provenance metadata is not signed".into(),
-                    evidence: vec![format!("actor: {}", prov.actor)],
-                });
-            }
             if prov.actor != ctx.actor {
                 return Err(InvariantViolation {
                     invariant: ConstitutionalInvariant::ProvenanceVerifiable,
@@ -400,6 +393,59 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
                         format!("context.actor: {}", ctx.actor),
                     ],
                 });
+            }
+            match &prov.public_key {
+                Some(pk_bytes) => {
+                    // Full Ed25519 verification path (closes GAP-02).
+                    let pk_arr: [u8; 32] =
+                        pk_bytes
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| InvariantViolation {
+                                invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                                description: "Provenance public_key is not 32 bytes".into(),
+                                evidence: vec![format!("key_len: {}", pk_bytes.len())],
+                            })?;
+                    let sig_arr: [u8; 64] =
+                        prov.signature
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| InvariantViolation {
+                                invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                                description:
+                                    "Provenance signature is not 64 bytes (required for Ed25519)"
+                                        .into(),
+                                evidence: vec![format!("sig_len: {}", prov.signature.len())],
+                            })?;
+                    // Canonical payload: actor || 0x00 || action_hash || 0x00 || timestamp
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(prov.actor.as_str().as_bytes());
+                    payload.push(0x00);
+                    payload.extend_from_slice(&prov.action_hash);
+                    payload.push(0x00);
+                    payload.extend_from_slice(prov.timestamp.as_bytes());
+                    let message = Hash256::digest(&payload);
+                    let pubkey = exo_core::PublicKey::from_bytes(pk_arr);
+                    let sig = exo_core::Signature::from_bytes(sig_arr);
+                    if !exo_core::crypto::verify(message.as_bytes(), &sig, &pubkey) {
+                        return Err(InvariantViolation {
+                            invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                            description:
+                                "Provenance Ed25519 signature is cryptographically invalid".into(),
+                            evidence: vec![format!("actor: {}", prov.actor)],
+                        });
+                    }
+                }
+                None => {
+                    // Legacy path: signature must be non-empty.
+                    if !prov.is_signed() {
+                        return Err(InvariantViolation {
+                            invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                            description: "Provenance metadata is not signed".into(),
+                            evidence: vec![format!("actor: {}", prov.actor)],
+                        });
+                    }
+                }
             }
             Ok(())
         }
@@ -458,6 +504,7 @@ mod tests {
                 timestamp: "2025-01-01T00:00:00Z".into(),
                 action_hash: vec![1, 2, 3],
                 signature: vec![4, 5, 6],
+                public_key: None,
             }),
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             requested_permissions: PermissionSet::default(),
@@ -804,6 +851,7 @@ mod tests {
             timestamp: "t".into(),
             action_hash: vec![1],
             signature: vec![],
+            public_key: None,
         });
         assert!(enforce_all(&engine, &ctx).is_err());
     }
@@ -819,6 +867,7 @@ mod tests {
             timestamp: "t".into(),
             action_hash: vec![1],
             signature: vec![1],
+            public_key: None,
         });
         assert!(enforce_all(&engine, &ctx).is_err());
     }

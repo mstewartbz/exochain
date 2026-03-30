@@ -46,7 +46,7 @@ impl PermissionSet {
 // ---------------------------------------------------------------------------
 
 /// Branch of government.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GovernmentBranch {
     Legislative,
     Executive,
@@ -175,6 +175,14 @@ pub struct Provenance {
     pub timestamp: String,
     pub action_hash: Vec<u8>,
     pub signature: Vec<u8>,
+    /// Ed25519 public key (32 bytes) of the actor.
+    ///
+    /// When present, `check_provenance_verifiable` performs full cryptographic
+    /// Ed25519 signature verification over the canonical provenance payload:
+    /// `Hash256(actor_bytes || 0x00 || action_hash || 0x00 || timestamp_bytes)`.
+    /// When absent, only non-emptiness of `signature` is checked (legacy path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<Vec<u8>>,
 }
 
 impl Provenance {
@@ -307,6 +315,7 @@ mod tests {
             timestamp: "2025-01-01".into(),
             action_hash: vec![1],
             signature: vec![4, 5, 6],
+            public_key: None,
         };
         assert!(signed.is_signed());
 
@@ -315,6 +324,7 @@ mod tests {
             timestamp: "2025-01-01".into(),
             action_hash: vec![1],
             signature: vec![],
+            public_key: None,
         };
         assert!(!unsigned.is_signed());
     }

@@ -204,6 +204,7 @@ mod tests {
                 timestamp: "t".into(),
                 action_hash: vec![1],
                 signature: vec![4, 5, 6],
+                public_key: None,
             }),
             quorum_evidence: None,
         }

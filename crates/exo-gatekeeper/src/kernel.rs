@@ -196,6 +196,7 @@ mod tests {
                 timestamp: "2025-01-01T00:00:00Z".into(),
                 action_hash: vec![1, 2, 3],
                 signature: vec![4, 5, 6],
+                public_key: None,
             }),
             quorum_evidence: None,
         }
