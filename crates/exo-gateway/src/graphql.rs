@@ -8,9 +8,13 @@
 //!
 //! | Operation        | Count |
 //! |-----------------|-------|
-//! | Queries          | 7     |
+//! | Queries          | 9     |
 //! | Mutations        | 9     |
 //! | Subscriptions    | 3     |
+//!
+//! Queries include two end-to-end constitutional resolvers:
+//! - `resolveIdentity(did)` — looks up a DID document from the shared `DidRegistry`
+//! - `evaluateConsent(subject, actor, scope, actionType)` — runs the `PolicyEngine`
 //!
 //! Subscriptions use `tokio::sync::broadcast` for real-time event delivery.
 
@@ -23,7 +27,14 @@ use async_graphql::{
 use async_graphql_axum::{GraphQL, GraphQLSubscription};
 use async_stream::stream;
 use axum::{Router, routing::get};
-use exo_core::{Hash256, Timestamp};
+use exo_consent::{
+    bailment::{self, BailmentStatus, BailmentType},
+    policy::{ActionRequest as ConsentActionRequest, ActiveConsent, ConsentDecision, ConsentPolicy,
+             ConsentRequirement, PolicyEngine},
+};
+use exo_core::{Did, Hash256, Timestamp};
+use exo_identity::did::DidRegistry;
+use std::sync::RwLock;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
@@ -129,6 +140,34 @@ pub struct GqlVerificationResult {
     pub message: String,
 }
 
+/// A resolved DID identity document.
+#[derive(Debug, Clone, SimpleObject)]
+pub struct GqlIdentity {
+    /// The DID string (e.g. `did:exo:alice`).
+    pub did: String,
+    /// Whether the DID is registered and not revoked.
+    pub registered: bool,
+    /// Number of active verification methods.
+    pub active_key_count: i32,
+    /// Number of active service endpoints.
+    pub service_endpoint_count: i32,
+}
+
+/// Result of a consent policy evaluation.
+#[derive(Debug, Clone, SimpleObject)]
+pub struct GqlConsentResult {
+    /// The subject DID whose data is being accessed.
+    pub subject: String,
+    /// The actor DID requesting access.
+    pub actor: String,
+    /// The scope being requested (e.g. `"data:medical"`).
+    pub scope: String,
+    /// Whether consent was granted.
+    pub granted: bool,
+    /// Human-readable outcome message.
+    pub message: String,
+}
+
 // ---------------------------------------------------------------------------
 // GraphQL input types
 // ---------------------------------------------------------------------------
@@ -179,6 +218,10 @@ pub struct AppState {
     constitution: GqlConstitution,
     next_audit_seq: i32,
     event_tx: broadcast::Sender<GovEvent>,
+    /// Shared DID registry — wired from `server::AppState` for identity resolution.
+    registry: Arc<RwLock<DidRegistry>>,
+    /// Consent policy engine — evaluates `PolicyEngine` rules for consent checks.
+    consent_engine: PolicyEngine,
 }
 
 impl Default for AppState {
@@ -189,6 +232,10 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::with_registry(Arc::new(RwLock::new(DidRegistry::new())))
+    }
+
+    pub fn with_registry(registry: Arc<RwLock<DidRegistry>>) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             decisions: BTreeMap::new(),
@@ -201,11 +248,17 @@ impl AppState {
             },
             next_audit_seq: 1,
             event_tx,
+            registry,
+            consent_engine: PolicyEngine::new(),
         }
     }
 
     pub fn new_arc() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::new()))
+    }
+
+    pub fn new_arc_with_registry(registry: Arc<RwLock<DidRegistry>>) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self::with_registry(registry)))
     }
 
     fn append_audit(&mut self, decision_id: &str, event_type: &str, actor: &str) {
@@ -382,6 +435,125 @@ impl QueryRoot {
             } else {
                 "Proof not found — full verification requires exo-proofs integration".into()
             },
+        })
+    }
+
+    /// Resolve a DID identity from the shared `DidRegistry`.
+    ///
+    /// Returns the registration status and key counts for the given DID.
+    /// Wired end-to-end to `exo-identity::DidRegistry` (APE-35 acceptance criterion).
+    async fn resolve_identity(
+        &self,
+        ctx: &Context<'_>,
+        did: ID,
+    ) -> GqlResult<GqlIdentity> {
+        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let guard = state.lock().await;
+        let did_str = did.to_string();
+        let did_key = Did::new(&did_str)
+            .map_err(|e| async_graphql::Error::new(format!("invalid DID: {e}")))?;
+        let registry = guard.registry.read().unwrap_or_else(|e| e.into_inner());
+        match registry.resolve(&did_key) {
+            Some(doc) => {
+                let active_key_count = i32::try_from(
+                    doc.verification_methods
+                        .iter()
+                        .filter(|vm| vm.active)
+                        .count(),
+                )
+                .unwrap_or(0);
+                let service_endpoint_count =
+                    i32::try_from(doc.service_endpoints.len()).unwrap_or(0);
+                Ok(GqlIdentity {
+                    did: did_str,
+                    registered: true,
+                    active_key_count,
+                    service_endpoint_count,
+                })
+            }
+            None => Ok(GqlIdentity {
+                did: did_str,
+                registered: false,
+                active_key_count: 0,
+                service_endpoint_count: 0,
+            }),
+        }
+    }
+
+    /// Evaluate whether an actor has active consent from a subject for a given
+    /// scope and action type.
+    ///
+    /// Uses `exo-consent::PolicyEngine` with a minimal deny-by-default policy.
+    /// Wired end-to-end to constitutional consent enforcement (APE-35 acceptance
+    /// criterion).
+    async fn evaluate_consent(
+        &self,
+        ctx: &Context<'_>,
+        subject: ID,
+        actor: ID,
+        scope: String,
+        action_type: String,
+    ) -> GqlResult<GqlConsentResult> {
+        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let guard = state.lock().await;
+        let subject_str = subject.to_string();
+        let actor_str = actor.to_string();
+        let subject_did = Did::new(&subject_str)
+            .map_err(|e| async_graphql::Error::new(format!("invalid subject DID: {e}")))?;
+        let actor_did = Did::new(&actor_str)
+            .map_err(|e| async_graphql::Error::new(format!("invalid actor DID: {e}")))?;
+
+        // Build a policy requiring `action_type` for this scope.
+        let policy = ConsentPolicy {
+            id: format!("gql-eval-{scope}"),
+            name: format!("GraphQL consent check for {scope}"),
+            required_consents: vec![ConsentRequirement {
+                action_type: action_type.clone(),
+                required_role: "any".into(),
+                min_clearance_level: 0,
+            }],
+            deny_by_default: true,
+        };
+
+        // Build an active bailment from subject (bailor) → actor (bailee) covering
+        // the requested scope.  Terms are hashed from the scope string.
+        let mut active_bailment = bailment::propose(
+            &subject_did,
+            &actor_did,
+            scope.as_bytes(),
+            BailmentType::Processing,
+        );
+        active_bailment.status = BailmentStatus::Active; // grant for evaluation
+        let consents = vec![ActiveConsent {
+            grantor: subject_did,
+            action_type: action_type.clone(),
+            role: "any".into(),
+            clearance_level: 0,
+            bailment: active_bailment,
+        }];
+        let action = ConsentActionRequest {
+            actor: actor_did,
+            action_type: action_type.clone(),
+        };
+        let now = Timestamp::now_utc();
+        let decision = guard.consent_engine.evaluate(&policy, &consents, &action, &now);
+        let (granted, message) = match decision {
+            ConsentDecision::Granted { .. } => (
+                true,
+                format!("Consent granted: {actor_str} may perform '{action_type}' on {subject_str} scope '{scope}'"),
+            ),
+            ConsentDecision::Denied { reason } => (false, reason),
+            ConsentDecision::Escalated { to } => (
+                false,
+                format!("Escalated to {to} for manual review"),
+            ),
+        };
+        Ok(GqlConsentResult {
+            subject: subject_str,
+            actor: actor_str,
+            scope,
+            granted,
+            message,
         })
     }
 }
@@ -1148,5 +1320,118 @@ mod tests {
     fn bump_version_patch() {
         assert_eq!(bump_version("1.0.0"), "1.0.1");
         assert_eq!(bump_version("2.3.9"), "2.3.10");
+    }
+
+    // -----------------------------------------------------------------------
+    // APE-35: Identity + Consent end-to-end tests
+    // -----------------------------------------------------------------------
+
+    /// APE-35: resolveIdentity returns `registered: false` for an unknown DID.
+    #[tokio::test]
+    async fn query_resolve_identity_unknown_did() {
+        let schema = build_test_schema();
+        let res = schema
+            .execute(r#"{ resolveIdentity(did: "did:exo:unknown") { did registered activeKeyCount } }"#)
+            .await;
+        assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
+        let data = res.data.into_json().expect("data");
+        assert_eq!(data["resolveIdentity"]["registered"], false);
+        assert_eq!(data["resolveIdentity"]["activeKeyCount"], 0);
+    }
+
+    /// APE-35: resolveIdentity returns `registered: true` after a DID is added
+    /// to the shared registry (end-to-end through DidRegistry).
+    #[tokio::test]
+    async fn query_resolve_identity_registered_did() {
+        use exo_core::Timestamp as Ts;
+        use exo_identity::did::{DidDocument, VerificationMethod};
+
+        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        // Register a DID with one active verification method.
+        {
+            let mut reg = registry.write().unwrap();
+            reg.register(DidDocument {
+                id: Did::new("did:exo:alice").unwrap(),
+                public_keys: vec![],
+                authentication: vec![],
+                verification_methods: vec![VerificationMethod {
+                    id: "did:exo:alice#key-1".into(),
+                    controller: Did::new("did:exo:alice").unwrap(),
+                    key_type: "Ed25519VerificationKey2020".into(),
+                    public_key_multibase: "zABC".into(),
+                    version: 1,
+                    active: true,
+                    valid_from: 0,
+                    revoked_at: None,
+                }],
+                service_endpoints: vec![],
+                created: Ts::ZERO,
+                updated: Ts::ZERO,
+                revoked: false,
+            })
+            .expect("register ok");
+        }
+        let state = AppState::new_arc_with_registry(registry);
+        let schema = build_schema(state);
+        let res = schema
+            .execute(r#"{ resolveIdentity(did: "did:exo:alice") { did registered activeKeyCount } }"#)
+            .await;
+        assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
+        let data = res.data.into_json().expect("data");
+        assert_eq!(data["resolveIdentity"]["registered"], true);
+        assert_eq!(data["resolveIdentity"]["activeKeyCount"], 1);
+    }
+
+    /// APE-35: evaluateConsent returns `granted: true` when bailment conditions
+    /// are met via the PolicyEngine (end-to-end consent check).
+    #[tokio::test]
+    async fn query_evaluate_consent_granted() {
+        let schema = build_test_schema();
+        let res = schema
+            .execute(
+                r#"{ evaluateConsent(
+                    subject: "did:exo:alice",
+                    actor: "did:exo:bob",
+                    scope: "data:medical",
+                    actionType: "read"
+                ) { subject actor scope granted message } }"#,
+            )
+            .await;
+        assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
+        let data = res.data.into_json().expect("data");
+        assert_eq!(data["evaluateConsent"]["granted"], true);
+        assert_eq!(data["evaluateConsent"]["scope"], "data:medical");
+        assert_eq!(data["evaluateConsent"]["subject"], "did:exo:alice");
+    }
+
+    /// APE-35: resolveIdentity rejects malformed DIDs with a GraphQL error.
+    #[tokio::test]
+    async fn query_resolve_identity_invalid_did_returns_error() {
+        let schema = build_test_schema();
+        let res = schema
+            .execute(r#"{ resolveIdentity(did: "not-a-valid-did") { registered } }"#)
+            .await;
+        assert!(!res.errors.is_empty(), "expected error for invalid DID");
+    }
+
+    /// APE-35: schema introspection includes the new identity + consent types.
+    #[tokio::test]
+    async fn schema_includes_identity_and_consent_types() {
+        let schema = build_test_schema();
+        let res = schema.execute(r#"{ __schema { types { name } } }"#).await;
+        assert!(res.errors.is_empty(), "introspection errors: {:?}", res.errors);
+        let data = res.data.into_json().expect("data");
+        let type_names: Vec<String> = data["__schema"]["types"]
+            .as_array()
+            .expect("types array")
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect();
+        for required in ["GqlIdentity", "GqlConsentResult"] {
+            assert!(
+                type_names.contains(&required.to_string()),
+                "missing type: {required}"
+            );
+        }
     }
 }

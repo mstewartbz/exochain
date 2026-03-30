@@ -883,9 +883,9 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 /// All 20 `RestRoute` paths are registered.  Unimplemented handlers return
 /// 501 until the full handler stack lands in a follow-up PR.
 pub fn build_router(state: AppState) -> Router {
-    // GraphQL sub-router has its own in-memory AppState (separate from
-    // the gateway AppState).  Build once and merge into the main router.
-    let gql_state = graphql::AppState::new_arc();
+    // GraphQL sub-router shares the gateway's DID registry so that
+    // `resolveIdentity` queries see any DIDs registered via REST.
+    let gql_state = graphql::AppState::new_arc_with_registry(state.registry.clone());
     let schema = graphql::build_schema(gql_state);
     let gql_router = graphql::graphql_router(schema);
 
