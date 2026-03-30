@@ -36,3 +36,4 @@ async-stream = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tower = { workspace = true }
+bs58 = { workspace = true }
