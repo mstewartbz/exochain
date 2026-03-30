@@ -172,6 +172,9 @@ mod tests {
             action_hash: vec![1u8; 32],
             signature: vec![2u8; 64],
             public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
         });
 
         InvariantContext {

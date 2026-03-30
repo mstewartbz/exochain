@@ -197,6 +197,9 @@ mod tests {
                 action_hash: vec![1, 2, 3],
                 signature: vec![4, 5, 6],
                 public_key: None,
+                voice_kind: None,
+                independence: None,
+                review_order: None,
             }),
             quorum_evidence: None,
         }
@@ -350,11 +353,13 @@ mod tests {
                     voter: did("did:exo:v1"),
                     approved: true,
                     signature: vec![1],
+                    provenance: None,
                 },
                 QuorumVote {
                     voter: did("did:exo:v2"),
                     approved: false,
                     signature: vec![2],
+                    provenance: None,
                 },
             ],
         });

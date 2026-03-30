@@ -149,6 +149,9 @@ fn valid_adj_context(actor: &Did) -> AdjudicationContext {
             action_hash: vec![0x01, 0x02, 0x03],
             signature: vec![0x04, 0x05, 0x06],
             public_key: None,
+            voice_kind: None,
+            independence: None,
+            review_order: None,
         }),
         quorum_evidence: None,
     }
@@ -269,11 +272,13 @@ fn quorum_not_met_escalates() {
                 voter: did("did:exo:voter-a"),
                 approved: true,
                 signature: vec![1],
+                provenance: None,
             },
             QuorumVote {
                 voter: did("did:exo:voter-b"),
                 approved: false,
                 signature: vec![2],
+                provenance: None,
             },
             // Only 1 approval against threshold of 3.
         ],
@@ -510,6 +515,9 @@ fn provenance_actor_mismatch_denied() {
         action_hash: vec![0x01],
         signature: vec![0x02],
         public_key: None,
+        voice_kind: None,
+        independence: None,
+        review_order: None,
     });
 
     let verdict = kernel.adjudicate(&action, &context);
@@ -633,6 +641,7 @@ fn all_eight_invariants_exercised() {
                         voter: did("did:exo:single-voter"),
                         approved: true,
                         signature: vec![1],
+                        provenance: None,
                     }],
                 });
             },
