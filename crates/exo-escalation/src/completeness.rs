@@ -75,6 +75,7 @@ pub fn check_completeness(case: &EscalationCase) -> CompletenessResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::Timestamp;
 

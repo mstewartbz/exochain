@@ -80,7 +80,7 @@ pub fn apply_learnings(feedbacks: &[FeedbackEntry]) -> Vec<PolicyRecommendation>
     }
 
     // Aggregate unique recommendations from entries
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for entry in feedbacks {
         for rec in &entry.policy_recommendations {
             if seen.insert(rec.clone()) {
