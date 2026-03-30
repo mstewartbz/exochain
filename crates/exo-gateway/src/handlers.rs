@@ -6,6 +6,11 @@
 //!   3. `write_audit` MUST use `ciborium::into_writer` before blake3, not serde_json (TransparencyAccountability)
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use decision_forum::{
+    decision_object::{ActorKind, DecisionObject, Vote, VoteChoice},
+    quorum::{QuorumCheckResult, QuorumRegistry, check_quorum, verify_quorum_precondition},
+};
+use exo_core::{hlc::HybridClock, types::Hash256};
 use exo_gatekeeper::{
     kernel::{ActionRequest as GatekeeperActionRequest, Verdict},
     types::{Permission, PermissionSet},
@@ -56,13 +61,14 @@ async fn write_audit(
     Ok(())
 }
 
-// ── Vote handler (all three violations fixed here) ────────────────────────
+// ── Vote handler (decision-forum integration) ─────────────────────────────
 
 #[derive(Deserialize)]
 pub struct VoteRequest {
     pub decision_id: String,
     pub voter_did: String,
-    pub choice: String,
+    pub choice: VoteChoice,
+    pub actor_kind: ActorKind,
     pub rationale: Option<String>,
 }
 
@@ -83,7 +89,6 @@ pub async fn vote_handler(
 
     // ── VIOLATION 1 FIX: ConflictAdjudication ───────────────────────────
     // Check if voter has a declared conflict of interest on this decision.
-    // Mirrors Node.js: wasm.wasm_check_conflicts(voter_did, action, '[]')
     let declarations = state
         .load_conflict_declarations(&voter_did)
         .await
@@ -104,8 +109,6 @@ pub async fn vote_handler(
     }
 
     // ── VIOLATION 2 FIX: TNC-01 Authority Chain / Governor Clearance ────
-    // Call Kernel::adjudicate before recording vote.
-    // Mirrors Node.js: wasm.wasm_check_clearance(voter_did, 'Vote', clearancePolicy)
     let gk_action = GatekeeperActionRequest {
         actor: voter_did.clone(),
         action: "Vote".into(),
@@ -145,12 +148,12 @@ pub async fn vote_handler(
         }
     };
 
-    // Load decision
+    // Load and deserialize DecisionObject from DB.
     let row = sqlx::query("SELECT payload FROM decisions WHERE id_hash = $1")
         .bind(&body.decision_id)
         .fetch_optional(db)
         .await;
-    let mut payload: Value = match row {
+    let payload_val: Value = match row {
         Ok(Some(r)) => match r.try_get::<Value, _>("payload") {
             Ok(p) => p,
             Err(e) => {
@@ -177,28 +180,102 @@ pub async fn vote_handler(
         }
     };
 
-    // Append vote
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let vote_entry = serde_json::json!({
-        "voter": body.voter_did,
-        "choice": body.choice,
-        "rationale": body.rationale,
-        "timestamp_ms": now_ms,
-    });
-    match payload["votes"].as_array_mut() {
-        Some(arr) => arr.push(vote_entry),
-        None => {
+    let mut decision: DecisionObject = match serde_json::from_value(payload_val) {
+        Ok(d) => d,
+        Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "decision payload missing 'votes' array"})),
+                Json(serde_json::json!({"error": format!("failed to deserialize decision: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Reject votes on terminal decisions (TNC-08 immutability).
+    if decision.is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "decision is in a terminal state and cannot accept further votes"})),
+        )
+            .into_response();
+    }
+
+    // Verify quorum precondition (TNC-07): enough eligible voters must exist
+    // before accepting the vote. Use the registered DID count as the eligible
+    // voter count since the gateway does not maintain a separate voter registry.
+    let registry = QuorumRegistry::with_defaults();
+    let eligible_voters = state
+        .registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .len();
+    match verify_quorum_precondition(&registry, decision.class, eligible_voters) {
+        Ok(true) => { /* enough eligible voters — proceed */ }
+        Ok(false) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "insufficient eligible voters to potentially reach quorum"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
             )
                 .into_response();
         }
     }
 
-    // Persist updated decision
+    // Build the typed Vote using HLC for deterministic timestamp (AGENTS.md §1).
+    let mut clock = HybridClock::new();
+    let timestamp = clock.now();
+    let sig_input = format!("{}:{}:{:?}", body.voter_did, body.decision_id, body.choice);
+    let signature_hash = Hash256::digest(sig_input.as_bytes());
+    let vote = Vote {
+        voter_did: voter_did.clone(),
+        choice: body.choice,
+        actor_kind: body.actor_kind,
+        timestamp,
+        signature_hash,
+    };
+
+    // Add vote — rejects duplicates (TNC-07 voter independence).
+    if let Err(e) = decision.add_vote(vote) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    // Check quorum post-vote to include status in response.
+    let quorum_result = match check_quorum(&registry, &decision) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    // Serialize updated DecisionObject back to JSON for DB persistence.
+    let updated_payload = match serde_json::to_value(&decision) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("serialization failed: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Persist updated decision.
     if let Err(e) = sqlx::query("UPDATE decisions SET payload = $1 WHERE id_hash = $2")
-        .bind(&payload)
+        .bind(&updated_payload)
         .bind(&body.decision_id)
         .execute(db)
         .await
@@ -226,9 +303,41 @@ pub async fn vote_handler(
             .into_response();
     }
 
+    // Build quorum summary for response.
+    let quorum_status = match quorum_result {
+        QuorumCheckResult::Met {
+            total_votes,
+            approve_count,
+            approve_pct,
+        } => serde_json::json!({
+            "status": "met",
+            "total_votes": total_votes,
+            "approve_count": approve_count,
+            "approve_pct": approve_pct,
+        }),
+        QuorumCheckResult::NotMet { reason } => serde_json::json!({
+            "status": "not_met",
+            "reason": reason,
+        }),
+        QuorumCheckResult::Degraded {
+            reason,
+            available,
+            required,
+        } => serde_json::json!({
+            "status": "degraded",
+            "reason": reason,
+            "available": available,
+            "required": required,
+        }),
+    };
+
     (
         StatusCode::OK,
-        Json(serde_json::json!({"vote_recorded": true, "decision": payload})),
+        Json(serde_json::json!({
+            "vote_recorded": true,
+            "decision": updated_payload,
+            "quorum": quorum_status,
+        })),
     )
         .into_response()
 }

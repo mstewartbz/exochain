@@ -1069,6 +1069,7 @@ dependencies = [
  "bs58",
  "chrono",
  "ciborium",
+ "decision-forum",
  "exo-consent",
  "exo-core",
  "exo-gatekeeper",

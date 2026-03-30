@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+decision-forum = { path = "../decision-forum" }
 exo-core = { path = "../exo-core" }
 exo-identity = { path = "../exo-identity" }
 exo-consent = { path = "../exo-consent" }
