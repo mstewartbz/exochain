@@ -140,9 +140,16 @@ impl AppState {
 
     /// Build a minimal adjudication context for the given actor.
     ///
-    /// For endpoints that are functional before full role/consent databases
-    /// are available.  Sets `human_override_preserved: true` and grants the
-    /// actor the `"vote"` permission so the Kernel can permit basic actions.
+    /// **WO-009 SAFETY NOTE (CR-001 §8.9 — No-Admin Preservation):**
+    /// This is a *deny-all dev scaffold* — it intentionally produces a context
+    /// that `Kernel::adjudicate` DENIES.  `BailmentState::None` fails the
+    /// `ConsentRequired` invariant and `AuthorityChain::default()` fails
+    /// `AuthorityChainValid`.  Do NOT change `bailment_state` to `Active` or
+    /// add authority links without a real DB-backed resolver — that would create
+    /// an AEGIS bypass prohibited by CR-001 §8.9.
+    ///
+    /// Replace with a real DB resolver once `roles`/`consents`/`authority_chains`
+    /// tables are available.
     pub async fn build_adjudication_context(&self, _actor: &Did) -> AdjudicationContext {
         AdjudicationContext {
             actor_roles: vec![],
