@@ -258,4 +258,75 @@ mod tests {
             );
         }
     }
+
+    // ── SPR2-04: challenge lifecycle completeness ─────────────────────────────
+
+    /// The path Filed → UnderReview → Overruled was untested; verify it and
+    /// confirm the challenge is terminal (no further transitions allowed).
+    #[test]
+    fn under_review_to_overruled() {
+        let mut c = file_challenge(
+            &challenger(),
+            &target(),
+            ChallengeGround::QuorumViolation,
+            b"",
+        );
+        c.status = ChallengeStatus::UnderReview;
+        assert!(adjudicate(&mut c, ChallengeVerdict::Overrule).is_ok());
+        assert_eq!(c.status, ChallengeStatus::Overruled);
+        // terminal: cannot re-adjudicate or withdraw
+        assert!(adjudicate(&mut c, ChallengeVerdict::Sustain).is_err());
+        assert!(withdraw(&mut c).is_err());
+    }
+
+    /// Full lifecycle walkthrough: File → UnderReview → Sustained, then
+    /// verify all further transitions are correctly rejected.
+    #[test]
+    fn full_lifecycle_filed_under_review_sustained() {
+        let mut c = file_challenge(
+            &challenger(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"strong evidence",
+        );
+        // Stage 1: Filed
+        assert_eq!(c.status, ChallengeStatus::Filed);
+        let _ = pause_action(&c); // pause order issued on filing
+
+        // Stage 2: Under review
+        c.status = ChallengeStatus::UnderReview;
+        assert_eq!(c.status, ChallengeStatus::UnderReview);
+
+        // Stage 3: Sustained (challenge upheld)
+        assert!(adjudicate(&mut c, ChallengeVerdict::Sustain).is_ok());
+        assert_eq!(c.status, ChallengeStatus::Sustained);
+
+        // Terminal state: further adjudication and withdrawal must fail
+        assert!(adjudicate(&mut c, ChallengeVerdict::Overrule).is_err());
+        assert!(withdraw(&mut c).is_err());
+    }
+
+    /// All 6 ChallengeGround values must transit through the complete lifecycle
+    /// (Filed → UnderReview → Overruled) without error — verifying each ground
+    /// is treated uniformly by the state machine.
+    #[test]
+    fn all_grounds_complete_lifecycle() {
+        for g in [
+            ChallengeGround::AuthorityChainInvalid,
+            ChallengeGround::QuorumViolation,
+            ChallengeGround::UndisclosedConflict,
+            ChallengeGround::ProceduralError,
+            ChallengeGround::SybilAllegation,
+            ChallengeGround::ConsentViolation,
+        ] {
+            let mut c = file_challenge(&challenger(), &target(), g, b"evidence");
+            assert_eq!(c.status, ChallengeStatus::Filed);
+
+            c.status = ChallengeStatus::UnderReview;
+            assert_eq!(c.status, ChallengeStatus::UnderReview);
+
+            assert!(adjudicate(&mut c, ChallengeVerdict::Overrule).is_ok());
+            assert_eq!(c.status, ChallengeStatus::Overruled);
+        }
+    }
 }

@@ -410,4 +410,108 @@ mod tests {
         let ctx = valid_adj(&h.id);
         assert!(step(&mut h, &CombinatorInput::new(), &kernel, &ctx).is_err());
     }
+
+    // ── SPR2-04: Holon isolation + lifecycle ──────────────────────────────────
+
+    /// Terminating Holon A must not change the state of Holon B.  Each Holon
+    /// is independently tracked; state mutations on one must not leak to
+    /// another.
+    #[test]
+    fn holon_isolation_termination_does_not_affect_sibling() {
+        let kernel = test_kernel();
+        let mut holon_a = spawn(
+            did("did:exo:holon-a"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Identity,
+        );
+        let mut holon_b = spawn(
+            did("did:exo:holon-b"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Identity,
+        );
+
+        // Deny holon_a (bad bailment) → terminates it
+        let mut bad_ctx = valid_adj(&holon_a.id);
+        bad_ctx.bailment_state = BailmentState::None;
+        assert!(step(&mut holon_a, &CombinatorInput::new(), &kernel, &bad_ctx).is_err());
+        assert_eq!(holon_a.state, HolonState::Terminated);
+
+        // holon_b must be completely unaffected
+        assert_eq!(holon_b.state, HolonState::Idle);
+        let ctx_b = valid_adj(&holon_b.id);
+        let out = step(
+            &mut holon_b,
+            &CombinatorInput::new().with("key", "val"),
+            &kernel,
+            &ctx_b,
+        )
+        .unwrap();
+        assert_eq!(out.fields.get("key"), Some(&"val".to_string()));
+    }
+
+    /// A checkpoint belonging to Holon A must not be usable to resume Holon B.
+    /// Cross-checkpoint resume must fail with a mismatch error, demonstrating
+    /// per-Holon identity isolation at the checkpoint boundary.
+    #[test]
+    fn holon_isolation_cross_checkpoint_resume_fails() {
+        let mut holon_a = spawn(
+            did("did:exo:holon-a"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Identity,
+        );
+        let mut holon_b = spawn(
+            did("did:exo:holon-b"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Identity,
+        );
+
+        // Suspend both holons, producing their respective checkpoints
+        let _cp_a = suspend(&mut holon_a).unwrap();
+        let cp_b = suspend(&mut holon_b).unwrap();
+
+        // Attempting to resume holon_a with holon_b's checkpoint must fail
+        assert!(resume(&mut holon_a, &cp_b).is_err());
+        // holon_a remains Suspended (state not corrupted)
+        assert_eq!(holon_a.state, HolonState::Suspended);
+    }
+
+    /// Full Holon lifecycle: create (Idle) → successful step (Idle) →
+    /// capability denied → Terminated.  Verifies the complete state machine
+    /// progression and that a Terminated Holon is permanently inoperable.
+    #[test]
+    fn holon_lifecycle_create_adjudicate_terminate() {
+        let kernel = test_kernel();
+        let mut h = spawn(
+            did("did:exo:lifecycle-holon"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Identity,
+        );
+
+        // Stage 1: Created → Idle
+        assert_eq!(h.state, HolonState::Idle);
+        assert!(h.last_output.is_none());
+
+        // Stage 2: Adjudicated (Permitted) → step succeeds, back to Idle
+        let ctx = valid_adj(&h.id);
+        let out = step(
+            &mut h,
+            &CombinatorInput::new().with("data", "payload"),
+            &kernel,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out.fields.get("data"), Some(&"payload".to_string()));
+        assert_eq!(h.state, HolonState::Idle);
+        assert!(h.last_output.is_some());
+
+        // Stage 3: Adjudicated (Denied) → Terminated
+        let mut denied_ctx = valid_adj(&h.id);
+        denied_ctx.bailment_state = BailmentState::None;
+        assert!(step(&mut h, &CombinatorInput::new(), &kernel, &denied_ctx).is_err());
+        assert_eq!(h.state, HolonState::Terminated);
+
+        // Stage 4: Terminated → all operations permanently fail
+        assert!(step(&mut h, &CombinatorInput::new(), &kernel, &ctx).is_err());
+        assert!(suspend(&mut h).is_err());
+    }
 }

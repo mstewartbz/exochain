@@ -231,6 +231,7 @@ pub fn is_finalized(state: &ConsensusState, hash: &Hash256) -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::dag::{Dag, HybridClock, append};
@@ -470,6 +471,146 @@ mod tests {
         let state = ConsensusState::new(config);
 
         assert!(check_commit(&state, &Hash256::ZERO).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // BFT integration tests: conflicting proposals
+    // -----------------------------------------------------------------------
+
+    /// 4-validator quorum (quorum = 3). Two competing proposals in the same
+    /// round. Three validators vote for node A; one votes for node B.
+    /// Only node A reaches quorum and is committed; node B is not finalized.
+    #[test]
+    fn conflicting_proposals_quorum_winner_commits() {
+        let validators = make_validators(4); // quorum = 3
+        let config = ConsensusConfig::new(validators.clone(), 1000);
+        let mut state = ConsensusState::new(config);
+
+        let mut dag = Dag::new();
+        let mut clock = HybridClock::new();
+        let creator = Did::new("did:exo:proposer").expect("valid");
+        let sign_fn = make_sign_fn();
+
+        let node_a = append(&mut dag, &[], b"event-A", &creator, &*sign_fn, &mut clock).unwrap();
+        let node_b =
+            append(&mut dag, &[node_a.hash], b"event-B", &creator, &*sign_fn, &mut clock).unwrap();
+
+        let v: Vec<Did> = validators.iter().cloned().collect();
+
+        // Both proposals are admitted to the pending set
+        propose(&mut state, &node_a, &v[0]).unwrap();
+        propose(&mut state, &node_b, &v[1]).unwrap();
+
+        // Three validators vote for A → quorum
+        for voter in &v[0..3] {
+            vote(&mut state, make_vote(voter, 0, &node_a.hash)).unwrap();
+        }
+
+        // One validator votes for B → insufficient
+        vote(&mut state, make_vote(&v[3], 0, &node_b.hash)).unwrap();
+
+        assert!(
+            check_commit(&state, &node_a.hash).is_some(),
+            "A must reach quorum"
+        );
+        assert!(
+            check_commit(&state, &node_b.hash).is_none(),
+            "B must not reach quorum"
+        );
+
+        let cert = check_commit(&state, &node_a.hash).unwrap();
+        commit(&mut state, cert);
+
+        assert!(is_finalized(&state, &node_a.hash));
+        assert!(!is_finalized(&state, &node_b.hash));
+        assert_eq!(state.committed.len(), 1);
+    }
+
+    /// 7-validator quorum (quorum = 5). Split 3-vs-3 across two conflicting
+    /// proposals. Neither reaches quorum; the round ends with no commit.
+    #[test]
+    fn split_vote_neither_proposal_commits() {
+        let validators = make_validators(7); // quorum = 5
+        let config = ConsensusConfig::new(validators.clone(), 1000);
+        let mut state = ConsensusState::new(config);
+
+        let mut dag = Dag::new();
+        let mut clock = HybridClock::new();
+        let creator = Did::new("did:exo:proposer").expect("valid");
+        let sign_fn = make_sign_fn();
+
+        let node_x = append(&mut dag, &[], b"event-X", &creator, &*sign_fn, &mut clock).unwrap();
+        let node_y =
+            append(&mut dag, &[node_x.hash], b"event-Y", &creator, &*sign_fn, &mut clock).unwrap();
+
+        let v: Vec<Did> = validators.iter().cloned().collect();
+
+        propose(&mut state, &node_x, &v[0]).unwrap();
+        propose(&mut state, &node_y, &v[1]).unwrap();
+
+        // v[0..3] vote for X (3 votes)
+        for voter in &v[0..3] {
+            vote(&mut state, make_vote(voter, 0, &node_x.hash)).unwrap();
+        }
+        // v[3..6] vote for Y (3 votes) — v[6] abstains
+        for voter in &v[3..6] {
+            vote(&mut state, make_vote(voter, 0, &node_y.hash)).unwrap();
+        }
+
+        // Neither X nor Y has the required 5 votes
+        assert!(
+            check_commit(&state, &node_x.hash).is_none(),
+            "X must not reach quorum with 3/5 votes"
+        );
+        assert!(
+            check_commit(&state, &node_y.hash).is_none(),
+            "Y must not reach quorum with 3/5 votes"
+        );
+        assert!(state.committed.is_empty());
+    }
+
+    /// After a split round, advancing to the next round and reaching quorum on
+    /// a new proposal produces a valid commit certificate.
+    #[test]
+    fn commit_succeeds_in_next_round_after_split() {
+        let validators = make_validators(7); // quorum = 5
+        let config = ConsensusConfig::new(validators.clone(), 1000);
+        let mut state = ConsensusState::new(config);
+
+        let mut dag = Dag::new();
+        let mut clock = HybridClock::new();
+        let creator = Did::new("did:exo:proposer").expect("valid");
+        let sign_fn = make_sign_fn();
+
+        let node_x = append(&mut dag, &[], b"event-X", &creator, &*sign_fn, &mut clock).unwrap();
+        let node_r1 =
+            append(&mut dag, &[node_x.hash], b"round1", &creator, &*sign_fn, &mut clock).unwrap();
+
+        let v: Vec<Did> = validators.iter().cloned().collect();
+
+        // Round 0: split → no commit
+        propose(&mut state, &node_x, &v[0]).unwrap();
+        for voter in &v[0..3] {
+            vote(&mut state, make_vote(voter, 0, &node_x.hash)).unwrap();
+        }
+        assert!(check_commit(&state, &node_x.hash).is_none());
+
+        // Advance to round 1
+        state.advance_round();
+
+        // Round 1: quorum on a new proposal
+        propose(&mut state, &node_r1, &v[0]).unwrap();
+        for voter in v.iter().take(5) {
+            vote(&mut state, make_vote(voter, 1, &node_r1.hash)).unwrap();
+        }
+
+        let cert = check_commit(&state, &node_r1.hash);
+        assert!(cert.is_some(), "round 1 proposal must reach quorum");
+        commit(&mut state, cert.unwrap());
+
+        assert!(is_finalized(&state, &node_r1.hash));
+        assert_eq!(state.current_round, 1);
+        assert_eq!(state.committed.len(), 1);
     }
 
     #[test]

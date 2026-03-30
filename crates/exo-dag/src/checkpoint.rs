@@ -72,6 +72,123 @@ pub fn checkpoint_signing_preimage(cp: &CheckpointPayload) -> Vec<u8> {
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
+mod proptests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn arb_hash256() -> impl Strategy<Value = Hash256> {
+        any::<[u8; 32]>().prop_map(Hash256::from_bytes)
+    }
+
+    fn arb_checkpoint() -> impl Strategy<Value = CheckpointPayload> {
+        (
+            arb_hash256(),
+            arb_hash256(),
+            any::<u64>(),
+            any::<u64>(),
+            prop::collection::vec(arb_hash256(), 0..=8usize),
+        )
+            .prop_map(
+                |(event_root, state_root, height, finalized_events, frontier)| CheckpointPayload {
+                    event_root,
+                    state_root,
+                    height,
+                    finalized_events,
+                    frontier,
+                    validator_sigs: vec![],
+                },
+            )
+    }
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(100))]
+
+        /// The preimage function must be pure: same input → same bytes.
+        #[test]
+        fn preimage_is_deterministic(cp in arb_checkpoint()) {
+            let p1 = checkpoint_signing_preimage(&cp);
+            let p2 = checkpoint_signing_preimage(&cp);
+            prop_assert_eq!(p1, p2);
+        }
+
+        /// Domain separation tag must always lead the preimage.
+        #[test]
+        fn preimage_starts_with_domain_sep(cp in arb_checkpoint()) {
+            let preimage = checkpoint_signing_preimage(&cp);
+            prop_assert!(preimage.starts_with(CHECKPOINT_DOMAIN_SEP));
+        }
+
+        /// Preimage length must equal the sum of all fixed and variable fields.
+        #[test]
+        fn preimage_length_accounts_for_all_fields(cp in arb_checkpoint()) {
+            let expected = CHECKPOINT_DOMAIN_SEP.len() // 22
+                + 32  // event_root
+                + 32  // state_root
+                + 8   // height (le64)
+                + 8   // finalized_events (le64)
+                + 32 * cp.frontier.len();
+            let preimage = checkpoint_signing_preimage(&cp);
+            prop_assert_eq!(preimage.len(), expected);
+        }
+
+        /// Any change to `height` must change the preimage.
+        #[test]
+        fn different_heights_produce_different_preimages(
+            mut cp in arb_checkpoint(),
+            alt_height in any::<u64>(),
+        ) {
+            prop_assume!(cp.height != alt_height);
+            let p1 = checkpoint_signing_preimage(&cp);
+            cp.height = alt_height;
+            let p2 = checkpoint_signing_preimage(&cp);
+            prop_assert_ne!(p1, p2);
+        }
+
+        /// Any change to `event_root` must change the preimage.
+        #[test]
+        fn different_event_roots_produce_different_preimages(
+            mut cp in arb_checkpoint(),
+            alt_root in arb_hash256(),
+        ) {
+            prop_assume!(cp.event_root != alt_root);
+            let p1 = checkpoint_signing_preimage(&cp);
+            cp.event_root = alt_root;
+            let p2 = checkpoint_signing_preimage(&cp);
+            prop_assert_ne!(p1, p2);
+        }
+
+        /// Any change to `state_root` must change the preimage.
+        #[test]
+        fn different_state_roots_produce_different_preimages(
+            mut cp in arb_checkpoint(),
+            alt_root in arb_hash256(),
+        ) {
+            prop_assume!(cp.state_root != alt_root);
+            let p1 = checkpoint_signing_preimage(&cp);
+            cp.state_root = alt_root;
+            let p2 = checkpoint_signing_preimage(&cp);
+            prop_assert_ne!(p1, p2);
+        }
+
+        /// Any change to `finalized_events` must change the preimage.
+        #[test]
+        fn different_finalized_events_produce_different_preimages(
+            mut cp in arb_checkpoint(),
+            alt_count in any::<u64>(),
+        ) {
+            prop_assume!(cp.finalized_events != alt_count);
+            let p1 = checkpoint_signing_preimage(&cp);
+            cp.finalized_events = alt_count;
+            let p2 = checkpoint_signing_preimage(&cp);
+            prop_assert_ne!(p1, p2);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

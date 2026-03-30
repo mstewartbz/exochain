@@ -113,6 +113,7 @@ impl DagStore for MemoryStore {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::types::{Did, Signature};
 

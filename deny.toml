@@ -17,7 +17,15 @@ all-features = true
 # ---------------------------------------------------------------------------
 # Advisories — reject any crate with a known security advisory
 # ---------------------------------------------------------------------------
-# Advisory notes (all must have named justification if ignored):
+# Gate 13 strict mode: CI runs `cargo audit --deny warnings` (APE-54).
+# Any new advisory must be patched or explicitly justified here with:
+#   - Advisory ID (RUSTSEC-YYYY-NNNN)
+#   - Crate and version range affected
+#   - Why it does not apply to this workspace
+#   - Linked issue for tracking resolution
+#
+# Current ignore list is intentionally empty — the dep graph is clean as of
+# v0.1.0-alpha.  Known non-applicable advisory for reference:
 #   RUSTSEC-2023-0071 (rsa timing side-channel via sqlx-mysql): NOT ignored here
 #     because the workspace does NOT enable the sqlx "mysql" feature — rsa is
 #     not in the dependency graph.  If mysql support is ever added, this must be

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! exo-dag benchmark suite.
 //!
 //! Covers the four operation families mandated by EXOCHAIN-REM-004:

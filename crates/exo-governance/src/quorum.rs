@@ -353,7 +353,9 @@ mod tests {
 
     // ── WO-004: challenge-blocked quorum ──────────────────────────────────────
 
-    use crate::challenge::{ChallengeGround, ChallengeStatus, file_challenge};
+    use crate::challenge::{
+        adjudicate, file_challenge, ChallengeGround, ChallengeStatus, ChallengeVerdict,
+    };
 
     fn target() -> [u8; 32] {
         [1u8; 32]
@@ -451,6 +453,126 @@ mod tests {
         assert!(matches!(
             compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
             QuorumResult::Met { .. }
+        ));
+    }
+
+    // ── SPR2-04: quorum hardening edge cases ─────────────────────────────────
+
+    /// Challenge filed mid-vote → Contested; moves to UnderReview → still
+    /// Contested; then resolved (Overruled) → quorum proceeds to Met.
+    #[test]
+    fn challenge_filed_mid_vote_resolved_then_quorum_proceeds() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let mut ch = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"coordinated approvers suspected",
+        );
+
+        // Phase 1: Filed → Contested
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Contested { .. }
+        ));
+
+        // Phase 2: UnderReview → still Contested
+        ch.status = ChallengeStatus::UnderReview;
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Contested { .. }
+        ));
+
+        // Phase 3: Overruled → quorum re-runs and succeeds
+        adjudicate(&mut ch, ChallengeVerdict::Overrule).expect("adjudicate ok");
+        assert_eq!(ch.status, ChallengeStatus::Overruled);
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Met { .. }
+        ));
+    }
+
+    /// A Sustained challenge (upheld) is a terminal state; it is no longer
+    /// Filed/UnderReview, so it must not block the quorum gate.
+    #[test]
+    fn sustained_challenge_does_not_block_quorum() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let mut ch = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::QuorumViolation,
+            b"",
+        );
+        adjudicate(&mut ch, ChallengeVerdict::Sustain).expect("adjudicate ok");
+        assert_eq!(ch.status, ChallengeStatus::Sustained);
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
+            QuorumResult::Met { .. }
+        ));
+    }
+
+    /// Two Filed challenges from different grounds must both produce Contested —
+    /// numerical multiplicity of challenges mirrors multiplicity of approvals.
+    #[test]
+    fn simultaneous_challenges_different_grounds_both_contested() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let ch1 = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"sybil evidence",
+        );
+        let ch2 = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::QuorumViolation,
+            b"quorum evidence",
+        );
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch1, &ch2]),
+            QuorumResult::Contested { .. }
+        ));
+    }
+
+    /// One resolved challenge plus one still-Filed challenge must remain Contested.
+    #[test]
+    fn mixed_resolved_and_open_challenge_stays_contested() {
+        let approvals = vec![
+            make_approval("alice", Role::Steward, true),
+            make_approval("bob", Role::Reviewer, true),
+            make_approval("carol", Role::Contributor, true),
+        ];
+        let mut resolved = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::SybilAllegation,
+            b"",
+        );
+        adjudicate(&mut resolved, ChallengeVerdict::Overrule).expect("adjudicate ok");
+
+        let open = file_challenge(
+            &challenger_did(),
+            &target(),
+            ChallengeGround::ProceduralError,
+            b"",
+        );
+
+        // resolved first in slice — open challenge must still block
+        assert!(matches!(
+            compute_quorum_with_challenges(&approvals, &default_policy(), &[&resolved, &open]),
+            QuorumResult::Contested { .. }
         ));
     }
 }
