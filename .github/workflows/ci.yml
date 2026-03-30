@@ -123,8 +123,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Audit dependencies
-        # RUSTSEC-2023-0071: rsa crate (via sqlx-mysql) — no fix available upstream
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        # deny.toml documents why no advisories are ignored: sqlx "mysql" feature
+        # is not enabled, so rsa (RUSTSEC-2023-0071) is not in the dep graph.
+        run: cargo audit
 
   # -----------------------------------------------------------------------
   # Gate 7: Deny (license + advisory compliance)
@@ -227,6 +228,30 @@ jobs:
           fi
           echo "✓ CycloneDX SBOM generated successfully ($SBOM_COUNT files):"
           find . -name '*.cdx.json' -o -name '*bom*.json' | head -20
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-ci-${{ github.sha }}
+          path: |
+            **/*.cdx.json
+            **/bom*.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Gate 11: Unused Dependencies (cargo-machete)
+  # -----------------------------------------------------------------------
+  machete:
+    name: "Gate 11 — Unused Dependencies (cargo-machete)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-machete
+        run: cargo install cargo-machete
+      - name: Check for unused dependencies
+        run: cargo machete
 
   # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
@@ -245,6 +270,7 @@ jobs:
       - doc
       - hygiene
       - sbom
+      - machete
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."

@@ -17,6 +17,11 @@ all-features = true
 # ---------------------------------------------------------------------------
 # Advisories — reject any crate with a known security advisory
 # ---------------------------------------------------------------------------
+# Advisory notes (all must have named justification if ignored):
+#   RUSTSEC-2023-0071 (rsa timing side-channel via sqlx-mysql): NOT ignored here
+#     because the workspace does NOT enable the sqlx "mysql" feature — rsa is
+#     not in the dependency graph.  If mysql support is ever added, this must be
+#     re-evaluated and either patched or explicitly ignored with justification.
 [advisories]
 ignore = []
 
