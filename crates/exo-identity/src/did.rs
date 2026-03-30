@@ -154,6 +154,12 @@ impl DidRegistry {
     pub fn is_empty(&self) -> bool {
         self.documents.is_empty()
     }
+
+    /// Return all registered DID strings in deterministic (sorted) order.
+    #[must_use]
+    pub fn list_dids(&self) -> Vec<&str> {
+        self.documents.keys().map(String::as_str).collect()
+    }
 }
 
 #[cfg(test)]
@@ -363,5 +369,17 @@ mod tests {
             resolved.service_endpoints[0].endpoint,
             "https://example.com/msg"
         );
+    }
+
+    #[test]
+    fn list_dids_returns_sorted_ids() {
+        let (pk1, _) = generate_keypair();
+        let (pk2, _) = generate_keypair();
+        let mut reg = DidRegistry::new();
+        reg.register(make_doc(make_did("charlie"), pk1)).unwrap();
+        reg.register(make_doc(make_did("alice"), pk2)).unwrap();
+        let dids = reg.list_dids();
+        // BTreeMap iteration is sorted, so alice comes before charlie.
+        assert_eq!(dids, vec!["did:exo:alice", "did:exo:charlie"]);
     }
 }

@@ -1,11 +1,15 @@
 //! HTTP server skeleton — gateway configuration, lifecycle, and axum routing.
+use std::sync::{Arc, RwLock};
+
 use axum::{
     Router,
-    extract::State,
-    http::StatusCode,
-    response::Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Json},
     routing::{get, post},
 };
+use exo_core::Did;
+use exo_identity::did::{DidDocument, DidRegistry};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
@@ -80,14 +84,17 @@ pub struct AppState {
     /// Live PostgreSQL pool.  `None` when the gateway starts without a DB
     /// URL (e.g. local dev without Docker Compose).
     pub pool: Option<sqlx::PgPool>,
+    /// In-memory DID registry shared across all request handlers.
+    pub registry: Arc<RwLock<DidRegistry>>,
     /// Wall-clock milliseconds at server start, used to compute uptime.
     start_ms: u64,
 }
 
 impl AppState {
-    pub fn new(pool: Option<sqlx::PgPool>) -> Self {
+    pub fn new(pool: Option<sqlx::PgPool>, registry: Arc<RwLock<DidRegistry>>) -> Self {
         Self {
             pool,
+            registry,
             start_ms: now_ms(),
         }
     }
@@ -147,6 +154,129 @@ async fn handle_not_implemented() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 // ---------------------------------------------------------------------------
+// DID / Auth / Agent handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/auth/register — register a new DID document.
+///
+/// Body: a `DidDocument` JSON object.  Returns 201 on success, 409 if the
+/// DID is already registered.
+async fn handle_auth_register(
+    State(state): State<AppState>,
+    Json(doc): Json<DidDocument>,
+) -> impl IntoResponse {
+    let did_str = doc.id.as_str().to_owned();
+    let mut reg = state.registry.write().unwrap_or_else(|e| e.into_inner());
+    match reg.register(doc) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "did": did_str, "status": "registered" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/auth/me — resolve the caller's DID document.
+///
+/// Requires `X-Actor-Did: did:exo:<id>` request header.
+async fn handle_auth_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let did_str = match headers.get("x-actor-did").and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing X-Actor-Did header" })),
+            )
+                .into_response();
+        }
+    };
+    let did = match Did::new(&did_str) {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid DID format" })),
+            )
+                .into_response();
+        }
+    };
+    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
+    match reg.resolve(&did) {
+        Some(doc) => Json(doc.clone()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "DID not found" })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/agents — list all registered DID identifiers.
+async fn handle_agents_list(State(state): State<AppState>) -> impl IntoResponse {
+    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
+    let dids: Vec<String> = reg.list_dids().into_iter().map(|s| s.to_owned()).collect();
+    Json(serde_json::json!({ "agents": dids }))
+}
+
+/// GET /api/v1/agents/:did — resolve a single DID document by its identifier.
+async fn handle_agent_get(
+    State(state): State<AppState>,
+    Path(did_str): Path<String>,
+) -> impl IntoResponse {
+    let did = match Did::new(&did_str) {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid DID format" })),
+            )
+                .into_response();
+        }
+    };
+    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
+    match reg.resolve(&did) {
+        Some(doc) => Json(doc.clone()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "DID not found" })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/agents/enroll — enroll an agent by registering its DID document.
+///
+/// Identical to `POST /api/v1/auth/register`; the distinct path expresses the
+/// agent-specific enrollment workflow while sharing the underlying DID registry.
+async fn handle_agents_enroll(
+    State(state): State<AppState>,
+    Json(doc): Json<DidDocument>,
+) -> impl IntoResponse {
+    let did_str = doc.id.as_str().to_owned();
+    let mut reg = state.registry.write().unwrap_or_else(|e| e.into_inner());
+    match reg.register(doc) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "did": did_str, "status": "enrolled" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -165,15 +295,15 @@ pub fn build_router(state: AppState) -> Router {
         // Auth
         .route("/api/v1/auth/token", post(handle_not_implemented))
         .route("/api/v1/auth/saml/callback", post(handle_not_implemented))
-        .route("/api/v1/auth/register", post(handle_not_implemented))
+        .route("/api/v1/auth/register", post(handle_auth_register))
         .route("/api/v1/auth/login", post(handle_not_implemented))
         .route("/api/v1/auth/refresh", post(handle_not_implemented))
-        .route("/api/v1/auth/me", get(handle_not_implemented))
+        .route("/api/v1/auth/me", get(handle_auth_me))
         .route("/api/v1/auth/logout", post(handle_not_implemented))
         // Agents (static route before parameterised to avoid ambiguity)
-        .route("/api/v1/agents/enroll", post(handle_not_implemented))
-        .route("/api/v1/agents", get(handle_not_implemented))
-        .route("/api/v1/agents/:did", get(handle_not_implemented))
+        .route("/api/v1/agents/enroll", post(handle_agents_enroll))
+        .route("/api/v1/agents", get(handle_agents_list))
+        .route("/api/v1/agents/:did", get(handle_agent_get))
         .route(
             "/api/v1/agents/:did/advance-pace",
             post(handle_not_implemented),
@@ -234,7 +364,8 @@ async fn shutdown_signal() {
 /// Bind to `config.bind_address`, serve all routes, and drain on SIGTERM /
 /// Ctrl+C.  Returns once shutdown is complete.
 pub async fn serve(config: GatewayConfig, pool: Option<sqlx::PgPool>) -> Result<()> {
-    let state = AppState::new(pool);
+    let registry = Arc::new(RwLock::new(DidRegistry::new()));
+    let state = AppState::new(pool, registry);
     let app = build_router(state);
 
     let listener = TcpListener::bind(&config.bind_address)
@@ -258,12 +389,29 @@ pub async fn serve(config: GatewayConfig, pool: Option<sqlx::PgPool>) -> Result<
 #[cfg(test)]
 mod tests {
     use axum::{body::Body, http::Request};
+    use exo_core::Timestamp;
+    use exo_identity::did::DidDocument;
     use tower::ServiceExt;
 
     use super::*; // for .oneshot()
 
     fn state() -> AppState {
-        AppState::new(None)
+        AppState::new(None, Arc::new(RwLock::new(DidRegistry::new())))
+    }
+
+    /// Build a minimal DidDocument for use in registration tests.
+    fn minimal_doc(did_str: &str) -> DidDocument {
+        let did = Did::new(did_str).expect("valid DID");
+        DidDocument {
+            id: did,
+            public_keys: vec![],
+            authentication: vec![],
+            verification_methods: vec![],
+            service_endpoints: vec![],
+            created: Timestamp::ZERO,
+            updated: Timestamp::ZERO,
+            revoked: false,
+        }
     }
 
     // --- GatewayConfig / start() (existing tests preserved) ---
@@ -369,11 +517,13 @@ mod tests {
 
     #[tokio::test]
     async fn defined_api_routes_return_non_404() {
+        // Routes that return non-404 regardless of body/headers.
+        // NOTE: /api/v1/agents/:did is excluded here because it returns 404
+        // when the DID is not registered — that behaviour is tested separately.
         let paths = [
             "/api/v1/decisions/some-id",
             "/api/v1/auth/me",
             "/api/v1/agents",
-            "/api/v1/agents/did:exo:bot",
             "/api/v1/identity/did:exo:alice/score",
             "/api/v1/users",
             "/api/v1/audit/decision-123",
@@ -391,5 +541,162 @@ mod tests {
                 "expected non-404 for GET {path}"
             );
         }
+    }
+
+    // --- New DID / auth / agent endpoint tests ---
+
+    #[tokio::test]
+    async fn auth_register_returns_201() {
+        let body = serde_json::to_string(&minimal_doc("did:exo:tester")).unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn auth_register_duplicate_returns_409() {
+        let doc = minimal_doc("did:exo:dup");
+        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        registry.write().unwrap().register(doc.clone()).unwrap();
+        let st = AppState::new(None, registry);
+        let body = serde_json::to_string(&doc).unwrap();
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn auth_me_missing_header_returns_400() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(Request::builder().uri("/api/v1/auth/me").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn auth_me_known_did_returns_200() {
+        let doc = minimal_doc("did:exo:me-test");
+        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(None, registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .header("x-actor-did", "did:exo:me-test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_me_unknown_did_returns_404() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .header("x-actor-did", "did:exo:ghost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn agents_list_returns_registered_dids() {
+        let doc = minimal_doc("did:exo:listed");
+        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(None, registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/v1/agents").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(val["agents"].as_array().unwrap().contains(&serde_json::json!("did:exo:listed")));
+    }
+
+    #[tokio::test]
+    async fn agent_get_known_did_returns_200() {
+        let doc = minimal_doc("did:exo:agent-get");
+        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(None, registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:agent-get")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn agent_get_unknown_returns_404() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:nobody")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn agents_enroll_returns_201() {
+        let body = serde_json::to_string(&minimal_doc("did:exo:enrollee")).unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/enroll")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 }
