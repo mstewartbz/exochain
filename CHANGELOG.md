@@ -50,6 +50,9 @@ the 11-gate CI pipeline.  The gateway REST/GraphQL layer is feature-in-progress
 - Repository truth baseline (docs/audit/REPO-TRUTH-BASELINE.md)
 - Truth generation utility (tools/repo_truth.sh)
 - National AI Policy Framework crosswalk (docs/policy/)
+- `HybridKeyStore` (`exo-identity`) — Ed25519 + ML-DSA-65 keypair bundle lifecycle (create/rotate/revoke) for PQ-hardened DID keys
+- `HybridVerificationMethod` (`exo-identity`) — strict AND verification enforcing both Ed25519 and ML-DSA-65 signatures; closes silent downgrade path (EXOCHAIN-REM-005)
+- FIPS 204 KAT integration tests + proptests in `exo-core` covering ML-DSA-65 round-trip, determinism, hybrid strict-AND, and normative byte lengths
 
 ### Fixed
 - License inconsistency: Cargo.toml declared AGPL-3.0 while LICENSE file was Apache-2.0 (resolved to Apache-2.0)
@@ -62,6 +65,7 @@ the 11-gate CI pipeline.  The gateway REST/GraphQL layer is feature-in-progress
 - Format issues resolved (`cargo +nightly fmt --all -- --check` passes)
 - CI clippy gate split: strict `-D warnings` for production code, allow expect/unwrap in test code
 - Removed stale `--ignore RUSTSEC-2023-0071` from `cargo audit` CI step; dependency graph confirmed clean (sqlx `mysql` feature not enabled)
+- EXOCHAIN-REM-005: silent Ed25519-only downgrade when hybrid verification methods are expected — `HybridVerificationMethod::verify` now enforces strict AND semantics via `crypto::verify_hybrid`
 
 ### Removed
 - Tracked `node_modules/` directory (~200 files) from git
