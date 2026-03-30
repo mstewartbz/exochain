@@ -35,6 +35,15 @@ async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 async-stream = { workspace = true }
 
+[features]
+## Enable the production DB-backed adjudication context resolver.
+##
+## When this feature is active, `AppState::build_adjudication_context` queries
+## `agent_roles`, `consent_records`, and `authority_chains` instead of returning
+## the WO-009 deny-all scaffold.  The scaffold remains the default so that
+## dev/test environments do not need a live database.
+production-db = []
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tower = { workspace = true }

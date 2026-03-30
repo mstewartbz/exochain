@@ -138,19 +138,40 @@ impl AppState {
         Ok(vec![])
     }
 
-    /// Build a minimal adjudication context for the given actor.
+    /// Build an adjudication context for the given actor.
     ///
     /// **WO-009 SAFETY NOTE (CR-001 §8.9 — No-Admin Preservation):**
-    /// This is a *deny-all dev scaffold* — it intentionally produces a context
-    /// that `Kernel::adjudicate` DENIES.  `BailmentState::None` fails the
-    /// `ConsentRequired` invariant and `AuthorityChain::default()` fails
-    /// `AuthorityChainValid`.  Do NOT change `bailment_state` to `Active` or
-    /// add authority links without a real DB-backed resolver — that would create
-    /// an AEGIS bypass prohibited by CR-001 §8.9.
+    /// The *deny-all dev scaffold* below is the **default path** and MUST
+    /// remain unchanged.  `BailmentState::None` fails the `ConsentRequired`
+    /// invariant and `AuthorityChain::default()` fails `AuthorityChainValid` —
+    /// both are intentional.  Do NOT short-circuit this method or change
+    /// `bailment_state` to `Active` without routing through the DB resolver
+    /// activated by the `production-db` Cargo feature.
     ///
-    /// Replace with a real DB resolver once `roles`/`consents`/`authority_chains`
-    /// tables are available.
-    pub async fn build_adjudication_context(&self, _actor: &Did) -> AdjudicationContext {
+    /// When `production-db` is enabled **and** a DB pool is configured, the
+    /// call is forwarded to `build_adjudication_context_from_db`.  If that
+    /// query fails the method falls back to the scaffold so the gateway stays
+    /// safe even under transient DB outages.
+    // `actor` is only consumed inside the #[cfg(feature = "production-db")] block.
+    // Suppress the "unused variable" lint when the feature is disabled.
+    #[cfg_attr(not(feature = "production-db"), allow(unused_variables))]
+    pub async fn build_adjudication_context(&self, actor: &Did) -> AdjudicationContext {
+        // Production path — compiled only when the feature flag is set.
+        #[cfg(feature = "production-db")]
+        if let Some(pool) = &self.pool {
+            match build_adjudication_context_from_db(pool, actor).await {
+                Ok(ctx) => return ctx,
+                Err(e) => {
+                    tracing::warn!(
+                        actor = %actor,
+                        error = %e,
+                        "DB adjudication context query failed; falling back to WO-009 scaffold"
+                    );
+                }
+            }
+        }
+
+        // WO-009 deny-all scaffold (dev/test default and production fallback).
         AdjudicationContext {
             actor_roles: vec![],
             authority_chain: AuthorityChain::default(),
@@ -167,6 +188,110 @@ impl AppState {
 
 fn now_ms() -> u64 {
     exo_core::Timestamp::now_utc().physical_ms
+}
+
+// ---------------------------------------------------------------------------
+// Production DB adjudication context resolver (APE-53)
+// ---------------------------------------------------------------------------
+
+/// Build an `AdjudicationContext` by loading the actor's roles, consent
+/// records, and authority chain from the live database.
+///
+/// Only compiled when the `production-db` Cargo feature is enabled.  Callers
+/// should not invoke this directly — use `AppState::build_adjudication_context`
+/// which dispatches here when both the feature flag and a DB pool are present.
+///
+/// **WO-009**: never call this outside the feature-gated dispatch to avoid
+/// inadvertently bypassing the deny-all scaffold in dev/test environments.
+#[cfg(feature = "production-db")]
+async fn build_adjudication_context_from_db(
+    pool: &sqlx::PgPool,
+    actor: &Did,
+) -> Result<AdjudicationContext> {
+    use exo_gatekeeper::types::{
+        AuthorityChain as GkChain, BailmentState as GkBailment, ConsentRecord, GovernmentBranch,
+        Role,
+    };
+
+    let now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    let actor_str = actor.as_str();
+
+    let role_rows = crate::db::load_agent_roles(pool, actor_str, now)
+        .await
+        .map_err(|e| GatewayError::Internal(format!("adjudication roles query: {e}")))?;
+
+    let consent_rows = crate::db::load_consent_records(pool, actor_str, now)
+        .await
+        .map_err(|e| GatewayError::Internal(format!("adjudication consents query: {e}")))?;
+
+    let chain_row = crate::db::load_authority_chain(pool, actor_str, now)
+        .await
+        .map_err(|e| GatewayError::Internal(format!("adjudication chain query: {e}")))?;
+
+    // Convert role rows → `Role` values.
+    let actor_roles: Vec<Role> = role_rows
+        .iter()
+        .map(|r| {
+            let branch = match r.branch.as_str() {
+                "legislative" => GovernmentBranch::Legislative,
+                "judicial" => GovernmentBranch::Judicial,
+                _ => GovernmentBranch::Executive,
+            };
+            Role {
+                name: r.role.clone(),
+                branch,
+            }
+        })
+        .collect();
+
+    // Convert consent rows → `ConsentRecord` values.
+    let consent_records: Vec<ConsentRecord> = consent_rows
+        .iter()
+        .filter_map(|r| {
+            let subject = Did::new(&r.subject_did).ok()?;
+            Some(ConsentRecord {
+                subject,
+                granted_to: actor.clone(),
+                scope: r.scope.clone(),
+                active: r.status == "active",
+            })
+        })
+        .collect();
+
+    // Derive `BailmentState` from the first active consent record.
+    // `BailmentState::None` is the safe default when no active consent exists.
+    let bailment_state = consent_rows
+        .iter()
+        .find(|r| r.status == "active")
+        .and_then(|r| {
+            let bailor = Did::new(&r.subject_did).ok()?;
+            Some(GkBailment::Active {
+                bailor,
+                bailee: actor.clone(),
+                scope: r.scope.clone(),
+            })
+        })
+        .unwrap_or(GkBailment::None);
+
+    // Deserialise the stored `AuthorityChain` blob; fall back to empty chain.
+    let authority_chain = chain_row
+        .as_ref()
+        .and_then(|row| serde_json::from_value::<GkChain>(row.chain_json.clone()).ok())
+        .unwrap_or_default();
+
+    Ok(AdjudicationContext {
+        actor_roles,
+        authority_chain,
+        consent_records,
+        bailment_state,
+        human_override_preserved: true,
+        actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+        // Provenance is per-action, not per-actor; callers that need full
+        // ProvenanceVerifiable enforcement must attach it before adjudication.
+        provenance: None,
+        quorum_evidence: None,
+        active_challenge_reason: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,5 +1794,215 @@ mod tests {
     async fn extract_bearer_token_missing_returns_none() {
         let headers = HeaderMap::new();
         assert!(extract_bearer_token(&headers).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Adjudication context integration tests (APE-53)
+    //
+    // These tests verify that the `Kernel` produces the correct `Verdict` for
+    // different adjudication contexts that mirror what the DB resolver would
+    // build.  No live database is required — contexts are constructed directly
+    // from types.
+    //
+    // Note on InvariantSet: `ProvenanceVerifiable` is intentionally excluded
+    // from these tests because provenance is per-action (not per-actor) and is
+    // not stored in the adjudication tables.  Callers that require full
+    // ProvenanceVerifiable enforcement must attach provenance to the context
+    // before calling `Kernel::adjudicate`.
+    // -----------------------------------------------------------------------
+
+    use exo_gatekeeper::{
+        invariants::ConstitutionalInvariant,
+        types::{AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Role},
+    };
+
+    /// Returns a `Kernel` that checks all invariants **except** ProvenanceVerifiable.
+    fn adjudication_kernel() -> Kernel {
+        Kernel::new(
+            b"exochain-constitution-v1",
+            InvariantSet::with(vec![
+                ConstitutionalInvariant::SeparationOfPowers,
+                ConstitutionalInvariant::ConsentRequired,
+                ConstitutionalInvariant::NoSelfGrant,
+                ConstitutionalInvariant::HumanOverride,
+                ConstitutionalInvariant::KernelImmutability,
+                ConstitutionalInvariant::AuthorityChainValid,
+                ConstitutionalInvariant::QuorumLegitimate,
+            ]),
+        )
+    }
+
+    /// Build a minimal valid `AdjudicationContext` for `actor` that satisfies
+    /// all non-provenance invariants.  Mirrors the context that
+    /// `build_adjudication_context_from_db` would produce for an actor with
+    /// a single role, one active consent record, and a one-link authority chain.
+    fn valid_db_context(actor: &Did) -> AdjudicationContext {
+        let root = Did::new("did:exo:root-grantor").unwrap();
+        AdjudicationContext {
+            actor_roles: vec![Role {
+                name: "voter".to_string(),
+                branch: GovernmentBranch::Executive,
+            }],
+            authority_chain: AuthorityChain {
+                links: vec![AuthorityLink {
+                    grantor: root.clone(),
+                    grantee: actor.clone(),
+                    permissions: PermissionSet::new(vec![Permission::new("vote")]),
+                    // Non-empty signature satisfies the legacy (no-public-key) path.
+                    signature: vec![0xAB; 8],
+                    grantor_public_key: None,
+                }],
+            },
+            consent_records: vec![ConsentRecord {
+                subject: root.clone(),
+                granted_to: actor.clone(),
+                scope: "data:vote".to_string(),
+                active: true,
+            }],
+            bailment_state: BailmentState::Active {
+                bailor: root,
+                bailee: actor.clone(),
+                scope: "data:vote".to_string(),
+            },
+            human_override_preserved: true,
+            actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+            provenance: None,
+            quorum_evidence: None,
+            active_challenge_reason: None,
+        }
+    }
+
+    fn vote_action(actor: &Did) -> GkActionRequest {
+        GkActionRequest {
+            actor: actor.clone(),
+            action: "vote".into(),
+            required_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+            is_self_grant: false,
+            modifies_kernel: false,
+        }
+    }
+
+    /// [APE-53 test 1] Scaffold remains deny-all regardless of feature flag.
+    #[tokio::test]
+    async fn scaffold_context_is_still_deny_all() {
+        // The default `AppState` (no pool, no production-db feature) must always
+        // produce a deny-all context — this is the WO-009 preservation check.
+        let st = state();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let ctx = st.build_adjudication_context(&actor).await;
+        let verdict = st.kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(verdict.is_denied(), "scaffold must always deny");
+    }
+
+    /// [APE-53 test 2] Role present + consent + valid chain → Permitted.
+    #[test]
+    fn kernel_permits_with_role_consent_and_valid_chain() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let ctx = valid_db_context(&actor);
+        let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(verdict.is_permitted(), "full DB context must be permitted");
+    }
+
+    /// [APE-53 test 3] Role absent (empty roles) + consent + valid chain → Permitted.
+    ///
+    /// The Kernel does not require roles to be present; `SeparationOfPowers`
+    /// only fires when an actor holds roles across *multiple* branches.
+    /// When no roles are present, all non-provenance invariants still pass.
+    #[test]
+    fn kernel_permits_consent_and_chain_even_without_roles() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let mut ctx = valid_db_context(&actor);
+        ctx.actor_roles = vec![]; // simulate no DB role records
+        let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(
+            verdict.is_permitted(),
+            "absent roles alone must not deny — consent+chain suffice"
+        );
+    }
+
+    /// [APE-53 test 4] No active bailment → ConsentRequired denied.
+    ///
+    /// Mirrors a DB state where the actor has no active consent records
+    /// (all expired or revoked), so `bailment_state` stays `BailmentState::None`.
+    #[test]
+    fn kernel_denies_without_active_bailment() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let mut ctx = valid_db_context(&actor);
+        ctx.bailment_state = BailmentState::None;
+        ctx.consent_records = vec![];
+        let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(verdict.is_denied(), "no bailment must be denied");
+    }
+
+    /// [APE-53 test 5] Active bailment but no matching consent record → ConsentRequired denied.
+    ///
+    /// Mirrors a DB state where the bailment record exists but no `consent_records`
+    /// row is present for this actor, violating the second half of ConsentRequired.
+    #[test]
+    fn kernel_denies_bailment_active_but_no_consent_record() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let root = Did::new("did:exo:root-grantor").unwrap();
+        let mut ctx = valid_db_context(&actor);
+        ctx.consent_records = vec![]; // remove consent records
+        // Keep bailment Active — the invariant checks both bailment AND records.
+        ctx.bailment_state = BailmentState::Active {
+            bailor: root,
+            bailee: actor.clone(),
+            scope: "data:vote".to_string(),
+        };
+        let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(
+            verdict.is_denied(),
+            "active bailment without consent record must be denied"
+        );
+    }
+
+    /// [APE-53 test 6] Consent present but empty authority chain → not permitted.
+    ///
+    /// Mirrors a DB state where no `authority_chains` row exists for the actor.
+    /// A single `AuthorityChainValid` violation escalates (not denies) per
+    /// the Kernel escalation policy; the important assertion is that the action
+    /// is never `Permitted`.
+    #[test]
+    fn kernel_blocks_with_empty_authority_chain() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let mut ctx = valid_db_context(&actor);
+        ctx.authority_chain = AuthorityChain::default(); // empty
+        let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(
+            !verdict.is_permitted(),
+            "empty chain must never be permitted (got Denied or Escalated)"
+        );
+    }
+
+    /// [APE-53 test 7] Roles spanning multiple branches → SeparationOfPowers denied.
+    ///
+    /// Mirrors a DB state where `agent_roles` has rows for both Executive and
+    /// Legislative branches, violating the single-branch rule.
+    #[test]
+    fn kernel_denies_roles_spanning_two_branches() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:alice").unwrap();
+        let mut ctx = valid_db_context(&actor);
+        ctx.actor_roles = vec![
+            Role {
+                name: "voter".to_string(),
+                branch: GovernmentBranch::Executive,
+            },
+            Role {
+                name: "legislator".to_string(),
+                branch: GovernmentBranch::Legislative,
+            },
+        ];
+        let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+        assert!(
+            verdict.is_denied(),
+            "cross-branch roles must be denied by SeparationOfPowers"
+        );
     }
 }
