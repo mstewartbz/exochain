@@ -3,6 +3,7 @@
 //! Detection, triage, escalation (including Sybil adjudication), kanban,
 //! feedback loops, and completeness checking.
 
+pub mod challenge;
 pub mod completeness;
 pub mod detector;
 pub mod error;
