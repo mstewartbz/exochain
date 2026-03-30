@@ -1018,6 +1018,7 @@ mod tests {
             public_keys: vec![],
             authentication: vec![],
             verification_methods: vec![],
+            hybrid_verification_methods: vec![],
             service_endpoints: vec![],
             created: Timestamp::ZERO,
             updated: Timestamp::ZERO,

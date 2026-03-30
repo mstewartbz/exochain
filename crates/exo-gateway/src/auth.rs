@@ -151,6 +151,7 @@ mod tests {
                 valid_from: 0,
                 revoked_at: None,
             }],
+            hybrid_verification_methods: vec![],
             service_endpoints: vec![],
             created: Timestamp::ZERO,
             updated: Timestamp::ZERO,
