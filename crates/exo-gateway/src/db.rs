@@ -712,3 +712,101 @@ pub struct TrusteeShardRow {
     pub shard_confirmed: bool,
     pub accepted_at_ms: Option<i64>,
 }
+
+// ---------------------------------------------------------------------------
+// Adjudication resolver tables (APE-53)
+// ---------------------------------------------------------------------------
+
+/// Row from `agent_roles` — roles held by an agent DID at a point in time.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AgentRoleRow {
+    pub agent_did: String,
+    pub role: String,
+    /// Constitutional branch: "executive" | "legislative" | "judicial"
+    pub branch: String,
+    pub granted_by: String,
+    pub valid_from: i64,
+    pub expires_at: Option<i64>,
+}
+
+/// Row from `consent_records` — active consent granted to an actor DID.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ConsentRecordRow {
+    pub subject_did: String,
+    pub actor_did: String,
+    pub scope: String,
+    pub bailment_type: String,
+    /// "active" | "revoked" | "expired"
+    pub status: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+}
+
+/// Row from `authority_chains` — JSONB-encoded `AuthorityChain` for an actor.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AuthorityChainRow {
+    pub actor_did: String,
+    pub chain_json: JsonValue,
+    pub valid_from: i64,
+    pub expires_at: Option<i64>,
+}
+
+/// Load all non-expired roles for `actor_did` as of `now_ms`.
+pub async fn load_agent_roles(
+    pool: &PgPool,
+    actor_did: &str,
+    now_ms: i64,
+) -> Result<Vec<AgentRoleRow>, sqlx::Error> {
+    sqlx::query_as::<_, AgentRoleRow>(
+        "SELECT agent_did, role, branch, granted_by, valid_from, expires_at \
+         FROM agent_roles \
+         WHERE agent_did = $1 \
+           AND valid_from <= $2 \
+           AND (expires_at IS NULL OR expires_at > $2)",
+    )
+    .bind(actor_did)
+    .bind(now_ms)
+    .fetch_all(pool)
+    .await
+}
+
+/// Load all active, non-expired consent records for `actor_did` as of `now_ms`.
+pub async fn load_consent_records(
+    pool: &PgPool,
+    actor_did: &str,
+    now_ms: i64,
+) -> Result<Vec<ConsentRecordRow>, sqlx::Error> {
+    sqlx::query_as::<_, ConsentRecordRow>(
+        "SELECT subject_did, actor_did, scope, bailment_type, status, created_at, expires_at \
+         FROM consent_records \
+         WHERE actor_did = $1 \
+           AND status = 'active' \
+           AND created_at <= $2 \
+           AND (expires_at IS NULL OR expires_at > $2)",
+    )
+    .bind(actor_did)
+    .bind(now_ms)
+    .fetch_all(pool)
+    .await
+}
+
+/// Load the most-recent valid `AuthorityChain` for `actor_did` as of `now_ms`.
+pub async fn load_authority_chain(
+    pool: &PgPool,
+    actor_did: &str,
+    now_ms: i64,
+) -> Result<Option<AuthorityChainRow>, sqlx::Error> {
+    sqlx::query_as::<_, AuthorityChainRow>(
+        "SELECT actor_did, chain_json, valid_from, expires_at \
+         FROM authority_chains \
+         WHERE actor_did = $1 \
+           AND valid_from <= $2 \
+           AND (expires_at IS NULL OR expires_at > $2) \
+         ORDER BY valid_from DESC \
+         LIMIT 1",
+    )
+    .bind(actor_did)
+    .bind(now_ms)
+    .fetch_optional(pool)
+    .await
+}
