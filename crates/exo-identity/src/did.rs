@@ -1,8 +1,16 @@
 //! Decentralized Identity (DID) document management.
+//!
+//! ## Hybrid verification methods
+//!
+//! `HybridVerificationMethod` binds an Ed25519 classical key and an
+//! ML-DSA-65 post-quantum key to a single DID fragment.  Verification
+//! requires **both** components to pass (strict AND, identical to
+//! `crypto::verify_hybrid`), providing a cryptographic instantiation of
+//! the `DualControl` constitutional invariant.
 
 use std::collections::BTreeMap;
 
-use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
+use exo_core::{Did, PqPublicKey, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IdentityError;
@@ -48,6 +56,57 @@ pub struct VerificationMethod {
     pub revoked_at: Option<u64>,
 }
 
+/// A hybrid Ed25519 + ML-DSA-65 verification method bound to a DID.
+///
+/// Verification requires **both** the classical Ed25519 and post-quantum
+/// ML-DSA-65 components to pass (`crypto::verify_hybrid`).  This is the
+/// cryptographic instantiation of the `DualControl` constitutional invariant
+/// and closes the silent Ed25519-only downgrade documented in EXOCHAIN-REM-005.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HybridVerificationMethod {
+    /// Unique fragment identifier, typically `did:exo:<id>#hybrid-key-<version>`.
+    pub id: String,
+    /// Always `"HybridKeyEd25519MlDsa652020"` for this variant.
+    pub key_type: String,
+    /// DID of the entity that controls this key pair.
+    pub controller: Did,
+    /// Ed25519 verifying key (32 bytes, multibase `z`-prefixed base58btc).
+    pub classical_public_key_multibase: String,
+    /// ML-DSA-65 verifying key (1952 bytes, multibase `z`-prefixed base58btc).
+    pub pq_public_key_multibase: String,
+    /// ML-DSA-65 verifying key, stored as raw bytes for efficient verification.
+    pub pq_public_key: PqPublicKey,
+    /// Ed25519 verifying key, stored as raw bytes for efficient verification.
+    pub classical_public_key: PublicKey,
+    /// Key version (monotonically increasing per DID).
+    pub version: u64,
+    /// Whether this key pair is currently active.
+    pub active: bool,
+    /// Timestamp (physical_ms) from which this key pair is valid.
+    pub valid_from: u64,
+    /// Timestamp (physical_ms) at which this key pair was revoked, if any.
+    pub revoked_at: Option<u64>,
+}
+
+impl HybridVerificationMethod {
+    /// Verify a `Signature::Hybrid` against this method's key bundle.
+    ///
+    /// Delegates to `crypto::verify_hybrid`, which requires **both** the
+    /// Ed25519 and ML-DSA-65 components to pass with no short-circuit.
+    #[must_use]
+    pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
+        if !self.active {
+            return false;
+        }
+        crypto::verify_hybrid(
+            message,
+            signature,
+            &self.classical_public_key,
+            &self.pq_public_key,
+        )
+    }
+}
+
 /// Proof that a DID holder authorized a revocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationProof {
@@ -64,6 +123,9 @@ pub struct DidDocument {
     /// W3C DID Core verification methods with lifecycle management.
     #[serde(default)]
     pub verification_methods: Vec<VerificationMethod>,
+    /// Hybrid Ed25519 + ML-DSA-65 verification methods.
+    #[serde(default)]
+    pub hybrid_verification_methods: Vec<HybridVerificationMethod>,
     pub service_endpoints: Vec<ServiceEndpoint>,
     pub created: Timestamp,
     pub updated: Timestamp,
@@ -168,6 +230,9 @@ mod tests {
 
     use super::*;
 
+    // bs58 is available as a dependency of this crate
+    use bs58;
+
     fn make_did(label: &str) -> Did {
         Did::new(&format!("did:exo:{label}")).expect("valid did")
     }
@@ -178,6 +243,7 @@ mod tests {
             public_keys: vec![pk],
             authentication: vec![],
             verification_methods: vec![],
+            hybrid_verification_methods: vec![],
             service_endpoints: vec![],
             created: Timestamp::new(1000, 0),
             updated: Timestamp::new(1000, 0),
@@ -349,6 +415,7 @@ mod tests {
                 public_key: pk,
             }],
             verification_methods: vec![],
+            hybrid_verification_methods: vec![],
             service_endpoints: vec![ServiceEndpoint {
                 id: "svc-1".into(),
                 service_type: "ExochainMessaging".into(),
@@ -381,5 +448,136 @@ mod tests {
         let dids = reg.list_dids();
         // BTreeMap iteration is sorted, so alice comes before charlie.
         assert_eq!(dids, vec!["did:exo:alice", "did:exo:charlie"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // HybridVerificationMethod tests
+    // -----------------------------------------------------------------------
+
+    fn make_hybrid_method(did: &Did, pk: PublicKey, pq_pk: PqPublicKey) -> HybridVerificationMethod {
+        let classical_mb = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
+        let pq_mb = format!("z{}", bs58::encode(pq_pk.as_bytes()).into_string());
+        HybridVerificationMethod {
+            id: format!("{}#hybrid-key-1", did.as_str()),
+            key_type: "HybridKeyEd25519MlDsa652020".into(),
+            controller: did.clone(),
+            classical_public_key_multibase: classical_mb,
+            pq_public_key_multibase: pq_mb,
+            pq_public_key: pq_pk,
+            classical_public_key: pk,
+            version: 1,
+            active: true,
+            valid_from: 1000,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn hybrid_method_verify_roundtrip() {
+        use exo_core::crypto::{generate_pq_keypair, sign_hybrid};
+
+        let (classical_pk, classical_sk) = generate_keypair();
+        let (pq_pk, pq_sk) = generate_pq_keypair();
+        let did = make_did("hybrid-alice");
+
+        let method = make_hybrid_method(&did, classical_pk, pq_pk);
+        let message = b"hybrid DID verification";
+        let sig = sign_hybrid(message, &classical_sk, &pq_sk).expect("sign_hybrid");
+        assert!(
+            method.verify(message, &sig),
+            "HybridVerificationMethod::verify must accept valid Hybrid signature"
+        );
+    }
+
+    #[test]
+    fn hybrid_method_verify_fails_wrong_message() {
+        use exo_core::crypto::{generate_pq_keypair, sign_hybrid};
+
+        let (classical_pk, classical_sk) = generate_keypair();
+        let (pq_pk, pq_sk) = generate_pq_keypair();
+        let did = make_did("hybrid-bob");
+        let method = make_hybrid_method(&did, classical_pk, pq_pk);
+        let sig = sign_hybrid(b"original", &classical_sk, &pq_sk).expect("sign_hybrid");
+        assert!(!method.verify(b"tampered", &sig));
+    }
+
+    #[test]
+    fn hybrid_method_verify_fails_wrong_key() {
+        use exo_core::crypto::{generate_pq_keypair, sign_hybrid};
+
+        let (_pk1, sk1) = generate_keypair();
+        let (pk2, _sk2) = generate_keypair();
+        let (_pq1, pq_sk1) = generate_pq_keypair();
+        let (pq2, _pq_sk2) = generate_pq_keypair();
+        let did = make_did("hybrid-carol");
+        // Method uses pk2/pq2 but signature was made with sk1/pq_sk1
+        let method = make_hybrid_method(&did, pk2, pq2);
+        let sig = sign_hybrid(b"msg", &sk1, &pq_sk1).expect("sign_hybrid");
+        assert!(!method.verify(b"msg", &sig));
+    }
+
+    #[test]
+    fn hybrid_method_inactive_always_fails() {
+        use exo_core::crypto::{generate_pq_keypair, sign_hybrid};
+
+        let (classical_pk, classical_sk) = generate_keypair();
+        let (pq_pk, pq_sk) = generate_pq_keypair();
+        let did = make_did("hybrid-dave");
+        let mut method = make_hybrid_method(&did, classical_pk, pq_pk);
+        method.active = false;
+        let sig = sign_hybrid(b"msg", &classical_sk, &pq_sk).expect("sign_hybrid");
+        assert!(
+            !method.verify(b"msg", &sig),
+            "inactive hybrid method must always reject verification"
+        );
+    }
+
+    #[test]
+    fn hybrid_method_rejects_non_hybrid_signature() {
+        use exo_core::crypto::generate_pq_keypair;
+
+        let (classical_pk, classical_sk) = generate_keypair();
+        let (pq_pk, _pq_sk) = generate_pq_keypair();
+        let did = make_did("hybrid-eve");
+        let method = make_hybrid_method(&did, classical_pk, pq_pk);
+        // Present a classical Ed25519 signature to a hybrid verifier
+        let ed_sig = exo_core::crypto::sign(b"msg", &classical_sk);
+        assert!(
+            !method.verify(b"msg", &ed_sig),
+            "hybrid method must reject plain Ed25519 signature (no downgrade)"
+        );
+    }
+
+    #[test]
+    fn did_document_with_hybrid_method_roundtrip() {
+        use exo_core::crypto::{generate_pq_keypair, sign_hybrid};
+
+        let (classical_pk, classical_sk) = generate_keypair();
+        let (pq_pk, pq_sk) = generate_pq_keypair();
+        let did = make_did("hybrid-frank");
+        let hybrid_method = make_hybrid_method(&did, classical_pk, pq_pk);
+
+        let doc = DidDocument {
+            id: did.clone(),
+            public_keys: vec![classical_pk],
+            authentication: vec![],
+            verification_methods: vec![],
+            hybrid_verification_methods: vec![hybrid_method],
+            service_endpoints: vec![],
+            created: Timestamp::new(1000, 0),
+            updated: Timestamp::new(1000, 0),
+            revoked: false,
+        };
+
+        let mut reg = DidRegistry::new();
+        reg.register(doc).unwrap();
+
+        let resolved = reg.resolve(&did).unwrap();
+        assert_eq!(resolved.hybrid_verification_methods.len(), 1);
+
+        let method = &resolved.hybrid_verification_methods[0];
+        let msg = b"hybrid DID doc test";
+        let sig = sign_hybrid(msg, &classical_sk, &pq_sk).expect("sign_hybrid");
+        assert!(method.verify(msg, &sig));
     }
 }
