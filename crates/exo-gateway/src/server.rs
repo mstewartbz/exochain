@@ -18,6 +18,7 @@ use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::did::{DidDocument, DidRegistry};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tower_http::trace::TraceLayer;
 
 use crate::{
     error::{GatewayError, Result},
@@ -925,6 +926,8 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
         // GraphQL sub-router has its own state — merge after with_state()
         .merge(gql_router)
+        // Emit structured tracing spans for every request/response.
+        .layer(TraceLayer::new_for_http())
 }
 
 // ---------------------------------------------------------------------------

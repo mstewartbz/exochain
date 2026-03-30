@@ -50,7 +50,9 @@ pub enum GovernanceMonitorError {
     },
 
     /// Circuit breaker has been tripped — too many Critical findings.
-    #[error("circuit breaker triggered: {critical_count} Critical findings in 24h (threshold: {threshold})")]
+    #[error(
+        "circuit breaker triggered: {critical_count} Critical findings in 24h (threshold: {threshold})"
+    )]
     CircuitBreakerTripped {
         /// Number of Critical findings in the window.
         critical_count: u64,
@@ -348,7 +350,10 @@ mod tests {
         let attestation = make_attestation(digest, test_did("scanner"), &sk);
 
         let err = verify_attestation(&attestation, &wrong_pk).unwrap_err();
-        assert!(matches!(err, GovernanceMonitorError::InvalidAttestation { .. }));
+        assert!(matches!(
+            err,
+            GovernanceMonitorError::InvalidAttestation { .. }
+        ));
     }
 
     #[test]
@@ -361,7 +366,10 @@ mod tests {
         attestation.findings_digest = Hash256::digest(b"tampered");
 
         let err = verify_attestation(&attestation, &pk).unwrap_err();
-        assert!(matches!(err, GovernanceMonitorError::InvalidAttestation { .. }));
+        assert!(matches!(
+            err,
+            GovernanceMonitorError::InvalidAttestation { .. }
+        ));
     }
 
     // ── Circuit breaker tests ───────────────────────────────────────────

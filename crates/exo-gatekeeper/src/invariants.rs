@@ -367,8 +367,7 @@ fn check_quorum_legitimate(ctx: &InvariantContext) -> Result<(), InvariantViolat
                     .votes
                     .iter()
                     .filter(|v| {
-                        v.approved
-                            && !v.provenance.as_ref().is_some_and(|p| p.is_synthetic())
+                        v.approved && !v.provenance.as_ref().is_some_and(|p| p.is_synthetic())
                     })
                     .count();
                 let synthetic_excluded = evidence.synthetic_vote_count();
@@ -977,10 +976,12 @@ mod tests {
         let err = enforce_all(&engine, &ctx).unwrap_err();
         assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
         assert!(err[0].description.contains("authentic"));
-        assert!(err[0]
-            .evidence
-            .iter()
-            .any(|e| e.contains("synthetic_votes_excluded: 2")));
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("synthetic_votes_excluded: 2"))
+        );
     }
 
     #[test]
@@ -1049,7 +1050,9 @@ mod tests {
 
     // ── CR-001 §8.3: Ed25519 provenance verification (WO-003 / GAP-02) ──────
 
-    fn signed_provenance(actor_str: &str) -> (Provenance, exo_core::PublicKey, exo_core::SecretKey) {
+    fn signed_provenance(
+        actor_str: &str,
+    ) -> (Provenance, exo_core::PublicKey, exo_core::SecretKey) {
         let (pk, sk) = exo_core::crypto::generate_keypair();
         let actor = did(actor_str);
         let action_hash = vec![0xde, 0xad, 0xbe, 0xef];

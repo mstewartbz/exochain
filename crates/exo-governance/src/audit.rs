@@ -62,7 +62,7 @@ pub fn append(log: &mut AuditLog, entry: AuditEntry) -> Result<(), GovernanceErr
     let head = log.head_hash();
     if entry.chain_hash != head {
         return Err(GovernanceError::AuditChainBroken {
-            sequence: log.entries.len() as u64,
+            sequence: u64::try_from(log.entries.len()).unwrap_or(u64::MAX),
             expected: Hash256(head),
             actual: Hash256(entry.chain_hash),
         });
@@ -76,7 +76,7 @@ pub fn verify_chain(log: &AuditLog) -> Result<(), GovernanceError> {
     for (i, entry) in log.entries.iter().enumerate() {
         if entry.chain_hash != prev {
             return Err(GovernanceError::AuditChainBroken {
-                sequence: i as u64,
+                sequence: u64::try_from(i).unwrap_or(u64::MAX),
                 expected: Hash256(prev),
                 actual: Hash256(entry.chain_hash),
             });

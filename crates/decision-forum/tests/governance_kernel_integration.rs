@@ -25,7 +25,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use decision_forum::{
-    decision_object::{ActorKind, AuthorityLink as ForumAuthorityLink, DecisionClass, DecisionObject, EvidenceItem},
+    decision_object::{
+        ActorKind, AuthorityLink as ForumAuthorityLink, DecisionClass, DecisionObject, EvidenceItem,
+    },
     tnc_enforcer::{TncContext, enforce_all as enforce_tnc_all},
 };
 use exo_core::{
@@ -98,7 +100,8 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
         BctsState::Governed,
         BctsState::Approved,
     ] {
-        d.transition(state, &actor, clock).expect("lifecycle transition");
+        d.transition(state, &actor, clock)
+            .expect("lifecycle transition");
     }
 
     d
@@ -186,7 +189,11 @@ fn strategic_decision_approved_permitted() {
 
     // Build a fully approved Strategic decision in the decision.forum layer.
     let decision = make_approved_decision(DecisionClass::Strategic, &mut clock);
-    assert_eq!(decision.state, BctsState::Approved, "decision must be Approved");
+    assert_eq!(
+        decision.state,
+        BctsState::Approved,
+        "decision must be Approved"
+    );
 
     // Verify the TNC controls on the forum side also pass.
     let tnc_ctx = TncContext {
@@ -240,10 +247,13 @@ fn missing_consent_denied() {
     );
 
     if let Verdict::Denied { violations } = &verdict {
-        let has_consent = violations
-            .iter()
-            .any(|v| v.invariant == exo_gatekeeper::invariants::ConstitutionalInvariant::ConsentRequired);
-        assert!(has_consent, "Expected ConsentRequired violation; got {violations:?}");
+        let has_consent = violations.iter().any(|v| {
+            v.invariant == exo_gatekeeper::invariants::ConstitutionalInvariant::ConsentRequired
+        });
+        assert!(
+            has_consent,
+            "Expected ConsentRequired violation; got {violations:?}"
+        );
     }
 }
 
@@ -312,7 +322,12 @@ fn full_lifecycle_adjudicated_at_each_transition() {
     let actor = did("did:exo:lifecycle-actor");
     let const_hash = Hash256::digest(CONSTITUTION);
 
-    let mut d = DecisionObject::new("Lifecycle Test", DecisionClass::Operational, const_hash, &mut clock);
+    let mut d = DecisionObject::new(
+        "Lifecycle Test",
+        DecisionClass::Operational,
+        const_hash,
+        &mut clock,
+    );
     d.add_authority_link(ForumAuthorityLink {
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
@@ -546,7 +561,12 @@ fn denied_forum_decision_correlates_with_kernel_denial() {
     let const_hash = Hash256::digest(CONSTITUTION);
 
     // Build a decision that gets denied in the forum layer (transition to Denied).
-    let mut d = DecisionObject::new("Denied Decision", DecisionClass::Operational, const_hash, &mut clock);
+    let mut d = DecisionObject::new(
+        "Denied Decision",
+        DecisionClass::Operational,
+        const_hash,
+        &mut clock,
+    );
     d.add_authority_link(ForumAuthorityLink {
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
@@ -554,8 +574,10 @@ fn denied_forum_decision_correlates_with_kernel_denial() {
         timestamp: clock.now(),
     })
     .expect("add link");
-    d.transition(BctsState::Submitted, &actor, &mut clock).expect("submit");
-    d.transition(BctsState::Denied, &actor, &mut clock).expect("deny");
+    d.transition(BctsState::Submitted, &actor, &mut clock)
+        .expect("submit");
+    d.transition(BctsState::Denied, &actor, &mut clock)
+        .expect("deny");
     assert_eq!(d.state, BctsState::Denied);
 
     // The enactment context reflects the consent failure (no active bailment).
@@ -594,9 +616,18 @@ fn all_eight_invariants_exercised() {
             name: "CP-1 SeparationOfPowers",
             mutate: |_, ctx| {
                 ctx.actor_roles = vec![
-                    Role { name: "l".into(), branch: GovernmentBranch::Legislative },
-                    Role { name: "e".into(), branch: GovernmentBranch::Executive },
-                    Role { name: "j".into(), branch: GovernmentBranch::Judicial },
+                    Role {
+                        name: "l".into(),
+                        branch: GovernmentBranch::Legislative,
+                    },
+                    Role {
+                        name: "e".into(),
+                        branch: GovernmentBranch::Executive,
+                    },
+                    Role {
+                        name: "j".into(),
+                        branch: GovernmentBranch::Judicial,
+                    },
                 ];
             },
             denied: true,
@@ -604,31 +635,41 @@ fn all_eight_invariants_exercised() {
         },
         Case {
             name: "CP-2 ConsentRequired",
-            mutate: |_, ctx| { ctx.bailment_state = BailmentState::None; },
+            mutate: |_, ctx| {
+                ctx.bailment_state = BailmentState::None;
+            },
             denied: true,
             escalated: false,
         },
         Case {
             name: "CP-3 NoSelfGrant",
-            mutate: |action, _| { action.is_self_grant = true; },
+            mutate: |action, _| {
+                action.is_self_grant = true;
+            },
             denied: true,
             escalated: false,
         },
         Case {
             name: "CP-4 HumanOverride",
-            mutate: |_, ctx| { ctx.human_override_preserved = false; },
+            mutate: |_, ctx| {
+                ctx.human_override_preserved = false;
+            },
             denied: true,
             escalated: false,
         },
         Case {
             name: "CP-5 KernelImmutability",
-            mutate: |action, _| { action.modifies_kernel = true; },
+            mutate: |action, _| {
+                action.modifies_kernel = true;
+            },
             denied: true,
             escalated: false,
         },
         Case {
             name: "CP-6 AuthorityChainValid",
-            mutate: |_, ctx| { ctx.authority_chain = AuthorityChain { links: vec![] }; },
+            mutate: |_, ctx| {
+                ctx.authority_chain = AuthorityChain { links: vec![] };
+            },
             denied: false,
             escalated: true,
         },
@@ -650,7 +691,9 @@ fn all_eight_invariants_exercised() {
         },
         Case {
             name: "CP-8 ProvenanceVerifiable",
-            mutate: |_, ctx| { ctx.provenance = None; },
+            mutate: |_, ctx| {
+                ctx.provenance = None;
+            },
             denied: true,
             escalated: false,
         },

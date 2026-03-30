@@ -449,7 +449,10 @@ mod tests {
             ],
         };
         assert!(ev.is_met(), "raw count should pass (3 approvals)");
-        assert!(!ev.is_met_authentic(), "authentic count should fail (only 2 human)");
+        assert!(
+            !ev.is_met_authentic(),
+            "authentic count should fail (only 2 human)"
+        );
         assert_eq!(ev.synthetic_vote_count(), 1);
     }
 
