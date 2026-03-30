@@ -193,6 +193,7 @@ mod tests {
                 valid_from: 1000,
                 revoked_at: None,
             }],
+            hybrid_verification_methods: vec![],
             service_endpoints: vec![],
             created: Timestamp::new(1000, 0),
             updated: Timestamp::new(1000, 0),

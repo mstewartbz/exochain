@@ -802,7 +802,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "decision-forum"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "exo-authority",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "exo-api"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "ciborium",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "exo-authority"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "exo-consent"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "exo-core",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "exo-core"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "chrono",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "exo-dag"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "criterion",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "exo-escalation"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "exo-core",
  "exo-gatekeeper",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "exo-gatekeeper"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "exo-gateway"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "exo-governance"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "exo-authority",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "exo-identity"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "bs58",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "exo-legal"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "exo-authority",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "exo-proofs"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "exo-core",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "exo-tenant"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "blake3",
  "exo-core",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "exochain-wasm"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "decision-forum",
  "ed25519-dalek",
