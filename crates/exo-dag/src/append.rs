@@ -103,6 +103,7 @@ pub fn verify_stored_integrity(store: &impl DagStore, hash: &Hash256) -> Result<
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::{
