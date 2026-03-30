@@ -1,7 +1,7 @@
-//! Governance error types.
+//! Governance error types (canonical, TNC-aware).
 
-use crate::types::{DecisionClass, Did, SemVer};
-use exo_core::crypto::Blake3Hash;
+use crate::types::{DecisionClass, SemVer};
+use exo_core::{Did, Hash256};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -11,26 +11,26 @@ pub enum GovernanceError {
     InvalidTransition { from: String, to: String },
 
     #[error("Decision {0:?} is immutable (terminal status reached) — TNC-08")]
-    DecisionImmutable(Blake3Hash),
+    DecisionImmutable(Hash256),
 
     #[error("Decision {0:?} not found")]
-    DecisionNotFound(Blake3Hash),
+    DecisionNotFound(Hash256),
 
     // --- Authority chain errors ---
     #[error("Authority chain verification failed: {reason}")]
     AuthorityChainBroken { reason: String },
 
     #[error("Delegation {0:?} has expired — TNC-05")]
-    DelegationExpired(Blake3Hash),
+    DelegationExpired(Hash256),
 
     #[error("Delegation {0:?} has been revoked")]
-    DelegationRevoked(Blake3Hash),
+    DelegationRevoked(Hash256),
 
     #[error("Delegation {0:?} not found")]
-    DelegationNotFound(Blake3Hash),
+    DelegationNotFound(Hash256),
 
     #[error("Sub-delegation not permitted by parent delegation {0:?}")]
-    SubDelegationNotPermitted(Blake3Hash),
+    SubDelegationNotPermitted(Hash256),
 
     #[error("Authority chain exceeds maximum depth of {0} levels")]
     ChainTooDeep(usize),
@@ -68,10 +68,10 @@ pub enum GovernanceError {
 
     // --- Challenge errors ---
     #[error("Challenge {0:?} not found")]
-    ChallengeNotFound(Blake3Hash),
+    ChallengeNotFound(Hash256),
 
     #[error("Decision {0:?} is already contested")]
-    AlreadyContested(Blake3Hash),
+    AlreadyContested(Hash256),
 
     // --- Emergency errors (TNC-10) ---
     #[error("Emergency action requires ratification — TNC-10")]
@@ -84,9 +84,20 @@ pub enum GovernanceError {
     #[error("Audit chain integrity violation at sequence {sequence}: expected {expected:?}, got {actual:?} — TNC-03")]
     AuditChainBroken {
         sequence: u64,
-        expected: Blake3Hash,
-        actual: Blake3Hash,
+        expected: Hash256,
+        actual: Hash256,
     },
+
+    // --- Deliberation errors ---
+    #[error("Deliberation is not open for votes")]
+    DeliberationNotOpen,
+
+    #[error("Duplicate vote from {0}")]
+    DuplicateVote(String),
+
+    // --- Succession / action errors ---
+    #[error("Action not found: {0}")]
+    ActionNotFound(String),
 
     // --- Serialization errors ---
     #[error("Serialization error: {0}")]
@@ -95,10 +106,4 @@ pub enum GovernanceError {
     // --- Crypto errors ---
     #[error("Signature verification failed")]
     SignatureVerificationFailed,
-}
-
-impl From<serde_cbor::Error> for GovernanceError {
-    fn from(e: serde_cbor::Error) -> Self {
-        GovernanceError::Serialization(e.to_string())
-    }
 }

@@ -12,7 +12,9 @@ pub mod conflict;
 pub mod crosscheck;
 pub mod custody;
 pub mod deliberation;
-pub mod error;
+pub mod errors;
 pub mod quorum;
 pub mod succession;
 pub mod types;
+
+pub use errors::GovernanceError;

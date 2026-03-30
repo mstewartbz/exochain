@@ -6,7 +6,7 @@
 use exo_core::{Did, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::GovernanceError;
+use crate::errors::GovernanceError;
 
 /// Roles that can participate in governance actions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,7 +122,8 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
 pub fn validate_approval(approval: &Approval) -> Result<(), GovernanceError> {
     if approval.approver_did.as_str().is_empty() {
         return Err(GovernanceError::QuorumNotMet {
-            reason: "empty approver DID".to_string(),
+            required: 1,
+            present: 0,
         });
     }
     Ok(())

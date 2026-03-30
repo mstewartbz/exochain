@@ -4,7 +4,7 @@ use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::GovernanceError;
+use crate::errors::GovernanceError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChallengeGround {
@@ -90,7 +90,7 @@ pub fn adjudicate(
             };
             Ok(())
         }
-        _ => Err(GovernanceError::InvalidStateTransition {
+        _ => Err(GovernanceError::InvalidTransition {
             from: format!("{:?}", challenge.status),
             to: format!("{verdict:?}"),
         }),
@@ -103,7 +103,7 @@ pub fn withdraw(challenge: &mut Challenge) -> Result<(), GovernanceError> {
             challenge.status = ChallengeStatus::Withdrawn;
             Ok(())
         }
-        _ => Err(GovernanceError::InvalidStateTransition {
+        _ => Err(GovernanceError::InvalidTransition {
             from: format!("{:?}", challenge.status),
             to: "Withdrawn".to_string(),
         }),

@@ -1,10 +1,10 @@
 //! Governance audit trail — append-only, hash-chained log.
 
-use exo_core::{Did, Timestamp};
+use exo_core::{Did, Hash256, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::GovernanceError;
+use crate::errors::GovernanceError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -59,9 +59,12 @@ fn hash_entry(entry: &AuditEntry) -> [u8; 32] {
 }
 
 pub fn append(log: &mut AuditLog, entry: AuditEntry) -> Result<(), GovernanceError> {
-    if entry.chain_hash != log.head_hash() {
+    let head = log.head_hash();
+    if entry.chain_hash != head {
         return Err(GovernanceError::AuditChainBroken {
-            index: log.entries.len(),
+            sequence: log.entries.len() as u64,
+            expected: Hash256(head),
+            actual: Hash256(entry.chain_hash),
         });
     }
     log.entries.push(entry);
@@ -72,7 +75,11 @@ pub fn verify_chain(log: &AuditLog) -> Result<(), GovernanceError> {
     let mut prev = [0u8; 32];
     for (i, entry) in log.entries.iter().enumerate() {
         if entry.chain_hash != prev {
-            return Err(GovernanceError::AuditChainBroken { index: i });
+            return Err(GovernanceError::AuditChainBroken {
+                sequence: i as u64,
+                expected: Hash256(prev),
+                actual: Hash256(entry.chain_hash),
+            });
         }
         prev = hash_entry(entry);
     }
@@ -138,7 +145,7 @@ mod tests {
         }
         log.entries[1].chain_hash = [0xffu8; 32];
         match verify_chain(&log).unwrap_err() {
-            GovernanceError::AuditChainBroken { index } => assert_eq!(index, 1),
+            GovernanceError::AuditChainBroken { sequence, .. } => assert_eq!(sequence, 1),
             e => panic!("unexpected: {e:?}"),
         }
     }
