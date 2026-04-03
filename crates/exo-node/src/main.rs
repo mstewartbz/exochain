@@ -14,6 +14,7 @@
 //! exochain peers                           # list connected peers
 //! ```
 
+mod api;
 mod cli;
 mod config;
 mod holons;
@@ -78,9 +79,36 @@ fn spawn_event_fanout(
     mut event_rx: mpsc::Receiver<NetworkEvent>,
     reactor_tx: mpsc::Sender<NetworkEvent>,
     sync_tx: mpsc::Sender<NetworkEvent>,
+    metrics: metrics::SharedMetrics,
 ) {
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
+            // Log peer lifecycle events and update metrics.
+            match &event {
+                NetworkEvent::MessageReceived { source, topic, .. } => {
+                    tracing::trace!(
+                        peer = %source,
+                        %topic,
+                        "Wire message received"
+                    );
+                }
+                NetworkEvent::PeerDiscovered { peer_id } => {
+                    tracing::debug!(%peer_id, "Peer discovered");
+                    metrics
+                        .peer_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                NetworkEvent::PeerLost { peer_id } => {
+                    tracing::debug!(%peer_id, "Peer lost");
+                    // Saturating subtract via fetch_update.
+                    let _ = metrics.peer_count.fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |v| Some(v.saturating_sub(1)),
+                    );
+                }
+            }
+
             // Dispatch to reactor (consensus + governance messages).
             let _ = reactor_tx.send(event.clone()).await;
             // Dispatch to sync engine (state sync messages).
@@ -101,7 +129,11 @@ async fn start_node(
 ) -> anyhow::Result<()> {
     // Bootstrap node identity.
     let node_identity = identity::load_or_create(data_dir)?;
-    tracing::info!(did = %node_identity.did, "Node identity ready");
+    tracing::info!(
+        did = %node_identity.did,
+        pubkey = hex::encode(node_identity.public_key_bytes()),
+        "Node identity ready"
+    );
 
     // Open local DAG store.
     let dag_store = store::SqliteDagStore::open(data_dir)?;
@@ -128,8 +160,8 @@ async fn start_node(
     network::start_listening(&mut swarm, &net_config)?;
 
     // Dial seed nodes if joining.
-    if is_join && !seed_addrs.is_empty() {
-        let dialed = network::dial_seeds(&mut swarm, &seed_addrs)?;
+    if is_join && !net_config.seed_addrs.is_empty() {
+        let dialed = network::dial_seeds(&mut swarm, &net_config.seed_addrs)?;
         tracing::info!(dialed, "Dialed seed nodes");
     }
 
@@ -161,7 +193,11 @@ async fn start_node(
         Arc::new(move |data: &[u8]| identity.sign(data))
     };
 
-    let reactor_state = reactor::create_reactor_state(&reactor_config, sign_fn);
+    let reactor_state = reactor::create_reactor_state(
+        &reactor_config,
+        sign_fn,
+        Some(&shared_store),
+    );
     let (reactor_tx, mut reactor_rx) = mpsc::channel::<ReactorEvent>(256);
     let (reactor_event_tx, reactor_event_rx) = mpsc::channel::<NetworkEvent>(256);
 
@@ -235,7 +271,12 @@ async fn start_node(
     tracing::info!("Sync engine started");
 
     // --- Event fan-out ---
-    spawn_event_fanout(event_rx, reactor_event_tx, sync_net_event_tx);
+    spawn_event_fanout(
+        event_rx,
+        reactor_event_tx,
+        sync_net_event_tx,
+        Arc::clone(&node_metrics),
+    );
 
     // --- Event loggers (with metrics updates) ---
     let reactor_metrics = Arc::clone(&node_metrics);
@@ -316,8 +357,9 @@ async fn start_node(
 
     tokio::spawn(holons::run_holon_manager(
         holon_config,
-        reactor_state,
-        net_handle,
+        Arc::clone(&reactor_state),
+        Arc::clone(&shared_store),
+        net_handle.clone(),
         holon_event_tx,
     ));
     tracing::info!("Infrastructure Holons started (topology, scaling, health)");
@@ -417,6 +459,17 @@ async fn start_node(
         }),
     );
 
+    // Build the governance API router.
+    let api_state = Arc::new(api::NodeApiState {
+        reactor_state: Arc::clone(&reactor_state),
+        store: Arc::clone(&shared_store),
+        net_handle: net_handle.clone(),
+    });
+    let governance_router = api::governance_router(api_state);
+
+    // Merge metrics + governance into a single extra router.
+    let extra_router = metrics_router.merge(governance_router);
+
     // Start the gateway HTTP server (blocks).
     let bind_address = format!("0.0.0.0:{api_port}");
     let gateway_config = exo_gateway::server::GatewayConfig {
@@ -439,7 +492,7 @@ async fn start_node(
     exo_gateway::server::serve_with_extra_routes(
         gateway_config,
         None,
-        Some(metrics_router),
+        Some(extra_router),
     )
     .await?;
     Ok(())
