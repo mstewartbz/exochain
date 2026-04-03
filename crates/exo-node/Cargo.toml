@@ -59,5 +59,16 @@ ciborium = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# P2P networking
+libp2p = { version = "0.54", features = [
+    "tokio", "tcp", "quic", "noise", "yamux",
+    "gossipsub", "kad", "identify", "mdns", "ping",
+    "macros", "request-response", "cbor", "serde",
+] }
+futures = "0.3"
+
+# Hex encoding for peer display
+hex = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
