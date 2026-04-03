@@ -1,0 +1,87 @@
+name: gap-engagement-lifecycle
+version: 1.0.0
+description: "Full lifecycle orchestration for a $25K-$75K GAP advisory engagement."
+trigger:
+  event: pjb_approved
+  tier: T1
+bcts_initial_state: Submitted
+
+nodes:
+  - id: kickoff-briefing
+    type: agent_facilitation
+    description: "Engagement Lead briefs the CEO on the 4-8 week GAP process."
+    assigned_agent: engagement-lead
+    inputs: [pjb_context]
+    outputs: [kickoff_consensus]
+
+  - id: phase1-workflow-map
+    type: artifact_generation
+    description: "Artifact Builder drafts the Workflow Control Map."
+    assigned_agent: artifact-builder
+    inputs: [kickoff_consensus, autonomous_inventory]
+    outputs: [holons/workflow-control-map.md]
+
+  - id: phase2-authority-matrix
+    type: artifact_generation
+    description: "Draft the Authority Matrix establishing cryptographic role boundaries."
+    assigned_agent: artifact-builder
+    inputs: [holons/workflow-control-map.md]
+    outputs: [authority/authority-matrix.md]
+
+  - id: gate-midpoint-review
+    type: protocol_call
+    description: "Midpoint Decision Forum review of Phase 1 and Phase 2 outputs."
+    protocol: council-review.yaml
+    inputs: [holons/workflow-control-map.md, authority/authority-matrix.md]
+    outputs: [midpoint_resolution]
+    error_strategy: halt_and_escalate
+
+  - id: phase3-policy-gates
+    type: artifact_generation
+    description: "Draft the machine-readable Policy Gate Library."
+    assigned_agent: artifact-builder
+    inputs: [midpoint_resolution]
+    outputs: [policies/policy-gate-library.md]
+
+  - id: phase4-escalation-graph
+    type: artifact_generation
+    description: "Draft human-in-the-loop fallback routing."
+    assigned_agent: artifact-builder
+    inputs: [policies/policy-gate-library.md]
+    outputs: [escalations/escalation-graph.md]
+
+  - id: phase5-evidence-schema
+    type: artifact_generation
+    description: "Draft immutable DAG logging requirements."
+    assigned_agent: artifact-builder
+    inputs: [escalations/escalation-graph.md]
+    outputs: [evidence/evidence-schema.md]
+
+  - id: gate-final-council
+    type: protocol_call
+    description: "Final 5-panel rigorous review of all 5 architectural deliverables."
+    protocol: council-review.yaml
+    inputs: [all_artifacts]
+    outputs: [final_council_resolution]
+    bcts_transition: Governed
+
+  - id: phase6-pilot-execution
+    type: agent_facilitation
+    description: "Run dry-run simulation of the governance architecture."
+    assigned_agent: engagement-lead
+    inputs: [final_council_resolution]
+    outputs: [pilots/pilot-outcome-memo.md]
+
+  - id: final-ceo-approval
+    type: approval_gate
+    description: "CEO reviews Pilot Outcome Memo and all artifacts for final executive sign-off."
+    inputs: [pilots/pilot-outcome-memo.md, final_council_resolution]
+    outputs: [ceo_final_signature]
+    bcts_transition: Approved
+
+  - id: handoff-and-close
+    type: ledger_anchor
+    description: "Anchor final state to DAG and transition to MeshCore SaaS readiness."
+    inputs: [ceo_final_signature]
+    outputs: [dag_receipt, engagement_closed]
+    bcts_transition: Closed

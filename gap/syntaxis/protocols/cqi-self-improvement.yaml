@@ -1,0 +1,62 @@
+name: cqi-exoforge-loop
+version: 1.0.0
+description: "Self-Development team continuous quality improvement and self-modification cycle."
+trigger:
+  event: threshold_alert OR cron_weekly
+  tier: T2
+bcts_initial_state: Submitted
+
+nodes:
+  - id: collect-metrics
+    type: telemetry_aggregation
+    description: "Governance Monitor agent collects DAG metrics, bottleneck latency, and error rates."
+    assigned_agent: governance-monitor
+    inputs: [system_logs, dag_events]
+    outputs: [performance_telemetry]
+
+  - id: analyze-degradation
+    type: data_analysis
+    description: "CQI Lead analyzes telemetry for systemic degradations or optimization paths."
+    assigned_agent: cqi-lead
+    inputs: [performance_telemetry]
+    outputs: [cqi_finding, improvement_hypothesis]
+    error_strategy: halt_if_no_findings
+
+  - id: generate-proposal
+    type: artifact_generation
+    description: "Draft a formal Syntaxis modification proposal to address the finding."
+    assigned_agent: cqi-lead
+    inputs: [improvement_hypothesis]
+    outputs: [syntaxis_patch_proposal]
+    bcts_transition: Deliberated
+
+  - id: internal-council-review
+    type: protocol_call
+    description: "Route the self-modification proposal through the 5-panel Decision Forum."
+    protocol: council-review.yaml
+    inputs: [syntaxis_patch_proposal]
+    outputs: [approved_patch_resolution]
+    error_strategy: halt_and_discard
+    bcts_transition: Governed
+
+  - id: exoforge-dispatch
+    type: external_integration
+    description: "ExoForge Liaison dispatches the approved patch to ExoForge for compilation and testing."
+    assigned_agent: exoforge-liaison
+    inputs: [approved_patch_resolution]
+    outputs: [exoforge_compiled_artifact, test_results]
+
+  - id: verify-improvement
+    type: validation_gate
+    description: "Verify that the ExoForge artifact passes the test suite and resolves the original finding."
+    assigned_agent: cqi-lead
+    inputs: [exoforge_compiled_artifact, test_results, improvement_hypothesis]
+    outputs: [verification_receipt]
+    bcts_transition: Verified
+
+  - id: deploy-and-record
+    type: ledger_anchor
+    description: "Deploy the new Syntaxis protocol and record the self-modification to the DAG."
+    inputs: [verification_receipt]
+    outputs: [dag_receipt]
+    bcts_transition: Closed
