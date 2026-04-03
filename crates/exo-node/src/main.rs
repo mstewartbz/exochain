@@ -8,6 +8,7 @@
 //!
 //! ```bash
 //! exochain start                           # start a standalone node
+//! exochain start --validator               # start as a BFT validator
 //! exochain join --seed=seed1.exochain.io   # join an existing network
 //! exochain status                          # show node status
 //! exochain peers                           # list connected peers
@@ -17,12 +18,18 @@ mod cli;
 mod config;
 mod identity;
 mod network;
+mod reactor;
 mod store;
 mod wire;
 
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+
 use clap::Parser;
 use cli::{Cli, Command};
+use exo_core::types::Did;
 use network::{NetworkConfig, NetworkHandle};
+use reactor::{ReactorConfig, ReactorEvent};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -37,12 +44,37 @@ async fn main() {
     }
 }
 
+/// Parse a list of validator DID strings, falling back to just this node's DID.
+fn parse_validator_set(
+    cli_validators: &Option<Vec<String>>,
+    node_did: &Did,
+) -> BTreeSet<Did> {
+    if let Some(vals) = cli_validators {
+        vals.iter()
+            .filter_map(|s| match Did::new(s) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    tracing::warn!(did = %s, err = %e, "Invalid validator DID — skipping");
+                    None
+                }
+            })
+            .collect()
+    } else {
+        // Default: this node is the sole validator (standalone mode).
+        let mut set = BTreeSet::new();
+        set.insert(node_did.clone());
+        set
+    }
+}
+
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Start {
             api_port,
             p2p_port,
             data_dir,
+            validator,
+            validators,
         } => {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let cfg = config::load_or_create(&data_dir)?;
@@ -62,6 +94,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             tracing::info!(
                 api_port,
                 p2p_port,
+                validator,
                 did = %node_identity.did,
                 "Starting exochain node"
             );
@@ -78,12 +111,71 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             network::start_listening(&mut swarm, &net_config)?;
 
             let (cmd_tx, cmd_rx) = mpsc::channel(256);
-            let (event_tx, _event_rx) = mpsc::channel(256);
-            let _net_handle = NetworkHandle::new(cmd_tx);
+            let (event_tx, event_rx) = mpsc::channel(256);
+            let net_handle = NetworkHandle::new(cmd_tx);
 
             // Spawn the P2P network event loop.
             tokio::spawn(network::run_network_loop(swarm, cmd_rx, event_tx));
             tracing::info!(p2p_port, "P2P network started");
+
+            // Initialize the consensus reactor.
+            let validator_set = parse_validator_set(&validators, &node_identity.did);
+            let reactor_config = ReactorConfig {
+                node_did: node_identity.did.clone(),
+                is_validator: validator,
+                validators: validator_set.clone(),
+                round_timeout_ms: 5000,
+            };
+
+            // Create a sign function from the node identity.
+            let sign_fn: Arc<dyn Fn(&[u8]) -> exo_core::types::Signature + Send + Sync> = {
+                // Capture the identity for signing.
+                let identity = identity::load_or_create(&data_dir)?;
+                Arc::new(move |data: &[u8]| identity.sign(data))
+            };
+
+            let reactor_state = reactor::create_reactor_state(&reactor_config, sign_fn);
+            let shared_store = Arc::new(Mutex::new(dag_store));
+            let (reactor_tx, mut reactor_rx) = mpsc::channel::<ReactorEvent>(256);
+
+            // Spawn the consensus reactor.
+            tokio::spawn(reactor::run_reactor(
+                reactor_state.clone(),
+                shared_store,
+                net_handle,
+                event_rx,
+                reactor_tx,
+            ));
+
+            if validator {
+                tracing::info!(
+                    validators = validator_set.len(),
+                    "Consensus reactor started (validator mode)"
+                );
+            } else {
+                tracing::info!("Consensus reactor started (observer mode)");
+            }
+
+            // Spawn reactor event logger.
+            tokio::spawn(async move {
+                while let Some(event) = reactor_rx.recv().await {
+                    match event {
+                        ReactorEvent::NodeCommitted { hash, height, round } => {
+                            tracing::info!(%hash, height, round, "Committed");
+                        }
+                        ReactorEvent::RoundAdvanced { round } => {
+                            tracing::trace!(round, "Round advanced");
+                        }
+                        ReactorEvent::GovernanceEventReceived { event } => {
+                            tracing::info!(
+                                sender = %event.sender,
+                                event_type = ?event.event_type,
+                                "Governance event received"
+                            );
+                        }
+                    }
+                }
+            });
 
             // Start the gateway HTTP server (blocks).
             let bind_address = format!("0.0.0.0:{api_port}");
@@ -106,6 +198,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             api_port,
             p2p_port,
             data_dir,
+            validator,
+            validators,
         } => {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let cfg = config::load_or_create(&data_dir)?;
@@ -156,12 +250,69 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             tracing::info!(dialed, "Dialed seed nodes");
 
             let (cmd_tx, cmd_rx) = mpsc::channel(256);
-            let (event_tx, _event_rx) = mpsc::channel(256);
-            let _net_handle = NetworkHandle::new(cmd_tx);
+            let (event_tx, event_rx) = mpsc::channel(256);
+            let net_handle = NetworkHandle::new(cmd_tx);
 
             // Spawn the P2P network event loop.
             tokio::spawn(network::run_network_loop(swarm, cmd_rx, event_tx));
             tracing::info!(p2p_port, seeds = dialed, "P2P network started");
+
+            // Initialize the consensus reactor.
+            let validator_set = parse_validator_set(&validators, &node_identity.did);
+            let reactor_config = ReactorConfig {
+                node_did: node_identity.did.clone(),
+                is_validator: validator,
+                validators: validator_set.clone(),
+                round_timeout_ms: 5000,
+            };
+
+            let sign_fn: Arc<dyn Fn(&[u8]) -> exo_core::types::Signature + Send + Sync> = {
+                let identity = identity::load_or_create(&data_dir)?;
+                Arc::new(move |data: &[u8]| identity.sign(data))
+            };
+
+            let reactor_state = reactor::create_reactor_state(&reactor_config, sign_fn);
+            let shared_store = Arc::new(Mutex::new(dag_store));
+            let (reactor_tx, mut reactor_rx) = mpsc::channel::<ReactorEvent>(256);
+
+            // Spawn the consensus reactor.
+            tokio::spawn(reactor::run_reactor(
+                reactor_state.clone(),
+                shared_store,
+                net_handle,
+                event_rx,
+                reactor_tx,
+            ));
+
+            if validator {
+                tracing::info!(
+                    validators = validator_set.len(),
+                    "Consensus reactor started (validator mode)"
+                );
+            } else {
+                tracing::info!("Consensus reactor started (observer mode)");
+            }
+
+            // Spawn reactor event logger.
+            tokio::spawn(async move {
+                while let Some(event) = reactor_rx.recv().await {
+                    match event {
+                        ReactorEvent::NodeCommitted { hash, height, round } => {
+                            tracing::info!(%hash, height, round, "Committed");
+                        }
+                        ReactorEvent::RoundAdvanced { round } => {
+                            tracing::trace!(round, "Round advanced");
+                        }
+                        ReactorEvent::GovernanceEventReceived { event } => {
+                            tracing::info!(
+                                sender = %event.sender,
+                                event_type = ?event.event_type,
+                                "Governance event received"
+                            );
+                        }
+                    }
+                }
+            });
 
             // Start the gateway HTTP server (blocks).
             let bind_address = format!("0.0.0.0:{api_port}");
@@ -192,7 +343,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
 
         Command::Peers { data_dir: _ } => {
-            // TODO(Phase 2 follow-up): connect to a running node's API to query peers
+            // TODO(Phase 4): connect to a running node's API to query peers
             println!("Peer listing requires a running node. Use `exochain start` first.");
             Ok(())
         }

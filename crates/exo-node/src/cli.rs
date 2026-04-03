@@ -31,6 +31,15 @@ pub enum Command {
         /// Data directory (default: ~/.exochain).
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Run as a BFT consensus validator.
+        #[arg(long, default_value_t = false)]
+        validator: bool,
+
+        /// Validator DIDs for the initial validator set (comma-separated).
+        /// If not provided, this node's DID is used as the sole validator.
+        #[arg(long, value_delimiter = ',')]
+        validators: Option<Vec<String>>,
     },
 
     /// Join an existing network via seed node(s).
@@ -50,6 +59,14 @@ pub enum Command {
         /// Data directory (default: ~/.exochain).
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Run as a BFT consensus validator.
+        #[arg(long, default_value_t = false)]
+        validator: bool,
+
+        /// Validator DIDs for the initial validator set (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        validators: Option<Vec<String>>,
     },
 
     /// Show node status.
