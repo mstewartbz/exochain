@@ -18,6 +18,7 @@ mod cli;
 mod config;
 mod holons;
 mod identity;
+mod metrics;
 mod network;
 mod reactor;
 mod store;
@@ -143,6 +144,9 @@ async fn start_node(
     // Create shared state.
     let shared_store = Arc::new(Mutex::new(dag_store));
 
+    // Create metrics registry.
+    let node_metrics = metrics::create_metrics();
+
     // --- Consensus reactor ---
     let validator_set = parse_validator_set(validators, &node_identity.did);
     let reactor_config = ReactorConfig {
@@ -168,6 +172,16 @@ async fn start_node(
         reactor_event_rx,
         reactor_tx,
     ));
+
+    // Set initial metrics from configuration.
+    node_metrics.is_validator.store(
+        u64::from(validator),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    node_metrics.validator_count.store(
+        validator_set.len() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     if validator {
         tracing::info!(
@@ -223,14 +237,27 @@ async fn start_node(
     // --- Event fan-out ---
     spawn_event_fanout(event_rx, reactor_event_tx, sync_net_event_tx);
 
-    // --- Event loggers ---
+    // --- Event loggers (with metrics updates) ---
+    let reactor_metrics = Arc::clone(&node_metrics);
     tokio::spawn(async move {
         while let Some(event) = reactor_rx.recv().await {
             match event {
                 ReactorEvent::NodeCommitted { hash, height, round } => {
+                    reactor_metrics
+                        .committed_height
+                        .store(height, std::sync::atomic::Ordering::Relaxed);
+                    reactor_metrics
+                        .consensus_round
+                        .store(round, std::sync::atomic::Ordering::Relaxed);
+                    reactor_metrics
+                        .dag_nodes_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(%hash, height, round, "Committed");
                 }
                 ReactorEvent::RoundAdvanced { round } => {
+                    reactor_metrics
+                        .consensus_round
+                        .store(round, std::sync::atomic::Ordering::Relaxed);
                     tracing::trace!(round, "Round advanced");
                 }
                 ReactorEvent::GovernanceEventReceived { event } => {
@@ -244,16 +271,26 @@ async fn start_node(
         }
     });
 
+    let sync_metrics = Arc::clone(&node_metrics);
     tokio::spawn(async move {
         while let Some(event) = sync_event_rx.recv().await {
             match event {
                 SyncEvent::Progress { from_height, to_height, total_nodes } => {
+                    sync_metrics
+                        .sync_in_progress
+                        .store(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(
                         from_height, to_height, total_nodes,
                         "Sync progress"
                     );
                 }
                 SyncEvent::Complete { committed_height } => {
+                    sync_metrics
+                        .sync_in_progress
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    sync_metrics
+                        .committed_height
+                        .store(committed_height, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(committed_height, "Sync complete — node is caught up");
                 }
                 SyncEvent::ServedSnapshot { peer, from_height, nodes_sent } => {
@@ -285,7 +322,8 @@ async fn start_node(
     ));
     tracing::info!("Infrastructure Holons started (topology, scaling, health)");
 
-    // Holon event logger.
+    // Holon event logger (with metrics updates).
+    let holon_metrics = Arc::clone(&node_metrics);
     tokio::spawn(async move {
         while let Some(event) = holon_event_rx.recv().await {
             match event {
@@ -294,6 +332,9 @@ async fn start_node(
                     diversity_score,
                     recommendation,
                 } => {
+                    holon_metrics
+                        .peer_count
+                        .store(peer_count as u64, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(
                         peer_count,
                         diversity_score,
@@ -306,6 +347,9 @@ async fn start_node(
                     node_count,
                     recommendation,
                 } => {
+                    holon_metrics
+                        .validator_count
+                        .store(validator_count as u64, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(
                         validator_count,
                         node_count,
@@ -355,6 +399,24 @@ async fn start_node(
         }
     });
 
+    // Build the metrics HTTP route.
+    let metrics_handle = Arc::clone(&node_metrics);
+    let metrics_router = axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(move || {
+            let m = Arc::clone(&metrics_handle);
+            async move {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/plain; version=0.0.4; charset=utf-8",
+                    )],
+                    m.render(),
+                )
+            }
+        }),
+    );
+
     // Start the gateway HTTP server (blocks).
     let bind_address = format!("0.0.0.0:{api_port}");
     let gateway_config = exo_gateway::server::GatewayConfig {
@@ -374,7 +436,12 @@ async fn start_node(
         );
     }
 
-    exo_gateway::server::serve(gateway_config, None).await?;
+    exo_gateway::server::serve_with_extra_routes(
+        gateway_config,
+        None,
+        Some(metrics_router),
+    )
+    .await?;
     Ok(())
 }
 

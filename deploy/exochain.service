@@ -1,0 +1,50 @@
+[Unit]
+Description=Exochain Constitutional Governance Node
+Documentation=https://github.com/exochain/exochain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=exochain
+Group=exochain
+ExecStart=/usr/local/bin/exochain join \
+    --seed=seed1.exochain.io:4001 \
+    --seed=seed2.exochain.io:4001 \
+    --seed=seed3.exochain.io:4001 \
+    --data-dir=/var/lib/exochain \
+    --api-port=8080 \
+    --p2p-port=4001
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/exochain
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=exochain
+
+# Environment
+Environment=RUST_LOG=info
+Environment=EXOCHAIN_DATA_DIR=/var/lib/exochain
+
+[Install]
+WantedBy=multi-user.target
