@@ -16,6 +16,7 @@ members = [
     "crates/exo-tenant",
     "crates/decision-forum",
     "crates/exochain-wasm",
+    "crates/exo-node",
 ]
 
 [workspace.package]

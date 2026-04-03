@@ -1,0 +1,63 @@
+[package]
+name = "exo-node"
+description = "EXOCHAIN distributed node — single binary for joining and participating in the constitutional governance network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "exochain"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates
+exo-core = { path = "../exo-core" }
+exo-dag = { path = "../exo-dag" }
+exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-gateway = { path = "../exo-gateway" }
+exo-api = { path = "../exo-api" }
+exo-governance = { path = "../exo-governance" }
+exo-identity = { path = "../exo-identity" }
+exo-consent = { path = "../exo-consent" }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Configuration
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Crypto (identity bootstrap)
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+
+# Data directory
+directories = "6"
+
+# Serialization (CBOR for DagNode persistence)
+ciborium = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
