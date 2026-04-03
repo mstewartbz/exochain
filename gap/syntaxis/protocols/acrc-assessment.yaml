@@ -1,0 +1,60 @@
+name: acrc-assessment-pipeline
+version: 1.0.0
+description: "The ACRC (Autonomous Capability Readiness Check) execution pipeline."
+trigger:
+  event: ceo_check_in
+  tier: T0
+bcts_initial_state: Draft
+
+nodes:
+  - id: intake
+    type: intake_form
+    description: "Collect basic organizational data and current autonomous systems context."
+    inputs: [company_name, autonomous_inventory, compliance_context]
+    outputs: [intake_payload]
+    error_strategy: retry
+
+  - id: identity-verify
+    type: identity_resolution
+    description: "Cryptographically verify the CEO's identity and mandate."
+    inputs: [intake_payload.user_signature]
+    outputs: [verified_identity_token]
+    error_strategy: halt_and_escalate
+
+  - id: consent-verify
+    type: consent_gate
+    description: "Ensure explicit consent to begin the ACRC assessment."
+    inputs: [verified_identity_token]
+    outputs: [consent_receipt]
+    error_strategy: halt
+
+  - id: acrc-facilitation
+    type: agent_facilitation
+    description: "ACRC Facilitator agent runs the 8-indicator assessment with the CEO."
+    assigned_agent: acrc-facilitator
+    inputs: [consent_receipt, intake_payload]
+    outputs: [raw_assessment_data]
+    error_strategy: request_human_input
+
+  - id: scoring
+    type: automated_scoring
+    description: "Score the 8 governance indicators based on the ACRC rubric."
+    inputs: [raw_assessment_data]
+    outputs: [scored_indicators, readiness_tier]
+    error_strategy: fail_to_safe
+
+  - id: council-brief
+    type: protocol_call
+    description: "Route the scored assessment to the Decision Forum for architectural sanity check."
+    protocol: council-review.yaml
+    inputs: [scored_indicators]
+    outputs: [council_resolution]
+    error_strategy: escalate_to_operations
+
+  - id: ceo-report
+    type: executive_presentation
+    description: "Deliver the final ACRC results and council recommendations to the CEO."
+    inputs: [scored_indicators, council_resolution]
+    outputs: [ceo_acknowledgement]
+    bcts_transition: Closed
+    error_strategy: halt_and_escalate

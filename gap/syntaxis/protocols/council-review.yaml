@@ -1,0 +1,72 @@
+name: 5-panel-council-review
+version: 1.0.0
+description: "Core Decision Forum routing protocol. Enforces multi-disciplinary review of T1+ proposals."
+trigger:
+  event: protocol_call
+  tier: T1
+bcts_initial_state: Deliberated
+
+nodes:
+  - id: limitations-precheck
+    type: invariant_validation
+    description: "Pre-flight check to ensure the proposal doesn't violate hardcoded system limits."
+    inputs: [proposal_payload]
+    outputs: [precheck_clearance]
+    error_strategy: reject_immediately
+
+  - id: panel-gov
+    type: panel_deliberation
+    description: "Governance panel evaluates adherence to Democratic Legitimacy and Delegation bounds."
+    inputs: [precheck_clearance]
+    outputs: [gov_vote, gov_rationale]
+
+  - id: panel-legal
+    type: panel_deliberation
+    description: "Legal panel evaluates compliance context and Liability parameters."
+    inputs: [precheck_clearance]
+    outputs: [legal_vote, legal_rationale]
+
+  - id: panel-arch
+    type: panel_deliberation
+    description: "Architecture panel evaluates structural integrity and DAG compatibility."
+    inputs: [precheck_clearance]
+    outputs: [arch_vote, arch_rationale]
+
+  - id: panel-sec
+    type: panel_deliberation
+    description: "Security panel evaluates cryptographic boundaries and threat vectors."
+    inputs: [precheck_clearance]
+    outputs: [sec_vote, sec_rationale]
+
+  - id: panel-ops
+    type: panel_deliberation
+    description: "Operations panel evaluates execution feasibility and latency impact."
+    inputs: [precheck_clearance]
+    outputs: [ops_vote, ops_rationale]
+
+  - id: aggregate-votes
+    type: consensus_engine
+    description: "Tally panel votes against the predefined confidence threshold (e.g., 4/5 required)."
+    inputs: [gov_vote, legal_vote, arch_vote, sec_vote, ops_vote]
+    outputs: [aggregate_result]
+    error_strategy: escalate_to_ceo
+
+  - id: doctrine-triad-check
+    type: doctrine_evaluation
+    description: "Final verification that the aggregate resolution upholds FM 3-05 corollaries."
+    inputs: [aggregate_result]
+    outputs: [doctrine_clearance]
+
+  - id: constitutional-validation
+    type: invariant_validation
+    description: "Ensure the final resolution does not violate any of the 10 Constitutional Invariants."
+    inputs: [doctrine_clearance]
+    outputs: [constitutional_receipt]
+    bcts_transition: Verified
+
+  - id: resolution-generation
+    type: ledger_anchor
+    description: "Draft formal resolution document and anchor the deliberation state to the DAG."
+    inputs: [constitutional_receipt, aggregate_result, *rationale]
+    outputs: [council_resolution, dag_receipt]
+    bcts_transition: Governed

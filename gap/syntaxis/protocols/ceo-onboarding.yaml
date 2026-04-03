@@ -1,0 +1,48 @@
+name: ceo-onboarding-sequence
+version: 1.0.0
+description: "The initial 15-minute quickstart and orientation sequence for a checking-in CEO."
+trigger:
+  event: new_user_registration
+  tier: T0
+bcts_initial_state: Draft
+
+nodes:
+  - id: welcome-message
+    type: notification
+    description: "Display authoritative welcome greeting and incubator context."
+    inputs: [user_profile]
+    outputs: [welcome_read_receipt]
+
+  - id: rapid-intake
+    type: intake_form
+    description: "Collect high-level company and objective data."
+    inputs: [welcome_read_receipt]
+    outputs: [quickstart_context]
+    error_strategy: retry
+
+  - id: orientation-briefing
+    type: content_delivery
+    description: "Present the 'What to Expect' honest explainer document."
+    inputs: [quickstart_context]
+    outputs: [orientation_acknowledged]
+
+  - id: team-activation
+    type: team_deployment
+    description: "Spin up the Facilitation Team specifically for this CEO's context."
+    inputs: [orientation_acknowledged, quickstart_context]
+    outputs: [active_team_manifest, engagement-lead-id]
+    bcts_transition: IdentityResolved
+
+  - id: first-task-assignment
+    type: agent_facilitation
+    description: "Engagement Lead introduces themselves and assigns the first task (ACRC intake)."
+    assigned_agent: engagement-lead
+    inputs: [active_team_manifest]
+    outputs: [first_task_delivered]
+
+  - id: dashboard-setup
+    type: ui_configuration
+    description: "Configure the CEO dashboard with appropriate read/write context and team widgets."
+    inputs: [first_task_delivered]
+    outputs: [dashboard_ready]
+    bcts_transition: Executed

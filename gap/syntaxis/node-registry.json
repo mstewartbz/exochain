@@ -1,0 +1,93 @@
+[
+  {
+    "node_type": "intake_form",
+    "description": "Presents a structured form to collect initial user or organizational data.",
+    "inputs": ["schema_definition"],
+    "outputs": ["json_payload"],
+    "maps_to_crate": "exo-gatekeeper"
+  },
+  {
+    "node_type": "identity_resolution",
+    "description": "Cryptographically verifies the identity and authority of the acting user.",
+    "inputs": ["user_signature", "context"],
+    "outputs": ["verified_identity_token"],
+    "maps_to_crate": "exo-gatekeeper"
+  },
+  {
+    "node_type": "consent_gate",
+    "description": "Pauses execution until explicit cryptographic consent is provided by the authorized user.",
+    "inputs": ["verified_identity_token", "consent_document"],
+    "outputs": ["consent_receipt"],
+    "maps_to_crate": "exo-governance"
+  },
+  {
+    "node_type": "agent_facilitation",
+    "description": "Assigns a specific task to a defined agentic persona within the Facilitation Team.",
+    "inputs": ["agent_id", "task_context"],
+    "outputs": ["agent_output"],
+    "maps_to_crate": "exo-governance"
+  },
+  {
+    "node_type": "artifact_generation",
+    "description": "Directs an agent to draft a formal GAP deliverable based on provided templates and context.",
+    "inputs": ["agent_id", "template_id", "context_data"],
+    "outputs": ["markdown_artifact"],
+    "maps_to_crate": "exo-governance"
+  },
+  {
+    "node_type": "protocol_call",
+    "description": "Invokes a sub-protocol (like council-review), pausing current execution until the sub-protocol resolves.",
+    "inputs": ["protocol_path", "payload"],
+    "outputs": ["sub_protocol_resolution"],
+    "maps_to_crate": "exo-governance"
+  },
+  {
+    "node_type": "approval_gate",
+    "description": "Final executive review node. Requires CEO signature to proceed to Execution or Closed states.",
+    "inputs": ["artifact_payload", "verified_identity_token"],
+    "outputs": ["executive_signature"],
+    "maps_to_crate": "exo-gatekeeper"
+  },
+  {
+    "node_type": "ledger_anchor",
+    "description": "Writes the current state, resolution, or artifact hash immutably to the ExoChain DAG.",
+    "inputs": ["payload", "bcts_state"],
+    "outputs": ["dag_receipt", "transaction_hash"],
+    "maps_to_crate": "exo-dag"
+  },
+  {
+    "node_type": "panel_deliberation",
+    "description": "Routes a proposal to a specific Decision Forum panel for evaluation and voting.",
+    "inputs": ["panel_id", "proposal_data"],
+    "outputs": ["vote_result", "rationale_text"],
+    "maps_to_crate": "decision-forum"
+  },
+  {
+    "node_type": "consensus_engine",
+    "description": "Aggregates votes from multiple panels against configured quorum and threshold rules.",
+    "inputs": ["vote_array", "threshold_config"],
+    "outputs": ["aggregate_decision"],
+    "maps_to_crate": "decision-forum"
+  },
+  {
+    "node_type": "invariant_validation",
+    "description": "Scans a payload to ensure it does not violate any of the 10 Constitutional Invariants.",
+    "inputs": ["payload_to_check"],
+    "outputs": ["validation_receipt"],
+    "maps_to_crate": "exo-governance"
+  },
+  {
+    "node_type": "telemetry_aggregation",
+    "description": "Collects system performance, DAG events, and error rates for CQI analysis.",
+    "inputs": ["time_window", "metric_keys"],
+    "outputs": ["telemetry_data"],
+    "maps_to_crate": "exo-dag"
+  },
+  {
+    "node_type": "external_integration",
+    "description": "Bridges internal GAP workflows to external systems like ExoForge for compilation.",
+    "inputs": ["integration_target", "payload"],
+    "outputs": ["external_response"],
+    "maps_to_crate": "exo-gatekeeper"
+  }
+]
