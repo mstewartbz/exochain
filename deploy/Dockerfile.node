@@ -1,0 +1,33 @@
+# Minimal single-binary exochain node image.
+#
+# Build:
+#   docker build -f deploy/Dockerfile.node -t exochain/node .
+#
+# Run:
+#   docker run -d -p 4001:4001 -p 8080:8080 -v exochain:/data \
+#     exochain/node join --seed=seed1.exochain.io:4001
+
+FROM rust:1.86-slim-bookworm AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+RUN cargo build --release --bin exochain
+
+FROM debian:bookworm-slim
+RUN apt-get update && \
+    apt-get install -y ca-certificates libssl3 && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --system --create-home --shell /usr/sbin/nologin exochain
+
+COPY --from=builder /app/target/release/exochain /usr/local/bin/exochain
+
+USER exochain
+ENV EXOCHAIN_DATA_DIR=/data
+ENV RUST_LOG=info
+
+EXPOSE 4001 4002 8080
+VOLUME ["/data"]
+
+ENTRYPOINT ["exochain"]
+CMD ["start"]

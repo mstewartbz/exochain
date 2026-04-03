@@ -315,6 +315,108 @@ jobs:
         run: docker compose -f docker-compose.ci.yml down
 
   # -----------------------------------------------------------------------
+  # Gate 14: Multi-node consensus integration test
+  #
+  # Validates that the BFT consensus reactor, state sync, and P2P
+  # networking all function correctly in exo-node.
+  # -----------------------------------------------------------------------
+  consensus-integration:
+    name: "Gate 14 — Consensus Integration Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            node:
+              - 'crates/exo-node/**'
+              - 'crates/exo-dag/**'
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.filter.outputs.node == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.filter.outputs.node == 'true'
+      - name: Run exo-node unit and integration tests
+        if: steps.filter.outputs.node == 'true'
+        run: cargo test -p exo-node
+      - name: Run exo-dag consensus tests
+        if: steps.filter.outputs.node == 'true'
+        run: cargo test -p exo-dag -- consensus
+
+  # -----------------------------------------------------------------------
+  # Gate 15: State sync and join test
+  #
+  # Verifies the sync engine, wire protocol, and DAG store functionality
+  # work correctly for new node bootstrap.
+  # -----------------------------------------------------------------------
+  state-sync-integration:
+    name: "Gate 15 — State Sync & Join Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            sync:
+              - 'crates/exo-node/**'
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.filter.outputs.sync == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.filter.outputs.sync == 'true'
+      - name: Run sync engine tests
+        if: steps.filter.outputs.sync == 'true'
+        run: cargo test -p exo-node -- sync
+      - name: Run store tests
+        if: steps.filter.outputs.sync == 'true'
+        run: cargo test -p exo-node -- store
+      - name: Run wire protocol tests
+        if: steps.filter.outputs.sync == 'true'
+        run: cargo test -p exo-node -- wire
+      - name: Run metrics tests
+        if: steps.filter.outputs.sync == 'true'
+        run: cargo test -p exo-node -- metrics
+
+  # -----------------------------------------------------------------------
+  # Gate 16: Cross-platform binary build
+  #
+  # Verifies the exochain binary compiles on all target platforms.
+  # Does not run tests (that is Gate 14-15's job) — only build verification.
+  # -----------------------------------------------------------------------
+  cross-platform:
+    name: "Gate 16 — Cross-Platform Build (${{ matrix.target }})"
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build exochain binary
+        run: cargo build --release --bin exochain --target ${{ matrix.target }}
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exochain-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/exochain
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
   # -----------------------------------------------------------------------
   all-gates:
@@ -334,6 +436,9 @@ jobs:
       - machete
       - integration-tests
       - integration-tests-db
+      - consensus-integration
+      - state-sync-integration
+      - cross-platform
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."

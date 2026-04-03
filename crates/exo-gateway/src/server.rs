@@ -1098,9 +1098,26 @@ async fn shutdown_signal() {
 /// Bind to `config.bind_address`, serve all routes, and drain on SIGTERM /
 /// Ctrl+C.  Returns once shutdown is complete.
 pub async fn serve(config: GatewayConfig, pool: Option<sqlx::PgPool>) -> Result<()> {
+    serve_with_extra_routes(config, pool, None).await
+}
+
+/// Like [`serve`] but merges an additional [`Router`] into the app.
+///
+/// The `extra` router is merged *after* the gateway's own routes, giving
+/// callers a way to inject endpoints (e.g. `/metrics`) without modifying
+/// this crate.
+pub async fn serve_with_extra_routes(
+    config: GatewayConfig,
+    pool: Option<sqlx::PgPool>,
+    extra: Option<Router>,
+) -> Result<()> {
     let registry = Arc::new(RwLock::new(DidRegistry::new()));
     let state = AppState::new(pool, registry);
-    let app = build_router(state);
+    let mut app = build_router(state);
+
+    if let Some(extra_router) = extra {
+        app = app.merge(extra_router);
+    }
 
     let listener = TcpListener::bind(&config.bind_address)
         .await

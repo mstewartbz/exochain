@@ -1,0 +1,84 @@
+# Fly.io configuration for Exochain seed nodes.
+#
+# Deploy:
+#   fly deploy --config deploy/fly.toml --dockerfile deploy/Dockerfile.node
+#
+# Scale to three regions:
+#   fly scale count 1 --region iad    # US East (Ashburn)
+#   fly scale count 1 --region lhr    # Europe (London)
+#   fly scale count 1 --region nrt    # Asia (Tokyo)
+#
+# The first deployed instance bootstraps the network; subsequent
+# instances use the first as a seed via Fly internal DNS.
+
+app = "exochain-seed"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.node"
+
+[env]
+  RUST_LOG = "info"
+  EXOCHAIN_DATA_DIR = "/data"
+
+# Persistent volume for identity key + DAG database.
+[mounts]
+  source = "exochain_data"
+  destination = "/data"
+
+# P2P TCP transport
+[[services]]
+  internal_port = 4001
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 4001
+
+# P2P QUIC transport
+[[services]]
+  internal_port = 4002
+  protocol = "udp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 4002
+
+# API + Dashboard HTTP
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 500
+    soft_limit = 250
+
+# Health check — gateway /health route.
+[[services.http_checks]]
+  interval = 10000
+  grace_period = "10s"
+  method = "GET"
+  path = "/health"
+  protocol = "http"
+  timeout = 5000
+
+# Machine sizing — consensus is CPU-light, DAG is IO-light.
+[vm]
+  size = "shared-cpu-1x"
+  memory = "512mb"
