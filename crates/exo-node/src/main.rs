@@ -16,6 +16,7 @@
 
 mod cli;
 mod config;
+mod holons;
 mod identity;
 mod network;
 mod reactor;
@@ -29,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use cli::{Cli, Command};
 use exo_core::types::Did;
+use holons::{HolonEvent, HolonManagerConfig};
 use network::{NetworkConfig, NetworkEvent, NetworkHandle};
 use reactor::{ReactorConfig, ReactorEvent};
 use sync::{SyncConfig, SyncEngine, SyncEvent};
@@ -258,6 +260,95 @@ async fn start_node(
                     tracing::debug!(
                         %peer, from_height, nodes_sent,
                         "Served snapshot to peer"
+                    );
+                }
+            }
+        }
+    });
+
+    // --- Infrastructure Holons ---
+    let holon_config = HolonManagerConfig {
+        node_did: node_identity.did.clone(),
+        root_did: Did::new("did:exo:root").unwrap_or_else(|_| node_identity.did.clone()),
+        topology_interval_secs: 60,
+        scaling_interval_secs: 300,
+        health_interval_secs: 30,
+    };
+
+    let (holon_event_tx, mut holon_event_rx) = mpsc::channel::<HolonEvent>(256);
+
+    tokio::spawn(holons::run_holon_manager(
+        holon_config,
+        reactor_state,
+        net_handle,
+        holon_event_tx,
+    ));
+    tracing::info!("Infrastructure Holons started (topology, scaling, health)");
+
+    // Holon event logger.
+    tokio::spawn(async move {
+        while let Some(event) = holon_event_rx.recv().await {
+            match event {
+                HolonEvent::TopologyAnalysis {
+                    peer_count,
+                    diversity_score,
+                    recommendation,
+                } => {
+                    tracing::info!(
+                        peer_count,
+                        diversity_score,
+                        %recommendation,
+                        "Topology Holon"
+                    );
+                }
+                HolonEvent::ScalingRecommendation {
+                    validator_count,
+                    node_count,
+                    recommendation,
+                } => {
+                    tracing::info!(
+                        validator_count,
+                        node_count,
+                        %recommendation,
+                        "Scaling Holon"
+                    );
+                }
+                HolonEvent::HealthCheck {
+                    consensus_round,
+                    committed_height,
+                    status,
+                } => {
+                    match &status {
+                        holons::HealthStatus::Healthy => {
+                            tracing::debug!(
+                                consensus_round,
+                                committed_height,
+                                "Health Holon: healthy"
+                            );
+                        }
+                        holons::HealthStatus::Degraded { reason } => {
+                            tracing::warn!(
+                                consensus_round,
+                                committed_height,
+                                %reason,
+                                "Health Holon: degraded"
+                            );
+                        }
+                        holons::HealthStatus::Critical { reason } => {
+                            tracing::error!(
+                                consensus_round,
+                                committed_height,
+                                %reason,
+                                "Health Holon: CRITICAL"
+                            );
+                        }
+                    }
+                }
+                HolonEvent::HolonTerminated { holon_id, reason } => {
+                    tracing::error!(
+                        %holon_id,
+                        %reason,
+                        "Infrastructure Holon terminated"
                     );
                 }
             }
