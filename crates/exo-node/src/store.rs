@@ -78,6 +78,60 @@ impl SqliteDagStore {
         ciborium::from_reader(bytes)
             .map_err(|e| store_err(format!("CBOR decode: {e}")))
     }
+
+    /// Query committed nodes in a height range (inclusive), ordered by height.
+    ///
+    /// Returns `(hash, height)` pairs. Used by state sync to serve snapshot chunks.
+    pub fn committed_nodes_in_range(
+        &self,
+        from_height: u64,
+        to_height: u64,
+    ) -> DagResult<Vec<(Hash256, u64)>> {
+        #[allow(clippy::as_conversions)]
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT hash, height FROM committed
+                 WHERE height >= ?1 AND height <= ?2
+                 ORDER BY height ASC",
+            )
+            .map_err(store_err)?;
+
+        #[allow(clippy::as_conversions)]
+        let rows = stmt
+            .query_map(params![from_height as i64, to_height as i64], |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                let height: i64 = row.get(1)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok((Hash256::from_bytes(arr), height as u64))
+            })
+            .map_err(store_err)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(store_err)?);
+        }
+        Ok(result)
+    }
+
+    /// Get all committed nodes with their full DagNode data, ordered by height.
+    ///
+    /// Used by state sync to serve snapshot chunks with actual node payloads.
+    pub fn committed_dag_nodes_in_range(
+        &self,
+        from_height: u64,
+        to_height: u64,
+    ) -> DagResult<Vec<DagNode>> {
+        let committed = self.committed_nodes_in_range(from_height, to_height)?;
+        let mut nodes = Vec::with_capacity(committed.len());
+        for (hash, _height) in committed {
+            if let Some(node) = self.get(&hash)? {
+                nodes.push(node);
+            }
+        }
+        Ok(nodes)
+    }
 }
 
 impl DagStore for SqliteDagStore {
