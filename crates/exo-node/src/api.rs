@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
-use exo_core::types::Did;
+use exo_core::types::{Did, Hash256};
 use serde::{Deserialize, Serialize};
 
 use crate::network::NetworkHandle;
@@ -65,6 +65,45 @@ pub struct BroadcastRequest {
 pub struct ValidatorChangeRequest {
     pub action: String,  // "add" or "remove"
     pub did: String,
+}
+
+/// Response representing a single trust receipt.
+#[derive(Debug, Serialize)]
+pub struct ReceiptResponse {
+    pub receipt_hash: String,
+    pub actor_did: String,
+    pub authority_chain_hash: String,
+    pub consent_reference: Option<String>,
+    pub action_type: String,
+    pub action_hash: String,
+    pub outcome: String,
+    pub timestamp_ms: u64,
+    pub challenge_reference: Option<String>,
+}
+
+impl From<exo_core::types::TrustReceipt> for ReceiptResponse {
+    fn from(r: exo_core::types::TrustReceipt) -> Self {
+        Self {
+            receipt_hash: hex::encode(r.receipt_hash.0),
+            actor_did: r.actor_did.to_string(),
+            authority_chain_hash: hex::encode(r.authority_chain_hash.0),
+            consent_reference: r.consent_reference.map(|h| hex::encode(h.0)),
+            action_type: r.action_type,
+            action_hash: hex::encode(r.action_hash.0),
+            outcome: r.outcome.to_string(),
+            timestamp_ms: r.timestamp.physical_ms,
+            challenge_reference: r.challenge_reference.map(|h| hex::encode(h.0)),
+        }
+    }
+}
+
+/// Query parameters for `GET /api/v1/receipts`.
+#[derive(Debug, Deserialize)]
+pub struct ReceiptQuery {
+    /// Filter by actor DID (required).
+    pub actor: Option<String>,
+    /// Maximum number of receipts to return (default 50, max 500).
+    pub limit: Option<u32>,
 }
 
 /// Response for `GET /api/v1/governance/status`.
@@ -240,6 +279,64 @@ async fn handle_validator_change(
 }
 
 // ---------------------------------------------------------------------------
+// Trust receipt handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/receipts/:hash` — look up a trust receipt by content hash.
+async fn handle_receipt_by_hash(
+    State(api): State<Arc<NodeApiState>>,
+    Path(hash_hex): Path<String>,
+) -> Result<Json<ReceiptResponse>, (StatusCode, String)> {
+    let hash_bytes = hex::decode(&hash_hex)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid hex hash: {e}")))?;
+    if hash_bytes.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Hash must be 32 bytes, got {}", hash_bytes.len()),
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&hash_bytes);
+    let hash = Hash256::from_bytes(arr);
+
+    let receipt = {
+        let st = api.store.lock().expect("store lock");
+        st.load_receipt(&hash)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    match receipt {
+        Some(r) => Ok(Json(ReceiptResponse::from(r))),
+        None => Err((StatusCode::NOT_FOUND, "Receipt not found".into())),
+    }
+}
+
+/// `GET /api/v1/receipts` — list trust receipts filtered by actor DID.
+async fn handle_receipts_list(
+    State(api): State<Arc<NodeApiState>>,
+    Query(q): Query<ReceiptQuery>,
+) -> Result<Json<Vec<ReceiptResponse>>, (StatusCode, String)> {
+    let actor = q.actor.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Query parameter 'actor' is required".into(),
+        )
+    })?;
+
+    let limit = q.limit.unwrap_or(50).min(500);
+
+    let receipts = {
+        let st = api.store.lock().expect("store lock");
+        st.load_receipts_by_actor(&actor, limit)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    Ok(Json(
+        receipts.into_iter().map(ReceiptResponse::from).collect(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Router construction
 // ---------------------------------------------------------------------------
 
@@ -250,6 +347,8 @@ pub fn governance_router(state: Arc<NodeApiState>) -> Router {
         .route("/api/v1/governance/broadcast", post(handle_broadcast))
         .route("/api/v1/governance/status", get(handle_status))
         .route("/api/v1/governance/validators", post(handle_validator_change))
+        .route("/api/v1/receipts/:hash", get(handle_receipt_by_hash))
+        .route("/api/v1/receipts", get(handle_receipts_list))
         .with_state(state)
 }
 
@@ -469,5 +568,145 @@ mod tests {
         let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(result["validator_count"], 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Trust receipt endpoint tests
+    // -----------------------------------------------------------------------
+
+    fn make_test_receipt(actor: &str, action: &str, ts_ms: u64) -> exo_core::types::TrustReceipt {
+        use exo_core::types::{Hash256, ReceiptOutcome, Timestamp, TrustReceipt};
+        let sign_fn = make_sign_fn();
+        TrustReceipt::new(
+            Did::new(actor).unwrap(),
+            Hash256::ZERO,
+            None,
+            action.to_string(),
+            Hash256::digest(format!("{actor}-{action}-{ts_ms}").as_bytes()),
+            ReceiptOutcome::Executed,
+            Timestamp {
+                physical_ms: ts_ms,
+                logical: 0,
+            },
+            &*sign_fn,
+        )
+    }
+
+    #[tokio::test]
+    async fn receipt_lookup_returns_stored_receipt() {
+        let state = test_api_state();
+        let receipt = make_test_receipt("did:exo:test-actor", "dag.commit", 1_700_000_000_000);
+        let receipt_hash = receipt.receipt_hash;
+
+        {
+            let mut st = state.store.lock().unwrap();
+            st.save_receipt(&receipt).unwrap();
+        }
+
+        let app = governance_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/api/v1/receipts/{}", hex::encode(receipt_hash.0)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["actor_did"], "did:exo:test-actor");
+        assert_eq!(result["action_type"], "dag.commit");
+        assert_eq!(result["outcome"], "executed");
+    }
+
+    #[tokio::test]
+    async fn receipt_lookup_not_found() {
+        let state = test_api_state();
+        let app = governance_router(state);
+        let fake_hash = "0".repeat(64);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/api/v1/receipts/{fake_hash}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn receipt_lookup_invalid_hex() {
+        let state = test_api_state();
+        let app = governance_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/receipts/not-valid-hex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn receipt_list_by_actor() {
+        let state = test_api_state();
+
+        // Save receipts for two different actors.
+        {
+            let mut st = state.store.lock().unwrap();
+            st.save_receipt(&make_test_receipt("did:exo:alice", "propose", 1000))
+                .unwrap();
+            st.save_receipt(&make_test_receipt("did:exo:alice", "commit", 2000))
+                .unwrap();
+            st.save_receipt(&make_test_receipt("did:exo:bob", "propose", 3000))
+                .unwrap();
+        }
+
+        let app = governance_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/receipts?actor=did:exo:alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let results: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r["actor_did"] == "did:exo:alice"));
+    }
+
+    #[tokio::test]
+    async fn receipt_list_requires_actor_param() {
+        let state = test_api_state();
+        let app = governance_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/receipts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

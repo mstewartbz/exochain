@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use exo_core::types::{Did, Hash256, Signature, Timestamp};
+use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt};
 use exo_dag::{
     consensus::{self, ConsensusConfig, ConsensusState, Vote},
     dag::{append, Dag, DagNode, HybridClock},
@@ -405,6 +405,33 @@ async fn handle_commit(
         }
     }
 
+    // Emit a trust receipt for the network-received commit.
+    let receipt = {
+        let s = state.lock().expect("reactor state lock");
+        #[allow(clippy::as_conversions)]
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let ts = Timestamp { physical_ms: now_ms, logical: 0 };
+        TrustReceipt::new(
+            s.node_did.clone(),
+            Hash256::ZERO,
+            None,
+            "dag.commit".to_string(),
+            hash,
+            ReceiptOutcome::Executed,
+            ts,
+            &*s.sign_fn,
+        )
+    };
+    {
+        let mut st = store.lock().expect("store lock");
+        if let Err(e) = st.save_receipt(&receipt) {
+            tracing::warn!(err = %e, "Failed to persist trust receipt for network commit");
+        }
+    }
+
     tracing::info!(
         %hash,
         height,
@@ -455,6 +482,33 @@ async fn check_and_commit(
             }
             if let Err(e) = st.save_certificate(&cert) {
                 tracing::warn!(err = %e, "Failed to persist certificate");
+            }
+        }
+
+        // Emit a trust receipt recording the commit action.
+        let receipt = {
+            let s = state.lock().expect("reactor state lock");
+            #[allow(clippy::as_conversions)]
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let ts = Timestamp { physical_ms: now_ms, logical: 0 };
+            TrustReceipt::new(
+                s.node_did.clone(),
+                Hash256::ZERO,
+                None,
+                "dag.commit".to_string(),
+                hash,
+                ReceiptOutcome::Executed,
+                ts,
+                &*s.sign_fn,
+            )
+        };
+        {
+            let mut st = store.lock().expect("store lock");
+            if let Err(e) = st.save_receipt(&receipt) {
+                tracing::warn!(err = %e, "Failed to persist trust receipt for commit");
             }
         }
 

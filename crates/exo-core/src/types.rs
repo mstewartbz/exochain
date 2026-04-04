@@ -814,6 +814,153 @@ impl fmt::Display for Version {
 }
 
 // ---------------------------------------------------------------------------
+// TrustReceipt — signed, machine-verifiable record of agent action
+// ---------------------------------------------------------------------------
+
+/// Outcome of a trust-receipted action.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReceiptOutcome {
+    /// Action was permitted and executed.
+    Executed,
+    /// Action was denied by the kernel.
+    Denied,
+    /// Action was escalated for review.
+    Escalated,
+    /// Action is pending consensus commit.
+    Pending,
+}
+
+impl fmt::Display for ReceiptOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Executed => write!(f, "executed"),
+            Self::Denied => write!(f, "denied"),
+            Self::Escalated => write!(f, "escalated"),
+            Self::Pending => write!(f, "pending"),
+        }
+    }
+}
+
+/// A signed, machine-verifiable trust receipt for an agent action.
+///
+/// Every material agent action emits a receipt suitable for later
+/// dispute, replay, and audit. Receipts are the evidentiary basis
+/// for the challenge/dispute pathway.
+///
+/// ## Fields
+///
+/// - `receipt_hash`: content-addressed identifier (BLAKE3 of canonical CBOR)
+/// - `actor_did`: who performed the action
+/// - `authority_chain_hash`: hash of the delegation chain authorizing the action
+/// - `consent_reference`: hash of the governing bailment/consent record (if any)
+/// - `action_type`: human-readable action descriptor
+/// - `action_hash`: content hash of the action payload
+/// - `outcome`: what happened (Executed, Denied, Escalated, Pending)
+/// - `timestamp`: hybrid logical clock timestamp
+/// - `signature`: actor's cryptographic signature over the receipt
+/// - `challenge_reference`: hash linking to a filed challenge (if disputed)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustReceipt {
+    /// Content-addressed receipt identifier.
+    pub receipt_hash: Hash256,
+    /// The agent who performed the action.
+    pub actor_did: Did,
+    /// Hash of the authority chain under which the action was performed.
+    pub authority_chain_hash: Hash256,
+    /// Reference to the governing consent/bailment record.
+    pub consent_reference: Option<Hash256>,
+    /// Human-readable action type (e.g., "governance.propose", "dag.commit").
+    pub action_type: String,
+    /// Content hash of the action payload.
+    pub action_hash: Hash256,
+    /// Outcome of the action.
+    pub outcome: ReceiptOutcome,
+    /// When the action occurred.
+    pub timestamp: Timestamp,
+    /// Actor's cryptographic signature over the receipt body.
+    pub signature: Signature,
+    /// Reference to a filed challenge, if this action is disputed.
+    pub challenge_reference: Option<Hash256>,
+}
+
+impl TrustReceipt {
+    /// Create a new trust receipt and compute its content-addressed hash.
+    ///
+    /// The `sign_fn` is called with the canonical signable payload to
+    /// produce the actor's signature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        actor_did: Did,
+        authority_chain_hash: Hash256,
+        consent_reference: Option<Hash256>,
+        action_type: String,
+        action_hash: Hash256,
+        outcome: ReceiptOutcome,
+        timestamp: Timestamp,
+        sign_fn: &dyn Fn(&[u8]) -> Signature,
+    ) -> Self {
+        // Build the signable payload: canonical concatenation of all fields.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(actor_did.to_string().as_bytes());
+        payload.extend_from_slice(&authority_chain_hash.0);
+        if let Some(ref cr) = consent_reference {
+            payload.extend_from_slice(&cr.0);
+        }
+        payload.extend_from_slice(action_type.as_bytes());
+        payload.extend_from_slice(&action_hash.0);
+        payload.extend_from_slice(outcome.to_string().as_bytes());
+        payload.extend_from_slice(&timestamp.physical_ms.to_le_bytes());
+        payload.extend_from_slice(&timestamp.logical.to_le_bytes());
+
+        let signature = sign_fn(&payload);
+        let receipt_hash = Hash256::digest(&payload);
+
+        Self {
+            receipt_hash,
+            actor_did,
+            authority_chain_hash,
+            consent_reference,
+            action_type,
+            action_hash,
+            outcome,
+            timestamp,
+            signature,
+            challenge_reference: None,
+        }
+    }
+
+    /// Verify that the receipt hash matches the content.
+    #[must_use]
+    pub fn verify_hash(&self) -> bool {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(self.actor_did.to_string().as_bytes());
+        payload.extend_from_slice(&self.authority_chain_hash.0);
+        if let Some(ref cr) = self.consent_reference {
+            payload.extend_from_slice(&cr.0);
+        }
+        payload.extend_from_slice(self.action_type.as_bytes());
+        payload.extend_from_slice(&self.action_hash.0);
+        payload.extend_from_slice(self.outcome.to_string().as_bytes());
+        payload.extend_from_slice(&self.timestamp.physical_ms.to_le_bytes());
+        payload.extend_from_slice(&self.timestamp.logical.to_le_bytes());
+
+        Hash256::digest(&payload) == self.receipt_hash
+    }
+}
+
+impl fmt::Display for TrustReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "TrustReceipt({} by {} -> {})",
+            hex_prefix(&self.receipt_hash.0),
+            self.actor_did,
+            self.outcome,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -1383,5 +1530,104 @@ mod tests {
     fn hex_prefix_short_input() {
         let result = hex_prefix(&[0xff]);
         assert_eq!(result, "ff");
+    }
+
+    // -- TrustReceipt --------------------------------------------------------
+
+    fn test_sign_fn(data: &[u8]) -> Signature {
+        let h = blake3::hash(data);
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(h.as_bytes());
+        Signature::from_bytes(sig)
+    }
+
+    #[test]
+    fn trust_receipt_creation_and_hash_verification() {
+        let receipt = TrustReceipt::new(
+            Did::new("did:exo:actor1").unwrap(),
+            Hash256::digest(b"authority-chain"),
+            None,
+            "governance.propose".into(),
+            Hash256::digest(b"action-payload"),
+            ReceiptOutcome::Executed,
+            Timestamp::new(1_700_000_000_000, 0),
+            &test_sign_fn,
+        );
+
+        assert!(receipt.verify_hash());
+        assert!(!receipt.signature.is_empty());
+        assert_eq!(receipt.actor_did.to_string(), "did:exo:actor1");
+        assert_eq!(receipt.action_type, "governance.propose");
+        assert_eq!(receipt.outcome, ReceiptOutcome::Executed);
+        assert!(receipt.challenge_reference.is_none());
+    }
+
+    #[test]
+    fn trust_receipt_serialization_roundtrip() {
+        let receipt = TrustReceipt::new(
+            Did::new("did:exo:actor2").unwrap(),
+            Hash256::digest(b"chain"),
+            Some(Hash256::digest(b"consent-ref")),
+            "dag.commit".into(),
+            Hash256::digest(b"payload"),
+            ReceiptOutcome::Pending,
+            Timestamp::new(1_700_000_001_000, 5),
+            &test_sign_fn,
+        );
+
+        let json = serde_json::to_string(&receipt).expect("serialize");
+        let deserialized: TrustReceipt = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(receipt.receipt_hash, deserialized.receipt_hash);
+        assert_eq!(receipt.actor_did, deserialized.actor_did);
+        assert_eq!(receipt.action_type, deserialized.action_type);
+        assert_eq!(receipt.outcome, deserialized.outcome);
+        assert_eq!(receipt.consent_reference, deserialized.consent_reference);
+        assert!(deserialized.verify_hash());
+    }
+
+    #[test]
+    fn trust_receipt_tampered_hash_fails_verification() {
+        let mut receipt = TrustReceipt::new(
+            Did::new("did:exo:actor3").unwrap(),
+            Hash256::digest(b"chain"),
+            None,
+            "governance.vote".into(),
+            Hash256::digest(b"vote-payload"),
+            ReceiptOutcome::Executed,
+            Timestamp::new(1_700_000_002_000, 0),
+            &test_sign_fn,
+        );
+
+        // Tamper with the action type.
+        receipt.action_type = "governance.escalate".into();
+        assert!(!receipt.verify_hash());
+    }
+
+    #[test]
+    fn trust_receipt_outcome_variants() {
+        assert_eq!(ReceiptOutcome::Executed.to_string(), "executed");
+        assert_eq!(ReceiptOutcome::Denied.to_string(), "denied");
+        assert_eq!(ReceiptOutcome::Escalated.to_string(), "escalated");
+        assert_eq!(ReceiptOutcome::Pending.to_string(), "pending");
+    }
+
+    #[test]
+    fn trust_receipt_display() {
+        let receipt = TrustReceipt::new(
+            Did::new("did:exo:display-test").unwrap(),
+            Hash256::digest(b"chain"),
+            None,
+            "test.action".into(),
+            Hash256::digest(b"payload"),
+            ReceiptOutcome::Executed,
+            Timestamp::now_utc(),
+            &test_sign_fn,
+        );
+
+        let display = format!("{receipt}");
+        assert!(display.contains("TrustReceipt("));
+        assert!(display.contains("did:exo:display-test"));
+        assert!(display.contains("executed"));
     }
 }
