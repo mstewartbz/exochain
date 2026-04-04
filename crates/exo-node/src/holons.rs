@@ -652,7 +652,6 @@ pub async fn run_holon_manager(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     fn test_did() -> Did {
         Did::new("did:exo:test-node").unwrap()
@@ -838,7 +837,7 @@ mod tests {
 
     #[test]
     fn kernel_immutability_enforced() {
-        let kernel = create_infrastructure_kernel();
+        let _kernel = create_infrastructure_kernel();
         let config = test_config();
         let h = create_health_holon(&test_did());
         let ctx = build_holon_adjudication_context(&h, &config);

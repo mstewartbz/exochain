@@ -25,9 +25,13 @@ mod identity;
 mod metrics;
 mod network;
 mod passport;
+mod provenance;
 mod reactor;
+mod receipt_dashboard;
+mod sentinels;
 mod store;
 mod sync;
+mod telegram;
 mod wire;
 
 use std::collections::BTreeSet;
@@ -483,7 +487,49 @@ async fn start_node(
 
     // Build the challenge/dispute router.
     let challenge_store = Arc::new(std::sync::Mutex::new(challenges::ChallengeStore::new()));
-    let challenge_router = challenges::challenge_router(challenge_store);
+    let challenge_router = challenges::challenge_router(Arc::clone(&challenge_store));
+
+    // Build the provenance API router.
+    let provenance_state = Arc::new(provenance::ProvenanceState {
+        store: Arc::clone(&shared_store),
+    });
+    let provenance_router = provenance::provenance_router(provenance_state);
+
+    // Build the receipt drill-down dashboard.
+    let receipt_dashboard_router = receipt_dashboard::receipt_dashboard_router();
+
+    // Build the sentinel API router and start the sentinel loop.
+    let sentinel_state: sentinels::SharedSentinelState =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sentinel_router = sentinels::sentinel_router(Arc::clone(&sentinel_state));
+    let (alert_tx, alert_rx) = tokio::sync::mpsc::channel::<sentinels::SentinelAlert>(64);
+
+    // Spawn sentinel background loop.
+    tokio::spawn(sentinels::run_sentinel_loop(
+        Arc::clone(&reactor_state),
+        Arc::clone(&shared_store),
+        Arc::clone(&sentinel_state),
+        alert_tx,
+        std::time::Duration::from_secs(30),
+    ));
+
+    // Start the Telegram adjutant if configured.
+    if let Some(tg_config) = telegram::AdjutantConfig::from_env() {
+        tracing::info!("Telegram adjutant configured — starting bot");
+        let adjutant = telegram::Adjutant::new(tg_config);
+        tokio::spawn(telegram::run_adjutant(
+            adjutant,
+            alert_rx,
+            Arc::clone(&reactor_state),
+            Arc::clone(&shared_store),
+            Arc::clone(&challenge_store),
+            Arc::clone(&sentinel_state),
+        ));
+    } else {
+        tracing::info!("Telegram adjutant not configured — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable");
+        // Drop the alert receiver so sentinels don't block.
+        drop(alert_rx);
+    }
 
     // Generate admin token for write-endpoint authentication.
     let admin_token = auth::generate_admin_token();
@@ -502,6 +548,9 @@ async fn start_node(
         .merge(passport_router)
         .merge(dashboard_router)
         .merge(challenge_router)
+        .merge(provenance_router)
+        .merge(receipt_dashboard_router)
+        .merge(sentinel_router)
         .layer(axum::middleware::from_fn(move |req, next| {
             let a = bearer_auth.clone();
             auth::require_bearer_on_writes(a, req, next)
