@@ -15,6 +15,8 @@
 //! ```
 
 mod api;
+mod auth;
+mod challenges;
 mod cli;
 mod config;
 mod dashboard;
@@ -479,11 +481,31 @@ async fn start_node(
     // Build the dashboard router (serves GET /).
     let dashboard_router = dashboard::dashboard_router();
 
-    // Merge metrics + governance + passport + dashboard into a single extra router.
+    // Build the challenge/dispute router.
+    let challenge_store = Arc::new(std::sync::Mutex::new(challenges::ChallengeStore::new()));
+    let challenge_router = challenges::challenge_router(challenge_store);
+
+    // Generate admin token for write-endpoint authentication.
+    let admin_token = auth::generate_admin_token();
+    tracing::info!(
+        admin_token = %admin_token,
+        "Admin bearer token generated — required for POST endpoints"
+    );
+    let bearer_auth = auth::BearerAuth {
+        token: Arc::new(admin_token),
+    };
+
+    // Merge metrics + governance + passport + dashboard into a single extra router
+    // and apply bearer-token auth middleware (protects POST, allows GET).
     let extra_router = metrics_router
         .merge(governance_router)
         .merge(passport_router)
-        .merge(dashboard_router);
+        .merge(dashboard_router)
+        .merge(challenge_router)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let a = bearer_auth.clone();
+            auth::require_bearer_on_writes(a, req, next)
+        }));
 
     // Start the gateway HTTP server (blocks).
     let bind_address = format!("0.0.0.0:{api_port}");

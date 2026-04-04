@@ -18,7 +18,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Workspace tests | 1,603 passing, 0 failing | `cargo test --workspace` |
 | CI quality gates | 16 | `.github/workflows/ci.yml` |
 | Published releases | None (pre-release) | `git tag -l` |
-| License | AGPL-3.0-or-later | `Cargo.toml` |
+| License | Apache-2.0 | `Cargo.toml` |
 | Live node | https://exochain.io | Fly.io deployment |
 
 ### What is verified today

@@ -24,6 +24,7 @@ exo-api = { path = "../exo-api" }
 exo-governance = { path = "../exo-governance" }
 exo-identity = { path = "../exo-identity" }
 exo-consent = { path = "../exo-consent" }
+exo-escalation = { path = "../exo-escalation" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -72,6 +73,12 @@ futures = "0.3"
 
 # Hex encoding for peer display
 hex = { workspace = true }
+
+# Secure random token generation
+getrandom = { workspace = true }
+
+# UUID for challenge IDs
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

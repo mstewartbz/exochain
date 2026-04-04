@@ -1495,11 +1495,13 @@ dependencies = [
  "exo-consent",
  "exo-core",
  "exo-dag",
+ "exo-escalation",
  "exo-gatekeeper",
  "exo-gateway",
  "exo-governance",
  "exo-identity",
  "futures",
+ "getrandom 0.2.16",
  "hex",
  "libp2p",
  "rand 0.8.5",
@@ -1513,6 +1515,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "zeroize",
 ]
 

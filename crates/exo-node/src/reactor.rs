@@ -234,6 +234,87 @@ pub async fn run_reactor(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wire message validation — reject before processing
+// ---------------------------------------------------------------------------
+
+/// Validate a consensus proposal before processing.
+///
+/// Checks: proposer is a known validator, signature is non-empty,
+/// and the node hash in the proposal matches the attached DAG node.
+fn validate_proposal(
+    msg: &ConsensusProposalMsg,
+    validators: &BTreeSet<Did>,
+) -> Result<(), String> {
+    if !validators.contains(&msg.proposal.proposer) {
+        return Err(format!(
+            "proposer {} is not in the validator set",
+            msg.proposal.proposer
+        ));
+    }
+    if msg.signature.is_empty() {
+        return Err("proposal carries empty signature".into());
+    }
+    if msg.node.hash != msg.proposal.node_hash {
+        return Err(format!(
+            "proposal node_hash {} does not match attached node {}",
+            msg.proposal.node_hash, msg.node.hash
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a consensus vote before processing.
+///
+/// Checks: voter is a known validator and signature is non-empty.
+fn validate_vote(
+    msg: &ConsensusVoteMsg,
+    validators: &BTreeSet<Did>,
+) -> Result<(), String> {
+    if !validators.contains(&msg.vote.voter) {
+        return Err(format!(
+            "voter {} is not in the validator set",
+            msg.vote.voter
+        ));
+    }
+    if msg.vote.signature.is_empty() {
+        return Err("vote carries empty signature".into());
+    }
+    Ok(())
+}
+
+/// Validate a commit certificate before processing.
+///
+/// Checks: every vote in the certificate is from a known validator,
+/// carries a non-empty signature, and references the certificate's
+/// node hash.
+fn validate_commit(
+    msg: &ConsensusCommitMsg,
+    validators: &BTreeSet<Did>,
+) -> Result<(), String> {
+    for vote in &msg.certificate.votes {
+        if !validators.contains(&vote.voter) {
+            return Err(format!(
+                "certificate contains vote from non-validator {}",
+                vote.voter
+            ));
+        }
+        if vote.signature.is_empty() {
+            return Err(format!(
+                "certificate vote from {} has empty signature",
+                vote.voter
+            ));
+        }
+        if vote.node_hash != msg.certificate.node_hash {
+            return Err(format!(
+                "certificate vote from {} references wrong node hash",
+                vote.voter
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Handle an incoming wire message.
 async fn handle_wire_message(
     state: &SharedReactorState,
@@ -270,6 +351,15 @@ async fn handle_proposal(
     reactor_tx: &mpsc::Sender<ReactorEvent>,
     msg: ConsensusProposalMsg,
 ) {
+    // Validate the proposal before any processing.
+    {
+        let s = state.lock().expect("reactor state lock");
+        if let Err(reason) = validate_proposal(&msg, &s.consensus.config.validators) {
+            tracing::warn!(err = %reason, "Rejected invalid proposal from network");
+            return;
+        }
+    }
+
     // All synchronous work in a block so MutexGuard is dropped before any .await.
     let vote_msg_opt = {
         let mut s = state.lock().expect("reactor state lock");
@@ -337,6 +427,15 @@ async fn handle_vote(
     reactor_tx: &mpsc::Sender<ReactorEvent>,
     msg: ConsensusVoteMsg,
 ) {
+    // Validate the vote before processing.
+    {
+        let s = state.lock().expect("reactor state lock");
+        if let Err(reason) = validate_vote(&msg, &s.consensus.config.validators) {
+            tracing::warn!(err = %reason, "Rejected invalid vote from network");
+            return;
+        }
+    }
+
     {
         let mut s = state.lock().expect("reactor state lock");
 
@@ -377,6 +476,15 @@ async fn handle_commit(
     reactor_tx: &mpsc::Sender<ReactorEvent>,
     msg: ConsensusCommitMsg,
 ) {
+    // Validate the commit certificate before processing.
+    {
+        let s = state.lock().expect("reactor state lock");
+        if let Err(reason) = validate_commit(&msg, &s.consensus.config.validators) {
+            tracing::warn!(err = %reason, "Rejected invalid commit certificate from network");
+            return;
+        }
+    }
+
     let commit_info = {
         let mut s = state.lock().expect("reactor state lock");
         let cert = msg.certificate;
