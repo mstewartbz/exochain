@@ -20,6 +20,7 @@ mod challenges;
 mod cli;
 mod config;
 mod dashboard;
+mod exoforge;
 mod holons;
 mod identity;
 mod metrics;
@@ -498,6 +499,12 @@ async fn start_node(
     // Build the receipt drill-down dashboard.
     let receipt_dashboard_router = receipt_dashboard::receipt_dashboard_router();
 
+    // Build the ExoForge build orchestration dashboard.
+    let forge_state: exoforge::SharedForgeState =
+        Arc::new(Mutex::new(exoforge::ForgeState::new_zerodentity()));
+    let forge_router = exoforge::exoforge_router(forge_state);
+    tracing::info!("ExoForge initialized — 0dentity spec loaded, 56 tasks across 12 phases");
+
     // Build the sentinel API router and start the sentinel loop.
     let sentinel_state: sentinels::SharedSentinelState =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -551,6 +558,7 @@ async fn start_node(
         .merge(provenance_router)
         .merge(receipt_dashboard_router)
         .merge(sentinel_router)
+        .merge(forge_router)
         .layer(axum::middleware::from_fn(move |req, next| {
             let a = bearer_auth.clone();
             auth::require_bearer_on_writes(a, req, next)
