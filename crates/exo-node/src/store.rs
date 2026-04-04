@@ -79,7 +79,21 @@ impl SqliteDagStore {
 
             CREATE TABLE IF NOT EXISTS validators (
                 did TEXT PRIMARY KEY NOT NULL
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS trust_receipts (
+                receipt_hash BLOB PRIMARY KEY NOT NULL,
+                actor_did    TEXT    NOT NULL,
+                action_type  TEXT    NOT NULL,
+                outcome      TEXT    NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                cbor_data    BLOB    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_receipts_actor
+                ON trust_receipts(actor_did);
+            CREATE INDEX IF NOT EXISTS idx_receipts_ts
+                ON trust_receipts(timestamp_ms);",
         )?;
 
         Ok(Self { conn })
@@ -317,6 +331,79 @@ impl SqliteDagStore {
             }
         }
         Ok(set)
+    }
+
+    /// Save a trust receipt to the database.
+    pub fn save_receipt(&mut self, receipt: &exo_core::types::TrustReceipt) -> DagResult<()> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(receipt, &mut buf)
+            .map_err(|e| store_err(format!("CBOR encode receipt: {e}")))?;
+
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO trust_receipts (receipt_hash, actor_did, action_type, outcome, timestamp_ms, cbor_data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    receipt.receipt_hash.0.as_slice(),
+                    receipt.actor_did.to_string(),
+                    receipt.action_type,
+                    receipt.outcome.to_string(),
+                    receipt.timestamp.physical_ms as i64,
+                    buf,
+                ],
+            )
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Load a trust receipt by its hash.
+    pub fn load_receipt(&self, receipt_hash: &Hash256) -> DagResult<Option<exo_core::types::TrustReceipt>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT cbor_data FROM trust_receipts WHERE receipt_hash = ?1")
+            .map_err(store_err)?;
+
+        let mut rows = stmt
+            .query_map(params![receipt_hash.0.as_slice()], |row| {
+                let data: Vec<u8> = row.get(0)?;
+                Ok(data)
+            })
+            .map_err(store_err)?;
+
+        match rows.next() {
+            Some(row) => {
+                let data = row.map_err(store_err)?;
+                let receipt: exo_core::types::TrustReceipt =
+                    ciborium::from_reader(&data[..]).map_err(|e| store_err(format!("CBOR decode receipt: {e}")))?;
+                Ok(Some(receipt))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load receipts by actor DID, ordered by timestamp descending.
+    pub fn load_receipts_by_actor(&self, actor_did: &str, limit: u32) -> DagResult<Vec<exo_core::types::TrustReceipt>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT cbor_data FROM trust_receipts WHERE actor_did = ?1 ORDER BY timestamp_ms DESC LIMIT ?2",
+            )
+            .map_err(store_err)?;
+
+        let rows = stmt
+            .query_map(params![actor_did, limit], |row| {
+                let data: Vec<u8> = row.get(0)?;
+                Ok(data)
+            })
+            .map_err(store_err)?;
+
+        let mut receipts = Vec::new();
+        for row in rows {
+            let data = row.map_err(store_err)?;
+            let receipt: exo_core::types::TrustReceipt =
+                ciborium::from_reader(&data[..]).map_err(|e| store_err(format!("CBOR decode receipt: {e}")))?;
+            receipts.push(receipt);
+        }
+        Ok(receipts)
     }
 
     /// Get all committed nodes with their full DagNode data, ordered by height.
@@ -657,6 +744,105 @@ mod tests {
         store.save_validator_set(&smaller).unwrap();
         let loaded2 = store.load_validator_set().unwrap();
         assert_eq!(loaded2.len(), 1);
+    }
+
+    #[test]
+    fn receipt_save_and_load_by_hash() {
+        use exo_core::types::{ReceiptOutcome, Timestamp, TrustReceipt};
+        let mut store = temp_store();
+        let sign_fn = make_sign_fn();
+
+        let receipt = TrustReceipt::new(
+            Did::new("did:exo:agent-a").unwrap(),
+            Hash256::ZERO,
+            None,
+            "dag.commit".to_string(),
+            Hash256::digest(b"action-payload"),
+            ReceiptOutcome::Executed,
+            Timestamp {
+                physical_ms: 1_700_000_000_000,
+                logical: 0,
+            },
+            &*sign_fn,
+        );
+
+        let hash = receipt.receipt_hash;
+        store.save_receipt(&receipt).unwrap();
+
+        let loaded = store.load_receipt(&hash).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.receipt_hash, hash);
+        assert_eq!(loaded.actor_did.to_string(), "did:exo:agent-a");
+        assert_eq!(loaded.action_type, "dag.commit");
+        assert_eq!(loaded.outcome, ReceiptOutcome::Executed);
+    }
+
+    #[test]
+    fn receipt_load_nonexistent() {
+        let store = temp_store();
+        let result = store.load_receipt(&Hash256::ZERO).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn receipt_load_by_actor_filters_and_limits() {
+        use exo_core::types::{ReceiptOutcome, Timestamp, TrustReceipt};
+        let mut store = temp_store();
+        let sign_fn = make_sign_fn();
+
+        // Save 3 receipts for actor-a at different timestamps.
+        for i in 0u64..3 {
+            let receipt = TrustReceipt::new(
+                Did::new("did:exo:actor-a").unwrap(),
+                Hash256::ZERO,
+                None,
+                format!("action.{i}"),
+                Hash256::digest(format!("payload-{i}").as_bytes()),
+                ReceiptOutcome::Executed,
+                Timestamp {
+                    physical_ms: 1_000_000 + i * 1000,
+                    logical: 0,
+                },
+                &*sign_fn,
+            );
+            store.save_receipt(&receipt).unwrap();
+        }
+
+        // Save 1 receipt for actor-b.
+        let other = TrustReceipt::new(
+            Did::new("did:exo:actor-b").unwrap(),
+            Hash256::ZERO,
+            None,
+            "other.action".to_string(),
+            Hash256::digest(b"other"),
+            ReceiptOutcome::Denied,
+            Timestamp {
+                physical_ms: 2_000_000,
+                logical: 0,
+            },
+            &*sign_fn,
+        );
+        store.save_receipt(&other).unwrap();
+
+        // Query actor-a — should get 3 receipts.
+        let results = store.load_receipts_by_actor("did:exo:actor-a", 10).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Query with limit 2 — should get 2 (most recent first).
+        let limited = store.load_receipts_by_actor("did:exo:actor-a", 2).unwrap();
+        assert_eq!(limited.len(), 2);
+        // Ordered by timestamp descending.
+        assert!(limited[0].timestamp.physical_ms >= limited[1].timestamp.physical_ms);
+
+        // Query actor-b — should get 1 receipt.
+        let b_results = store.load_receipts_by_actor("did:exo:actor-b", 10).unwrap();
+        assert_eq!(b_results.len(), 1);
+        assert_eq!(b_results[0].outcome, ReceiptOutcome::Denied);
+
+        // Query unknown actor — should get 0.
+        let none = store.load_receipts_by_actor("did:exo:unknown", 10).unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
