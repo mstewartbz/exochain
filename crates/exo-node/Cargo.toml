@@ -80,6 +80,9 @@ getrandom = { workspace = true }
 # UUID for challenge IDs
 uuid = { workspace = true }
 
+# HTTP client for Telegram bot API
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 [dev-dependencies]
 tempfile = "3"
 tower = "0.5"

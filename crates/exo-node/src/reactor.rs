@@ -831,7 +831,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::channel(32);
         let net_handle = NetworkHandle::new(cmd_tx);
 
-        let result = submit_proposal(&state, &store, &net_handle, b"test payload").await;
+        let _result = submit_proposal(&state, &store, &net_handle, b"test payload").await;
         // The publish will fail because no network loop is running, but the DAG node
         // and proposal should still be created locally.
         // In this test setup, the channel receiver is dropped so publish returns Err.

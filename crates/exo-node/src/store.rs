@@ -406,6 +406,56 @@ impl SqliteDagStore {
         Ok(receipts)
     }
 
+    /// Find all child nodes of a given parent hash.
+    pub fn children(&self, parent_hash: &Hash256) -> DagResult<Vec<Hash256>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT child_hash FROM dag_parents WHERE parent_hash = ?1")
+            .map_err(store_err)?;
+
+        let rows = stmt
+            .query_map(params![parent_hash.0.as_slice()], |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Hash256::from_bytes(arr))
+            })
+            .map_err(store_err)?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(store_err)?);
+        }
+        Ok(result)
+    }
+
+    /// Check whether a node hash is committed.
+    #[allow(dead_code)]
+    pub fn is_committed(&self, hash: &Hash256) -> DagResult<bool> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT 1 FROM committed WHERE hash = ?1")
+            .map_err(store_err)?;
+        Ok(stmt.query_row(params![hash.0.as_slice()], |_| Ok(())).is_ok())
+    }
+
+    /// Get the committed height for a specific hash (if committed).
+    pub fn committed_height_for(&self, hash: &Hash256) -> DagResult<Option<u64>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT height FROM committed WHERE hash = ?1")
+            .map_err(store_err)?;
+
+        match stmt.query_row(params![hash.0.as_slice()], |row| {
+            let h: i64 = row.get(0)?;
+            #[allow(clippy::as_conversions)]
+            Ok(h as u64)
+        }) {
+            Ok(h) => Ok(Some(h)),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Get all committed nodes with their full DagNode data, ordered by height.
     ///
     /// Used by state sync to serve snapshot chunks with actual node payloads.
