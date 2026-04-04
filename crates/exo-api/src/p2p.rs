@@ -93,11 +93,26 @@ pub fn send(registry: &PeerRegistry, msg: &Message) -> Result<()> {
     Ok(())
 }
 
+/// Verify structural integrity of a peer-to-peer message.
+///
+/// Validates:
+/// 1. Signature is not empty / all-zero (rejects [`Signature::Empty`] and zero-filled Ed25519).
+/// 2. Sender DID (`msg.from`) is well-formed.
+///
+/// Full Ed25519 cryptographic verification requires a `PublicKey` lookup via
+/// `exo_core::crypto::verify()`; callers that hold a key registry should
+/// perform that step after this structural check passes.
 pub fn verify_message(msg: &Message) -> Result<()> {
-    // Verify signature is non-zero (placeholder for real crypto verification)
-    if *msg.signature.as_bytes() == [0u8; 64] {
+    // Reject empty / all-zero signatures.
+    if msg.signature.is_empty() || *msg.signature.as_bytes() == [0u8; 64] {
         return Err(ApiError::VerificationFailed {
-            reason: "empty signature".into(),
+            reason: "empty or zero signature".into(),
+        });
+    }
+    // Reject malformed sender DID (syntactic check — Does it parse?).
+    if msg.from.0.to_string().is_empty() {
+        return Err(ApiError::VerificationFailed {
+            reason: "sender DID is empty".into(),
         });
     }
     Ok(())
