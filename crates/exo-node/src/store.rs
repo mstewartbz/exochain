@@ -4,8 +4,9 @@
 //! This implementation mirrors `MemoryStore` from `exo-dag` but uses durable
 //! storage so state survives restarts.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+#![allow(clippy::expect_used, clippy::as_conversions)]
+
+use std::{collections::BTreeSet, path::Path};
 
 use exo_core::types::{Did, Hash256};
 use exo_dag::{
@@ -115,8 +116,7 @@ impl SqliteDagStore {
 
     /// Deserialize a `DagNode` from CBOR bytes.
     fn decode_node(bytes: &[u8]) -> DagResult<DagNode> {
-        ciborium::from_reader(bytes)
-            .map_err(|e| store_err(format!("CBOR decode: {e}")))
+        ciborium::from_reader(bytes).map_err(|e| store_err(format!("CBOR decode: {e}")))
     }
 
     /// Query committed nodes in a height range (inclusive), ordered by height.
@@ -173,15 +173,13 @@ impl SqliteDagStore {
 
     /// Load the persisted consensus round number (0 if none).
     pub fn load_consensus_round(&self) -> DagResult<u64> {
-        let result: Result<String, _> = self
-            .conn
-            .query_row(
-                "SELECT value FROM consensus_meta WHERE key = 'round'",
-                [],
-                |row| row.get(0),
-            );
+        let result: Result<String, _> = self.conn.query_row(
+            "SELECT value FROM consensus_meta WHERE key = 'round'",
+            [],
+            |row| row.get(0),
+        );
         match result {
-            Ok(s) => s.parse::<u64>().map_err(|e| store_err(e)),
+            Ok(s) => s.parse::<u64>().map_err(store_err),
             Err(_) => Ok(0),
         }
     }
@@ -228,9 +226,8 @@ impl SqliteDagStore {
                 }
 
                 Ok(Vote {
-                    voter: Did::new(&voter_str).unwrap_or_else(|_| {
-                        Did::new("did:exo:unknown").expect("fallback DID")
-                    }),
+                    voter: Did::new(&voter_str)
+                        .unwrap_or_else(|_| Did::new("did:exo:unknown").expect("fallback DID")),
                     round,
                     node_hash: Hash256::from_bytes(hash_arr),
                     signature: exo_core::types::Signature::from_bytes(sig_arr),
@@ -356,7 +353,10 @@ impl SqliteDagStore {
     }
 
     /// Load a trust receipt by its hash.
-    pub fn load_receipt(&self, receipt_hash: &Hash256) -> DagResult<Option<exo_core::types::TrustReceipt>> {
+    pub fn load_receipt(
+        &self,
+        receipt_hash: &Hash256,
+    ) -> DagResult<Option<exo_core::types::TrustReceipt>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT cbor_data FROM trust_receipts WHERE receipt_hash = ?1")
@@ -372,8 +372,8 @@ impl SqliteDagStore {
         match rows.next() {
             Some(row) => {
                 let data = row.map_err(store_err)?;
-                let receipt: exo_core::types::TrustReceipt =
-                    ciborium::from_reader(&data[..]).map_err(|e| store_err(format!("CBOR decode receipt: {e}")))?;
+                let receipt: exo_core::types::TrustReceipt = ciborium::from_reader(&data[..])
+                    .map_err(|e| store_err(format!("CBOR decode receipt: {e}")))?;
                 Ok(Some(receipt))
             }
             None => Ok(None),
@@ -381,7 +381,11 @@ impl SqliteDagStore {
     }
 
     /// Load receipts by actor DID, ordered by timestamp descending.
-    pub fn load_receipts_by_actor(&self, actor_did: &str, limit: u32) -> DagResult<Vec<exo_core::types::TrustReceipt>> {
+    pub fn load_receipts_by_actor(
+        &self,
+        actor_did: &str,
+        limit: u32,
+    ) -> DagResult<Vec<exo_core::types::TrustReceipt>> {
         let mut stmt = self
             .conn
             .prepare_cached(
@@ -399,8 +403,8 @@ impl SqliteDagStore {
         let mut receipts = Vec::new();
         for row in rows {
             let data = row.map_err(store_err)?;
-            let receipt: exo_core::types::TrustReceipt =
-                ciborium::from_reader(&data[..]).map_err(|e| store_err(format!("CBOR decode receipt: {e}")))?;
+            let receipt: exo_core::types::TrustReceipt = ciborium::from_reader(&data[..])
+                .map_err(|e| store_err(format!("CBOR decode receipt: {e}")))?;
             receipts.push(receipt);
         }
         Ok(receipts)
@@ -436,7 +440,9 @@ impl SqliteDagStore {
             .conn
             .prepare_cached("SELECT 1 FROM committed WHERE hash = ?1")
             .map_err(store_err)?;
-        Ok(stmt.query_row(params![hash.0.as_slice()], |_| Ok(())).is_ok())
+        Ok(stmt
+            .query_row(params![hash.0.as_slice()], |_| Ok(()))
+            .is_ok())
     }
 
     /// Get the committed height for a specific hash (if committed).
@@ -480,7 +486,7 @@ impl DagStore for SqliteDagStore {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT cbor_payload FROM dag_nodes WHERE hash = ?1")
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
         let result: Option<Vec<u8>> = stmt
             .query_row(params![hash.0.as_slice()], |row| row.get(0))
@@ -500,7 +506,7 @@ impl DagStore for SqliteDagStore {
                 "INSERT OR IGNORE INTO dag_nodes (hash, cbor_payload) VALUES (?1, ?2)",
                 params![node.hash.0.as_slice(), cbor],
             )
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
         // Record parent relationships.
         for parent in &node.parents {
@@ -509,7 +515,7 @@ impl DagStore for SqliteDagStore {
                     "INSERT OR IGNORE INTO dag_parents (child_hash, parent_hash) VALUES (?1, ?2)",
                     params![node.hash.0.as_slice(), parent.0.as_slice()],
                 )
-                .map_err(|e| store_err(e))?;
+                .map_err(store_err)?;
         }
 
         Ok(())
@@ -519,7 +525,7 @@ impl DagStore for SqliteDagStore {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT 1 FROM dag_nodes WHERE hash = ?1")
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
         let exists = stmt
             .query_row(params![hash.0.as_slice()], |_| Ok(()))
@@ -537,7 +543,7 @@ impl DagStore for SqliteDagStore {
                  WHERE hash NOT IN (SELECT parent_hash FROM dag_parents)
                  ORDER BY hash",
             )
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -546,11 +552,11 @@ impl DagStore for SqliteDagStore {
                 arr.copy_from_slice(&bytes);
                 Ok(Hash256::from_bytes(arr))
             })
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
         let mut tips = Vec::new();
         for row in rows {
-            tips.push(row.map_err(|e| store_err(e))?);
+            tips.push(row.map_err(store_err)?);
         }
         Ok(tips)
     }
@@ -559,11 +565,9 @@ impl DagStore for SqliteDagStore {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT COALESCE(MAX(height), 0) FROM committed")
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
-        let height: i64 = stmt
-            .query_row([], |row| row.get(0))
-            .map_err(|e| store_err(e))?;
+        let height: i64 = stmt.query_row([], |row| row.get(0)).map_err(store_err)?;
 
         #[allow(clippy::as_conversions)]
         Ok(height as u64)
@@ -581,7 +585,7 @@ impl DagStore for SqliteDagStore {
                 "INSERT OR REPLACE INTO committed (hash, height) VALUES (?1, ?2)",
                 params![hash.0.as_slice(), height as i64],
             )
-            .map_err(|e| store_err(e))?;
+            .map_err(store_err)?;
 
         Ok(())
     }

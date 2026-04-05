@@ -404,6 +404,8 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       &middot;
       <a href="/health">/health</a>
       &middot;
+      <a href="/ready">/ready</a>
+      &middot;
       <a href="/metrics">/metrics</a>
       &middot;
       <a href="/api/v1/governance/status">/api</a>
@@ -620,20 +622,22 @@ mod tests {
     async fn dashboard_returns_html() {
         let app = dashboard_router();
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
         assert_eq!(resp.status(), 200);
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/html"));
 
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let html = std::str::from_utf8(&body).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("exochain"));
@@ -644,16 +648,13 @@ mod tests {
     async fn dashboard_html_contains_all_endpoints() {
         let app = dashboard_router();
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let html = std::str::from_utf8(&body).unwrap();
         assert!(html.contains("/health"));
         assert!(html.contains("/metrics"));

@@ -21,27 +21,35 @@
 //! 3. **Health Monitor** — tracks consensus round times, peer latency,
 //!    DAG growth rate, and alerts on anomalies.
 
+#![allow(
+    clippy::expect_used,
+    clippy::as_conversions,
+    clippy::float_arithmetic,
+    clippy::float_cmp,
+    clippy::single_match
+)]
+
 use std::time::Duration;
 
 use exo_core::types::Did;
 use exo_gatekeeper::{
-    combinator::{
-        Combinator, CombinatorInput, Predicate, TransformFn,
-    },
+    combinator::{Combinator, CombinatorInput, Predicate, TransformFn},
     holon::{self, Holon, HolonState},
     invariants::InvariantSet,
     kernel::{AdjudicationContext, Kernel},
     types::{
-        AuthorityChain, AuthorityLink, BailmentState, ConsentRecord,
-        GovernmentBranch, Permission, PermissionSet, Provenance, Role,
+        AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
+        PermissionSet, Provenance, Role,
     },
 };
 use tokio::sync::mpsc;
 
-use crate::network::NetworkHandle;
-use crate::reactor::{self, SharedReactorState};
-use crate::store::SqliteDagStore;
-use crate::wire::{GovernanceEventType, ValidatorChange};
+use crate::{
+    network::NetworkHandle,
+    reactor::{self, SharedReactorState},
+    store::SqliteDagStore,
+    wire::{GovernanceEventType, ValidatorChange},
+};
 
 // ---------------------------------------------------------------------------
 // Holon events (sent to application layer)
@@ -69,10 +77,7 @@ pub enum HolonEvent {
         status: HealthStatus,
     },
     /// A Holon was terminated due to capability denial.
-    HolonTerminated {
-        holon_id: Did,
-        reason: String,
-    },
+    HolonTerminated { holon_id: Did, reason: String },
 }
 
 /// Health status of the node.
@@ -284,10 +289,7 @@ pub fn build_holon_adjudication_context(
 // ---------------------------------------------------------------------------
 
 /// Analyze peer topology and produce a diversity recommendation.
-fn analyze_topology(
-    peer_count: usize,
-    _net_handle: &NetworkHandle,
-) -> (f64, String) {
+fn analyze_topology(peer_count: usize, _net_handle: &NetworkHandle) -> (f64, String) {
     // Diversity score: simple heuristic based on peer count.
     // In production, this would query ASN distribution from PeerRegistry.
     let diversity_score = if peer_count == 0 {
@@ -305,9 +307,7 @@ fn analyze_topology(
     let recommendation = if diversity_score < 0.3 {
         "CRITICAL: No peers connected. Node is isolated.".into()
     } else if diversity_score < 0.5 {
-        format!(
-            "WARNING: Only {peer_count} peers. Recommend connecting to more diverse nodes."
-        )
+        format!("WARNING: Only {peer_count} peers. Recommend connecting to more diverse nodes.")
     } else if diversity_score < 0.8 {
         format!(
             "FAIR: {peer_count} peers, diversity score {diversity_score:.1}. Consider adding peers from different ASNs."
@@ -326,10 +326,7 @@ fn analyze_topology(
 // ---------------------------------------------------------------------------
 
 /// Analyze validator-to-node ratio and produce a scaling recommendation.
-fn analyze_scaling(
-    validator_count: usize,
-    node_count: usize,
-) -> String {
+fn analyze_scaling(validator_count: usize, node_count: usize) -> String {
     if node_count == 0 {
         return "No nodes in network.".into();
     }
@@ -368,10 +365,7 @@ fn analyze_scaling(
 // ---------------------------------------------------------------------------
 
 /// Analyze node health from consensus and DAG metrics.
-fn analyze_health(
-    consensus_round: u64,
-    committed_height: u64,
-) -> HealthStatus {
+fn analyze_health(consensus_round: u64, committed_height: u64) -> HealthStatus {
     // If consensus is running (rounds advancing) and nodes are being committed, healthy.
     if committed_height == 0 && consensus_round > 10 {
         HealthStatus::Critical {
@@ -408,13 +402,7 @@ async fn execute_governance_action(
     reactor::submit_proposal(state, store, net_handle, payload).await?;
 
     // Broadcast the governance event.
-    reactor::broadcast_governance_event(
-        state,
-        net_handle,
-        action_type,
-        payload.to_vec(),
-    )
-    .await
+    reactor::broadcast_governance_event(state, net_handle, action_type, payload.to_vec()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -438,15 +426,11 @@ pub async fn run_holon_manager(
     let mut scaling_holon = create_scaling_holon(&config.node_did);
     let mut health_holon = create_health_holon(&config.node_did);
 
-    let mut topology_timer = tokio::time::interval(Duration::from_secs(
-        config.topology_interval_secs,
-    ));
-    let mut scaling_timer = tokio::time::interval(Duration::from_secs(
-        config.scaling_interval_secs,
-    ));
-    let mut health_timer = tokio::time::interval(Duration::from_secs(
-        config.health_interval_secs,
-    ));
+    let mut topology_timer =
+        tokio::time::interval(Duration::from_secs(config.topology_interval_secs));
+    let mut scaling_timer =
+        tokio::time::interval(Duration::from_secs(config.scaling_interval_secs));
+    let mut health_timer = tokio::time::interval(Duration::from_secs(config.health_interval_secs));
 
     // Skip first ticks (fire immediately on first interval).
     topology_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -464,8 +448,8 @@ pub async fn run_holon_manager(
                 let (diversity_score, recommendation) = analyze_topology(peer_count, &net_handle);
 
                 let input = CombinatorInput::new()
-                    .with("peer_count", &peer_count.to_string())
-                    .with("diversity_score", &format!("{diversity_score:.2}"));
+                    .with("peer_count", peer_count.to_string())
+                    .with("diversity_score", format!("{diversity_score:.2}"));
 
                 let ctx = build_holon_adjudication_context(&topology_holon, &config);
                 match holon::step(&mut topology_holon, &input, &kernel, &ctx) {
@@ -513,8 +497,8 @@ pub async fn run_holon_manager(
                 let recommendation = analyze_scaling(validator_count, node_count);
 
                 let input = CombinatorInput::new()
-                    .with("validator_count", &validator_count.to_string())
-                    .with("node_count", &node_count.to_string());
+                    .with("validator_count", validator_count.to_string())
+                    .with("node_count", node_count.to_string());
 
                 let ctx = build_holon_adjudication_context(&scaling_holon, &config);
                 match holon::step(&mut scaling_holon, &input, &kernel, &ctx) {
@@ -607,8 +591,8 @@ pub async fn run_holon_manager(
                 let status = analyze_health(consensus_round, committed_height);
 
                 let input = CombinatorInput::new()
-                    .with("consensus_round", &consensus_round.to_string())
-                    .with("committed_height", &committed_height.to_string());
+                    .with("consensus_round", consensus_round.to_string())
+                    .with("committed_height", committed_height.to_string());
 
                 let ctx = build_holon_adjudication_context(&health_holon, &config);
                 match holon::step(&mut health_holon, &input, &kernel, &ctx) {
@@ -695,8 +679,7 @@ mod tests {
         let mut h = create_topology_holon(&test_did());
         let ctx = build_holon_adjudication_context(&h, &config);
 
-        let input = CombinatorInput::new()
-            .with("peer_count", "5");
+        let input = CombinatorInput::new().with("peer_count", "5");
 
         let output = holon::step(&mut h, &input, &kernel, &ctx).unwrap();
         assert_eq!(h.state, HolonState::Idle);
@@ -851,8 +834,8 @@ mod tests {
 
     #[tokio::test]
     async fn holon_manager_emits_health_event() {
-        use std::collections::BTreeSet;
-        use std::sync::Arc;
+        use std::{collections::BTreeSet, sync::Arc};
+
         use exo_core::types::Signature;
 
         let validators: BTreeSet<Did> = (0..4)
@@ -911,13 +894,10 @@ mod tests {
         ));
 
         // Wait for at least one health event.
-        let event = tokio::time::timeout(
-            Duration::from_secs(5),
-            event_rx.recv(),
-        )
-        .await
-        .expect("Should receive an event within 5s")
-        .expect("Channel should not be closed");
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("Should receive an event within 5s")
+            .expect("Channel should not be closed");
 
         // Should be one of the three Holon event types (first tick fires immediately).
         match event {

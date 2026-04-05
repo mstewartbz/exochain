@@ -9,13 +9,16 @@
 //! layer will be upgraded to Ed25519 DID-signature authentication (as already
 //! implemented in `exo-gateway/src/auth.rs`).
 
+#![allow(clippy::expect_used)]
+
+use std::sync::Arc;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware::Next,
     response::Response,
 };
-use std::sync::Arc;
 
 /// Shared bearer token state for the auth middleware.
 #[derive(Clone)]
