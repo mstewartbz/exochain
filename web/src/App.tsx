@@ -15,13 +15,23 @@ import { AgentsPage } from './pages/AgentsPage'
 import { PaceWizardPage } from './pages/PaceWizardPage'
 import { DevBoardPage } from './pages/DevBoardPage'
 import { LiveSafePage } from './pages/LiveSafePage'
+import { OnboardPage } from './pages/APE/OnboardPage'
+import { APEDashboardPage } from './pages/APE/APEDashboardPage'
 
 export default function App() {
   return (
     <Routes>
+      {/* Public routes */}
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+
+      {/* APE onboarding — public, no auth required */}
+      <Route path="/APE" element={<OnboardPage />} />
+      <Route path="/APE/onboard" element={<OnboardPage />} />
+
+      {/* APE dashboard — auth required, wraps Command Center with board sidebar */}
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
+        <Route path="/APE/dashboard" element={<APEDashboardPage />} />
         <Route path="/" element={<CommandCenterPage />} />
         <Route path="/decisions" element={<DashboardPage />} />
         <Route path="/decisions/:id" element={<DecisionDetailPage />} />
