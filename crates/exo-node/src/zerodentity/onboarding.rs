@@ -5,7 +5,10 @@
 //!
 //! Spec reference: §7.1.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use exo_core::types::{Did, Hash256, Signature};
@@ -145,6 +148,7 @@ fn parse_claim_type(ct: &str, provider: Option<&str>) -> Option<ClaimType> {
 // POST /api/v1/0dentity/claims
 // ---------------------------------------------------------------------------
 
+/// `POST /api/v1/0dentity/claims` — submit a new identity claim for verification.
 pub async fn submit_claim(
     State(state): State<OnboardingState>,
     Json(req): Json<SubmitClaimRequest>,
@@ -234,6 +238,7 @@ pub async fn submit_claim(
 // POST /api/v1/0dentity/verify
 // ---------------------------------------------------------------------------
 
+/// `POST /api/v1/0dentity/verify` — verify an OTP code against a challenge.
 pub async fn verify_otp(
     State(state): State<OnboardingState>,
     Json(req): Json<VerifyOtpRequest>,
@@ -323,6 +328,7 @@ pub async fn verify_otp(
 // POST /api/v1/0dentity/verify/resend
 // ---------------------------------------------------------------------------
 
+/// `POST /api/v1/0dentity/verify/resend` — resend an OTP code for an existing challenge.
 pub async fn resend_otp(
     State(state): State<OnboardingState>,
     Json(req): Json<ResendOtpRequest>,

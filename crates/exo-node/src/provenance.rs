@@ -8,7 +8,7 @@
 //!
 //! - `GET /api/v1/provenance/:hash` — full lineage for a DAG node
 
-#![allow(clippy::expect_used, clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 
 use std::sync::{Arc, Mutex};
 
@@ -82,7 +82,12 @@ async fn handle_provenance(
     arr.copy_from_slice(&hash_bytes);
     let hash = Hash256::from_bytes(arr);
 
-    let st = state.store.lock().expect("store lock");
+    let st = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Store unavailable".to_string(),
+        )
+    })?;
 
     let node = st
         .get(&hash)

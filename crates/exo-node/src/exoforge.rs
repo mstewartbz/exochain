@@ -16,7 +16,7 @@
 //! | POST   | `/api/v1/forge/tasks/:id/escalate`| Escalate a task          |
 //! | POST   | `/api/v1/forge/log`               | Append activity log      |
 
-#![allow(clippy::as_conversions, clippy::unwrap_used, clippy::float_arithmetic)]
+#![allow(clippy::as_conversions, clippy::float_arithmetic)]
 
 use std::sync::{Arc, Mutex};
 
@@ -31,8 +31,10 @@ use serde::{Deserialize, Serialize};
 
 // ─── Types ──────────────────────────────────────────────────────────
 
+/// Thread-safe shared handle to the forge orchestration state.
 pub type SharedForgeState = Arc<Mutex<ForgeState>>;
 
+/// A single task in the build orchestration graph, tracking phase, status, and agent assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeTask {
     pub id: u32,
@@ -49,6 +51,7 @@ pub struct ForgeTask {
     pub completed_ms: Option<u64>,
 }
 
+/// Lifecycle status of a forge task (Queued -> Assigned -> InProgress -> Review -> Complete).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     Queued,
@@ -60,6 +63,7 @@ pub enum TaskStatus {
     Escalated,
 }
 
+/// Escalation tier for a blocked or contested task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EscalationLevel {
     None,
@@ -68,6 +72,7 @@ pub enum EscalationLevel {
     Human,
 }
 
+/// A timestamped entry in the forge activity log, optionally linked to a task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEntry {
     pub timestamp_ms: u64,
@@ -75,6 +80,7 @@ pub struct ActivityEntry {
     pub task_id: Option<u32>,
 }
 
+/// Aggregate statistics across all forge tasks, including per-phase breakdowns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeStats {
     pub total: u32,
@@ -89,6 +95,7 @@ pub struct ForgeStats {
     pub phases: Vec<PhaseStats>,
 }
 
+/// Completion statistics for a single build phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseStats {
     pub phase: u32,
@@ -98,6 +105,7 @@ pub struct PhaseStats {
     pub percent: f64,
 }
 
+/// Mutable state for the forge orchestrator: task graph, activity log, and spec metadata.
 pub struct ForgeState {
     pub spec_name: String,
     #[allow(dead_code)]
@@ -110,22 +118,26 @@ pub struct ForgeState {
 
 // ─── Request / Response bodies ──────────────────────────────────────
 
+/// Request body for updating a task's status.
 #[derive(Deserialize)]
 pub struct StatusUpdate {
     pub status: TaskStatus,
 }
 
+/// Request body for assigning an agent to a task.
 #[derive(Deserialize)]
 pub struct AgentAssignment {
     pub agent: String,
 }
 
+/// Request body for escalating a task to a higher authority tier.
 #[derive(Deserialize)]
 pub struct EscalateRequest {
     pub level: EscalationLevel,
     pub reason: String,
 }
 
+/// Request body for appending a message to the forge activity log.
 #[derive(Deserialize)]
 pub struct LogEntry {
     pub message: String,
@@ -142,6 +154,7 @@ fn now_ms() -> u64 {
 }
 
 impl ForgeState {
+    /// Create a new forge state pre-loaded with the 0DENTITY spec task graph.
     pub fn new_zerodentity() -> Self {
         let tasks = build_zerodentity_tasks();
         let started = now_ms();
@@ -170,6 +183,7 @@ impl ForgeState {
         }
     }
 
+    /// Compute aggregate and per-phase completion statistics from the current task list.
     pub fn stats(&self) -> ForgeStats {
         let total = self.tasks.len() as u32;
         let queued = self
@@ -757,31 +771,51 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
 
 // ─── API Handlers ───────────────────────────────────────────────────
 
-async fn list_tasks(State(state): State<SharedForgeState>) -> Json<serde_json::Value> {
-    let s = state.lock().unwrap();
-    Json(serde_json::json!({
+/// `GET /api/v1/forge/tasks` — list all spec tasks with current stats.
+async fn list_tasks(
+    State(state): State<SharedForgeState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in list_tasks");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(serde_json::json!({
         "spec_name": s.spec_name,
         "tasks": s.tasks,
         "stats": s.stats(),
-    }))
+    })))
 }
 
-async fn get_stats(State(state): State<SharedForgeState>) -> Json<ForgeStats> {
-    let s = state.lock().unwrap();
-    Json(s.stats())
+/// `GET /api/v1/forge/stats` — aggregate task statistics.
+async fn get_stats(State(state): State<SharedForgeState>) -> Result<Json<ForgeStats>, StatusCode> {
+    let s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in get_stats");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(s.stats()))
 }
 
-async fn get_activity(State(state): State<SharedForgeState>) -> Json<Vec<ActivityEntry>> {
-    let s = state.lock().unwrap();
-    Json(s.activity_log.clone())
+/// `GET /api/v1/forge/activity` — recent task activity log.
+async fn get_activity(
+    State(state): State<SharedForgeState>,
+) -> Result<Json<Vec<ActivityEntry>>, StatusCode> {
+    let s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in get_activity");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(s.activity_log.clone()))
 }
 
+/// `PUT /api/v1/forge/tasks/:id/status` — update a task's status.
 async fn update_task_status(
     State(state): State<SharedForgeState>,
     Path(task_id): Path<u32>,
     Json(body): Json<StatusUpdate>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in update_task_status");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let task = s
         .tasks
         .iter_mut()
@@ -811,12 +845,16 @@ async fn update_task_status(
     Ok(Json(serde_json::json!({ "ok": true, "task_id": task_id })))
 }
 
+/// `PUT /api/v1/forge/tasks/:id/assign` — assign an agent to a task.
 async fn assign_agent(
     State(state): State<SharedForgeState>,
     Path(task_id): Path<u32>,
     Json(body): Json<AgentAssignment>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in assign_agent");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let task = s
         .tasks
         .iter_mut()
@@ -843,12 +881,16 @@ async fn assign_agent(
     ))
 }
 
+/// `POST /api/v1/forge/tasks/:id/escalate` — escalate a blocked task.
 async fn escalate_task(
     State(state): State<SharedForgeState>,
     Path(task_id): Path<u32>,
     Json(body): Json<EscalateRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in escalate_task");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let task = s
         .tasks
         .iter_mut()
@@ -879,29 +921,39 @@ async fn escalate_task(
     ))
 }
 
+/// `POST /api/v1/forge/log` — append an entry to the activity log.
 async fn append_log(
     State(state): State<SharedForgeState>,
     Json(body): Json<LogEntry>,
-) -> Json<serde_json::Value> {
-    let mut s = state.lock().unwrap();
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in append_log");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     s.activity_log.push(ActivityEntry {
         timestamp_ms: now_ms(),
         message: body.message,
         task_id: body.task_id,
     });
-    Json(serde_json::json!({ "ok": true }))
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ─── Dashboard HTML ─────────────────────────────────────────────────
 
-async fn serve_dashboard(State(state): State<SharedForgeState>) -> Html<String> {
-    let s = state.lock().unwrap();
+/// `GET /exoforge` — serve the ExoForge task-board dashboard as HTML.
+async fn serve_dashboard(
+    State(state): State<SharedForgeState>,
+) -> Result<Html<String>, StatusCode> {
+    let s = state.lock().map_err(|_| {
+        tracing::error!("ForgeState mutex poisoned in serve_dashboard");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let tasks_json = serde_json::to_string(&s.tasks).unwrap_or_default();
     let stats_json = serde_json::to_string(&s.stats()).unwrap_or_default();
     let log_json = serde_json::to_string(&s.activity_log).unwrap_or_default();
     drop(s);
 
-    Html(format!(
+    Ok(Html(format!(
         r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1426,11 +1478,12 @@ setInterval(async () => {{
 
 </body>
 </html>"##
-    ))
+    )))
 }
 
 // ─── Router ─────────────────────────────────────────────────────────
 
+/// Build the Axum router for all ExoForge API and dashboard routes.
 pub fn exoforge_router(state: SharedForgeState) -> Router {
     Router::new()
         .route("/exoforge", get(serve_dashboard))

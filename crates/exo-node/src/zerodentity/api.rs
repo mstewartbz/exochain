@@ -11,7 +11,10 @@
 //!
 //! Spec reference: §7.2, §7.3.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -207,6 +210,7 @@ fn now_ms() -> u64 {
 // GET /api/v1/0dentity/:did/score
 // ---------------------------------------------------------------------------
 
+/// `GET /api/v1/0dentity/:did/score` — retrieve the current composite identity score.
 pub async fn get_score(
     State(state): State<ApiState>,
     Path(did_str): Path<String>,
@@ -256,6 +260,7 @@ pub async fn get_score(
 // GET /api/v1/0dentity/:did/claims
 // ---------------------------------------------------------------------------
 
+/// `GET /api/v1/0dentity/:did/claims` — list identity claims for a subject.
 #[allow(clippy::as_conversions)]
 pub async fn list_claims(
     State(state): State<ApiState>,
@@ -356,6 +361,7 @@ pub async fn list_claims(
 // GET /api/v1/0dentity/:did/score/history
 // ---------------------------------------------------------------------------
 
+/// `GET /api/v1/0dentity/:did/score/history` — paginated score computation history.
 pub async fn score_history(
     State(state): State<ApiState>,
     Path(did_str): Path<String>,
@@ -390,6 +396,7 @@ pub async fn score_history(
 // GET /api/v1/0dentity/:did/fingerprints
 // ---------------------------------------------------------------------------
 
+/// `GET /api/v1/0dentity/:did/fingerprints` — behavioral fingerprint timeline (owner only).
 pub async fn list_fingerprints(
     State(state): State<ApiState>,
     Path(did_str): Path<String>,
@@ -452,6 +459,7 @@ pub async fn list_fingerprints(
 // POST /api/v1/0dentity/:did/attest
 // ---------------------------------------------------------------------------
 
+/// `POST /api/v1/0dentity/:did/attest` — submit a peer attestation for a subject.
 pub async fn create_peer_attestation(
     State(state): State<ApiState>,
     Path(did_str): Path<String>,
@@ -600,6 +608,7 @@ pub async fn create_peer_attestation(
 // GET /api/v1/0dentity/server-key
 // ---------------------------------------------------------------------------
 
+/// `GET /api/v1/0dentity/server-key` — retrieve the server's RSA-OAEP public key.
 pub async fn get_server_key(State(state): State<ApiState>) -> Json<ServerKeyResponse> {
     // Derive a deterministic key fingerprint from the node's DID.
     // In production, this will be replaced by a live RSA-OAEP key pair

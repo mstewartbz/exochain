@@ -197,6 +197,7 @@ pub struct GrantDelegationInput {
 // Broadcast events for subscriptions
 // ---------------------------------------------------------------------------
 
+/// Real-time governance events broadcast to subscribers.
 #[derive(Clone, Debug)]
 pub enum GovEvent {
     DecisionUpdated(GqlDecision),
@@ -235,10 +236,12 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Create a new `AppState` with a default empty DID registry.
     pub fn new() -> Self {
         Self::with_registry(Arc::new(RwLock::new(DidRegistry::new())))
     }
 
+    /// Create a new `AppState` with the given shared DID registry.
     pub fn with_registry(registry: Arc<RwLock<DidRegistry>>) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
@@ -257,10 +260,12 @@ impl AppState {
         }
     }
 
+    /// Create a new `AppState` wrapped in `Arc<Mutex<>>` for concurrent access.
     pub fn new_arc() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::new()))
     }
 
+    /// Create a new `AppState` with a shared registry, wrapped in `Arc<Mutex<>>`.
     pub fn new_arc_with_registry(registry: Arc<RwLock<DidRegistry>>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::with_registry(registry)))
     }
@@ -303,12 +308,14 @@ fn now_str() -> String {
 // Schema type alias
 // ---------------------------------------------------------------------------
 
+/// Fully-built GraphQL schema type with query, mutation, and subscription roots.
 pub type GovSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 // ---------------------------------------------------------------------------
 // Query resolvers
 // ---------------------------------------------------------------------------
 
+/// GraphQL query root — governance decisions, delegations, identity, and consent.
 pub struct QueryRoot;
 
 #[Object]
@@ -565,6 +572,7 @@ impl QueryRoot {
 // Mutation resolvers
 // ---------------------------------------------------------------------------
 
+/// GraphQL mutation root — decision lifecycle, voting, delegations, and emergency actions.
 pub struct MutationRoot;
 
 #[Object]
@@ -591,9 +599,13 @@ impl MutationRoot {
             challenges: Vec::new(),
             content_hash: body_hash,
         };
-        let _ = guard
+        if guard
             .event_tx
-            .send(GovEvent::DecisionUpdated(decision.clone()));
+            .send(GovEvent::DecisionUpdated(decision.clone()))
+            .is_err()
+        {
+            tracing::warn!("Governance event channel closed — DecisionUpdated dropped");
+        }
         guard.decisions.insert(
             id.clone(),
             DecisionRecord {
@@ -627,9 +639,13 @@ impl MutationRoot {
         };
         let actor = reason.as_deref().unwrap_or("system");
         guard.append_audit(&id_str, &format!("StatusAdvanced:{new_status}"), actor);
-        let _ = guard
+        if guard
             .event_tx
-            .send(GovEvent::DecisionUpdated(decision.clone()));
+            .send(GovEvent::DecisionUpdated(decision.clone()))
+            .is_err()
+        {
+            tracing::warn!("Governance event channel closed — DecisionUpdated dropped");
+        }
         Ok(decision)
     }
 
@@ -671,7 +687,13 @@ impl MutationRoot {
             (vote, rec.decision.clone())
         };
         guard.append_audit(&id_str, "VoteCast", &voter);
-        let _ = guard.event_tx.send(GovEvent::DecisionUpdated(decision));
+        if guard
+            .event_tx
+            .send(GovEvent::DecisionUpdated(decision))
+            .is_err()
+        {
+            tracing::warn!("Governance event channel closed — DecisionUpdated dropped");
+        }
         Ok(vote)
     }
 
@@ -748,7 +770,13 @@ impl MutationRoot {
             &format!("ChallengeRaised:{grounds}"),
             "did:exo:caller",
         );
-        let _ = guard.event_tx.send(GovEvent::DecisionUpdated(decision));
+        if guard
+            .event_tx
+            .send(GovEvent::DecisionUpdated(decision))
+            .is_err()
+        {
+            tracing::warn!("Governance event channel closed — DecisionUpdated dropped");
+        }
         Ok(challenge)
     }
 
@@ -766,10 +794,11 @@ impl MutationRoot {
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
         // Verify decision exists before creating emergency action.
-        let _ = guard
-            .decisions
-            .get(&id_str)
-            .ok_or_else(|| async_graphql::Error::new(format!("decision {id_str} not found")))?;
+        if !guard.decisions.contains_key(&id_str) {
+            return Err(async_graphql::Error::new(format!(
+                "decision {id_str} not found"
+            )));
+        }
         let action_id = Uuid::new_v4().to_string();
         let now = Timestamp::now_utc();
         // Ratification deadline: 24 hours from now.
@@ -793,9 +822,13 @@ impl MutationRoot {
             &format!("EmergencyAction:{justification}"),
             "did:exo:caller",
         );
-        let _ = guard
+        if guard
             .event_tx
-            .send(GovEvent::EmergencyActionCreated(action.clone()));
+            .send(GovEvent::EmergencyActionCreated(action.clone()))
+            .is_err()
+        {
+            tracing::warn!("Governance event channel closed — EmergencyActionCreated dropped");
+        }
         Ok(action)
     }
 
@@ -864,6 +897,7 @@ fn bump_version(v: &str) -> String {
 // Subscription resolvers
 // ---------------------------------------------------------------------------
 
+/// GraphQL subscription root — real-time decision, delegation, and emergency events.
 pub struct SubscriptionRoot;
 
 #[Subscription]

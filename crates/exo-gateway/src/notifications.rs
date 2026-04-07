@@ -45,6 +45,7 @@ pub struct NotificationService {
 }
 
 impl NotificationService {
+    /// Create a new notification service with the given per-recipient hourly limit.
     pub fn new(max_per_hour: u32) -> Self {
         Self {
             notifications: Vec::new(),
@@ -53,6 +54,7 @@ impl NotificationService {
     }
 
     /// Send a notification, respecting fatigue controls.
+    #[allow(clippy::expect_used)] // Safety: vec.last() after vec.push() is always Some.
     pub fn send(
         &mut self,
         tenant_id: String,
@@ -85,7 +87,11 @@ impl NotificationService {
         };
 
         self.notifications.push(notification);
-        Ok(self.notifications.last().unwrap())
+        // Safety: we just pushed, so last() is always Some
+        Ok(self
+            .notifications
+            .last()
+            .expect("just pushed, vec is non-empty"))
     }
 
     /// Count recent notifications for a recipient (within the last hour).
