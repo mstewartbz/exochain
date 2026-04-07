@@ -14,7 +14,7 @@
  * JSON serialization helpers are used internally; callers pass plain JS objects.
  */
 
-const wasm = require('../../packages/exochain-wasm/wasm');
+const wasm = require('../../../packages/exochain-wasm/wasm');
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 

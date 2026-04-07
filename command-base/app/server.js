@@ -179,6 +179,10 @@ function getCachedMember(id) {
   return getCachedTeamMembers().get(Number(id)) ?? null;
 }
 
+// ── Bootstrap Core Tables (clean install) ───────────────────────
+// Idempotently creates all 35 tables that server.js expects to exist.
+require('./lib/bootstrap-schema')(db);
+
 // ── Local Mode ──────────────────────────────────────────────────
 // When enabled, all AI-dependent features are disabled while keeping the
 // dashboard fully readable.  Prevents cascading failures when AI tokens
@@ -4447,15 +4451,20 @@ app.get('/api/dashboard', (req, res) => {
         LIMIT 10
       `).all();
 
-      const actionItems = stmt(`
-        SELECT ai.*, n.title as note_title, t.title as task_title
-        LEFT JOIN notes n ON ai.note_id = n.id
-        LEFT JOIN tasks t ON ai.task_id = t.id
-        WHERE ai.status IN ('pending', 'needs_max')
-        ORDER BY
-          CASE ai.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END,
-          ai.created_at DESC
-      `).all();
+      // action_items table does not exist yet — guard against crash
+      let actionItems = [];
+      try {
+        actionItems = stmt(`
+          SELECT ai.*, n.title as note_title, t.title as task_title
+          FROM action_items ai
+          LEFT JOIN notes n ON ai.note_id = n.id
+          LEFT JOIN tasks t ON ai.task_id = t.id
+          WHERE ai.status IN ('pending', 'needs_max')
+          ORDER BY
+            CASE ai.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END,
+            ai.created_at DESC
+        `).all();
+      } catch (_) {}
 
       const pendingDecisions = stmt(`
         SELECT d.*, t.title as task_title
