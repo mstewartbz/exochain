@@ -1003,6 +1003,361 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard handlers (layout templates + feedback issues)
+// ---------------------------------------------------------------------------
+
+/// PUT /api/v1/layout-templates — upsert a layout template.
+async fn handle_layout_template_put(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "database not configured" })),
+            )
+                .into_response();
+        }
+    };
+    let id = match body.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing 'id' field" })),
+            )
+                .into_response();
+        }
+    };
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Untitled");
+    let layout_json = body
+        .get("layout")
+        .cloned()
+        .unwrap_or(serde_json::json!([]));
+    let hidden_panels = body
+        .get("hiddenPanels")
+        .cloned()
+        .unwrap_or(serde_json::json!([]));
+    let is_built_in = body
+        .get("isBuiltIn")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let now_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    let updated_at = body
+        .get("updatedAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(now_ms);
+    let created_at = body
+        .get("createdAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(now_ms);
+
+    // Extract user DID from bearer token session if available.
+    // For now, accept an optional `userDid` field in the body.
+    let user_did_owned = body
+        .get("userDid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let user_did = user_did_owned.as_deref();
+
+    match crate::db::upsert_layout_template(
+        db,
+        &id,
+        user_did,
+        name,
+        &layout_json,
+        &hidden_panels,
+        is_built_in,
+        created_at,
+        updated_at,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "id": id, "status": "saved" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/v1/layout-templates/:id — delete a user layout template.
+async fn handle_layout_template_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "database not configured" })),
+            )
+                .into_response();
+        }
+    };
+    match crate::db::delete_layout_template(db, &id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "id": id, "status": "deleted" })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "template not found or is built-in" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/layout-templates — list all layout templates.
+async fn handle_layout_templates_list(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "database not configured" })),
+            )
+                .into_response();
+        }
+    };
+    match crate::db::list_layout_templates(db, None).await {
+        Ok(rows) => {
+            let templates: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "name": r.name,
+                        "layout": r.layout_json,
+                        "hiddenPanels": r.hidden_panels,
+                        "isBuiltIn": r.is_built_in,
+                        "createdAt": r.created_at,
+                        "updatedAt": r.updated_at,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "templates": templates })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/feedback-issues — file a new feedback issue.
+async fn handle_feedback_issue_create(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "database not configured" })),
+            )
+                .into_response();
+        }
+    };
+    let title = match body.get("title").and_then(|v| v.as_str()) {
+        Some(s) => s.to_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing 'title' field" })),
+            )
+                .into_response();
+        }
+    };
+    let source_widget_id = match body.get("sourceWidgetId").and_then(|v| v.as_str()) {
+        Some(s) => s.to_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing 'sourceWidgetId' field" })),
+            )
+                .into_response();
+        }
+    };
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let description = body
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let severity = body
+        .get("severity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium");
+    let category = body
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("bug");
+    let source_module_type = body
+        .get("sourceModuleType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let reporter_did_owned = body
+        .get("reporterDid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let reporter_did = reporter_did_owned.as_deref();
+    let widget_state = body.get("widgetState");
+    let browser_info = body.get("browserInfo");
+    let now_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    let created_at = body
+        .get("createdAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(now_ms);
+
+    match crate::db::insert_feedback_issue(
+        db,
+        &id,
+        &title,
+        description,
+        severity,
+        category,
+        &source_widget_id,
+        source_module_type,
+        reporter_did,
+        widget_state,
+        browser_info,
+        created_at,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "id": id, "status": "filed" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/feedback-issues — list feedback issues.
+async fn handle_feedback_issues_list(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "database not configured" })),
+            )
+                .into_response();
+        }
+    };
+    match crate::db::list_feedback_issues(db, None).await {
+        Ok(rows) => {
+            let issues: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "title": r.title,
+                        "description": r.description,
+                        "severity": r.severity,
+                        "category": r.category,
+                        "status": r.status,
+                        "sourceWidgetId": r.source_widget_id,
+                        "sourceModuleType": r.source_module_type,
+                        "reporterDid": r.reporter_did,
+                        "assignedAgentTeam": r.assigned_agent_team,
+                        "createdAt": r.created_at,
+                        "updatedAt": r.updated_at,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "issues": issues })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /api/v1/feedback-issues/:id — update issue status/assignment.
+async fn handle_feedback_issue_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "database not configured" })),
+            )
+                .into_response();
+        }
+    };
+    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("open");
+    let agent_team_owned = body
+        .get("assignedAgentTeam")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let agent_team = agent_team_owned.as_deref();
+    let notes_owned = body
+        .get("resolutionNotes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let notes = notes_owned.as_deref();
+    let now_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+
+    match crate::db::update_feedback_issue_status(db, &id, status, agent_team, notes, now_ms).await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "id": id, "status": status })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "issue not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -1059,6 +1414,24 @@ pub fn build_router(state: AppState) -> Router {
         // Users
         .route("/api/v1/users", get(handle_users_list))
         .route("/api/v1/users/:did/advance-pace", post(handle_advance_pace))
+        // Dashboard layout templates
+        .route(
+            "/api/v1/layout-templates",
+            get(handle_layout_templates_list).put(handle_layout_template_put),
+        )
+        .route(
+            "/api/v1/layout-templates/:id",
+            axum::routing::delete(handle_layout_template_delete),
+        )
+        // Feedback issues (mandated reporter)
+        .route(
+            "/api/v1/feedback-issues",
+            get(handle_feedback_issues_list).post(handle_feedback_issue_create),
+        )
+        .route(
+            "/api/v1/feedback-issues/:id",
+            axum::routing::patch(handle_feedback_issue_update),
+        )
         .with_state(state)
         // GraphQL sub-router has its own state — merge after with_state()
         .merge(gql_router)

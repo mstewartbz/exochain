@@ -859,3 +859,163 @@ pub async fn load_authority_chain(
     .fetch_optional(pool)
     .await
 }
+
+// ---------------------------------------------------------------------------
+// Layout templates (dashboard persistence)
+// ---------------------------------------------------------------------------
+
+/// Row representation of a layout template from the `layout_templates` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LayoutTemplateRow {
+    pub id: String,
+    pub user_did: Option<String>,
+    pub name: String,
+    pub layout_json: JsonValue,
+    pub hidden_panels: JsonValue,
+    pub is_built_in: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Upsert a layout template (insert or update on conflict).
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_layout_template(
+    pool: &PgPool,
+    id: &str,
+    user_did: Option<&str>,
+    name: &str,
+    layout_json: &JsonValue,
+    hidden_panels: &JsonValue,
+    is_built_in: bool,
+    created_at: i64,
+    updated_at: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO layout_templates (id, user_did, name, layout_json, hidden_panels, is_built_in, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (id) DO UPDATE SET name = $3, layout_json = $4, hidden_panels = $5, updated_at = $8"
+    )
+    .bind(id).bind(user_did).bind(name).bind(layout_json).bind(hidden_panels)
+    .bind(is_built_in).bind(created_at).bind(updated_at)
+    .execute(pool).await?;
+    Ok(())
+}
+
+/// List all layout templates for a user (or all templates if `user_did` is None).
+pub async fn list_layout_templates(
+    pool: &PgPool,
+    user_did: Option<&str>,
+) -> Result<Vec<LayoutTemplateRow>, sqlx::Error> {
+    if let Some(uid) = user_did {
+        sqlx::query_as::<_, LayoutTemplateRow>(
+            "SELECT id, user_did, name, layout_json, hidden_panels, is_built_in, created_at, updated_at \
+             FROM layout_templates WHERE user_did = $1 OR is_built_in = true ORDER BY created_at"
+        ).bind(uid).fetch_all(pool).await
+    } else {
+        sqlx::query_as::<_, LayoutTemplateRow>(
+            "SELECT id, user_did, name, layout_json, hidden_panels, is_built_in, created_at, updated_at \
+             FROM layout_templates ORDER BY created_at"
+        ).fetch_all(pool).await
+    }
+}
+
+/// Delete a layout template by ID (refuses to delete built-in templates).
+pub async fn delete_layout_template(
+    pool: &PgPool,
+    id: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM layout_templates WHERE id = $1 AND is_built_in = false"
+    ).bind(id).execute(pool).await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Feedback issues (mandated reporter)
+// ---------------------------------------------------------------------------
+
+/// Row representation of a feedback issue from the `feedback_issues` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct FeedbackIssueRow {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub severity: String,
+    pub category: String,
+    pub status: String,
+    pub source_widget_id: String,
+    pub source_module_type: String,
+    pub reporter_did: Option<String>,
+    pub assigned_agent_team: Option<String>,
+    pub widget_state: Option<JsonValue>,
+    pub browser_info: Option<JsonValue>,
+    pub resolution_notes: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Insert a new feedback issue.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_feedback_issue(
+    pool: &PgPool,
+    id: &str,
+    title: &str,
+    description: &str,
+    severity: &str,
+    category: &str,
+    source_widget_id: &str,
+    source_module_type: &str,
+    reporter_did: Option<&str>,
+    widget_state: Option<&JsonValue>,
+    browser_info: Option<&JsonValue>,
+    created_at: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO feedback_issues (id, title, description, severity, category, status, source_widget_id, source_module_type, reporter_did, widget_state, browser_info, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'open', $6, $7, $8, $9, $10, $11, $11)"
+    )
+    .bind(id).bind(title).bind(description).bind(severity).bind(category)
+    .bind(source_widget_id).bind(source_module_type).bind(reporter_did)
+    .bind(widget_state).bind(browser_info).bind(created_at)
+    .execute(pool).await?;
+    Ok(())
+}
+
+/// List feedback issues, optionally filtered by status.
+pub async fn list_feedback_issues(
+    pool: &PgPool,
+    status_filter: Option<&str>,
+) -> Result<Vec<FeedbackIssueRow>, sqlx::Error> {
+    if let Some(status) = status_filter {
+        sqlx::query_as::<_, FeedbackIssueRow>(
+            "SELECT id, title, description, severity, category, status, source_widget_id, source_module_type, \
+             reporter_did, assigned_agent_team, widget_state, browser_info, resolution_notes, created_at, updated_at \
+             FROM feedback_issues WHERE status = $1 ORDER BY created_at DESC"
+        ).bind(status).fetch_all(pool).await
+    } else {
+        sqlx::query_as::<_, FeedbackIssueRow>(
+            "SELECT id, title, description, severity, category, status, source_widget_id, source_module_type, \
+             reporter_did, assigned_agent_team, widget_state, browser_info, resolution_notes, created_at, updated_at \
+             FROM feedback_issues ORDER BY created_at DESC"
+        ).fetch_all(pool).await
+    }
+}
+
+/// Update a feedback issue's status and optionally assign an agent team.
+pub async fn update_feedback_issue_status(
+    pool: &PgPool,
+    id: &str,
+    status: &str,
+    assigned_agent_team: Option<&str>,
+    resolution_notes: Option<&str>,
+    updated_at: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE feedback_issues SET status = $1, assigned_agent_team = COALESCE($2, assigned_agent_team), \
+         resolution_notes = COALESCE($3, resolution_notes), updated_at = $4 WHERE id = $5"
+    )
+    .bind(status).bind(assigned_agent_team).bind(resolution_notes)
+    .bind(updated_at).bind(id)
+    .execute(pool).await?;
+    Ok(result.rows_affected() > 0)
+}
