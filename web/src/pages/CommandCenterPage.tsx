@@ -9,12 +9,13 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { WidgetGrid, type WidgetConfig, type WidgetSize } from '../components/WidgetGrid'
+import { GridDashboard } from '../components/grid/GridDashboard'
 import { KanbanBoard, defaultGovernanceColumns, type KanbanColumnData, type KanbanCardData } from '../components/KanbanBoard'
 import { cn } from '../lib/utils'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { useCouncil } from '../lib/CouncilContext'
+import type { PanelDef } from '../data/defaultLayouts'
 import type { Decision } from '../lib/types'
 
 // ---------------------------------------------------------------------------
@@ -23,21 +24,7 @@ import type { Decision } from '../lib/types'
 
 type ViewMode = 'grid' | 'kanban' | 'split'
 
-// ---------------------------------------------------------------------------
-// Default widget configuration
-// ---------------------------------------------------------------------------
-
-const defaultWidgets: WidgetConfig[] = [
-  { id: 'kpi-overview', title: 'Governance KPIs', size: '3x1', collapsible: true, removable: false, moduleType: 'metrics', tags: ['overview', 'real-time'] },
-  { id: 'active-decisions', title: 'Active Decisions', size: '2x2', collapsible: true, removable: false, moduleType: 'decisions', tags: ['workflow', 'voting'] },
-  { id: 'escalation-feed', title: 'Escalation Feed', size: '1x2', collapsible: true, removable: true, moduleType: 'escalation', tags: ['alerts', 'triage'] },
-  { id: 'trust-scores', title: 'Trust Score Monitor', size: '1x1', collapsible: true, removable: true, moduleType: 'identity', tags: ['pace', 'scoring'] },
-  { id: 'audit-chain', title: 'Audit Chain Health', size: '1x1', collapsible: true, removable: true, moduleType: 'audit', tags: ['integrity', 'forensic'] },
-  { id: 'delegation-map', title: 'Authority Map', size: '1x1', collapsible: true, removable: true, moduleType: 'delegation', tags: ['authority', 'chain'] },
-  { id: 'agent-status', title: 'Agent Registry', size: '2x1', collapsible: true, removable: true, moduleType: 'agents', tags: ['holon', 'ai'] },
-  { id: 'cgr-kernel', title: 'CGR Kernel Status', size: '1x1', collapsible: true, removable: true, moduleType: 'kernel', tags: ['invariants', 'judicial'] },
-  { id: 'council-tickets', title: 'Council Tickets', size: '2x1', collapsible: true, removable: false, moduleType: 'council', tags: ['tickets', 'triage', 'feedback'] },
-]
+// Default widget configuration moved to src/data/defaultLayouts.ts (PANEL_REGISTRY)
 
 // ---------------------------------------------------------------------------
 // Widget renderers
@@ -371,20 +358,7 @@ function StatusPill({ status }: { status: string }) {
 // Widget renderer map
 // ---------------------------------------------------------------------------
 
-function renderWidgetContent(config: WidgetConfig) {
-  switch (config.id) {
-    case 'kpi-overview': return <KpiWidget />
-    case 'active-decisions': return <ActiveDecisionsWidget />
-    case 'escalation-feed': return <EscalationWidget />
-    case 'trust-scores': return <TrustScoreWidget />
-    case 'audit-chain': return <AuditChainWidget />
-    case 'delegation-map': return <DelegationWidget />
-    case 'agent-status': return <AgentWidget />
-    case 'cgr-kernel': return <CgrKernelWidget />
-    case 'council-tickets': return <CouncilTicketsWidget />
-    default: return <div className="text-sm text-[var(--text-muted)]">Unknown widget: {config.id}</div>
-  }
-}
+// Widget rendering moved inline to GridDashboard renderPanel prop below
 
 // ---------------------------------------------------------------------------
 // Mock kanban data
@@ -462,7 +436,6 @@ function buildKanbanData(decisions: Decision[], councilTickets?: import('../lib/
 
 export function CommandCenterPage() {
   const [viewMode, setViewMode] = useState<ViewMode>('split')
-  const [widgets, setWidgets] = useState(defaultWidgets)
   const [kanbanCols, setKanbanCols] = useState<KanbanColumnData[]>(defaultGovernanceColumns())
   const navigate = useNavigate()
   const { tickets: councilTickets } = useCouncil()
@@ -473,14 +446,6 @@ export function CommandCenterPage() {
       .then(decisions => setKanbanCols(buildKanbanData(decisions, councilTickets)))
       .catch(() => setKanbanCols(buildKanbanData([], councilTickets)))
   }, [councilTickets])
-
-  const handleRemoveWidget = useCallback((id: string) => {
-    setWidgets(prev => prev.filter(w => w.id !== id))
-  }, [])
-
-  const handleResizeWidget = useCallback((id: string, size: WidgetSize) => {
-    setWidgets(prev => prev.map(w => w.id === id ? { ...w, size } : w))
-  }, [])
 
   const handleCardMove = useCallback((cardId: string, fromCol: string, toCol: string, _newIndex: number) => {
     console.log(`Card ${cardId} moved from ${fromCol} to ${toCol}`)
@@ -523,15 +488,25 @@ export function CommandCenterPage() {
         </div>
       </div>
 
-      {/* Widget Grid */}
+      {/* 24-Column Grid Dashboard */}
       {(viewMode === 'grid' || viewMode === 'split') && (
         <section aria-label="Widget grid">
-          <WidgetGrid
-            widgets={widgets}
-            onReorder={setWidgets}
-            onRemove={handleRemoveWidget}
-            onResize={handleResizeWidget}
-            renderWidget={renderWidgetContent}
+          <GridDashboard
+            renderPanel={(panelDef: PanelDef) => {
+              // Map panel registry to existing widget renderers
+              switch (panelDef.id) {
+                case 'kpi-overview': return <KpiWidget />
+                case 'active-decisions': return <ActiveDecisionsWidget />
+                case 'escalation-feed': return <EscalationWidget />
+                case 'trust-scores': return <TrustScoreWidget />
+                case 'audit-chain': return <AuditChainWidget />
+                case 'delegation-map': return <DelegationWidget />
+                case 'agent-status': return <AgentWidget />
+                case 'cgr-kernel': return <CgrKernelWidget />
+                case 'council-tickets': return <CouncilTicketsWidget />
+                default: return <div className="text-sm text-[var(--text-muted)]">Widget: {panelDef.id}</div>
+              }
+            }}
           />
         </section>
       )}

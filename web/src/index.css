@@ -101,3 +101,58 @@ body {
 .status-dot-lg {
   @apply w-3 h-3;
 }
+
+/* ── Grid Dashboard ─────────────────────────────────────────── */
+
+/* react-grid-layout placeholder shown during drag */
+.react-grid-placeholder {
+  background-color: var(--accent-primary, #2563EB) !important;
+  opacity: 0.15 !important;
+  border-radius: var(--radius-widget, 12px) !important;
+  border: 2px dashed var(--accent-primary, #2563EB) !important;
+}
+
+/* react-grid-layout resize handle */
+.react-resizable-handle {
+  background-image: none !important;
+}
+.react-resizable-handle-se {
+  width: 16px !important;
+  height: 16px !important;
+  bottom: 4px !important;
+  right: 4px !important;
+  cursor: se-resize !important;
+  background: transparent !important;
+}
+.react-resizable-handle-se::after {
+  content: '';
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--text-muted, #94A3B8);
+  border-bottom: 2px solid var(--text-muted, #94A3B8);
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  border-radius: 0 0 2px 0;
+}
+
+/* Slideout animation */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.2s ease-out;
+}
+
+/* 2xs text size utility */
+.text-2xs {
+  font-size: 0.625rem;
+  line-height: 0.875rem;
+}

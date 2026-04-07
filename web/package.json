@@ -15,12 +15,15 @@
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@types/react-grid-layout": "^1.3.6",
     "clsx": "^2.1.1",
     "react": "^18.3.1",
     "react-aria": "^3.33.0",
     "react-dom": "^18.3.1",
+    "react-grid-layout": "^2.2.3",
     "react-router-dom": "^6.26.0",
-    "tailwind-merge": "^2.4.0"
+    "tailwind-merge": "^2.4.0",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.4.8",
