@@ -18823,9 +18823,9 @@
       // ExoForge status section
       var forgeHtml = '';
       if (forgeHealth) {
-        var fChecks = forgeHealth.checks || {};
-        var fPassCount = Object.values(fChecks).filter(function(c) { return c && c.status === 'ok'; }).length;
-        var fTotal = Object.keys(fChecks).length || 1;
+        var fChecksArr = Array.isArray(forgeHealth.checks) ? forgeHealth.checks : Object.values(forgeHealth.checks || {});
+        var fPassCount = fChecksArr.filter(function(c) { return c && (c.status === 'healthy' || c.status === 'ok'); }).length;
+        var fTotal = fChecksArr.length || 1;
         var fColor = forgeHealth.status === 'healthy' ? '#4ade80' : forgeHealth.status === 'degraded' ? '#fb923c' : '#f87171';
         forgeHtml = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">'
           + '<div style="font-size:13px;font-weight:500;margin-bottom:6px">ExoForge Engine</div>'
@@ -36697,21 +36697,21 @@
     if (healthPanel) {
       var hd = healthData && healthData.data ? healthData.data : healthData;
       if (hd && !hd.error) {
-        var checks = hd.checks || {};
-        var checkKeys = Object.keys(checks);
-        var passCount = checkKeys.filter(function(k) { return checks[k] && checks[k].status === 'ok'; }).length;
+        // checks is an array of { check, status, score, ... } objects from the API
+        var checksArr = Array.isArray(hd.checks) ? hd.checks : Object.values(hd.checks || {});
+        var passCount = checksArr.filter(function(c) { return c && (c.status === 'healthy' || c.status === 'ok'); }).length;
         var statusColor = hd.status === 'healthy' ? '#4ade80' : hd.status === 'degraded' ? '#fb923c' : '#f87171';
 
-        var checkCards = checkKeys.map(function(k) {
-          var c = checks[k];
-          var ok = c && c.status === 'ok';
+        var checkCards = checksArr.map(function(c) {
+          var ok = c && (c.status === 'healthy' || c.status === 'ok');
           var icon = ok ? '&#10003;' : '&#10007;';
-          var col = ok ? '#4ade80' : '#f87171';
-          var label = k.replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+          var col = ok ? '#4ade80' : c.status === 'degraded' ? '#fb923c' : '#f87171';
+          var label = (c.check || 'unknown').replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+          var detail = c.error || (ok ? 'Operational' : c.status || 'Unknown');
           return '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,255,255,0.04)">'
             + '<span style="color:' + col + ';font-size:16px;font-weight:700">' + icon + '</span>'
-            + '<div><div style="font-size:12px;font-weight:500">' + label + '</div>'
-            + '<div style="font-size:11px;color:#888">' + escHtml(c.message || c.status || '') + '</div></div></div>';
+            + '<div><div style="font-size:12px;font-weight:500">' + escHtml(label) + '</div>'
+            + '<div style="font-size:11px;color:#888">' + escHtml(detail) + '</div></div></div>';
         }).join('');
 
         healthPanel.innerHTML = '<div style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06)">'
