@@ -1,0 +1,29 @@
+[package]
+name = "exo-catapult"
+description = "EXOCHAIN Catapult — franchise business incubator with FM 3-05 operational doctrine"
+documentation = "https://docs.exochain.io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
+exo-consent = { path = "../exo-consent" }
+exo-authority = { path = "../exo-authority" }
+exo-tenant = { path = "../exo-tenant" }
+exo-escalation = { path = "../exo-escalation" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[package.metadata.cargo-machete]
+ignored = ["exo-identity", "exo-consent", "exo-authority", "exo-tenant", "exo-escalation"]

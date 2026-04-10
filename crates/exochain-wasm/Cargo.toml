@@ -11,7 +11,7 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# ExoChain crates (13 of 14 — excludes exo-gateway which is server-only)
+# ExoChain crates (14 of 15 — excludes exo-gateway which is server-only)
 exo-core       = { path = "../exo-core" }
 exo-identity   = { path = "../exo-identity" }
 exo-consent    = { path = "../exo-consent" }
@@ -25,6 +25,7 @@ exo-proofs     = { path = "../exo-proofs" }
 exo-api        = { path = "../exo-api" }
 exo-tenant     = { path = "../exo-tenant" }
 decision-forum = { path = "../decision-forum" }
+exo-catapult   = { path = "../exo-catapult" }
 
 # WASM bindings
 wasm-bindgen = "=0.2.100"
@@ -55,4 +56,4 @@ wasm-bindgen-test = "0.3"
 wasm-opt = false
 
 [package.metadata.cargo-machete]
-ignored = ["ed25519-dalek", "exo-api", "exo-dag", "exo-proofs", "exo-tenant", "getrandom", "rand", "serde-wasm-bindgen"]
+ignored = ["ed25519-dalek", "exo-api", "exo-catapult", "exo-dag", "exo-proofs", "exo-tenant", "getrandom", "rand", "serde-wasm-bindgen"]

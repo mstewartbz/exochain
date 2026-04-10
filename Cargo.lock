@@ -1326,6 +1326,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "exo-catapult"
+version = "0.1.0-alpha"
+dependencies = [
+ "exo-authority",
+ "exo-consent",
+ "exo-core",
+ "exo-escalation",
+ "exo-identity",
+ "exo-tenant",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "uuid",
+]
+
+[[package]]
 name = "exo-consent"
 version = "0.1.0-alpha"
 dependencies = [
@@ -1556,6 +1572,7 @@ dependencies = [
  "ed25519-dalek",
  "exo-api",
  "exo-authority",
+ "exo-catapult",
  "exo-consent",
  "exo-core",
  "exo-dag",

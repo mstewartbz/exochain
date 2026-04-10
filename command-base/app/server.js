@@ -22361,6 +22361,7 @@ require('./routes/system.js')(app, db, { broadcast, localNow, createNotification
 require('./routes/plugins.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/ideas.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/exoforge.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
+require('./routes/catapult.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 
 // ── GSD (Get Shit Done) Control Panel routes ─────────────────────
 // GSD uses express.Router() so we mount it with app.use and inject

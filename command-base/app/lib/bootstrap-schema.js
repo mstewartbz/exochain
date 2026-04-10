@@ -538,4 +538,36 @@ module.exports = function bootstrapSchema(db) {
     max_concurrent INTEGER DEFAULT 3,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
   )`);
+
+  // ── Catapult: franchise incubator tables ─────────────────────────────────
+
+  db.exec(`CREATE TABLE IF NOT EXISTS catapult_blueprints (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    business_model TEXT NOT NULL,
+    constitution_hash TEXT,
+    blueprint_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS catapult_newcos (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    franchise_id TEXT REFERENCES catapult_blueprints(id),
+    phase TEXT NOT NULL DEFAULT 'Assessment',
+    status TEXT NOT NULL DEFAULT 'Provisioning',
+    newco_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_catapult_newcos_status ON catapult_newcos(status)`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS catapult_roster (
+    newco_id TEXT NOT NULL REFERENCES catapult_newcos(id),
+    slot TEXT NOT NULL,
+    member_id INTEGER REFERENCES team_members(id),
+    did_identity TEXT,
+    hired_at TEXT,
+    PRIMARY KEY (newco_id, slot)
+  )`);
 };
