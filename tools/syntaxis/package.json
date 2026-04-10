@@ -1,0 +1,24 @@
+{
+  "name": "@exochain/syntaxis",
+  "version": "0.1.0",
+  "description": "Syntaxis Protocol Engine - Intermediary protocol translating council governance decisions into executable workflow definitions for ExoForge",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test.js",
+    "validate": "node validate.js"
+  },
+  "keywords": [
+    "exochain",
+    "governance",
+    "protocol",
+    "workflow",
+    "exoforge"
+  ],
+  "author": "ExoChain Team",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

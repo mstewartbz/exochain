@@ -1260,7 +1260,7 @@
       'system-health': 'System Health', notifications: 'Notifications',
       research: 'Research', projects: 'Projects', companies: 'Companies', refinement: 'Refinement',
       'white-paper': 'White Paper', 'system-map': 'System Map', 'org-chart': 'Org Chart',
-      'task-forces': 'Task Forces', gsd: 'GSD Control Panel'
+      'task-forces': 'Task Forces', gsd: 'GSD Control Panel', exoforge: 'ExoForge'
     };
     var navBase = page.split('/')[0];
     announce('Navigated to ' + (PAGE_NAMES[navBase] || navBase));
@@ -1954,6 +1954,7 @@
         case 'white-paper': await renderWhitePaper(container); break;
         case 'task-forces': await renderTaskForces(container); break;
         case 'gsd': await renderGsdPage(container); break;
+        case 'exoforge': await renderExoForgePage(container); break;
         case 'research':
           if (subId === 'program' || (subId && subId.toString().startsWith('program'))) {
             // Handle research/program/123 route
@@ -2042,7 +2043,8 @@
     { id: 'team',        label: 'Team Status',        default: false, size: 'half', category: 'People',    desc: 'Most recently active team members and their latest actions.',                                                    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
     { id: 'contacts',    label: 'Contacts',           default: false, size: 'half', category: 'People',    desc: 'Snapshot of your contact count and most recently added people.',                                                  icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
     { id: 'notes',       label: 'Recent Notes',       default: false, size: 'half', category: 'Knowledge', desc: 'Latest notes captured in the knowledge base with titles and timestamps.',                                         icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
-    { id: 'decisions',   label: 'Decision Log',       default: false, size: 'half', category: 'Knowledge', desc: 'Recent answered decisions so you can quickly review past choices.',                                               icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' }
+    { id: 'decisions',   label: 'Decision Log',       default: false, size: 'half', category: 'Knowledge', desc: 'Recent answered decisions so you can quickly review past choices.',                                               icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' },
+    { id: 'cqi',         label: 'CQI Self-Improvement', default: true,  size: 'half', category: 'Work',      desc: 'Continuous Quality Improvement loop status, metrics, and proposals.', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-6.22-8.56"/><path d="M21 3v5h-5"/><circle cx="12" cy="12" r="3"/></svg>' }
   ];
 
   function getDashboardWidgetConfig() {
@@ -2886,6 +2888,16 @@
         return '<div class="dashboard-widget" data-widget-id="governance">'
           + '<div class="dashboard-widget-handle" title="Governance">' + handleSvg + '</div>'
           + '<div class="card governance-widget" id="governance-dashboard-widget"></div></div>';
+      case 'cqi':
+        return '<div class="dashboard-widget" data-widget-id="cqi">'
+          + '<div class="dashboard-widget-handle" title="CQI Self-Improvement">' + handleSvg + '</div>'
+          + '<div class="biz-card">'
+          +   '<h3>CQI Self-Improvement</h3>'
+          +   '<p class="biz-subtitle">Continuous quality improvement loop</p>'
+          +   '<div id="cqi-dashboard-content" style="margin-top:12px">'
+          +     '<div style="color:#888;font-size:13px">Loading CQI data…</div>'
+          +   '</div>'
+          + '</div></div>';
       case 'improvements':
         return '<div class="dashboard-widget" data-widget-id="improvements">'
           + '<div class="dashboard-widget-handle" title="Improvements">' + handleSvg + '</div>'
@@ -3058,6 +3070,9 @@
         break;
       case 'governance':
         loadGovernanceDashboardWidget();
+        break;
+      case 'cqi':
+        loadCqiDashboardWidget();
         break;
       case 'improvements':
         loadImprovementDashboardWidget();
@@ -18765,6 +18780,117 @@
         + '<div style="font-size:12px;color:var(--text-tertiary);padding:8px 0">Unavailable</div>';
     }
   }
+
+  // -- CQI Self-Improvement Dashboard Widget ---------------------------
+
+  async function loadCqiDashboardWidget() {
+    var slot = document.getElementById('cqi-dashboard-content');
+    if (!slot) return;
+
+    try {
+      var res = await Promise.all([
+        fetchJson('/api/cqi/metrics'),
+        fetchJson('/api/cqi/proposals?limit=5'),
+        fetchJson('/api/exoforge/health').catch(function() { return null; }),
+        fetchJson('/api/solutions/templates').catch(function() { return null; })
+      ]);
+      var metrics = res[0] && res[0].data ? res[0].data : res[0];
+      var proposals = res[1] && res[1].data ? res[1].data : [];
+      var forgeHealth = res[2] && res[2].data ? res[2].data : null;
+      var templates = res[3] && res[3].data ? res[3].data : null;
+
+      var errRatePct = ((metrics.error_rate || 0) * 100).toFixed(1);
+      var uptimePct = metrics.uptime_percent || 0;
+      var chainOk = metrics.chain_integrity !== false;
+      var chainHtml = chainOk
+        ? '<span style="color:#4ade80">&#10003; Valid</span>'
+        : '<span style="color:#f87171">&#10007; Broken</span>';
+
+      var proposalRows = '';
+      if (proposals.length === 0) {
+        proposalRows = '<div style="color:#888;font-size:12px;margin-top:6px">No proposals yet.</div>';
+      } else {
+        proposalRows = proposals.slice(0, 3).map(function(p) {
+          var sevColor = p.severity === 'critical' ? '#f87171' : p.severity === 'high' ? '#fb923c' : '#a3a3a3';
+          return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,0.06)">'
+            + '<span style="width:6px;height:6px;border-radius:50%;background:' + sevColor + ';flex-shrink:0"></span>'
+            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(p.finding_summary || p.proposal_id) + '</span>'
+            + '<span style="color:#888;font-size:11px">' + (p.approval_status || p.status || '') + '</span>'
+            + '</div>';
+        }).join('');
+      }
+
+      // ExoForge status section
+      var forgeHtml = '';
+      if (forgeHealth) {
+        var fChecks = forgeHealth.checks || {};
+        var fPassCount = Object.values(fChecks).filter(function(c) { return c && c.status === 'ok'; }).length;
+        var fTotal = Object.keys(fChecks).length || 1;
+        var fColor = forgeHealth.status === 'healthy' ? '#4ade80' : forgeHealth.status === 'degraded' ? '#fb923c' : '#f87171';
+        forgeHtml = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">'
+          + '<div style="font-size:13px;font-weight:500;margin-bottom:6px">ExoForge Engine</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;font-size:12px">'
+          +   '<span style="width:8px;height:8px;border-radius:50%;background:' + fColor + '"></span>'
+          +   '<span>' + escHtml(forgeHealth.status || 'unknown') + '</span>'
+          +   '<span style="color:#888;margin-left:auto">' + fPassCount + '/' + fTotal + ' checks</span>'
+          + '</div>'
+          + '</div>';
+      }
+
+      // Solutions Builder section
+      var solHtml = '';
+      if (templates && templates.templates) {
+        var tCount = templates.templates.length || templates.count || 0;
+        var catCounts = {};
+        (templates.templates || []).forEach(function(t) {
+          var cat = t.category || 'Other';
+          catCounts[cat] = (catCounts[cat] || 0) + 1;
+        });
+        var catTags = Object.keys(catCounts).map(function(c) {
+          return '<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:rgba(255,255,255,0.08);font-size:10px;margin:2px">' + escHtml(c) + ' (' + catCounts[c] + ')</span>';
+        }).join('');
+        solHtml = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">'
+          + '<div style="font-size:13px;font-weight:500;margin-bottom:6px">Solutions Builder</div>'
+          + '<div style="font-size:12px;color:#888;margin-bottom:4px">' + tCount + ' templates available</div>'
+          + '<div>' + catTags + '</div>'
+          + '</div>';
+      }
+
+      slot.innerHTML = ''
+        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">'
+        +   '<div style="text-align:center"><div style="font-size:18px;font-weight:600">' + errRatePct + '%</div><div style="font-size:11px;color:#888">Error Rate</div></div>'
+        +   '<div style="text-align:center"><div style="font-size:18px;font-weight:600">' + uptimePct + '%</div><div style="font-size:11px;color:#888">Uptime</div></div>'
+        +   '<div style="text-align:center"><div style="font-size:18px;font-weight:600">' + chainHtml + '</div><div style="font-size:11px;color:#888">Chain</div></div>'
+        + '</div>'
+        + '<div style="font-size:13px;font-weight:500;margin-bottom:4px">Recent Proposals (' + proposals.length + ')</div>'
+        + proposalRows
+        + forgeHtml
+        + solHtml
+        + '<div style="margin-top:8px;text-align:right"><a href="#" onclick="triggerCqiCycle(); return false;" style="color:var(--accent);font-size:12px">Run CQI Cycle &rarr;</a></div>';
+    } catch (err) {
+      slot.innerHTML = '<div style="color:#888;font-size:12px">CQI data unavailable: ' + escHtml(err.message) + '</div>';
+    }
+  }
+
+  // Global trigger for CQI cycle from dashboard
+  window.triggerCqiCycle = async function() {
+    try {
+      var cycleId = 'cqi-' + Date.now().toString(36);
+      var res = await fetchJson('/api/cqi/cycle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cycle_id: cycleId })
+      });
+      if (res && res.success) {
+        showToast('CQI cycle ' + cycleId + ' completed successfully', 'success');
+        loadCqiDashboardWidget(); // refresh
+      } else {
+        showToast('CQI cycle failed: ' + (res.error || 'unknown'), 'error');
+      }
+    } catch (err) {
+      showToast('CQI cycle error: ' + err.message, 'error');
+    }
+  };
 
   // -- Improvements --------------------------------------------------
 
@@ -36524,6 +36650,228 @@
         }
       });
     });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── ExoForge Dashboard ──────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+
+  async function renderExoForgePage(container) {
+    container.innerHTML = '<div style="padding:24px;max-width:1200px;margin:0 auto">'
+      + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">'
+      +   '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>'
+      +   '<div><h1 style="margin:0;font-size:22px;font-weight:700">ExoForge</h1>'
+      +   '<div style="font-size:13px;color:#888;margin-top:2px">Autonomous Implementation Engine &bull; Archon DAG Workflows &bull; Syntaxis Protocol</div></div>'
+      + '</div>'
+      + '<div id="exoforge-health-panel" style="margin-bottom:20px"><div style="color:#888;font-size:13px">Loading health status...</div></div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">'
+      +   '<div id="exoforge-queue-panel" style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06)"><div style="color:#888;font-size:13px">Loading queue...</div></div>'
+      +   '<div id="exoforge-solutions-panel" style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06)"><div style="color:#888;font-size:13px">Loading solutions...</div></div>'
+      + '</div>'
+      + '<div id="exoforge-cqi-panel" style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06);margin-bottom:20px"><div style="color:#888;font-size:13px">Loading CQI cycles...</div></div>'
+      + '<div id="exoforge-templates-panel" style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06)"><div style="color:#888;font-size:13px">Loading templates...</div></div>'
+      + '</div>';
+
+    // Fetch all data in parallel
+    var healthData, queueData, templatesData, cqiData, solutionsData;
+    try {
+      var results = await Promise.all([
+        fetchJson('/api/exoforge/health').catch(function(e) { return { error: e.message }; }),
+        fetchJson('/api/exoforge/queue').catch(function(e) { return { error: e.message }; }),
+        fetchJson('/api/solutions/templates').catch(function(e) { return { error: e.message }; }),
+        fetchJson('/api/cqi/proposals?limit=20').catch(function(e) { return { error: e.message }; }),
+        fetchJson('/api/cqi/metrics').catch(function(e) { return { error: e.message }; })
+      ]);
+      healthData = results[0];
+      queueData = results[1];
+      templatesData = results[2];
+      cqiData = results[3];
+      solutionsData = results[4];
+    } catch (err) {
+      container.innerHTML = '<div style="padding:24px;color:var(--danger)">Failed to load ExoForge data: ' + escHtml(err.message) + '</div>';
+      return;
+    }
+
+    // ── Health Panel ──────────────────────────────────────────────────────
+    var healthPanel = document.getElementById('exoforge-health-panel');
+    if (healthPanel) {
+      var hd = healthData && healthData.data ? healthData.data : healthData;
+      if (hd && !hd.error) {
+        var checks = hd.checks || {};
+        var checkKeys = Object.keys(checks);
+        var passCount = checkKeys.filter(function(k) { return checks[k] && checks[k].status === 'ok'; }).length;
+        var statusColor = hd.status === 'healthy' ? '#4ade80' : hd.status === 'degraded' ? '#fb923c' : '#f87171';
+
+        var checkCards = checkKeys.map(function(k) {
+          var c = checks[k];
+          var ok = c && c.status === 'ok';
+          var icon = ok ? '&#10003;' : '&#10007;';
+          var col = ok ? '#4ade80' : '#f87171';
+          var label = k.replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+          return '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,255,255,0.04)">'
+            + '<span style="color:' + col + ';font-size:16px;font-weight:700">' + icon + '</span>'
+            + '<div><div style="font-size:12px;font-weight:500">' + label + '</div>'
+            + '<div style="font-size:11px;color:#888">' + escHtml(c.message || c.status || '') + '</div></div></div>';
+        }).join('');
+
+        healthPanel.innerHTML = '<div style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06)">'
+          + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">'
+          +   '<span style="width:12px;height:12px;border-radius:50%;background:' + statusColor + ';box-shadow:0 0 8px ' + statusColor + '40"></span>'
+          +   '<span style="font-size:15px;font-weight:600">Engine Status: ' + escHtml(hd.status || 'unknown') + '</span>'
+          +   '<span style="margin-left:auto;font-size:12px;color:#888">' + passCount + '/' + checkKeys.length + ' checks passing</span>'
+          + '</div>'
+          + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">' + checkCards + '</div>'
+          + '</div>';
+      } else {
+        healthPanel.innerHTML = '<div style="background:var(--card-bg,#1a1a2e);border-radius:10px;padding:16px;border:1px solid rgba(255,255,255,0.06)">'
+          + '<div style="display:flex;align-items:center;gap:10px">'
+          +   '<span style="width:12px;height:12px;border-radius:50%;background:#f87171"></span>'
+          +   '<span style="font-size:15px;font-weight:600">Engine Status: Unavailable</span>'
+          + '</div>'
+          + '<div style="font-size:12px;color:#888;margin-top:8px">' + escHtml((hd && hd.error) || 'Health endpoint not responding') + '</div>'
+          + '</div>';
+      }
+    }
+
+    // ── Queue Panel ──────────────────────────────────────────────────────
+    var queuePanel = document.getElementById('exoforge-queue-panel');
+    if (queuePanel) {
+      var qd = queueData && queueData.data ? queueData.data : queueData;
+      var qItems = [];
+      if (qd && qd.queue) qItems = qd.queue;
+      else if (Array.isArray(qd)) qItems = qd;
+
+      var qRows = '';
+      if (qItems.length === 0) {
+        qRows = '<div style="color:#888;font-size:12px;padding:8px 0">No items in queue.</div>';
+      } else {
+        qRows = qItems.slice(0, 8).map(function(q) {
+          var stColor = q.status === 'completed' ? '#4ade80' : q.status === 'implementing' ? '#60a5fa' : q.status === 'failed' ? '#f87171' : '#888';
+          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,0.04)">'
+            + '<span style="width:7px;height:7px;border-radius:50%;background:' + stColor + ';flex-shrink:0"></span>'
+            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(q.title || q.source_id || 'Queue #' + q.id) + '</span>'
+            + '<span style="color:' + stColor + ';font-size:11px;font-weight:500">' + escHtml(q.status || '') + '</span>'
+            + '<span style="color:#666;font-size:10px">' + escHtml(q.priority || '') + '</span>'
+            + '</div>';
+        }).join('');
+      }
+
+      queuePanel.innerHTML = '<div style="font-size:14px;font-weight:600;margin-bottom:10px">Implementation Queue</div>'
+        + '<div style="font-size:12px;color:#888;margin-bottom:8px">' + qItems.length + ' item' + (qItems.length !== 1 ? 's' : '') + '</div>'
+        + qRows;
+    }
+
+    // ── Solutions Panel ──────────────────────────────────────────────────
+    var solPanel = document.getElementById('exoforge-solutions-panel');
+    if (solPanel) {
+      var sd = templatesData && templatesData.data ? templatesData.data : templatesData;
+      var templates = (sd && sd.templates) || [];
+
+      // Group by category
+      var catGroups = {};
+      templates.forEach(function(t) {
+        var cat = t.category || 'Other';
+        if (!catGroups[cat]) catGroups[cat] = [];
+        catGroups[cat].push(t);
+      });
+
+      var catHtml = Object.keys(catGroups).map(function(cat) {
+        var items = catGroups[cat];
+        var catColor = cat === 'SECURITY' ? '#f87171' : cat === 'GOVERNANCE' ? '#a78bfa' : cat === 'DEVELOPMENT' ? '#60a5fa' : cat === 'MAINTENANCE' ? '#fb923c' : cat === 'INFRASTRUCTURE' ? '#4ade80' : '#888';
+        var itemList = items.map(function(t) {
+          var tagStr = '';
+          try { var tags = typeof t.tags === 'string' ? JSON.parse(t.tags) : (t.tags || []); tagStr = tags.slice(0, 3).join(', '); } catch(_) {}
+          return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:12px">'
+            + '<span style="width:5px;height:5px;border-radius:50%;background:' + catColor + '"></span>'
+            + '<span style="flex:1">' + escHtml(t.name) + '</span>'
+            + (tagStr ? '<span style="color:#666;font-size:10px">' + escHtml(tagStr) + '</span>' : '')
+            + '</div>';
+        }).join('');
+        return '<div style="margin-bottom:10px">'
+          + '<div style="font-size:11px;font-weight:600;color:' + catColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">' + escHtml(cat) + '</div>'
+          + itemList + '</div>';
+      }).join('');
+
+      solPanel.innerHTML = '<div style="font-size:14px;font-weight:600;margin-bottom:10px">Solutions Builder</div>'
+        + '<div style="font-size:12px;color:#888;margin-bottom:8px">' + templates.length + ' template' + (templates.length !== 1 ? 's' : '') + ' across ' + Object.keys(catGroups).length + ' categories</div>'
+        + catHtml;
+    }
+
+    // ── CQI Panel ────────────────────────────────────────────────────────
+    var cqiPanel = document.getElementById('exoforge-cqi-panel');
+    if (cqiPanel) {
+      var metrics = solutionsData && solutionsData.data ? solutionsData.data : solutionsData;
+      var proposals = cqiData && cqiData.data ? cqiData.data : (Array.isArray(cqiData) ? cqiData : []);
+
+      var errRatePct = ((metrics && metrics.error_rate || 0) * 100).toFixed(1);
+      var uptimePct = (metrics && metrics.uptime_percent) || 0;
+      var chainOk = metrics && metrics.chain_integrity !== false;
+
+      var proposalRows = '';
+      if (proposals.length === 0) {
+        proposalRows = '<div style="color:#888;font-size:12px;padding:8px 0">No CQI proposals generated yet.</div>';
+      } else {
+        proposalRows = proposals.slice(0, 5).map(function(p) {
+          var sevColor = p.severity === 'critical' ? '#f87171' : p.severity === 'high' ? '#fb923c' : p.severity === 'medium' ? '#fbbf24' : '#888';
+          var statusBg = p.approval_status === 'approved' ? 'rgba(74,222,128,0.15)' : p.approval_status === 'pending' ? 'rgba(251,191,36,0.15)' : 'rgba(248,113,113,0.15)';
+          var statusColor = p.approval_status === 'approved' ? '#4ade80' : p.approval_status === 'pending' ? '#fbbf24' : '#f87171';
+          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,0.04)">'
+            + '<span style="width:7px;height:7px;border-radius:50%;background:' + sevColor + ';flex-shrink:0"></span>'
+            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(p.finding_summary || p.proposal_id) + '</span>'
+            + '<span style="padding:1px 6px;border-radius:3px;background:' + statusBg + ';color:' + statusColor + ';font-size:10px;font-weight:500">' + escHtml(p.approval_status || p.status || 'unknown') + '</span>'
+            + '</div>';
+        }).join('');
+      }
+
+      cqiPanel.innerHTML = '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">'
+        + '<div style="font-size:14px;font-weight:600">CQI Self-Improvement Loop</div>'
+        + '<a href="#" onclick="triggerCqiCycle(); return false;" style="margin-left:auto;color:var(--accent);font-size:12px;text-decoration:none">Run CQI Cycle &rarr;</a>'
+        + '</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">'
+        +   '<div style="text-align:center;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px"><div style="font-size:20px;font-weight:700">' + errRatePct + '%</div><div style="font-size:11px;color:#888">Error Rate</div></div>'
+        +   '<div style="text-align:center;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px"><div style="font-size:20px;font-weight:700">' + uptimePct + '%</div><div style="font-size:11px;color:#888">Uptime</div></div>'
+        +   '<div style="text-align:center;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px"><div style="font-size:20px;font-weight:700;color:' + (chainOk ? '#4ade80' : '#f87171') + '">' + (chainOk ? '&#10003;' : '&#10007;') + '</div><div style="font-size:11px;color:#888">Chain Integrity</div></div>'
+        +   '<div style="text-align:center;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px"><div style="font-size:20px;font-weight:700">' + proposals.length + '</div><div style="font-size:11px;color:#888">Proposals</div></div>'
+        + '</div>'
+        + '<div style="font-size:13px;font-weight:500;margin-bottom:6px">Recent Proposals</div>'
+        + proposalRows;
+    }
+
+    // ── Templates Detail Panel ───────────────────────────────────────────
+    var tplPanel = document.getElementById('exoforge-templates-panel');
+    if (tplPanel) {
+      var sd2 = templatesData && templatesData.data ? templatesData.data : templatesData;
+      var tpls = (sd2 && sd2.templates) || [];
+
+      if (tpls.length === 0) {
+        tplPanel.innerHTML = '<div style="font-size:14px;font-weight:600;margin-bottom:8px">Syntaxis Workflow Templates</div>'
+          + '<div style="color:#888;font-size:12px">No templates loaded. Run a CQI cycle to bootstrap.</div>';
+      } else {
+        var tplCards = tpls.map(function(t) {
+          var catColor = t.category === 'SECURITY' ? '#f87171' : t.category === 'GOVERNANCE' ? '#a78bfa' : t.category === 'DEVELOPMENT' ? '#60a5fa' : t.category === 'MAINTENANCE' ? '#fb923c' : t.category === 'INFRASTRUCTURE' ? '#4ade80' : '#888';
+          var steps = [];
+          try { steps = typeof t.workflow_steps_json === 'string' ? JSON.parse(t.workflow_steps_json) : (t.workflow_steps_json || []); } catch(_) {}
+          var bcts = [];
+          try { bcts = typeof t.bcts_coverage_json === 'string' ? JSON.parse(t.bcts_coverage_json) : (t.bcts_coverage_json || []); } catch(_) {}
+          var stepsStr = steps.length > 0 ? steps.length + ' nodes' : '';
+          var bctsStr = bcts.length > 0 ? bcts.length + ' BCTS states' : '';
+          return '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:12px;border:1px solid rgba(255,255,255,0.04)">'
+            + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+            +   '<span style="padding:2px 8px;border-radius:4px;background:' + catColor + '20;color:' + catColor + ';font-size:10px;font-weight:600;text-transform:uppercase">' + escHtml(t.category || '') + '</span>'
+            +   '<span style="font-size:13px;font-weight:600">' + escHtml(t.name) + '</span>'
+            + '</div>'
+            + '<div style="font-size:12px;color:#aaa;margin-bottom:6px;line-height:1.4">' + escHtml(t.description || '') + '</div>'
+            + '<div style="display:flex;gap:12px;font-size:11px;color:#666">'
+            +   (stepsStr ? '<span>' + stepsStr + '</span>' : '')
+            +   (bctsStr ? '<span>' + bctsStr + '</span>' : '')
+            + '</div>'
+            + '</div>';
+        }).join('');
+
+        tplPanel.innerHTML = '<div style="font-size:14px;font-weight:600;margin-bottom:12px">Syntaxis Workflow Templates</div>'
+          + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px">' + tplCards + '</div>';
+      }
+    }
   }
 
 })();

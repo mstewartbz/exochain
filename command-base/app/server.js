@@ -1108,6 +1108,18 @@ try { db.exec(`ALTER TABLE tasks ADD COLUMN blocked_reason TEXT`); } catch (_) {
 try { db.exec(`ALTER TABLE tasks ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 try { db.exec(`ALTER TABLE notes ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 
+// CQI-001: Missing column migrations discovered by ExoChain self-improvement loop.
+// The tasks query at GET /api/tasks references these columns but they were never added
+// via ALTER TABLE, causing a 500 error ("no such column: t.revision_count").
+// Governance receipt: this fix is the first artifact of the inaugural CQI cycle.
+try { db.exec(`ALTER TABLE tasks ADD COLUMN revision_count INTEGER DEFAULT 0`); } catch (_) {}
+try { db.exec(`ALTER TABLE tasks ADD COLUMN subagent_count INTEGER DEFAULT 0`); } catch (_) {}
+try { db.exec(`ALTER TABLE tasks ADD COLUMN delivered_at TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE tasks ADD COLUMN progress INTEGER DEFAULT 0`); } catch (_) {}
+try { db.exec(`ALTER TABLE tasks ADD COLUMN current_step TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE tasks ADD COLUMN started_at TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE tasks ADD COLUMN original_priority TEXT`); } catch (_) {}
+
 // ── Paperclip Phase 3: Adapter Architecture + Skill System ────────
 
 // Adapter types: registry of available agent execution adapters
@@ -22362,6 +22374,8 @@ require('./routes/plugins.js')(app, db, { broadcast, localNow, createNotificatio
 require('./routes/ideas.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/exoforge.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/catapult.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
+require('./routes/cqi.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
+require('./routes/solutions.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 
 // ── GSD (Get Shit Done) Control Panel routes ─────────────────────
 // GSD uses express.Router() so we mount it with app.use and inject

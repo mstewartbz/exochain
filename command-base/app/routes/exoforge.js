@@ -53,13 +53,13 @@ module.exports = function(app, db, helpers) {
     try {
       const result = db.prepare(`
         INSERT INTO governance_receipts (
-          action_type, entity_type, entity_id, actor, description,
+          action, action_type, entity_type, entity_id, actor, description,
           payload_hash, previous_hash, receipt_hash, invariants_checked, invariants_passed,
           project_id, created_at, hash_algorithm, encoding, branch,
           adjudication, metadata, chain_depth, verified
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        actionType, entityType, entityId, actor, description,
+        actionType, actionType, entityType, entityId, actor, description,
         payloadHash, previousHash, receiptHash, '[]', 1,
         projectId || null, now, 'sha256', 'json', branch,
         adjudication, '{}', chainDepth + 1, 1
