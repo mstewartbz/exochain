@@ -36718,7 +36718,7 @@
           + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">'
           +   '<span style="width:12px;height:12px;border-radius:50%;background:' + statusColor + ';box-shadow:0 0 8px ' + statusColor + '40"></span>'
           +   '<span style="font-size:15px;font-weight:600">Engine Status: ' + escHtml(hd.status || 'unknown') + '</span>'
-          +   '<span style="margin-left:auto;font-size:12px;color:#888">' + passCount + '/' + checkKeys.length + ' checks passing</span>'
+          +   '<span style="margin-left:auto;font-size:12px;color:#888">' + passCount + '/' + checksArr.length + ' checks passing</span>'
           + '</div>'
           + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">' + checkCards + '</div>'
           + '</div>';
