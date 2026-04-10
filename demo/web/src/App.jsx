@@ -1317,10 +1317,10 @@ export default function App() {
     ]).then(([sys, users, decisions, scores]) => {
       setData(prev => ({
         ...prev,
-        systemInfo: sys || prev.systemInfo,
-        users: users || prev.users,
-        decisions: decisions || prev.decisions,
-        scores: scores || prev.scores,
+        systemInfo: sys && !sys.error ? sys : prev.systemInfo,
+        users: Array.isArray(users) ? users : prev.users,
+        decisions: Array.isArray(decisions) ? decisions : prev.decisions,
+        scores: Array.isArray(scores) ? scores : prev.scores,
       }));
     });
   }, []);
