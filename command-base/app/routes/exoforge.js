@@ -84,8 +84,9 @@ module.exports = function(app, db, helpers) {
   function getKernel() {
     if (wasm) return wasm;
     try {
-      wasm = require('../../packages/exochain-wasm/wasm');
-    } catch (_) {
+      wasm = require('@exochain/exochain-wasm');
+    } catch (err) {
+      console.error('[ExoForge] WASM kernel load failed:', err.message);
       return null;
     }
     return wasm;
@@ -426,33 +427,29 @@ module.exports = function(app, db, helpers) {
         checks.push({ check: 'kernel_availability', status: 'healthy', score: 1.0 });
 
         // Check 2: TNC enforcement
+        // Use wasm_create_decision to build a valid DecisionObject, then enforce all TNCs.
+        // A health-check decision won't pass all TNCs (e.g. empty authority chain), but the
+        // check validates that the TNC enforcement engine is functional — not that a synthetic
+        // decision passes all rules. We mark healthy if the engine responds without crashing.
         try {
+          const healthDecision = kernel.wasm_create_decision('Health Check', '"Routine"', '2'.repeat(64));
+          const decisionStr = typeof healthDecision === 'string' ? healthDecision : JSON.stringify(healthDecision);
           const tncResult = kernel.wasm_enforce_all_tnc(
+            decisionStr,
             JSON.stringify({
-              id: 'health-' + Date.now(),
-              title: 'Health Check',
-              class: 'Routine',
-              state: 'Draft',
-              constitution_hash: '0'.repeat(64),
-              votes: [],
-              evidence: [],
-              created_at: Date.now(),
-              transitions: []
-            }),
-            JSON.stringify({
-              authority_chain_verified: true,
-              human_gate_satisfied: true,
+              constitutional_hash_valid: true,
               consent_verified: true,
               identity_verified: true,
-              delegation_unexpired: true,
-              constitutional_binding_valid: true,
+              evidence_complete: true,
               quorum_met: true,
-              terminal_immutable: true,
-              ai_ceiling_respected: true,
-              evidence_bundle_complete: true
+              human_gate_satisfied: true,
+              authority_chain_verified: true,
+              ai_ceilings_externally_verified: true
             })
           );
-          checks.push({ check: 'tnc_enforcement', status: 'healthy', score: 1.0 });
+          // The engine responded (ok:true or ok:false with violation detail) — it's functional.
+          const parsed = typeof tncResult === 'string' ? JSON.parse(tncResult) : tncResult;
+          checks.push({ check: 'tnc_enforcement', status: 'healthy', score: 1.0, engine_ok: true, tnc_result: parsed });
         } catch (err) {
           checks.push({ check: 'tnc_enforcement', status: 'degraded', score: 0.5, error: err.message });
         }
@@ -560,7 +557,7 @@ module.exports = function(app, db, helpers) {
           kernel_available: kernelAvailable,
           checks,
           exochain_version: '2.2',
-          exoforge_version: '0.1.0-alpha',
+          exoforge_version: '0.1.0-beta',
           checked_at: localNow(),
           branches: ['legislative', 'executive', 'judicial']
         },

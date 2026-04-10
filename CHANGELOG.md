@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta] - 2026-04-10
+
+Promotes alpha to beta. The WASM CGR Kernel is now fully operational, all 7
+ExoForge health checks pass green, and the CQI self-improvement loop runs
+end-to-end through council governance.
+
+### Fixed
+- **WASM kernel loading** — `getKernel()` used a wrong relative path (`../../packages/...` resolved to `command-base/packages/` instead of repo root). Switched to `@exochain/exochain-wasm` npm package resolution. All 163 exported functions from 14 Rust governance crates now load correctly.
+- **TNC enforcement health check** — rewrote to use `wasm_create_decision()` with correct `DecisionObject` and `TncFlags` field names matching the Rust structs.
+- **Governance receipt `action` NOT NULL constraint** — fixed in 5 locations: `exoforge.js`, `exoforge-bridge.js`, `cqi-orchestrator.js`, `governance.js` (createReceipt + backfill).
+- **Auth module WASM path** — `auth.js` had the same wrong relative path; fixed to npm package resolution.
+
+### Added
+- **Constitutional invariants seeding** — 10 invariants (INV-001 through INV-010) seeded on startup, mapping 1:1 to `wasm_enforce_tnc_01`–`wasm_enforce_tnc_10`. INV-010 (AI Ceiling Respected) added as new invariant with formal spec.
+- **ExoForge dashboard** — first-class page in CommandBase with 5 panels: health status, implementation queue, solutions builder, CQI self-improvement loop, and Syntaxis workflow templates.
+- **CQI self-improvement pipeline** — 7-node pipeline (collect → analyze → propose → council-review → exoforge-dispatch → verify → deploy) with ExoForge bridge integration.
+- **Syntaxis solution templates** — 7 built-in templates across 5 categories (governance, development, maintenance, security, infrastructure).
+
+### Health Check Status
+All 7 checks healthy (score: 1.0): kernel availability, TNC enforcement, workflow stages (14), audit chain, receipt chain, invariant coverage (10/10), ExoForge cycle.
+
 ## [0.1.0-alpha] - 2026-03-30
 
 First tagged pre-release of EXOCHAIN.  All 15 workspace crates compile and pass

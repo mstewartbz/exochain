@@ -42,7 +42,7 @@ function loadWasm() {
   if (wasmLoadAttempted) return wasmModule;
   wasmLoadAttempted = true;
   try {
-    wasmModule = require('../../packages/exochain-wasm/wasm/exochain_wasm');
+    wasmModule = require('@exochain/exochain-wasm');
     if (typeof wasmModule.wasm_ed25519_sign !== 'function' ||
         typeof wasmModule.wasm_ed25519_verify !== 'function') {
       console.warn('[auth] WASM module loaded but missing Ed25519 functions — falling back to HMAC');

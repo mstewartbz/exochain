@@ -2731,8 +2731,27 @@ db.exec(`CREATE TABLE IF NOT EXISTS refinement_team_assignments (
     UNIQUE(target_id, member_id)
 )`);
 
-// Part 1 continued: Upgrade existing 9 invariants with ExoChain-quality specs
-// Map our invariants to ExoChain's 8 and enrich each with formal specs
+// Part 1a: Seed the 10 constitutional invariants (INSERT OR IGNORE — idempotent)
+// These map 1:1 to the CGR Kernel's wasm_enforce_tnc_01 through wasm_enforce_tnc_10.
+const constitutionalInvariantSeeds = [
+  { code: 'INV-001', name: 'Authority Chain Valid',           description: 'Every governance action must trace to an authorized actor with verified identity and valid permissions.', severity: 'critical', enforced: 1 },
+  { code: 'INV-002', name: 'Receipt Chain Continuity',       description: 'Governance receipts form an unbroken hash chain. Each receipt references the hash of its predecessor.', severity: 'critical', enforced: 1 },
+  { code: 'INV-003', name: 'No Silent Mutations',            description: 'Every state change to a governed entity must produce a corresponding governance receipt within tolerance.', severity: 'critical', enforced: 1 },
+  { code: 'INV-004', name: 'Constitutional Supremacy',       description: 'Constitutional invariants cannot be overridden without formal amendment. Priority upgrades require elevated authorization.', severity: 'high', enforced: 1 },
+  { code: 'INV-005', name: 'Due Process Required',           description: 'Deliverables require review panel approval with minimum quorum before acceptance.', severity: 'critical', enforced: 1 },
+  { code: 'INV-006', name: 'Separation of Powers',           description: 'In-progress tasks must be assigned to active team members. No single actor controls all governance branches.', severity: 'high', enforced: 1 },
+  { code: 'INV-007', name: 'Provenance Required',            description: 'All governed outputs must have provenance records tracing inputs, transformations, and task linkage.', severity: 'critical', enforced: 1 },
+  { code: 'INV-008', name: 'Authority Chain Delegation',     description: 'Team-level decisions (hire, fire, restructure) require Board or orchestrator authorization with receipt.', severity: 'critical', enforced: 1 },
+  { code: 'INV-009', name: 'Immutable History',              description: 'Governance receipts and provenance records are append-only. UPDATE and DELETE operations are prohibited.', severity: 'critical', enforced: 1 },
+  { code: 'INV-010', name: 'AI Ceiling Respected',           description: 'AI agents cannot exceed delegated authority. Human gates must be satisfied for escalation-class decisions.', severity: 'critical', enforced: 1 }
+];
+const seedInvariantStmt = db.prepare(`INSERT OR IGNORE INTO constitutional_invariants (code, name, description, severity, enforced) VALUES (?, ?, ?, ?, ?)`);
+for (const inv of constitutionalInvariantSeeds) {
+  try { seedInvariantStmt.run(inv.code, inv.name, inv.description, inv.severity, inv.enforced); } catch (_) {}
+}
+
+// Part 1b: Upgrade existing invariants with ExoChain-quality specs
+// Map our invariants to ExoChain's governance crates and enrich each with formal specs
 const exochainInvariantUpgrades = [
   {
     code: 'INV-001',
@@ -2823,6 +2842,16 @@ const exochainInvariantUpgrades = [
     remediation: 'Never issue UPDATE or DELETE against governance_receipts or provenance_chain tables. If data correction is needed, append a new corrective receipt referencing the original. Run chain verification to detect tampering.',
     category: 'immutability',
     exochain_ref: 'ExoChain INV: Immutable History (receipts cannot be altered; KernelImmutability)'
+  },
+  {
+    code: 'INV-010',
+    formal_spec: 'FORALL ai_action A: A.authority_level <= delegated_ceiling(A.actor) AND (A.class IN {escalation, constitutional} IMPLIES human_gate_satisfied(A))',
+    enforcement_level: 'block',
+    validation_logic: 'check_ai_authority_ceiling,check_human_gate_for_escalation,check_delegation_scope',
+    exochain_severity: 'critical',
+    remediation: 'AI agents must operate within their delegated authority ceiling. Escalation-class and constitutional-class decisions require human gate approval. Review agent authority assignments via the delegation chain.',
+    category: 'safety',
+    exochain_ref: 'ExoChain INV: AI Ceiling (wasm_enforce_tnc_10; HumanGateSatisfied + AiCeilingRespected)'
   }
 ];
 

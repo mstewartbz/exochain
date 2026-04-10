@@ -308,7 +308,7 @@ function runHealthCheck(verbose) {
       details: c.details
     })),
     exochain_version: '2.2',
-    monitor_version: '0.1.0-alpha',
+    monitor_version: '0.1.0-beta',
     checked_at: new Date().toISOString()
   };
 

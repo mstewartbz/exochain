@@ -1,6 +1,6 @@
 {
   "name": "@exochain/exoforge",
-  "version": "0.1.0-alpha",
+  "version": "0.1.0-beta",
   "description": "ExoForge — autonomous implementation engine for EXOCHAIN",
   "type": "module",
   "bin": {

@@ -148,7 +148,7 @@ as the liveness probe in Kubernetes / Docker Compose.
 
 ```bash
 curl -s http://localhost:8080/health | jq .
-# {"status":"ok","version":"0.1.0-alpha","uptime_seconds":42}
+# {"status":"ok","version":"0.1.0-beta","uptime_seconds":42}
 ```
 
 ### `GET /ready`

@@ -66,13 +66,13 @@ module.exports = function(db, broadcast, helpers) {
 
     const result = db.prepare(`
       INSERT INTO governance_receipts (
-        action_type, entity_type, entity_id, actor, description,
+        action, action_type, entity_type, entity_id, actor, description,
         payload_hash, previous_hash, receipt_hash, invariants_checked, invariants_passed,
         project_id, created_at, hash_algorithm, encoding, branch,
         invariant_id, adjudication, metadata, chain_depth, verified
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      actionType, entityType, entityId, actor, description,
+      actionType, actionType, entityType, entityId, actor, description,
       payloadHash, previousHash, receiptHash, invariantsChecked,
       adjudication === 'pass' || adjudication === 'warn' ? 1 : 0,
       projectId || null, now, 'sha256', 'json', branch,
@@ -515,8 +515,8 @@ module.exports = function(db, broadcast, helpers) {
     for (const task of ungoverned) {
       const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ task_id: task.id, title: task.title, backfilled: true, ts: now })).digest('hex');
       const receiptHash = crypto.createHash('sha256').update(payloadHash + previousHash + now).digest('hex');
-      db.prepare(`INSERT INTO governance_receipts (action_type, entity_type, entity_id, actor, description, payload_hash, previous_hash, receipt_hash, branch, adjudication, metadata, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run('task_completion', 'task', task.id, 'System', `Backfill: governance receipt for completed task #${task.id}`, payloadHash, previousHash, receiptHash, 'executive', 'pass', JSON.stringify({ task_id: task.id, title: task.title, backfilled: true }), now);
+      db.prepare(`INSERT INTO governance_receipts (action, action_type, entity_type, entity_id, actor, description, payload_hash, previous_hash, receipt_hash, branch, adjudication, metadata, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run('task_completion', 'task_completion', 'task', task.id, 'System', `Backfill: governance receipt for completed task #${task.id}`, payloadHash, previousHash, receiptHash, 'executive', 'pass', JSON.stringify({ task_id: task.id, title: task.title, backfilled: true }), now);
       previousHash = receiptHash;
       receiptCount++;
     }
@@ -547,8 +547,8 @@ module.exports = function(db, broadcast, helpers) {
     for (const inv of invariants) {
       const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ invariant_id: inv.id, code: inv.code, checked: true, ts: now })).digest('hex');
       const receiptHash = crypto.createHash('sha256').update(payloadHash + previousHash + now).digest('hex');
-      db.prepare(`INSERT INTO governance_receipts (action_type, entity_type, entity_id, actor, description, payload_hash, previous_hash, receipt_hash, branch, adjudication, invariant_id, metadata, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run('invariant_check', 'invariant', inv.id, 'System', `Backfill: invariant check for ${inv.code} (${inv.name})`, payloadHash, previousHash, receiptHash, 'executive', 'pass', inv.id, JSON.stringify({ invariant_id: inv.id, code: inv.code, backfilled: true }), now);
+      db.prepare(`INSERT INTO governance_receipts (action, action_type, entity_type, entity_id, actor, description, payload_hash, previous_hash, receipt_hash, branch, adjudication, invariant_id, metadata, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run('invariant_check', 'invariant_check', 'invariant', inv.id, 'System', `Backfill: invariant check for ${inv.code} (${inv.name})`, payloadHash, previousHash, receiptHash, 'executive', 'pass', inv.id, JSON.stringify({ invariant_id: inv.id, code: inv.code, backfilled: true }), now);
       previousHash = receiptHash;
       invCount++;
     }
