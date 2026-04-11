@@ -1,0 +1,32 @@
+[package]
+name = "exo-messaging"
+description = "EXOCHAIN constitutional trust fabric — end-to-end encrypted messaging with X25519 key exchange"
+documentation = "https://docs.exochain.io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom", "blake3", "serde_json"]

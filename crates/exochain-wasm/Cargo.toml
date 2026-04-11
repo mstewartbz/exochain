@@ -26,6 +26,7 @@ exo-api        = { path = "../exo-api" }
 exo-tenant     = { path = "../exo-tenant" }
 decision-forum = { path = "../decision-forum" }
 exo-catapult   = { path = "../exo-catapult" }
+exo-messaging  = { path = "../exo-messaging" }
 
 # WASM bindings
 wasm-bindgen = "=0.2.100"
@@ -56,4 +57,4 @@ wasm-bindgen-test = "0.3"
 wasm-opt = false
 
 [package.metadata.cargo-machete]
-ignored = ["ed25519-dalek", "exo-api", "exo-catapult", "exo-dag", "exo-proofs", "exo-tenant", "getrandom", "rand", "serde-wasm-bindgen"]
+ignored = ["ed25519-dalek", "exo-api", "exo-catapult", "exo-dag", "exo-messaging", "exo-proofs", "exo-tenant", "getrandom", "rand", "serde-wasm-bindgen"]

@@ -1001,6 +1001,7 @@ dependencies = [
  "digest 0.10.7",
  "fiat-crypto",
  "rustc_version",
+ "serde",
  "subtle",
  "zeroize",
 ]
@@ -1497,6 +1498,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "exo-messaging"
+version = "0.1.0-beta"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "exo-core",
+ "exo-identity",
+ "getrandom 0.2.16",
+ "hex",
+ "hkdf",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.17",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "exo-node"
 version = "0.1.0-beta"
 dependencies = [
@@ -1581,6 +1603,7 @@ dependencies = [
  "exo-governance",
  "exo-identity",
  "exo-legal",
+ "exo-messaging",
  "exo-proofs",
  "exo-tenant",
  "getrandom 0.2.16",
