@@ -1,8 +1,8 @@
 //! ExoChain WASM Bindings
 //!
 //! Exposes the full ExoChain governance engine to JavaScript/Node.js via WebAssembly.
-//! Covers 13 crates: core, identity, consent, authority, gatekeeper, governance,
-//! escalation, legal, dag, proofs, api, tenant, and decision-forum.
+//! Covers 14 crates: core, identity, consent, authority, gatekeeper, governance,
+//! escalation, legal, dag, proofs, api, tenant, decision-forum, and messaging.
 
 pub mod authority_bindings;
 pub mod catapult_bindings;
@@ -14,6 +14,7 @@ pub mod gatekeeper_bindings;
 pub mod governance_bindings;
 pub mod identity_bindings;
 pub mod legal_bindings;
+pub mod messaging_bindings;
 mod serde_bridge;
 
 // Flat re-exports so integration tests and downstream rlib consumers can
@@ -28,3 +29,4 @@ pub use gatekeeper_bindings::*;
 pub use governance_bindings::*;
 pub use identity_bindings::*;
 pub use legal_bindings::*;
+pub use messaging_bindings::*;
