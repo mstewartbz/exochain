@@ -6,7 +6,6 @@
  */
 
 import init, {
-  wasm_generate_keypair,
   wasm_generate_x25519_keypair,
   wasm_encrypt_message,
   wasm_decrypt_message,
@@ -32,19 +31,9 @@ export function isCryptoReady(): boolean {
 
 // ── Key Generation ──
 
-export interface Ed25519KeyPair {
-  public_key_hex: string;
-  secret_key_hex: string;
-}
-
 export interface X25519KeyPair {
   public_key_hex: string;
   secret_key_hex: string;
-}
-
-/** Generate an Ed25519 keypair (for signing). */
-export function generateEd25519Keypair(): Ed25519KeyPair {
-  return wasm_generate_keypair();
 }
 
 /** Generate an X25519 keypair (for encryption key exchange). */
