@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import React from 'react';
 
 export interface AuthState {
   did: string;
@@ -7,6 +8,13 @@ export interface AuthState {
   ed25519SecretHex: string;
   x25519PublicHex: string;
   x25519SecretHex: string;
+}
+
+interface AuthContextType {
+  auth: AuthState | null;
+  isAuthenticated: boolean;
+  login: (state: AuthState) => void;
+  logout: () => void;
 }
 
 const STORAGE_KEY = 'vitallock_auth';
@@ -20,7 +28,9 @@ function loadAuth(): AuthState | null {
   }
 }
 
-export function useAuth() {
+const AuthContext = createContext<AuthContextType | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
   const [auth, setAuth] = useState<AuthState | null>(loadAuth);
 
   const login = useCallback((state: AuthState) => {
@@ -33,10 +43,15 @@ export function useAuth() {
     setAuth(null);
   }, []);
 
-  return {
-    auth,
-    isAuthenticated: auth !== null,
-    login,
-    logout,
-  };
+  return React.createElement(
+    AuthContext.Provider,
+    { value: { auth, isAuthenticated: auth !== null, login, logout } },
+    children,
+  );
+}
+
+export function useAuth(): AuthContextType {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  return ctx;
 }

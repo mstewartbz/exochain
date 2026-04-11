@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { useAuth, type AuthState } from '@/hooks/useAuth';
-import { updateProfile } from '@/lib/api';
 import {
   initCrypto, isCryptoReady,
   generateX25519Keypair as genX25519Wasm,
@@ -53,11 +52,19 @@ export default function Login() {
       setStatus('Initializing sharded keystore...');
 
       // Register profile (non-blocking — skip if backend unavailable)
-      const profileTimeout = new Promise<void>(resolve => setTimeout(resolve, 2000));
-      await Promise.race([
-        updateProfile({ did, display_name: name, x25519_public_key_hex: x25519Public }).catch(() => {}),
-        profileTimeout,
-      ]);
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 1500);
+        await fetch('/api/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ did, display_name: name, x25519_public_key_hex: x25519Public }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+      } catch {
+        // Backend unavailable — continue without profile registration
+      }
 
       const authState: AuthState = {
         did,
