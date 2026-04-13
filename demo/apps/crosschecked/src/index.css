@@ -1,0 +1,5 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+body { font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; background: #0c1222; }
+h1, h2, h3, h4, h5, h6 { font-family: 'Sora', system-ui, sans-serif; }
