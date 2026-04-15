@@ -19,7 +19,7 @@ use axum::{
     routing::get,
 };
 use exo_core::types::Hash256;
-use exo_dag::store::DagStore;
+
 use serde::Serialize;
 
 use crate::store::SqliteDagStore;
@@ -90,7 +90,7 @@ async fn handle_provenance(
     })?;
 
     let node = st
-        .get(&hash)
+        .get_sync(&hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "node not found in DAG".into()))?;
 
@@ -111,7 +111,7 @@ async fn handle_provenance(
         max_iters -= 1;
         let mut next_frontier = Vec::new();
         for parent_hash in &frontier {
-            if let Ok(Some(parent_node)) = st.get(parent_hash) {
+            if let Ok(Some(parent_node)) = st.get_sync(parent_hash) {
                 next_frontier.extend_from_slice(&parent_node.parents);
             }
         }
@@ -185,9 +185,9 @@ mod tests {
         )
         .unwrap();
 
-        store.put(genesis.clone()).unwrap();
-        store.put(child.clone()).unwrap();
-        store.mark_committed(&genesis.hash, 1).unwrap();
+        store.put_sync(genesis.clone()).unwrap();
+        store.put_sync(child.clone()).unwrap();
+        store.mark_committed_sync(&genesis.hash, 1).unwrap();
 
         let state = Arc::new(ProvenanceState {
             store: Arc::new(Mutex::new(store)),

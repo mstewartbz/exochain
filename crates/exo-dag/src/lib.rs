@@ -15,5 +15,7 @@ pub mod consensus;
 pub mod dag;
 pub mod error;
 pub mod mmr;
+#[cfg(feature = "postgres")]
+pub mod pg_store;
 pub mod smt;
 pub mod store;

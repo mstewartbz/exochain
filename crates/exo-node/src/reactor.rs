@@ -23,7 +23,6 @@ use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustR
 use exo_dag::{
     consensus::{self, ConsensusConfig, ConsensusState, Vote},
     dag::{Dag, DagNode, HybridClock, append},
-    store::DagStore,
 };
 use tokio::sync::mpsc;
 
@@ -371,7 +370,7 @@ async fn handle_wire_message(
                 tracing::warn!("Reactor event receiver dropped (GovernanceEvent)");
             }
         }
-        // DAG sync and state snapshot handled by Phase 4
+        // DAG persistence layer shipped (GAP-001). State sync TBD.
         _ => {}
     }
 }
@@ -409,7 +408,7 @@ async fn handle_proposal(
                 tracing::error!("Store mutex poisoned in handle_proposal");
                 return;
             };
-            if let Err(e) = st.put(msg.node.clone()) {
+            if let Err(e) = st.put_sync(msg.node.clone()) {
                 tracing::warn!(err = %e, "Failed to store proposed node");
                 return;
             }
@@ -566,7 +565,7 @@ async fn handle_commit(
             tracing::error!("Store mutex poisoned in handle_commit (mark)");
             return;
         };
-        if let Err(e) = st.mark_committed(&hash, height) {
+        if let Err(e) = st.mark_committed_sync(&hash, height) {
             tracing::warn!(err = %e, "Failed to mark committed in store");
         }
     }
@@ -672,7 +671,7 @@ async fn check_and_commit(
                 tracing::error!("Store mutex poisoned in check_and_commit (persist)");
                 return;
             };
-            if let Err(e) = st.mark_committed(&hash, height) {
+            if let Err(e) = st.mark_committed_sync(&hash, height) {
                 tracing::warn!(err = %e, "Failed to mark committed");
             }
             if let Err(e) = st.save_certificate(&cert) {
@@ -765,7 +764,7 @@ pub async fn submit_proposal(
             let st = store
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Store mutex poisoned in submit_proposal (tips)"))?;
-            st.tips().map_err(|e| anyhow::anyhow!("tips: {e}"))?
+            st.tips_sync().map_err(|e| anyhow::anyhow!("tips: {e}"))?
         };
         let parents: Vec<Hash256> = if tips.is_empty() {
             vec![] // genesis
@@ -792,7 +791,7 @@ pub async fn submit_proposal(
             let mut st = store
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Store mutex poisoned in submit_proposal (put)"))?;
-            st.put(node.clone())
+            st.put_sync(node.clone())
                 .map_err(|e| anyhow::anyhow!("put: {e}"))?;
         }
 
@@ -948,7 +947,7 @@ mod tests {
         assert_eq!(s.dag.len(), 1, "DAG should have one node");
 
         let st = store.lock().unwrap();
-        assert_eq!(st.tips().unwrap().len(), 1, "Store should have one tip");
+        assert_eq!(st.tips_sync().unwrap().len(), 1, "Store should have one tip");
     }
 
     #[tokio::test]

@@ -345,7 +345,7 @@ fn build_delegation_profile() -> DelegationProfile {
     // The DelegationRegistry in exo-authority and DelegatedAuthority in
     // decision-forum track live delegation chains. These are in-memory
     // per-crate structures; wiring them here requires a shared delegation
-    // persistence layer (planned for the Phase 4 state-sync milestone).
+    // DAG persistence shipped (GAP-001). Delegation persistence TBD.
     DelegationProfile {
         delegations_granted: 0,
         delegations_received: 0,
@@ -356,7 +356,7 @@ fn build_delegation_profile() -> DelegationProfile {
 fn build_consent_profile() -> ConsentProfile {
     // Bailment lifecycle (propose → accept → terminate) is implemented in
     // exo-consent and gatekeeper.  Wiring requires a shared consent store
-    // that persists bailment state across the node (planned for Phase 4).
+    // that persists bailment state across the node. DAG persistence shipped (GAP-001). Consent persistence TBD.
     // Default-deny is always enforced by the constitutional kernel.
     ConsentProfile {
         bailments_as_bailor: 0,

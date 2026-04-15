@@ -22,7 +22,7 @@
 use std::sync::{Arc, Mutex};
 
 use exo_core::types::Did;
-use exo_dag::store::DagStore;
+
 use tokio::sync::mpsc;
 
 use crate::{
@@ -155,7 +155,7 @@ impl SyncEngine {
                 .store
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Store mutex poisoned in request_dag_sync"))?;
-            st.tips().map_err(|e| anyhow::anyhow!("tips: {e}"))?
+            st.tips_sync().map_err(|e| anyhow::anyhow!("tips: {e}"))?
         };
 
         let request = WireMessage::DagSyncRequest(DagSyncRequestMsg {
@@ -309,13 +309,13 @@ impl SyncEngine {
             for (i, node) in msg.nodes.into_iter().enumerate() {
                 let hash = node.hash;
 
-                if let Err(e) = st.put(node) {
+                if let Err(e) = st.put_sync(node) {
                     tracing::warn!(err = %e, %hash, "Failed to store synced node");
                     continue;
                 }
 
                 let height = msg.from_height + i as u64;
-                if let Err(e) = st.mark_committed(&hash, height) {
+                if let Err(e) = st.mark_committed_sync(&hash, height) {
                     tracing::warn!(err = %e, %hash, height, "Failed to mark committed");
                 }
             }
@@ -373,7 +373,7 @@ impl SyncEngine {
             // Find nodes the requester is missing by comparing tips.
             // Strategy: send all our committed nodes that are not in the
             // requester's tip set (simple but effective for small DAGs).
-            let our_tips = match st.tips() {
+            let our_tips = match st.tips_sync() {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(err = %e, "Failed to get tips for sync");
@@ -462,7 +462,7 @@ impl SyncEngine {
             };
             for node in msg.nodes {
                 let hash = node.hash;
-                if let Err(e) = st.put(node) {
+                if let Err(e) = st.put_sync(node) {
                     tracing::warn!(err = %e, %hash, "Failed to store synced node");
                 }
             }
@@ -562,8 +562,8 @@ mod tests {
             )
             .unwrap();
             let hash = node.hash;
-            store.put(node).unwrap();
-            store.mark_committed(&hash, (i + 1) as u64).unwrap();
+            store.put_sync(node).unwrap();
+            store.mark_committed_sync(&hash, (i + 1) as u64).unwrap();
             hashes.push(hash);
             parents = vec![hash];
         }
@@ -736,8 +736,8 @@ mod tests {
         // Verify nodes were stored and committed.
         {
             let st = store.lock().unwrap();
-            assert!(st.contains(&node1.hash).unwrap());
-            assert!(st.contains(&node2.hash).unwrap());
+            assert!(st.contains_sync(&node1.hash).unwrap());
+            assert!(st.contains_sync(&node2.hash).unwrap());
             assert_eq!(st.committed_height_value(), 2);
         }
 

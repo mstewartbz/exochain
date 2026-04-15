@@ -11,12 +11,20 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+postgres = ["dep:sqlx", "dep:serde_json"]
+
 [dependencies]
 exo-core = { path = "../exo-core" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

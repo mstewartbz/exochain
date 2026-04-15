@@ -178,12 +178,12 @@ fn bench_store_checkpoint(c: &mut Criterion) {
                 b.iter(|| {
                     let mut store = MemoryStore::new();
                     for (height, node) in ns.iter().enumerate() {
-                        store.put(node.clone()).expect("put");
+                        store.put_sync(node.clone()).expect("put");
                         store
                             .mark_committed(&node.hash, u64::try_from(height).unwrap())
                             .expect("mark_committed");
                     }
-                    black_box(store.committed_height().expect("height"))
+                    black_box(store.committed_height_sync().expect("height"))
                 });
             },
         );
@@ -192,13 +192,13 @@ fn bench_store_checkpoint(c: &mut Criterion) {
             // Pre-populated store — only measure read throughput.
             let mut store = MemoryStore::new();
             for node in ns {
-                store.put(node.clone()).expect("put");
+                store.put_sync(node.clone()).expect("put");
             }
             let hashes: Vec<Hash256> = ns.iter().map(|n| n.hash).collect();
             b.iter(|| {
                 let mut found = 0usize;
                 for h in &hashes {
-                    if store.get(h).expect("get").is_some() {
+                    if store.get_sync(h).expect("get").is_some() {
                         found += 1;
                     }
                 }

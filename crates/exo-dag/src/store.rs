@@ -14,19 +14,20 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Abstraction over persistent storage for DAG nodes.
-pub trait DagStore {
+#[async_trait::async_trait]
+pub trait DagStore: Send + Sync {
     /// Retrieve a node by hash.
-    fn get(&self, hash: &Hash256) -> Result<Option<DagNode>>;
+    async fn get(&self, hash: &Hash256) -> Result<Option<DagNode>>;
     /// Store a node.
-    fn put(&mut self, node: DagNode) -> Result<()>;
+    async fn put(&mut self, node: DagNode) -> Result<()>;
     /// Check if a node exists.
-    fn contains(&self, hash: &Hash256) -> Result<bool>;
+    async fn contains(&self, hash: &Hash256) -> Result<bool>;
     /// Return the current tip hashes.
-    fn tips(&self) -> Result<Vec<Hash256>>;
+    async fn tips(&self) -> Result<Vec<Hash256>>;
     /// Return the number of committed (finalized) nodes.
-    fn committed_height(&self) -> Result<u64>;
+    async fn committed_height(&self) -> Result<u64>;
     /// Mark a node as committed at the given height.
-    fn mark_committed(&mut self, hash: &Hash256, height: u64) -> Result<()>;
+    async fn mark_committed(&mut self, hash: &Hash256, height: u64) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,14 +61,18 @@ impl MemoryStore {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
-}
 
-impl DagStore for MemoryStore {
-    fn get(&self, hash: &Hash256) -> Result<Option<DagNode>> {
+    // ------------------------------------------------------------------
+    // Sync convenience methods — for benchmarks and non-async contexts.
+    // ------------------------------------------------------------------
+
+    /// Sync version of `DagStore::get`.
+    pub fn get_sync(&self, hash: &Hash256) -> Result<Option<DagNode>> {
         Ok(self.nodes.get(hash).cloned())
     }
 
-    fn put(&mut self, node: DagNode) -> Result<()> {
+    /// Sync version of `DagStore::put`.
+    pub fn put_sync(&mut self, node: DagNode) -> Result<()> {
         let hash = node.hash;
         for parent in &node.parents {
             self.children.entry(*parent).or_default().push(hash);
@@ -77,11 +82,13 @@ impl DagStore for MemoryStore {
         Ok(())
     }
 
-    fn contains(&self, hash: &Hash256) -> Result<bool> {
+    /// Sync version of `DagStore::contains`.
+    pub fn contains_sync(&self, hash: &Hash256) -> Result<bool> {
         Ok(self.nodes.contains_key(hash))
     }
 
-    fn tips(&self) -> Result<Vec<Hash256>> {
+    /// Sync version of `DagStore::tips`.
+    pub fn tips_sync(&self) -> Result<Vec<Hash256>> {
         let mut result: Vec<Hash256> = self
             .nodes
             .keys()
@@ -92,11 +99,13 @@ impl DagStore for MemoryStore {
         Ok(result)
     }
 
-    fn committed_height(&self) -> Result<u64> {
+    /// Sync version of `DagStore::committed_height`.
+    pub fn committed_height_sync(&self) -> Result<u64> {
         Ok(self.max_committed_height)
     }
 
-    fn mark_committed(&mut self, hash: &Hash256, height: u64) -> Result<()> {
+    /// Sync version of `DagStore::mark_committed`.
+    pub fn mark_committed_sync(&mut self, hash: &Hash256, height: u64) -> Result<()> {
         if !self.nodes.contains_key(hash) {
             return Err(DagError::NodeNotFound(*hash));
         }
@@ -105,6 +114,33 @@ impl DagStore for MemoryStore {
             self.max_committed_height = height;
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl DagStore for MemoryStore {
+    async fn get(&self, hash: &Hash256) -> Result<Option<DagNode>> {
+        self.get_sync(hash)
+    }
+
+    async fn put(&mut self, node: DagNode) -> Result<()> {
+        self.put_sync(node)
+    }
+
+    async fn contains(&self, hash: &Hash256) -> Result<bool> {
+        self.contains_sync(hash)
+    }
+
+    async fn tips(&self) -> Result<Vec<Hash256>> {
+        self.tips_sync()
+    }
+
+    async fn committed_height(&self) -> Result<u64> {
+        self.committed_height_sync()
+    }
+
+    async fn mark_committed(&mut self, hash: &Hash256, height: u64) -> Result<()> {
+        self.mark_committed_sync(hash, height)
     }
 }
 
@@ -139,13 +175,13 @@ mod tests {
         append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap()
     }
 
-    #[test]
-    fn new_store_is_empty() {
+    #[tokio::test]
+    async fn new_store_is_empty() {
         let store = MemoryStore::new();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
-        assert_eq!(store.committed_height().unwrap(), 0);
-        assert!(store.tips().unwrap().is_empty());
+        assert_eq!(store.committed_height().await.unwrap(), 0);
+        assert!(store.tips().await.unwrap().is_empty());
     }
 
     #[test]
@@ -154,49 +190,49 @@ mod tests {
         assert!(store.is_empty());
     }
 
-    #[test]
-    fn put_and_get() {
+    #[tokio::test]
+    async fn put_and_get() {
         let mut store = MemoryStore::new();
         let node = make_test_node();
 
-        store.put(node.clone()).unwrap();
+        store.put(node.clone()).await.unwrap();
 
         assert_eq!(store.len(), 1);
         assert!(!store.is_empty());
 
-        let retrieved = store.get(&node.hash).unwrap();
+        let retrieved = store.get(&node.hash).await.unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().hash, node.hash);
     }
 
-    #[test]
-    fn get_nonexistent() {
+    #[tokio::test]
+    async fn get_nonexistent() {
         let store = MemoryStore::new();
-        let result = store.get(&Hash256::ZERO).unwrap();
+        let result = store.get(&Hash256::ZERO).await.unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn contains() {
+    #[tokio::test]
+    async fn contains() {
         let mut store = MemoryStore::new();
         let node = make_test_node();
 
-        assert!(!store.contains(&node.hash).unwrap());
-        store.put(node.clone()).unwrap();
-        assert!(store.contains(&node.hash).unwrap());
+        assert!(!store.contains(&node.hash).await.unwrap());
+        store.put(node.clone()).await.unwrap();
+        assert!(store.contains(&node.hash).await.unwrap());
     }
 
-    #[test]
-    fn tips_single_node() {
+    #[tokio::test]
+    async fn tips_single_node() {
         let mut store = MemoryStore::new();
         let node = make_test_node();
-        store.put(node.clone()).unwrap();
-        let t = store.tips().unwrap();
+        store.put(node.clone()).await.unwrap();
+        let t = store.tips().await.unwrap();
         assert_eq!(t, vec![node.hash]);
     }
 
-    #[test]
-    fn tips_with_children() {
+    #[tokio::test]
+    async fn tips_with_children() {
         let mut dag = Dag::new();
         let mut clock = HybridClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
@@ -214,43 +250,43 @@ mod tests {
         .unwrap();
 
         let mut store = MemoryStore::new();
-        store.put(genesis).unwrap();
-        store.put(child.clone()).unwrap();
+        store.put(genesis).await.unwrap();
+        store.put(child.clone()).await.unwrap();
 
-        let t = store.tips().unwrap();
+        let t = store.tips().await.unwrap();
         assert_eq!(t, vec![child.hash]);
     }
 
-    #[test]
-    fn committed_height_tracking() {
+    #[tokio::test]
+    async fn committed_height_tracking() {
         let mut store = MemoryStore::new();
         let node = make_test_node();
-        store.put(node.clone()).unwrap();
+        store.put(node.clone()).await.unwrap();
 
-        assert_eq!(store.committed_height().unwrap(), 0);
+        assert_eq!(store.committed_height().await.unwrap(), 0);
 
-        store.mark_committed(&node.hash, 1).unwrap();
-        assert_eq!(store.committed_height().unwrap(), 1);
+        store.mark_committed(&node.hash, 1).await.unwrap();
+        assert_eq!(store.committed_height().await.unwrap(), 1);
 
         let mut dag = Dag::new();
         let mut clock = HybridClock::new();
         let creator = Did::new("did:exo:test2").expect("valid");
         let sign_fn = make_sign_fn();
         let node2 = append(&mut dag, &[], b"other", &creator, &*sign_fn, &mut clock).unwrap();
-        store.put(node2.clone()).unwrap();
-        store.mark_committed(&node2.hash, 5).unwrap();
-        assert_eq!(store.committed_height().unwrap(), 5);
+        store.put(node2.clone()).await.unwrap();
+        store.mark_committed(&node2.hash, 5).await.unwrap();
+        assert_eq!(store.committed_height().await.unwrap(), 5);
     }
 
-    #[test]
-    fn mark_committed_nonexistent_fails() {
+    #[tokio::test]
+    async fn mark_committed_nonexistent_fails() {
         let mut store = MemoryStore::new();
-        let err = store.mark_committed(&Hash256::ZERO, 1).unwrap_err();
+        let err = store.mark_committed(&Hash256::ZERO, 1).await.unwrap_err();
         assert!(matches!(err, DagError::NodeNotFound(_)));
     }
 
-    #[test]
-    fn multiple_tips() {
+    #[tokio::test]
+    async fn multiple_tips() {
         let mut dag = Dag::new();
         let mut clock = HybridClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
@@ -277,11 +313,11 @@ mod tests {
         .unwrap();
 
         let mut store = MemoryStore::new();
-        store.put(genesis).unwrap();
-        store.put(c1.clone()).unwrap();
-        store.put(c2.clone()).unwrap();
+        store.put(genesis).await.unwrap();
+        store.put(c1.clone()).await.unwrap();
+        store.put(c2.clone()).await.unwrap();
 
-        let t = store.tips().unwrap();
+        let t = store.tips().await.unwrap();
         assert_eq!(t.len(), 2);
         assert!(t.contains(&c1.hash));
         assert!(t.contains(&c2.hash));

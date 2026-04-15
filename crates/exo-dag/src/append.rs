@@ -32,7 +32,7 @@ const MAX_CLOCK_SKEW_MS: u64 = 500;
 /// This is the normative append path for persistent deployments (EXOCHAIN Specification v2.2).
 /// The in-memory [`dag::append`](crate::dag::append) handles local construction;
 /// this function handles validation for nodes received from external sources.
-pub fn validated_append(store: &mut impl DagStore, node: crate::dag::DagNode) -> Result<()> {
+pub async fn validated_append(store: &mut impl DagStore, node: crate::dag::DagNode) -> Result<()> {
     // 1. Wall-clock skew check: reject future-dated nodes
     if node.timestamp.physical_ms > 0 {
         let now_ms = std::time::SystemTime::now()
@@ -50,7 +50,8 @@ pub fn validated_append(store: &mut impl DagStore, node: crate::dag::DagNode) ->
     // 2. Parent existence & HLC causality
     for parent_hash in &node.parents {
         let parent = store
-            .get(parent_hash)?
+            .get(parent_hash)
+            .await?
             .ok_or(DagError::ParentNotFound(*parent_hash))?;
 
         // Normative HLC Check: node timestamp must strictly exceed parent
@@ -63,7 +64,7 @@ pub fn validated_append(store: &mut impl DagStore, node: crate::dag::DagNode) ->
     }
 
     // 3. Persist
-    store.put(node)
+    store.put(node).await
 }
 
 /// Verify integrity of a stored node: check that its hash is correctly
@@ -72,15 +73,15 @@ pub fn validated_append(store: &mut impl DagStore, node: crate::dag::DagNode) ->
 /// Returns `Ok(true)` if the node passes all integrity checks,
 /// `Ok(false)` if any check fails (hash mismatch or missing parent),
 /// and `Err` if the node itself is not found.
-pub fn verify_stored_integrity(store: &impl DagStore, hash: &Hash256) -> Result<bool> {
-    let node = match store.get(hash)? {
+pub async fn verify_stored_integrity(store: &impl DagStore, hash: &Hash256) -> Result<bool> {
+    let node = match store.get(hash).await? {
         Some(n) => n,
         None => return Err(DagError::NodeNotFound(*hash)),
     };
 
     // Check all parents exist
     for parent in &node.parents {
-        if !store.contains(parent)? {
+        if !store.contains(parent).await? {
             return Ok(false);
         }
     }
@@ -163,34 +164,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn validated_append_success() {
+    #[tokio::test]
+    async fn validated_append_success() {
         let mut store = MemoryStore::new();
         let genesis = make_test_node();
-        store.put(genesis.clone()).expect("put genesis");
+        store.put(genesis.clone()).await.expect("put genesis");
 
         let child = make_child_node(&genesis);
-        validated_append(&mut store, child.clone()).expect("validated append");
+        validated_append(&mut store, child.clone()).await.expect("validated append");
 
-        assert!(store.contains(&child.hash).expect("contains"));
+        assert!(store.contains(&child.hash).await.expect("contains"));
     }
 
-    #[test]
-    fn validated_append_missing_parent() {
+    #[tokio::test]
+    async fn validated_append_missing_parent() {
         let mut store = MemoryStore::new();
         // Don't put the parent in the store
         let genesis = make_test_node();
         let child = make_child_node(&genesis);
 
-        let err = validated_append(&mut store, child).unwrap_err();
+        let err = validated_append(&mut store, child).await.unwrap_err();
         assert!(matches!(err, DagError::ParentNotFound(_)));
     }
 
-    #[test]
-    fn validated_append_causality_violation() {
+    #[tokio::test]
+    async fn validated_append_causality_violation() {
         let mut store = MemoryStore::new();
         let genesis = make_test_node();
-        store.put(genesis.clone()).expect("put genesis");
+        store.put(genesis.clone()).await.expect("put genesis");
 
         // Create a child with timestamp <= parent (causality violation)
         let creator = test_did();
@@ -209,24 +210,24 @@ mod tests {
             signature,
         };
 
-        let err = validated_append(&mut store, bad_child).unwrap_err();
+        let err = validated_append(&mut store, bad_child).await.unwrap_err();
         assert!(
             matches!(err, DagError::StoreError(ref msg) if msg.contains("causality")),
             "expected causality violation, got: {err:?}"
         );
     }
 
-    #[test]
-    fn verify_stored_integrity_valid() {
+    #[tokio::test]
+    async fn verify_stored_integrity_valid() {
         let mut store = MemoryStore::new();
         let node = make_test_node();
-        store.put(node.clone()).expect("put");
+        store.put(node.clone()).await.expect("put");
 
-        assert!(verify_stored_integrity(&store, &node.hash).expect("verify"));
+        assert!(verify_stored_integrity(&store, &node.hash).await.expect("verify"));
     }
 
-    #[test]
-    fn verify_stored_integrity_tampered_hash() {
+    #[tokio::test]
+    async fn verify_stored_integrity_tampered_hash() {
         let mut store = MemoryStore::new();
         let mut node = make_test_node();
         let original_hash = node.hash;
@@ -234,25 +235,25 @@ mod tests {
         node.payload_hash = Hash256::digest(b"tampered");
         // Re-insert with original hash (simulating store corruption)
         node.hash = original_hash;
-        store.put(node).expect("put");
+        store.put(node).await.expect("put");
 
         // Integrity check should detect the hash mismatch
-        assert!(!verify_stored_integrity(&store, &original_hash).expect("verify"));
+        assert!(!verify_stored_integrity(&store, &original_hash).await.expect("verify"));
     }
 
-    #[test]
-    fn verify_stored_integrity_not_found() {
+    #[tokio::test]
+    async fn verify_stored_integrity_not_found() {
         let store = MemoryStore::new();
-        let err = verify_stored_integrity(&store, &Hash256::ZERO).unwrap_err();
+        let err = verify_stored_integrity(&store, &Hash256::ZERO).await.unwrap_err();
         assert!(matches!(err, DagError::NodeNotFound(_)));
     }
 
-    #[test]
-    fn genesis_node_validated_append() {
+    #[tokio::test]
+    async fn genesis_node_validated_append() {
         let mut store = MemoryStore::new();
         let genesis = make_test_node();
         // Genesis has no parents — should pass validation
-        validated_append(&mut store, genesis.clone()).expect("genesis append");
-        assert!(store.contains(&genesis.hash).expect("contains"));
+        validated_append(&mut store, genesis.clone()).await.expect("genesis append");
+        assert!(store.contains(&genesis.hash).await.expect("contains"));
     }
 }

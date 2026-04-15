@@ -13,7 +13,6 @@ use exo_dag::{
     consensus::{CommitCertificate, Vote},
     dag::DagNode,
     error::{DagError, Result as DagResult},
-    store::DagStore,
 };
 
 /// Map a SQLite / CBOR error into `DagError::StoreError`.
@@ -103,7 +102,7 @@ impl SqliteDagStore {
     /// Convenience accessor for the current committed height.
     #[must_use]
     pub fn committed_height_value(&self) -> u64 {
-        self.committed_height().unwrap_or(0)
+        self.committed_height_sync().unwrap_or(0)
     }
 
     /// Serialize a `DagNode` to CBOR bytes.
@@ -474,7 +473,7 @@ impl SqliteDagStore {
         let committed = self.committed_nodes_in_range(from_height, to_height)?;
         let mut nodes = Vec::with_capacity(committed.len());
         for (hash, _height) in committed {
-            if let Some(node) = self.get(&hash)? {
+            if let Some(node) = self.get_sync(&hash)? {
                 nodes.push(node);
             }
         }
@@ -482,8 +481,14 @@ impl SqliteDagStore {
     }
 }
 
-impl DagStore for SqliteDagStore {
-    fn get(&self, hash: &Hash256) -> DagResult<Option<DagNode>> {
+// ---------------------------------------------------------------------------
+// Sync helper methods — used by callers holding std::sync::Mutex locks.
+// The async DagStore trait impl delegates to these.
+// ---------------------------------------------------------------------------
+
+impl SqliteDagStore {
+    /// Sync version of `DagStore::get`.
+    pub fn get_sync(&self, hash: &Hash256) -> DagResult<Option<DagNode>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT cbor_payload FROM dag_nodes WHERE hash = ?1")
@@ -499,7 +504,8 @@ impl DagStore for SqliteDagStore {
         }
     }
 
-    fn put(&mut self, node: DagNode) -> DagResult<()> {
+    /// Sync version of `DagStore::put`.
+    pub fn put_sync(&mut self, node: DagNode) -> DagResult<()> {
         let cbor = Self::encode_node(&node)?;
 
         self.conn
@@ -509,7 +515,6 @@ impl DagStore for SqliteDagStore {
             )
             .map_err(store_err)?;
 
-        // Record parent relationships.
         for parent in &node.parents {
             self.conn
                 .execute(
@@ -522,7 +527,8 @@ impl DagStore for SqliteDagStore {
         Ok(())
     }
 
-    fn contains(&self, hash: &Hash256) -> DagResult<bool> {
+    /// Sync version of `DagStore::contains`.
+    pub fn contains_sync(&self, hash: &Hash256) -> DagResult<bool> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT 1 FROM dag_nodes WHERE hash = ?1")
@@ -535,8 +541,8 @@ impl DagStore for SqliteDagStore {
         Ok(exists)
     }
 
-    fn tips(&self) -> DagResult<Vec<Hash256>> {
-        // Tips are nodes that are not parents of any other node.
+    /// Sync version of `DagStore::tips`.
+    pub fn tips_sync(&self) -> DagResult<Vec<Hash256>> {
         let mut stmt = self
             .conn
             .prepare_cached(
@@ -562,7 +568,8 @@ impl DagStore for SqliteDagStore {
         Ok(tips)
     }
 
-    fn committed_height(&self) -> DagResult<u64> {
+    /// Sync version of `DagStore::committed_height`.
+    pub fn committed_height_sync(&self) -> DagResult<u64> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT COALESCE(MAX(height), 0) FROM committed")
@@ -574,9 +581,9 @@ impl DagStore for SqliteDagStore {
         Ok(height as u64)
     }
 
-    fn mark_committed(&mut self, hash: &Hash256, height: u64) -> DagResult<()> {
-        // Verify the node exists.
-        if !self.contains(hash)? {
+    /// Sync version of `DagStore::mark_committed`.
+    pub fn mark_committed_sync(&mut self, hash: &Hash256, height: u64) -> DagResult<()> {
+        if !self.contains_sync(hash)? {
             return Err(DagError::NodeNotFound(*hash));
         }
 
@@ -591,6 +598,11 @@ impl DagStore for SqliteDagStore {
         Ok(())
     }
 }
+
+// NOTE: SqliteDagStore does NOT implement the async DagStore trait because
+// rusqlite::Connection is !Sync. Callers use the _sync methods directly
+// (via Arc<Mutex<SqliteDagStore>>). The async DagStore trait is implemented
+// by MemoryStore (exo-dag) and PostgresStore (exo-dag, postgres feature).
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -629,8 +641,8 @@ mod tests {
     #[test]
     fn new_store_is_empty() {
         let store = temp_store();
-        assert_eq!(store.committed_height().unwrap(), 0);
-        assert!(store.tips().unwrap().is_empty());
+        assert_eq!(store.committed_height_sync().unwrap(), 0);
+        assert!(store.tips_sync().unwrap().is_empty());
     }
 
     #[test]
@@ -638,8 +650,8 @@ mod tests {
         let mut store = temp_store();
         let node = make_test_node();
 
-        store.put(node.clone()).unwrap();
-        let retrieved = store.get(&node.hash).unwrap();
+        store.put_sync(node.clone()).unwrap();
+        let retrieved = store.get_sync(&node.hash).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().hash, node.hash);
     }
@@ -647,7 +659,7 @@ mod tests {
     #[test]
     fn get_nonexistent() {
         let store = temp_store();
-        let result = store.get(&Hash256::ZERO).unwrap();
+        let result = store.get_sync(&Hash256::ZERO).unwrap();
         assert!(result.is_none());
     }
 
@@ -656,17 +668,17 @@ mod tests {
         let mut store = temp_store();
         let node = make_test_node();
 
-        assert!(!store.contains(&node.hash).unwrap());
-        store.put(node.clone()).unwrap();
-        assert!(store.contains(&node.hash).unwrap());
+        assert!(!store.contains_sync(&node.hash).unwrap());
+        store.put_sync(node.clone()).unwrap();
+        assert!(store.contains_sync(&node.hash).unwrap());
     }
 
     #[test]
     fn tips_single_node() {
         let mut store = temp_store();
         let node = make_test_node();
-        store.put(node.clone()).unwrap();
-        let t = store.tips().unwrap();
+        store.put_sync(node.clone()).unwrap();
+        let t = store.tips_sync().unwrap();
         assert_eq!(t, vec![node.hash]);
     }
 
@@ -689,10 +701,10 @@ mod tests {
         .unwrap();
 
         let mut store = temp_store();
-        store.put(genesis).unwrap();
-        store.put(child.clone()).unwrap();
+        store.put_sync(genesis).unwrap();
+        store.put_sync(child.clone()).unwrap();
 
-        let t = store.tips().unwrap();
+        let t = store.tips_sync().unwrap();
         assert_eq!(t, vec![child.hash]);
     }
 
@@ -700,18 +712,18 @@ mod tests {
     fn committed_height_tracking() {
         let mut store = temp_store();
         let node = make_test_node();
-        store.put(node.clone()).unwrap();
+        store.put_sync(node.clone()).unwrap();
 
-        assert_eq!(store.committed_height().unwrap(), 0);
+        assert_eq!(store.committed_height_sync().unwrap(), 0);
 
-        store.mark_committed(&node.hash, 1).unwrap();
-        assert_eq!(store.committed_height().unwrap(), 1);
+        store.mark_committed_sync(&node.hash, 1).unwrap();
+        assert_eq!(store.committed_height_sync().unwrap(), 1);
     }
 
     #[test]
     fn mark_committed_nonexistent_fails() {
         let mut store = temp_store();
-        let err = store.mark_committed(&Hash256::ZERO, 1).unwrap_err();
+        let err = store.mark_committed_sync(&Hash256::ZERO, 1).unwrap_err();
         assert!(matches!(err, DagError::NodeNotFound(_)));
     }
 
@@ -928,11 +940,11 @@ mod tests {
         .unwrap();
 
         let mut store = temp_store();
-        store.put(genesis).unwrap();
-        store.put(c1.clone()).unwrap();
-        store.put(c2.clone()).unwrap();
+        store.put_sync(genesis).unwrap();
+        store.put_sync(c1.clone()).unwrap();
+        store.put_sync(c2.clone()).unwrap();
 
-        let t = store.tips().unwrap();
+        let t = store.tips_sync().unwrap();
         assert_eq!(t.len(), 2);
         assert!(t.contains(&c1.hash));
         assert!(t.contains(&c2.hash));
