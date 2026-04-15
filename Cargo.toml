@@ -18,7 +18,7 @@ members = [
     "crates/exochain-wasm",
     "crates/exo-node",
     "crates/exo-catapult",
-    "crates/exo-messaging",
+    "crates/exo-messaging", "crates/exo-consensus",
 ]
 
 [workspace.package]

@@ -1343,6 +1343,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "exo-consensus"
+version = "0.1.0-beta"
+dependencies = [
+ "blake3",
+ "decision-forum",
+ "exo-core",
+ "exo-legal",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "exo-consent"
 version = "0.1.0-beta"
 dependencies = [
