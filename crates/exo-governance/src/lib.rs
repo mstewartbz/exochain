@@ -7,9 +7,11 @@
 
 pub mod audit;
 pub mod challenge;
+pub mod constitution;
 pub mod clearance;
 pub mod conflict;
 pub mod crosscheck;
+pub mod delegation;
 pub mod custody;
 pub mod deliberation;
 pub mod errors;

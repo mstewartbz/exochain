@@ -122,7 +122,8 @@ fn check_freshness(ts: &Timestamp) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::crypto::{generate_keypair, sign};
-    use exo_identity::did::{DidDocument, LocalDidRegistry, VerificationMethod};
+    use exo_identity::did::{DidDocument, VerificationMethod};
+    use exo_identity::registry::LocalDidRegistry;
 
     use super::*;
 

@@ -1,6 +1,6 @@
 //! API route definitions — BCTS lifecycle, identity, governance endpoints.
 use exo_core::Did;
-use exo_identity::registry::{LocalDidRegistry, DidRegistry};
+use exo_identity::registry::LocalDidRegistry;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -68,7 +68,9 @@ mod tests {
         Hash256, Timestamp,
         crypto::{generate_keypair, sign},
     };
-    use exo_identity::did::{DidDocument, LocalDidRegistry, VerificationMethod};
+    use exo_identity::did::{DidDocument, VerificationMethod};
+    use exo_identity::registry::DidRegistry;
+    use exo_identity::registry::LocalDidRegistry;
 
     use super::*;
 
