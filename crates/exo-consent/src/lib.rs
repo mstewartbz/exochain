@@ -4,6 +4,7 @@
 //! Default posture: DENY.
 
 pub mod bailment;
+pub mod contract;
 pub mod error;
 pub mod gatekeeper;
 pub mod policy;
