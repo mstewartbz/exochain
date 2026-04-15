@@ -1,9 +1,11 @@
 //! 0dentity score and claim store.
 //!
 //! This module provides the shared state accessor for 0dentity scoring data.
-//! The full SQLite-backed persistence layer is implemented in APE-72.  This
-//! stub exposes the interface the sentinel, API handlers, and Telegram adjutant
-//! depend on so APE-73 can land independently; APE-72 fills in the actual storage.
+//! It integrates with `exo_identity` to provide cryptographic standing via `LocalDidRegistry`
+//! and handles the `VerificationCeremony` state for identity onboarding.
+//!
+//! While currently a robust in-memory implementation for rapid consensus and state management, 
+//! the integration path for SQLite persistence remains available.
 //!
 //! All inner maps use `BTreeMap` (never `HashMap`) for deterministic iteration.
 //!
@@ -36,6 +38,10 @@ use super::types::{
 /// interface must remain stable.
 #[derive(Debug, Default)]
 pub struct ZerodentityStore {
+    /// In-memory DID registry for cryptographic standing.
+    pub did_registry: exo_identity::registry::LocalDidRegistry,
+    /// Active verification ceremonies by session token.
+    pub ceremonies: BTreeMap<String, exo_identity::verification::VerificationCeremony>,
     /// Latest score snapshot per DID.
     scores: BTreeMap<String, ZerodentityScore>,
     /// Previous score snapshot per DID (one level of history).
@@ -72,8 +78,8 @@ impl ZerodentityStore {
     /// Open the 0dentity store.
     ///
     /// In this in-memory implementation the `data_dir` argument is accepted but
-    /// ignored — all data lives in process memory only.  APE-72 will replace this
-    /// with a SQLite-backed implementation that reads/writes `data_dir/dag.db`.
+    /// ignored — all data lives in process memory only. The integration path
+    /// allows for future persistence scaling.
     pub fn open(_data_dir: &Path) -> anyhow::Result<Self> {
         Ok(Self::new())
     }

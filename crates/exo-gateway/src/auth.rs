@@ -9,7 +9,7 @@
 //!   4. Ed25519 signature via `exo_identity::did_verification::verify_did_signature`
 //!      against the first active verification method in the resolved DID document
 use exo_core::{Did, Hash256, Signature, Timestamp};
-use exo_identity::{did::DidRegistry, did_verification::verify_did_signature};
+use exo_identity::{registry::{LocalDidRegistry, DidRegistry}, did_verification::verify_did_signature};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GatewayError, Result};
@@ -46,7 +46,7 @@ pub struct AuthenticatedActor {
 /// - `AuthenticationFailed` if the DID is not found in `registry`
 /// - `AuthenticationFailed` if the DID has no active verification method
 /// - `AuthenticationFailed` if signature verification fails
-pub fn authenticate(request: &Request, registry: &DidRegistry) -> Result<AuthenticatedActor> {
+pub fn authenticate(request: &Request, registry: &LocalDidRegistry) -> Result<AuthenticatedActor> {
     // 1. Validate DID format.
     let did = Did::new(&request.actor_did).map_err(|_| GatewayError::AuthenticationFailed {
         reason: format!("invalid DID: {}", request.actor_did),
@@ -122,7 +122,7 @@ fn check_freshness(ts: &Timestamp) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::crypto::{generate_keypair, sign};
-    use exo_identity::did::{DidDocument, DidRegistry, VerificationMethod};
+    use exo_identity::did::{DidDocument, LocalDidRegistry, VerificationMethod};
 
     use super::*;
 
@@ -135,7 +135,7 @@ mod tests {
     /// Build an in-memory registry with a single DID `did:exo:alice` registered
     /// under a freshly generated Ed25519 key pair.  Returns the registry and the
     /// signing key so callers can produce valid signatures.
-    fn registry_with_alice() -> (DidRegistry, exo_core::SecretKey) {
+    fn registry_with_alice() -> (LocalDidRegistry, exo_core::SecretKey) {
         let did = Did::new("did:exo:alice").unwrap();
         let (pk, sk) = generate_keypair();
         let multibase = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
@@ -159,7 +159,7 @@ mod tests {
             updated: Timestamp::ZERO,
             revoked: false,
         };
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
         (reg, sk)
     }

@@ -15,7 +15,8 @@ use exo_gatekeeper::{
     types::{AuthorityChain, BailmentState, Permission, PermissionSet},
 };
 use exo_governance::conflict::ConflictDeclaration;
-use exo_identity::did::{DidDocument, DidRegistry};
+use exo_identity::registry::DidRegistry;
+use exo_identity::{did::DidDocument, registry::LocalDidRegistry};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tokio::net::TcpListener;
@@ -98,7 +99,7 @@ pub struct AppState {
     /// URL (e.g. local dev without Docker Compose).
     pub pool: Option<sqlx::PgPool>,
     /// In-memory DID registry shared across all request handlers.
-    pub registry: Arc<RwLock<DidRegistry>>,
+    pub registry: Arc<RwLock<LocalDidRegistry>>,
     /// Constitutional kernel — enforces the 8 invariants on every action.
     pub kernel: Arc<Kernel>,
     /// Wall-clock milliseconds at server start, used to compute uptime.
@@ -107,7 +108,7 @@ pub struct AppState {
 
 impl AppState {
     /// Create a new `AppState` with an optional database pool and a shared DID registry.
-    pub fn new(pool: Option<sqlx::PgPool>, registry: Arc<RwLock<DidRegistry>>) -> Self {
+    pub fn new(pool: Option<sqlx::PgPool>, registry: Arc<RwLock<LocalDidRegistry>>) -> Self {
         // Bootstrap kernel with the all-invariants set.
         // constitution bytes are hashed for immutability verification.
         let kernel = Kernel::new(b"exochain-constitution-v1", InvariantSet::all());
@@ -1488,7 +1489,7 @@ pub async fn serve_with_extra_routes(
     pool: Option<sqlx::PgPool>,
     extra: Option<Router>,
 ) -> Result<()> {
-    let registry = Arc::new(RwLock::new(DidRegistry::new()));
+    let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
     let state = AppState::new(pool, registry);
     let mut app = build_router(state);
 
@@ -1525,7 +1526,7 @@ mod tests {
     use super::*; // for .oneshot()
 
     fn state() -> AppState {
-        AppState::new(None, Arc::new(RwLock::new(DidRegistry::new())))
+        AppState::new(None, Arc::new(RwLock::new(LocalDidRegistry::new())))
     }
 
     /// Build a minimal DidDocument for use in registration tests.
@@ -1699,7 +1700,7 @@ mod tests {
     #[tokio::test]
     async fn auth_register_duplicate_returns_409() {
         let doc = minimal_doc("did:exo:dup");
-        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc.clone()).unwrap();
         let st = AppState::new(None, registry);
         let body = serde_json::to_string(&doc).unwrap();
@@ -1736,7 +1737,7 @@ mod tests {
     #[tokio::test]
     async fn auth_me_known_did_returns_200() {
         let doc = minimal_doc("did:exo:me-test");
-        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
         let st = AppState::new(None, registry);
         let app = build_router(st);
@@ -1772,7 +1773,7 @@ mod tests {
     #[tokio::test]
     async fn agents_list_returns_registered_dids() {
         let doc = minimal_doc("did:exo:listed");
-        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
         let st = AppState::new(None, registry);
         let app = build_router(st);
@@ -1801,7 +1802,7 @@ mod tests {
     #[tokio::test]
     async fn agent_get_known_did_returns_200() {
         let doc = minimal_doc("did:exo:agent-get");
-        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
         let st = AppState::new(None, registry);
         let app = build_router(st);
@@ -1929,7 +1930,7 @@ mod tests {
     #[tokio::test]
     async fn identity_score_registered_did_returns_200() {
         let doc = minimal_doc("did:exo:scored");
-        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
         let st = AppState::new(None, registry);
         let app = build_router(st);

@@ -13,7 +13,7 @@
 //! | Subscriptions    | 3     |
 //!
 //! Queries include two end-to-end constitutional resolvers:
-//! - `resolveIdentity(did)` — looks up a DID document from the shared `DidRegistry`
+//! - `resolveIdentity(did)` — looks up a DID document from the shared `LocalDidRegistry`
 //! - `evaluateConsent(subject, actor, scope, actionType)` — runs the `PolicyEngine`
 //!
 //! Subscriptions use `tokio::sync::broadcast` for real-time event delivery.
@@ -38,7 +38,7 @@ use exo_consent::{
     },
 };
 use exo_core::{Did, Hash256, Timestamp};
-use exo_identity::did::DidRegistry;
+use exo_identity::registry::{LocalDidRegistry, DidRegistry};
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
@@ -224,7 +224,7 @@ pub struct AppState {
     next_audit_seq: i32,
     event_tx: broadcast::Sender<GovEvent>,
     /// Shared DID registry — wired from `server::AppState` for identity resolution.
-    registry: Arc<RwLock<DidRegistry>>,
+    registry: Arc<RwLock<LocalDidRegistry>>,
     /// Consent policy engine — evaluates `PolicyEngine` rules for consent checks.
     consent_engine: PolicyEngine,
 }
@@ -238,11 +238,11 @@ impl Default for AppState {
 impl AppState {
     /// Create a new `AppState` with a default empty DID registry.
     pub fn new() -> Self {
-        Self::with_registry(Arc::new(RwLock::new(DidRegistry::new())))
+        Self::with_registry(Arc::new(RwLock::new(LocalDidRegistry::new())))
     }
 
     /// Create a new `AppState` with the given shared DID registry.
-    pub fn with_registry(registry: Arc<RwLock<DidRegistry>>) -> Self {
+    pub fn with_registry(registry: Arc<RwLock<LocalDidRegistry>>) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             decisions: BTreeMap::new(),
@@ -266,7 +266,7 @@ impl AppState {
     }
 
     /// Create a new `AppState` with a shared registry, wrapped in `Arc<Mutex<>>`.
-    pub fn new_arc_with_registry(registry: Arc<RwLock<DidRegistry>>) -> Arc<Mutex<Self>> {
+    pub fn new_arc_with_registry(registry: Arc<RwLock<LocalDidRegistry>>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::with_registry(registry)))
     }
 
@@ -449,10 +449,10 @@ impl QueryRoot {
         })
     }
 
-    /// Resolve a DID identity from the shared `DidRegistry`.
+    /// Resolve a DID identity from the shared `LocalDidRegistry`.
     ///
     /// Returns the registration status and key counts for the given DID.
-    /// Wired end-to-end to `exo-identity::DidRegistry` (APE-35 acceptance criterion).
+    /// Wired end-to-end to `exo-identity::LocalDidRegistry` (APE-35 acceptance criterion).
     async fn resolve_identity(&self, ctx: &Context<'_>, did: ID) -> GqlResult<GqlIdentity> {
         let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
         let guard = state.lock().await;
@@ -1379,13 +1379,13 @@ mod tests {
     }
 
     /// APE-35: resolveIdentity returns `registered: true` after a DID is added
-    /// to the shared registry (end-to-end through DidRegistry).
+    /// to the shared registry (end-to-end through LocalDidRegistry).
     #[tokio::test]
     async fn query_resolve_identity_registered_did() {
         use exo_core::Timestamp as Ts;
         use exo_identity::did::{DidDocument, VerificationMethod};
 
-        let registry = Arc::new(RwLock::new(DidRegistry::new()));
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         // Register a DID with one active verification method.
         {
             let mut reg = registry.write().unwrap();

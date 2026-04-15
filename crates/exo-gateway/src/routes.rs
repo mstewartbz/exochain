@@ -1,6 +1,6 @@
 //! API route definitions — BCTS lifecycle, identity, governance endpoints.
 use exo_core::Did;
-use exo_identity::did::DidRegistry;
+use exo_identity::registry::{LocalDidRegistry, DidRegistry};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -35,7 +35,7 @@ pub struct RouteResult {
 /// Process a request through the full middleware chain: auth -> consent -> governance -> execution.
 pub fn process_request(
     request: &Request,
-    registry: &DidRegistry,
+    registry: &LocalDidRegistry,
     route: Route,
     consent: bool,
     verdict: &Verdict,
@@ -68,13 +68,13 @@ mod tests {
         Hash256, Timestamp,
         crypto::{generate_keypair, sign},
     };
-    use exo_identity::did::{DidDocument, DidRegistry, VerificationMethod};
+    use exo_identity::did::{DidDocument, LocalDidRegistry, VerificationMethod};
 
     use super::*;
 
     /// Create a registry with `did:exo:alice` and return the registry +
     /// a signed request using alice's key.
-    fn alice_registry_and_req() -> (DidRegistry, Request) {
+    fn alice_registry_and_req() -> (LocalDidRegistry, Request) {
         let did = Did::new("did:exo:alice").unwrap();
         let (pk, sk) = generate_keypair();
         let multibase = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
@@ -98,7 +98,7 @@ mod tests {
             updated: Timestamp::ZERO,
             revoked: false,
         };
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let body_hash = Hash256::digest(b"route-test");

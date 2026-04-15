@@ -30,7 +30,7 @@ use exo_gatekeeper::{
     },
 };
 use exo_gateway::server::AppState;
-use exo_identity::did::DidRegistry;
+use exo_identity::registry::{LocalDidRegistry, DidRegistry};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,7 +59,7 @@ fn adjudication_kernel() -> Kernel {
 }
 
 fn empty_app_state() -> AppState {
-    AppState::new(None, Arc::new(RwLock::new(DidRegistry::new())))
+    AppState::new(None, Arc::new(RwLock::new(LocalDidRegistry::new())))
 }
 
 fn vote_action(actor: &Did) -> ActionRequest {
@@ -316,7 +316,7 @@ mod db_roundtrip {
         types::{AuthorityChain, AuthorityLink, Permission, PermissionSet},
     };
     use exo_gateway::server::AppState;
-    use exo_identity::did::DidRegistry;
+    use exo_identity::registry::{LocalDidRegistry, DidRegistry};
     use sqlx::postgres::PgPoolOptions;
 
     fn did(s: &str) -> Did {
@@ -427,7 +427,7 @@ mod db_roundtrip {
         .unwrap();
 
         // Build the context from the real DB and adjudicate.
-        let state = AppState::new(Some(pool), Arc::new(RwLock::new(DidRegistry::new())));
+        let state = AppState::new(Some(pool), Arc::new(RwLock::new(LocalDidRegistry::new())));
         let ctx = state.build_adjudication_context(&actor).await;
 
         assert!(
@@ -470,7 +470,7 @@ mod db_roundtrip {
             .await;
 
         let actor = did(actor_did);
-        let state = AppState::new(Some(pool), Arc::new(RwLock::new(DidRegistry::new())));
+        let state = AppState::new(Some(pool), Arc::new(RwLock::new(LocalDidRegistry::new())));
         let ctx = state.build_adjudication_context(&actor).await;
 
         assert!(

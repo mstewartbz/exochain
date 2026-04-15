@@ -14,6 +14,8 @@ pub mod did_verification;
 pub mod error;
 pub mod key_management;
 pub mod pace;
+pub mod registry;
 pub mod risk;
 pub mod shamir;
 pub mod vault;
+pub mod verification;

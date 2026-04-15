@@ -8,12 +8,10 @@
 //! `crypto::verify_hybrid`), providing a cryptographic instantiation of
 //! the `DualControl` constitutional invariant.
 
-use std::collections::BTreeMap;
 
 use exo_core::{Did, PqPublicKey, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
-use crate::error::IdentityError;
 
 /// Authentication method associated with a DID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,106 +131,9 @@ pub struct DidDocument {
 }
 
 /// In-memory DID registry using a `BTreeMap` for deterministic ordering.
-#[derive(Debug, Default)]
-pub struct DidRegistry {
-    documents: BTreeMap<String, DidDocument>,
-}
-
-impl DidRegistry {
-    /// Create an empty DID registry.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Resolve a DID to its document, returning `None` if not found or revoked.
-    #[must_use]
-    pub fn resolve(&self, did: &Did) -> Option<&DidDocument> {
-        self.documents.get(did.as_str()).filter(|doc| !doc.revoked)
-    }
-
-    /// Register a new DID document, returning an error if the DID is already registered.
-    pub fn register(&mut self, doc: DidDocument) -> Result<(), IdentityError> {
-        if self.documents.contains_key(doc.id.as_str()) {
-            return Err(IdentityError::DuplicateDid(doc.id));
-        }
-        self.documents.insert(doc.id.as_str().to_owned(), doc);
-        Ok(())
-    }
-
-    /// Revoke a DID after verifying the revocation proof against a registered public key.
-    pub fn revoke(&mut self, did: &Did, proof: &RevocationProof) -> Result<(), IdentityError> {
-        let doc = self
-            .documents
-            .get_mut(did.as_str())
-            .ok_or_else(|| IdentityError::DidNotFound(did.clone()))?;
-
-        let msg = did.as_str().as_bytes();
-        let valid = doc
-            .public_keys
-            .iter()
-            .any(|pk| crypto::verify(msg, &proof.signature, pk));
-
-        if !valid {
-            return Err(IdentityError::InvalidRevocationProof(did.clone()));
-        }
-
-        doc.revoked = true;
-        Ok(())
-    }
-
-    /// Append a new public key to the DID document after verifying the rotation proof.
-    pub fn rotate_key(
-        &mut self,
-        did: &Did,
-        new_key: &PublicKey,
-        proof: &Signature,
-    ) -> Result<(), IdentityError> {
-        let doc = self
-            .documents
-            .get_mut(did.as_str())
-            .ok_or_else(|| IdentityError::DidNotFound(did.clone()))?;
-
-        if doc.revoked {
-            return Err(IdentityError::DidRevoked(did.clone()));
-        }
-
-        let msg = new_key.as_bytes();
-        let valid = doc
-            .public_keys
-            .iter()
-            .any(|pk| crypto::verify(msg, proof, pk));
-
-        if !valid {
-            return Err(IdentityError::InvalidSignature);
-        }
-
-        doc.public_keys.push(*new_key);
-        doc.updated = Timestamp::new(doc.updated.physical_ms + 1, 0);
-        Ok(())
-    }
-
-    /// Return the total number of registered DID documents (including revoked).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.documents.len()
-    }
-
-    /// Return `true` if the registry contains no DID documents.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.documents.is_empty()
-    }
-
-    /// Return all registered DID strings in deterministic (sorted) order.
-    #[must_use]
-    pub fn list_dids(&self) -> Vec<&str> {
-        self.documents.keys().map(String::as_str).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::registry::{LocalDidRegistry, DidRegistry};
     // bs58 is available as a dependency of this crate
     use bs58;
     use exo_core::crypto::{generate_keypair, sign};
@@ -263,7 +164,7 @@ mod tests {
         let did = make_did("alice");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
         assert_eq!(reg.len(), 1);
         assert!(!reg.is_empty());
@@ -278,7 +179,7 @@ mod tests {
         let did = make_did("bob");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc.clone()).unwrap();
         let err = reg.register(doc).unwrap_err();
         assert!(matches!(err, IdentityError::DuplicateDid(_)));
@@ -286,7 +187,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_did_returns_none() {
-        let reg = DidRegistry::new();
+        let reg = LocalDidRegistry::new();
         assert!(reg.is_empty());
         let did = make_did("nonexistent");
         assert!(reg.resolve(&did).is_none());
@@ -298,7 +199,7 @@ mod tests {
         let did = make_did("charlie");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let proof = RevocationProof {
@@ -318,7 +219,7 @@ mod tests {
             signature: sign(did.as_str().as_bytes(), &sk),
         };
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         let err = reg.revoke(&did, &proof).unwrap_err();
         assert!(matches!(err, IdentityError::DidNotFound(_)));
     }
@@ -329,7 +230,7 @@ mod tests {
         let did = make_did("dave");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let (_pk2, sk2) = generate_keypair();
@@ -347,7 +248,7 @@ mod tests {
         let did = make_did("eve");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let (new_pk, _new_sk) = generate_keypair();
@@ -366,7 +267,7 @@ mod tests {
         let (new_pk, _) = generate_keypair();
         let proof = sign(new_pk.as_bytes(), &sk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         let err = reg.rotate_key(&did, &new_pk, &proof).unwrap_err();
         assert!(matches!(err, IdentityError::DidNotFound(_)));
     }
@@ -377,7 +278,7 @@ mod tests {
         let did = make_did("frank");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let revocation = RevocationProof {
@@ -398,7 +299,7 @@ mod tests {
         let did = make_did("grace");
         let doc = make_doc(did.clone(), pk);
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let (new_pk, _) = generate_keypair();
@@ -432,7 +333,7 @@ mod tests {
             revoked: false,
         };
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
         let resolved = reg.resolve(&did).unwrap();
         assert_eq!(resolved.authentication.len(), 1);
@@ -448,7 +349,7 @@ mod tests {
     fn list_dids_returns_sorted_ids() {
         let (pk1, _) = generate_keypair();
         let (pk2, _) = generate_keypair();
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(make_doc(make_did("charlie"), pk1)).unwrap();
         reg.register(make_doc(make_did("alice"), pk2)).unwrap();
         let dids = reg.list_dids();
@@ -579,7 +480,7 @@ mod tests {
             revoked: false,
         };
 
-        let mut reg = DidRegistry::new();
+        let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
         let resolved = reg.resolve(&did).unwrap();
