@@ -25,3 +25,5 @@ command-base/*.db-shm
 # Environment
 .env
 *.env.local
+.claude/worktrees/
+web/test-gap.mjs
