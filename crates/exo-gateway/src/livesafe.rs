@@ -176,13 +176,18 @@ pub enum LiveSafeMutation {
 // Resolver stubs (mock data)
 // ---------------------------------------------------------------------------
 
-/// Resolve a `LiveSafeQuery` and return a JSON-serialisable result.
-/// Falls back to mock data when no database pool is provided.
-pub fn resolve_query(query: &LiveSafeQuery) -> serde_json::Value {
-    resolve_query_mock(query)
+/// Resolve a `LiveSafeQuery` against a real PostgreSQL database.
+///
+/// Returns a JSON-serialisable result, or `Err` if the database query fails.
+/// **Do not fall back to mock data in production.** Use [`resolve_query_mock`] in tests only.
+pub async fn resolve_query(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> Result<serde_json::Value, sqlx::Error> {
+    Ok(resolve_query_db(query, pool).await)
 }
 
-/// Resolve a query against a real PostgreSQL database.
+/// Resolve a `LiveSafeQuery` against a real PostgreSQL database.
+///
+/// Returns an `Err` on database failure. Empty result sets return an empty JSON array/null
+/// rather than falling back to mock data.
 pub async fn resolve_query_db(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> serde_json::Value {
     use crate::db;
     match query {
@@ -196,12 +201,16 @@ pub async fn resolve_query_db(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> ser
                     "createdAtMs": row.created_at_ms,
                     "exochainAnchor": row.exochain_anchor,
                 }),
-                _ => resolve_query_mock(query),
+                Ok(None) => serde_json::Value::Null,
+                Err(e) => {
+                    tracing::error!(err = %e, did, "DB error fetching livesafe identity");
+                    serde_json::Value::Null
+                }
             }
         }
         LiveSafeQuery::ScanHistory { subscriber_did } => {
             match db::list_scan_receipts(pool, subscriber_did).await {
-                Ok(rows) if !rows.is_empty() => {
+                Ok(rows) => {
                     let receipts: Vec<_> = rows.iter().map(|r| serde_json::json!({
                         "scanId": r.scan_id,
                         "subscriberDid": r.subscriber_did,
@@ -214,12 +223,15 @@ pub async fn resolve_query_db(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> ser
                     })).collect();
                     serde_json::to_value(receipts).unwrap_or_default()
                 }
-                _ => resolve_query_mock(query),
+                Err(e) => {
+                    tracing::error!(err = %e, subscriber_did, "DB error fetching scan history");
+                    serde_json::json!([])
+                }
             }
         }
         LiveSafeQuery::ConsentLog { subscriber_did } => {
             match db::list_consent_anchors(pool, subscriber_did).await {
-                Ok(rows) if !rows.is_empty() => {
+                Ok(rows) => {
                     let consents: Vec<_> = rows.iter().map(|r| serde_json::json!({
                         "consentId": r.consent_id,
                         "subscriberDid": r.subscriber_did,
@@ -232,12 +244,15 @@ pub async fn resolve_query_db(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> ser
                     })).collect();
                     serde_json::to_value(consents).unwrap_or_default()
                 }
-                _ => resolve_query_mock(query),
+                Err(e) => {
+                    tracing::error!(err = %e, subscriber_did, "DB error fetching consent log");
+                    serde_json::json!([])
+                }
             }
         }
         LiveSafeQuery::PaceStatus { subscriber_did } => {
             match db::list_trustee_shards(pool, subscriber_did).await {
-                Ok(rows) if !rows.is_empty() => {
+                Ok(rows) => {
                     let shards: Vec<_> = rows.iter().map(|r| serde_json::json!({
                         "trusteeDid": r.trustee_did,
                         "role": r.role,
@@ -246,13 +261,17 @@ pub async fn resolve_query_db(query: &LiveSafeQuery, pool: &sqlx::PgPool) -> ser
                     })).collect();
                     serde_json::to_value(shards).unwrap_or_default()
                 }
-                _ => resolve_query_mock(query),
+                Err(e) => {
+                    tracing::error!(err = %e, subscriber_did, "DB error fetching PACE shard status");
+                    serde_json::json!([])
+                }
             }
         }
     }
 }
 
-fn resolve_query_mock(query: &LiveSafeQuery) -> serde_json::Value {
+/// FOR TESTING ONLY — returns deterministic mock data. Never call in production resolvers.
+pub fn resolve_query_mock(query: &LiveSafeQuery) -> serde_json::Value {
     match query {
         LiveSafeQuery::Identity { did } => {
             serde_json::to_value(LiveSafeIdentity {
@@ -288,9 +307,13 @@ fn resolve_query_mock(query: &LiveSafeQuery) -> serde_json::Value {
     }
 }
 
-/// Resolve a `LiveSafeMutation` and return a JSON-serialisable result.
-pub fn resolve_mutation(mutation: &LiveSafeMutation) -> serde_json::Value {
-    resolve_mutation_mock(mutation)
+/// Resolve a `LiveSafeMutation` against a real PostgreSQL database.
+///
+/// Returns a JSON-serialisable result. On database failure, logs the error and returns
+/// a best-effort response without falling back to mock data.
+/// **Do not call [`resolve_mutation_mock`] in production resolvers.**
+pub async fn resolve_mutation(mutation: &LiveSafeMutation, pool: &sqlx::PgPool) -> serde_json::Value {
+    resolve_mutation_db(mutation, pool).await
 }
 
 /// Resolve a mutation against a real PostgreSQL database.
@@ -353,7 +376,8 @@ pub async fn resolve_mutation_db(mutation: &LiveSafeMutation, pool: &sqlx::PgPoo
     }
 }
 
-fn resolve_mutation_mock(mutation: &LiveSafeMutation) -> serde_json::Value {
+/// FOR TESTING ONLY — returns deterministic mock data. Never call in production resolvers.
+pub fn resolve_mutation_mock(mutation: &LiveSafeMutation) -> serde_json::Value {
     match mutation {
         LiveSafeMutation::AnchorScan { input } => {
             serde_json::to_value(ScanReceipt {
@@ -513,12 +537,15 @@ mod tests {
         assert!(sdl.contains("livesafeAnchorScan"));
     }
 
+    // NOTE: resolve_query and resolve_mutation now require a PgPool and are async.
+    // Unit tests below use resolve_query_mock / resolve_mutation_mock directly.
+
     #[test]
     fn test_query_identity() {
         let q = LiveSafeQuery::Identity {
             did: "did:exo:subscriber:abc".into(),
         };
-        let result = resolve_query(&q);
+        let result = resolve_query_mock(&q);
         assert_eq!(result["did"], "did:exo:subscriber:abc");
         assert_eq!(result["odentityComposite"], 72.5);
     }
@@ -528,7 +555,7 @@ mod tests {
         let q = LiveSafeQuery::ScanHistory {
             subscriber_did: "did:exo:subscriber:abc".into(),
         };
-        let result = resolve_query(&q);
+        let result = resolve_query_mock(&q);
         assert!(result.is_array());
         assert_eq!(result[0]["subscriberDid"], "did:exo:subscriber:abc");
     }
@@ -538,7 +565,7 @@ mod tests {
         let q = LiveSafeQuery::ConsentLog {
             subscriber_did: "did:exo:subscriber:abc".into(),
         };
-        let result = resolve_query(&q);
+        let result = resolve_query_mock(&q);
         assert!(result.is_array());
         assert_eq!(result[0]["subscriberDid"], "did:exo:subscriber:abc");
     }
@@ -548,7 +575,7 @@ mod tests {
         let q = LiveSafeQuery::PaceStatus {
             subscriber_did: "did:exo:subscriber:abc".into(),
         };
-        let result = resolve_query(&q);
+        let result = resolve_query_mock(&q);
         assert!(result.is_array());
         assert!(result[0]["shardConfirmed"].as_bool().unwrap());
     }
@@ -563,7 +590,7 @@ mod tests {
                 consent_expires_at_ms: 1_700_000_200_000,
             },
         };
-        let result = resolve_mutation(&m);
+        let result = resolve_mutation_mock(&m);
         assert_eq!(result["subscriberDid"], "did:exo:subscriber:abc");
         assert!(result["scanId"].as_str().unwrap().starts_with("scan-"));
     }
@@ -578,7 +605,7 @@ mod tests {
                 expires_at_ms: Some(1_700_086_400_000),
             },
         };
-        let result = resolve_mutation(&m);
+        let result = resolve_mutation_mock(&m);
         assert_eq!(result["subscriberDid"], "did:exo:subscriber:abc");
         assert!(result["consentId"]
             .as_str()
@@ -591,7 +618,7 @@ mod tests {
         let m = LiveSafeMutation::RegisterIdentity {
             did: "did:exo:subscriber:new".into(),
         };
-        let result = resolve_mutation(&m);
+        let result = resolve_mutation_mock(&m);
         assert_eq!(result["did"], "did:exo:subscriber:new");
         assert_eq!(result["odentityComposite"], 0.0);
         assert_eq!(result["paceStatus"], "Incomplete");
@@ -604,7 +631,7 @@ mod tests {
             receipt_hash: "deadbeef".into(),
             event_type: "scan".into(),
         };
-        let result = resolve_mutation(&m);
+        let result = resolve_mutation_mock(&m);
         assert!(result.is_string());
         assert!(!result.as_str().unwrap().is_empty());
     }
