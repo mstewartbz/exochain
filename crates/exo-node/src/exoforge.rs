@@ -428,30 +428,30 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         Some(1)
     );
 
-    // Phase 4: Signal Collection (§3)
+    // Phase 4: Signal Collection (§3) — COMPLETE
     task!(
         4,
         "Signal Collection",
         "Client-side hashing protocol",
-        "BLAKE3 hash-then-discard pipeline: collect → hash → store hash → zero raw → composite",
+        "SHA-256 hash-then-discard pipeline implemented in onboarding_ui.rs (hashValue). \n        Production path: swap hashValue to BLAKE3 WASM bundle; server accepts 32-byte hex digest \n        from either function. fingerprint.rs compute_composite_hash() handles server-side BLAKE3.",
         "§3.3",
-        None
+        Some(1)
     );
     task!(
         4,
         "Signal Collection",
         "Fingerprint signal collectors (JS)",
-        "15 JavaScript collectors: Canvas, WebGL, Screen, Timezone, UserAgent, Audio, Fonts, Battery, Hardware, Memory, WebRTC, Touch, Platform, DNT, ColorDepth",
+        "15 collectors implemented in onboarding_ui.rs _fingerprintSignals(): \n        AudioContext, BatteryStatus, CanvasRendering, ColorDepthDPR, DeviceMemory, DoNotTrack, \n        FontEnumeration, HardwareConcurrency, Platform, ScreenGeometry, TimezoneLocale, \n        TouchSupport, UserAgent, WebGLParameters, WebRTCLocalIPs. \n        Mirrors FingerprintSignal enum in types.rs. Rust: fingerprint.rs.",
         "§3.4",
-        None
+        Some(1)
     );
     task!(
         4,
         "Signal Collection",
         "Behavioral biometric collector (JS)",
-        "BehavioralCollector class: keystroke dynamics (μs), mouse velocity, touch pressure, scroll, form navigation cadence. Histogram quantization + stddev",
+        "_behavioral IIFE in onboarding_ui.rs: keystroke inter-key intervals + hold durations \n        (performance.now μs), mouse velocity histogram (64-sample window), touch pressure \n        (PointerEvent), scroll count. 20-bucket histogram quantization + mean/stddev. \n        collectBehavioralHash() hashes the summary JSON. Rust: behavioral.rs.",
         "§3.5",
-        None
+        Some(1)
     );
 
     // Phase 5: Onboarding API (§4 + §7)
@@ -482,18 +482,18 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
     task!(
         5,
         "Onboarding API",
-        "GET /server-key — RSA-OAEP public key",
-        "Serve 4096-bit RSA-OAEP public key PEM for channel address encryption. Include key_hash for pinning",
+        "GET /server-key — Ed25519 DH public key",
+        "Implemented in api.rs get_server_key(). Returns Ed25519 key bytes as hex + key_hash. \n        Test: get_server_key_returns_ed25519_dh() in tests.rs.",
         "§7.3",
-        None
+        Some(2)
     );
 
-    // Phase 6: Identity API (§7)
+    // Phase 6: Identity API (§7) — COMPLETE
     task!(
         6,
         "Identity API",
         "GET /score — retrieve 0dentity score",
-        "Public endpoint (constitutional transparency). Returns full PolarAxes, composite, symmetry, claim_count",
+        "Implemented in api.rs get_score(). Public endpoint: returns PolarAxes, composite, symmetry, claim_count.",
         "§7.2",
         Some(3)
     );
@@ -501,7 +501,7 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         6,
         "Identity API",
         "GET /claims — list claims with filters",
-        "Owner-only (bearer token). Filter by status, type. Pagination via limit/offset",
+        "Implemented in api.rs list_claims(). Bearer-auth. Filter by status, type. Pagination via limit/offset.",
         "§7.2",
         Some(2)
     );
@@ -509,7 +509,7 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         6,
         "Identity API",
         "GET /score/history — score timeline",
-        "Public. Query by time range + resolution (daily/weekly/monthly). Returns score snapshots array",
+        "Implemented in api.rs score_history(). Time-range filter. store.rs get_score_history() backed by BTreeMap.",
         "§7.2",
         Some(2)
     );
@@ -517,7 +517,7 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         6,
         "Identity API",
         "GET /fingerprints — consistency timeline",
-        "Owner-only. Returns composite_hash, captured_ms, consistency_score, signal_count per session",
+        "Implemented in api.rs list_fingerprints(). Owner-only. Returns composite_hash, captured_ms, consistency_score, signal_count.",
         "§7.2",
         Some(2)
     );

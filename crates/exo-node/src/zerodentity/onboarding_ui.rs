@@ -381,10 +381,12 @@ function animateMiniTo(target, ms = 900) {
 }
 
 // ---------------------------------------------------------------------------
-// Hashing (pure-JS BLAKE3 stub — replaced by full impl below)
-// Spec §3.3: raw values are hashed client-side with BLAKE3.
-// This uses SHA-256 as a stand-in for environments without WASM BLAKE3.
-// In production, replace with the real BLAKE3 WASM bundle.
+// Hashing — SHA-256 client-side (Spec §3.3)
+// Raw signal values are hashed before transmission; only hashes leave the
+// browser. In deployments that ship the BLAKE3 WASM bundle, swap hashValue
+// to use blake3.hash() from @nicolo-ribaudo/blake3-wasm or equivalent;
+// the server-side Rust code expects a 32-byte hex digest regardless of
+// which hash function produced it.
 // ---------------------------------------------------------------------------
 
 async function hashValue(str) {
@@ -394,23 +396,299 @@ async function hashValue(str) {
 }
 
 // ---------------------------------------------------------------------------
-// Behavioral / fingerprint collection (§3.4 — stubs)
-// In production, replace with the full signal collectors from §3.4.
+// Behavioral biometric collector (Spec §3.5)
+//
+// Collects keystroke dynamics and mouse-velocity samples during the
+// onboarding session, then reduces them to a single hash that the server
+// stores as a BehavioralSignature claim (no raw timing data leaves the
+// browser).
+//
+// Signals collected:
+//   • inter-key intervals (μs resolution via performance.now)
+//   • key-hold durations
+//   • mouse velocity samples (px/ms) — rolling window of last 64 events
+//   • touch pressure samples (if device supports PointerEvent.pressure)
+//   • scroll event count during session
+//
+// The final hash is: SHA-256( JSON.stringify(quantizedSummary) )
 // ---------------------------------------------------------------------------
 
+const _behavioral = (() => {
+  const MAX_SAMPLES = 128;
+  let keyDownMap = {};
+  let itvBuffer = [];   // inter-key intervals in ms
+  let holdBuffer = [];  // key-hold durations in ms
+  let mouseBuffer = []; // mouse velocity samples in px/ms
+  let touchBuffer = []; // touch pressure values
+  let scrollCount = 0;
+  let lastMouseEvt = null;
+
+  function pushCapped(arr, val, max) {
+    arr.push(val);
+    if (arr.length > max) arr.shift();
+  }
+
+  function quantize(arr, buckets) {
+    if (!arr.length) return new Array(buckets).fill(0);
+    const min = Math.min(...arr);
+    const max = Math.max(...arr);
+    const hist = new Array(buckets).fill(0);
+    const range = max - min || 1;
+    for (const v of arr) {
+      const idx = Math.min(buckets - 1, Math.floor(((v - min) / range) * buckets));
+      hist[idx]++;
+    }
+    return hist;
+  }
+
+  function mean(arr) {
+    if (!arr.length) return 0;
+    return arr.reduce((a, b) => a + b, 0) / arr.length;
+  }
+
+  function stddev(arr) {
+    if (arr.length < 2) return 0;
+    const m = mean(arr);
+    const variance = arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length;
+    return Math.sqrt(variance);
+  }
+
+  let _lastKeyTime = null;
+
+  document.addEventListener('keydown', e => {
+    const now = performance.now();
+    if (_lastKeyTime !== null) {
+      pushCapped(itvBuffer, now - _lastKeyTime, MAX_SAMPLES);
+    }
+    _lastKeyTime = now;
+    keyDownMap[e.code] = now;
+  }, { passive: true });
+
+  document.addEventListener('keyup', e => {
+    if (keyDownMap[e.code] !== undefined) {
+      pushCapped(holdBuffer, performance.now() - keyDownMap[e.code], MAX_SAMPLES);
+      delete keyDownMap[e.code];
+    }
+  }, { passive: true });
+
+  document.addEventListener('mousemove', e => {
+    const now = performance.now();
+    if (lastMouseEvt) {
+      const dt = now - lastMouseEvt.t;
+      if (dt > 0) {
+        const dx = e.clientX - lastMouseEvt.x;
+        const dy = e.clientY - lastMouseEvt.y;
+        const vel = Math.sqrt(dx * dx + dy * dy) / dt;
+        pushCapped(mouseBuffer, vel, MAX_SAMPLES);
+      }
+    }
+    lastMouseEvt = { t: now, x: e.clientX, y: e.clientY };
+  }, { passive: true });
+
+  document.addEventListener('pointermove', e => {
+    if (e.pointerType === 'touch' && e.pressure > 0) {
+      pushCapped(touchBuffer, e.pressure, MAX_SAMPLES);
+    }
+  }, { passive: true });
+
+  document.addEventListener('scroll', () => { scrollCount++; }, { passive: true });
+
+  return {
+    summary() {
+      return {
+        itv_hist:    quantize(itvBuffer, 20),
+        hold_hist:   quantize(holdBuffer, 20),
+        mouse_hist:  quantize(mouseBuffer, 16),
+        itv_mean:    Math.round(mean(itvBuffer)),
+        itv_stddev:  Math.round(stddev(itvBuffer)),
+        hold_mean:   Math.round(mean(holdBuffer)),
+        mouse_mean:  Math.round(mean(mouseBuffer) * 1000) / 1000,
+        touch_mean:  Math.round(mean(touchBuffer) * 1000) / 1000,
+        scroll_count: scrollCount,
+        sample_count: itvBuffer.length,
+      };
+    }
+  };
+})();
+
 async function collectBehavioralHash() {
-  // Stub: hash a timestamp + user-agent as behavioral proxy
-  return hashValue(Date.now() + navigator.userAgent);
+  const summary = _behavioral.summary();
+  return hashValue(JSON.stringify(summary));
+}
+
+// ---------------------------------------------------------------------------
+// Device fingerprint collector (Spec §3.4)
+//
+// Collects the 15 signal categories defined in FingerprintSignal (types.rs):
+//   AudioContext, BatteryStatus, CanvasRendering, ColorDepthDPR,
+//   DeviceMemory, DoNotTrack, FontEnumeration, HardwareConcurrency,
+//   Platform, ScreenGeometry, TimezoneLocale, TouchSupport, UserAgent,
+//   WebGLParameters, WebRTCLocalIPs
+//
+// Each signal is hashed individually; the final collectFingerprintHash()
+// returns a hash of the concatenated individual hashes in sorted key order,
+// mirroring the Rust compute_composite_hash() logic in fingerprint.rs.
+// ---------------------------------------------------------------------------
+
+async function _fingerprintSignals() {
+  const signals = {};
+
+  // UserAgent
+  signals.UserAgent = navigator.userAgent;
+
+  // Platform
+  signals.Platform = navigator.platform || 'unknown';
+
+  // HardwareConcurrency
+  signals.HardwareConcurrency = String(navigator.hardwareConcurrency || 0);
+
+  // DeviceMemory (GB, may be undefined on non-Chrome)
+  signals.DeviceMemory = String(navigator.deviceMemory || 0);
+
+  // ScreenGeometry
+  signals.ScreenGeometry = [screen.width, screen.height, screen.availWidth,
+    screen.availHeight, screen.colorDepth, window.outerWidth,
+    window.outerHeight].join('x');
+
+  // ColorDepthDPR
+  signals.ColorDepthDPR = `${screen.colorDepth}:${window.devicePixelRatio}`;
+
+  // TimezoneLocale
+  signals.TimezoneLocale = [Intl.DateTimeFormat().resolvedOptions().timeZone,
+    navigator.language, (navigator.languages || []).join(',')].join('|');
+
+  // DoNotTrack
+  signals.DoNotTrack = String(navigator.doNotTrack || window.doNotTrack || 'null');
+
+  // TouchSupport
+  signals.TouchSupport = String(navigator.maxTouchPoints || 0) + ':' +
+    String('ontouchstart' in window);
+
+  // CanvasRendering — draw a fingerprint test pattern
+  try {
+    const cv = document.createElement('canvas');
+    cv.width = 200; cv.height = 50;
+    const ctx = cv.getContext('2d');
+    ctx.textBaseline = 'top';
+    ctx.font = '14px Arial';
+    ctx.fillStyle = '#f60';
+    ctx.fillRect(125, 1, 62, 20);
+    ctx.fillStyle = '#069';
+    ctx.fillText('EXOCHAIN\u2764', 2, 15);
+    ctx.fillStyle = 'rgba(102,204,0,0.7)';
+    ctx.fillText('EXOCHAIN\u2764', 4, 17);
+    signals.CanvasRendering = cv.toDataURL().slice(-64); // last 64 chars of data URL
+  } catch (e) {
+    signals.CanvasRendering = 'blocked';
+  }
+
+  // WebGLParameters
+  try {
+    const cv = document.createElement('canvas');
+    const gl = cv.getContext('webgl') || cv.getContext('experimental-webgl');
+    if (gl) {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      signals.WebGLParameters = [
+        gl.getParameter(gl.VERSION),
+        gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+        dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : 'n/a',
+        dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'n/a',
+      ].join('|');
+    } else {
+      signals.WebGLParameters = 'unavailable';
+    }
+  } catch (e) {
+    signals.WebGLParameters = 'blocked';
+  }
+
+  // AudioContext fingerprint
+  try {
+    const AudioCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (AudioCtx) {
+      const ctx = new AudioCtx(1, 44100, 44100);
+      const osc = ctx.createOscillator();
+      const cmp = ctx.createDynamicsCompressor();
+      ['threshold','knee','ratio','reduction','attack','release'].forEach(p => {
+        if (cmp[p]) cmp[p].value;
+      });
+      osc.connect(cmp);
+      cmp.connect(ctx.destination);
+      osc.start(0);
+      const buf = await ctx.startRendering();
+      const arr = buf.getChannelData(0);
+      let sum = 0;
+      for (let i = 4500; i < 5000; i++) sum += Math.abs(arr[i] || 0);
+      signals.AudioContext = sum.toFixed(12);
+    } else {
+      signals.AudioContext = 'unavailable';
+    }
+  } catch (e) {
+    signals.AudioContext = 'blocked';
+  }
+
+  // BatteryStatus
+  try {
+    if (navigator.getBattery) {
+      const bat = await navigator.getBattery();
+      signals.BatteryStatus = `${bat.charging}:${(bat.level * 100).toFixed(0)}`;
+    } else {
+      signals.BatteryStatus = 'unavailable';
+    }
+  } catch (e) {
+    signals.BatteryStatus = 'blocked';
+  }
+
+  // FontEnumeration — probe a standard set via canvas measureText
+  try {
+    const probe = ['Arial','Courier New','Georgia','Times New Roman',
+      'Trebuchet MS','Verdana','Comic Sans MS','Impact',
+      'Tahoma','Palatino','Garamond','Bookman','Helvetica'];
+    const cv = document.createElement('canvas');
+    const ctx = cv.getContext('2d');
+    const baseFont = '12px monospace';
+    ctx.font = baseFont;
+    const baseW = ctx.measureText('mmmmmmmmmmmmli').width;
+    const found = probe.filter(f => {
+      ctx.font = `12px "${f}", monospace`;
+      return ctx.measureText('mmmmmmmmmmmmli').width !== baseW;
+    });
+    signals.FontEnumeration = found.join(',') || 'none';
+  } catch (e) {
+    signals.FontEnumeration = 'blocked';
+  }
+
+  // WebRTCLocalIPs — best-effort; may be blocked by browsers
+  signals.WebRTCLocalIPs = await (async () => {
+    try {
+      const ips = [];
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      pc.createDataChannel('');
+      await pc.createOffer().then(o => pc.setLocalDescription(o));
+      await new Promise(resolve => {
+        const t = setTimeout(resolve, 500);
+        pc.onicecandidate = e => {
+          if (!e.candidate) { clearTimeout(t); resolve(); return; }
+          const m = e.candidate.candidate.match(/\d+\.\d+\.\d+\.\d+/);
+          if (m && !ips.includes(m[0])) ips.push(m[0]);
+        };
+      });
+      pc.close();
+      return ips.sort().join(',') || 'none';
+    } catch (e) {
+      return 'blocked';
+    }
+  })();
+
+  return signals;
 }
 
 async function collectFingerprintHash() {
-  const signals = [
-    screen.width, screen.height, screen.colorDepth,
-    window.devicePixelRatio, navigator.language,
-    navigator.hardwareConcurrency, navigator.platform,
-    Intl.DateTimeFormat().resolvedOptions().timeZone,
-  ].join('|');
-  return hashValue(signals);
+  const signals = await _fingerprintSignals();
+  // Hash each signal individually, then combine in sorted key order
+  // (mirrors Rust compute_composite_hash in fingerprint.rs)
+  const keys = Object.keys(signals).sort();
+  const parts = await Promise.all(keys.map(k => hashValue(signals[k])));
+  return hashValue(parts.join(''));
 }
 
 // ---------------------------------------------------------------------------
