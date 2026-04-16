@@ -1,14 +1,54 @@
 //! Cryptographic primitives — hash, sign, verify.
 //!
 //! This module provides ergonomic wrappers around [`exo_core::crypto`] for the
-//! three operations every SDK user needs: hashing bytes, signing a message, and
-//! verifying a signature. The underlying primitives are BLAKE3 for hashing and
-//! Ed25519 for classical signatures.
+//! three operations every SDK user needs: hashing bytes, signing a message,
+//! and verifying a signature. The underlying primitives are **BLAKE3** for
+//! hashing and **Ed25519** for classical signatures.
+//!
+//! ## Why use this module
+//!
+//! - You want to hash and sign without pulling in the full `exo-core` crate
+//!   or sorting out the right primitive to use.
+//! - You want deterministic, reproducible hex digests for logging and test
+//!   vectors.
+//! - You want re-exports of the foundational types ([`Did`], [`PublicKey`],
+//!   [`SecretKey`], [`Signature`], [`Hash256`], [`Timestamp`]) from a single
+//!   place.
+//!
+//! ## Quick start
+//!
+//! ```
+//! use exochain_sdk::crypto::{generate_keypair, hash, hash_hex, sign, verify};
+//!
+//! // Hash bytes.
+//! let digest = hash(b"hello");
+//! assert_eq!(digest.len(), 32);
+//! assert_eq!(hash_hex(b"hello").len(), 64);
+//!
+//! // Sign and verify.
+//! let (pk, sk) = generate_keypair();
+//! let sig = sign(b"payload", &sk);
+//! assert!(verify(b"payload", &sig, &pk));
+//! ```
 
 pub use exo_core::crypto::{generate_keypair, sign, verify};
 pub use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp};
 
 /// Compute the BLAKE3 hash of `data`, returning the raw 32-byte digest.
+///
+/// BLAKE3 is collision-resistant, deterministic, and the same hash used for
+/// DID derivation, bailment IDs, and decision IDs across the Rust SDK.
+///
+/// # Examples
+///
+/// ```
+/// use exochain_sdk::crypto::hash;
+///
+/// let a = hash(b"hello");
+/// let b = hash(b"hello");
+/// assert_eq!(a, b); // deterministic
+/// assert_ne!(a, hash(b"world"));
+/// ```
 #[must_use]
 pub fn hash(data: &[u8]) -> [u8; 32] {
     *blake3::hash(data).as_bytes()
@@ -16,6 +56,19 @@ pub fn hash(data: &[u8]) -> [u8; 32] {
 
 /// Compute the BLAKE3 hash of `data`, returning it as a 64-character lowercase
 /// hex string.
+///
+/// Use this when you want a human-readable, copy-pasteable digest — for
+/// example when logging a fingerprint or embedding a hash in JSON.
+///
+/// # Examples
+///
+/// ```
+/// use exochain_sdk::crypto::hash_hex;
+///
+/// let hex = hash_hex(b"hello");
+/// assert_eq!(hex.len(), 64);
+/// assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+/// ```
 #[must_use]
 pub fn hash_hex(data: &[u8]) -> String {
     let digest = blake3::hash(data);

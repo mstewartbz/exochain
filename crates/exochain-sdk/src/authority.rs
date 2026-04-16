@@ -1,9 +1,43 @@
 //! Authority delegation and chain verification.
 //!
-//! An authority chain is an ordered list of delegation links where the
+//! An **authority chain** is an ordered list of delegation links where the
 //! `grantee` of each link is the `grantor` of the next. The chain terminates
 //! at a specific actor (the "terminal"). [`AuthorityChainBuilder`] accumulates
-//! links and validates the resulting topology on [`AuthorityChainBuilder::build`].
+//! links and validates the resulting topology on
+//! [`AuthorityChainBuilder::build`]. Structurally:
+//!
+//! ```text
+//! root --[perms]--> middle --[perms]--> leaf
+//! ```
+//!
+//! ## Why use this module
+//!
+//! - You need to prove that a terminal actor was delegated authority through
+//!   a well-formed chain rooted at a specific principal.
+//! - You want the SDK to reject broken topologies (gaps, wrong terminal,
+//!   empty chain) before you ever submit them to the kernel.
+//! - You want the validated chain as a serializable artifact that survives
+//!   network hops and storage.
+//!
+//! ## Quick start
+//!
+//! ```
+//! use exochain_sdk::authority::AuthorityChainBuilder;
+//! use exo_core::Did;
+//!
+//! let root = Did::new("did:exo:root").expect("valid");
+//! let mid = Did::new("did:exo:mid").expect("valid");
+//! let leaf = Did::new("did:exo:leaf").expect("valid");
+//!
+//! let chain = AuthorityChainBuilder::new()
+//!     .add_link(root, mid.clone(), vec!["delegate".into()])
+//!     .add_link(mid, leaf.clone(), vec!["read".into()])
+//!     .build(&leaf)?;
+//!
+//! assert_eq!(chain.depth, 2);
+//! assert_eq!(chain.terminal, leaf);
+//! # Ok::<(), exochain_sdk::error::ExoError>(())
+//! ```
 
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
@@ -11,6 +45,25 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ExoError, ExoResult};
 
 /// Builder for a validated authority chain.
+///
+/// Links are appended one at a time with [`AuthorityChainBuilder::add_link`]
+/// and the full chain is validated by [`AuthorityChainBuilder::build`]. The
+/// builder is `Default` and `Clone`, so a partially-built chain can be forked.
+///
+/// # Examples
+///
+/// ```
+/// use exochain_sdk::authority::AuthorityChainBuilder;
+/// use exo_core::Did;
+///
+/// let root = Did::new("did:exo:root").expect("valid");
+/// let leaf = Did::new("did:exo:leaf").expect("valid");
+/// let chain = AuthorityChainBuilder::new()
+///     .add_link(root, leaf.clone(), vec!["all".into()])
+///     .build(&leaf)?;
+/// assert_eq!(chain.depth, 1);
+/// # Ok::<(), exochain_sdk::error::ExoError>(())
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct AuthorityChainBuilder {
     links: Vec<ChainLink>,
@@ -18,12 +71,36 @@ pub struct AuthorityChainBuilder {
 
 impl AuthorityChainBuilder {
     /// Construct an empty builder.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::authority::AuthorityChainBuilder;
+    /// let builder = AuthorityChainBuilder::new();
+    /// # let _ = builder;
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self { links: Vec::new() }
     }
 
     /// Append a new delegation link.
+    ///
+    /// Each link records that `grantor` has delegated `permissions` to
+    /// `grantee`. Permission strings are opaque to the SDK; downstream
+    /// consumers are free to interpret them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::authority::AuthorityChainBuilder;
+    /// # use exo_core::Did;
+    /// let a = Did::new("did:exo:a").expect("valid");
+    /// let b = Did::new("did:exo:b").expect("valid");
+    /// let builder = AuthorityChainBuilder::new()
+    ///     .add_link(a, b, vec!["read".into(), "write".into()]);
+    /// # let _ = builder;
+    /// ```
     #[must_use]
     pub fn add_link(mut self, grantor: Did, grantee: Did, permissions: Vec<String>) -> Self {
         self.links.push(ChainLink {
@@ -38,12 +115,53 @@ impl AuthorityChainBuilder {
     ///
     /// Validation rules:
     /// - The chain must contain at least one link.
-    /// - For each consecutive pair of links, `links[i].grantee == links[i+1].grantor`.
+    /// - For each consecutive pair of links,
+    ///   `links[i].grantee == links[i+1].grantor`.
     /// - The final link's `grantee` must equal `terminal_actor`.
     ///
     /// # Errors
     ///
-    /// Returns [`ExoError::Authority`] if any rule is violated.
+    /// Returns [`ExoError::Authority`] if any rule is violated: empty chain,
+    /// a broken delegation between consecutive links, or a mismatch between
+    /// the terminal link's grantee and `terminal_actor`.
+    ///
+    /// # Examples
+    ///
+    /// A valid three-link chain:
+    ///
+    /// ```
+    /// use exochain_sdk::authority::AuthorityChainBuilder;
+    /// use exo_core::Did;
+    ///
+    /// let root = Did::new("did:exo:root").expect("valid");
+    /// let mid = Did::new("did:exo:mid").expect("valid");
+    /// let leaf = Did::new("did:exo:leaf").expect("valid");
+    /// let chain = AuthorityChainBuilder::new()
+    ///     .add_link(root, mid.clone(), vec!["delegate".into()])
+    ///     .add_link(mid, leaf.clone(), vec!["read".into()])
+    ///     .build(&leaf)?;
+    /// assert_eq!(chain.depth, 2);
+    /// # Ok::<(), exochain_sdk::error::ExoError>(())
+    /// ```
+    ///
+    /// A broken chain (middle grantee does not match next grantor):
+    ///
+    /// ```
+    /// use exochain_sdk::authority::AuthorityChainBuilder;
+    /// use exochain_sdk::error::ExoError;
+    /// use exo_core::Did;
+    ///
+    /// let root = Did::new("did:exo:root").expect("valid");
+    /// let mid = Did::new("did:exo:mid").expect("valid");
+    /// let other = Did::new("did:exo:other").expect("valid");
+    /// let leaf = Did::new("did:exo:leaf").expect("valid");
+    /// let err = AuthorityChainBuilder::new()
+    ///     .add_link(root, mid, vec!["read".into()])
+    ///     .add_link(other, leaf.clone(), vec!["read".into()])
+    ///     .build(&leaf)
+    ///     .unwrap_err();
+    /// assert!(matches!(err, ExoError::Authority(_)));
+    /// ```
     pub fn build(self, terminal_actor: &Did) -> ExoResult<ValidatedChain> {
         if self.links.is_empty() {
             return Err(ExoError::Authority("authority chain is empty".into()));

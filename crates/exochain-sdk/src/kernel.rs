@@ -1,10 +1,39 @@
 //! Constitutional Governance Runtime (CGR) Kernel interface.
 //!
+//! The **CGR kernel** is the heart of EXOCHAIN. Every action that matters —
+//! reading data, delegating authority, invoking a tool — is first submitted
+//! to the kernel, which checks the action against the constitution and the
+//! eight structural invariants (including `NoSelfGrant`, `ConsentRequired`,
+//! and `KernelImmutability`). Only if the kernel returns `Permitted` does the
+//! action run.
+//!
 //! [`ConstitutionalKernel`] is a simplified, ergonomic wrapper around
 //! [`exo_gatekeeper::Kernel`]. It initialises the kernel with the default
 //! EXOCHAIN constitution text and the full set of eight constitutional
 //! invariants, and exposes a minimal [`ConstitutionalKernel::adjudicate`]
 //! that supplies reasonable defaults for the adjudication context.
+//!
+//! ## Why use this module
+//!
+//! - You want to ask "is this action permitted?" without having to construct
+//!   the full [`exo_gatekeeper::AdjudicationContext`] by hand.
+//! - You want to exercise specific invariants (self-grant, kernel
+//!   modification, consent-required) in tests via the named `adjudicate_*`
+//!   helpers.
+//! - You want the same verdict enum to flow through your application and
+//!   your test vectors.
+//!
+//! ## Quick start
+//!
+//! ```
+//! use exochain_sdk::kernel::ConstitutionalKernel;
+//! use exo_core::Did;
+//!
+//! let kernel = ConstitutionalKernel::new();
+//! let actor = Did::new("did:exo:alice").expect("valid");
+//! let verdict = kernel.adjudicate(&actor, "data:medical:read");
+//! assert!(verdict.is_permitted());
+//! ```
 
 use exo_core::Did;
 use exo_gatekeeper::{
@@ -29,6 +58,21 @@ const INVARIANT_COUNT: usize = 8;
 /// This mirrors [`exo_gatekeeper::Verdict`] but flattens the violation list
 /// to a simple `Vec<String>` so SDK consumers do not need to depend on the
 /// full gatekeeper types.
+///
+/// # Examples
+///
+/// ```
+/// use exochain_sdk::kernel::KernelVerdict;
+///
+/// let ok = KernelVerdict::Permitted;
+/// assert!(ok.is_permitted());
+///
+/// let denied = KernelVerdict::Denied { violations: vec!["NoSelfGrant".into()] };
+/// assert!(denied.is_denied());
+///
+/// let escalated = KernelVerdict::Escalated { reason: "human review".into() };
+/// assert!(escalated.is_escalated());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KernelVerdict {
     /// The action is permitted.
@@ -47,18 +91,42 @@ pub enum KernelVerdict {
 
 impl KernelVerdict {
     /// Returns `true` if the verdict is [`KernelVerdict::Permitted`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::kernel::KernelVerdict;
+    /// assert!(KernelVerdict::Permitted.is_permitted());
+    /// assert!(!KernelVerdict::Denied { violations: vec![] }.is_permitted());
+    /// ```
     #[must_use]
     pub fn is_permitted(&self) -> bool {
         matches!(self, Self::Permitted)
     }
 
     /// Returns `true` if the verdict is [`KernelVerdict::Denied`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::kernel::KernelVerdict;
+    /// let v = KernelVerdict::Denied { violations: vec!["NoSelfGrant".into()] };
+    /// assert!(v.is_denied());
+    /// ```
     #[must_use]
     pub fn is_denied(&self) -> bool {
         matches!(self, Self::Denied { .. })
     }
 
     /// Returns `true` if the verdict is [`KernelVerdict::Escalated`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::kernel::KernelVerdict;
+    /// let v = KernelVerdict::Escalated { reason: "human in the loop".into() };
+    /// assert!(v.is_escalated());
+    /// ```
     #[must_use]
     pub fn is_escalated(&self) -> bool {
         matches!(self, Self::Escalated { .. })
@@ -72,6 +140,21 @@ impl KernelVerdict {
 /// an active bailment to a sentinel bailor. Callers needing fine-grained
 /// control over the adjudication context should use [`exo_gatekeeper::Kernel`]
 /// directly.
+///
+/// # Examples
+///
+/// ```
+/// use exochain_sdk::kernel::ConstitutionalKernel;
+/// use exo_core::Did;
+///
+/// let kernel = ConstitutionalKernel::new();
+/// assert!(kernel.verify_integrity());
+/// assert_eq!(kernel.invariant_count(), 8);
+///
+/// let actor = Did::new("did:exo:alice").expect("valid");
+/// let verdict = kernel.adjudicate(&actor, "read:profile");
+/// assert!(verdict.is_permitted());
+/// ```
 pub struct ConstitutionalKernel {
     inner: Kernel,
     constitution: Vec<u8>,
@@ -80,6 +163,15 @@ pub struct ConstitutionalKernel {
 impl ConstitutionalKernel {
     /// Construct a new kernel with the default constitution and all eight
     /// constitutional invariants.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::kernel::ConstitutionalKernel;
+    /// let kernel = ConstitutionalKernel::new();
+    /// assert_eq!(kernel.invariant_count(), 8);
+    /// assert!(kernel.verify_integrity());
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -92,8 +184,8 @@ impl ConstitutionalKernel {
     ///
     /// The SDK supplies a permissive default context:
     /// - A single Judicial role for `actor`.
-    /// - A one-link authority chain `did:exo:root → actor` granting `read`.
-    /// - An active bailment from `did:exo:sdk-bailor → actor` scoped to
+    /// - A one-link authority chain `did:exo:root -> actor` granting `read`.
+    /// - An active bailment from `did:exo:sdk-bailor -> actor` scoped to
     ///   `action`.
     /// - Full human-override preservation.
     /// - Signed provenance with timestamp `"sdk"`.
@@ -103,29 +195,82 @@ impl ConstitutionalKernel {
     ///
     /// The action is flagged as `is_self_grant = false` and
     /// `modifies_kernel = false` by default. Helpers are available for the
-    /// common deny-cases used in tests: see [`Self::adjudicate_self_grant`]
-    /// and [`Self::adjudicate_kernel_modification`].
+    /// common deny-cases used in tests: see
+    /// [`Self::adjudicate_self_grant`],
+    /// [`Self::adjudicate_kernel_modification`], and
+    /// [`Self::adjudicate_without_bailment`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exochain_sdk::kernel::ConstitutionalKernel;
+    /// use exo_core::Did;
+    ///
+    /// let kernel = ConstitutionalKernel::new();
+    /// let actor = Did::new("did:exo:alice").expect("valid");
+    /// let verdict = kernel.adjudicate(&actor, "data:read");
+    /// assert!(verdict.is_permitted());
+    /// ```
     #[must_use]
     pub fn adjudicate(&self, actor: &Did, action: &str) -> KernelVerdict {
         self.adjudicate_internal(actor, action, false, false, true, true)
     }
 
     /// Same as [`Self::adjudicate`] but sets `is_self_grant = true` so the
-    /// kernel can enforce the NoSelfGrant invariant.
+    /// kernel can enforce the `NoSelfGrant` invariant.
+    ///
+    /// Useful for exercising the invariant in tests: a permitted verdict
+    /// here would indicate a constitutional defect.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exochain_sdk::kernel::ConstitutionalKernel;
+    /// use exo_core::Did;
+    ///
+    /// let kernel = ConstitutionalKernel::new();
+    /// let actor = Did::new("did:exo:self-granter").expect("valid");
+    /// let verdict = kernel.adjudicate_self_grant(&actor, "escalate-self");
+    /// assert!(verdict.is_denied());
+    /// ```
     #[must_use]
     pub fn adjudicate_self_grant(&self, actor: &Did, action: &str) -> KernelVerdict {
         self.adjudicate_internal(actor, action, true, false, true, true)
     }
 
     /// Same as [`Self::adjudicate`] but sets `modifies_kernel = true` so the
-    /// kernel can enforce the KernelImmutability invariant.
+    /// kernel can enforce the `KernelImmutability` invariant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exochain_sdk::kernel::ConstitutionalKernel;
+    /// use exo_core::Did;
+    ///
+    /// let kernel = ConstitutionalKernel::new();
+    /// let actor = Did::new("did:exo:patcher").expect("valid");
+    /// let verdict = kernel.adjudicate_kernel_modification(&actor, "patch-kernel");
+    /// assert!(verdict.is_denied());
+    /// ```
     #[must_use]
     pub fn adjudicate_kernel_modification(&self, actor: &Did, action: &str) -> KernelVerdict {
         self.adjudicate_internal(actor, action, false, true, true, true)
     }
 
     /// Same as [`Self::adjudicate`] but omits the default bailment so the
-    /// kernel can enforce the ConsentRequired invariant.
+    /// kernel can enforce the `ConsentRequired` invariant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exochain_sdk::kernel::ConstitutionalKernel;
+    /// use exo_core::Did;
+    ///
+    /// let kernel = ConstitutionalKernel::new();
+    /// let actor = Did::new("did:exo:unauth").expect("valid");
+    /// let verdict = kernel.adjudicate_without_bailment(&actor, "read-data");
+    /// assert!(verdict.is_denied());
+    /// ```
     #[must_use]
     pub fn adjudicate_without_bailment(&self, actor: &Did, action: &str) -> KernelVerdict {
         self.adjudicate_internal(actor, action, false, false, false, true)
@@ -133,12 +278,32 @@ impl ConstitutionalKernel {
 
     /// Verify that the kernel's stored constitution hash matches the
     /// configured constitution text.
+    ///
+    /// Returns `false` if the constitution in memory has drifted from the
+    /// hash the kernel was initialised with — which should never happen in
+    /// practice, but is checked defensively because constitutional integrity
+    /// is a load-bearing invariant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::kernel::ConstitutionalKernel;
+    /// let kernel = ConstitutionalKernel::new();
+    /// assert!(kernel.verify_integrity());
+    /// ```
     #[must_use]
     pub fn verify_integrity(&self) -> bool {
         self.inner.verify_kernel_integrity(&self.constitution)
     }
 
     /// Number of constitutional invariants enforced by this kernel (always 8).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::kernel::ConstitutionalKernel;
+    /// assert_eq!(ConstitutionalKernel::new().invariant_count(), 8);
+    /// ```
     #[must_use]
     pub fn invariant_count(&self) -> usize {
         INVARIANT_COUNT
