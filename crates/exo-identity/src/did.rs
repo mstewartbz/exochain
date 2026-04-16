@@ -133,6 +133,7 @@ pub struct DidDocument {
 /// In-memory DID registry using a `BTreeMap` for deterministic ordering.
 #[cfg(test)]
 mod tests {
+    use crate::error::IdentityError;
     use crate::registry::{LocalDidRegistry, DidRegistry};
     // bs58 is available as a dependency of this crate
     use bs58;
