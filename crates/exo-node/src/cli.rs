@@ -84,4 +84,16 @@ pub enum Command {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+
+    /// Start the MCP (Model Context Protocol) server on stdio.
+    /// Enables AI agents to interact with the governance fabric.
+    Mcp {
+        /// Data directory (default: ~/.exochain).
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// DID for the MCP actor. If not provided, uses the node's identity.
+        #[arg(long)]
+        actor_did: Option<String>,
+    },
 }

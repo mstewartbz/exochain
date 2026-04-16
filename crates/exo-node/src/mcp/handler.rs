@@ -1,0 +1,512 @@
+//! MCP server handler — processes JSON-RPC requests from AI clients.
+//!
+//! The `McpServer` is the main entry point for handling MCP protocol messages.
+//! It dispatches JSON-RPC requests to the appropriate handlers, enforces
+//! constitutional constraints through the middleware, and returns properly
+//! formatted JSON-RPC responses.
+
+use exo_core::Did;
+use serde_json::Value;
+
+use super::error::McpError;
+use super::middleware::ConstitutionalMiddleware;
+use super::protocol::{
+    InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResponse, ResourcesCapability,
+    ServerCapabilities, ServerInfo, ToolContent, ToolResult, ToolsCapability, INTERNAL_ERROR,
+    INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
+};
+use super::tools::ToolRegistry;
+
+/// MCP server that processes JSON-RPC messages from AI clients.
+///
+/// Each server instance is bound to a specific actor DID, ensuring that
+/// all tool invocations are constitutionally adjudicated for that actor.
+pub struct McpServer {
+    actor_did: Did,
+    registry: ToolRegistry,
+    middleware: ConstitutionalMiddleware,
+}
+
+impl McpServer {
+    /// Create a new MCP server for the given actor DID.
+    ///
+    /// Initializes the tool registry with all built-in tools and creates
+    /// a constitutional middleware instance with the full kernel.
+    #[must_use]
+    pub fn new(actor_did: Did) -> Self {
+        Self {
+            actor_did,
+            registry: ToolRegistry::default(),
+            middleware: ConstitutionalMiddleware::new(),
+        }
+    }
+
+    /// Returns the actor DID string.
+    #[must_use]
+    pub fn actor_did(&self) -> &str {
+        self.actor_did.as_str()
+    }
+
+    /// Returns the number of registered tools.
+    #[must_use]
+    pub fn tool_count(&self) -> usize {
+        self.registry.list().len()
+    }
+
+    /// Handle a raw JSON-RPC message string.
+    ///
+    /// Returns `Some(response)` for requests (messages with an `id`),
+    /// and `None` for notifications (messages without an `id`).
+    #[must_use]
+    pub fn handle_message(&self, message: &str) -> Option<String> {
+        let request: JsonRpcRequest = match serde_json::from_str(message) {
+            Ok(req) => req,
+            Err(e) => {
+                let resp = JsonRpcResponse::error(
+                    None,
+                    PARSE_ERROR,
+                    format!("parse error: {e}"),
+                );
+                return Some(serde_json::to_string(&resp).unwrap_or_default());
+            }
+        };
+
+        // Notifications (no id) don't get responses.
+        // Process notification side-effects (none for now) and return.
+        request.id.as_ref()?;
+
+        let response = self.dispatch(&request);
+        Some(serde_json::to_string(&response).unwrap_or_default())
+    }
+
+    /// Dispatch a parsed JSON-RPC request to the appropriate handler.
+    fn dispatch(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        match request.method.as_str() {
+            "initialize" => self.handle_initialize(request),
+            "notifications/initialized" => {
+                // This is a notification but sometimes sent with an id.
+                JsonRpcResponse::success(request.id.clone(), Value::Null)
+            }
+            "tools/list" => self.handle_tools_list(request),
+            "tools/call" => self.handle_tools_call(request),
+            "resources/list" => self.handle_resources_list(request),
+            "ping" => self.handle_ping(request),
+            _ => JsonRpcResponse::error(
+                request.id.clone(),
+                METHOD_NOT_FOUND,
+                format!("method not found: {}", request.method),
+            ),
+        }
+    }
+
+    /// Handle `initialize` — returns server capabilities.
+    fn handle_initialize(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        // Validate params if provided.
+        if let Some(ref params) = request.params {
+            if serde_json::from_value::<InitializeParams>(params.clone()).is_err() {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "invalid initialize params".into(),
+                );
+            }
+        }
+
+        let result = InitializeResult {
+            protocol_version: "2024-11-05".into(),
+            capabilities: ServerCapabilities {
+                tools: Some(ToolsCapability { list_changed: false }),
+                resources: Some(ResourcesCapability {
+                    subscribe: false,
+                    list_changed: false,
+                }),
+                prompts: None,
+            },
+            server_info: ServerInfo {
+                name: "exochain-mcp".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        };
+
+        match serde_json::to_value(&result) {
+            Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
+            Err(e) => JsonRpcResponse::error(
+                request.id.clone(),
+                INTERNAL_ERROR,
+                format!("serialization error: {e}"),
+            ),
+        }
+    }
+
+    /// Handle `tools/list` — returns all registered tools.
+    fn handle_tools_list(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        let tools: Vec<Value> = self
+            .registry
+            .list()
+            .into_iter()
+            .filter_map(|t| serde_json::to_value(t).ok())
+            .collect();
+
+        JsonRpcResponse::success(
+            request.id.clone(),
+            serde_json::json!({ "tools": tools }),
+        )
+    }
+
+    /// Handle `tools/call` — dispatch to a specific tool with constitutional enforcement.
+    fn handle_tools_call(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        let params = match &request.params {
+            Some(p) => p,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "missing params for tools/call".into(),
+                );
+            }
+        };
+
+        let tool_name = match params.get("name").and_then(|n| n.as_str()) {
+            Some(name) => name,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "missing 'name' in tools/call params".into(),
+                );
+            }
+        };
+
+        let tool_params = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        // Constitutional enforcement before tool execution.
+        if let Err(e) = self.middleware.enforce(&self.actor_did, tool_name) {
+            let error_result = ToolResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Constitutional enforcement failed: {e}"),
+                }],
+                is_error: true,
+            };
+            return match serde_json::to_value(&error_result) {
+                Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
+                Err(ser_err) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    INTERNAL_ERROR,
+                    format!("serialization error: {ser_err}"),
+                ),
+            };
+        }
+
+        // Execute the tool.
+        match self.registry.execute(tool_name, &tool_params) {
+            Ok(result) => match serde_json::to_value(&result) {
+                Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
+                Err(e) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    INTERNAL_ERROR,
+                    format!("serialization error: {e}"),
+                ),
+            },
+            Err(McpError::ToolNotFound(name)) => {
+                let error_result = ToolResult {
+                    content: vec![ToolContent::Text {
+                        text: format!("Tool not found: {name}"),
+                    }],
+                    is_error: true,
+                };
+                match serde_json::to_value(&error_result) {
+                    Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
+                    Err(ser_err) => JsonRpcResponse::error(
+                        request.id.clone(),
+                        INVALID_REQUEST,
+                        format!("tool not found: {name} (serialization error: {ser_err})"),
+                    ),
+                }
+            }
+            Err(e) => JsonRpcResponse::error(
+                request.id.clone(),
+                INTERNAL_ERROR,
+                format!("tool execution error: {e}"),
+            ),
+        }
+    }
+
+    /// Handle `resources/list` — returns empty list (resources coming in next phase).
+    fn handle_resources_list(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        JsonRpcResponse::success(
+            request.id.clone(),
+            serde_json::json!({ "resources": [] }),
+        )
+    }
+
+    /// Handle `ping` — returns pong.
+    fn handle_ping(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        JsonRpcResponse::success(request.id.clone(), serde_json::json!({}))
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn test_server() -> McpServer {
+        McpServer::new(Did::new("did:exo:test-ai-agent").expect("valid DID"))
+    }
+
+    #[test]
+    fn handler_initialize() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test-client" }
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "exochain-mcp");
+        assert!(result["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn handler_tools_list() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 21, "expected 3+5+4+5+4 = 21 tools");
+        // Tools are in BTreeMap order (alphabetical).
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"exochain_node_status"));
+        assert!(names.contains(&"exochain_create_identity"));
+        assert!(names.contains(&"exochain_propose_bailment"));
+        assert!(names.contains(&"exochain_create_decision"));
+        assert!(names.contains(&"exochain_adjudicate_action"));
+    }
+
+    #[test]
+    fn handler_tools_call_node_status() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "exochain_node_status",
+                "arguments": {}
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        // The result is a ToolResult with content.
+        let content = result["content"].as_array().unwrap();
+        assert!(!content.is_empty());
+        assert_eq!(content[0]["type"], "text");
+        let text = content[0]["text"].as_str().unwrap();
+        let status: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(status["node"], "exochain");
+    }
+
+    #[test]
+    fn handler_tools_call_unknown() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "nonexistent_tool",
+                "arguments": {}
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        // Unknown tools return a ToolResult with is_error: true.
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        assert_eq!(result["is_error"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not found"));
+    }
+
+    #[test]
+    fn handler_invalid_json() {
+        let server = test_server();
+        let response = server.handle_message("not json at all{{{").unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, PARSE_ERROR);
+    }
+
+    #[test]
+    fn handler_ping() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "ping"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        assert!(parsed.result.is_some());
+    }
+
+    #[test]
+    fn handler_unknown_method() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "nonexistent/method"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn handler_notification_returns_none() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg);
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn handler_resources_list_empty() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "resources/list"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        let resources = result["resources"].as_array().unwrap();
+        assert!(resources.is_empty());
+    }
+
+    #[test]
+    fn handler_tools_call_missing_params() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn handler_tools_call_missing_name() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": { "arguments": {} }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn handler_tools_call_list_invariants() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "exochain_list_invariants",
+                "arguments": {}
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        // is_error is skipped when false, so the field is absent.
+        assert!(result.get("is_error").is_none() || result["is_error"] == false);
+    }
+
+    #[test]
+    fn handler_tools_call_list_mcp_rules() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "exochain_list_mcp_rules",
+                "arguments": {}
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        // is_error is skipped when false, so the field is absent.
+        assert!(result.get("is_error").is_none() || result["is_error"] == false);
+    }
+}
