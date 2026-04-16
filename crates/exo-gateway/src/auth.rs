@@ -183,7 +183,7 @@ impl ApiKeyRegistry {
 /// - `AuthenticationFailed` if the DID is not found in `registry`
 /// - `AuthenticationFailed` if the DID has no active verification method
 /// - `AuthenticationFailed` if signature verification fails
-pub fn authenticate(request: &Request, registry: &LocalDidRegistry) -> Result<AuthenticatedActor> {
+pub fn authenticate(request: &Request, registry: &dyn DidRegistry) -> Result<AuthenticatedActor> {
     // 1. Validate DID format.
     let did = Did::new(&request.actor_did).map_err(|_| GatewayError::AuthenticationFailed {
         reason: format!("invalid DID: {}", request.actor_did),
@@ -254,7 +254,7 @@ pub fn authenticate(request: &Request, registry: &LocalDidRegistry) -> Result<Au
 /// when the credential is invalid, revoked, expired, or unknown.
 pub fn resolve_credential(
     credential: &Credential,
-    did_registry: &DidRegistry,
+    did_registry: &dyn DidRegistry,
     api_key_registry: &ApiKeyRegistry,
 ) -> Result<AuthenticatedActor> {
     match credential {
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn credential_api_key_valid() {
-        let did_reg = DidRegistry::new();
+        let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
         let (plaintext, _record) = api_reg.register(did, "test key".into());
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn credential_api_key_revoked() {
-        let did_reg = DidRegistry::new();
+        let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
         let (plaintext, record) = api_reg.register(did, "test key".into());
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn credential_api_key_expired() {
-        let did_reg = DidRegistry::new();
+        let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
         let (plaintext, record) = api_reg.register(did, "test key".into());
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn credential_api_key_unknown() {
-        let did_reg = DidRegistry::new();
+        let did_reg = LocalDidRegistry::new();
         let api_reg = ApiKeyRegistry::new();
         let cred = Credential::ApiKey("deadbeef".repeat(8));
         let err = resolve_credential(&cred, &did_reg, &api_reg).unwrap_err();
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn credential_bearer_valid() {
-        let did_reg = DidRegistry::new();
+        let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:bob").unwrap();
         let (plaintext, _record) = api_reg.register(did, "bearer session".into());
