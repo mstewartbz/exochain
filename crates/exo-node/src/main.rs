@@ -25,6 +25,7 @@ mod dashboard;
 mod exoforge;
 mod holons;
 mod identity;
+mod mcp;
 mod metrics;
 mod network;
 mod passport;
@@ -720,6 +721,28 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Peers { data_dir: _ } => {
             println!("Peer listing requires a running node. Use `exochain start` first.");
             Ok(())
+        }
+
+        Command::Mcp {
+            data_dir,
+            actor_did,
+        } => {
+            let data_dir = config::resolve_data_dir(data_dir)?;
+            let node_identity = identity::load_or_create(&data_dir)?;
+
+            let did = if let Some(ref did_str) = actor_did {
+                Did::new(did_str).map_err(|e| anyhow::anyhow!("invalid actor DID: {e}"))?
+            } else {
+                node_identity.did.clone()
+            };
+
+            eprintln!("[exochain-mcp] Starting MCP server...");
+            eprintln!("[exochain-mcp] Node identity: {}", node_identity.did);
+
+            let server = mcp::McpServer::new(did);
+            mcp::serve_stdio(server)
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
         }
     }
 }

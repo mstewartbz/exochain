@@ -1450,6 +1450,7 @@ dependencies = [
  "exo-gatekeeper",
  "exo-governance",
  "exo-identity",
+ "getrandom 0.2.16",
  "hex",
  "serde",
  "serde_json",

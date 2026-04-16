@@ -8,6 +8,14 @@
 //!   3. Timestamp freshness (±`FRESHNESS_WINDOW_MS`)
 //!   4. Ed25519 signature via `exo_identity::did_verification::verify_did_signature`
 //!      against the first active verification method in the resolved DID document
+//!
+//! ## Multi-credential support
+//!
+//! `resolve_credential` accepts any [`Credential`] variant (DID signature, API key,
+//! or bearer token) and resolves it to an [`AuthenticatedActor`].  Every credential
+//! resolves to a DID — there is no identity outside the DID system.
+use std::collections::BTreeMap;
+
 use exo_core::{Did, Hash256, Signature, Timestamp};
 use exo_identity::{registry::{LocalDidRegistry, DidRegistry}, did_verification::verify_did_signature};
 use serde::{Deserialize, Serialize};
@@ -17,6 +25,10 @@ use crate::error::{GatewayError, Result};
 /// Maximum age (or future skew) of a request timestamp in milliseconds.
 /// Requests outside this window are rejected to prevent replay attacks.
 const FRESHNESS_WINDOW_MS: u64 = 300_000; // 5 minutes
+
+// ---------------------------------------------------------------------------
+// Existing types (backward-compatible)
+// ---------------------------------------------------------------------------
 
 /// An incoming gateway request with actor identity and signed payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +46,131 @@ pub struct AuthenticatedActor {
     pub did: Did,
     pub authenticated_at: Timestamp,
 }
+
+// ---------------------------------------------------------------------------
+// Credential enum
+// ---------------------------------------------------------------------------
+
+/// Supported authentication credential types.
+/// All credentials resolve to a DID — there is no identity outside the DID system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Credential {
+    /// Direct DID signature authentication (strongest).
+    /// The actor signs a challenge with their DID key.
+    DidSignature {
+        actor_did: String,
+        body_hash: Hash256,
+        signature: Signature,
+        timestamp: Timestamp,
+    },
+    /// API key authentication (convenience, DID-bound).
+    /// The key is a random 256-bit token that maps to a DID in the key registry.
+    ApiKey(String),
+    /// Bearer token authentication (HTTP-friendly, DID-bound).
+    /// A bearer token that maps to a DID in the session registry.
+    BearerToken(String),
+}
+
+// ---------------------------------------------------------------------------
+// API key registry
+// ---------------------------------------------------------------------------
+
+/// A registered API key bound to a DID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyRecord {
+    /// BLAKE3 hash of the plaintext API key.
+    pub key_hash: Hash256,
+    /// The DID this key is bound to.
+    pub did: Did,
+    /// Human-readable label for this key.
+    pub label: String,
+    /// When this key was created (HLC timestamp).
+    pub created_at: Timestamp,
+    /// Optional expiration timestamp. `None` = never expires.
+    pub expires_at: Option<Timestamp>,
+    /// Whether this key has been revoked.
+    pub revoked: bool,
+}
+
+/// Registry of API keys mapped to DIDs.
+/// Uses `BTreeMap` (not `HashMap`) for deterministic iteration.
+#[derive(Debug, Clone, Default)]
+pub struct ApiKeyRegistry {
+    /// Maps `BLAKE3(api_key)` to `ApiKeyRecord`.
+    /// Keys are stored hashed — the plaintext key is only shown once at creation.
+    keys: BTreeMap<Hash256, ApiKeyRecord>,
+}
+
+impl ApiKeyRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a new API key for `did` with a human-readable `label`.
+    ///
+    /// Returns `(plaintext_key_hex, record)`.  The plaintext key is shown **once**
+    /// at creation and never stored — only its BLAKE3 hash is persisted.
+    /// # Panics
+    ///
+    /// Panics if the OS entropy source is unavailable (unrecoverable).
+    #[allow(clippy::expect_used)] // OS entropy failure is unrecoverable.
+    pub fn register(&mut self, did: Did, label: String) -> (String, ApiKeyRecord) {
+        // Generate 32 random bytes via getrandom.
+        let mut key_bytes = [0u8; 32];
+        getrandom::getrandom(&mut key_bytes).expect("OS entropy source unavailable");
+
+        let plaintext_hex = hex::encode(key_bytes);
+        let key_hash = Hash256::digest(&key_bytes);
+
+        let record = ApiKeyRecord {
+            key_hash,
+            did,
+            label,
+            created_at: Timestamp::now_utc(),
+            expires_at: None,
+            revoked: false,
+        };
+
+        self.keys.insert(key_hash, record.clone());
+        (plaintext_hex, record)
+    }
+
+    /// Resolve a plaintext API key (hex-encoded) to its record.
+    ///
+    /// Returns `None` if the key is not found.
+    #[must_use]
+    pub fn resolve(&self, api_key: &str) -> Option<&ApiKeyRecord> {
+        let key_bytes = hex::decode(api_key).ok()?;
+        let key_hash = Hash256::digest(&key_bytes);
+        self.keys.get(&key_hash)
+    }
+
+    /// Revoke a key by its hash.  Returns `true` if the key existed (and was
+    /// marked revoked), `false` if the hash was not found.
+    pub fn revoke(&mut self, key_hash: &Hash256) -> bool {
+        if let Some(record) = self.keys.get_mut(key_hash) {
+            record.revoked = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List all key records bound to `did`.
+    #[must_use]
+    pub fn keys_for_did(&self, did: &Did) -> Vec<&ApiKeyRecord> {
+        self.keys
+            .values()
+            .filter(|r| r.did == *did)
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// authenticate() — original DID-signature path (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Authenticate a request by validating DID format, signature freshness,
 /// and cryptographic Ed25519 signature against the registered DID document.
@@ -102,6 +239,84 @@ pub fn authenticate(request: &Request, registry: &LocalDidRegistry) -> Result<Au
     })
 }
 
+// ---------------------------------------------------------------------------
+// resolve_credential() — unified entry point
+// ---------------------------------------------------------------------------
+
+/// Resolve any credential type to an authenticated actor.
+///
+/// This is the unified entry point — all downstream code sees only
+/// [`AuthenticatedActor`].
+///
+/// # Errors
+///
+/// Returns `GatewayError::AuthenticationFailed` with a descriptive reason
+/// when the credential is invalid, revoked, expired, or unknown.
+pub fn resolve_credential(
+    credential: &Credential,
+    did_registry: &DidRegistry,
+    api_key_registry: &ApiKeyRegistry,
+) -> Result<AuthenticatedActor> {
+    match credential {
+        Credential::DidSignature {
+            actor_did,
+            body_hash,
+            signature,
+            timestamp,
+        } => {
+            let request = Request {
+                actor_did: actor_did.clone(),
+                action: String::new(),
+                body_hash: *body_hash,
+                signature: signature.clone(),
+                timestamp: *timestamp,
+            };
+            authenticate(&request, did_registry)
+        }
+
+        Credential::ApiKey(key) => resolve_token(key, api_key_registry, "API key"),
+
+        Credential::BearerToken(token) => resolve_token(token, api_key_registry, "bearer token"),
+    }
+}
+
+/// Shared resolution logic for API key and bearer token credentials.
+fn resolve_token(
+    token: &str,
+    registry: &ApiKeyRegistry,
+    kind: &str,
+) -> Result<AuthenticatedActor> {
+    let record = registry.resolve(token).ok_or_else(|| {
+        GatewayError::AuthenticationFailed {
+            reason: format!("unknown {kind}"),
+        }
+    })?;
+
+    if record.revoked {
+        return Err(GatewayError::AuthenticationFailed {
+            reason: format!("{kind} has been revoked"),
+        });
+    }
+
+    if let Some(expires_at) = record.expires_at {
+        let now = Timestamp::now_utc();
+        if now > expires_at {
+            return Err(GatewayError::AuthenticationFailed {
+                reason: format!("{kind} has expired"),
+            });
+        }
+    }
+
+    Ok(AuthenticatedActor {
+        did: record.did.clone(),
+        authenticated_at: Timestamp::now_utc(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 /// Reject requests whose timestamp deviates from `now` by more than
 /// `FRESHNESS_WINDOW_MS`.
 fn check_freshness(ts: &Timestamp) -> Result<()> {
@@ -117,6 +332,10 @@ fn check_freshness(ts: &Timestamp) -> Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -164,6 +383,10 @@ mod tests {
         reg.register(doc).unwrap();
         (reg, sk)
     }
+
+    // -----------------------------------------------------------------------
+    // Original authenticate() tests (unchanged)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn auth_valid() {
@@ -286,5 +509,174 @@ mod tests {
         // physical_ms = 1 is Jan 1 1970 — way outside any freshness window.
         let stale = Timestamp::new(1, 0);
         assert!(check_freshness(&stale).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential / resolve_credential tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn credential_did_signature_valid() {
+        let (reg, sk) = registry_with_alice();
+        let body_hash = Hash256::ZERO;
+        let signature = sign(body_hash.as_bytes(), &sk);
+        let cred = Credential::DidSignature {
+            actor_did: "did:exo:alice".into(),
+            body_hash,
+            signature,
+            timestamp: req_ts(),
+        };
+        let api_reg = ApiKeyRegistry::new();
+        let actor = resolve_credential(&cred, &reg, &api_reg).unwrap();
+        assert_eq!(actor.did.as_str(), "did:exo:alice");
+    }
+
+    #[test]
+    fn credential_did_signature_invalid() {
+        let (reg, _sk) = registry_with_alice();
+        let (_pk2, sk2) = generate_keypair();
+        let body_hash = Hash256::ZERO;
+        let bad_sig = sign(body_hash.as_bytes(), &sk2);
+        let cred = Credential::DidSignature {
+            actor_did: "did:exo:alice".into(),
+            body_hash,
+            signature: bad_sig,
+            timestamp: req_ts(),
+        };
+        let api_reg = ApiKeyRegistry::new();
+        assert!(resolve_credential(&cred, &reg, &api_reg).is_err());
+    }
+
+    #[test]
+    fn credential_api_key_valid() {
+        let did_reg = DidRegistry::new();
+        let mut api_reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:alice").unwrap();
+        let (plaintext, _record) = api_reg.register(did, "test key".into());
+
+        let cred = Credential::ApiKey(plaintext);
+        let actor = resolve_credential(&cred, &did_reg, &api_reg).unwrap();
+        assert_eq!(actor.did.as_str(), "did:exo:alice");
+    }
+
+    #[test]
+    fn credential_api_key_revoked() {
+        let did_reg = DidRegistry::new();
+        let mut api_reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:alice").unwrap();
+        let (plaintext, record) = api_reg.register(did, "test key".into());
+        api_reg.revoke(&record.key_hash);
+
+        let cred = Credential::ApiKey(plaintext);
+        let err = resolve_credential(&cred, &did_reg, &api_reg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("revoked"), "expected 'revoked' in: {msg}");
+    }
+
+    #[test]
+    fn credential_api_key_expired() {
+        let did_reg = DidRegistry::new();
+        let mut api_reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:alice").unwrap();
+        let (plaintext, record) = api_reg.register(did, "test key".into());
+
+        // Manually set expiration to the past.
+        let key_hash = record.key_hash;
+        api_reg.keys.get_mut(&key_hash).unwrap().expires_at = Some(Timestamp::new(1, 0));
+
+        let cred = Credential::ApiKey(plaintext);
+        let err = resolve_credential(&cred, &did_reg, &api_reg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expired"), "expected 'expired' in: {msg}");
+    }
+
+    #[test]
+    fn credential_api_key_unknown() {
+        let did_reg = DidRegistry::new();
+        let api_reg = ApiKeyRegistry::new();
+        let cred = Credential::ApiKey("deadbeef".repeat(8));
+        let err = resolve_credential(&cred, &did_reg, &api_reg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown"), "expected 'unknown' in: {msg}");
+    }
+
+    #[test]
+    fn credential_bearer_valid() {
+        let did_reg = DidRegistry::new();
+        let mut api_reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:bob").unwrap();
+        let (plaintext, _record) = api_reg.register(did, "bearer session".into());
+
+        let cred = Credential::BearerToken(plaintext);
+        let actor = resolve_credential(&cred, &did_reg, &api_reg).unwrap();
+        assert_eq!(actor.did.as_str(), "did:exo:bob");
+    }
+
+    #[test]
+    fn api_key_registry_register() {
+        let mut reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:carol").unwrap();
+        let (plaintext, record) = reg.register(did.clone(), "my key".into());
+
+        // Plaintext is 64 hex chars (32 bytes).
+        assert_eq!(plaintext.len(), 64);
+        assert!(hex::decode(&plaintext).is_ok());
+
+        // Record fields are set correctly.
+        assert_eq!(record.did, did);
+        assert_eq!(record.label, "my key");
+        assert!(!record.revoked);
+        assert!(record.expires_at.is_none());
+
+        // The registry contains exactly one entry.
+        assert_eq!(reg.keys.len(), 1);
+    }
+
+    #[test]
+    fn api_key_registry_revoke() {
+        let mut reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:carol").unwrap();
+        let (_plaintext, record) = reg.register(did, "my key".into());
+
+        assert!(reg.revoke(&record.key_hash));
+        assert!(reg.keys.get(&record.key_hash).unwrap().revoked);
+
+        // Revoking a non-existent hash returns false.
+        assert!(!reg.revoke(&Hash256::ZERO));
+    }
+
+    #[test]
+    fn api_key_registry_keys_for_did() {
+        let mut reg = ApiKeyRegistry::new();
+        let alice = Did::new("did:exo:alice").unwrap();
+        let bob = Did::new("did:exo:bob").unwrap();
+
+        reg.register(alice.clone(), "alice-1".into());
+        reg.register(alice.clone(), "alice-2".into());
+        reg.register(bob.clone(), "bob-1".into());
+
+        let alice_keys = reg.keys_for_did(&alice);
+        assert_eq!(alice_keys.len(), 2);
+        assert!(alice_keys.iter().all(|r| r.did == alice));
+
+        let bob_keys = reg.keys_for_did(&bob);
+        assert_eq!(bob_keys.len(), 1);
+        assert_eq!(bob_keys[0].did, bob);
+    }
+
+    #[test]
+    fn api_key_plaintext_shown_once() {
+        let mut reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:alice").unwrap();
+        let (plaintext, record) = reg.register(did, "test".into());
+
+        // The plaintext key, when hashed with BLAKE3, must equal the stored key_hash.
+        let key_bytes = hex::decode(&plaintext).unwrap();
+        let computed_hash = Hash256::digest(&key_bytes);
+        assert_eq!(computed_hash, record.key_hash);
+
+        // Resolve round-trips through the same hash.
+        let resolved = reg.resolve(&plaintext).unwrap();
+        assert_eq!(resolved.key_hash, record.key_hash);
     }
 }
