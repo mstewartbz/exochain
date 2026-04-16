@@ -59,11 +59,12 @@ railway volume create exochain-data --mount-path /data
 ## Step 4: Set Environment Variables
 
 ```bash
-railway variables set JWT_SECRET=$(openssl rand -hex 32)
-railway variables set EXOCHAIN_DATA_DIR=/data
-railway variables set RUST_LOG=info
-railway variables set PORT=8080
+railway variables --set "JWT_SECRET=$(openssl rand -hex 32)"
+railway variables --set "EXOCHAIN_DATA_DIR=/data"
+railway variables --set "RUST_LOG=info"
+railway variables --set "IS_VALIDATOR=true"   # Genesis validator mode
 # DATABASE_URL is injected automatically by the Postgres plugin
+# PORT is auto-injected by Railway and consumed by entrypoint.sh
 ```
 
 | Variable | Required | Description |
@@ -71,8 +72,12 @@ railway variables set PORT=8080
 | `DATABASE_URL` | Yes (auto) | Set by Railway Postgres plugin — private network URL |
 | `JWT_SECRET` | Yes | 32+ byte random hex — JWT signing secret |
 | `EXOCHAIN_DATA_DIR` | Yes | `/data` — persistent volume mount path |
+| `IS_VALIDATOR` | Yes for Node 0 | `true` — entrypoint.sh adds `--validator` flag |
+| `PORT` | Auto | Railway auto-injects; binary + entrypoint honor it |
+| `P2P_PORT` | No | Default `4001`; override only for non-default routing |
 | `RUST_LOG` | No | `info` for production; `debug` for troubleshooting |
-| `PORT` | Yes | `8080` — HTTP API port (Railway also auto-sets this) |
+| `SEED_ADDR` | No | Set on subsequent nodes joining the network |
+| `VALIDATORS` | No | Comma-separated DIDs for explicit initial validator set |
 
 ---
 
@@ -119,32 +124,27 @@ curl https://<your-railway-domain>/api/v1/governance/status
 
 ## Step 7: Run as Validator (Genesis Mode)
 
-Node 0 must start as a BFT validator to bootstrap the network. The `--validator` flag in the start command enables this.
+Node 0 must start as a BFT validator to bootstrap the network. The
+Dockerfile's `entrypoint.sh` reads `IS_VALIDATOR=true` and adds the
+`--validator` flag automatically. If you set `IS_VALIDATOR=true` in
+Step 4, validator mode is already on — no further action needed.
 
-**Option A — Start command flag (recommended, already set in `railway.json`):**
-
-The `railway.json` start command is:
-```
-./exochain start --data-dir /data
-```
-
-To run as a validator, update the start command:
+**To verify:**
 ```bash
-railway variables set EXOCHAIN_VALIDATOR=true
+railway logs | grep "Consensus reactor"
+# Expected: "Consensus reactor started (validator mode)"
 ```
 
-Then update `railway.json` to pass `--validator`:
-```json
-"startCommand": "./exochain start --data-dir /data --validator"
+**To toggle off (for read-only observer node):**
+```bash
+railway variables --set "IS_VALIDATOR=false"
 ```
 
-Push to `main` — Railway auto-deploys.
-
-**Option B — Override via Railway dashboard:**
-Project → `exochain` service → Settings → **Start Command** → set to:
+**For an explicit multi-validator set (instead of just this node's DID):**
+```bash
+railway variables --set "VALIDATORS=did:exo:abc...,did:exo:def..."
 ```
-./exochain start --data-dir /data --validator
-```
+The entrypoint will then pass `--validator --validators <list>` to the binary.
 
 **CLI flags reference** (from `crates/exo-node/src/cli.rs`):
 
