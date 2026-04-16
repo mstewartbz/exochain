@@ -647,7 +647,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let cfg = config::load_or_create(&data_dir)?;
 
-            let api_port = api_port.unwrap_or(cfg.api_port);
+            // Resolution order: CLI flag > $PORT env (set by Railway/Heroku-style PaaS) > config.toml.
+            let api_port = api_port
+                .or_else(|| std::env::var("PORT").ok().and_then(|s| s.parse().ok()))
+                .unwrap_or(cfg.api_port);
             let p2p_port = p2p_port.unwrap_or(cfg.p2p_port);
 
             start_node(
@@ -673,7 +676,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let cfg = config::load_or_create(&data_dir)?;
 
-            let api_port = api_port.unwrap_or(cfg.api_port);
+            // Resolution order: CLI flag > $PORT env (set by Railway/Heroku-style PaaS) > config.toml.
+            let api_port = api_port
+                .or_else(|| std::env::var("PORT").ok().and_then(|s| s.parse().ok()))
+                .unwrap_or(cfg.api_port);
             let p2p_port = p2p_port.unwrap_or(cfg.p2p_port);
 
             // Parse seed addresses into multiaddrs.

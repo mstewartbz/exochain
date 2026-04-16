@@ -5,7 +5,7 @@
     "dockerfilePath": "./Dockerfile"
   },
   "deploy": {
-    "startCommand": "./exochain start --data-dir /data",
+    "_comment_startCommand": "Empty — Dockerfile CMD invokes /app/entrypoint.sh which reads env vars (IS_VALIDATOR, SEED_ADDR, EXOCHAIN_DATA_DIR, PORT, P2P_PORT, VALIDATORS).",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",

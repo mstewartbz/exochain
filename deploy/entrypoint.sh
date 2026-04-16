@@ -5,7 +5,8 @@ set -e
 
 DATA_DIR="${EXOCHAIN_DATA_DIR:-/data}"
 P2P_PORT="${P2P_PORT:-4001}"
-API_PORT="${API_PORT:-8080}"
+# Honor Railway/Heroku-style $PORT first, then $API_PORT, then default 8080.
+API_PORT="${PORT:-${API_PORT:-8080}}"
 
 # Build base arguments.
 ARGS="--data-dir ${DATA_DIR} --p2p-port ${P2P_PORT} --api-port ${API_PORT}"
