@@ -4,6 +4,7 @@
 use exo_core::{Did, Hash256, Timestamp};
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ pub fn ediscovery_search_definition() -> ToolDefinition {
 
 /// Execute the `exochain_ediscovery_search` tool.
 #[must_use]
-pub fn execute_ediscovery_search(params: &Value) -> ToolResult {
+pub fn execute_ediscovery_search(params: &Value, _context: &NodeContext) -> ToolResult {
     let query = match params.get("query").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -128,7 +129,7 @@ pub fn assert_privilege_definition() -> ToolDefinition {
 
 /// Execute the `exochain_assert_privilege` tool.
 #[must_use]
-pub fn execute_assert_privilege(params: &Value) -> ToolResult {
+pub fn execute_assert_privilege(params: &Value, _context: &NodeContext) -> ToolResult {
     let evidence_id = match params.get("evidence_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -228,7 +229,7 @@ pub fn initiate_safe_harbor_definition() -> ToolDefinition {
 
 /// Execute the `exochain_initiate_safe_harbor` tool.
 #[must_use]
-pub fn execute_initiate_safe_harbor(params: &Value) -> ToolResult {
+pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> ToolResult {
     let initiator_did_str = match params.get("initiator_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -353,7 +354,7 @@ pub fn check_fiduciary_duty_definition() -> ToolDefinition {
 
 /// Execute the `exochain_check_fiduciary_duty` tool.
 #[must_use]
-pub fn execute_check_fiduciary_duty(params: &Value) -> ToolResult {
+pub fn execute_check_fiduciary_duty(params: &Value, _context: &NodeContext) -> ToolResult {
     let actor_did_str = match params.get("actor_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -454,7 +455,7 @@ mod tests {
     #[test]
     fn execute_ediscovery_search_success() {
         let params = json!({"query": "contract breach"});
-        let result = execute_ediscovery_search(&params);
+        let result = execute_ediscovery_search(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["query"], "contract breach");
@@ -471,7 +472,7 @@ mod tests {
             "date_range_start": "2025-01-01",
             "date_range_end": "2025-12-31",
         });
-        let result = execute_ediscovery_search(&params);
+        let result = execute_ediscovery_search(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["scope"], "emails");
@@ -479,7 +480,7 @@ mod tests {
 
     #[test]
     fn execute_ediscovery_search_missing_query() {
-        let result = execute_ediscovery_search(&json!({}));
+        let result = execute_ediscovery_search(&json!({}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -499,7 +500,7 @@ mod tests {
             "privilege_type": "attorney_client",
             "asserter_did": "did:exo:counsel",
         });
-        let result = execute_assert_privilege(&params);
+        let result = execute_assert_privilege(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["privilege_type"], "attorney_client");
@@ -514,7 +515,7 @@ mod tests {
             "privilege_type": "invalid_type",
             "asserter_did": "did:exo:counsel",
         });
-        let result = execute_assert_privilege(&params);
+        let result = execute_assert_privilege(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -525,7 +526,7 @@ mod tests {
             "privilege_type": "work_product",
             "asserter_did": "bad",
         });
-        let result = execute_assert_privilege(&params);
+        let result = execute_assert_privilege(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -545,7 +546,7 @@ mod tests {
             "transaction_description": "Acquisition of subsidiary",
             "interested_parties": ["did:exo:bob", "did:exo:carol"],
         });
-        let result = execute_initiate_safe_harbor(&params);
+        let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["dgcl_section"], "144");
@@ -567,7 +568,7 @@ mod tests {
             "transaction_description": "test",
             "interested_parties": [],
         });
-        let result = execute_initiate_safe_harbor(&params);
+        let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -578,7 +579,7 @@ mod tests {
             "transaction_description": "test",
             "interested_parties": ["not-a-did"],
         });
-        let result = execute_initiate_safe_harbor(&params);
+        let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -598,7 +599,7 @@ mod tests {
             "action": "approve merger with personal interest",
             "beneficiary_did": "did:exo:shareholders",
         });
-        let result = execute_check_fiduciary_duty(&params);
+        let result = execute_check_fiduciary_duty(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["overall_status"], "requires_review");
@@ -614,7 +615,7 @@ mod tests {
             "action": "something",
             "beneficiary_did": "did:exo:someone",
         });
-        let result = execute_check_fiduciary_duty(&params);
+        let result = execute_check_fiduciary_duty(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -622,6 +623,7 @@ mod tests {
     fn execute_check_fiduciary_duty_missing_action() {
         let result = execute_check_fiduciary_duty(
             &json!({"actor_did": "did:exo:a", "beneficiary_did": "did:exo:b"}),
+            &NodeContext::empty(),
         );
         assert!(result.is_error);
     }

@@ -4,6 +4,7 @@
 use exo_core::{Did, Hash256, Timestamp};
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ pub fn submit_event_definition() -> ToolDefinition {
 
 /// Execute the `exochain_submit_event` tool.
 #[must_use]
-pub fn execute_submit_event(params: &Value) -> ToolResult {
+pub fn execute_submit_event(params: &Value, _context: &NodeContext) -> ToolResult {
     let event_type = match params.get("event_type").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -125,7 +126,7 @@ pub fn get_event_definition() -> ToolDefinition {
 
 /// Execute the `exochain_get_event` tool.
 #[must_use]
-pub fn execute_get_event(params: &Value) -> ToolResult {
+pub fn execute_get_event(params: &Value, context: &NodeContext) -> ToolResult {
     let event_hash = match params.get("event_hash").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -142,13 +143,26 @@ pub fn execute_get_event(params: &Value) -> ToolResult {
         );
     }
 
-    // In the current local state we don't have persistent storage, so we
-    // return a structured "not found" response.
+    // When a DAG store is attached, we differentiate the response so
+    // callers know the lookup was attempted against real state. Full
+    // event retrieval wiring lands in a subsequent change — for now we
+    // surface that a store is available but the lookup path is not yet
+    // implemented.
+    if context.has_store() {
+        let response = json!({
+            "event_hash": event_hash,
+            "found": false,
+            "status": "known_store_but_lookup_not_yet_implemented",
+            "suggestion": "Store is attached; direct event retrieval will be wired in a future change.",
+        });
+        return ToolResult::success(response.to_string());
+    }
+
     let response = json!({
         "event_hash": event_hash,
         "found": false,
-        "status": "not found in local state",
-        "suggestion": "The event may exist on a remote peer or may not have been replicated yet.",
+        "status": "not_found_no_store",
+        "suggestion": "No DAG store is attached to this MCP server; run within a live node to query events.",
     });
     ToolResult::success(response.to_string())
 }
@@ -188,7 +202,7 @@ pub fn verify_inclusion_definition() -> ToolDefinition {
 
 /// Execute the `exochain_verify_inclusion` tool.
 #[must_use]
-pub fn execute_verify_inclusion(params: &Value) -> ToolResult {
+pub fn execute_verify_inclusion(params: &Value, _context: &NodeContext) -> ToolResult {
     let event_hash = match params.get("event_hash").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -290,18 +304,57 @@ pub fn get_checkpoint_definition() -> ToolDefinition {
 
 /// Execute the `exochain_get_checkpoint` tool.
 #[must_use]
-pub fn execute_get_checkpoint(params: &Value) -> ToolResult {
+pub fn execute_get_checkpoint(params: &Value, context: &NodeContext) -> ToolResult {
     let _ = params; // No required params.
 
     let now = Timestamp::now_utc();
 
+    // Prefer live store-reported height if we have one.
+    if let Some(store) = context.store.as_ref() {
+        let height = match store.lock() {
+            Ok(guard) => guard.committed_height_value(),
+            Err(_) => {
+                return ToolResult::error(
+                    json!({"error": "store mutex poisoned"}).to_string(),
+                );
+            }
+        };
+
+        // Consensus round and validator count come from the reactor state
+        // when available; otherwise we only report the height.
+        let (round, validator_count) = if let Some(reactor) = context.reactor_state.as_ref() {
+            match reactor.lock() {
+                Ok(state) => (
+                    state.consensus.current_round,
+                    state.consensus.config.validators.len(),
+                ),
+                Err(_) => {
+                    return ToolResult::error(
+                        json!({"error": "reactor state mutex poisoned"}).to_string(),
+                    );
+                }
+            }
+        } else {
+            (0, 0)
+        };
+
+        let response = json!({
+            "checkpoint_height": height,
+            "round": round,
+            "validator_count": validator_count,
+            "status": "live",
+            "last_finalized_at": format!("{}:{}", now.physical_ms, now.logical),
+        });
+        return ToolResult::success(response.to_string());
+    }
+
     let response = json!({
         "checkpoint_height": 0,
         "round": 0,
-        "validator_count": 1,
-        "status": "genesis",
+        "validator_count": 0,
+        "status": "no_store_available",
         "last_finalized_at": format!("{}:{}", now.physical_ms, now.logical),
-        "note": "Node is at genesis checkpoint. No events have been finalized yet.",
+        "note": "No DAG store attached to this MCP server. Returning genesis-style template.",
     });
     ToolResult::success(response.to_string())
 }
@@ -331,7 +384,7 @@ mod tests {
             "payload_hex": "deadbeef",
             "author_did": "did:exo:alice",
         });
-        let result = execute_submit_event(&params);
+        let result = execute_submit_event(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert!(v["event_id"].as_str().is_some());
@@ -347,7 +400,7 @@ mod tests {
             "payload_hex": "deadbeef",
             "author_did": "bad",
         });
-        let result = execute_submit_event(&params);
+        let result = execute_submit_event(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -358,13 +411,16 @@ mod tests {
             "payload_hex": "not-hex!!",
             "author_did": "did:exo:alice",
         });
-        let result = execute_submit_event(&params);
+        let result = execute_submit_event(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_submit_event_missing_type() {
-        let result = execute_submit_event(&json!({"payload_hex": "aa", "author_did": "did:exo:a"}));
+        let result = execute_submit_event(
+            &json!({"payload_hex": "aa", "author_did": "did:exo:a"}),
+            &NodeContext::empty(),
+        );
         assert!(result.is_error);
     }
 
@@ -380,22 +436,22 @@ mod tests {
     #[test]
     fn execute_get_event_not_found() {
         let params = json!({"event_hash": "abcdef0123456789"});
-        let result = execute_get_event(&params);
+        let result = execute_get_event(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["found"], false);
-        assert_eq!(v["status"], "not found in local state");
+        assert_eq!(v["status"], "not_found_no_store");
     }
 
     #[test]
     fn execute_get_event_invalid_hex() {
-        let result = execute_get_event(&json!({"event_hash": "zzzz"}));
+        let result = execute_get_event(&json!({"event_hash": "zzzz"}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_get_event_missing_hash() {
-        let result = execute_get_event(&json!({}));
+        let result = execute_get_event(&json!({}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -424,7 +480,7 @@ mod tests {
             "proof_hashes": [sibling_hex],
             "root_hash": expected_root.to_string(),
         });
-        let result = execute_verify_inclusion(&params);
+        let result = execute_verify_inclusion(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verified"], true);
@@ -437,7 +493,7 @@ mod tests {
             "proof_hashes": ["1234"],
             "root_hash": "0000",
         });
-        let result = execute_verify_inclusion(&params);
+        let result = execute_verify_inclusion(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verified"], false);
@@ -450,7 +506,7 @@ mod tests {
             "proof_hashes": [],
             "root_hash": "0000",
         });
-        let result = execute_verify_inclusion(&params);
+        let result = execute_verify_inclusion(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -465,12 +521,12 @@ mod tests {
 
     #[test]
     fn execute_get_checkpoint_success() {
-        let result = execute_get_checkpoint(&json!({}));
+        let result = execute_get_checkpoint(&json!({}), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["checkpoint_height"], 0);
         assert_eq!(v["round"], 0);
-        assert_eq!(v["validator_count"], 1);
-        assert_eq!(v["status"], "genesis");
+        assert_eq!(v["validator_count"], 0);
+        assert_eq!(v["status"], "no_store_available");
     }
 }

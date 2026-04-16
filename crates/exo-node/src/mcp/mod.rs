@@ -11,12 +11,15 @@
 //! exochain mcp --actor-did did:exo:x  # use a specific DID
 //! ```
 
+pub mod context;
 pub mod error;
 pub mod handler;
 pub mod middleware;
 pub mod protocol;
 pub mod tools;
 
+#[allow(unused_imports)]
+pub use context::NodeContext;
 pub use handler::McpServer;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

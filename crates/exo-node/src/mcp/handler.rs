@@ -8,6 +8,7 @@
 use exo_core::Did;
 use serde_json::Value;
 
+use super::context::NodeContext;
 use super::error::McpError;
 use super::middleware::ConstitutionalMiddleware;
 use super::protocol::{
@@ -25,20 +26,49 @@ pub struct McpServer {
     actor_did: Did,
     registry: ToolRegistry,
     middleware: ConstitutionalMiddleware,
+    context: NodeContext,
 }
 
 impl McpServer {
     /// Create a new MCP server for the given actor DID.
     ///
     /// Initializes the tool registry with all built-in tools and creates
-    /// a constitutional middleware instance with the full kernel.
+    /// a constitutional middleware instance with the full kernel. The
+    /// runtime context is empty — tools that query live node state will
+    /// fall back to template responses. Use `with_context` to bind a
+    /// running node's reactor and DAG store.
     #[must_use]
     pub fn new(actor_did: Did) -> Self {
         Self {
             actor_did,
             registry: ToolRegistry::default(),
             middleware: ConstitutionalMiddleware::new(),
+            context: NodeContext::empty(),
         }
+    }
+
+    /// Create a new MCP server bound to a live node context.
+    ///
+    /// Tools that support live queries (node status, checkpoints, event
+    /// lookup) will read from the context's reactor state and DAG store
+    /// rather than returning templated responses. Used when the MCP
+    /// server is embedded in a running node.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_context(actor_did: Did, context: NodeContext) -> Self {
+        Self {
+            actor_did,
+            registry: ToolRegistry::default(),
+            middleware: ConstitutionalMiddleware::new(),
+            context,
+        }
+    }
+
+    /// Returns a reference to the runtime context.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn context(&self) -> &NodeContext {
+        &self.context
     }
 
     /// Returns the actor DID string.
@@ -201,7 +231,7 @@ impl McpServer {
         }
 
         // Execute the tool.
-        match self.registry.execute(tool_name, &tool_params) {
+        match self.registry.execute(tool_name, &tool_params, &self.context) {
             Ok(result) => match serde_json::to_value(&result) {
                 Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
                 Err(e) => JsonRpcResponse::error(
@@ -259,6 +289,17 @@ mod tests {
 
     fn test_server() -> McpServer {
         McpServer::new(Did::new("did:exo:test-ai-agent").expect("valid DID"))
+    }
+
+    #[test]
+    fn handler_with_context() {
+        // An McpServer built with an empty NodeContext should behave
+        // identically to one built with `new`.
+        let did = Did::new("did:exo:test-ai-agent").expect("valid DID");
+        let server = McpServer::with_context(did, NodeContext::empty());
+        assert_eq!(server.actor_did(), "did:exo:test-ai-agent");
+        assert_eq!(server.tool_count(), 40);
+        assert!(!server.context().has_store());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use exo_core::{Did, Hash256, Timestamp};
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ pub fn send_encrypted_definition() -> ToolDefinition {
 
 /// Execute the `exochain_send_encrypted` tool.
 #[must_use]
-pub fn execute_send_encrypted(params: &Value) -> ToolResult {
+pub fn execute_send_encrypted(params: &Value, _context: &NodeContext) -> ToolResult {
     let sender_did_str = match params.get("sender_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -147,7 +148,7 @@ pub fn receive_encrypted_definition() -> ToolDefinition {
 
 /// Execute the `exochain_receive_encrypted` tool.
 #[must_use]
-pub fn execute_receive_encrypted(params: &Value) -> ToolResult {
+pub fn execute_receive_encrypted(params: &Value, _context: &NodeContext) -> ToolResult {
     let envelope_id = match params.get("envelope_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -230,7 +231,7 @@ pub fn configure_death_trigger_definition() -> ToolDefinition {
 
 /// Execute the `exochain_configure_death_trigger` tool.
 #[must_use]
-pub fn execute_configure_death_trigger(params: &Value) -> ToolResult {
+pub fn execute_configure_death_trigger(params: &Value, _context: &NodeContext) -> ToolResult {
     let owner_did_str = match params.get("owner_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -344,7 +345,7 @@ mod tests {
             "recipient_did": "did:exo:bob",
             "plaintext": "Hello, Bob!",
         });
-        let result = execute_send_encrypted(&params);
+        let result = execute_send_encrypted(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["sender_did"], "did:exo:alice");
@@ -363,7 +364,7 @@ mod tests {
             "content_type": "application/json",
             "plaintext": "{}",
         });
-        let result = execute_send_encrypted(&params);
+        let result = execute_send_encrypted(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["content_type"], "application/json");
@@ -376,7 +377,7 @@ mod tests {
             "recipient_did": "did:exo:bob",
             "plaintext": "hello",
         });
-        let result = execute_send_encrypted(&params);
+        let result = execute_send_encrypted(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -384,6 +385,7 @@ mod tests {
     fn execute_send_encrypted_missing_plaintext() {
         let result = execute_send_encrypted(
             &json!({"sender_did": "did:exo:a", "recipient_did": "did:exo:b"}),
+            &NodeContext::empty(),
         );
         assert!(result.is_error);
     }
@@ -403,7 +405,7 @@ mod tests {
             "envelope_id": "env_abc123",
             "recipient_did": "did:exo:bob",
         });
-        let result = execute_receive_encrypted(&params);
+        let result = execute_receive_encrypted(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["envelope_id"], "env_abc123");
@@ -416,13 +418,13 @@ mod tests {
             "envelope_id": "env_abc",
             "recipient_did": "bad",
         });
-        let result = execute_receive_encrypted(&params);
+        let result = execute_receive_encrypted(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_receive_encrypted_missing_envelope() {
-        let result = execute_receive_encrypted(&json!({"recipient_did": "did:exo:bob"}));
+        let result = execute_receive_encrypted(&json!({"recipient_did": "did:exo:bob"}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -444,7 +446,7 @@ mod tests {
             "trigger_type": "inactivity",
             "trigger_params": {"inactivity_days": 365},
         });
-        let result = execute_configure_death_trigger(&params);
+        let result = execute_configure_death_trigger(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["trigger_type"], "inactivity");
@@ -462,7 +464,7 @@ mod tests {
             "message": "test",
             "trigger_type": "unknown",
         });
-        let result = execute_configure_death_trigger(&params);
+        let result = execute_configure_death_trigger(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -474,7 +476,7 @@ mod tests {
             "message": "test",
             "trigger_type": "explicit",
         });
-        let result = execute_configure_death_trigger(&params);
+        let result = execute_configure_death_trigger(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -486,7 +488,7 @@ mod tests {
             "message": "test",
             "trigger_type": "date",
         });
-        let result = execute_configure_death_trigger(&params);
+        let result = execute_configure_death_trigger(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["trigger_params"], json!({}));
