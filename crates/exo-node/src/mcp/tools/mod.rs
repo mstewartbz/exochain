@@ -13,6 +13,7 @@ pub mod proofs;
 
 use std::collections::BTreeMap;
 
+use super::context::NodeContext;
 use super::error::{McpError, Result};
 use super::protocol::{ToolDefinition, ToolResult};
 
@@ -104,69 +105,94 @@ impl ToolRegistry {
         self.register(messaging::configure_death_trigger_definition());
     }
 
-    /// Execute a tool by name with the given params.
+    /// Execute a tool by name with the given params and runtime context.
     pub fn execute(
         &self,
         name: &str,
         params: &serde_json::Value,
+        context: &NodeContext,
     ) -> Result<ToolResult> {
         if !self.tools.contains_key(name) {
             return Err(McpError::ToolNotFound(name.to_string()));
         }
         match name {
             // Node
-            "exochain_node_status" => Ok(node::execute_node_status(params)),
-            "exochain_list_invariants" => Ok(node::execute_list_invariants(params)),
-            "exochain_list_mcp_rules" => Ok(node::execute_list_mcp_rules(params)),
+            "exochain_node_status" => Ok(node::execute_node_status(params, context)),
+            "exochain_list_invariants" => Ok(node::execute_list_invariants(params, context)),
+            "exochain_list_mcp_rules" => Ok(node::execute_list_mcp_rules(params, context)),
             // Identity
-            "exochain_create_identity" => Ok(identity::execute_create_identity(params)),
-            "exochain_resolve_identity" => Ok(identity::execute_resolve_identity(params)),
-            "exochain_assess_risk" => Ok(identity::execute_assess_risk(params)),
-            "exochain_verify_signature" => Ok(identity::execute_verify_signature(params)),
-            "exochain_get_passport" => Ok(identity::execute_get_passport(params)),
+            "exochain_create_identity" => Ok(identity::execute_create_identity(params, context)),
+            "exochain_resolve_identity" => Ok(identity::execute_resolve_identity(params, context)),
+            "exochain_assess_risk" => Ok(identity::execute_assess_risk(params, context)),
+            "exochain_verify_signature" => Ok(identity::execute_verify_signature(params, context)),
+            "exochain_get_passport" => Ok(identity::execute_get_passport(params, context)),
             // Consent
-            "exochain_propose_bailment" => Ok(consent::execute_propose_bailment(params)),
-            "exochain_check_consent" => Ok(consent::execute_check_consent(params)),
-            "exochain_list_bailments" => Ok(consent::execute_list_bailments(params)),
-            "exochain_terminate_bailment" => Ok(consent::execute_terminate_bailment(params)),
-            // Governance
-            "exochain_create_decision" => Ok(governance::execute_create_decision(params)),
-            "exochain_cast_vote" => Ok(governance::execute_cast_vote(params)),
-            "exochain_check_quorum" => Ok(governance::execute_check_quorum(params)),
-            "exochain_get_decision_status" => Ok(governance::execute_get_decision_status(params)),
-            "exochain_propose_amendment" => Ok(governance::execute_propose_amendment(params)),
-            // Authority
-            "exochain_delegate_authority" => Ok(authority::execute_delegate_authority(params)),
-            "exochain_verify_authority_chain" => Ok(authority::execute_verify_authority_chain(params)),
-            "exochain_check_permission" => Ok(authority::execute_check_permission(params)),
-            "exochain_adjudicate_action" => Ok(authority::execute_adjudicate_action(params)),
-            // Ledger
-            "exochain_submit_event" => Ok(ledger::execute_submit_event(params)),
-            "exochain_get_event" => Ok(ledger::execute_get_event(params)),
-            "exochain_verify_inclusion" => Ok(ledger::execute_verify_inclusion(params)),
-            "exochain_get_checkpoint" => Ok(ledger::execute_get_checkpoint(params)),
-            // Proofs
-            "exochain_create_evidence" => Ok(proofs::execute_create_evidence(params)),
-            "exochain_verify_chain_of_custody" => {
-                Ok(proofs::execute_verify_chain_of_custody(params))
+            "exochain_propose_bailment" => Ok(consent::execute_propose_bailment(params, context)),
+            "exochain_check_consent" => Ok(consent::execute_check_consent(params, context)),
+            "exochain_list_bailments" => Ok(consent::execute_list_bailments(params, context)),
+            "exochain_terminate_bailment" => {
+                Ok(consent::execute_terminate_bailment(params, context))
             }
-            "exochain_generate_merkle_proof" => Ok(proofs::execute_generate_merkle_proof(params)),
-            "exochain_verify_cgr_proof" => Ok(proofs::execute_verify_cgr_proof(params)),
+            // Governance
+            "exochain_create_decision" => Ok(governance::execute_create_decision(params, context)),
+            "exochain_cast_vote" => Ok(governance::execute_cast_vote(params, context)),
+            "exochain_check_quorum" => Ok(governance::execute_check_quorum(params, context)),
+            "exochain_get_decision_status" => {
+                Ok(governance::execute_get_decision_status(params, context))
+            }
+            "exochain_propose_amendment" => {
+                Ok(governance::execute_propose_amendment(params, context))
+            }
+            // Authority
+            "exochain_delegate_authority" => {
+                Ok(authority::execute_delegate_authority(params, context))
+            }
+            "exochain_verify_authority_chain" => {
+                Ok(authority::execute_verify_authority_chain(params, context))
+            }
+            "exochain_check_permission" => {
+                Ok(authority::execute_check_permission(params, context))
+            }
+            "exochain_adjudicate_action" => {
+                Ok(authority::execute_adjudicate_action(params, context))
+            }
+            // Ledger
+            "exochain_submit_event" => Ok(ledger::execute_submit_event(params, context)),
+            "exochain_get_event" => Ok(ledger::execute_get_event(params, context)),
+            "exochain_verify_inclusion" => Ok(ledger::execute_verify_inclusion(params, context)),
+            "exochain_get_checkpoint" => Ok(ledger::execute_get_checkpoint(params, context)),
+            // Proofs
+            "exochain_create_evidence" => Ok(proofs::execute_create_evidence(params, context)),
+            "exochain_verify_chain_of_custody" => {
+                Ok(proofs::execute_verify_chain_of_custody(params, context))
+            }
+            "exochain_generate_merkle_proof" => {
+                Ok(proofs::execute_generate_merkle_proof(params, context))
+            }
+            "exochain_verify_cgr_proof" => Ok(proofs::execute_verify_cgr_proof(params, context)),
             // Legal
-            "exochain_ediscovery_search" => Ok(legal::execute_ediscovery_search(params)),
-            "exochain_assert_privilege" => Ok(legal::execute_assert_privilege(params)),
-            "exochain_initiate_safe_harbor" => Ok(legal::execute_initiate_safe_harbor(params)),
-            "exochain_check_fiduciary_duty" => Ok(legal::execute_check_fiduciary_duty(params)),
+            "exochain_ediscovery_search" => {
+                Ok(legal::execute_ediscovery_search(params, context))
+            }
+            "exochain_assert_privilege" => Ok(legal::execute_assert_privilege(params, context)),
+            "exochain_initiate_safe_harbor" => {
+                Ok(legal::execute_initiate_safe_harbor(params, context))
+            }
+            "exochain_check_fiduciary_duty" => {
+                Ok(legal::execute_check_fiduciary_duty(params, context))
+            }
             // Escalation
-            "exochain_evaluate_threat" => Ok(escalation::execute_evaluate_threat(params)),
-            "exochain_escalate_case" => Ok(escalation::execute_escalate_case(params)),
-            "exochain_triage" => Ok(escalation::execute_triage(params)),
-            "exochain_record_feedback" => Ok(escalation::execute_record_feedback(params)),
+            "exochain_evaluate_threat" => Ok(escalation::execute_evaluate_threat(params, context)),
+            "exochain_escalate_case" => Ok(escalation::execute_escalate_case(params, context)),
+            "exochain_triage" => Ok(escalation::execute_triage(params, context)),
+            "exochain_record_feedback" => Ok(escalation::execute_record_feedback(params, context)),
             // Messaging
-            "exochain_send_encrypted" => Ok(messaging::execute_send_encrypted(params)),
-            "exochain_receive_encrypted" => Ok(messaging::execute_receive_encrypted(params)),
+            "exochain_send_encrypted" => Ok(messaging::execute_send_encrypted(params, context)),
+            "exochain_receive_encrypted" => {
+                Ok(messaging::execute_receive_encrypted(params, context))
+            }
             "exochain_configure_death_trigger" => {
-                Ok(messaging::execute_configure_death_trigger(params))
+                Ok(messaging::execute_configure_death_trigger(params, context))
             }
             _ => Err(McpError::ToolNotFound(name.to_string())),
         }
@@ -226,7 +252,11 @@ mod tests {
     #[test]
     fn registry_execute_unknown_tool() {
         let registry = ToolRegistry::default();
-        let result = registry.execute("nonexistent", &serde_json::json!({}));
+        let result = registry.execute(
+            "nonexistent",
+            &serde_json::json!({}),
+            &NodeContext::empty(),
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             McpError::ToolNotFound(name) => assert_eq!(name, "nonexistent"),

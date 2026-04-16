@@ -4,6 +4,7 @@
 use exo_core::{Did, Hash256, Timestamp};
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ pub fn create_evidence_definition() -> ToolDefinition {
 
 /// Execute the `exochain_create_evidence` tool.
 #[must_use]
-pub fn execute_create_evidence(params: &Value) -> ToolResult {
+pub fn execute_create_evidence(params: &Value, _context: &NodeContext) -> ToolResult {
     let description = match params.get("description").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -133,7 +134,7 @@ pub fn verify_chain_of_custody_definition() -> ToolDefinition {
 
 /// Execute the `exochain_verify_chain_of_custody` tool.
 #[must_use]
-pub fn execute_verify_chain_of_custody(params: &Value) -> ToolResult {
+pub fn execute_verify_chain_of_custody(params: &Value, _context: &NodeContext) -> ToolResult {
     let evidence_id = match params.get("evidence_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -222,7 +223,7 @@ pub fn generate_merkle_proof_definition() -> ToolDefinition {
 
 /// Execute the `exochain_generate_merkle_proof` tool.
 #[must_use]
-pub fn execute_generate_merkle_proof(params: &Value) -> ToolResult {
+pub fn execute_generate_merkle_proof(params: &Value, _context: &NodeContext) -> ToolResult {
     let leaves_val = match params.get("leaves").and_then(Value::as_array) {
         Some(arr) => arr,
         None => {
@@ -361,7 +362,7 @@ pub fn verify_cgr_proof_definition() -> ToolDefinition {
 
 /// Execute the `exochain_verify_cgr_proof` tool.
 #[must_use]
-pub fn execute_verify_cgr_proof(params: &Value) -> ToolResult {
+pub fn execute_verify_cgr_proof(params: &Value, _context: &NodeContext) -> ToolResult {
     let proof_hash = match params.get("proof_hash").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -435,7 +436,7 @@ mod tests {
             "evidence_type": "document",
             "source_did": "did:exo:alice",
         });
-        let result = execute_create_evidence(&params);
+        let result = execute_create_evidence(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert!(v["evidence_id"].as_str().is_some());
@@ -454,13 +455,13 @@ mod tests {
             "evidence_type": "document",
             "source_did": "bad",
         });
-        let result = execute_create_evidence(&params);
+        let result = execute_create_evidence(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_create_evidence_missing_description() {
-        let result = execute_create_evidence(&json!({"evidence_type": "doc", "source_did": "did:exo:a"}));
+        let result = execute_create_evidence(&json!({"evidence_type": "doc", "source_did": "did:exo:a"}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -482,7 +483,7 @@ mod tests {
                 {"custodian": "did:exo:bob", "action": "transferred"},
             ],
         });
-        let result = execute_verify_chain_of_custody(&params);
+        let result = execute_verify_chain_of_custody(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], true);
@@ -497,7 +498,7 @@ mod tests {
                 {"custodian": "did:exo:alice", "action": "transferred"},
             ],
         });
-        let result = execute_verify_chain_of_custody(&params);
+        let result = execute_verify_chain_of_custody(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], false);
@@ -506,7 +507,7 @@ mod tests {
     #[test]
     fn execute_verify_chain_of_custody_empty() {
         let params = json!({"evidence_id": "abc", "chain": []});
-        let result = execute_verify_chain_of_custody(&params);
+        let result = execute_verify_chain_of_custody(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -525,7 +526,7 @@ mod tests {
             "leaves": ["aabb", "ccdd", "eeff", "1122"],
             "target_index": 1,
         });
-        let result = execute_generate_merkle_proof(&params);
+        let result = execute_generate_merkle_proof(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert!(v["root"].as_str().is_some());
@@ -537,14 +538,14 @@ mod tests {
     #[test]
     fn execute_generate_merkle_proof_out_of_range() {
         let params = json!({"leaves": ["aa"], "target_index": 5});
-        let result = execute_generate_merkle_proof(&params);
+        let result = execute_generate_merkle_proof(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_generate_merkle_proof_empty() {
         let params = json!({"leaves": [], "target_index": 0});
-        let result = execute_generate_merkle_proof(&params);
+        let result = execute_generate_merkle_proof(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -563,7 +564,7 @@ mod tests {
             "proof_hash": "abcdef01",
             "invariants_checked": ["consent_required", "no_self_dealing"],
         });
-        let result = execute_verify_cgr_proof(&params);
+        let result = execute_verify_cgr_proof(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verification_status"], "verified");
@@ -574,13 +575,13 @@ mod tests {
     #[test]
     fn execute_verify_cgr_proof_invalid_hex() {
         let params = json!({"proof_hash": "zzzz", "invariants_checked": []});
-        let result = execute_verify_cgr_proof(&params);
+        let result = execute_verify_cgr_proof(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_verify_cgr_proof_missing_hash() {
-        let result = execute_verify_cgr_proof(&json!({"invariants_checked": []}));
+        let result = execute_verify_cgr_proof(&json!({"invariants_checked": []}), &NodeContext::empty());
         assert!(result.is_error);
     }
 }

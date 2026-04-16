@@ -739,6 +739,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             eprintln!("[exochain-mcp] Starting MCP server...");
             eprintln!("[exochain-mcp] Node identity: {}", node_identity.did);
 
+            // The standalone `exochain mcp` command does NOT connect to a
+            // running node, so we spin up the MCP server with an empty
+            // runtime context. Tools that query live node state fall back
+            // to standalone / template responses.
+            //
+            // When an MCP server is embedded in a running node (future
+            // enhancement), it would use `McpServer::with_context(did,
+            // context)` where `context` carries the `SharedReactorState`
+            // and the `Arc<Mutex<SqliteDagStore>>` so tools return real
+            // runtime data.
             let server = mcp::McpServer::new(did);
             mcp::serve_stdio(server)
                 .await

@@ -4,6 +4,7 @@
 use exo_core::{Hash256, Timestamp};
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ pub fn evaluate_threat_definition() -> ToolDefinition {
 /// numbers are rejected — the workspace denies floating-point arithmetic,
 /// so we keep all math in `i64` for determinism.
 #[must_use]
-pub fn execute_evaluate_threat(params: &Value) -> ToolResult {
+pub fn execute_evaluate_threat(params: &Value, _context: &NodeContext) -> ToolResult {
     let signals = match params.get("signals").and_then(Value::as_array) {
         Some(arr) => arr,
         None => {
@@ -185,7 +186,7 @@ pub fn escalate_case_definition() -> ToolDefinition {
 
 /// Execute the `exochain_escalate_case` tool.
 #[must_use]
-pub fn execute_escalate_case(params: &Value) -> ToolResult {
+pub fn execute_escalate_case(params: &Value, _context: &NodeContext) -> ToolResult {
     let threat_assessment_id =
         match params.get("threat_assessment_id").and_then(Value::as_str) {
             Some(s) => s,
@@ -278,7 +279,7 @@ pub fn triage_definition() -> ToolDefinition {
 
 /// Execute the `exochain_triage` tool.
 #[must_use]
-pub fn execute_triage(params: &Value) -> ToolResult {
+pub fn execute_triage(params: &Value, _context: &NodeContext) -> ToolResult {
     let case_id = match params.get("case_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -360,7 +361,7 @@ pub fn record_feedback_definition() -> ToolDefinition {
 
 /// Execute the `exochain_record_feedback` tool.
 #[must_use]
-pub fn execute_record_feedback(params: &Value) -> ToolResult {
+pub fn execute_record_feedback(params: &Value, _context: &NodeContext) -> ToolResult {
     let case_id = match params.get("case_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -440,7 +441,7 @@ mod tests {
                 {"type": "policy_violation", "severity": 3, "source": "audit_log"},
             ],
         });
-        let result = execute_evaluate_threat(&params);
+        let result = execute_evaluate_threat(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["signal_count"], 2);
@@ -456,7 +457,7 @@ mod tests {
                 {"type": "breach", "severity": 9, "source": "firewall"},
             ],
         });
-        let result = execute_evaluate_threat(&params);
+        let result = execute_evaluate_threat(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["threat_level"], "critical");
@@ -464,13 +465,13 @@ mod tests {
 
     #[test]
     fn execute_evaluate_threat_empty_signals() {
-        let result = execute_evaluate_threat(&json!({"signals": []}));
+        let result = execute_evaluate_threat(&json!({"signals": []}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_evaluate_threat_missing_signals() {
-        let result = execute_evaluate_threat(&json!({}));
+        let result = execute_evaluate_threat(&json!({}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -490,7 +491,7 @@ mod tests {
             "escalation_reason": "Multiple high-severity signals detected",
             "priority": "high",
         });
-        let result = execute_escalate_case(&params);
+        let result = execute_escalate_case(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["priority"], "high");
@@ -505,7 +506,7 @@ mod tests {
             "escalation_reason": "test",
             "priority": "urgent",
         });
-        let result = execute_escalate_case(&params);
+        let result = execute_escalate_case(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -513,6 +514,7 @@ mod tests {
     fn execute_escalate_case_missing_reason() {
         let result = execute_escalate_case(
             &json!({"threat_assessment_id": "ta_abc", "priority": "high"}),
+            &NodeContext::empty(),
         );
         assert!(result.is_error);
     }
@@ -533,7 +535,7 @@ mod tests {
             "assessment": "Confirmed unauthorized access attempt",
             "recommended_action": "block_source_ip",
         });
-        let result = execute_triage(&params);
+        let result = execute_triage(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["case_id"], "case_abc");
@@ -546,6 +548,7 @@ mod tests {
     fn execute_triage_missing_case_id() {
         let result = execute_triage(
             &json!({"assessment": "test", "recommended_action": "block"}),
+            &NodeContext::empty(),
         );
         assert!(result.is_error);
     }
@@ -566,7 +569,7 @@ mod tests {
             "outcome": "true_positive",
             "notes": "Confirmed breach via log analysis",
         });
-        let result = execute_record_feedback(&params);
+        let result = execute_record_feedback(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["outcome"], "true_positive");
@@ -577,14 +580,14 @@ mod tests {
     #[test]
     fn execute_record_feedback_invalid_outcome() {
         let params = json!({"case_id": "case_abc", "outcome": "maybe"});
-        let result = execute_record_feedback(&params);
+        let result = execute_record_feedback(&params, &NodeContext::empty());
         assert!(result.is_error);
     }
 
     #[test]
     fn execute_record_feedback_no_notes() {
         let params = json!({"case_id": "case_abc", "outcome": "false_positive"});
-        let result = execute_record_feedback(&params);
+        let result = execute_record_feedback(&params, &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["notes"], "");

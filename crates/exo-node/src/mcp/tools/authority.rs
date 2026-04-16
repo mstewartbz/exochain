@@ -12,6 +12,7 @@ use exo_gatekeeper::{
 };
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 /// Constitution bytes used to initialise the CGR Kernel for adjudication.
@@ -52,7 +53,7 @@ pub fn delegate_authority_definition() -> ToolDefinition {
 
 /// Execute the `exochain_delegate_authority` tool.
 #[must_use]
-pub fn execute_delegate_authority(params: &Value) -> ToolResult {
+pub fn execute_delegate_authority(params: &Value, _context: &NodeContext) -> ToolResult {
     let grantor_str = match params.get("grantor_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -158,7 +159,7 @@ pub fn verify_authority_chain_definition() -> ToolDefinition {
 
 /// Execute the `exochain_verify_authority_chain` tool.
 #[must_use]
-pub fn execute_verify_authority_chain(params: &Value) -> ToolResult {
+pub fn execute_verify_authority_chain(params: &Value, _context: &NodeContext) -> ToolResult {
     let chain_val = match params.get("chain").and_then(Value::as_array) {
         Some(arr) => arr,
         None => {
@@ -296,7 +297,7 @@ pub fn check_permission_definition() -> ToolDefinition {
 
 /// Execute the `exochain_check_permission` tool.
 #[must_use]
-pub fn execute_check_permission(params: &Value) -> ToolResult {
+pub fn execute_check_permission(params: &Value, _context: &NodeContext) -> ToolResult {
     let actor_str = match params.get("actor_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -378,7 +379,7 @@ pub fn adjudicate_action_definition() -> ToolDefinition {
 /// invariants enforced.
 #[must_use]
 #[allow(clippy::expect_used)] // Static DID strings are always valid.
-pub fn execute_adjudicate_action(params: &Value) -> ToolResult {
+pub fn execute_adjudicate_action(params: &Value, _context: &NodeContext) -> ToolResult {
     let actor_str = match params.get("actor_did").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -530,7 +531,7 @@ mod tests {
             "grantor_did": "did:exo:root",
             "grantee_did": "did:exo:alice",
             "permissions": ["read", "write"],
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["grantor"], "did:exo:root");
@@ -545,7 +546,7 @@ mod tests {
             "grantor_did": "bad",
             "grantee_did": "did:exo:alice",
             "permissions": ["read"],
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -555,7 +556,7 @@ mod tests {
             "grantor_did": "did:exo:root",
             "grantee_did": "did:exo:alice",
             "permissions": [],
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -576,7 +577,7 @@ mod tests {
                 {"grantor": "did:exo:mid", "grantee": "did:exo:leaf", "permissions": ["read"]},
             ],
             "terminal_actor": "did:exo:leaf",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], true);
@@ -592,7 +593,7 @@ mod tests {
                 {"grantor": "did:exo:other", "grantee": "did:exo:leaf", "permissions": ["read"]},
             ],
             "terminal_actor": "did:exo:leaf",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], false);
@@ -606,7 +607,7 @@ mod tests {
                 {"grantor": "did:exo:root", "grantee": "did:exo:alice", "permissions": ["read"]},
             ],
             "terminal_actor": "did:exo:bob",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], false);
@@ -617,7 +618,7 @@ mod tests {
         let result = execute_verify_authority_chain(&json!({
             "chain": [],
             "terminal_actor": "did:exo:alice",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], false);
@@ -638,7 +639,7 @@ mod tests {
         let result = execute_check_permission(&json!({
             "actor_did": "did:exo:alice",
             "permission": "read",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["actor"], "did:exo:alice");
@@ -652,7 +653,7 @@ mod tests {
         let result = execute_check_permission(&json!({
             "actor_did": "bad",
             "permission": "read",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -661,7 +662,7 @@ mod tests {
         let result = execute_check_permission(&json!({
             "actor_did": "did:exo:alice",
             "permission": "",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -679,7 +680,7 @@ mod tests {
         let result = execute_adjudicate_action(&json!({
             "actor_did": "did:exo:alice",
             "action": "read medical record",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verdict"], "Permitted");
@@ -693,7 +694,7 @@ mod tests {
             "actor_did": "did:exo:alice",
             "action": "elevate permissions",
             "is_self_grant": true,
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verdict"], "Denied");
@@ -706,7 +707,7 @@ mod tests {
             "actor_did": "did:exo:alice",
             "action": "patch kernel",
             "modifies_kernel": true,
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verdict"], "Denied");
@@ -717,7 +718,7 @@ mod tests {
         let result = execute_adjudicate_action(&json!({
             "actor_did": "bad",
             "action": "read",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 }

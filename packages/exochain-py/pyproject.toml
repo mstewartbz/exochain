@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "exochain"
+version = "0.1.0"
+description = "EXOCHAIN SDK — constitutional governance fabric for AI and data sovereignty"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "EXOCHAIN Foundation", email = "engineering@exochain.io" },
+]
+keywords = ["exochain", "constitutional", "governance", "did", "consent", "ai-safety"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "cryptography>=42.0.0",
+    "pydantic>=2.5.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.7",
+    "ruff>=0.1.8",
+]
+
+[project.urls]
+Homepage = "https://exochain.io"
+Repository = "https://github.com/exochain/exochain"
+Documentation = "https://docs.exochain.io/sdk/python"
+Issues = "https://github.com/exochain/exochain/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["exochain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"

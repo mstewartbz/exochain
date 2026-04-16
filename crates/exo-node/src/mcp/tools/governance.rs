@@ -4,6 +4,7 @@
 use exo_core::{Did, Hash256, Timestamp};
 use serde_json::{Value, json};
 
+use crate::mcp::context::NodeContext;
 use crate::mcp::protocol::{ToolDefinition, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ pub fn create_decision_definition() -> ToolDefinition {
 
 /// Execute the `exochain_create_decision` tool.
 #[must_use]
-pub fn execute_create_decision(params: &Value) -> ToolResult {
+pub fn execute_create_decision(params: &Value, _context: &NodeContext) -> ToolResult {
     let title = match params.get("title").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -135,7 +136,7 @@ pub fn cast_vote_definition() -> ToolDefinition {
 
 /// Execute the `exochain_cast_vote` tool.
 #[must_use]
-pub fn execute_cast_vote(params: &Value) -> ToolResult {
+pub fn execute_cast_vote(params: &Value, _context: &NodeContext) -> ToolResult {
     let decision_id = match params.get("decision_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -226,7 +227,7 @@ pub fn check_quorum_definition() -> ToolDefinition {
 
 /// Execute the `exochain_check_quorum` tool.
 #[must_use]
-pub fn execute_check_quorum(params: &Value) -> ToolResult {
+pub fn execute_check_quorum(params: &Value, _context: &NodeContext) -> ToolResult {
     let decision_id = match params.get("decision_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -288,7 +289,7 @@ pub fn get_decision_status_definition() -> ToolDefinition {
 
 /// Execute the `exochain_get_decision_status` tool.
 #[must_use]
-pub fn execute_get_decision_status(params: &Value) -> ToolResult {
+pub fn execute_get_decision_status(params: &Value, _context: &NodeContext) -> ToolResult {
     let decision_id = match params.get("decision_id").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -351,7 +352,7 @@ pub fn propose_amendment_definition() -> ToolDefinition {
 
 /// Execute the `exochain_propose_amendment` tool.
 #[must_use]
-pub fn execute_propose_amendment(params: &Value) -> ToolResult {
+pub fn execute_propose_amendment(params: &Value, _context: &NodeContext) -> ToolResult {
     let title = match params.get("title").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -444,7 +445,7 @@ mod tests {
             "title": "Approve data sharing policy",
             "description": "Allow cross-org medical data sharing under bailment.",
             "proposer_did": "did:exo:alice",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["title"], "Approve data sharing policy");
@@ -459,7 +460,7 @@ mod tests {
             "title": "Test",
             "description": "Test",
             "proposer_did": "bad",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -468,7 +469,7 @@ mod tests {
         let result = execute_create_decision(&json!({
             "description": "Test",
             "proposer_did": "did:exo:alice",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -488,7 +489,7 @@ mod tests {
             "voter_did": "did:exo:bob",
             "choice": "approve",
             "rationale": "Looks good to me.",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["decision_id"], "abc123");
@@ -505,7 +506,7 @@ mod tests {
             "decision_id": "abc123",
             "voter_did": "did:exo:bob",
             "choice": "maybe",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -515,7 +516,7 @@ mod tests {
             "decision_id": "abc123",
             "voter_did": "bad",
             "choice": "approve",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -533,7 +534,7 @@ mod tests {
         let result = execute_check_quorum(&json!({
             "decision_id": "abc123",
             "threshold": 3,
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["decision_id"], "abc123");
@@ -544,7 +545,7 @@ mod tests {
 
     #[test]
     fn execute_check_quorum_missing_threshold() {
-        let result = execute_check_quorum(&json!({"decision_id": "abc123"}));
+        let result = execute_check_quorum(&json!({"decision_id": "abc123"}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -559,7 +560,7 @@ mod tests {
 
     #[test]
     fn execute_get_decision_status_success() {
-        let result = execute_get_decision_status(&json!({"decision_id": "abc123"}));
+        let result = execute_get_decision_status(&json!({"decision_id": "abc123"}), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["decision_id"], "abc123");
@@ -568,7 +569,7 @@ mod tests {
 
     #[test]
     fn execute_get_decision_status_empty_id() {
-        let result = execute_get_decision_status(&json!({"decision_id": ""}));
+        let result = execute_get_decision_status(&json!({"decision_id": ""}), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -588,7 +589,7 @@ mod tests {
             "description": "Extend the constitutional invariant set to require ML-DSA-65 for kernel modification quorum.",
             "proposer_did": "did:exo:alice",
             "target": "constitution",
-        }));
+        }), &NodeContext::empty());
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text()).expect("valid JSON");
         assert_eq!(v["target"], "constitution");
@@ -606,7 +607,7 @@ mod tests {
             "description": "Test",
             "proposer_did": "did:exo:alice",
             "target": "invalid_target",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 
@@ -617,7 +618,7 @@ mod tests {
             "description": "Test",
             "proposer_did": "bad",
             "target": "constitution",
-        }));
+        }), &NodeContext::empty());
         assert!(result.is_error);
     }
 }
