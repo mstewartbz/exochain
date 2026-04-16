@@ -85,7 +85,7 @@ pub enum Command {
         data_dir: Option<PathBuf>,
     },
 
-    /// Start the MCP (Model Context Protocol) server on stdio.
+    /// Start the MCP (Model Context Protocol) server on stdio or HTTP+SSE.
     /// Enables AI agents to interact with the governance fabric.
     Mcp {
         /// Data directory (default: ~/.exochain).
@@ -95,5 +95,10 @@ pub enum Command {
         /// DID for the MCP actor. If not provided, uses the node's identity.
         #[arg(long)]
         actor_did: Option<String>,
+
+        /// Use HTTP+SSE transport instead of stdio. The value is the bind
+        /// address (host:port). Example: `--sse 127.0.0.1:3030`.
+        #[arg(long)]
+        sse: Option<String>,
     },
 }

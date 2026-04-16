@@ -5,17 +5,21 @@
 //! constitutional constraints through the middleware, and returns properly
 //! formatted JSON-RPC responses.
 
+use std::collections::BTreeMap;
+
 use exo_core::Did;
 use serde_json::Value;
 
 use super::context::NodeContext;
 use super::error::McpError;
 use super::middleware::ConstitutionalMiddleware;
+use super::prompts::PromptRegistry;
 use super::protocol::{
-    InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResponse, ResourcesCapability,
-    ServerCapabilities, ServerInfo, ToolContent, ToolResult, ToolsCapability, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
+    InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResponse, PromptsCapability,
+    ResourcesCapability, ServerCapabilities, ServerInfo, ToolContent, ToolResult, ToolsCapability,
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR,
 };
+use super::resources::ResourceRegistry;
 use super::tools::ToolRegistry;
 
 /// MCP server that processes JSON-RPC messages from AI clients.
@@ -25,6 +29,8 @@ use super::tools::ToolRegistry;
 pub struct McpServer {
     actor_did: Did,
     registry: ToolRegistry,
+    resources: ResourceRegistry,
+    prompts: PromptRegistry,
     middleware: ConstitutionalMiddleware,
     context: NodeContext,
 }
@@ -42,6 +48,8 @@ impl McpServer {
         Self {
             actor_did,
             registry: ToolRegistry::default(),
+            resources: ResourceRegistry::default(),
+            prompts: PromptRegistry::default(),
             middleware: ConstitutionalMiddleware::new(),
             context: NodeContext::empty(),
         }
@@ -59,6 +67,8 @@ impl McpServer {
         Self {
             actor_did,
             registry: ToolRegistry::default(),
+            resources: ResourceRegistry::default(),
+            prompts: PromptRegistry::default(),
             middleware: ConstitutionalMiddleware::new(),
             context,
         }
@@ -120,6 +130,9 @@ impl McpServer {
             "tools/list" => self.handle_tools_list(request),
             "tools/call" => self.handle_tools_call(request),
             "resources/list" => self.handle_resources_list(request),
+            "resources/read" => self.handle_resources_read(request),
+            "prompts/list" => self.handle_prompts_list(request),
+            "prompts/get" => self.handle_prompts_get(request),
             "ping" => self.handle_ping(request),
             _ => JsonRpcResponse::error(
                 request.id.clone(),
@@ -150,7 +163,7 @@ impl McpServer {
                     subscribe: false,
                     list_changed: false,
                 }),
-                prompts: None,
+                prompts: Some(PromptsCapability { list_changed: false }),
             },
             server_info: ServerInfo {
                 name: "exochain-mcp".into(),
@@ -264,12 +277,133 @@ impl McpServer {
         }
     }
 
-    /// Handle `resources/list` — returns empty list (resources coming in next phase).
+    /// Handle `resources/list` — return all registered resource definitions.
     fn handle_resources_list(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        let resources: Vec<Value> = self
+            .resources
+            .list()
+            .into_iter()
+            .filter_map(|r| serde_json::to_value(r).ok())
+            .collect();
+
         JsonRpcResponse::success(
             request.id.clone(),
-            serde_json::json!({ "resources": [] }),
+            serde_json::json!({ "resources": resources }),
         )
+    }
+
+    /// Handle `resources/read` — return the body of a resource by URI.
+    fn handle_resources_read(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        let params = match &request.params {
+            Some(p) => p,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "missing params for resources/read".into(),
+                );
+            }
+        };
+
+        let uri = match params.get("uri").and_then(Value::as_str) {
+            Some(uri) => uri,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "missing 'uri' in resources/read params".into(),
+                );
+            }
+        };
+
+        match self.resources.read(uri, &self.context) {
+            Some(content) => match serde_json::to_value(&content) {
+                Ok(value) => JsonRpcResponse::success(
+                    request.id.clone(),
+                    serde_json::json!({ "contents": [value] }),
+                ),
+                Err(e) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    INTERNAL_ERROR,
+                    format!("serialization error: {e}"),
+                ),
+            },
+            None => JsonRpcResponse::error(
+                request.id.clone(),
+                INVALID_REQUEST,
+                format!("resource not found: {uri}"),
+            ),
+        }
+    }
+
+    /// Handle `prompts/list` — return all registered prompt definitions.
+    fn handle_prompts_list(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        let prompts: Vec<Value> = self
+            .prompts
+            .list()
+            .into_iter()
+            .filter_map(|p| serde_json::to_value(p).ok())
+            .collect();
+
+        JsonRpcResponse::success(
+            request.id.clone(),
+            serde_json::json!({ "prompts": prompts }),
+        )
+    }
+
+    /// Handle `prompts/get` — return a rendered prompt result.
+    fn handle_prompts_get(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
+        let params = match &request.params {
+            Some(p) => p,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "missing params for prompts/get".into(),
+                );
+            }
+        };
+
+        let name = match params.get("name").and_then(Value::as_str) {
+            Some(name) => name,
+            None => {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    INVALID_PARAMS,
+                    "missing 'name' in prompts/get params".into(),
+                );
+            }
+        };
+
+        let mut args: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(arg_value) = params.get("arguments") {
+            if let Some(obj) = arg_value.as_object() {
+                for (k, v) in obj {
+                    let string_value = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Null => String::new(),
+                        other => other.to_string(),
+                    };
+                    args.insert(k.clone(), string_value);
+                }
+            }
+        }
+
+        match self.prompts.get(name, &args) {
+            Some(result) => match serde_json::to_value(&result) {
+                Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
+                Err(e) => JsonRpcResponse::error(
+                    request.id.clone(),
+                    INTERNAL_ERROR,
+                    format!("serialization error: {e}"),
+                ),
+            },
+            None => JsonRpcResponse::error(
+                request.id.clone(),
+                INVALID_REQUEST,
+                format!("prompt not found: {name}"),
+            ),
+        }
     }
 
     /// Handle `ping` — returns pong.
@@ -457,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_resources_list_empty() {
+    fn handler_resources_list() {
         let server = test_server();
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -471,7 +605,187 @@ mod tests {
         assert!(parsed.error.is_none());
         let result = parsed.result.unwrap();
         let resources = result["resources"].as_array().unwrap();
-        assert!(resources.is_empty());
+        assert_eq!(resources.len(), 6, "expected 6 registered resources");
+        let uris: Vec<&str> = resources
+            .iter()
+            .filter_map(|r| r["uri"].as_str())
+            .collect();
+        assert!(uris.contains(&"exochain://constitution"));
+        assert!(uris.contains(&"exochain://invariants"));
+        assert!(uris.contains(&"exochain://mcp-rules"));
+        assert!(uris.contains(&"exochain://node/status"));
+        assert!(uris.contains(&"exochain://tools"));
+        assert!(uris.contains(&"exochain://readme"));
+    }
+
+    #[test]
+    fn handler_resources_read() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 70,
+            "method": "resources/read",
+            "params": { "uri": "exochain://constitution" }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        let contents = result["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        assert!(!text.is_empty());
+        assert_eq!(contents[0]["uri"], "exochain://constitution");
+    }
+
+    #[test]
+    fn handler_resources_read_unknown_uri() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 71,
+            "method": "resources/read",
+            "params": { "uri": "exochain://does-not-exist" }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, INVALID_REQUEST);
+    }
+
+    #[test]
+    fn handler_resources_read_missing_uri() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": "resources/read",
+            "params": {}
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn handler_prompts_list() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 80,
+            "method": "prompts/list"
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        let prompts = result["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 4, "expected 4 registered prompts");
+        let names: Vec<&str> = prompts
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert!(names.contains(&"governance_review"));
+        assert!(names.contains(&"compliance_check"));
+        assert!(names.contains(&"evidence_analysis"));
+        assert!(names.contains(&"constitutional_audit"));
+    }
+
+    #[test]
+    fn handler_prompts_get() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 81,
+            "method": "prompts/get",
+            "params": {
+                "name": "governance_review",
+                "arguments": {
+                    "decision_id": "dec-100",
+                    "decision_title": "Sample decision"
+                }
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        assert!(!messages.is_empty());
+        let text = messages[0]["content"]["text"].as_str().unwrap();
+        assert!(text.contains("dec-100"));
+        assert!(text.contains("Sample decision"));
+    }
+
+    #[test]
+    fn handler_prompts_get_unknown() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 82,
+            "method": "prompts/get",
+            "params": {
+                "name": "does-not-exist",
+                "arguments": {}
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, INVALID_REQUEST);
+    }
+
+    #[test]
+    fn handler_prompts_get_missing_name() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 83,
+            "method": "prompts/get",
+            "params": {}
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_some());
+        assert_eq!(parsed.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn handler_initialize_advertises_prompts() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 90,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test-client" }
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        let result = parsed.result.unwrap();
+        assert!(result["capabilities"]["prompts"].is_object());
+        assert!(result["capabilities"]["resources"].is_object());
+        assert!(result["capabilities"]["tools"].is_object());
     }
 
     #[test]
