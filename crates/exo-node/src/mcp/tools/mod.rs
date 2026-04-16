@@ -2,9 +2,14 @@
 
 pub mod authority;
 pub mod consent;
+pub mod escalation;
 pub mod governance;
 pub mod identity;
+pub mod ledger;
+pub mod legal;
+pub mod messaging;
 pub mod node;
+pub mod proofs;
 
 use std::collections::BTreeMap;
 
@@ -73,6 +78,30 @@ impl ToolRegistry {
         self.register(authority::verify_authority_chain_definition());
         self.register(authority::check_permission_definition());
         self.register(authority::adjudicate_action_definition());
+        // Ledger tools (4)
+        self.register(ledger::submit_event_definition());
+        self.register(ledger::get_event_definition());
+        self.register(ledger::verify_inclusion_definition());
+        self.register(ledger::get_checkpoint_definition());
+        // Proofs tools (4)
+        self.register(proofs::create_evidence_definition());
+        self.register(proofs::verify_chain_of_custody_definition());
+        self.register(proofs::generate_merkle_proof_definition());
+        self.register(proofs::verify_cgr_proof_definition());
+        // Legal tools (4)
+        self.register(legal::ediscovery_search_definition());
+        self.register(legal::assert_privilege_definition());
+        self.register(legal::initiate_safe_harbor_definition());
+        self.register(legal::check_fiduciary_duty_definition());
+        // Escalation tools (4)
+        self.register(escalation::evaluate_threat_definition());
+        self.register(escalation::escalate_case_definition());
+        self.register(escalation::triage_definition());
+        self.register(escalation::record_feedback_definition());
+        // Messaging tools (3)
+        self.register(messaging::send_encrypted_definition());
+        self.register(messaging::receive_encrypted_definition());
+        self.register(messaging::configure_death_trigger_definition());
     }
 
     /// Execute a tool by name with the given params.
@@ -111,6 +140,34 @@ impl ToolRegistry {
             "exochain_verify_authority_chain" => Ok(authority::execute_verify_authority_chain(params)),
             "exochain_check_permission" => Ok(authority::execute_check_permission(params)),
             "exochain_adjudicate_action" => Ok(authority::execute_adjudicate_action(params)),
+            // Ledger
+            "exochain_submit_event" => Ok(ledger::execute_submit_event(params)),
+            "exochain_get_event" => Ok(ledger::execute_get_event(params)),
+            "exochain_verify_inclusion" => Ok(ledger::execute_verify_inclusion(params)),
+            "exochain_get_checkpoint" => Ok(ledger::execute_get_checkpoint(params)),
+            // Proofs
+            "exochain_create_evidence" => Ok(proofs::execute_create_evidence(params)),
+            "exochain_verify_chain_of_custody" => {
+                Ok(proofs::execute_verify_chain_of_custody(params))
+            }
+            "exochain_generate_merkle_proof" => Ok(proofs::execute_generate_merkle_proof(params)),
+            "exochain_verify_cgr_proof" => Ok(proofs::execute_verify_cgr_proof(params)),
+            // Legal
+            "exochain_ediscovery_search" => Ok(legal::execute_ediscovery_search(params)),
+            "exochain_assert_privilege" => Ok(legal::execute_assert_privilege(params)),
+            "exochain_initiate_safe_harbor" => Ok(legal::execute_initiate_safe_harbor(params)),
+            "exochain_check_fiduciary_duty" => Ok(legal::execute_check_fiduciary_duty(params)),
+            // Escalation
+            "exochain_evaluate_threat" => Ok(escalation::execute_evaluate_threat(params)),
+            "exochain_escalate_case" => Ok(escalation::execute_escalate_case(params)),
+            "exochain_triage" => Ok(escalation::execute_triage(params)),
+            "exochain_record_feedback" => Ok(escalation::execute_record_feedback(params)),
+            // Messaging
+            "exochain_send_encrypted" => Ok(messaging::execute_send_encrypted(params)),
+            "exochain_receive_encrypted" => Ok(messaging::execute_receive_encrypted(params)),
+            "exochain_configure_death_trigger" => {
+                Ok(messaging::execute_configure_death_trigger(params))
+            }
             _ => Err(McpError::ToolNotFound(name.to_string())),
         }
     }
@@ -136,7 +193,7 @@ mod tests {
     fn registry_registers_and_lists() {
         let registry = ToolRegistry::default();
         let tools = registry.list();
-        assert_eq!(tools.len(), 21, "expected 3+5+4+5+4 = 21 tools");
+        assert_eq!(tools.len(), 40, "expected 3+5+4+5+4+4+4+4+4+3 = 40 tools");
     }
 
     #[test]

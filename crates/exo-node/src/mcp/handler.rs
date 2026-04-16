@@ -300,7 +300,7 @@ mod tests {
         assert!(parsed.error.is_none());
         let result = parsed.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21, "expected 3+5+4+5+4 = 21 tools");
+        assert_eq!(tools.len(), 40, "expected 3+5+4+5+4+4+4+4+4+3 = 40 tools");
         // Tools are in BTreeMap order (alphabetical).
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"exochain_node_status"));

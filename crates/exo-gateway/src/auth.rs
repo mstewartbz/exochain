@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use exo_core::{Did, Hash256, Signature, Timestamp};
-use exo_identity::{registry::{LocalDidRegistry, DidRegistry}, did_verification::verify_did_signature};
+use exo_identity::{registry::DidRegistry, did_verification::verify_did_signature};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GatewayError, Result};

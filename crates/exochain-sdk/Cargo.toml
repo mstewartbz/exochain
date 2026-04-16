@@ -1,0 +1,35 @@
+[package]
+name = "exochain-sdk"
+description = "EXOCHAIN SDK — ergonomic Rust API for the constitutional governance fabric"
+documentation = "https://docs.exochain.io/sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Core crates
+exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
+exo-consent = { path = "../exo-consent" }
+exo-authority = { path = "../exo-authority" }
+exo-governance = { path = "../exo-governance" }
+exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-escalation = { path = "../exo-escalation" }
+exo-legal = { path = "../exo-legal" }
+exo-dag = { path = "../exo-dag" }
+exo-proofs = { path = "../exo-proofs" }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Crypto
+blake3 = { workspace = true }

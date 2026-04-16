@@ -19,6 +19,7 @@ members = [
     "crates/exo-node",
     "crates/exo-catapult",
     "crates/exo-messaging", "crates/exo-consensus",
+    "crates/exochain-sdk",
 ]
 
 [workspace.package]

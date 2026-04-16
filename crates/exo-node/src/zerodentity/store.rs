@@ -39,8 +39,10 @@ use super::types::{
 #[derive(Debug, Default)]
 pub struct ZerodentityStore {
     /// In-memory DID registry for cryptographic standing.
+    #[allow(dead_code)] // Used via trait methods in verification ceremony.
     pub did_registry: exo_identity::registry::LocalDidRegistry,
     /// Active verification ceremonies by session token.
+    #[allow(dead_code)] // Used via trait methods in verification ceremony.
     pub ceremonies: BTreeMap<String, exo_identity::verification::VerificationCeremony>,
     /// Latest score snapshot per DID.
     scores: BTreeMap<String, ZerodentityScore>,
