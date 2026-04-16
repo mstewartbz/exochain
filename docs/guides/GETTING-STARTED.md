@@ -1,382 +1,269 @@
 ---
-title: "EXOCHAIN Getting Started Guide"
+title: "EXOCHAIN Getting Started"
 status: active
 created: 2026-03-18
+updated: 2026-04-15
 tags: [exochain, guide, getting-started, contributing]
 ---
 
 # Getting Started
 
-**Build, test, contribute to, and understand the EXOCHAIN constitutional trust fabric.**
+**You have 5 minutes. Pick your path.**
+
+EXOCHAIN is a constitutional trust fabric: every action is adjudicated by an immutable kernel that enforces 8 invariants (consent required, no self-grant, kernel immutability, ...) before it takes effect. The fabric ships a Rust canonical implementation, two SDKs (TypeScript, Python), and an MCP server that lets AI agents operate inside the constitution.
 
 > Cross-references: [[ARCHITECTURE]], [[CRATE-REFERENCE]], [[THREAT-MODEL]], [[CONSTITUTIONAL-PROOFS]]
 
 ---
 
-## 1. Prerequisites
+## Table of Contents
 
-### Required Toolchain
+- [3-step quickstart](#3-step-quickstart)
+- [Pick your path](#pick-your-path)
+- [Prerequisites (for building)](#prerequisites-for-building)
+- [Build, test, lint](#build-test-lint)
+- [Architecture in 60 seconds](#architecture-in-60-seconds)
+- [Contributing changes](#contributing-changes)
+- [Constitutional constraints](#constitutional-constraints)
+- [Running the full quality gate locally](#running-the-full-quality-gate-locally)
+- [Council process for constitutional changes](#council-process-for-constitutional-changes)
+- [Quick reference](#quick-reference)
 
-| Tool | Minimum Version | Purpose |
-|------|----------------|---------|
-| **Rust** | 1.85+ | The workspace uses `edition = "2024"` and `rust-version = "1.85"` |
-| **cargo-tarpaulin** | latest | Code coverage measurement (CI requires >= 90% line coverage) |
-| **cargo-deny** | latest | License, advisory, and dependency governance |
-| **cargo-audit** | latest | Known vulnerability scanning |
+---
 
-### Installation
+## 3-step quickstart
 
 ```bash
-# Install Rust via rustup (if not already installed)
+# 1. Clone
+git clone https://github.com/exochain/exochain.git
+cd exochain
+
+# 2. Build the node + SDK (release mode)
+cargo build --release -p exo-node -p exochain-sdk
+
+# 3. Launch the MCP server (stdio)
+./target/release/exochain mcp
+```
+
+Expected output on stderr:
+
+```text
+[exochain-mcp] Constitutional MCP server ready on stdio
+[exochain-mcp] Actor: did:exo:<your-node-identity>
+[exochain-mcp] Tools: 40
+```
+
+That's it — you have a constitutional node running with 40 MCP tools, 6 resources, and 4 prompts. Point a Claude Code config at the binary (see the MCP guide below) and an AI agent can now drive governance operations under the kernel.
+
+---
+
+## Pick your path
+
+| I want to... | Start here | One-liner |
+|---|---|---|
+| **Build a Rust app on the fabric** | [Rust SDK Quickstart](./sdk-quickstart-rust.md) | `cargo add exochain-sdk` |
+| **Build a TS/JS app (Node or browser)** | [TypeScript SDK Quickstart](./sdk-quickstart-typescript.md) | `npm install @exochain/sdk` |
+| **Build a Python service** | [Python SDK Quickstart](./sdk-quickstart-python.md) | `pip install exochain` |
+| **Let Claude (or any AI) drive the fabric** | [MCP Integration Guide](./mcp-integration.md) | `exochain mcp` |
+| **Run a node (operator)** | [Deployment Guide](./DEPLOYMENT.md) | `exochain start --api-port 8080` |
+| **Join an existing network** | [Deployment Guide](./DEPLOYMENT.md) | `exochain join --seed <host:port>` |
+| **Understand the architecture** | [Architecture](../architecture/ARCHITECTURE.md) | — |
+| **Integrate with ExoForge** | [Archon Integration](./ARCHON-INTEGRATION.md) | — |
+| **Contribute a new feature** | [Contributing section below](#contributing-changes) | `cargo test --workspace` |
+
+---
+
+## Prerequisites (for building)
+
+| Tool | Minimum | Purpose |
+|---|---|---|
+| **Rust** | 1.85+ (edition 2024) | Core workspace |
+| **cargo-tarpaulin** | latest | Coverage (CI requires >=90%) |
+| **cargo-deny** | latest | License + advisory + source governance |
+| **cargo-audit** | latest | Known-vulnerability scanning |
+| **Node 20+** *(optional)* | | TypeScript SDK |
+| **Python 3.11+** *(optional)* | | Python SDK + codegen tools |
+
+Install:
+
+```bash
+# Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustc --version  # must be >= 1.85.0
 
-# Verify Rust version
-rustc --version  # Must be >= 1.85.0
-
-# Install quality gate tools
+# Quality gate tools
 cargo install cargo-tarpaulin
 cargo install cargo-deny
 cargo install cargo-audit
 ```
 
-### Optional but Recommended
-
-| Tool | Purpose |
-|------|---------|
-| `cargo-watch` | Auto-rebuild on file changes: `cargo watch -x test` |
-| `cargo-expand` | Macro expansion debugging |
-| `python3` | Required for `tools/codegen/` and `tools/syntaxis/` |
-
 ---
 
-## 2. Clone and Build
+## Build, test, lint
 
 ```bash
-# Clone the repository
-git clone https://github.com/exochain/exochain.git
-cd exochain
-
-# Build all 16 crates (debug mode)
+# Build all 16 crates (debug)
 cargo build --workspace
 
-# Build in release mode (LTO enabled, may take longer)
+# Build in release mode (LTO, may take longer)
 cargo build --workspace --release
-```
 
-The workspace compiles all 16 crates and their dependencies. The first build downloads and compiles external dependencies (ed25519-dalek, blake3, serde, etc.). Subsequent builds are incremental.
-
-### Build Verification
-
-A clean build should produce:
-
-- Zero errors
-- Zero warnings (clippy is set to deny warnings in CI)
-- All 16 crates compiled
-
-```bash
-# Verify no warnings
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
----
-
-## 3. Run Tests
-
-```bash
-# Run all 1,846 tests across 16 crates
+# Run all 1,846 tests
 cargo test --workspace
 
 # Run tests for a specific crate
-cargo test -p exo-core
+cargo test -p exochain-sdk
 cargo test -p exo-gatekeeper
 
-# Run tests with output (useful for debugging)
-cargo test --workspace -- --nocapture
+# Lint (zero warnings — CI denies)
+cargo clippy --workspace --all-targets -- -D warnings
 
-# Run a specific test by name
-cargo test -p exo-core bcts_transition_happy_path
-
-# Run property-based tests (proptest)
-cargo test --workspace -- --include-ignored
+# Coverage (HTML report)
+cargo tarpaulin --workspace --out html
+open tarpaulin-report.html
 ```
 
-### Expected Output
-
-All 1,846 tests should pass with 0 failures:
+A clean build produces zero errors and zero warnings. All 1,846 tests should pass with 0 failures:
 
 ```
 test result: ok. 1846 passed; 0 failed; 0 ignored
 ```
 
-### Coverage
-
-```bash
-# Generate coverage report
-cargo tarpaulin --workspace --out html
-
-# Open the report
-open tarpaulin-report.html
-```
-
-CI requires a minimum of 90% line coverage. If adding new code, ensure coverage does not drop below this threshold.
-
 ---
 
-## 4. Understanding the Architecture
+## Architecture in 60 seconds
 
-Before contributing, read the [[ARCHITECTURE]] document. Key concepts:
-
-### The Three Branches
-
-EXOCHAIN implements a separation-of-powers model inspired by constitutional governance:
+EXOCHAIN separates powers across three crate families:
 
 | Branch | Crate | Role |
-|--------|-------|------|
-| **Judicial** | `exo-gatekeeper` | Immutable kernel that adjudicates all actions against the 8 constitutional invariants |
-| **Legislative** | `exo-governance` | Quorum-based decision making with independence-aware voting |
-| **Executive** | `exo-consent`, `exo-authority` | Consent enforcement and delegated authority chains |
+|---|---|---|
+| **Judicial** | `exo-gatekeeper` | Immutable kernel adjudicating actions against 8 invariants. |
+| **Legislative** | `exo-governance` | Quorum-based decisions with independence-aware voting. |
+| **Executive** | `exo-consent`, `exo-authority` | Consent enforcement + delegated authority chains. |
 
-### The BCTS Transaction Lifecycle
-
-Every operation in EXOCHAIN follows the Bailment-Conditioned Transaction Set (BCTS) state machine defined in `exo-core::bcts`:
+Every operation flows through the BCTS (Bailment-Conditioned Transaction Set) state machine in `exo-core::bcts`:
 
 ```
 Draft -> Submitted -> IdentityResolved -> ConsentValidated -> Deliberated
 -> Verified -> Governed -> Approved -> Executed -> Recorded -> Closed
 ```
 
-Each transition produces a cryptographic receipt. The receipt chain is verifiable end-to-end. See [[CRATE-REFERENCE]] Section 1 (`exo-core::bcts`) for the full state diagram.
+Each transition emits a cryptographic receipt; the receipt chain is verifiable end-to-end.
 
-### The Dependency Graph
-
-```
-exo-core (root)
-├── exo-identity, exo-consent, exo-dag, exo-proofs, exo-authority
-├── exo-gatekeeper
-├── exo-governance, exo-escalation, exo-legal
-├── exo-tenant, exo-api, exo-gateway
-└── decision-forum
-```
-
-All crates depend on `exo-core`. See [[CRATE-REFERENCE]] for the complete dependency map.
+All 16 crates depend on `exo-core`. The full dependency graph is in [[ARCHITECTURE]]; the complete API surface in [[CRATE-REFERENCE]]; the 10 formal proofs that the invariants hold in [[CONSTITUTIONAL-PROOFS]].
 
 ---
 
-## 5. Your First Contribution
+## Contributing changes
 
-### 5.1 How to Add a New Invariant
+### Add a new invariant
 
-The eight constitutional invariants are defined in `exo-gatekeeper`. To add a ninth:
+The 8 invariants live in `crates/exo-gatekeeper/src/invariants.rs`. To add a 9th:
 
-**Step 1.** Add the variant to `ConstitutionalInvariant` in `crates/exo-gatekeeper/src/invariants.rs`:
+1. Extend the `ConstitutionalInvariant` enum.
+2. Add it to `InvariantSet::all()` so it is enforced by default.
+3. Implement the check in `InvariantEngine::check()` against `InvariantContext`.
+4. Add to the kernel adjudication loop in `crates/exo-gatekeeper/src/kernel.rs`.
+5. Write tests proving the invariant holds, rejects violations, and cannot be bypassed.
+6. Update `tools/syntaxis/node_registry.json` if the invariant should be visible to Syntaxis.
+7. Submit a council resolution under `governance/resolutions/` documenting the rationale.
 
-```rust
-pub enum ConstitutionalInvariant {
-    SeparationOfPowers,
-    ConsentRequired,
-    NoSelfGrant,
-    HumanOverride,
-    KernelImmutability,
-    AuthorityChainValid,
-    QuorumLegitimate,
-    ProvenanceVerifiable,
-    YourNewInvariant,       // <-- add here
-}
-```
+### Add a new combinator
 
-**Step 2.** Add it to `InvariantSet::all()` so it is enforced by default.
+Combinators live in `exo-gatekeeper::combinator`. Add the variant, implement deterministic reduction, write composition tests, update `node_registry.json`.
 
-**Step 3.** Implement the check logic in `InvariantEngine::check()`. The check receives an `InvariantContext` with actor info, consent state, authority chain, and action details.
-
-**Step 4.** Add the invariant to the kernel's adjudication loop in `crates/exo-gatekeeper/src/kernel.rs`.
-
-**Step 5.** Write tests proving the invariant:
-- Holds for valid operations
-- Rejects violating operations
-- Cannot be bypassed by any combination of actor roles
-- Produces a detailed `InvariantViolation` with evidence
-
-**Step 6.** Update `tools/syntaxis/node_registry.json` to reference the new invariant in all node types it applies to.
-
-**Step 7.** Submit a governance proposal under `governance/resolutions/` documenting the invariant's constitutional basis and rationale.
-
-### 5.2 How to Add a New Combinator
-
-Combinators live in `exo-gatekeeper::combinator`. The current algebra includes: Identity, Sequence, Parallel, Choice, Guard, Transform, Retry, Timeout, Checkpoint.
-
-**Step 1.** Add the variant to the `Combinator` enum in `crates/exo-gatekeeper/src/combinator.rs`:
-
-```rust
-pub enum Combinator {
-    Identity,
-    Sequence(Vec<Combinator>),
-    // ... existing variants ...
-    YourCombinator(Box<Combinator>, YourConfig),
-}
-```
-
-**Step 2.** Implement the reduction case in the `reduce()` function. Reduction must be pure: the same input always produces the same output.
-
-**Step 3.** Write tests proving:
-- Deterministic reduction (same input -> same output across runs)
-- Composition with other combinators (e.g., `Sequence([YourCombinator, Identity])`)
-- Error propagation behavior
-- Interaction with Guard predicates
-
-**Step 4.** Update `tools/syntaxis/node_registry.json` if the combinator should be available in the visual workflow builder.
-
-### 5.3 How to Add a New Crate
-
-Use the scaffolding generator in `tools/codegen/`:
+### Scaffold a new crate
 
 ```bash
 python3 tools/codegen/generate_crate.py exo-newcrate module1 module2 module3
 ```
 
-This generates:
-- `crates/exo-newcrate/Cargo.toml` linked to workspace dependencies
-- `crates/exo-newcrate/src/lib.rs` with module declarations and re-exports
-- `crates/exo-newcrate/src/error.rs` with typed error variants
-- `crates/exo-newcrate/src/<module>.rs` with struct, trait, and test skeleton
-- `crates/exo-newcrate/tests/<module>_tests.rs` integration tests
-
-The generator also adds the crate to the workspace `Cargo.toml` members list.
-
-**After generation:**
+This generates `Cargo.toml`, `lib.rs`, `error.rs`, per-module source + test skeletons, and adds the crate to the workspace.
 
 ```bash
-# Verify the crate builds
 cargo build -p exo-newcrate
-
-# Verify tests pass
-cargo test -p exo-newcrate
-
-# Verify no clippy warnings
+cargo test  -p exo-newcrate
 cargo clippy -p exo-newcrate -- -D warnings
 ```
 
-Then customize the generated types for your domain, add the crate to the dependency graph in the appropriate position, and ensure all eight invariants are addressed where applicable.
-
 ---
 
-## 6. Constitutional Constraints You Must Follow
+## Constitutional constraints
 
-These constraints are non-negotiable. Every change must satisfy all of them. Violations are rejected by CI and by the kernel at runtime.
+These are non-negotiable. CI rejects violations; the kernel rejects them at runtime.
 
-### 6.1 No Floating-Point Arithmetic
+### No floating-point arithmetic
 
 ```rust
-// FORBIDDEN — will not compile
+// FORBIDDEN
 let x: f64 = 3.14;
 let y = x * 2.0;
 
-// CORRECT — use integer arithmetic or basis points
-let x_bp: u64 = 31_400;  // 3.14 in basis points (1/10000)
+// CORRECT — basis points
+let x_bp: u64 = 31_400;      // 3.14 in basis points (1/10_000)
 let y_bp = x_bp * 2;
 ```
 
-The workspace denies `clippy::float_arithmetic`, `clippy::float_cmp`, and `clippy::float_cmp_const`. Floating-point is inherently non-deterministic across platforms (rounding, NaN handling, denormals). Use basis points (1/10,000) or millibels for fractional values.
+The workspace denies `clippy::float_arithmetic`, `clippy::float_cmp`, and `clippy::float_cmp_const`. Floating-point is non-deterministic across platforms.
 
-### 6.2 No HashMap
+### No HashMap
 
 ```rust
 // FORBIDDEN — non-deterministic iteration order
 use std::collections::HashMap;
-let mut map = HashMap::new();
 
-// CORRECT — deterministic iteration order
+// CORRECT
 use std::collections::BTreeMap;
-let mut map = BTreeMap::new();
-
-// Or use the alias from exo-core
-use exo_core::DeterministicMap;
-let mut map: DeterministicMap<String, String> = DeterministicMap::new();
+use exo_core::DeterministicMap;   // type alias for BTreeMap
 ```
 
-`HashMap` and `HashSet` have non-deterministic iteration order. Use `BTreeMap` and `BTreeSet` exclusively. The `DeterministicMap` alias from `exo-core` makes the intent explicit.
-
-### 6.3 No Unsafe Code
+### No unsafe code
 
 ```rust
-// FORBIDDEN — workspace denies unsafe_code
-unsafe { std::ptr::read(ptr) }
-
-// CORRECT — use safe abstractions only
+// FORBIDDEN
+unsafe { ... }
 ```
 
-The workspace sets `unsafe_code = "deny"` in `[workspace.lints.rust]`. If you believe unsafe is required, document the justification and request a constitutional amendment through the governance process.
+`unsafe_code = "deny"` is set in `[workspace.lints.rust]`. If you think you need `unsafe`, propose a council amendment.
 
-### 6.4 Every Public Function Needs Tests
+### Every public function needs tests
 
-Every public function, method, and trait implementation must have at least one test proving it works correctly. Property-based tests using `proptest` are encouraged for functions with complex input spaces.
+Every public fn / method / trait impl must have at least one test. Property-based tests via `proptest` are encouraged for complex input spaces.
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+### Every new feature needs an invariant check
 
-    #[test]
-    fn my_function_happy_path() {
-        let result = my_function("valid input");
-        assert!(result.is_ok());
-    }
+A new operation type must be:
 
-    #[test]
-    fn my_function_rejects_empty() {
-        let result = my_function("");
-        assert!(result.is_err());
-    }
-}
-```
+1. Adjudicated by the kernel (all 8 invariants).
+2. Covered by consent (requires an active bailment).
+3. Attributed to an actor (provenance verifiable).
+4. Recorded in the audit trail.
 
-### 6.5 Every New Feature Needs an Invariant Check
+### Other rules
 
-If your feature introduces a new operation type, ensure it is:
-1. Adjudicated by the kernel (all 8 invariants checked)
-2. Covered by consent (requires an active bailment)
-3. Attributed to an actor (provenance verifiable)
-4. Recorded in the audit trail
-
-### 6.6 Additional Rules
-
-- **No system time.** Use `exo_core::hlc::HybridClock` for all timestamps. Never call `std::time::SystemTime::now()` or `Instant::now()` in production code.
-- **No randomness in logic.** Randomness is only permitted for key generation. All governance logic must be purely deterministic.
-- **Canonical serialization.** All data that gets hashed must be serialized via CBOR using `ciborium` with sorted keys. Never hash JSON directly.
-- **Error context.** Every error variant must carry enough context to diagnose the failure without access to the source code. Use `thiserror` for all error types.
+- **No system time.** Use `exo_core::hlc::HybridClock`. Never call `SystemTime::now()` or `Instant::now()` in production code.
+- **No randomness in logic.** Randomness is permitted only for key generation.
+- **Canonical serialization.** Hash CBOR (via `ciborium`) with sorted keys, not JSON.
+- **Error context.** Every error variant carries enough context to diagnose the failure from the error alone. Use `thiserror`.
 
 ---
 
-## 7. Running the Full Quality Gate Locally
+## Running the full quality gate locally
 
-Before pushing, run all 8 quality gates that CI enforces per [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] Section 8.8:
+Before pushing, run all 8 gates CI enforces per [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] §8.8:
 
 ```bash
-# 1. Build (release mode)
 cargo build --workspace --release
-
-# 2. Test (all 1,846 tests)
 cargo test --workspace
-
-# 3. Coverage (minimum 90%)
 cargo tarpaulin --workspace
-
-# 4. Lint (zero warnings)
 cargo clippy --workspace --all-targets -- -D warnings
-
-# 5. Format check
 cargo fmt --all -- --check
-
-# 6. Security audit
 cargo audit
-
-# 7. Dependency governance (license + advisory)
 cargo deny check
-
-# 8. Documentation (no warnings)
 cargo doc --workspace --no-deps
 ```
 
-**One-liner for quick validation:**
+One-liner for quick validation:
 
 ```bash
 cargo build --workspace --release && \
@@ -386,36 +273,32 @@ cargo fmt --all -- --check && \
 cargo doc --workspace --no-deps
 ```
 
-If any gate fails, the CI pipeline will reject the PR. Fix all issues locally before pushing.
+### Cross-implementation consistency
 
-### Cross-Implementation Consistency
-
-For changes that affect determinism-critical code, run the cross-implementation test:
+For determinism-critical changes:
 
 ```bash
 ./tools/cross-impl-test/compare.sh
 ```
 
-This verifies that the same inputs produce identical outputs across implementations.
+Verifies identical inputs produce identical outputs across Rust, TypeScript, and Python.
 
 ---
 
-## 8. Understanding the Council Process
+## Council process for constitutional changes
 
-EXOCHAIN changes that affect constitutional properties require a council assessment. This is not bureaucracy -- it is the mechanism that ensures the trust fabric remains trustworthy.
+Changes that affect constitutional properties require a council resolution. This is not bureaucracy — it is the mechanism that keeps the trust fabric trustworthy.
 
-### When Is a Council Assessment Required?
+**When required:**
 
-- Adding or modifying a constitutional invariant
+- Adding or modifying an invariant
 - Changing the kernel adjudication logic
 - Modifying the BCTS state machine
 - Adding new cryptographic primitives
 - Changing the consensus protocol
 - Any change that affects determinism guarantees
 
-### How to Submit a Resolution
-
-1. Create a resolution file under `governance/resolutions/`:
+**Submission**: create a file under `governance/resolutions/` with this header:
 
 ```markdown
 ---
@@ -428,43 +311,27 @@ created: YYYY-MM-DD
 # CR-XXX: Your Resolution Title
 
 ## Summary
-One paragraph describing the change.
-
 ## Constitutional Impact
-Which invariants are affected and how.
-
 ## Determinism Analysis
-How determinism is preserved.
-
-## Threat Analysis
-What new attack vectors are introduced (if any).
-Reference the [[THREAT-MODEL]] taxonomy.
-
+## Threat Analysis    (reference [[THREAT-MODEL]])
 ## Separation of Powers
-How the change interacts with the three branches.
-
 ## Consent Impact
-Whether consent requirements change.
 ```
 
-2. Run all quality gates (Section 7 above).
+Run all quality gates, submit as a PR, council reviews against [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]].
 
-3. Submit as a PR. The CI pipeline enforces the same gates automatically.
+Existing resolutions:
 
-4. The council reviews the resolution against the constitutional framework defined in [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]].
-
-### Existing Council Documents
-
-- [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] -- Foundational council resolution defining AEGIS and the Sybil threat taxonomy
-- [[COUNCIL-ASSESSMENT-EXO-VS-EXOCHAIN]] -- 5-panel assessment that drove the refactor from EXO to EXOCHAIN
-- [[EXOCHAIN-REFACTOR-PLAN]] -- Master plan: council -> Syntaxis -> assimilation
+- [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] — Foundational council resolution defining AEGIS and the Sybil threat taxonomy
+- [[COUNCIL-ASSESSMENT-EXO-VS-EXOCHAIN]] — 5-panel assessment that drove the EXO -> EXOCHAIN refactor
+- [[EXOCHAIN-REFACTOR-PLAN]] — Master plan: council -> Syntaxis -> assimilation
 
 ---
 
-## Quick Reference
+## Quick reference
 
 | Task | Command |
-|------|---------|
+|---|---|
 | Build all | `cargo build --workspace` |
 | Test all | `cargo test --workspace` |
 | Test one crate | `cargo test -p exo-core` |
@@ -475,9 +342,15 @@ Whether consent requirements change.
 | Audit | `cargo audit` |
 | Deny check | `cargo deny check` |
 | Docs | `cargo doc --workspace --no-deps --open` |
+| Run MCP server (stdio) | `exochain mcp` |
+| Run MCP server (SSE) | `exochain mcp --sse 127.0.0.1:3030` |
+| Start a node | `exochain start --api-port 8080` |
+| Join a network | `exochain join --seed seed.exochain.io:4001` |
 | New crate | `python3 tools/codegen/generate_crate.py exo-name mod1 mod2` |
 | Cross-impl test | `./tools/cross-impl-test/compare.sh` |
 
 ---
 
 > For the full API surface see [[CRATE-REFERENCE]]. For the threat model see [[THREAT-MODEL]]. For formal proofs of constitutional properties see [[CONSTITUTIONAL-PROOFS]].
+
+Licensed under Apache-2.0. © 2025 EXOCHAIN Foundation.

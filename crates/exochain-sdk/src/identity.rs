@@ -1,10 +1,28 @@
-//! Decentralized identity management.
+//! Decentralized identity — DIDs backed by Ed25519 keypairs.
 //!
 //! [`Identity`] is the SDK's ergonomic handle to a DID with its associated
 //! Ed25519 keypair. The DID is derived deterministically from the public key
 //! so that two identities generated with different entropy always produce
 //! different DIDs, while an identity re-constructed from the same key bytes
 //! always yields the same DID.
+//!
+//! ## When to reach for this module
+//!
+//! - Every actor in EXOCHAIN — human, AI agent, service, organization — needs
+//!   an [`Identity`]. The identity's DID is the principal that appears in
+//!   bailments, decisions, authority chains, and kernel adjudications.
+//! - Signatures produced by [`Identity::sign`] feed straight into the kernel
+//!   as proof of provenance.
+//!
+//! ## Quick start
+//!
+//! ```
+//! use exochain_sdk::identity::Identity;
+//!
+//! let alice = Identity::generate("alice");
+//! let sig = alice.sign(b"hello");
+//! assert!(alice.verify(b"hello", &sig));
+//! ```
 
 use exo_core::crypto::{generate_keypair, sign as core_sign, verify as core_verify};
 use exo_core::{Did, PublicKey, SecretKey, Signature, Timestamp};
@@ -14,11 +32,29 @@ use crate::error::{ExoError, ExoResult};
 
 /// A DID paired with its Ed25519 keypair and a human-readable label.
 ///
-/// Use [`Identity::generate`] to create a fresh identity with a random keypair.
-/// The DID is derived from the public key as:
+/// Identities are created either with [`Identity::generate`] (fresh random
+/// keypair) or [`Identity::from_keypair`] (reuse an existing keypair, e.g.
+/// loaded from a keystore). The DID is derived from the public key as:
 ///
 /// ```text
 /// did:exo: + first 16 hex chars of BLAKE3(public_key_bytes)
+/// ```
+///
+/// The `Debug` implementation deliberately redacts the secret key so
+/// identities can be logged without leaking private material.
+///
+/// # Examples
+///
+/// ```
+/// use exochain_sdk::identity::Identity;
+///
+/// let alice = Identity::generate("alice");
+/// assert!(alice.did().as_str().starts_with("did:exo:"));
+/// assert_eq!(alice.label(), "alice");
+///
+/// // Debug never leaks the secret key.
+/// let debug = format!("{alice:?}");
+/// assert!(debug.contains("***"));
 /// ```
 pub struct Identity {
     did: Did,
@@ -32,13 +68,36 @@ impl Identity {
     /// derived from the public key.
     ///
     /// The `label` is stored alongside the identity for developer convenience
-    /// and is never cryptographically bound to the DID.
+    /// and is never cryptographically bound to the DID — renaming an identity
+    /// does not change its DID.
     ///
-    /// Deriving the DID cannot fail in practice: the method-specific portion
-    /// is always a 16-character lowercase hex string, which satisfies the
-    /// `did:exo:` validation rules.  In the unreachable case that validation
-    /// ever rejected such a string, the generated DID falls back to
-    /// `did:exo:sdk-fallback` — still well-formed, still valid.
+    /// Use this when you need a brand-new principal. Use
+    /// [`Identity::from_keypair`] when loading a previously generated keypair
+    /// from storage.
+    ///
+    /// This method is infallible in practice: the method-specific portion of
+    /// the DID is always 16 lowercase hex characters, which satisfies DID
+    /// validation. In the unreachable case of validation failure, the DID
+    /// falls back to `did:exo:sdk-fallback`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exochain_sdk::identity::Identity;
+    ///
+    /// let id = Identity::generate("agent");
+    /// assert!(id.did().as_str().starts_with("did:exo:"));
+    /// assert_eq!(id.did().as_str().len(), "did:exo:".len() + 16);
+    /// ```
+    ///
+    /// Two fresh identities have different DIDs:
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let a = Identity::generate("a");
+    /// let b = Identity::generate("b");
+    /// assert_ne!(a.did(), b.did());
+    /// ```
     #[must_use]
     pub fn generate(label: &str) -> Self {
         let (public, secret) = generate_keypair();
@@ -51,16 +110,36 @@ impl Identity {
         }
     }
 
-    /// Build an [`Identity`] from an existing keypair and label.
+    /// Build an [`Identity`] from an existing Ed25519 keypair and label.
     ///
     /// The DID is derived from the public key in the same way as
-    /// [`Identity::generate`].
+    /// [`Identity::generate`]. Reconstructing an identity from the same
+    /// keypair always produces the same DID.
+    ///
+    /// Use this to load a persisted identity, or to rehydrate the identity
+    /// belonging to another actor when you only know their public material.
     ///
     /// # Errors
     ///
     /// Returns [`ExoError::InvalidDid`] only in the highly unlikely case that
     /// BLAKE3 output somehow failed DID validation — this should be
     /// unreachable in practice.
+    ///
+    /// # Examples
+    ///
+    /// Build an identity from a freshly generated keypair using the
+    /// underlying core crypto primitives.
+    ///
+    /// ```
+    /// use exochain_sdk::identity::Identity;
+    /// use exo_core::crypto::generate_keypair;
+    ///
+    /// let (public, secret) = generate_keypair();
+    /// let alice = Identity::from_keypair("alice", public, secret)?;
+    /// assert!(alice.did().as_str().starts_with("did:exo:"));
+    /// assert_eq!(alice.label(), "alice");
+    /// # Ok::<(), exochain_sdk::error::ExoError>(())
+    /// ```
     pub fn from_keypair(label: &str, public: PublicKey, secret: SecretKey) -> ExoResult<Self> {
         let did = derive_did(&public)?;
         Ok(Self {
@@ -72,30 +151,85 @@ impl Identity {
     }
 
     /// Return the DID for this identity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let id = Identity::generate("alice");
+    /// assert!(id.did().as_str().starts_with("did:exo:"));
+    /// ```
     #[must_use]
     pub fn did(&self) -> &Did {
         &self.did
     }
 
-    /// Return the public key.
+    /// Return the Ed25519 public key.
+    ///
+    /// Public keys are safe to share and can be handed to counterparties so
+    /// they can verify signatures this identity produces.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let id = Identity::generate("alice");
+    /// let pk = id.public_key();
+    /// assert_eq!(pk.as_bytes().len(), 32);
+    /// ```
     #[must_use]
     pub fn public_key(&self) -> &PublicKey {
         &self.public
     }
 
     /// Return the human-readable label.
+    ///
+    /// Labels are developer affordances and have no cryptographic meaning.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let id = Identity::generate("alice");
+    /// assert_eq!(id.label(), "alice");
+    /// ```
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
 
     /// Sign `message` with this identity's secret key (Ed25519).
+    ///
+    /// The returned [`Signature`] is suitable for feeding into
+    /// [`Identity::verify`] or into the kernel's provenance field.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let id = Identity::generate("signer");
+    /// let sig = id.sign(b"hello");
+    /// assert!(id.verify(b"hello", &sig));
+    /// ```
     #[must_use]
     pub fn sign(&self, message: &[u8]) -> Signature {
         core_sign(message, &self.secret)
     }
 
     /// Verify `signature` over `message` against this identity's public key.
+    ///
+    /// Returns `true` only if the signature was produced by the matching
+    /// secret key over exactly these message bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let id = Identity::generate("signer");
+    /// let sig = id.sign(b"hello");
+    /// assert!(id.verify(b"hello", &sig));
+    /// assert!(!id.verify(b"tampered", &sig));
+    /// ```
     #[must_use]
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
         core_verify(message, signature, &self.public)
@@ -107,6 +241,17 @@ impl Identity {
     /// key, with empty authentication/verification-method/service-endpoint
     /// lists and `created == updated == Timestamp::ZERO`. Callers can augment
     /// the document after construction if they need richer DID metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use exochain_sdk::identity::Identity;
+    /// let id = Identity::generate("alice");
+    /// let doc = id.did_document();
+    /// assert_eq!(&doc.id, id.did());
+    /// assert_eq!(doc.public_keys.len(), 1);
+    /// assert!(!doc.revoked);
+    /// ```
     #[must_use]
     pub fn did_document(&self) -> DidDocument {
         DidDocument {
@@ -243,4 +388,5 @@ mod tests {
         let pk = *id.public_key();
         assert_eq!(&pk, id.public_key());
     }
+
 }
