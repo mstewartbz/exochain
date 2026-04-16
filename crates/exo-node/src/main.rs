@@ -726,6 +726,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Mcp {
             data_dir,
             actor_did,
+            sse,
         } => {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let node_identity = identity::load_or_create(&data_dir)?;
@@ -735,9 +736,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 node_identity.did.clone()
             };
-
-            eprintln!("[exochain-mcp] Starting MCP server...");
-            eprintln!("[exochain-mcp] Node identity: {}", node_identity.did);
 
             // The standalone `exochain mcp` command does NOT connect to a
             // running node, so we spin up the MCP server with an empty
@@ -750,9 +748,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             // and the `Arc<Mutex<SqliteDagStore>>` so tools return real
             // runtime data.
             let server = mcp::McpServer::new(did);
-            mcp::serve_stdio(server)
-                .await
-                .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))
+
+            if let Some(bind) = sse {
+                eprintln!("[exochain-mcp] Starting MCP server on SSE at {bind}...");
+                eprintln!("[exochain-mcp] Node identity: {}", node_identity.did);
+                mcp::serve_sse(server, &bind)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("MCP SSE server error: {e}"))
+            } else {
+                eprintln!("[exochain-mcp] Starting MCP server on stdio...");
+                eprintln!("[exochain-mcp] Node identity: {}", node_identity.did);
+                mcp::serve_stdio(server)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("MCP stdio server error: {e}"))
+            }
         }
     }
 }

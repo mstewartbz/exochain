@@ -179,6 +179,7 @@ pub struct ResourceDefinition {
 
 /// MCP Resource content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(dead_code)] // Used when MCP resources are implemented.
 pub struct ResourceContent {
     pub uri: String,
@@ -186,6 +187,63 @@ pub struct ResourceContent {
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+
+/// MCP Prompt definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Used when MCP prompts are implemented.
+pub struct PromptDefinition {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub arguments: Vec<PromptArgument>,
+}
+
+/// A named argument for an MCP prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Used when MCP prompts are implemented.
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A message inside a prompt result (role + content).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Used when MCP prompts are implemented.
+pub struct PromptMessage {
+    pub role: String,
+    pub content: PromptContent,
+}
+
+/// The content of a prompt message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PromptContent {
+    #[serde(rename = "text")]
+    Text { text: String },
+}
+
+impl PromptContent {
+    /// Extract the text payload regardless of variant.
+    #[must_use]
+    #[allow(dead_code)] // Used in tests.
+    pub fn text(&self) -> &str {
+        match self {
+            PromptContent::Text { text } => text,
+        }
+    }
+}
+
+/// The result returned by `prompts/get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Used when MCP prompts are implemented.
+pub struct PromptResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
 }
 
 impl JsonRpcResponse {

@@ -1543,6 +1543,7 @@ name = "exo-node"
 version = "0.1.0-beta"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum 0.7.9",
  "blake3",
  "ciborium",
