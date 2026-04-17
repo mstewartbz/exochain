@@ -8,8 +8,10 @@
 # Run locally:    docker run -p 4001:4001 -p 8080:8080 -v exochain:/data exochain/node
 
 # Stage 1: Build Rust binaries
-# Pinned to 1.85 to match workspace `rust-version` in Cargo.toml.
-FROM rust:1.85-slim-bookworm AS rust-builder
+# Use 1.88 — workspace minimum is 1.85, but some transitive deps
+# (time 0.3.47, async-graphql 7.0.17) require newer rustc. 1.88 is
+# the lowest version that satisfies the current full dep graph.
+FROM rust:1.88-slim-bookworm AS rust-builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev clang && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
