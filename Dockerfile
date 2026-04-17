@@ -41,7 +41,9 @@ ENV RUST_LOG=info
 # P2P (TCP + QUIC) and API
 EXPOSE 4001 4002 8080
 
-# Mount a volume for persistent state (identity key + DAG).
-VOLUME ["/data"]
+# Persistent state (identity key + DAG) lives at /data.
+# On Railway, /data is mounted via a Railway volume — do NOT use the
+# Dockerfile VOLUME keyword (Railway bans it).
+# For plain Docker: `docker run -v exochain-data:/data exochain/node`.
 
 CMD ["/app/entrypoint.sh"]
