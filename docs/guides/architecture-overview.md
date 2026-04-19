@@ -377,7 +377,7 @@ rollbacks.
   resolution. Implemented in `exo-identity::pace` with Verifiable
   Secret Sharing (Feldman commitments) and a geographic-distribution
   requirement (no two stewards in the same jurisdiction).
-- **Species Quorum** (CR-001 / spec v2.1 §3A): PACE recovery must
+- **Species Quorum** (CR-001 / spec v2.2 §3A): PACE recovery must
   include ≥3 human stewards and ≥1 Holon steward. Single-species
   control is rejected.
 
