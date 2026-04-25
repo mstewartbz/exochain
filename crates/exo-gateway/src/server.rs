@@ -1879,6 +1879,90 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    #[cfg(not(feature = "unaudited-gateway-graphql-api"))]
+    #[tokio::test]
+    async fn graphql_post_default_off_returns_403_with_initiative() {
+        let app = build_router(state());
+        let body = serde_json::json!({
+            "query": "mutation { createDecision(input: { tenantId: \"t1\", title: \"x\", body: \"y\", decisionClass: \"Routine\" }) { id } }"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["error"], "unaudited_graphql_api_disabled");
+        assert_eq!(val["feature_flag"], "unaudited-gateway-graphql-api");
+        assert_eq!(
+            val["initiative"],
+            "Initiatives/fix-spline-r1-graphql-auth-gate.md"
+        );
+    }
+
+    #[cfg(not(feature = "unaudited-gateway-graphql-api"))]
+    #[tokio::test]
+    async fn graphql_ws_default_off_returns_403_with_initiative() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/graphql/ws")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["feature_flag"], "unaudited-gateway-graphql-api");
+        assert_eq!(
+            val["initiative"],
+            "Initiatives/fix-spline-r1-graphql-auth-gate.md"
+        );
+    }
+
+    #[cfg(feature = "unaudited-gateway-graphql-api")]
+    #[tokio::test]
+    async fn graphql_post_feature_on_preserves_existing_mutation_behavior() {
+        let app = build_router(state());
+        let body = serde_json::json!({
+            "query": "mutation { createDecision(input: { tenantId: \"t1\", title: \"x\", body: \"y\", decisionClass: \"Routine\" }) { id status author } }"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(val["errors"].is_null(), "unexpected errors: {val}");
+        assert_eq!(val["data"]["createDecision"]["status"], "CREATED");
+        assert_eq!(val["data"]["createDecision"]["author"], "system");
+    }
+
     #[tokio::test]
     async fn vote_route_without_authority_returns_403() {
         let body = serde_json::to_string(&serde_json::json!({

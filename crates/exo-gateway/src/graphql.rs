@@ -27,8 +27,11 @@ use async_graphql::{
     Context, ID, InputObject, Object, Result as GqlResult, Schema, SimpleObject, Subscription,
     futures_util::Stream,
 };
+#[cfg(feature = "unaudited-gateway-graphql-api")]
 use async_graphql_axum::{GraphQL, GraphQLSubscription};
 use async_stream::stream;
+#[cfg(not(feature = "unaudited-gateway-graphql-api"))]
+use axum::{Json, http::StatusCode};
 use axum::{Router, routing::get};
 use exo_consent::{
     bailment::{self, BailmentStatus, BailmentType},
@@ -310,6 +313,11 @@ fn now_str() -> String {
 
 /// Fully-built GraphQL schema type with query, mutation, and subscription roots.
 pub type GovSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
+
+pub const UNAUDITED_GRAPHQL_API_FEATURE: &str = "unaudited-gateway-graphql-api";
+pub const UNAUDITED_GRAPHQL_API_INITIATIVE: &str = "Initiatives/fix-spline-r1-graphql-auth-gate.md";
+pub const UNAUDITED_GRAPHQL_API_MEMO: &str =
+    "exochain/council-intake/exo-spline-gateway-api-messaging.md";
 
 // ---------------------------------------------------------------------------
 // Query resolvers
@@ -980,7 +988,14 @@ pub fn build_schema(state: Arc<Mutex<AppState>>) -> GovSchema {
 /// - `POST /graphql` — query and mutation handler
 /// - `GET  /graphql` — GraphQL Playground (development)
 /// - `GET  /graphql/ws` — WebSocket subscription endpoint
+#[cfg(feature = "unaudited-gateway-graphql-api")]
 pub fn graphql_router(schema: GovSchema) -> Router {
+    tracing::warn!(
+        feature_flag = UNAUDITED_GRAPHQL_API_FEATURE,
+        initiative = UNAUDITED_GRAPHQL_API_INITIATIVE,
+        memo = UNAUDITED_GRAPHQL_API_MEMO,
+        "unaudited gateway GraphQL API enabled"
+    );
     Router::new()
         .route(
             "/graphql",
@@ -989,11 +1004,41 @@ pub fn graphql_router(schema: GovSchema) -> Router {
         .route_service("/graphql/ws", GraphQLSubscription::new(schema))
 }
 
+/// Construct the default-safe GraphQL router.
+///
+/// The playground remains available for local schema inspection, but executable
+/// GraphQL operations are refused unless `unaudited-gateway-graphql-api` is
+/// explicitly enabled. This avoids exposing resolver-local placeholder caller
+/// identity, fabricated consent, and proof-verification scaffolding.
+#[cfg(not(feature = "unaudited-gateway-graphql-api"))]
+pub fn graphql_router(_schema: GovSchema) -> Router {
+    Router::new()
+        .route(
+            "/graphql",
+            get(graphql_playground_handler).post(graphql_refusal_handler),
+        )
+        .route("/graphql/ws", get(graphql_refusal_handler))
+}
+
 async fn graphql_playground_handler() -> impl axum::response::IntoResponse {
     axum::response::Html(async_graphql::http::playground_source(
         async_graphql::http::GraphQLPlaygroundConfig::new("/graphql")
             .subscription_endpoint("/graphql/ws"),
     ))
+}
+
+#[cfg(not(feature = "unaudited-gateway-graphql-api"))]
+async fn graphql_refusal_handler() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "unaudited_graphql_api_disabled",
+            "message": "The gateway GraphQL execution surface is disabled by default pending Spline R1 remediation.",
+            "feature_flag": UNAUDITED_GRAPHQL_API_FEATURE,
+            "initiative": UNAUDITED_GRAPHQL_API_INITIATIVE,
+            "memo": UNAUDITED_GRAPHQL_API_MEMO,
+        })),
+    )
 }
 
 // ---------------------------------------------------------------------------
