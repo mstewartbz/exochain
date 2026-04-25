@@ -7,7 +7,6 @@
 //! - `GET /api/v1/0dentity/:did/score/history`  — score history (public)
 //! - `GET /api/v1/0dentity/:did/fingerprints`   — fingerprint timeline (owner only)
 //! - `POST /api/v1/0dentity/:did/attest`        — peer attestation
-//! - `GET /api/v1/0dentity/server-key`          — server RSA-OAEP public key
 //!
 //! Spec reference: §7.2, §7.3.
 
@@ -41,10 +40,6 @@ use super::{
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Arc<Mutex<ZerodentityStore>>,
-    /// Node DID used for deterministic server key derivation.
-    pub node_did: exo_core::types::Did,
-    /// Epoch ms when the node started (used as key rotation timestamp).
-    pub started_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,15 +148,6 @@ pub struct AttestResponse {
     pub receipt_hash: String,
     pub attester_score_impact: serde_json::Value,
     pub target_score_impact: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ServerKeyResponse {
-    pub algorithm: String,
-    pub key_size: u32,
-    pub public_key_pem: String,
-    pub key_hash: String,
-    pub rotated_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -605,31 +591,6 @@ pub async fn create_peer_attestation(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/0dentity/server-key
-// ---------------------------------------------------------------------------
-
-/// `GET /api/v1/0dentity/server-key` — retrieve the server's RSA-OAEP public key.
-pub async fn get_server_key(State(state): State<ApiState>) -> Json<ServerKeyResponse> {
-    // Derive a deterministic key fingerprint from the node's DID.
-    // In production, this will be replaced by a live RSA-OAEP key pair
-    // generated at startup and rotated on a configurable interval.
-    // The key_hash is a BLAKE3 digest of the node DID, providing a
-    // stable per-node identifier that clients can pin.
-    let key_material = format!("exochain-server-key:{}", state.node_did.as_str());
-    let key_hash = Hash256::digest(key_material.as_bytes());
-    Json(ServerKeyResponse {
-        algorithm: "Ed25519-DH".into(),
-        key_size: 256,
-        public_key_pem: format!(
-            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
-            hex::encode(key_hash.as_bytes())
-        ),
-        key_hash: hex::encode(key_hash.as_bytes()),
-        rotated_ms: state.started_ms,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // DELETE /api/v1/0dentity/:did — right to erasure (§11.4)
 // ---------------------------------------------------------------------------
 
@@ -719,7 +680,6 @@ pub async fn delete_identity(
 
 pub fn zerodentity_api_router(state: ApiState) -> Router {
     Router::new()
-        .route("/api/v1/0dentity/server-key", get(get_server_key))
         .route("/api/v1/0dentity/:did/score", get(get_score))
         .route("/api/v1/0dentity/:did/claims", get(list_claims))
         .route("/api/v1/0dentity/:did/score/history", get(score_history))
@@ -755,8 +715,6 @@ mod tests {
     fn make_state() -> ApiState {
         ApiState {
             store: Arc::new(Mutex::new(ZerodentityStore::new())),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
         }
     }
 
@@ -774,8 +732,6 @@ mod tests {
         store.insert_session(&session).unwrap();
         ApiState {
             store: Arc::new(Mutex::new(store)),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
         }
     }
 
@@ -805,8 +761,6 @@ mod tests {
         store.insert_claim("claim-001", &claim).unwrap();
         ApiState {
             store: Arc::new(Mutex::new(store)),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
         }
     }
 
@@ -1026,6 +980,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn server_key_get_does_not_return_key_material() {
+        let app = zerodentity_api_router(make_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/server-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     // --- list_claims ---
