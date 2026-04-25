@@ -118,6 +118,9 @@ pub struct ResendOtpResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const FIRST_TOUCH_ONBOARDING_FEATURE: &str = "unaudited-zerodentity-first-touch-onboarding";
+const FIRST_TOUCH_ONBOARDING_INITIATIVE: &str = "fix-onyx-4-r1-onboarding-auth.md";
+
 fn now_ms() -> u64 {
     exo_core::hlc::HybridClock::new().now().physical_ms
 }
@@ -205,6 +208,28 @@ fn parse_claim_type(ct: &str, provider: Option<&str>) -> Option<ClaimType> {
     }
 }
 
+fn first_touch_onboarding_refusal() -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!(
+        "refusing POST /api/v1/0dentity/claims: first-touch onboarding \
+         is gated. See fix-onyx-4-r1-onboarding-auth initiative. To opt \
+         in for a dev cluster, build with \
+         --features exo-node/unaudited-zerodentity-first-touch-onboarding."
+    );
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "zerodentity_first_touch_onboarding_disabled",
+            "message": "First-touch 0dentity claim creation is disabled by default. \
+                        The approved onboarding proof-of-possession design must land \
+                        before this path is exposed. See \
+                        Initiatives/fix-onyx-4-r1-onboarding-auth.md.",
+            "feature_flag": FIRST_TOUCH_ONBOARDING_FEATURE,
+            "initiative": FIRST_TOUCH_ONBOARDING_INITIATIVE,
+            "refusal_source": "exo-node/zerodentity/onboarding.rs::submit_claim",
+        })),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/v1/0dentity/claims
 // ---------------------------------------------------------------------------
@@ -214,6 +239,11 @@ pub async fn submit_claim(
     State(state): State<OnboardingState>,
     Json(req): Json<SubmitClaimRequest>,
 ) -> Result<Json<SubmitClaimResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !cfg!(feature = "unaudited-zerodentity-first-touch-onboarding") {
+        let _ = (state, req);
+        return Err(first_touch_onboarding_refusal());
+    }
+
     let subject_did = parse_did(&req.subject_did)?;
     let now = now_ms();
 

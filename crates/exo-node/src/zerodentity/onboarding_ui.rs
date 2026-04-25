@@ -1,7 +1,13 @@
 //! 0dentity Onboarding UI — self-contained HTML Gamma Flow.
 //!
-//! Serves `GET /0dentity` as a single HTML document with all CSS and JavaScript
-//! inlined.  Implements the 7-step Gamma Flow onboarding arc from spec §4:
+//! Serves `GET /0dentity`.
+//!
+//! By default this route returns the Onyx-4 R1 refusal page because the
+//! first-touch claim path is gated. When the
+//! `unaudited-zerodentity-first-touch-onboarding` feature is explicitly
+//! enabled, it serves a single HTML document with all CSS and JavaScript
+//! inlined.  The legacy document implements the 7-step Gamma Flow onboarding
+//! arc from spec §4:
 //!
 //! 1. Landing — "Establish your 0dentity"
 //! 2. Name input → POST /api/v1/0dentity/claims (DisplayName)
@@ -18,7 +24,14 @@
 
 use axum::{Router, response::Html, routing::get};
 
-/// Route: `GET /0dentity`
+/// Route: `GET /0dentity`.
+#[cfg(not(feature = "unaudited-zerodentity-first-touch-onboarding"))]
+pub async fn zerodentity_onboarding() -> Html<&'static str> {
+    Html(ONBOARDING_DISABLED_HTML)
+}
+
+/// Route: `GET /0dentity`.
+#[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
 pub async fn zerodentity_onboarding() -> Html<&'static str> {
     Html(ONBOARDING_HTML)
 }
@@ -32,6 +45,35 @@ pub fn zerodentity_onboarding_router() -> Router {
 // Self-contained onboarding HTML (§4 Gamma Flow)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "unaudited-zerodentity-first-touch-onboarding"))]
+const ONBOARDING_DISABLED_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0dentity onboarding disabled</title>
+<style>
+  :root { --primary: #38bdf8; --bg: #0a0e17; --text: #e2e8f0; --dim: #94a3b8; --border: #1e2940; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 1rem; }
+  main { width: min(100%, 44rem); border: 1px solid var(--border); padding: 2rem; }
+  h1 { margin: 0 0 1rem; font-size: 1.25rem; color: var(--primary); }
+  p { color: var(--dim); line-height: 1.6; }
+  code { color: var(--text); overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <h1>0dentity first-touch onboarding is disabled</h1>
+  <p>POST /api/v1/0dentity/claims is refused by default while the approved proof-of-possession design is pending.</p>
+  <p>Feature flag: <code>unaudited-zerodentity-first-touch-onboarding</code></p>
+  <p>Initiative: <code>fix-onyx-4-r1-onboarding-auth.md</code></p>
+</main>
+</body>
+</html>
+"##;
+
+#[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
 const ONBOARDING_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1178,6 +1220,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg(not(feature = "unaudited-zerodentity-first-touch-onboarding"))]
+    async fn test_onboarding_refuses_when_first_touch_disabled() {
+        let response = zerodentity_onboarding().await;
+        let html = response.0;
+        assert!(
+            html.contains("unaudited-zerodentity-first-touch-onboarding"),
+            "refusal page must name the feature flag"
+        );
+        assert!(
+            html.contains("fix-onyx-4-r1-onboarding-auth.md"),
+            "refusal page must name the R1 initiative"
+        );
+        assert!(
+            !html.contains("'00'.repeat"),
+            "default onboarding page must not ship placeholder key material"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn test_onboarding_contains_all_steps() {
         let response = zerodentity_onboarding().await;
         let html = response.0;
@@ -1187,6 +1249,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn test_onboarding_contains_polar_graph() {
         let response = zerodentity_onboarding().await;
         let html = response.0;
@@ -1205,6 +1268,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn test_onboarding_contains_api_endpoints() {
         let response = zerodentity_onboarding().await;
         let html = response.0;
