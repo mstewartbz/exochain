@@ -7,6 +7,7 @@
 //! - `types::ApiVersion` / `Cursor`
 //!
 //! Async GraphQL resolver tests live in `crates/exo-gateway/src/graphql.rs`.
+#![allow(clippy::expect_used)]
 
 use exo_api::schema::{ApiRequest, ApiResponse, canonical_request_hash};
 use exo_core::{Did, Hash256, Timestamp};

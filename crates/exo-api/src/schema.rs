@@ -75,6 +75,7 @@ pub fn canonical_request_hash(request: &ApiRequest) -> Hash256 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     fn did(n: &str) -> Did {
