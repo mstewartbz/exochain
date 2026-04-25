@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
 use crate::{
+    db,
     error::{GatewayError, Result},
     graphql,
     handlers::{health_handler as db_health_handler, vote_handler},
@@ -588,12 +589,12 @@ async fn handle_decision_get(
 
 /// GET /api/v1/audit/:decision_id — retrieve the audit trail for a decision.
 ///
-/// Queries the `audit_log` table populated by the vote handler.  Requires a DB pool.
+/// Queries the `audit_entries` table populated by the vote handler.  Requires a DB pool.
 async fn handle_audit_trail(
     State(state): State<AppState>,
     Path(decision_id): Path<String>,
 ) -> impl IntoResponse {
-    let db = match state.require_db() {
+    let pool = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
             return (
@@ -606,25 +607,22 @@ async fn handle_audit_trail(
                 .into_response();
         }
     };
-    match sqlx::query_as::<_, (String, String, String, serde_json::Value, i64)>(
-        "SELECT id, event_type, actor, payload, created_at \
-         FROM audit_log WHERE actor = $1 OR payload->>'decision_id' = $1 \
-         ORDER BY created_at ASC",
-    )
-    .bind(&decision_id)
-    .fetch_all(db)
-    .await
-    {
+    match db::list_audit_entries_for_decision(pool, &decision_id).await {
         Ok(rows) => {
             let entries: Vec<serde_json::Value> = rows
                 .into_iter()
-                .map(|(id, event_type, actor, payload, created_at)| {
+                .map(|entry| {
                     serde_json::json!({
-                        "id": id,
-                        "event_type": event_type,
-                        "actor": actor,
-                        "payload": payload,
-                        "created_at": created_at,
+                        "sequence": entry.sequence,
+                        "prev_hash": entry.prev_hash,
+                        "event_hash": entry.event_hash,
+                        "event_type": entry.event_type,
+                        "actor": entry.actor,
+                        "tenant_id": entry.tenant_id,
+                        "decision_id": entry.decision_id,
+                        "timestamp_physical_ms": entry.timestamp_physical_ms,
+                        "timestamp_logical": entry.timestamp_logical,
+                        "entry_hash": entry.entry_hash,
                     })
                 })
                 .collect();

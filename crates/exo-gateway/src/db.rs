@@ -422,17 +422,18 @@ pub async fn insert_audit_entry(
     event_type: &str,
     actor: &str,
     tenant_id: &str,
+    decision_id: &str,
     timestamp_physical_ms: i64,
     timestamp_logical: i32,
     entry_hash: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO audit_entries (sequence, prev_hash, event_hash, event_type, actor, tenant_id, timestamp_physical_ms, timestamp_logical, entry_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (sequence) DO NOTHING"
+        "INSERT INTO audit_entries (sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
     )
     .bind(sequence).bind(prev_hash).bind(event_hash).bind(event_type)
-    .bind(actor).bind(tenant_id).bind(timestamp_physical_ms).bind(timestamp_logical)
-    .bind(entry_hash)
+    .bind(actor).bind(tenant_id).bind(decision_id).bind(timestamp_physical_ms)
+    .bind(timestamp_logical).bind(entry_hash)
     .execute(pool).await?;
     Ok(())
 }
@@ -440,14 +441,28 @@ pub async fn insert_audit_entry(
 /// List all audit entries ordered by sequence number.
 pub async fn list_audit_entries(pool: &PgPool) -> Result<Vec<AuditRow>, sqlx::Error> {
     sqlx::query_as::<_, AuditRow>(
-        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, timestamp_physical_ms, timestamp_logical, entry_hash FROM audit_entries ORDER BY sequence"
+        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash FROM audit_entries ORDER BY sequence"
     ).fetch_all(pool).await
+}
+
+/// List audit entries for one decision ordered by sequence number.
+pub async fn list_audit_entries_for_decision(
+    pool: &PgPool,
+    decision_id: &str,
+) -> Result<Vec<AuditRow>, sqlx::Error> {
+    sqlx::query_as::<_, AuditRow>(
+        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash
+         FROM audit_entries WHERE decision_id = $1 ORDER BY sequence",
+    )
+    .bind(decision_id)
+    .fetch_all(pool)
+    .await
 }
 
 /// Return the most recent audit entry by sequence number, or `None` if empty.
 pub async fn get_last_audit_entry(pool: &PgPool) -> Result<Option<AuditRow>, sqlx::Error> {
     sqlx::query_as::<_, AuditRow>(
-        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, timestamp_physical_ms, timestamp_logical, entry_hash FROM audit_entries ORDER BY sequence DESC LIMIT 1"
+        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash FROM audit_entries ORDER BY sequence DESC LIMIT 1"
     ).fetch_optional(pool).await
 }
 
@@ -490,6 +505,7 @@ pub struct AuditRow {
     pub event_type: String,
     pub actor: String,
     pub tenant_id: String,
+    pub decision_id: String,
     pub timestamp_physical_ms: i64,
     pub timestamp_logical: i32,
     pub entry_hash: String,
