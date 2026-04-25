@@ -743,7 +743,10 @@ pub fn zerodentity_api_router(state: ApiState) -> Router {
 #[allow(clippy::unwrap_used, clippy::needless_borrows_for_generic_args)]
 mod tests {
     use axum::{body::Body, http::Request};
-    use exo_core::types::{Did, Hash256, Signature};
+    use exo_core::{
+        crypto::KeyPair,
+        types::{Did, Hash256, Signature},
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -752,16 +755,24 @@ mod tests {
         types::{ClaimStatus, ClaimType, IdentityClaim, IdentitySession},
     };
 
+    fn test_store() -> ZerodentityStore {
+        let keypair = KeyPair::from_secret_bytes([31u8; 32]).unwrap();
+        let signer = Arc::new(move |payload: &[u8]| keypair.sign(payload));
+        let mut store = ZerodentityStore::new();
+        store.set_receipt_signer(Did::new("did:exo:test-node").unwrap(), signer);
+        store
+    }
+
     fn make_state() -> ApiState {
         ApiState {
-            store: Arc::new(Mutex::new(ZerodentityStore::new())),
+            store: Arc::new(Mutex::new(test_store())),
             node_did: Did::new("did:exo:test-node").unwrap(),
             started_ms: 1_700_000_000_000,
         }
     }
 
     fn make_state_with_session(token: &str, did_str: &str) -> ApiState {
-        let mut store = ZerodentityStore::new();
+        let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
@@ -780,7 +791,7 @@ mod tests {
     }
 
     fn make_state_with_session_and_claim(token: &str, did_str: &str) -> ApiState {
-        let mut store = ZerodentityStore::new();
+        let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),

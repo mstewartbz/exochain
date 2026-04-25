@@ -9,12 +9,17 @@
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::module_inception)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::{
         Router,
         body::Body,
         http::{Request, StatusCode, header},
     };
-    use exo_core::types::{Did, Hash256, Signature};
+    use exo_core::{
+        crypto::KeyPair,
+        types::{Did, Hash256, Signature},
+    };
     use rand::{SeedableRng, rngs::StdRng};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -101,11 +106,21 @@ mod tests {
     }
 
     fn api_app(store: SharedZerodentityStore) -> Router {
+        configure_test_receipt_signer(&store);
         zerodentity_api_router(ApiState {
             store,
             node_did: Did::new("did:exo:test-node").unwrap(),
             started_ms: 1_700_000_000_000,
         })
+    }
+
+    fn configure_test_receipt_signer(store: &SharedZerodentityStore) {
+        let keypair = KeyPair::from_secret_bytes([37u8; 32]).unwrap();
+        let signer = Arc::new(move |payload: &[u8]| keypair.sign(payload));
+        store
+            .lock()
+            .unwrap()
+            .set_receipt_signer(td("test-node"), signer);
     }
 
     async fn post_json(app: &Router, uri: &str, body: Value) -> axum::response::Response {
