@@ -165,7 +165,12 @@ async fn start_node(
     tracing::info!(height, "DAG store opened");
 
     // Open 0dentity store (shares the same dag.db, applies zerodentity migration).
-    let zerodentity_store = zerodentity::store::ZerodentityStore::open(data_dir)?;
+    let mut zerodentity_store = zerodentity::store::ZerodentityStore::open(data_dir)?;
+    let zd_receipt_signer: zerodentity::store::ReceiptSigner = {
+        let identity = identity::load_or_create(data_dir)?;
+        Arc::new(move |payload: &[u8]| identity.sign(payload))
+    };
+    zerodentity_store.set_receipt_signer(node_identity.did.clone(), zd_receipt_signer);
     let zerodentity_store = std::sync::Arc::new(Mutex::new(zerodentity_store));
     tracing::info!("0dentity store ready");
 
@@ -611,14 +616,8 @@ async fn start_node(
     let zd_onboarding_state = zerodentity::onboarding::OnboardingState {
         store: std::sync::Arc::clone(&zerodentity_store),
     };
-    let started_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
     let zd_api_state = zerodentity::api::ApiState {
         store: std::sync::Arc::clone(&zerodentity_store),
-        node_did: node_identity.did.clone(),
-        started_ms,
     };
     let zerodentity_onboarding_router =
         zerodentity::onboarding::onboarding_router(zd_onboarding_state);

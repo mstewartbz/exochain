@@ -13,6 +13,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -24,6 +25,30 @@ use super::types::{
     BehavioralSample, ClaimStatus, DeviceFingerprint, IdentityClaim, IdentitySession, OtpChallenge,
     PeerAttestation, ZerodentityScore,
 };
+
+pub type ReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
+
+#[derive(Clone)]
+pub struct ReceiptSigningContext {
+    actor_did: Did,
+    signer: ReceiptSigner,
+}
+
+impl ReceiptSigningContext {
+    #[must_use]
+    pub fn new(actor_did: Did, signer: ReceiptSigner) -> Self {
+        Self { actor_did, signer }
+    }
+}
+
+impl fmt::Debug for ReceiptSigningContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiptSigningContext")
+            .field("actor_did", &self.actor_did)
+            .field("signer", &"<receipt signer>")
+            .finish()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ZerodentityStore
@@ -70,6 +95,8 @@ pub struct ZerodentityStore {
     dag_nodes: Vec<DagNode>,
     /// Trust receipts emitted for claim verification events (APE-72).
     trust_receipts: Vec<TrustReceipt>,
+    /// Node identity signer used to emit verifiable trust receipts.
+    receipt_signing: Option<ReceiptSigningContext>,
 }
 
 impl ZerodentityStore {
@@ -79,6 +106,11 @@ impl ZerodentityStore {
         Self::default()
     }
 
+    /// Configure the node identity used to sign store-emitted trust receipts.
+    pub fn set_receipt_signer(&mut self, actor_did: Did, signer: ReceiptSigner) {
+        self.receipt_signing = Some(ReceiptSigningContext::new(actor_did, signer));
+    }
+
     /// Open the 0dentity store.
     ///
     /// In this in-memory implementation the `data_dir` argument is accepted but
@@ -86,6 +118,28 @@ impl ZerodentityStore {
     /// allows for future persistence scaling.
     pub fn open(_data_dir: &Path) -> anyhow::Result<Self> {
         Ok(Self::new())
+    }
+
+    fn trust_receipt(
+        &self,
+        action_type: &str,
+        action_hash: Hash256,
+        outcome: ReceiptOutcome,
+        timestamp: Timestamp,
+    ) -> anyhow::Result<TrustReceipt> {
+        let Some(context) = &self.receipt_signing else {
+            anyhow::bail!("0dentity trust receipt signer is not configured");
+        };
+        Ok(TrustReceipt::new(
+            context.actor_did.clone(),
+            Hash256::ZERO,
+            None,
+            action_type.to_owned(),
+            action_hash,
+            outcome,
+            timestamp,
+            &*context.signer,
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -385,6 +439,18 @@ impl ZerodentityStore {
     ///   `self.trust_receipts` when `claim.status == Verified`.
     #[allow(dead_code)]
     pub fn save_claim(&mut self, claim_id: &str, claim: &IdentityClaim) -> anyhow::Result<()> {
+        let receipt = if claim.status == ClaimStatus::Verified {
+            let verified_ms = claim.verified_ms.unwrap_or(claim.created_ms);
+            Some(self.trust_receipt(
+                "zerodentity.claim_verified",
+                claim.claim_hash,
+                ReceiptOutcome::Executed,
+                Timestamp::new(verified_ms, 0),
+            )?)
+        } else {
+            None
+        };
+
         self.insert_claim(claim_id, claim)?;
 
         // Record DAG node for this claim.
@@ -399,18 +465,7 @@ impl ZerodentityStore {
         self.dag_nodes.push(node);
 
         // Emit TrustReceipt for verified claims.
-        if claim.status == ClaimStatus::Verified {
-            let verified_ms = claim.verified_ms.unwrap_or(claim.created_ms);
-            let receipt = TrustReceipt::new(
-                claim.subject_did.clone(),
-                Hash256::ZERO,
-                None,
-                "zerodentity.claim_verified".to_string(),
-                claim.claim_hash,
-                ReceiptOutcome::Executed,
-                Timestamp::new(verified_ms, 0),
-                &|_payload| Signature::Empty,
-            );
+        if let Some(receipt) = receipt {
             self.trust_receipts.push(receipt);
         }
 
@@ -466,6 +521,10 @@ impl ZerodentityStore {
     ///
     /// Returns the number of claims revoked.
     pub fn erase_did(&mut self, did: &Did) -> anyhow::Result<u32> {
+        if self.receipt_signing.is_none() {
+            anyhow::bail!("0dentity trust receipt signer is not configured");
+        }
+
         let key = did.as_str().to_owned();
         let mut revoked_count = 0u32;
 
@@ -508,16 +567,12 @@ impl ZerodentityStore {
 
         // 7. Emit erasure receipt
         let now_ms = crate::sentinels::now_ms();
-        let receipt = TrustReceipt::new(
-            did.clone(),
-            Hash256::ZERO,
-            None,
-            "zerodentity.identity_erased".to_string(),
+        let receipt = self.trust_receipt(
+            "zerodentity.identity_erased",
             Hash256::digest(format!("erase:{}", did.as_str()).as_bytes()),
             ReceiptOutcome::Executed,
             Timestamp::new(now_ms, 0),
-            &|_payload| Signature::Empty,
-        );
+        )?;
         self.trust_receipts.push(receipt);
 
         Ok(revoked_count)
@@ -565,7 +620,12 @@ pub fn new_shared_store() -> SharedZerodentityStore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use exo_core::types::{Did, Hash256, Signature};
+    use std::sync::Arc;
+
+    use exo_core::{
+        crypto::KeyPair,
+        types::{Did, Hash256, PublicKey, Signature},
+    };
 
     use super::*;
     use crate::zerodentity::types::{
@@ -578,6 +638,16 @@ mod tests {
 
     fn h() -> Hash256 {
         Hash256::digest(b"t")
+    }
+
+    fn signed_store(seed: u8) -> (ZerodentityStore, Did, PublicKey) {
+        let keypair = KeyPair::from_secret_bytes([seed; 32]).unwrap();
+        let public_key = *keypair.public_key();
+        let actor_did = did(&format!("did:exo:receipt-node-{seed}"));
+        let signer = Arc::new(move |payload: &[u8]| keypair.sign(payload));
+        let mut store = ZerodentityStore::new();
+        store.set_receipt_signer(actor_did.clone(), signer);
+        (store, actor_did, public_key)
     }
 
     fn score_for(subject_did: Did, composite: u32) -> ZerodentityScore {
@@ -713,7 +783,7 @@ mod tests {
 
     #[test]
     fn save_claim_stores_claim_and_dag_node() {
-        let mut store = ZerodentityStore::new();
+        let (mut store, _, _) = signed_store(3);
         let d = did("did:exo:grace");
         let c = claim(&d, ClaimType::Email);
         store.save_claim("apg-001", &c).unwrap();
@@ -729,16 +799,33 @@ mod tests {
 
     #[test]
     fn save_verified_claim_emits_trust_receipt() {
-        let mut store = ZerodentityStore::new();
+        let (mut store, node_did, node_public_key) = signed_store(5);
         let d = did("did:exo:heidi");
         let c = claim(&d, ClaimType::Phone); // claim() sets status=Verified
         store.save_claim("apg-002", &c).unwrap();
 
         assert_eq!(store.trust_receipts().len(), 1);
         let r = &store.trust_receipts()[0];
-        assert_eq!(r.actor_did, d);
+        assert_eq!(r.actor_did, node_did);
         assert_eq!(r.action_hash, c.claim_hash);
         assert_eq!(r.action_type, "zerodentity.claim_verified");
+        assert!(r.verify_signature(&node_public_key));
+    }
+
+    #[test]
+    fn save_verified_claim_emits_node_signed_trust_receipt() {
+        let (mut store, node_did, node_public_key) = signed_store(11);
+        let d = did("did:exo:signed-claim");
+        let c = claim(&d, ClaimType::Phone);
+        store.save_claim("apg-signed-001", &c).unwrap();
+
+        let receipt = &store.trust_receipts()[0];
+        assert_eq!(receipt.actor_did, node_did);
+        assert_eq!(receipt.action_hash, c.claim_hash);
+        assert_eq!(receipt.action_type, "zerodentity.claim_verified");
+        assert!(!receipt.signature.is_empty());
+        assert!(receipt.verify_hash());
+        assert!(receipt.verify_signature(&node_public_key));
     }
 
     #[test]
@@ -789,7 +876,7 @@ mod tests {
     fn erase_did_revokes_claims_and_zeroes_scores() {
         use crate::zerodentity::types::IdentitySession;
 
-        let mut store = ZerodentityStore::new();
+        let (mut store, _, _) = signed_store(7);
         let d = did("did:exo:eraseme");
 
         // Set up: claim, score, session
@@ -836,6 +923,26 @@ mod tests {
     }
 
     #[test]
+    fn erase_did_emits_node_signed_erasure_receipt() {
+        let (mut store, node_did, node_public_key) = signed_store(17);
+        let d = did("did:exo:signed-erase");
+        store.put_claim(claim(&d, ClaimType::Email));
+
+        let revoked = store.erase_did(&d).unwrap();
+        assert_eq!(revoked, 1);
+
+        let receipt = store
+            .trust_receipts()
+            .iter()
+            .find(|r| r.action_type == "zerodentity.identity_erased")
+            .unwrap();
+        assert_eq!(receipt.actor_did, node_did);
+        assert!(!receipt.signature.is_empty());
+        assert!(receipt.verify_hash());
+        assert!(receipt.verify_signature(&node_public_key));
+    }
+
+    #[test]
     fn erase_did_removes_fingerprints_and_behavioral() {
         use std::collections::BTreeMap;
 
@@ -843,7 +950,7 @@ mod tests {
             BehavioralSample, BehavioralSignalType, DeviceFingerprint,
         };
 
-        let mut store = ZerodentityStore::new();
+        let (mut store, _, _) = signed_store(19);
         let d = did("did:exo:fptest");
 
         store.put_fingerprint(
@@ -876,7 +983,7 @@ mod tests {
 
     #[test]
     fn erase_did_tombstones_dag_nodes() {
-        let mut store = ZerodentityStore::new();
+        let (mut store, _, _) = signed_store(23);
         let d = did("did:exo:dagtest");
         let c = claim(&d, ClaimType::Email);
         store.save_claim("dag-001", &c).unwrap();
