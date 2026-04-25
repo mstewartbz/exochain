@@ -161,3 +161,14 @@ unaudited-mcp-simulation-tools = []
 # first-touch 0dentity claim creation is running under the legacy,
 # unaudited onboarding contract tracked by Onyx-4 R1."
 unaudited-zerodentity-first-touch-onboarding = []
+
+# ONYX-4 RED R5: infrastructure Holons currently build kernel adjudication
+# contexts with sentinel authority/provenance signatures (`vec![1, 2, 3]`) and
+# no public key. The Holons are recommendation-only today, but the runtime must
+# not start by default until the context carries real signed authority and
+# provenance.
+#
+# Do NOT enable this in production. Enabling it means: "I accept that
+# infrastructure Holons run with the unaudited R5 adjudication context tracked
+# by fix-onyx-4-r5-holons-stub-context.md."
+unaudited-infrastructure-holons = []

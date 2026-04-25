@@ -59,6 +59,7 @@ pub enum NetworkCommand {
     #[allow(dead_code)] // Used when governance API enables dynamic peer dialing
     Dial { addr: Multiaddr },
     /// Request the current peer count.
+    #[cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
     PeerCount {
         reply: tokio::sync::oneshot::Sender<usize>,
     },
@@ -482,6 +483,7 @@ impl NetworkHandle {
     }
 
     /// Get the current connected peer count.
+    #[cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
     pub async fn peer_count(&self) -> anyhow::Result<usize> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.cmd_tx

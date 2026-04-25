@@ -47,6 +47,7 @@ use std::{
 use clap::Parser;
 use cli::{Cli, Command};
 use exo_core::types::Did;
+#[cfg(feature = "unaudited-infrastructure-holons")]
 use holons::{HolonEvent, HolonManagerConfig};
 use network::{NetworkConfig, NetworkEvent, NetworkHandle};
 use reactor::{ReactorConfig, ReactorEvent};
@@ -384,95 +385,115 @@ async fn start_node(
     });
 
     // --- Infrastructure Holons ---
-    let holon_config = HolonManagerConfig {
-        node_did: node_identity.did.clone(),
-        root_did: Did::new("did:exo:root").unwrap_or_else(|_| node_identity.did.clone()),
-        topology_interval_secs: 60,
-        scaling_interval_secs: 300,
-        health_interval_secs: 30,
-    };
+    #[cfg(feature = "unaudited-infrastructure-holons")]
+    {
+        let holon_config = HolonManagerConfig {
+            node_did: node_identity.did.clone(),
+            root_did: Did::new("did:exo:root").unwrap_or_else(|_| node_identity.did.clone()),
+            topology_interval_secs: 60,
+            scaling_interval_secs: 300,
+            health_interval_secs: 30,
+        };
 
-    let (holon_event_tx, mut holon_event_rx) = mpsc::channel::<HolonEvent>(256);
+        let (holon_event_tx, mut holon_event_rx) = mpsc::channel::<HolonEvent>(256);
 
-    tokio::spawn(holons::run_holon_manager(
-        holon_config,
-        Arc::clone(&reactor_state),
-        Arc::clone(&shared_store),
-        net_handle.clone(),
-        holon_event_tx,
-    ));
-    tracing::info!("Infrastructure Holons started (topology, scaling, health)");
+        tokio::spawn(holons::run_holon_manager(
+            holon_config,
+            Arc::clone(&reactor_state),
+            Arc::clone(&shared_store),
+            net_handle.clone(),
+            holon_event_tx,
+        ));
+        tracing::warn!(
+            enabled = holons::infrastructure_holons_enabled(),
+            feature_flag = holons::INFRASTRUCTURE_HOLONS_FEATURE,
+            initiative = holons::INFRASTRUCTURE_HOLONS_INITIATIVE,
+            "Infrastructure Holons started under unaudited feature gate"
+        );
 
-    // Holon event logger (with metrics updates).
-    let holon_metrics = Arc::clone(&node_metrics);
-    tokio::spawn(async move {
-        while let Some(event) = holon_event_rx.recv().await {
-            match event {
-                HolonEvent::TopologyAnalysis {
-                    peer_count,
-                    diversity_score,
-                    recommendation,
-                } => {
-                    holon_metrics
-                        .peer_count
-                        .store(peer_count as u64, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!(
+        // Holon event logger (with metrics updates).
+        let holon_metrics = Arc::clone(&node_metrics);
+        tokio::spawn(async move {
+            while let Some(event) = holon_event_rx.recv().await {
+                match event {
+                    HolonEvent::TopologyAnalysis {
                         peer_count,
                         diversity_score,
-                        %recommendation,
-                        "Topology Holon"
-                    );
-                }
-                HolonEvent::ScalingRecommendation {
-                    validator_count,
-                    node_count,
-                    recommendation,
-                } => {
-                    holon_metrics
-                        .validator_count
-                        .store(validator_count as u64, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!(
+                        recommendation,
+                    } => {
+                        holon_metrics
+                            .peer_count
+                            .store(peer_count as u64, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            peer_count,
+                            diversity_score,
+                            %recommendation,
+                            "Topology Holon"
+                        );
+                    }
+                    HolonEvent::ScalingRecommendation {
                         validator_count,
                         node_count,
-                        %recommendation,
-                        "Scaling Holon"
-                    );
-                }
-                HolonEvent::HealthCheck {
-                    consensus_round,
-                    committed_height,
-                    status,
-                } => match &status {
-                    holons::HealthStatus::Healthy => {
-                        tracing::debug!(consensus_round, committed_height, "Health Holon: healthy");
-                    }
-                    holons::HealthStatus::Degraded { reason } => {
-                        tracing::warn!(
-                            consensus_round,
-                            committed_height,
-                            %reason,
-                            "Health Holon: degraded"
+                        recommendation,
+                    } => {
+                        holon_metrics
+                            .validator_count
+                            .store(validator_count as u64, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            validator_count,
+                            node_count,
+                            %recommendation,
+                            "Scaling Holon"
                         );
                     }
-                    holons::HealthStatus::Critical { reason } => {
+                    HolonEvent::HealthCheck {
+                        consensus_round,
+                        committed_height,
+                        status,
+                    } => match &status {
+                        holons::HealthStatus::Healthy => {
+                            tracing::debug!(
+                                consensus_round,
+                                committed_height,
+                                "Health Holon: healthy"
+                            );
+                        }
+                        holons::HealthStatus::Degraded { reason } => {
+                            tracing::warn!(
+                                consensus_round,
+                                committed_height,
+                                %reason,
+                                "Health Holon: degraded"
+                            );
+                        }
+                        holons::HealthStatus::Critical { reason } => {
+                            tracing::error!(
+                                consensus_round,
+                                committed_height,
+                                %reason,
+                                "Health Holon: CRITICAL"
+                            );
+                        }
+                    },
+                    HolonEvent::HolonTerminated { holon_id, reason } => {
                         tracing::error!(
-                            consensus_round,
-                            committed_height,
+                            %holon_id,
                             %reason,
-                            "Health Holon: CRITICAL"
+                            "Infrastructure Holon terminated"
                         );
                     }
-                },
-                HolonEvent::HolonTerminated { holon_id, reason } => {
-                    tracing::error!(
-                        %holon_id,
-                        %reason,
-                        "Infrastructure Holon terminated"
-                    );
                 }
             }
-        }
-    });
+        });
+    }
+
+    #[cfg(not(feature = "unaudited-infrastructure-holons"))]
+    tracing::warn!(
+        enabled = holons::infrastructure_holons_enabled(),
+        feature_flag = holons::INFRASTRUCTURE_HOLONS_FEATURE,
+        initiative = holons::INFRASTRUCTURE_HOLONS_INITIATIVE,
+        "Infrastructure Holons disabled: adjudication context still uses sentinel signatures"
+    );
 
     // NOTE: /health and /ready are provided by the gateway (exo-gateway)
     // with uptime tracking and DB readiness checks. Node-specific probes

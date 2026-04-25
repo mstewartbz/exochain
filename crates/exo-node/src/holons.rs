@@ -10,6 +10,19 @@
 //! - **INV-005 KernelImmutability**: AI cannot modify the governance kernel
 //! - **MCP-001/002**: AI operates within defined scope, cannot self-escalate
 //!
+//! # Audit status — Onyx-4 R5 (default-off runtime)
+//!
+//! The current infrastructure Holon adjudication context still uses sentinel
+//! authority and provenance signatures (`vec![1, 2, 3]`) with no Ed25519 public
+//! key. That means `ProvenanceVerifiable` can only confirm that bytes are
+//! present, not that the action was signed by a real infrastructure authority.
+//!
+//! The runtime background manager is therefore disabled by default behind the
+//! `unaudited-infrastructure-holons` feature flag. Enabling the feature means
+//! the operator accepts the recommendation-only Holon runtime while the real
+//! signed authority/provenance context is tracked in
+//! `Initiatives/fix-onyx-4-r5-holons-stub-context.md`.
+//!
 //! ## Holons
 //!
 //! 1. **Topology Optimizer** — monitors peer diversity (ASN, geography),
@@ -28,6 +41,7 @@
     clippy::float_cmp,
     clippy::single_match
 )]
+#![cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
 
 use std::time::Duration;
 
@@ -51,12 +65,26 @@ use crate::{
     wire::{GovernanceEventType, ValidatorChange},
 };
 
+/// Feature flag required to run infrastructure Holons while R5 remains open.
+pub const INFRASTRUCTURE_HOLONS_FEATURE: &str = "unaudited-infrastructure-holons";
+
+/// Initiative documenting the R5 stub adjudication context and real fix scope.
+pub const INFRASTRUCTURE_HOLONS_INITIATIVE: &str =
+    "Initiatives/fix-onyx-4-r5-holons-stub-context.md";
+
+/// Whether the unaudited infrastructure Holon runtime is compiled in.
+#[must_use]
+pub const fn infrastructure_holons_enabled() -> bool {
+    cfg!(feature = "unaudited-infrastructure-holons")
+}
+
 // ---------------------------------------------------------------------------
 // Holon events (sent to application layer)
 // ---------------------------------------------------------------------------
 
 /// Events emitted by infrastructure Holons.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
 pub enum HolonEvent {
     /// Topology analysis completed.
     TopologyAnalysis {
@@ -679,6 +707,45 @@ mod tests {
             scaling_interval_secs: 300,
             health_interval_secs: 30,
         }
+    }
+
+    #[test]
+    fn module_doc_retains_infrastructure_holon_audit_status() {
+        let src = include_str!("holons.rs");
+        assert!(
+            src.contains("# Audit status"),
+            "module doc must retain the R5 audit-status section"
+        );
+        assert!(
+            src.contains(INFRASTRUCTURE_HOLONS_FEATURE),
+            "module doc must name the default-off feature flag"
+        );
+        assert!(
+            src.contains(INFRASTRUCTURE_HOLONS_INITIATIVE),
+            "module doc must point at the R5 initiative"
+        );
+        assert!(
+            src.contains("vec![1, 2, 3]"),
+            "module doc must call out the sentinel adjudication signatures"
+        );
+    }
+
+    #[cfg(not(feature = "unaudited-infrastructure-holons"))]
+    #[test]
+    fn infrastructure_holons_disabled_without_feature_flag() {
+        assert!(
+            !infrastructure_holons_enabled(),
+            "infrastructure Holons must be disabled by default while R5 is open"
+        );
+    }
+
+    #[cfg(feature = "unaudited-infrastructure-holons")]
+    #[test]
+    fn infrastructure_holons_feature_enables_runtime() {
+        assert!(
+            infrastructure_holons_enabled(),
+            "feature flag must explicitly opt into the unaudited Holon runtime"
+        );
     }
 
     #[test]
