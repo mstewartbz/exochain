@@ -14,7 +14,10 @@ mod tests {
         body::Body,
         http::{Request, StatusCode, header},
     };
-    use exo_core::types::{Did, Hash256, Signature};
+    use exo_core::{
+        crypto::KeyPair,
+        types::{Did, Hash256, Signature},
+    };
     use rand::{SeedableRng, rngs::StdRng};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -65,14 +68,65 @@ mod tests {
     }
 
     fn make_session(did: &Did, token: &str, ms: u64) -> IdentitySession {
+        make_session_with_public_key(did, token, ms, vec![])
+    }
+
+    fn make_session_with_public_key(
+        did: &Did,
+        token: &str,
+        ms: u64,
+        public_key: Vec<u8>,
+    ) -> IdentitySession {
         IdentitySession {
             session_token: token.to_owned(),
             subject_did: did.clone(),
-            public_key: vec![],
+            public_key,
             created_ms: ms,
             last_active_ms: ms,
             revoked: false,
         }
+    }
+
+    fn test_keypair(seed: u8) -> KeyPair {
+        KeyPair::from_secret_bytes([seed; 32]).unwrap()
+    }
+
+    fn bootstrap_verify_body(
+        challenge_id: &str,
+        code: &str,
+        subject_did: &Did,
+        keypair: &KeyPair,
+    ) -> Value {
+        let payload = crate::zerodentity::session_auth::bootstrap_signing_payload(
+            challenge_id,
+            subject_did,
+            keypair.public_key(),
+        )
+        .unwrap();
+        let signature = keypair.sign(&payload);
+        serde_json::json!({
+            "challenge_id": challenge_id,
+            "code": code,
+            "public_key": hex::encode(keypair.public_key().as_bytes()),
+            "bootstrap_signature": hex::encode(signature.to_bytes())
+        })
+    }
+
+    fn request_signature_headers(
+        method: &str,
+        uri: &str,
+        token: &str,
+        nonce: &str,
+        body: &[u8],
+        keypair: &KeyPair,
+    ) -> (String, String) {
+        let body_hash = Hash256::digest(body);
+        let payload = crate::zerodentity::session_auth::request_signing_payload(
+            method, uri, token, nonce, &body_hash,
+        )
+        .unwrap();
+        let signature = keypair.sign(&payload);
+        (nonce.to_owned(), hex::encode(signature.to_bytes()))
     }
 
     fn make_score(did: &Did, bp: u32, ms: u64) -> ZerodentityScore {
@@ -544,10 +598,53 @@ mod tests {
         let store = new_shared_store();
         let app = onboarding_app(store.clone());
         let did = td("otp-ok-01");
+        let keypair = test_keypair(1);
         // Far-future dispatched_ms so TTL check won't trigger on wall clock
         let dispatched_ms = u64::MAX / 2;
 
         let mut rng = seeded_rng(0xCAFE_0001);
+        let (challenge, code) =
+            OtpChallenge::new(&did, OtpChannel::Email, dispatched_ms, &mut rng).unwrap();
+        let cid = challenge.challenge_id.clone();
+        store
+            .lock()
+            .unwrap()
+            .insert_otp_challenge(&challenge)
+            .unwrap();
+
+        let resp = post_json(
+            &app,
+            "/api/v1/0dentity/verify",
+            bootstrap_verify_body(&cid, &code, &did, &keypair),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["verified"], true);
+        assert!(
+            body["session_token"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        let session_token = body["session_token"].as_str().unwrap();
+        let session = store
+            .lock()
+            .unwrap()
+            .get_session(session_token)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.public_key, keypair.public_key().as_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn verify_otp_success_without_bootstrap_signature_returns_400() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let did = td("otp-bootstrap-missing");
+        let dispatched_ms = u64::MAX / 2;
+
+        let mut rng = seeded_rng(0xCAFE_1010);
         let (challenge, code) =
             OtpChallenge::new(&did, OtpChannel::Email, dispatched_ms, &mut rng).unwrap();
         let cid = challenge.challenge_id.clone();
@@ -567,14 +664,49 @@ mod tests {
         )
         .await;
 
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_json(resp).await;
-        assert_eq!(body["verified"], true);
-        assert!(
-            body["session_token"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-        );
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn verify_otp_success_rejects_wrong_bootstrap_key() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let did = td("otp-bootstrap-wrong-key");
+        let keypair = test_keypair(2);
+        let wrong_keypair = test_keypair(3);
+        let dispatched_ms = u64::MAX / 2;
+
+        let mut rng = seeded_rng(0xCAFE_1011);
+        let (challenge, code) =
+            OtpChallenge::new(&did, OtpChannel::Email, dispatched_ms, &mut rng).unwrap();
+        let cid = challenge.challenge_id.clone();
+        store
+            .lock()
+            .unwrap()
+            .insert_otp_challenge(&challenge)
+            .unwrap();
+
+        let payload = crate::zerodentity::session_auth::bootstrap_signing_payload(
+            &cid,
+            &did,
+            keypair.public_key(),
+        )
+        .unwrap();
+        let wrong_signature = wrong_keypair.sign(&payload);
+
+        let resp = post_json(
+            &app,
+            "/api/v1/0dentity/verify",
+            serde_json::json!({
+                "challenge_id": cid,
+                "code": code,
+                "public_key": hex::encode(keypair.public_key().as_bytes()),
+                "bootstrap_signature": hex::encode(wrong_signature.to_bytes())
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1045,6 +1177,29 @@ mod tests {
         app.clone().oneshot(req).await.unwrap()
     }
 
+    async fn post_with_signed_auth(
+        app: &Router,
+        uri: &str,
+        token: &str,
+        nonce: &str,
+        body: serde_json::Value,
+        keypair: &KeyPair,
+    ) -> axum::response::Response {
+        let body_bytes = body.to_string();
+        let (nonce, signature) =
+            request_signature_headers("POST", uri, token, nonce, body_bytes.as_bytes(), keypair);
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("x-exo-nonce", nonce)
+            .header("x-exo-sig", signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap()
+    }
+
     #[tokio::test]
     async fn attest_without_auth_returns_401() {
         let app = api_app(new_shared_store());
@@ -1066,6 +1221,7 @@ mod tests {
         let app = api_app(store.clone());
         let attester = td("attest-type-err");
         let token = "attest-type-token";
+        let keypair = test_keypair(11);
 
         {
             let mut s = store.lock().unwrap();
@@ -1074,30 +1230,39 @@ mod tests {
                 &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
             )
             .unwrap();
-            s.insert_session(&make_session(&attester, token, 1_000_000))
-                .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &attester,
+                token,
+                1_000_000,
+                keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
         }
 
-        let resp = post_with_auth(
+        let uri = format!("/api/v1/0dentity/{}/attest", attester.as_str());
+        let resp = post_with_signed_auth(
             &app,
-            &format!("/api/v1/0dentity/{}/attest", attester.as_str()),
+            &uri,
             token,
+            "nonce-invalid-type",
             serde_json::json!({
                 "target_did": "did:exo:target",
                 "attestation_type": "NotAType"
             }),
+            &keypair,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn attest_valid_creates_attestation_201() {
+    async fn attest_write_without_session_signature_returns_401() {
         let store = new_shared_store();
         let app = api_app(store.clone());
-        let attester = td("attest-ok-a");
-        let target = td("attest-ok-b");
-        let token = "attest-ok-token";
+        let attester = td("attest-nosig");
+        let target = td("attest-nosig-target");
+        let token = "attest-nosig-token";
+        let keypair = test_keypair(12);
 
         {
             let mut s = store.lock().unwrap();
@@ -1106,8 +1271,13 @@ mod tests {
                 &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
             )
             .unwrap();
-            s.insert_session(&make_session(&attester, token, 1_000_000))
-                .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &attester,
+                token,
+                1_000_000,
+                keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
         }
 
         let resp = post_with_auth(
@@ -1120,6 +1290,85 @@ mod tests {
             }),
         )
         .await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn attest_signed_write_rejects_wrong_key() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let attester = td("attest-wrong-key-a");
+        let target = td("attest-wrong-key-b");
+        let token = "attest-wrong-key-token";
+        let session_keypair = test_keypair(13);
+        let wrong_keypair = test_keypair(14);
+
+        {
+            let mut s = store.lock().unwrap();
+            s.insert_claim(
+                "e1",
+                &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
+            )
+            .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &attester,
+                token,
+                1_000_000,
+                session_keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
+        }
+
+        let uri = format!("/api/v1/0dentity/{}/attest", attester.as_str());
+        let resp = post_with_signed_auth(
+            &app,
+            &uri,
+            token,
+            "nonce-wrong-key",
+            serde_json::json!({
+                "target_did": target.as_str(),
+                "attestation_type": "Identity"
+            }),
+            &wrong_keypair,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn attest_valid_creates_attestation_201() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let attester = td("attest-ok-a");
+        let target = td("attest-ok-b");
+        let token = "attest-ok-token";
+        let keypair = test_keypair(15);
+
+        {
+            let mut s = store.lock().unwrap();
+            s.insert_claim(
+                "e1",
+                &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
+            )
+            .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &attester,
+                token,
+                1_000_000,
+                keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
+        }
+
+        let uri = format!("/api/v1/0dentity/{}/attest", attester.as_str());
+        let body = serde_json::json!({
+            "target_did": target.as_str(),
+            "attestation_type": "Identity"
+        });
+        let resp =
+            post_with_signed_auth(&app, &uri, token, "nonce-valid-attest", body, &keypair).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(
@@ -1131,11 +1380,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attest_signed_write_rejects_nonce_replay() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let attester = td("attest-replay-a");
+        let target = td("attest-replay-b");
+        let token = "attest-replay-token";
+        let keypair = test_keypair(16);
+        let nonce = "nonce-replay";
+
+        {
+            let mut s = store.lock().unwrap();
+            s.insert_claim(
+                "e1",
+                &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
+            )
+            .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &attester,
+                token,
+                1_000_000,
+                keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
+        }
+
+        let uri = format!("/api/v1/0dentity/{}/attest", attester.as_str());
+        let body = serde_json::json!({
+            "target_did": target.as_str(),
+            "attestation_type": "Identity"
+        });
+        let first = post_with_signed_auth(&app, &uri, token, nonce, body.clone(), &keypair).await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let replay = post_with_signed_auth(&app, &uri, token, nonce, body, &keypair).await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn attest_self_returns_400() {
         let store = new_shared_store();
         let app = api_app(store.clone());
         let did = td("attest-self");
         let token = "attest-self-token";
+        let keypair = test_keypair(17);
 
         {
             let mut s = store.lock().unwrap();
@@ -1144,18 +1432,26 @@ mod tests {
                 &make_claim(&did, ClaimType::Email, ClaimStatus::Verified, 1_000),
             )
             .unwrap();
-            s.insert_session(&make_session(&did, token, 1_000_000))
-                .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &did,
+                token,
+                1_000_000,
+                keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
         }
 
-        let resp = post_with_auth(
+        let uri = format!("/api/v1/0dentity/{}/attest", did.as_str());
+        let resp = post_with_signed_auth(
             &app,
-            &format!("/api/v1/0dentity/{}/attest", did.as_str()),
+            &uri,
             token,
+            "nonce-self",
             serde_json::json!({
                 "target_did": did.as_str(),
                 "attestation_type": "Identity"
             }),
+            &keypair,
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1250,6 +1546,7 @@ mod tests {
         let api = api_app(store.clone());
         let did = td("arc-e2e-001");
         let did_str = did.as_str();
+        let keypair = test_keypair(21);
 
         // ── 1. DisplayName claim ──────────────────────────────────────────
         let resp = post_json(
@@ -1299,10 +1596,7 @@ mod tests {
         let resp = post_json(
             &onb,
             "/api/v1/0dentity/verify",
-            serde_json::json!({
-                "challenge_id": email_cid,
-                "code": email_code
-            }),
+            bootstrap_verify_body(&email_cid, &email_code, &did, &keypair),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1356,10 +1650,7 @@ mod tests {
         let resp = post_json(
             &onb,
             "/api/v1/0dentity/verify",
-            serde_json::json!({
-                "challenge_id": phone_cid,
-                "code": phone_code
-            }),
+            bootstrap_verify_body(&phone_cid, &phone_code, &did, &keypair),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);

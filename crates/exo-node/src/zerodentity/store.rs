@@ -12,7 +12,7 @@
 //! Spec reference: §9, §12.1.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -64,6 +64,8 @@ pub struct ZerodentityStore {
     attestations: BTreeMap<(String, String), PeerAttestation>,
     /// Identity sessions by session token.
     sessions: BTreeMap<String, IdentitySession>,
+    /// Consumed request nonces keyed by `(session_token, nonce)`.
+    session_request_nonces: BTreeSet<(String, String)>,
     /// DAG nodes recorded for claim operations (APE-72).
     dag_nodes: Vec<DagNode>,
     /// Trust receipts emitted for claim verification events (APE-72).
@@ -199,6 +201,20 @@ impl ZerodentityStore {
         self.sessions
             .insert(session.session_token.clone(), session.clone());
         Ok(())
+    }
+
+    /// Consume a session request nonce.
+    ///
+    /// Returns `true` when the nonce was new and is now consumed. Returns
+    /// `false` when the same session already used the nonce.
+    pub fn consume_session_nonce(
+        &mut self,
+        session_token: &str,
+        nonce: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .session_request_nonces
+            .insert((session_token.to_owned(), nonce.to_owned())))
     }
 
     // -----------------------------------------------------------------------

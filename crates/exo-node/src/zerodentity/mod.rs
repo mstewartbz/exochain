@@ -18,6 +18,7 @@
 // Core modules
 pub mod otp;
 pub mod scoring;
+pub(crate) mod session_auth;
 pub mod store;
 pub mod types;
 
