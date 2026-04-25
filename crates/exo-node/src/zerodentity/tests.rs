@@ -47,6 +47,23 @@ mod tests {
         Hash256::digest(tag.as_bytes())
     }
 
+    #[test]
+    fn module_doc_retains_device_behavioral_axes_audit_status() {
+        let src = include_str!("mod.rs");
+        assert!(
+            src.contains("# Audit status"),
+            "module doc must retain the R3 audit-status section"
+        );
+        assert!(
+            src.contains("unaudited-zerodentity-device-behavioral-axes"),
+            "module doc must name the R3 feature flag"
+        );
+        assert!(
+            src.contains("fix-onyx-4-r3-unwired-axes.md"),
+            "module doc must point at the R3 initiative"
+        );
+    }
+
     fn seeded_rng(seed: u64) -> StdRng {
         StdRng::seed_from_u64(seed)
     }
@@ -1187,6 +1204,36 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "unaudited-zerodentity-device-behavioral-axes"))]
+    #[tokio::test]
+    async fn list_fingerprints_refused_without_device_behavioral_feature_flag() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let did = td("api-fp-gated");
+        let token = "fp-gated-session-token";
+
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+
+        let resp = get_with_auth(
+            &app,
+            &format!("/api/v1/0dentity/{}/fingerprints", did.as_str()),
+            token,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["feature_flag"],
+            "unaudited-zerodentity-device-behavioral-axes"
+        );
+        assert_eq!(body["initiative"], "fix-onyx-4-r3-unwired-axes.md");
+    }
+
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[tokio::test]
     async fn list_fingerprints_without_auth_returns_401() {
         let app = api_app(new_shared_store());
@@ -1195,6 +1242,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[tokio::test]
     async fn list_fingerprints_with_valid_session_returns_200() {
         let store = new_shared_store();

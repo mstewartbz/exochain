@@ -172,3 +172,14 @@ unaudited-zerodentity-first-touch-onboarding = []
 # infrastructure Holons run with the unaudited R5 adjudication context tracked
 # by fix-onyx-4-r5-holons-stub-context.md."
 unaudited-infrastructure-holons = []
+
+# ONYX-4 RED R3: the 0dentity device fingerprint and behavioral biometric
+# modules have deterministic helpers and tests, but there is no public
+# ingestion path that persists client-collected samples into the store. The
+# onboarding UI can collect hashes and the scoring engine can consume samples,
+# yet POST /api/v1/0dentity/claims ignores those fields.
+#
+# Do NOT enable this in production. Enabling it means: "I accept that the
+# device_trust and behavioral_signature axes are running under the unaudited R3
+# contract tracked by fix-onyx-4-r3-unwired-axes.md."
+unaudited-zerodentity-device-behavioral-axes = []

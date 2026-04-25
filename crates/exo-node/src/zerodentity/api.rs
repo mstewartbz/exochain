@@ -29,10 +29,12 @@ use exo_core::{
 use serde::{Deserialize, Serialize};
 
 use super::{
+    DEVICE_BEHAVIORAL_AXES_FEATURE, DEVICE_BEHAVIORAL_AXES_INITIATIVE,
     attestation::{
         CreateAttestationInput, attester_score_impact, build_target_claim, create_attestation,
         target_score_impact, validate_attestation,
     },
+    device_behavioral_axes_enabled,
     session_auth::{public_key_from_session_bytes, request_signing_payload, signature_from_hex},
     store::ZerodentityStore,
     types::{AttestationType, IdentityClaim, ZerodentityScore},
@@ -339,6 +341,27 @@ fn parse_signature(
     parse_hex_exact::<64>("signature", value).map(Signature::from_bytes)
 }
 
+fn device_behavioral_axes_refusal(
+    refusal_source: &'static str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!(
+        feature_flag = DEVICE_BEHAVIORAL_AXES_FEATURE,
+        initiative = DEVICE_BEHAVIORAL_AXES_INITIATIVE,
+        refusal_source,
+        "refusing unaudited 0dentity device/behavioral axis surface"
+    );
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "zerodentity_device_behavioral_axes_disabled",
+            "message": "0dentity device fingerprint and behavioral biometric axes are disabled by default because the ingestion path is not wired to persist client-collected samples.",
+            "feature_flag": DEVICE_BEHAVIORAL_AXES_FEATURE,
+            "initiative": DEVICE_BEHAVIORAL_AXES_INITIATIVE,
+            "refusal_source": refusal_source,
+        })),
+    )
+}
+
 fn axes_from_score(s: &ZerodentityScore) -> AxesResponse {
     AxesResponse {
         communication: s.axes.communication,
@@ -553,6 +576,11 @@ pub async fn list_fingerprints(
     headers: HeaderMap,
 ) -> Result<Json<FingerprintsResponse>, (StatusCode, Json<serde_json::Value>)> {
     let did = parse_did(&did_str)?;
+    if !device_behavioral_axes_enabled() {
+        return Err(device_behavioral_axes_refusal(
+            "exo-node/zerodentity/api.rs::list_fingerprints",
+        ));
+    }
 
     // Auth required
     let token = extract_session_token(&headers).ok_or_else(|| {
@@ -1058,6 +1086,32 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[cfg(not(feature = "unaudited-zerodentity-device-behavioral-axes"))]
+    #[tokio::test]
+    async fn list_fingerprints_refused_without_device_behavioral_feature_flag() {
+        let state = make_state_with_session("tok-alice", "did:exo:alice");
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice/fingerprints")
+                    .header("authorization", "Bearer tok-alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            result["feature_flag"],
+            "unaudited-zerodentity-device-behavioral-axes"
+        );
+        assert_eq!(result["initiative"], "fix-onyx-4-r3-unwired-axes.md");
+    }
+
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[tokio::test]
     async fn list_fingerprints_no_token_returns_401() {
         let app = zerodentity_api_router(make_state());
@@ -1073,6 +1127,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[tokio::test]
     async fn list_fingerprints_unknown_session_returns_401() {
         let app = zerodentity_api_router(make_state());
@@ -1089,6 +1144,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[tokio::test]
     async fn list_fingerprints_wrong_did_returns_403() {
         let state = make_state_with_session("tok-bob", "did:exo:bob");
@@ -1106,6 +1162,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[tokio::test]
     async fn list_fingerprints_returns_empty_list() {
         let state = make_state_with_session("tok-alice", "did:exo:alice");

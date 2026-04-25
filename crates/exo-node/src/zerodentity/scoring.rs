@@ -26,9 +26,12 @@ use std::collections::BTreeSet;
 
 use exo_core::types::{Did, Hash256, Signature};
 
-use super::types::{
-    BehavioralSample, BehavioralSignalType, ClaimStatus, ClaimType, DeviceFingerprint,
-    IdentityClaim, PolarAxes, ZerodentityScore,
+use super::{
+    device_behavioral_axes_enabled,
+    types::{
+        BehavioralSample, BehavioralSignalType, ClaimStatus, ClaimType, DeviceFingerprint,
+        IdentityClaim, PolarAxes, ZerodentityScore,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -93,8 +96,16 @@ impl ZerodentityScore {
         let axes = PolarAxes {
             communication: score_communication(claims),
             credential_depth: score_credential_depth(claims),
-            device_trust: score_device_trust(fingerprints),
-            behavioral_signature: score_behavioral(behavioral_samples),
+            device_trust: if device_behavioral_axes_enabled() {
+                score_device_trust(fingerprints)
+            } else {
+                0
+            },
+            behavioral_signature: if device_behavioral_axes_enabled() {
+                score_behavioral(behavioral_samples)
+            } else {
+                0
+            },
             network_reputation: score_network_reputation(claims),
             temporal_stability: score_temporal_stability(claims, now_ms),
             cryptographic_strength: score_cryptographic_strength(claims),
@@ -492,6 +503,29 @@ mod tests {
         Hash256::digest(b"test")
     }
 
+    fn fingerprint_sample() -> DeviceFingerprint {
+        DeviceFingerprint {
+            composite_hash: h(),
+            signal_hashes: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(FingerprintSignal::CanvasRendering, h());
+                m.insert(FingerprintSignal::UserAgent, h());
+                m
+            },
+            captured_ms: 1000,
+            consistency_score_bp: Some(9000),
+        }
+    }
+
+    fn behavioral_sample(signal_type: BehavioralSignalType, similarity: u32) -> BehavioralSample {
+        BehavioralSample {
+            sample_hash: h(),
+            signal_type,
+            captured_ms: 1000,
+            baseline_similarity_bp: Some(similarity),
+        }
+    }
+
     fn claim(ct: ClaimType, status: ClaimStatus) -> IdentityClaim {
         IdentityClaim {
             claim_hash: h(),
@@ -685,5 +719,47 @@ mod tests {
         let recomputed = ZerodentityScore::compute(&d, &claims, &[], &[], stored.computed_ms);
         let drift = stored.composite.abs_diff(recomputed.composite);
         assert_eq!(drift, 0, "deterministic algorithm must produce zero drift");
+    }
+
+    #[cfg(not(feature = "unaudited-zerodentity-device-behavioral-axes"))]
+    #[test]
+    fn compute_ignores_device_behavioral_samples_without_feature_flag() {
+        let d = did();
+        let fingerprints = vec![fingerprint_sample()];
+        let behavioral = vec![
+            behavioral_sample(BehavioralSignalType::KeystrokeDynamics, 9000),
+            behavioral_sample(BehavioralSignalType::MouseDynamics, 8000),
+        ];
+        let score = ZerodentityScore::compute(&d, &[], &fingerprints, &behavioral, 10_000_000);
+
+        assert_eq!(
+            score.axes.device_trust, 0,
+            "device_trust must stay zero while R3 axes are feature-gated"
+        );
+        assert_eq!(
+            score.axes.behavioral_signature, 0,
+            "behavioral_signature must stay zero while R3 axes are feature-gated"
+        );
+    }
+
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[test]
+    fn compute_uses_device_behavioral_samples_with_feature_flag() {
+        let d = did();
+        let fingerprints = vec![fingerprint_sample()];
+        let behavioral = vec![
+            behavioral_sample(BehavioralSignalType::KeystrokeDynamics, 9000),
+            behavioral_sample(BehavioralSignalType::MouseDynamics, 8000),
+        ];
+        let score = ZerodentityScore::compute(&d, &[], &fingerprints, &behavioral, 10_000_000);
+
+        assert!(
+            score.axes.device_trust > 0,
+            "feature-on build must preserve existing device_trust scoring"
+        );
+        assert!(
+            score.axes.behavioral_signature > 0,
+            "feature-on build must preserve existing behavioral scoring"
+        );
     }
 }
