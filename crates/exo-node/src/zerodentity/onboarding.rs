@@ -11,7 +11,10 @@ use std::{
 };
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-use exo_core::types::{Did, Hash256, Signature};
+use exo_core::{
+    crypto,
+    types::{Did, Hash256, PublicKey, Signature},
+};
 use getrandom::getrandom;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -19,6 +22,7 @@ use uuid::Uuid;
 
 use super::{
     otp::OtpResult,
+    session_auth::{bootstrap_signing_payload, public_key_from_hex, signature_from_hex},
     store::ZerodentityStore,
     types::{
         ClaimStatus, ClaimType, IdentityClaim, IdentitySession, OtpChallenge, OtpChannel,
@@ -85,6 +89,10 @@ pub struct SubmitClaimResponse {
 pub struct VerifyOtpRequest {
     pub challenge_id: String,
     pub code: String,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub bootstrap_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +135,59 @@ fn parse_did(s: &str) -> Result<Did, (StatusCode, Json<serde_json::Value>)> {
             Json(serde_json::json!({"error": "Invalid DID format"})),
         )
     })
+}
+
+fn json_error(
+    status: StatusCode,
+    error: impl Into<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({ "error": error.into() })))
+}
+
+fn lock_store(
+    state: &OnboardingState,
+) -> Result<std::sync::MutexGuard<'_, ZerodentityStore>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .store
+        .lock()
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Store lock error"))
+}
+
+fn verify_bootstrap_signature(
+    req: &VerifyOtpRequest,
+    challenge: &OtpChallenge,
+) -> Result<PublicKey, (StatusCode, Json<serde_json::Value>)> {
+    let public_key_hex = req
+        .public_key
+        .as_deref()
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "public_key is required"))?;
+    let signature_hex = req
+        .bootstrap_signature
+        .as_deref()
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "bootstrap_signature is required"))?;
+
+    let public_key =
+        public_key_from_hex(public_key_hex).map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
+    let signature =
+        signature_from_hex(signature_hex).map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
+    if signature.is_empty() {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "bootstrap_signature must not be empty",
+        ));
+    }
+
+    let payload =
+        bootstrap_signing_payload(&challenge.challenge_id, &challenge.subject_did, &public_key)
+            .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !crypto::verify(&payload, &signature, &public_key) {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "bootstrap_signature verification failed",
+        ));
+    }
+
+    Ok(public_key)
 }
 
 fn parse_claim_type(ct: &str, provider: Option<&str>) -> Option<ClaimType> {
@@ -246,12 +307,7 @@ pub async fn verify_otp(
     let now = now_ms();
 
     let mut challenge = {
-        let store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Store lock error"})),
-            )
-        })?;
+        let store = lock_store(&state)?;
         store
             .get_otp_challenge(&req.challenge_id)
             .map_err(|e| {
@@ -270,35 +326,32 @@ pub async fn verify_otp(
 
     let result = challenge.verify(&req.code, now);
 
-    {
-        let mut store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Store lock error"})),
-            )
-        })?;
-        let _ = store.update_otp_challenge(&challenge);
-    }
-
     match result {
         OtpResult::Success => {
+            let public_key = verify_bootstrap_signature(&req, &challenge)?;
             let session_token = Uuid::new_v4().to_string();
             let session = IdentitySession {
                 session_token: session_token.clone(),
                 subject_did: challenge.subject_did.clone(),
-                public_key: vec![],
+                public_key: public_key.as_bytes().to_vec(),
                 created_ms: now,
                 last_active_ms: now,
                 revoked: false,
             };
             {
-                let mut store = state.store.lock().map_err(|_| {
+                let mut store = lock_store(&state)?;
+                store.update_otp_challenge(&challenge).map_err(|e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": "Store lock error"})),
+                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
                     )
                 })?;
-                let _ = store.insert_session(&session);
+                store.insert_session(&session).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                    )
+                })?;
             }
             Ok(Json(VerifyOtpResponse {
                 verified: true,
@@ -307,20 +360,44 @@ pub async fn verify_otp(
                 message: "Verification successful".into(),
             }))
         }
-        OtpResult::WrongCode { attempts_remaining } => Ok(Json(VerifyOtpResponse {
-            verified: false,
-            session_token: None,
-            attempts_remaining: Some(attempts_remaining),
-            message: "Incorrect code".into(),
-        })),
-        OtpResult::Expired => Err((
-            StatusCode::GONE,
-            Json(serde_json::json!({"error": "Challenge has expired"})),
-        )),
-        OtpResult::Locked { .. } => Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({"error": "Too many failed attempts — locked"})),
-        )),
+        OtpResult::WrongCode { attempts_remaining } => {
+            let mut store = lock_store(&state)?;
+            store.update_otp_challenge(&challenge).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                )
+            })?;
+            Ok(Json(VerifyOtpResponse {
+                verified: false,
+                session_token: None,
+                attempts_remaining: Some(attempts_remaining),
+                message: "Incorrect code".into(),
+            }))
+        }
+        OtpResult::Expired => {
+            let mut store = lock_store(&state)?;
+            store.update_otp_challenge(&challenge).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                )
+            })?;
+            Err(json_error(StatusCode::GONE, "Challenge has expired"))
+        }
+        OtpResult::Locked { .. } => {
+            let mut store = lock_store(&state)?;
+            store.update_otp_challenge(&challenge).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                )
+            })?;
+            Err(json_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many failed attempts — locked",
+            ))
+        }
     }
 }
 

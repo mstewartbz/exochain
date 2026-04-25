@@ -17,11 +17,15 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    body::Bytes,
+    extract::{OriginalUri, Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use exo_core::types::{Did, Hash256, PublicKey, Signature};
+use exo_core::{
+    crypto,
+    types::{Did, Hash256, PublicKey, Signature},
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -29,6 +33,7 @@ use super::{
         CreateAttestationInput, attester_score_impact, build_target_claim, create_attestation,
         target_score_impact, validate_attestation,
     },
+    session_auth::{public_key_from_session_bytes, request_signing_payload, signature_from_hex},
     store::ZerodentityStore,
     types::{AttestationType, IdentityClaim, ZerodentityScore},
 };
@@ -172,6 +177,115 @@ fn parse_did(did_str: &str) -> Result<Did, (StatusCode, Json<serde_json::Value>)
             Json(serde_json::json!({"error": "Invalid DID format"})),
         )
     })
+}
+
+fn json_error(
+    status: StatusCode,
+    error: impl Into<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({ "error": error.into() })))
+}
+
+fn path_and_query(uri: &axum::http::Uri) -> String {
+    uri.path_and_query()
+        .map_or_else(|| uri.path().to_owned(), |value| value.as_str().to_owned())
+}
+
+fn require_header<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+    missing: &str,
+) -> Result<&'a str, (StatusCode, Json<serde_json::Value>)> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, missing))
+}
+
+fn validate_nonce(nonce: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if nonce.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "X-Exo-Nonce is required",
+        ));
+    }
+    if nonce.len() > 128 || !nonce.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "X-Exo-Nonce must be 1-128 visible ASCII bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_signed_write(
+    state: &ApiState,
+    headers: &HeaderMap,
+    expected_did: &Did,
+    method: &str,
+    path_and_query: &str,
+    body: &[u8],
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let token = extract_session_token(headers)
+        .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Bearer session token required"))?;
+
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "lock poisoned"))?;
+    let session = store
+        .get_session(&token)
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Store error: {e}"),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
+
+    if session.subject_did.as_str() != expected_did.as_str() {
+        return Err(json_error(StatusCode::FORBIDDEN, "Access denied"));
+    }
+
+    let nonce = require_header(headers, "x-exo-nonce", "X-Exo-Nonce header required")?;
+    validate_nonce(nonce)?;
+    let signature_hex = require_header(headers, "x-exo-sig", "X-Exo-Sig header required")?;
+    let signature =
+        signature_from_hex(signature_hex).map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
+    if signature.is_empty() {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "X-Exo-Sig must not be empty",
+        ));
+    }
+
+    let public_key = public_key_from_session_bytes(&session.public_key)
+        .map_err(|e| json_error(StatusCode::UNAUTHORIZED, e))?;
+    let body_hash = Hash256::digest(body);
+    let payload = request_signing_payload(method, path_and_query, &token, nonce, &body_hash)
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    if !crypto::verify(&payload, &signature, &public_key) {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "X-Exo-Sig verification failed",
+        ));
+    }
+
+    let nonce_is_new = store.consume_session_nonce(&token, nonce).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Store error: {e}"),
+        )
+    })?;
+    if !nonce_is_new {
+        return Err(json_error(
+            StatusCode::CONFLICT,
+            "X-Exo-Nonce has already been used for this session",
+        ));
+    }
+
+    Ok(token)
 }
 
 fn hex_hash(h: &Hash256) -> String {
@@ -498,42 +612,26 @@ pub async fn list_fingerprints(
 /// `POST /api/v1/0dentity/:did/attest` — submit a peer attestation for a subject.
 pub async fn create_peer_attestation(
     State(state): State<ApiState>,
+    OriginalUri(uri): OriginalUri,
     Path(did_str): Path<String>,
     headers: HeaderMap,
-    Json(req): Json<AttestRequest>,
+    body: Bytes,
 ) -> Result<(StatusCode, Json<AttestResponse>), (StatusCode, Json<serde_json::Value>)> {
     let attester_did = parse_did(&did_str)?;
+    let req: AttestRequest = serde_json::from_slice(&body)
+        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))?;
     let target_did = parse_did(&req.target_did)?;
     let now = now_ms();
 
-    // Auth required
-    let token = extract_session_token(&headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Bearer session token required"})),
-        )
-    })?;
-
-    {
-        let store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "lock poisoned"})),
-            )
-        })?;
-        let session = store.get_session(&token).ok().flatten().ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid or expired session"})),
-            )
-        })?;
-        if session.subject_did.as_str() != attester_did.as_str() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "Access denied"})),
-            ));
-        }
-    }
+    let request_path = path_and_query(&uri);
+    let _token = verify_signed_write(
+        &state,
+        &headers,
+        &attester_did,
+        "POST",
+        &request_path,
+        &body,
+    )?;
 
     let attestation_type = AttestationType::from_str(&req.attestation_type).map_err(|_| {
         (
@@ -666,39 +764,15 @@ pub struct ErasureResponse {
 /// - Emits an erasure TrustReceipt
 pub async fn delete_identity(
     State(state): State<ApiState>,
+    OriginalUri(uri): OriginalUri,
     Path(did_str): Path<String>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<ErasureResponse>, (StatusCode, Json<serde_json::Value>)> {
     let did = parse_did(&did_str)?;
 
-    // Auth: session token required — must own the DID
-    let token = extract_session_token(&headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Bearer session token required"})),
-        )
-    })?;
-
-    {
-        let store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "lock poisoned"})),
-            )
-        })?;
-        let session = store.get_session(&token).ok().flatten().ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid or expired session"})),
-            )
-        })?;
-        if session.subject_did.as_str() != did.as_str() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "Access denied — can only erase own identity"})),
-            ));
-        }
-    }
+    let request_path = path_and_query(&uri);
+    let _token = verify_signed_write(&state, &headers, &did, "DELETE", &request_path, &body)?;
 
     let claims_revoked = {
         let mut store = state.store.lock().map_err(|_| {
@@ -783,6 +857,10 @@ mod tests {
         }
     }
 
+    fn test_keypair(seed: u8) -> KeyPair {
+        KeyPair::from_secret_bytes([seed; 32]).unwrap()
+    }
+
     fn make_state_with_session(token: &str, did_str: &str) -> ApiState {
         let mut store = test_store();
         let did = Did::new(did_str).unwrap();
@@ -827,6 +905,106 @@ mod tests {
         ApiState {
             store: Arc::new(Mutex::new(store)),
         }
+    }
+
+    fn make_state_with_signed_session_and_claim(
+        token: &str,
+        did_str: &str,
+        keypair: &KeyPair,
+    ) -> ApiState {
+        let mut store = test_store();
+        let did = Did::new(did_str).unwrap();
+        let session = IdentitySession {
+            session_token: token.to_owned(),
+            subject_did: did.clone(),
+            public_key: keypair.public_key().as_bytes().to_vec(),
+            created_ms: 0,
+            last_active_ms: 0,
+            revoked: false,
+        };
+        store.insert_session(&session).unwrap();
+        let claim = IdentityClaim {
+            claim_hash: Hash256::digest(b"email-claim"),
+            subject_did: did,
+            claim_type: ClaimType::Email,
+            status: ClaimStatus::Verified,
+            created_ms: 1000,
+            verified_ms: Some(2000),
+            expires_ms: None,
+            signature: Signature::Empty,
+            dag_node_hash: Hash256::digest(b"dag-node"),
+        };
+        store.insert_claim("claim-001", &claim).unwrap();
+        ApiState {
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
+
+    fn request_signature_headers(
+        method: &str,
+        uri: &str,
+        token: &str,
+        nonce: &str,
+        body: &[u8],
+        keypair: &KeyPair,
+    ) -> (String, String) {
+        let body_hash = Hash256::digest(body);
+        let payload = crate::zerodentity::session_auth::request_signing_payload(
+            method, uri, token, nonce, &body_hash,
+        )
+        .unwrap();
+        let signature = keypair.sign(&payload);
+        (nonce.to_owned(), hex::encode(signature.to_bytes()))
+    }
+
+    async fn signed_post(
+        app: Router,
+        uri: &str,
+        token: &str,
+        nonce: &str,
+        body: serde_json::Value,
+        keypair: &KeyPair,
+    ) -> axum::response::Response {
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let (nonce, signature) =
+            request_signature_headers("POST", uri, token, nonce, &body_bytes, keypair);
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-exo-nonce", nonce)
+                .header("x-exo-sig", signature)
+                .body(Body::from(body_bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn signed_delete(
+        app: Router,
+        uri: &str,
+        token: &str,
+        nonce: &str,
+        keypair: &KeyPair,
+    ) -> axum::response::Response {
+        let body = Vec::new();
+        let (nonce, signature) =
+            request_signature_headers("DELETE", uri, token, nonce, &body, keypair);
+        app.oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-exo-nonce", nonce)
+                .header("x-exo-sig", signature)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
     }
 
     fn keypair(seed: u8) -> (PublicKey, SecretKey) {
@@ -1033,12 +1211,18 @@ mod tests {
 
     #[tokio::test]
     async fn create_peer_attestation_success_with_message_hash() {
-        let state = make_state_with_session_and_claim("tok-alice", "did:exo:alice");
+        let session_keypair = test_keypair(41);
+        let state = make_state_with_signed_session_and_claim(
+            "tok-alice",
+            "did:exo:alice",
+            &session_keypair,
+        );
         let app = zerodentity_api_router(state);
         let attester = Did::new("did:exo:alice").unwrap();
         let target = Did::new("did:exo:carol").unwrap();
         let message_hash = Hash256::from_bytes([0u8; 32]);
         let (public_key, secret_key) = keypair(51);
+        let uri = "/api/v1/0dentity/did%3Aexo%3Aalice/attest";
         let body = signed_attest_body(
             &attester,
             &target,
@@ -1048,28 +1232,31 @@ mod tests {
             &public_key,
             &secret_key,
         );
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice/attest")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer tok-alice")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = signed_post(
+            app,
+            uri,
+            "tok-alice",
+            "nonce-api-attest-1",
+            body,
+            &session_keypair,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
     async fn create_peer_attestation_short_message_hash_returns_400() {
-        let state = make_state_with_session_and_claim("tok-alice", "did:exo:alice");
+        let session_keypair = test_keypair(42);
+        let state = make_state_with_signed_session_and_claim(
+            "tok-alice",
+            "did:exo:alice",
+            &session_keypair,
+        );
         let app = zerodentity_api_router(state);
         let attester = Did::new("did:exo:alice").unwrap();
         let target = Did::new("did:exo:dave").unwrap();
         let (public_key, secret_key) = keypair(53);
+        let uri = "/api/v1/0dentity/did%3Aexo%3Aalice/attest";
         let mut body = signed_attest_body(
             &attester,
             &target,
@@ -1080,18 +1267,15 @@ mod tests {
             &secret_key,
         );
         body["message_hash"] = serde_json::Value::String(hex::encode([0u8; 16]));
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice/attest")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer tok-alice")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = signed_post(
+            app,
+            uri,
+            "tok-alice",
+            "nonce-api-attest-2",
+            body,
+            &session_keypair,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1192,19 +1376,18 @@ mod tests {
 
     #[tokio::test]
     async fn delete_identity_success_returns_erasure_receipt() {
-        let state = make_state_with_session_and_claim("tok-alice", "did:exo:alice");
+        let keypair = test_keypair(43);
+        let state =
+            make_state_with_signed_session_and_claim("tok-alice", "did:exo:alice", &keypair);
         let app = zerodentity_api_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice")
-                    .header("authorization", "Bearer tok-alice")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let resp = signed_delete(
+            app,
+            "/api/v1/0dentity/did%3Aexo%3Aalice",
+            "tok-alice",
+            "nonce-api-delete-1",
+            &keypair,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
