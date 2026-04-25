@@ -7,7 +7,6 @@
 //! - `GET /api/v1/0dentity/:did/score/history`  — score history (public)
 //! - `GET /api/v1/0dentity/:did/fingerprints`   — fingerprint timeline (owner only)
 //! - `POST /api/v1/0dentity/:did/attest`        — peer attestation
-//! - `GET /api/v1/0dentity/server-key`          — server RSA-OAEP public key
 //!
 //! Spec reference: §7.2, §7.3.
 
@@ -25,14 +24,14 @@ use axum::{
 };
 use exo_core::{
     crypto,
-    types::{Did, Hash256},
+    types::{Did, Hash256, PublicKey, Signature},
 };
 use serde::{Deserialize, Serialize};
 
 use super::{
     attestation::{
-        attester_score_impact, build_target_claim, create_attestation, target_score_impact,
-        validate_attestation,
+        CreateAttestationInput, attester_score_impact, build_target_claim, create_attestation,
+        target_score_impact, validate_attestation,
     },
     session_auth::{public_key_from_session_bytes, request_signing_payload, signature_from_hex},
     store::ZerodentityStore,
@@ -46,10 +45,6 @@ use super::{
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Arc<Mutex<ZerodentityStore>>,
-    /// Node DID used for deterministic server key derivation.
-    pub node_did: exo_core::types::Did,
-    /// Epoch ms when the node started (used as key rotation timestamp).
-    pub started_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +145,9 @@ pub struct AttestRequest {
     pub target_did: String,
     pub attestation_type: String,
     pub message_hash: Option<String>,
+    pub created_ms: Option<u64>,
+    pub attester_public_key: Option<String>,
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,15 +156,6 @@ pub struct AttestResponse {
     pub receipt_hash: String,
     pub attester_score_impact: serde_json::Value,
     pub target_score_impact: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ServerKeyResponse {
-    pub algorithm: String,
-    pub key_size: u32,
-    pub public_key_pem: String,
-    pub key_hash: String,
-    pub rotated_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +290,53 @@ fn verify_signed_write(
 
 fn hex_hash(h: &Hash256) -> String {
     hex::encode(h.as_bytes())
+}
+
+fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": message })),
+    )
+}
+
+fn parse_hex_exact<const N: usize>(
+    field: &str,
+    value: &str,
+) -> Result<[u8; N], (StatusCode, Json<serde_json::Value>)> {
+    let bytes =
+        hex::decode(value).map_err(|_| bad_request(&format!("{field} must be hex-encoded")))?;
+    if bytes.len() != N {
+        return Err(bad_request(&format!("{field} must be exactly {N} bytes")));
+    }
+    let mut out = [0u8; N];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn parse_message_hash(
+    value: Option<&str>,
+) -> Result<Option<Hash256>, (StatusCode, Json<serde_json::Value>)> {
+    value
+        .map(|s| parse_hex_exact::<32>("message_hash", s).map(Hash256::from_bytes))
+        .transpose()
+}
+
+fn parse_public_key(
+    value: Option<&str>,
+) -> Result<PublicKey, (StatusCode, Json<serde_json::Value>)> {
+    let Some(value) = value else {
+        return Err(bad_request("attester_public_key is required"));
+    };
+    parse_hex_exact::<32>("attester_public_key", value).map(PublicKey::from_bytes)
+}
+
+fn parse_signature(
+    value: Option<&str>,
+) -> Result<Signature, (StatusCode, Json<serde_json::Value>)> {
+    let Some(value) = value else {
+        return Err(bad_request("signature is required"));
+    };
+    parse_hex_exact::<64>("signature", value).map(Signature::from_bytes)
 }
 
 fn axes_from_score(s: &ZerodentityScore) -> AxesResponse {
@@ -604,17 +640,12 @@ pub async fn create_peer_attestation(
         )
     })?;
 
-    let message_hash = req.message_hash.as_deref().and_then(|s| {
-        hex::decode(s).ok().and_then(|b| {
-            if b.len() >= 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&b[..32]);
-                Some(Hash256::from_bytes(arr))
-            } else {
-                None
-            }
-        })
-    });
+    let message_hash = parse_message_hash(req.message_hash.as_deref())?;
+    let created_ms = req
+        .created_ms
+        .ok_or_else(|| bad_request("created_ms is required"))?;
+    let attester_public_key = parse_public_key(req.attester_public_key.as_deref())?;
+    let signature = parse_signature(req.signature.as_deref())?;
 
     // Validate
     let (attester_claims, already_exists) = {
@@ -650,14 +681,22 @@ pub async fn create_peer_attestation(
         format!("attest:{}:{}", attester_did.as_str(), target_did.as_str()).as_bytes(),
     );
 
-    let attestation = create_attestation(
-        &attester_did,
-        &target_did,
+    let attestation = create_attestation(CreateAttestationInput {
+        attester_did: &attester_did,
+        target_did: &target_did,
         attestation_type,
         message_hash,
         dag_node_hash,
-        now,
-    );
+        created_ms,
+        attester_public_key,
+        signature,
+    })
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
     // Persist attestation
     {
@@ -700,31 +739,6 @@ pub async fn create_peer_attestation(
             }),
         }),
     ))
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/0dentity/server-key
-// ---------------------------------------------------------------------------
-
-/// `GET /api/v1/0dentity/server-key` — retrieve the server's RSA-OAEP public key.
-pub async fn get_server_key(State(state): State<ApiState>) -> Json<ServerKeyResponse> {
-    // Derive a deterministic key fingerprint from the node's DID.
-    // In production, this will be replaced by a live RSA-OAEP key pair
-    // generated at startup and rotated on a configurable interval.
-    // The key_hash is a BLAKE3 digest of the node DID, providing a
-    // stable per-node identifier that clients can pin.
-    let key_material = format!("exochain-server-key:{}", state.node_did.as_str());
-    let key_hash = Hash256::digest(key_material.as_bytes());
-    Json(ServerKeyResponse {
-        algorithm: "Ed25519-DH".into(),
-        key_size: 256,
-        public_key_pem: format!(
-            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
-            hex::encode(key_hash.as_bytes())
-        ),
-        key_hash: hex::encode(key_hash.as_bytes()),
-        rotated_ms: state.started_ms,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -793,7 +807,6 @@ pub async fn delete_identity(
 
 pub fn zerodentity_api_router(state: ApiState) -> Router {
     Router::new()
-        .route("/api/v1/0dentity/server-key", get(get_server_key))
         .route("/api/v1/0dentity/:did/score", get(get_score))
         .route("/api/v1/0dentity/:did/claims", get(list_claims))
         .route("/api/v1/0dentity/:did/score/history", get(score_history))
@@ -818,22 +831,29 @@ pub fn zerodentity_api_router(state: ApiState) -> Router {
 mod tests {
     use axum::{body::Body, http::Request};
     use exo_core::{
-        crypto::KeyPair,
-        types::{Did, Hash256, Signature},
+        crypto::{self, KeyPair},
+        types::{Did, Hash256, PublicKey, SecretKey, Signature},
     };
     use tower::ServiceExt;
 
     use super::*;
     use crate::zerodentity::{
+        attestation::attestation_signing_payload,
         store::ZerodentityStore,
         types::{ClaimStatus, ClaimType, IdentityClaim, IdentitySession},
     };
 
+    fn test_store() -> ZerodentityStore {
+        let keypair = KeyPair::from_secret_bytes([31u8; 32]).unwrap();
+        let signer = Arc::new(move |payload: &[u8]| keypair.sign(payload));
+        let mut store = ZerodentityStore::new();
+        store.set_receipt_signer(Did::new("did:exo:test-node").unwrap(), signer);
+        store
+    }
+
     fn make_state() -> ApiState {
         ApiState {
-            store: Arc::new(Mutex::new(ZerodentityStore::new())),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
+            store: Arc::new(Mutex::new(test_store())),
         }
     }
 
@@ -842,7 +862,7 @@ mod tests {
     }
 
     fn make_state_with_session(token: &str, did_str: &str) -> ApiState {
-        let mut store = ZerodentityStore::new();
+        let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
@@ -855,13 +875,11 @@ mod tests {
         store.insert_session(&session).unwrap();
         ApiState {
             store: Arc::new(Mutex::new(store)),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
         }
     }
 
     fn make_state_with_session_and_claim(token: &str, did_str: &str) -> ApiState {
-        let mut store = ZerodentityStore::new();
+        let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
@@ -886,8 +904,6 @@ mod tests {
         store.insert_claim("claim-001", &claim).unwrap();
         ApiState {
             store: Arc::new(Mutex::new(store)),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
         }
     }
 
@@ -896,7 +912,7 @@ mod tests {
         did_str: &str,
         keypair: &KeyPair,
     ) -> ApiState {
-        let mut store = ZerodentityStore::new();
+        let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
@@ -921,8 +937,6 @@ mod tests {
         store.insert_claim("claim-001", &claim).unwrap();
         ApiState {
             store: Arc::new(Mutex::new(store)),
-            node_did: Did::new("did:exo:test-node").unwrap(),
-            started_ms: 1_700_000_000_000,
         }
     }
 
@@ -991,6 +1005,39 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    fn keypair(seed: u8) -> (PublicKey, SecretKey) {
+        let pair = crypto::KeyPair::from_secret_bytes([seed; 32]).unwrap();
+        (*pair.public_key(), pair.secret_key().clone())
+    }
+
+    fn signed_attest_body(
+        attester: &Did,
+        target: &Did,
+        attestation_type: AttestationType,
+        message_hash: Option<Hash256>,
+        created_ms: u64,
+        public_key: &PublicKey,
+        secret_key: &SecretKey,
+    ) -> serde_json::Value {
+        let payload = attestation_signing_payload(
+            attester,
+            target,
+            &attestation_type,
+            message_hash.as_ref(),
+            created_ms,
+        )
+        .unwrap();
+        let signature = crypto::sign(&payload, secret_key);
+        serde_json::json!({
+            "target_did": target.as_str(),
+            "attestation_type": attestation_type.to_string(),
+            "message_hash": message_hash.map(|h| hex::encode(h.as_bytes())),
+            "created_ms": created_ms,
+            "attester_public_key": hex::encode(public_key.as_bytes()),
+            "signature": hex::encode(signature.as_bytes())
+        })
     }
 
     // --- list_fingerprints ---
@@ -1164,35 +1211,87 @@ mod tests {
 
     #[tokio::test]
     async fn create_peer_attestation_success_with_message_hash() {
-        let keypair = test_keypair(41);
-        let state =
-            make_state_with_signed_session_and_claim("tok-alice", "did:exo:alice", &keypair);
+        let session_keypair = test_keypair(41);
+        let state = make_state_with_signed_session_and_claim(
+            "tok-alice",
+            "did:exo:alice",
+            &session_keypair,
+        );
         let app = zerodentity_api_router(state);
+        let attester = Did::new("did:exo:alice").unwrap();
+        let target = Did::new("did:exo:carol").unwrap();
+        let message_hash = Hash256::from_bytes([0u8; 32]);
+        let (public_key, secret_key) = keypair(51);
         let uri = "/api/v1/0dentity/did%3Aexo%3Aalice/attest";
-        let body = serde_json::json!({
-            "target_did": "did:exo:carol",
-            "attestation_type": "Identity",
-            "message_hash": hex::encode([0u8; 32])
-        });
-        let resp = signed_post(app, uri, "tok-alice", "nonce-api-attest-1", body, &keypair).await;
+        let body = signed_attest_body(
+            &attester,
+            &target,
+            AttestationType::Identity,
+            Some(message_hash),
+            1_700_000_100_000,
+            &public_key,
+            &secret_key,
+        );
+        let resp = signed_post(
+            app,
+            uri,
+            "tok-alice",
+            "nonce-api-attest-1",
+            body,
+            &session_keypair,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
-    async fn create_peer_attestation_short_message_hash_succeeds() {
-        // message_hash < 32 bytes → parsed as None (covers the else branch)
-        let keypair = test_keypair(42);
-        let state =
-            make_state_with_signed_session_and_claim("tok-alice", "did:exo:alice", &keypair);
+    async fn create_peer_attestation_short_message_hash_returns_400() {
+        let session_keypair = test_keypair(42);
+        let state = make_state_with_signed_session_and_claim(
+            "tok-alice",
+            "did:exo:alice",
+            &session_keypair,
+        );
         let app = zerodentity_api_router(state);
+        let attester = Did::new("did:exo:alice").unwrap();
+        let target = Did::new("did:exo:dave").unwrap();
+        let (public_key, secret_key) = keypair(53);
         let uri = "/api/v1/0dentity/did%3Aexo%3Aalice/attest";
-        let body = serde_json::json!({
-            "target_did": "did:exo:dave",
-            "attestation_type": "Trustworthy",
-            "message_hash": hex::encode([0u8; 16])
-        });
-        let resp = signed_post(app, uri, "tok-alice", "nonce-api-attest-2", body, &keypair).await;
-        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mut body = signed_attest_body(
+            &attester,
+            &target,
+            AttestationType::Trustworthy,
+            None,
+            1_700_000_200_000,
+            &public_key,
+            &secret_key,
+        );
+        body["message_hash"] = serde_json::Value::String(hex::encode([0u8; 16]));
+        let resp = signed_post(
+            app,
+            uri,
+            "tok-alice",
+            "nonce-api-attest-2",
+            body,
+            &session_keypair,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn server_key_get_does_not_return_key_material() {
+        let app = zerodentity_api_router(make_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/server-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     // --- list_claims ---
