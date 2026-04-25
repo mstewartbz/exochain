@@ -1616,16 +1616,22 @@ GET /api/v1/0dentity/:did/fingerprints
 
 POST /api/v1/0dentity/:did/attest
   Description: Attest/vouch for another identity (peer attestation).
-  Auth: Bearer session_token (attester must be verified)
+  Auth: Bearer session_token (attester must be verified).
+  Signature: Ed25519 over canonical CBOR tuple
+    ("exo.zerodentity.attestation.v1", attester_did, target_did,
+     attestation_type, message_hash, created_ms)
   Request body:
     {
       "target_did": "did:exo:...",
-      "attestation_type": "identity" | "competence" | "trustworthy",
-      "message_hash": "hex..."  // optional hash of attestation message
+      "attestation_type": "Identity" | "Professional" | "Trustworthy" | "Character",
+      "message_hash": "32-byte hex...",  // optional hash of attestation message
+      "created_ms": 1743724800000,
+      "attester_public_key": "32-byte Ed25519 public key hex",
+      "signature": "64-byte Ed25519 signature hex"
     }
   Response 201:
     {
-      "attestation_id": "uuid",
+      "attestation_id": "deterministic blake3 hex",
       "receipt_hash": "hex...",
       "attester_score_impact": { "network_reputation": "+3" },
       "target_score_impact": { "network_reputation": "+5" }
@@ -1890,6 +1896,8 @@ CREATE TABLE IF NOT EXISTS peer_attestations (
     attestation_type TEXT NOT NULL,
     message_hash    BLOB,
     created_ms      INTEGER NOT NULL,
+    attester_public_key BLOB NOT NULL,
+    signature       BLOB NOT NULL,
     dag_node_hash   BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_attest_target ON peer_attestations(target_did);
