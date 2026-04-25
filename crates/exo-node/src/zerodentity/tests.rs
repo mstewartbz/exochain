@@ -541,6 +541,42 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
+    #[cfg(not(feature = "unaudited-zerodentity-first-touch-onboarding"))]
+    async fn submit_claim_refused_without_first_touch_feature_flag() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let did = td("onb-gated-default");
+
+        let resp = post_json(
+            &app,
+            "/api/v1/0dentity/claims",
+            serde_json::json!({
+                "subject_did": did.as_str(),
+                "claim_type": "DisplayName"
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["feature_flag"],
+            "unaudited-zerodentity-first-touch-onboarding"
+        );
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("fix-onyx-4-r1-onboarding-auth.md")),
+            "refusal body must point at the R1 initiative: {body}"
+        );
+        assert!(
+            store.lock().unwrap().get_claims(&did).unwrap().is_empty(),
+            "default-off refusal must not persist a claim"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn submit_claim_returns_200_and_claim_id() {
         let app = onboarding_app(new_shared_store());
 
@@ -561,6 +597,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn submit_claim_invalid_did_returns_400() {
         let app = onboarding_app(new_shared_store());
 
@@ -578,6 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn submit_claim_unknown_type_returns_400() {
         let app = onboarding_app(new_shared_store());
 
@@ -595,6 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn submit_claim_with_otp_channel_returns_challenge_id_and_ttl() {
         let app = onboarding_app(new_shared_store());
 
@@ -616,6 +655,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn submit_claim_stores_claim_in_store() {
         let store = new_shared_store();
         let app = onboarding_app(store.clone());
@@ -1676,6 +1716,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
     async fn test_full_onboarding_arc() {
         let store = new_shared_store();
         let onb = onboarding_app(store.clone());

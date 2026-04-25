@@ -142,3 +142,22 @@ unaudited-admin-governance-shortcut = []
 # that these MCP tool calls return truthy-shaped JSON while doing
 # nothing on-chain."
 unaudited-mcp-simulation-tools = []
+
+# ONYX-4 RED R1: `POST /api/v1/0dentity/claims` is the first-touch
+# identity-claim bootstrap path. Before R7, this path allowed a caller
+# with only the node write bearer token to create a pending claim for any
+# DID, then later session flows had no cryptographic key binding. R7
+# now binds OTP sessions to a verified Ed25519 bootstrap key, but the
+# first-touch product design still needs an approved proof-of-possession
+# contract (for example did:exo:<bs58(blake3(pubkey))> derivation match
+# plus signed bootstrap payload) before the open claim-creation path is
+# safe to expose.
+#
+# Until that design is accepted and implemented, the endpoint refuses by
+# default. Enable this only for a controlled dev cluster that explicitly
+# accepts the unaudited first-touch onboarding behavior.
+#
+# Do NOT enable this in production. Enabling it means: "I accept that
+# first-touch 0dentity claim creation is running under the legacy,
+# unaudited onboarding contract tracked by Onyx-4 R1."
+unaudited-zerodentity-first-touch-onboarding = []
