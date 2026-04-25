@@ -28,6 +28,12 @@ use super::types::{
 
 pub type ReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
 
+/// The current 0dentity store is intentionally volatile process memory.
+pub const ZERODENTITY_STORE_PERSISTENCE_READY: bool = false;
+
+/// Startup warning emitted while 0dentity data is not durable.
+pub const ZERODENTITY_STORE_PERSISTENCE_WARNING: &str = "0dentity store is memory only; claims, sessions, OTPs, scores, and receipts are not durable across process restarts";
+
 #[derive(Clone)]
 pub struct ReceiptSigningContext {
     actor_did: Did,
@@ -104,6 +110,18 @@ impl ZerodentityStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the current store implementation is durable across restarts.
+    #[must_use]
+    pub const fn persistence_ready() -> bool {
+        ZERODENTITY_STORE_PERSISTENCE_READY
+    }
+
+    /// Operator-facing warning for the current persistence posture.
+    #[must_use]
+    pub const fn persistence_warning() -> &'static str {
+        ZERODENTITY_STORE_PERSISTENCE_WARNING
     }
 
     /// Configure the node identity used to sign store-emitted trust receipts.
@@ -691,6 +709,15 @@ mod tests {
         assert!(store.get_score(&did("did:exo:a")).is_none());
         assert_eq!(store.get_claims(&did("did:exo:a")).unwrap(), vec![]);
         assert_eq!(store.sample_scored_dids(5), vec![]);
+    }
+
+    #[test]
+    fn in_memory_store_declares_persistence_not_ready() {
+        assert!(!ZerodentityStore::persistence_ready());
+        assert!(
+            ZerodentityStore::persistence_warning().contains("memory only"),
+            "startup warning must plainly identify the volatile store"
+        );
     }
 
     #[test]
