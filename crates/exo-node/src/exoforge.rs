@@ -525,7 +525,7 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         6,
         "Identity API",
         "POST /attest — peer attestation",
-        "Create attestation from verified DID to target DID. Reject self-attestation, duplicate. Compute score impact",
+        "Create signed Ed25519 attestation from verified DID to target DID. Reject self-attestation, duplicate, empty signature, zero signature, wrong key, tampered payload, replayed payload. Compute score impact",
         "§7.2",
         Some(5)
     );

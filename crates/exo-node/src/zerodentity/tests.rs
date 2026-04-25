@@ -14,7 +14,10 @@ mod tests {
         body::Body,
         http::{Request, StatusCode, header},
     };
-    use exo_core::types::{Did, Hash256, Signature};
+    use exo_core::{
+        crypto,
+        types::{Did, Hash256, PublicKey, SecretKey, Signature},
+    };
     use rand::{SeedableRng, rngs::StdRng};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -23,9 +26,11 @@ mod tests {
         ClaimStatus, ClaimType, IdentityClaim, IdentitySession, OTP_MAX_ATTEMPTS, OtpChallenge,
         OtpChannel, OtpState, PolarAxes, ZerodentityScore,
         api::{ApiState, zerodentity_api_router},
+        attestation::attestation_signing_payload,
         onboarding::{OnboardingState, onboarding_router},
         scoring::compute_symmetry,
         store::{SharedZerodentityStore, ZerodentityStore, new_shared_store},
+        types::AttestationType,
     };
 
     // -----------------------------------------------------------------------
@@ -42,6 +47,39 @@ mod tests {
 
     fn seeded_rng(seed: u64) -> StdRng {
         StdRng::seed_from_u64(seed)
+    }
+
+    fn keypair(seed: u8) -> (PublicKey, SecretKey) {
+        let pair = crypto::KeyPair::from_secret_bytes([seed; 32]).unwrap();
+        (*pair.public_key(), pair.secret_key().clone())
+    }
+
+    fn signed_attest_body(
+        attester: &Did,
+        target: &Did,
+        attestation_type: AttestationType,
+        message_hash: Option<Hash256>,
+        created_ms: u64,
+        public_key: &PublicKey,
+        secret_key: &SecretKey,
+    ) -> serde_json::Value {
+        let payload = attestation_signing_payload(
+            attester,
+            target,
+            &attestation_type,
+            message_hash.as_ref(),
+            created_ms,
+        )
+        .unwrap();
+        let signature = crypto::sign(&payload, secret_key);
+        serde_json::json!({
+            "target_did": target.as_str(),
+            "attestation_type": attestation_type.to_string(),
+            "message_hash": message_hash.map(|h| hex::encode(h.as_bytes())),
+            "created_ms": created_ms,
+            "attester_public_key": hex::encode(public_key.as_bytes()),
+            "signature": hex::encode(signature.as_bytes())
+        })
     }
 
     fn make_claim(did: &Did, ct: ClaimType, status: ClaimStatus, ms: u64) -> IdentityClaim {
@@ -1068,12 +1106,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attest_valid_creates_attestation_201() {
+    async fn attest_unsigned_body_returns_400() {
         let store = new_shared_store();
         let app = api_app(store.clone());
-        let attester = td("attest-ok-a");
-        let target = td("attest-ok-b");
-        let token = "attest-ok-token";
+        let attester = td("attest-unsigned-a");
+        let target = td("attest-unsigned-b");
+        let token = "attest-unsigned-token";
 
         {
             let mut s = store.lock().unwrap();
@@ -1096,6 +1134,83 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn attest_wrong_public_key_returns_400() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let attester = td("attest-wrong-key-a");
+        let target = td("attest-wrong-key-b");
+        let token = "attest-wrong-key-token";
+        let (public_key, _) = keypair(45);
+        let (_, signing_key) = keypair(46);
+
+        {
+            let mut s = store.lock().unwrap();
+            s.insert_claim(
+                "e1",
+                &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
+            )
+            .unwrap();
+            s.insert_session(&make_session(&attester, token, 1_000_000))
+                .unwrap();
+        }
+
+        let resp = post_with_auth(
+            &app,
+            &format!("/api/v1/0dentity/{}/attest", attester.as_str()),
+            token,
+            signed_attest_body(
+                &attester,
+                &target,
+                AttestationType::Identity,
+                None,
+                1_236_000,
+                &public_key,
+                &signing_key,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn attest_valid_creates_attestation_201() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let attester = td("attest-ok-a");
+        let target = td("attest-ok-b");
+        let token = "attest-ok-token";
+        let (public_key, secret_key) = keypair(41);
+
+        {
+            let mut s = store.lock().unwrap();
+            s.insert_claim(
+                "e1",
+                &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
+            )
+            .unwrap();
+            s.insert_session(&make_session(&attester, token, 1_000_000))
+                .unwrap();
+        }
+
+        let resp = post_with_auth(
+            &app,
+            &format!("/api/v1/0dentity/{}/attest", attester.as_str()),
+            token,
+            signed_attest_body(
+                &attester,
+                &target,
+                AttestationType::Identity,
+                None,
+                1_234_000,
+                &public_key,
+                &secret_key,
+            ),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(
@@ -1112,6 +1227,7 @@ mod tests {
         let app = api_app(store.clone());
         let did = td("attest-self");
         let token = "attest-self-token";
+        let (public_key, secret_key) = keypair(43);
 
         {
             let mut s = store.lock().unwrap();
@@ -1128,10 +1244,15 @@ mod tests {
             &app,
             &format!("/api/v1/0dentity/{}/attest", did.as_str()),
             token,
-            serde_json::json!({
-                "target_did": did.as_str(),
-                "attestation_type": "Identity"
-            }),
+            signed_attest_body(
+                &did,
+                &did,
+                AttestationType::Identity,
+                None,
+                1_235_000,
+                &public_key,
+                &secret_key,
+            ),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
