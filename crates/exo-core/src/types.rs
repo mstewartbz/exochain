@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use crate::crypto;
-use crate::error::{ExoError, Result};
+use crate::{
+    crypto,
+    error::{ExoError, Result},
+};
 
 // ---------------------------------------------------------------------------
 // DeterministicMap
