@@ -34,13 +34,7 @@
 //! 3. **Health Monitor** — tracks consensus round times, peer latency,
 //!    DAG growth rate, and alerts on anomalies.
 
-#![allow(
-    clippy::expect_used,
-    clippy::as_conversions,
-    clippy::float_arithmetic,
-    clippy::float_cmp,
-    clippy::single_match
-)]
+#![allow(clippy::expect_used, clippy::as_conversions, clippy::single_match)]
 #![cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
 
 use std::time::Duration;
@@ -89,7 +83,7 @@ pub enum HolonEvent {
     /// Topology analysis completed.
     TopologyAnalysis {
         peer_count: usize,
-        diversity_score: f64,
+        diversity_score_bp: u32,
         recommendation: String,
     },
     /// Scaling recommendation produced.
@@ -317,36 +311,36 @@ pub fn build_holon_adjudication_context(
 // ---------------------------------------------------------------------------
 
 /// Analyze peer topology and produce a diversity recommendation.
-fn analyze_topology(peer_count: usize, _net_handle: &NetworkHandle) -> (f64, String) {
+fn analyze_topology(peer_count: usize, _net_handle: &NetworkHandle) -> (u32, String) {
     // Diversity score: simple heuristic based on peer count.
     // In production, this would query ASN distribution from PeerRegistry.
-    let diversity_score = if peer_count == 0 {
-        0.0
+    let diversity_score_bp = if peer_count == 0 {
+        0
     } else if peer_count < 3 {
-        0.3
+        3000
     } else if peer_count < 7 {
-        0.6
+        6000
     } else if peer_count < 15 {
-        0.8
+        8000
     } else {
-        1.0
+        10_000
     };
 
-    let recommendation = if diversity_score < 0.3 {
+    let recommendation = if diversity_score_bp < 3000 {
         "CRITICAL: No peers connected. Node is isolated.".into()
-    } else if diversity_score < 0.5 {
+    } else if diversity_score_bp < 5000 {
         format!("WARNING: Only {peer_count} peers. Recommend connecting to more diverse nodes.")
-    } else if diversity_score < 0.8 {
+    } else if diversity_score_bp < 8000 {
         format!(
-            "FAIR: {peer_count} peers, diversity score {diversity_score:.1}. Consider adding peers from different ASNs."
+            "FAIR: {peer_count} peers, diversity score {diversity_score_bp} bp. Consider adding peers from different ASNs."
         )
     } else {
         format!(
-            "GOOD: {peer_count} peers, diversity score {diversity_score:.1}. Topology is healthy."
+            "GOOD: {peer_count} peers, diversity score {diversity_score_bp} bp. Topology is healthy."
         )
     };
 
-    (diversity_score, recommendation)
+    (diversity_score_bp, recommendation)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +353,8 @@ fn analyze_scaling(validator_count: usize, node_count: usize) -> String {
         return "No nodes in network.".into();
     }
 
-    let ratio = validator_count as f64 / node_count as f64;
+    let ratio_bp = ((validator_count as u128) * 10_000 / (node_count as u128)) as u32;
+    let ratio_percent = ratio_bp / 100;
 
     if validator_count < 3 {
         format!(
@@ -367,23 +362,20 @@ fn analyze_scaling(validator_count: usize, node_count: usize) -> String {
              Recommend promoting {} more nodes.",
             4usize.saturating_sub(validator_count)
         )
-    } else if ratio < 0.2 {
+    } else if ratio_bp < 2000 {
         format!(
-            "LOW: {validator_count}/{node_count} nodes are validators ({:.0}%). \
+            "LOW: {validator_count}/{node_count} nodes are validators ({ratio_percent}%). \
              Consider promoting more nodes for resilience.",
-            ratio * 100.0
         )
-    } else if ratio >= 0.8 {
+    } else if ratio_bp >= 8000 {
         format!(
-            "HIGH: {validator_count}/{node_count} nodes are validators ({:.0}%). \
+            "HIGH: {validator_count}/{node_count} nodes are validators ({ratio_percent}%). \
              Consider whether all need validator status.",
-            ratio * 100.0
         )
     } else {
         format!(
-            "GOOD: {validator_count}/{node_count} nodes are validators ({:.0}%). \
+            "GOOD: {validator_count}/{node_count} nodes are validators ({ratio_percent}%). \
              Ratio is healthy.",
-            ratio * 100.0
         )
     }
 }
@@ -473,18 +465,18 @@ pub async fn run_holon_manager(
                 }
 
                 let peer_count = net_handle.peer_count().await.unwrap_or(0);
-                let (diversity_score, recommendation) = analyze_topology(peer_count, &net_handle);
+                let (diversity_score_bp, recommendation) = analyze_topology(peer_count, &net_handle);
 
                 let input = CombinatorInput::new()
                     .with("peer_count", peer_count.to_string())
-                    .with("diversity_score", format!("{diversity_score:.2}"));
+                    .with("diversity_score_bp", diversity_score_bp.to_string());
 
                 let ctx = build_holon_adjudication_context(&topology_holon, &config);
                 match holon::step(&mut topology_holon, &input, &kernel, &ctx) {
                     Ok(_output) => {
                         if event_tx.send(HolonEvent::TopologyAnalysis {
                             peer_count,
-                            diversity_score,
+                            diversity_score_bp,
                             recommendation,
                         }).await.is_err() {
                             tracing::warn!("Holon event channel closed — TopologyAnalysis dropped");
@@ -492,7 +484,7 @@ pub async fn run_holon_manager(
 
                         tracing::debug!(
                             peer_count,
-                            diversity_score,
+                            diversity_score_bp,
                             "Topology Holon: analysis complete"
                         );
                     }
@@ -843,26 +835,27 @@ mod tests {
 
     #[test]
     fn topology_analysis_scoring() {
-        let (score, rec) = analyze_topology(0, &{
+        let (score_bp, rec) = analyze_topology(0, &{
             let (tx, _rx) = mpsc::channel(1);
             NetworkHandle::new(tx)
         });
-        assert_eq!(score, 0.0);
+        let _: u32 = score_bp;
+        assert_eq!(score_bp, 0);
         assert!(rec.contains("CRITICAL"));
 
         let handle = {
             let (tx, _rx) = mpsc::channel(1);
             NetworkHandle::new(tx)
         };
-        let (score, rec) = analyze_topology(2, &handle);
-        assert_eq!(score, 0.3);
+        let (score_bp, rec) = analyze_topology(2, &handle);
+        assert_eq!(score_bp, 3000);
         assert!(rec.contains("WARNING"));
 
-        let (score, _) = analyze_topology(10, &handle);
-        assert_eq!(score, 0.8);
+        let (score_bp, _) = analyze_topology(10, &handle);
+        assert_eq!(score_bp, 8000);
 
-        let (score, rec) = analyze_topology(20, &handle);
-        assert_eq!(score, 1.0);
+        let (score_bp, rec) = analyze_topology(20, &handle);
+        assert_eq!(score_bp, 10_000);
         assert!(rec.contains("GOOD"));
     }
 

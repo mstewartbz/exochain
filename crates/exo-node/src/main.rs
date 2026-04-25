@@ -172,8 +172,18 @@ async fn start_node(
         Arc::new(move |payload: &[u8]| identity.sign(payload))
     };
     zerodentity_store.set_receipt_signer(node_identity.did.clone(), zd_receipt_signer);
+    if !zerodentity::store::ZerodentityStore::persistence_ready() {
+        tracing::warn!(
+            persistence_ready = zerodentity::store::ZerodentityStore::persistence_ready(),
+            warning = zerodentity::store::ZerodentityStore::persistence_warning(),
+            "0dentity store persistence is not ready"
+        );
+    }
     let zerodentity_store = std::sync::Arc::new(Mutex::new(zerodentity_store));
-    tracing::info!("0dentity store ready");
+    tracing::info!(
+        persistence_ready = zerodentity::store::ZerodentityStore::persistence_ready(),
+        "0dentity store ready"
+    );
 
     tracing::info!(
         api_port,
@@ -418,7 +428,7 @@ async fn start_node(
                 match event {
                     HolonEvent::TopologyAnalysis {
                         peer_count,
-                        diversity_score,
+                        diversity_score_bp,
                         recommendation,
                     } => {
                         holon_metrics
@@ -426,7 +436,7 @@ async fn start_node(
                             .store(peer_count as u64, std::sync::atomic::Ordering::Relaxed);
                         tracing::info!(
                             peer_count,
-                            diversity_score,
+                            diversity_score_bp,
                             %recommendation,
                             "Topology Holon"
                         );

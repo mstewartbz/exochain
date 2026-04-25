@@ -63,9 +63,7 @@ mod tests;
 // ---------------------------------------------------------------------------
 
 #[allow(unused_imports)]
-pub use otp::{
-    OTP_LOCKOUT_MS, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_MS, OTP_TTL_MS, OtpError, OtpResult,
-};
+pub use otp::{OTP_LOCKOUT_MS, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_MS, OtpError, OtpResult};
 #[allow(unused_imports)]
 pub use store::{SharedZerodentityStore, ZerodentityStore};
 #[allow(unused_imports)]
