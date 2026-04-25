@@ -317,6 +317,7 @@ pub const UNAUDITED_GRAPHQL_API_MEMO: &str =
     "exochain/council-intake/exo-spline-gateway-api-messaging.md";
 pub const GRAPHQL_CONSENT_FABRICATION_INITIATIVE: &str =
     "Initiatives/fix-spline-r2-graphql-consent-fabrication.md";
+pub const GRAPHQL_PROOF_STUB_INITIATIVE: &str = "Initiatives/fix-spline-r3-graphql-proof-stub.md";
 
 // ---------------------------------------------------------------------------
 // Query resolvers
@@ -441,18 +442,14 @@ impl QueryRoot {
         _ctx: &Context<'_>,
         proof_id: ID,
     ) -> GqlResult<GqlVerificationResult> {
-        // Proof verification delegates to exo-proofs crate; placeholder returns
-        // deterministic result based on the proof_id hash.
-        let hash = Hash256::digest(proof_id.as_str().as_bytes());
-        let valid = hash.as_bytes()[0] & 1 == 0; // deterministic stub
         Ok(GqlVerificationResult {
-            proof_type: "Blake3Commitment".into(),
-            valid,
-            message: if valid {
-                "Proof verified".into()
-            } else {
-                "Proof not found — full verification requires exo-proofs integration".into()
-            },
+            proof_type: "Unavailable".into(),
+            valid: false,
+            message: format!(
+                "Proof verification refused: gateway GraphQL proof storage and verification are not wired for proof ID '{}'; see {}",
+                proof_id.as_str(),
+                GRAPHQL_PROOF_STUB_INITIATIVE
+            ),
         })
     }
 
@@ -1485,6 +1482,32 @@ mod tests {
             .expect("message is a string");
         assert!(message.contains("no verified consent evidence"));
         assert!(message.contains("fix-spline-r2-graphql-consent-fabrication.md"));
+    }
+
+    /// SPLINE-R3: verifyProof must not treat arbitrary proof IDs as valid.
+    /// The GraphQL schema has no proof bytes, public inputs, or verified proof
+    /// store wired, so it must fail closed instead of using hash parity.
+    #[tokio::test]
+    async fn query_verify_proof_refuses_arbitrary_proof_id() {
+        let schema = build_test_schema();
+        let res = schema
+            .execute(
+                r#"{ verifyProof(proofId: "proof-acceptance-must-not-depend-on-id-hash") {
+                    proofType
+                    valid
+                    message
+                } }"#,
+            )
+            .await;
+        assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
+        let data = res.data.into_json().expect("data");
+        assert_eq!(data["verifyProof"]["valid"], false);
+        assert_eq!(data["verifyProof"]["proofType"], "Unavailable");
+        let message = data["verifyProof"]["message"]
+            .as_str()
+            .expect("message is a string");
+        assert!(message.contains("proof storage and verification are not wired"));
+        assert!(message.contains("fix-spline-r3-graphql-proof-stub.md"));
     }
 
     /// APE-35: resolveIdentity rejects malformed DIDs with a GraphQL error.
