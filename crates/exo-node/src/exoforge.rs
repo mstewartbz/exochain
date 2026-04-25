@@ -482,8 +482,8 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
     task!(
         5,
         "Onboarding API",
-        "GET /server-key — Ed25519 DH public key",
-        "Implemented in api.rs get_server_key(). Returns Ed25519 key bytes as hex + key_hash. \n        Test: get_server_key_returns_ed25519_dh() in tests.rs.",
+        "Server key endpoint removed",
+        "ONYX-4 R6 deleted the fabricated /api/v1/0dentity/server-key route. The removed handler wrapped a BLAKE3 digest as a public key; regression coverage asserts the route is absent.",
         "§7.3",
         Some(2)
     );
@@ -525,7 +525,7 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         6,
         "Identity API",
         "POST /attest — peer attestation",
-        "Create attestation from verified DID to target DID. Reject self-attestation, duplicate. Compute score impact",
+        "Create signed Ed25519 attestation from verified DID to target DID. Reject self-attestation, duplicate, empty signature, zero signature, wrong key, tampered payload, replayed payload. Compute score impact",
         "§7.2",
         Some(5)
     );
@@ -559,7 +559,7 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
         7,
         "Onboarding UI",
         "Email input + OTP steps",
-        "Email form → RSA-OAEP encrypt → dispatch OTP. 6-digit auto-advance input, countdown timer, resend cooldown",
+        "Email form submits claim hash with no server-key dependency. 6-digit auto-advance input, countdown timer, resend cooldown",
         "§4.3-§4.4",
         Some(4)
     );
