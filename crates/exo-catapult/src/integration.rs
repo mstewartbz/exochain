@@ -158,10 +158,10 @@ mod tests {
             display_name: name.into(),
             capabilities: vec![],
             status: AgentStatus::Active,
-            last_heartbeat: Timestamp::ZERO,
+            last_heartbeat: Timestamp::new(1_765_000_000_100, 0),
             budget_spent_cents: 0,
             budget_limit_cents: 100_000,
-            hired_at: Timestamp::ZERO,
+            hired_at: Timestamp::new(1_765_000_000_000, 0),
             hired_by: test_did("hr"),
             commandbase_profile: None,
         }

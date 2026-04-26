@@ -53,6 +53,60 @@ pub struct Goal {
     pub updated: Timestamp,
 }
 
+/// Caller-supplied deterministic metadata for creating a goal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalInput {
+    pub id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub level: GoalLevel,
+    pub status: GoalStatus,
+    pub parent_id: Option<Uuid>,
+    pub owner_slot: Option<OdaSlot>,
+    pub created: Timestamp,
+    pub updated: Timestamp,
+}
+
+impl Goal {
+    /// Create a goal from caller-supplied deterministic metadata.
+    ///
+    /// # Errors
+    /// Returns [`CatapultError`] if the input contains placeholder IDs or
+    /// timestamps.
+    pub fn new(input: GoalInput) -> Result<Self> {
+        validate_goal_input(&input)?;
+        Ok(Self {
+            id: input.id,
+            title: input.title,
+            description: input.description,
+            level: input.level,
+            status: input.status,
+            parent_id: input.parent_id,
+            owner_slot: input.owner_slot,
+            created: input.created,
+            updated: input.updated,
+        })
+    }
+
+    /// Validate externally supplied or deserialized goal metadata.
+    ///
+    /// # Errors
+    /// Returns [`CatapultError`] if placeholder IDs or timestamps are present.
+    pub fn validate(&self) -> Result<()> {
+        validate_goal_input(&GoalInput {
+            id: self.id,
+            title: self.title.clone(),
+            description: self.description.clone(),
+            level: self.level,
+            status: self.status,
+            parent_id: self.parent_id,
+            owner_slot: self.owner_slot,
+            created: self.created,
+            updated: self.updated,
+        })
+    }
+}
+
 /// Default goal template for franchise blueprints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalTemplate {
@@ -109,9 +163,17 @@ impl GoalTree {
 
     /// Add a goal to the tree.
     pub fn add(&mut self, goal: Goal) -> Result<()> {
+        goal.validate()?;
         let id = goal.id;
         if self.goals.contains_key(&id) {
             return Err(CatapultError::DuplicateGoal(id));
+        }
+        if let Some(parent_id) = goal.parent_id {
+            if !self.goals.contains_key(&parent_id) {
+                return Err(CatapultError::InvalidGoal {
+                    reason: format!("goal parent id {parent_id} does not exist"),
+                });
+            }
         }
         self.goals.insert(id, goal);
         Ok(())
@@ -124,12 +186,19 @@ impl GoalTree {
     }
 
     /// Update the status of a goal.
-    pub fn update_status(&mut self, id: &Uuid, status: GoalStatus) -> Result<()> {
+    pub fn update_status(
+        &mut self,
+        id: &Uuid,
+        status: GoalStatus,
+        updated: Timestamp,
+    ) -> Result<()> {
         let goal = self
             .goals
             .get_mut(id)
             .ok_or(CatapultError::GoalNotFound(*id))?;
+        validate_goal_update_timestamp(goal, updated)?;
         goal.status = status;
+        goal.updated = updated;
         Ok(())
     }
 
@@ -202,6 +271,83 @@ impl GoalTree {
     pub fn iter(&self) -> impl Iterator<Item = (&Uuid, &Goal)> {
         self.goals.iter()
     }
+
+    /// Validate every goal and parent relationship in a deserialized tree.
+    ///
+    /// # Errors
+    /// Returns [`CatapultError`] if placeholders, mismatched map keys, or
+    /// orphan parent references are present.
+    pub fn validate(&self) -> Result<()> {
+        for (id, goal) in &self.goals {
+            if *id != goal.id {
+                return Err(CatapultError::InvalidGoal {
+                    reason: format!("goal stored under id {id} but declares id {}", goal.id),
+                });
+            }
+            goal.validate()?;
+            if let Some(parent_id) = goal.parent_id {
+                if !self.goals.contains_key(&parent_id) {
+                    return Err(CatapultError::InvalidGoal {
+                        reason: format!("goal parent id {parent_id} does not exist"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_goal_input(input: &GoalInput) -> Result<()> {
+    if input.id.is_nil() {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal id must be caller-supplied and non-nil".into(),
+        });
+    }
+    if input.title.trim().is_empty() {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal title must not be empty".into(),
+        });
+    }
+    if input.parent_id == Some(input.id) {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal parent id must not equal goal id".into(),
+        });
+    }
+    if input.created == Timestamp::ZERO {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal created timestamp must be caller-supplied HLC".into(),
+        });
+    }
+    if input.updated == Timestamp::ZERO {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal updated timestamp must be caller-supplied HLC".into(),
+        });
+    }
+    if input.updated < input.created {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal updated timestamp must not precede creation timestamp".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_goal_update_timestamp(goal: &Goal, updated: Timestamp) -> Result<()> {
+    if updated == Timestamp::ZERO {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal status update timestamp must be caller-supplied HLC".into(),
+        });
+    }
+    if updated < goal.updated {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal status update timestamp must not regress".into(),
+        });
+    }
+    if updated < goal.created {
+        return Err(CatapultError::InvalidGoal {
+            reason: "goal status update timestamp must not precede creation timestamp".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -209,17 +355,95 @@ mod tests {
     use super::*;
 
     fn make_goal(title: &str, level: GoalLevel, status: GoalStatus) -> Goal {
-        Goal {
-            id: Uuid::new_v4(),
+        let mut bytes = [0u8; 16];
+        for (index, byte) in title.as_bytes().iter().take(16).enumerate() {
+            bytes[index] = *byte;
+        }
+        if bytes.iter().all(|byte| *byte == 0) {
+            bytes[0] = 1;
+        }
+        Goal::new(GoalInput {
+            id: Uuid::from_bytes(bytes),
             title: title.into(),
             description: None,
             level,
             status,
             parent_id: None,
             owner_slot: None,
-            created: Timestamp::ZERO,
-            updated: Timestamp::ZERO,
-        }
+            created: Timestamp::new(1_765_000_000_000, 0),
+            updated: Timestamp::new(1_765_000_000_000, 0),
+        })
+        .unwrap()
+    }
+
+    fn test_uuid(byte: u8) -> Uuid {
+        Uuid::from_bytes([byte; 16])
+    }
+
+    fn test_timestamp(offset: u64) -> Timestamp {
+        Timestamp::new(1_765_000_000_000 + offset, 0)
+    }
+
+    fn valid_goal(title: &str, level: GoalLevel, status: GoalStatus) -> Goal {
+        Goal::new(GoalInput {
+            id: test_uuid(1),
+            title: title.into(),
+            description: None,
+            level,
+            status,
+            parent_id: None,
+            owner_slot: None,
+            created: test_timestamp(0),
+            updated: test_timestamp(0),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn add_rejects_placeholder_goal_metadata() {
+        let mut tree = GoalTree::new();
+
+        let mut goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        goal.id = Uuid::nil();
+        assert!(tree.add(goal).is_err());
+
+        let mut goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        goal.created = Timestamp::ZERO;
+        assert!(tree.add(goal).is_err());
+
+        let mut goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        goal.updated = Timestamp::new(1, 0);
+        goal.created = Timestamp::new(2, 0);
+        assert!(tree.add(goal).is_err());
+    }
+
+    #[test]
+    fn add_rejects_orphan_goal_parent() {
+        let mut tree = GoalTree::new();
+        let mut child = valid_goal("Child", GoalLevel::Team, GoalStatus::Planned);
+        child.parent_id = Some(test_uuid(9));
+
+        assert!(tree.add(child).is_err());
+    }
+
+    #[test]
+    fn update_status_requires_caller_supplied_hlc() {
+        let mut tree = GoalTree::new();
+        let goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        let id = goal.id;
+        tree.add(goal).unwrap();
+
+        assert!(
+            tree.update_status(&id, GoalStatus::Completed, Timestamp::ZERO)
+                .is_err()
+        );
+
+        let updated = test_timestamp(100);
+        tree.update_status(&id, GoalStatus::Completed, updated)
+            .unwrap();
+        let goal = tree.get(&id).unwrap();
+        assert_eq!(goal.status, GoalStatus::Completed);
+        assert_eq!(goal.updated, updated);
     }
 
     #[test]
@@ -247,7 +471,8 @@ mod tests {
         let goal = make_goal("Test", GoalLevel::Company, GoalStatus::Planned);
         let id = goal.id;
         tree.add(goal).unwrap();
-        tree.update_status(&id, GoalStatus::Completed).unwrap();
+        tree.update_status(&id, GoalStatus::Completed, test_timestamp(100))
+            .unwrap();
         assert_eq!(tree.get(&id).unwrap().status, GoalStatus::Completed);
     }
 
@@ -255,7 +480,7 @@ mod tests {
     fn update_not_found() {
         let mut tree = GoalTree::new();
         assert!(
-            tree.update_status(&Uuid::nil(), GoalStatus::Active)
+            tree.update_status(&Uuid::nil(), GoalStatus::Active, test_timestamp(100))
                 .is_err()
         );
     }

@@ -222,6 +222,9 @@ pub fn wasm_hire_agent(newco_json: &str, agent_json: &str) -> Result<JsValue, Js
 #[wasm_bindgen]
 pub fn wasm_release_agent(newco_json: &str, slot_json: &str) -> Result<JsValue, JsValue> {
     let mut newco: exo_catapult::newco::Newco = from_json_str(newco_json)?;
+    newco
+        .validate()
+        .map_err(|e| JsValue::from_str(&format!("Newco validation error: {e}")))?;
     let slot: exo_catapult::OdaSlot = from_json_str(slot_json)?;
     let released = newco
         .release_agent(&slot)
@@ -236,6 +239,9 @@ pub fn wasm_release_agent(newco_json: &str, slot_json: &str) -> Result<JsValue, 
 #[wasm_bindgen]
 pub fn wasm_roster_status(newco_json: &str) -> Result<JsValue, JsValue> {
     let newco: exo_catapult::newco::Newco = from_json_str(newco_json)?;
+    newco
+        .validate()
+        .map_err(|e| JsValue::from_str(&format!("Newco validation error: {e}")))?;
     to_js_value(&serde_json::json!({
         "filled": newco.roster.filled_count(),
         "vacancies": newco.roster.vacancy_count(),
@@ -249,6 +255,9 @@ pub fn wasm_roster_status(newco_json: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_oda_authority_chain(newco_json: &str) -> Result<JsValue, JsValue> {
     let newco: exo_catapult::newco::Newco = from_json_str(newco_json)?;
+    newco
+        .validate()
+        .map_err(|e| JsValue::from_str(&format!("Newco validation error: {e}")))?;
     let pace = exo_catapult::integration::build_pace_config(&newco);
     to_js_value(&serde_json::json!({
         "primary": pace.primary.map(|d| d.to_string()),
@@ -266,8 +275,12 @@ pub fn wasm_oda_authority_chain(newco_json: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_record_heartbeat(monitor_json: &str, record_json: &str) -> Result<JsValue, JsValue> {
     let mut monitor: exo_catapult::HeartbeatMonitor = from_json_str(monitor_json)?;
-    let record: exo_catapult::HeartbeatRecord = from_json_str(record_json)?;
-    monitor.record(record);
+    let input: exo_catapult::HeartbeatRecordInput = from_json_str(record_json)?;
+    let record = exo_catapult::HeartbeatRecord::new(input)
+        .map_err(|e| JsValue::from_str(&format!("Heartbeat record error: {e}")))?;
+    monitor
+        .record(record)
+        .map_err(|e| JsValue::from_str(&format!("Heartbeat record error: {e}")))?;
     to_js_value(&monitor)
 }
 
@@ -275,10 +288,10 @@ pub fn wasm_record_heartbeat(monitor_json: &str, record_json: &str) -> Result<Js
 #[wasm_bindgen]
 pub fn wasm_check_heartbeat_health(monitor_json: &str, now_ms: u64) -> Result<JsValue, JsValue> {
     let monitor: exo_catapult::HeartbeatMonitor = from_json_str(monitor_json)?;
-    let now = exo_core::Timestamp {
-        physical_ms: now_ms,
-        logical: 0,
-    };
+    monitor
+        .validate()
+        .map_err(|e| JsValue::from_str(&format!("Heartbeat monitor validation error: {e}")))?;
+    let now = parse_timestamp(now_ms, 0, "heartbeat health check")?;
     let alerts = monitor.check_health(&now);
     to_js_value(&serde_json::json!({
         "alerts": alerts.iter().map(|a| serde_json::json!({
@@ -299,8 +312,12 @@ pub fn wasm_check_heartbeat_health(monitor_json: &str, now_ms: u64) -> Result<Js
 #[wasm_bindgen]
 pub fn wasm_record_cost_event(ledger_json: &str, event_json: &str) -> Result<JsValue, JsValue> {
     let mut ledger: exo_catapult::BudgetLedger = from_json_str(ledger_json)?;
-    let event: exo_catapult::CostEvent = from_json_str(event_json)?;
-    ledger.record_cost(event);
+    let input: exo_catapult::CostEventInput = from_json_str(event_json)?;
+    let event = exo_catapult::CostEvent::new(input)
+        .map_err(|e| JsValue::from_str(&format!("Cost event error: {e}")))?;
+    ledger
+        .record_cost(event)
+        .map_err(|e| JsValue::from_str(&format!("Cost event error: {e}")))?;
     to_js_value(&ledger)
 }
 
@@ -308,6 +325,9 @@ pub fn wasm_record_cost_event(ledger_json: &str, event_json: &str) -> Result<JsV
 #[wasm_bindgen]
 pub fn wasm_check_budget_status(ledger_json: &str, scope_json: &str) -> Result<JsValue, JsValue> {
     let ledger: exo_catapult::BudgetLedger = from_json_str(ledger_json)?;
+    ledger
+        .validate()
+        .map_err(|e| JsValue::from_str(&format!("Budget ledger validation error: {e}")))?;
     let scope: exo_catapult::BudgetScope = from_json_str(scope_json)?;
     let verdict = ledger.check_enforcement(&scope);
     let json = match verdict {
@@ -326,6 +346,9 @@ pub fn wasm_check_budget_status(ledger_json: &str, scope_json: &str) -> Result<J
 #[wasm_bindgen]
 pub fn wasm_enforce_budget(newco_json: &str) -> Result<JsValue, JsValue> {
     let newco: exo_catapult::newco::Newco = from_json_str(newco_json)?;
+    newco
+        .validate()
+        .map_err(|e| JsValue::from_str(&format!("Newco validation error: {e}")))?;
     let company_verdict = newco
         .budget
         .check_enforcement(&exo_catapult::BudgetScope::Company);
@@ -351,6 +374,8 @@ pub fn wasm_enforce_budget(newco_json: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_create_goal(tree_json: &str, goal_json: &str) -> Result<JsValue, JsValue> {
     let mut tree: exo_catapult::GoalTree = from_json_str(tree_json)?;
+    tree.validate()
+        .map_err(|e| JsValue::from_str(&format!("Goal tree validation error: {e}")))?;
     let goal: exo_catapult::Goal = from_json_str(goal_json)?;
     tree.add(goal)
         .map_err(|e| JsValue::from_str(&format!("Goal error: {e}")))?;
@@ -363,13 +388,18 @@ pub fn wasm_update_goal_status(
     tree_json: &str,
     goal_id: &str,
     status_json: &str,
+    updated_physical_ms: u64,
+    updated_logical: u32,
 ) -> Result<JsValue, JsValue> {
     let mut tree: exo_catapult::GoalTree = from_json_str(tree_json)?;
+    tree.validate()
+        .map_err(|e| JsValue::from_str(&format!("Goal tree validation error: {e}")))?;
     let id: uuid::Uuid = goal_id
         .parse()
         .map_err(|e| JsValue::from_str(&format!("UUID error: {e}")))?;
     let status: exo_catapult::GoalStatus = from_json_str(status_json)?;
-    tree.update_status(&id, status)
+    let updated = parse_timestamp(updated_physical_ms, updated_logical, "goal update")?;
+    tree.update_status(&id, status, updated)
         .map_err(|e| JsValue::from_str(&format!("Goal update error: {e}")))?;
     to_js_value(&tree)
 }
@@ -378,6 +408,8 @@ pub fn wasm_update_goal_status(
 #[wasm_bindgen]
 pub fn wasm_goal_alignment_score(tree_json: &str) -> Result<u32, JsValue> {
     let tree: exo_catapult::GoalTree = from_json_str(tree_json)?;
+    tree.validate()
+        .map_err(|e| JsValue::from_str(&format!("Goal tree validation error: {e}")))?;
     Ok(tree.alignment_score())
 }
 

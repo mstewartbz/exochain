@@ -38,6 +38,16 @@ pub enum CatapultError {
     FranchiseAlreadyExists(Uuid),
     #[error("newco already exists: {0}")]
     NewcoAlreadyExists(Uuid),
+    #[error("invalid catapult agent: {reason}")]
+    InvalidAgent { reason: String },
+    #[error("invalid budget policy: {reason}")]
+    InvalidBudgetPolicy { reason: String },
+    #[error("invalid cost event: {reason}")]
+    InvalidCostEvent { reason: String },
+    #[error("invalid goal: {reason}")]
+    InvalidGoal { reason: String },
+    #[error("invalid heartbeat record: {reason}")]
+    InvalidHeartbeat { reason: String },
     #[error("invalid franchise blueprint: {reason}")]
     InvalidFranchiseBlueprint { reason: String },
     #[error("invalid newco: {reason}")]
@@ -84,6 +94,21 @@ mod tests {
             CatapultError::DuplicateGoal(Uuid::nil()),
             CatapultError::FranchiseAlreadyExists(Uuid::nil()),
             CatapultError::NewcoAlreadyExists(Uuid::nil()),
+            CatapultError::InvalidAgent {
+                reason: "bad agent".into(),
+            },
+            CatapultError::InvalidBudgetPolicy {
+                reason: "bad policy".into(),
+            },
+            CatapultError::InvalidCostEvent {
+                reason: "bad cost".into(),
+            },
+            CatapultError::InvalidGoal {
+                reason: "bad goal".into(),
+            },
+            CatapultError::InvalidHeartbeat {
+                reason: "bad heartbeat".into(),
+            },
             CatapultError::InvalidFranchiseBlueprint {
                 reason: "bad blueprint".into(),
             },
