@@ -233,6 +233,8 @@ jobs:
             exit 1
           fi
           echo "✓ No GAP stubs remaining in code"
+      - name: Repo truth and public claims
+        run: bash tools/test_repo_truth.sh
 
   # -----------------------------------------------------------------------
   # Gate 10: SBOM (dry-run generation — no upload, validates toolchain)
