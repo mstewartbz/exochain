@@ -560,6 +560,81 @@ mod tests {
     }
 
     #[test]
+    fn receipt_rejects_invalid_operation_payloads() {
+        let signer = keypair(9);
+        let invalid_operations = [
+            FranchiseOperation::BlueprintPublished {
+                blueprint_id: Uuid::nil(),
+            },
+            FranchiseOperation::BudgetPolicyUpdated {
+                policy_id: Uuid::nil(),
+            },
+            FranchiseOperation::CostRecorded {
+                event_id: Uuid::nil(),
+                amount_cents: 1,
+            },
+            FranchiseOperation::CostRecorded {
+                event_id: uuid(30),
+                amount_cents: 0,
+            },
+            FranchiseOperation::GoalCreated {
+                goal_id: Uuid::nil(),
+            },
+            FranchiseOperation::GoalCompleted {
+                goal_id: Uuid::nil(),
+            },
+            FranchiseOperation::FranchiseReplicated {
+                source_newco_id: Uuid::nil(),
+                target_newco_id: uuid(31),
+            },
+            FranchiseOperation::FranchiseReplicated {
+                source_newco_id: uuid(31),
+                target_newco_id: Uuid::nil(),
+            },
+            FranchiseOperation::FranchiseReplicated {
+                source_newco_id: uuid(31),
+                target_newco_id: uuid(31),
+            },
+            FranchiseOperation::PaceEscalation {
+                from_level: " ".into(),
+                to_level: "incident command".into(),
+            },
+        ];
+
+        for (index, operation) in invalid_operations.into_iter().enumerate() {
+            let id = uuid(100 + u128::try_from(index).unwrap());
+            assert!(
+                FranchiseReceipt::signed(
+                    receipt_input(id, uuid(10), operation, Hash256::ZERO),
+                    signer.secret_key(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_receipt_fails_signature_verification() {
+        let signer = keypair(10);
+        let mut receipt = FranchiseReceipt::signed(
+            receipt_input(
+                uuid(90),
+                uuid(10),
+                FranchiseOperation::HeartbeatRecorded {
+                    agent_did: test_did(),
+                },
+                Hash256::ZERO,
+            ),
+            signer.secret_key(),
+        )
+        .unwrap();
+        receipt.signature = Signature::Empty;
+
+        assert!(!receipt.is_signed());
+        assert!(!receipt.verify_signature(signer.public_key()).unwrap());
+    }
+
+    #[test]
     fn chain_append_requires_valid_signature_and_prev_hash() {
         let signer = keypair(5);
         let wrong = keypair(6);

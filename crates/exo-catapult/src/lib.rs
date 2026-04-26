@@ -30,14 +30,16 @@ pub mod phase;
 pub mod receipt;
 
 // Re-export the most commonly used items at crate root.
-pub use agent::{AgentRoster, AgentStatus, CatapultAgent};
-pub use budget::{BudgetLedger, BudgetPolicy, BudgetScope, BudgetVerdict, CostEvent};
+pub use agent::{AgentRoster, AgentStatus, CatapultAgent, CatapultAgentInput};
+pub use budget::{
+    BudgetLedger, BudgetPolicy, BudgetScope, BudgetVerdict, CostEvent, CostEventInput,
+};
 pub use error::{CatapultError, Result};
 pub use franchise::{
     BusinessModel, FranchiseBlueprint, FranchiseBlueprintInput, FranchiseRegistry,
 };
-pub use goal::{Goal, GoalLevel, GoalStatus, GoalTree};
-pub use heartbeat::{HeartbeatMonitor, HeartbeatRecord, HeartbeatStatus};
+pub use goal::{Goal, GoalInput, GoalLevel, GoalStatus, GoalTree};
+pub use heartbeat::{HeartbeatMonitor, HeartbeatRecord, HeartbeatRecordInput, HeartbeatStatus};
 pub use newco::{Newco, NewcoInput, NewcoStatus};
 pub use oda::{MosCode, OdaSlot};
 pub use phase::OperationalPhase;

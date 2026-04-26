@@ -601,6 +601,81 @@ test('wasm_instantiate_newco', () => {
   return newco;
 });
 
+test('wasm_record_cost_event', () => {
+  const ledger = wasm.wasm_record_cost_event(
+    JSON.stringify({ policies: [], events: [] }),
+    JSON.stringify({
+      id: UUID_1,
+      newco_id: UUID_2,
+      agent_did: TEST_DID,
+      slot: 'VentureCommander',
+      amount: 1234,
+      metric: 'BilledCents',
+      description: 'Bridge cost event',
+      timestamp: { physical_ms: NOW_NUM + 10, logical: 0 }
+    })
+  );
+  if (ledger.events.length !== 1) throw new Error('cost event was not recorded');
+  assertNonZeroHash(ledger.events[0].receipt_hash, 'cost event receipt_hash');
+  return ledger;
+});
+
+test('wasm_record_heartbeat', () => {
+  const monitor = wasm.wasm_record_heartbeat(
+    JSON.stringify({
+      last_seen: {},
+      history: {},
+      warn_ms: 180000,
+      timeout_ms: 300000
+    }),
+    JSON.stringify({
+      id: UUID_2,
+      newco_id: UUID_3,
+      agent_did: TEST_DID,
+      status: 'Completed',
+      started: { physical_ms: NOW_NUM + 20, logical: 0 },
+      finished: { physical_ms: NOW_NUM + 120, logical: 0 },
+      usage: { tokens: 12 }
+    })
+  );
+  if (monitor.last_seen[TEST_DID].physical_ms !== NOW_NUM + 20) {
+    throw new Error('heartbeat last_seen was not recorded');
+  }
+  assertNonZeroHash(monitor.history[TEST_DID][0].receipt_hash, 'heartbeat receipt_hash');
+  return monitor;
+});
+
+test('wasm_create_goal and wasm_update_goal_status', () => {
+  const tree = wasm.wasm_create_goal(
+    JSON.stringify({ goals: {} }),
+    JSON.stringify({
+      id: UUID_3,
+      title: 'Bridge goal',
+      description: null,
+      level: 'Company',
+      status: 'Planned',
+      parent_id: null,
+      owner_slot: null,
+      created: { physical_ms: NOW_NUM + 30, logical: 0 },
+      updated: { physical_ms: NOW_NUM + 30, logical: 0 }
+    })
+  );
+  const updated = wasm.wasm_update_goal_status(
+    JSON.stringify(tree),
+    UUID_3,
+    JSON.stringify('Completed'),
+    BigInt(NOW_NUM + 40),
+    0
+  );
+  if (updated.goals[UUID_3].status !== 'Completed') {
+    throw new Error('goal status was not updated');
+  }
+  if (updated.goals[UUID_3].updated.physical_ms !== NOW_NUM + 40) {
+    throw new Error('goal updated timestamp was not caller-supplied HLC');
+  }
+  return updated;
+});
+
 // =========================================================================
 // Module 9 — Risk Assessment
 // =========================================================================

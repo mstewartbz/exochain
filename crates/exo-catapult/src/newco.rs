@@ -124,6 +124,9 @@ impl Newco {
                 reason: "newco last heartbeat must not precede creation timestamp".into(),
             });
         }
+        self.roster.validate()?;
+        self.budget.validate()?;
+        self.goals.validate()?;
         Ok(())
     }
 
@@ -131,6 +134,7 @@ impl Newco {
     ///
     /// Validates both the phase transition and roster sufficiency.
     pub fn advance_phase(&mut self, target: OperationalPhase) -> Result<()> {
+        self.validate()?;
         // Validate the phase transition
         if !self.phase.can_transition_to(target) {
             return Err(CatapultError::InvalidPhaseTransition {
@@ -165,6 +169,7 @@ impl Newco {
 
     /// Hire an agent into an ODA slot.
     pub fn hire_agent(&mut self, agent: CatapultAgent) -> Result<()> {
+        self.validate()?;
         self.roster.fill_slot(agent)
     }
 
@@ -408,6 +413,17 @@ mod tests {
         assert!(reg.register(newco).is_err());
     }
 
+    #[test]
+    fn newco_validate_rejects_deserialized_bad_heartbeat_state() {
+        let mut newco = make_newco();
+        newco.last_heartbeat = Timestamp::ZERO;
+        assert!(newco.validate().is_err());
+
+        let mut newco = make_newco();
+        newco.last_heartbeat = Timestamp::new(1, 0);
+        assert!(newco.validate().is_err());
+    }
+
     fn make_agent(slot: OdaSlot) -> CatapultAgent {
         CatapultAgent {
             did: Did::new(&format!("did:exo:test-{slot:?}").to_ascii_lowercase()).unwrap(),
@@ -415,10 +431,10 @@ mod tests {
             display_name: slot.display_name().into(),
             capabilities: vec![],
             status: AgentStatus::Active,
-            last_heartbeat: Timestamp::ZERO,
+            last_heartbeat: Timestamp::new(1_765_000_000_100, 0),
             budget_spent_cents: 0,
             budget_limit_cents: 100_000,
-            hired_at: Timestamp::ZERO,
+            hired_at: Timestamp::new(1_765_000_000_000, 0),
             hired_by: test_did(),
             commandbase_profile: None,
         }
@@ -514,7 +530,10 @@ mod tests {
 
         assert_eq!(reg.len(), 1);
         assert!(reg.get(&id).is_some());
+        assert!(reg.get_mut(&id).is_some());
         assert!(reg.receipts(&id).is_some());
+        assert!(reg.receipts_mut(&id).is_some());
+        assert_eq!(reg.list().len(), 1);
     }
 
     #[test]
