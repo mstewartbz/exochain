@@ -427,6 +427,44 @@ mod tests {
     }
 
     #[test]
+    fn goal_validation_rejects_empty_title_self_parent_and_regressive_update() {
+        let mut goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        goal.title = "   ".into();
+        assert!(goal.validate().is_err());
+
+        let mut goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        goal.parent_id = Some(goal.id);
+        assert!(goal.validate().is_err());
+
+        let mut tree = GoalTree::new();
+        let goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);
+        let id = goal.id;
+        tree.add(goal).unwrap();
+        assert!(
+            tree.update_status(&id, GoalStatus::Blocked, test_timestamp(0))
+                .is_ok()
+        );
+        assert!(
+            tree.update_status(&id, GoalStatus::Completed, Timestamp::new(1, 0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn tree_validate_rejects_deserialized_key_mismatch_and_orphan_parent() {
+        let mut key_mismatch = GoalTree::new();
+        let goal = valid_goal("Mismatch", GoalLevel::Company, GoalStatus::Planned);
+        key_mismatch.goals.insert(test_uuid(9), goal);
+        assert!(key_mismatch.validate().is_err());
+
+        let mut orphan = GoalTree::new();
+        let mut child = valid_goal("Child", GoalLevel::Team, GoalStatus::Planned);
+        child.parent_id = Some(test_uuid(8));
+        orphan.goals.insert(child.id, child);
+        assert!(orphan.validate().is_err());
+    }
+
+    #[test]
     fn update_status_requires_caller_supplied_hlc() {
         let mut tree = GoalTree::new();
         let goal = valid_goal("Test", GoalLevel::Company, GoalStatus::Planned);

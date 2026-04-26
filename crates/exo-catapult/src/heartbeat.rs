@@ -418,6 +418,54 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_input_validation_rejects_placeholder_and_regressive_time() {
+        let mut input = valid_heartbeat_input(test_did("agent1"), 1000);
+        input.id = Uuid::nil();
+        assert!(HeartbeatRecord::new(input).is_err());
+
+        let mut input = valid_heartbeat_input(test_did("agent1"), 1000);
+        input.newco_id = Uuid::nil();
+        assert!(HeartbeatRecord::new(input).is_err());
+
+        let mut input = valid_heartbeat_input(test_did("agent1"), 1000);
+        input.started = Timestamp::ZERO;
+        assert!(HeartbeatRecord::new(input).is_err());
+
+        let mut input = valid_heartbeat_input(test_did("agent1"), 1000);
+        input.finished = Some(Timestamp::new(999, 0));
+        assert!(HeartbeatRecord::new(input).is_err());
+    }
+
+    #[test]
+    fn monitor_validate_rejects_deserialized_inconsistencies() {
+        let did = test_did("agent1");
+        let record = make_heartbeat(did.clone(), 1000);
+        let mut monitor = HeartbeatMonitor::new();
+        monitor.record(record.clone()).unwrap();
+        assert!(monitor.validate().is_ok());
+
+        let mut mismatched_key = HeartbeatMonitor::new();
+        let other = test_did("other");
+        mismatched_key
+            .last_seen
+            .insert(other.clone(), record.started);
+        mismatched_key.history.insert(other, vec![record.clone()]);
+        assert!(mismatched_key.validate().is_err());
+
+        let mut stale_last_seen = monitor.clone();
+        stale_last_seen
+            .last_seen
+            .insert(did.clone(), Timestamp::new(1, 0));
+        assert!(stale_last_seen.validate().is_err());
+
+        let mut missing_history = HeartbeatMonitor::new();
+        missing_history
+            .last_seen
+            .insert(did, Timestamp::new(1000, 0));
+        assert!(missing_history.validate().is_err());
+    }
+
+    #[test]
     fn record_and_last_seen() {
         let mut monitor = HeartbeatMonitor::new();
         let did = test_did("agent1");

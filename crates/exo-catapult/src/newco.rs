@@ -413,6 +413,17 @@ mod tests {
         assert!(reg.register(newco).is_err());
     }
 
+    #[test]
+    fn newco_validate_rejects_deserialized_bad_heartbeat_state() {
+        let mut newco = make_newco();
+        newco.last_heartbeat = Timestamp::ZERO;
+        assert!(newco.validate().is_err());
+
+        let mut newco = make_newco();
+        newco.last_heartbeat = Timestamp::new(1, 0);
+        assert!(newco.validate().is_err());
+    }
+
     fn make_agent(slot: OdaSlot) -> CatapultAgent {
         CatapultAgent {
             did: Did::new(&format!("did:exo:test-{slot:?}").to_ascii_lowercase()).unwrap(),
@@ -519,7 +530,10 @@ mod tests {
 
         assert_eq!(reg.len(), 1);
         assert!(reg.get(&id).is_some());
+        assert!(reg.get_mut(&id).is_some());
         assert!(reg.receipts(&id).is_some());
+        assert!(reg.receipts_mut(&id).is_some());
+        assert_eq!(reg.list().len(), 1);
     }
 
     #[test]

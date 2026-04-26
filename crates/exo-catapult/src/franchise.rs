@@ -360,7 +360,29 @@ mod tests {
         assert!(FranchiseBlueprint::new(input).is_err());
 
         let mut input = test_blueprint_input();
+        input.description = " ".into();
+        assert!(FranchiseBlueprint::new(input).is_err());
+
+        let mut input = test_blueprint_input();
+        input.business_model = BusinessModel::Custom {
+            description: " ".into(),
+        };
+        assert!(FranchiseBlueprint::new(input).is_err());
+
+        let mut input = test_blueprint_input();
         input.constitution_hash = Hash256::ZERO;
+        assert!(FranchiseBlueprint::new(input).is_err());
+
+        let mut input = test_blueprint_input();
+        input.required_slots = Vec::new();
+        assert!(FranchiseBlueprint::new(input).is_err());
+
+        let mut input = test_blueprint_input();
+        input.required_slots = vec![OdaSlot::HrPeopleOps1, OdaSlot::DeepResearcher];
+        assert!(FranchiseBlueprint::new(input).is_err());
+
+        let mut input = test_blueprint_input();
+        input.required_slots = vec![OdaSlot::HrPeopleOps1, OdaSlot::HrPeopleOps1];
         assert!(FranchiseBlueprint::new(input).is_err());
 
         let mut input = test_blueprint_input();
@@ -378,6 +400,10 @@ mod tests {
 
         let mut blueprint = test_blueprint();
         blueprint.id = Uuid::nil();
+        assert!(reg.publish(blueprint).is_err());
+
+        let mut blueprint = test_blueprint();
+        blueprint.content_hash = Hash256::ZERO;
         assert!(reg.publish(blueprint).is_err());
     }
 

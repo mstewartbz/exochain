@@ -327,6 +327,40 @@ mod tests {
     }
 
     #[test]
+    fn agent_validation_rejects_empty_name_and_regressive_heartbeat() {
+        let mut agent = make_agent(OdaSlot::DeepResearcher, "dr1");
+        agent.display_name = "   ".into();
+        assert!(agent.validate().is_err());
+
+        let mut agent = make_agent(OdaSlot::DeepResearcher, "dr1");
+        agent.last_heartbeat = Timestamp::new(1, 0);
+        assert!(agent.validate().is_err());
+    }
+
+    #[test]
+    fn roster_validate_detects_deserialized_slot_key_mismatch() {
+        let mut roster = AgentRoster::new();
+        let agent = make_agent(OdaSlot::DeepResearcher, "dr1");
+        roster.agents.insert(OdaSlot::HrPeopleOps1, agent);
+
+        assert!(roster.validate().is_err());
+    }
+
+    #[test]
+    fn active_count_ignores_non_active_agents() {
+        let mut roster = AgentRoster::new();
+        roster
+            .fill_slot(make_agent(OdaSlot::DeepResearcher, "dr1"))
+            .unwrap();
+        let mut suspended = make_agent(OdaSlot::HrPeopleOps1, "hr1");
+        suspended.status = AgentStatus::Suspended;
+        roster.fill_slot(suspended).unwrap();
+
+        assert_eq!(roster.active_count(), 1);
+        assert_eq!(roster.iter().count(), 2);
+    }
+
+    #[test]
     fn fill_and_get() {
         let mut roster = AgentRoster::new();
         let agent = make_agent(OdaSlot::HrPeopleOps1, "hr1");

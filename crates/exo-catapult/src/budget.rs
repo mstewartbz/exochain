@@ -538,6 +538,74 @@ mod tests {
     }
 
     #[test]
+    fn policy_and_cost_input_validation_rejects_boundary_placeholders() {
+        let mut policy = valid_policy(BudgetScope::Company, 100_000);
+        policy.warn_threshold_bps = 0;
+        assert!(policy.validate().is_err());
+
+        let mut policy = valid_policy(BudgetScope::Company, 100_000);
+        policy.warn_threshold_bps = 10_001;
+        assert!(policy.validate().is_err());
+
+        let mut input = valid_cost_input(OdaSlot::VentureCommander, 100);
+        input.id = Uuid::nil();
+        assert!(CostEvent::new(input).is_err());
+
+        let mut input = valid_cost_input(OdaSlot::VentureCommander, 100);
+        input.newco_id = Uuid::nil();
+        assert!(CostEvent::new(input).is_err());
+
+        let mut input = valid_cost_input(OdaSlot::VentureCommander, 100);
+        input.amount = 0;
+        assert!(CostEvent::new(input).is_err());
+
+        let mut input = valid_cost_input(OdaSlot::VentureCommander, 100);
+        input.description = "   ".into();
+        assert!(CostEvent::new(input).is_err());
+
+        let mut input = valid_cost_input(OdaSlot::VentureCommander, 100);
+        input.timestamp = Timestamp::ZERO;
+        assert!(CostEvent::new(input).is_err());
+    }
+
+    #[test]
+    fn ledger_rejects_duplicate_ids_from_api_and_deserialized_state() {
+        let mut ledger = BudgetLedger::new();
+        let policy = valid_policy(BudgetScope::Company, 100_000);
+        ledger.add_policy(policy.clone()).unwrap();
+        assert!(ledger.add_policy(policy.clone()).is_err());
+
+        let duplicate_policy_ledger = BudgetLedger {
+            policies: vec![policy.clone(), policy],
+            events: Vec::new(),
+        };
+        assert!(duplicate_policy_ledger.validate().is_err());
+
+        let event = CostEvent::new(valid_cost_input(OdaSlot::VentureCommander, 100)).unwrap();
+        let duplicate_event_ledger = BudgetLedger {
+            policies: Vec::new(),
+            events: vec![event.clone(), event],
+        };
+        assert!(duplicate_event_ledger.validate().is_err());
+    }
+
+    #[test]
+    fn inactive_policy_is_ignored_by_enforcement() {
+        let mut ledger = BudgetLedger::new();
+        let mut policy = make_policy(BudgetScope::Company, 1);
+        policy.is_active = false;
+        ledger.add_policy(policy).unwrap();
+        ledger
+            .record_cost(make_cost(OdaSlot::VentureCommander, 10))
+            .unwrap();
+
+        assert_eq!(
+            ledger.check_enforcement(&BudgetScope::Company),
+            BudgetVerdict::Ok
+        );
+    }
+
+    #[test]
     fn empty_ledger_ok() {
         let ledger = BudgetLedger::new();
         assert_eq!(
