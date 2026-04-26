@@ -1522,6 +1522,7 @@ dependencies = [
 name = "exo-messaging"
 version = "0.1.0-beta"
 dependencies = [
+ "ciborium",
  "exo-core",
  "exo-identity",
  "hex",

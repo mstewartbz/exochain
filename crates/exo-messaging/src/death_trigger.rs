@@ -3,12 +3,14 @@
 //! Manages the lifecycle of death verification claims and the
 //! conditional release of afterlife messages.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use exo_core::{Did, Timestamp, hlc::HybridClock};
+use exo_core::{Did, PublicKey, Signature, Timestamp, hlc::HybridClock};
 use serde::{Deserialize, Serialize};
 
 use crate::error::MessagingError;
+
+const DEATH_CONFIRMATION_SIGNING_DOMAIN: &str = "exo.messaging.death-trigger.confirmation.v1";
 
 /// Status of a death verification request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +27,8 @@ pub enum DeathVerificationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrusteeConfirmation {
     pub trustee_did: Did,
+    pub public_key: PublicKey,
+    pub signature: Signature,
     pub confirmed_at: Timestamp,
 }
 
@@ -37,6 +41,10 @@ pub struct DeathVerification {
     pub initiated_by: Did,
     /// Number of trustee confirmations required (default: 3 for 3-of-4 PACE).
     pub required_confirmations: u8,
+    /// Authorized trustee public keys, sorted by DID for deterministic signing payloads.
+    pub authorized_trustees: BTreeMap<Did, PublicKey>,
+    /// Caller-supplied claim nonce binding signatures to this verification instance.
+    pub claim_nonce: Vec<u8>,
     /// Collected trustee confirmations.
     pub confirmations: Vec<TrusteeConfirmation>,
     /// Current verification status.
@@ -47,31 +55,169 @@ pub struct DeathVerification {
     pub resolved_at: Option<Timestamp>,
 }
 
+#[derive(Serialize)]
+struct AuthorizedTrusteeSigningEntry<'a> {
+    did: &'a str,
+    public_key: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
+struct ConfirmationSigningPayload<'a> {
+    domain: &'static str,
+    subject_did: &'a str,
+    initiated_by: &'a str,
+    required_confirmations: u8,
+    claim_nonce: &'a [u8],
+    trustee_did: &'a str,
+    authorized_trustees: Vec<AuthorizedTrusteeSigningEntry<'a>>,
+}
+
+/// Canonical CBOR payload signed for the initiator's first confirmation.
+///
+/// The payload binds the subject, initiator, threshold, authorized trustee set,
+/// caller-supplied claim nonce, and confirming trustee DID. The signature itself
+/// and HLC timestamps are excluded so callers can sign before the state exists.
+pub fn initial_confirmation_signing_payload(
+    subject_did: &Did,
+    initiated_by: &Did,
+    required_confirmations: u8,
+    authorized_trustees: &BTreeMap<Did, PublicKey>,
+    claim_nonce: &[u8],
+) -> Result<Vec<u8>, MessagingError> {
+    confirmation_signing_payload_for(
+        subject_did,
+        initiated_by,
+        required_confirmations,
+        authorized_trustees,
+        claim_nonce,
+        initiated_by,
+    )
+}
+
+fn confirmation_signing_payload_for(
+    subject_did: &Did,
+    initiated_by: &Did,
+    required_confirmations: u8,
+    authorized_trustees: &BTreeMap<Did, PublicKey>,
+    claim_nonce: &[u8],
+    trustee_did: &Did,
+) -> Result<Vec<u8>, MessagingError> {
+    let trustee_entries = authorized_trustees
+        .iter()
+        .map(|(did, public_key)| AuthorizedTrusteeSigningEntry {
+            did: did.as_str(),
+            public_key: public_key.as_bytes(),
+        })
+        .collect();
+    let payload = ConfirmationSigningPayload {
+        domain: DEATH_CONFIRMATION_SIGNING_DOMAIN,
+        subject_did: subject_did.as_str(),
+        initiated_by: initiated_by.as_str(),
+        required_confirmations,
+        claim_nonce,
+        trustee_did: trustee_did.as_str(),
+        authorized_trustees: trustee_entries,
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&payload, &mut encoded)
+        .map_err(|e| MessagingError::DeathConfirmationPayloadEncoding(e.to_string()))?;
+    Ok(encoded)
+}
+
 impl DeathVerification {
     /// Create a new death verification request.
-    pub fn new(subject_did: Did, initiated_by: Did, required_confirmations: u8) -> Self {
+    pub fn new(
+        subject_did: Did,
+        initiated_by: Did,
+        required_confirmations: u8,
+        authorized_trustees: BTreeMap<Did, PublicKey>,
+        claim_nonce: Vec<u8>,
+        initiator_signature: Signature,
+    ) -> Result<Self, MessagingError> {
+        validate_death_verification_request(
+            &initiated_by,
+            required_confirmations,
+            &authorized_trustees,
+            &claim_nonce,
+        )?;
+        let initiator_public_key = *authorized_trustees
+            .get(&initiated_by)
+            .ok_or_else(|| MessagingError::UnauthorizedTrustee(initiated_by.as_str().to_owned()))?;
+        let signing_payload = initial_confirmation_signing_payload(
+            &subject_did,
+            &initiated_by,
+            required_confirmations,
+            &authorized_trustees,
+            &claim_nonce,
+        )?;
+        if !exo_core::crypto::verify(
+            &signing_payload,
+            &initiator_signature,
+            &initiator_public_key,
+        ) {
+            return Err(MessagingError::SignatureVerificationFailed);
+        }
+
         let mut clock = HybridClock::new();
         let now = clock.now();
+        let status = if required_confirmations == 1 {
+            DeathVerificationStatus::Verified
+        } else {
+            DeathVerificationStatus::Pending
+        };
+        let resolved_at = if status == DeathVerificationStatus::Verified {
+            Some(now)
+        } else {
+            None
+        };
 
-        Self {
+        Ok(Self {
             subject_did,
             initiated_by: initiated_by.clone(),
             required_confirmations,
+            authorized_trustees,
+            claim_nonce,
             confirmations: vec![TrusteeConfirmation {
                 trustee_did: initiated_by,
+                public_key: initiator_public_key,
+                signature: initiator_signature,
                 confirmed_at: now,
             }],
-            status: DeathVerificationStatus::Pending,
+            status,
             created: now,
-            resolved_at: None,
-        }
+            resolved_at,
+        })
+    }
+
+    /// Canonical CBOR payload a trustee signs to confirm this death claim.
+    pub fn confirmation_signing_payload(
+        &self,
+        trustee_did: &Did,
+    ) -> Result<Vec<u8>, MessagingError> {
+        confirmation_signing_payload_for(
+            &self.subject_did,
+            &self.initiated_by,
+            self.required_confirmations,
+            &self.authorized_trustees,
+            &self.claim_nonce,
+            trustee_did,
+        )
     }
 
     /// Add a trustee confirmation. Returns `true` if the threshold is now met.
-    pub fn confirm(&mut self, trustee_did: Did) -> Result<bool, MessagingError> {
+    pub fn confirm(
+        &mut self,
+        trustee_did: Did,
+        trustee_public_key: PublicKey,
+        signature: Signature,
+    ) -> Result<bool, MessagingError> {
         if self.status != DeathVerificationStatus::Pending {
             return Err(MessagingError::DeathTriggerAlreadyResolved);
         }
+        let expected_public_key = *self
+            .authorized_trustees
+            .get(&trustee_did)
+            .ok_or_else(|| MessagingError::UnauthorizedTrustee(trustee_did.as_str().to_owned()))?;
 
         // Check for duplicate
         let existing: BTreeSet<String> = self
@@ -84,12 +230,21 @@ impl DeathVerification {
                 trustee_did.as_str().to_owned(),
             ));
         }
+        if expected_public_key != trustee_public_key {
+            return Err(MessagingError::SignatureVerificationFailed);
+        }
+        let signing_payload = self.confirmation_signing_payload(&trustee_did)?;
+        if !exo_core::crypto::verify(&signing_payload, &signature, &expected_public_key) {
+            return Err(MessagingError::SignatureVerificationFailed);
+        }
 
         let mut clock = HybridClock::new();
         let now = clock.now();
 
         self.confirmations.push(TrusteeConfirmation {
             trustee_did,
+            public_key: expected_public_key,
+            signature,
             confirmed_at: now,
         });
 
@@ -132,36 +287,303 @@ impl DeathVerification {
     }
 }
 
+fn validate_death_verification_request(
+    initiated_by: &Did,
+    required_confirmations: u8,
+    authorized_trustees: &BTreeMap<Did, PublicKey>,
+    claim_nonce: &[u8],
+) -> Result<(), MessagingError> {
+    if required_confirmations == 0 {
+        return Err(MessagingError::InvalidDeathVerification(
+            "required_confirmations must be at least 1".to_owned(),
+        ));
+    }
+    if authorized_trustees.is_empty() {
+        return Err(MessagingError::InvalidDeathVerification(
+            "authorized_trustees must not be empty".to_owned(),
+        ));
+    }
+    if usize::from(required_confirmations) > authorized_trustees.len() {
+        return Err(MessagingError::InsufficientConfirmations {
+            need: required_confirmations,
+            got: u8::try_from(authorized_trustees.len()).unwrap_or(u8::MAX),
+        });
+    }
+    if claim_nonce.is_empty() {
+        return Err(MessagingError::InvalidDeathVerification(
+            "claim_nonce must not be empty".to_owned(),
+        ));
+    }
+    if !authorized_trustees.contains_key(initiated_by) {
+        return Err(MessagingError::UnauthorizedTrustee(
+            initiated_by.as_str().to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use exo_core::{
+        PublicKey, Signature,
+        crypto::{KeyPair, sign},
+    };
+
     use super::*;
 
     fn did(name: &str) -> Did {
         Did::new(&format!("did:exo:{name}")).unwrap()
     }
 
+    fn keypair(seed: u8) -> KeyPair {
+        KeyPair::from_secret_bytes([seed; 32]).unwrap()
+    }
+
+    fn authorized_trustees(entries: &[(&Did, &KeyPair)]) -> BTreeMap<Did, PublicKey> {
+        entries
+            .iter()
+            .map(|(trustee_did, keypair)| ((*trustee_did).clone(), *keypair.public_key()))
+            .collect()
+    }
+
+    fn initial_signature(
+        subject: &Did,
+        initiated_by: &Did,
+        required_confirmations: u8,
+        authorized_trustees: &BTreeMap<Did, PublicKey>,
+        claim_nonce: &[u8],
+        keypair: &KeyPair,
+    ) -> Signature {
+        let payload = initial_confirmation_signing_payload(
+            subject,
+            initiated_by,
+            required_confirmations,
+            authorized_trustees,
+            claim_nonce,
+        )
+        .unwrap();
+        sign(&payload, keypair.secret_key())
+    }
+
+    fn signed_verification(
+        subject: &Did,
+        initiated_by: &Did,
+        required_confirmations: u8,
+        authorized_trustees: BTreeMap<Did, PublicKey>,
+        claim_nonce: Vec<u8>,
+        keypair: &KeyPair,
+    ) -> DeathVerification {
+        let signature = initial_signature(
+            subject,
+            initiated_by,
+            required_confirmations,
+            &authorized_trustees,
+            &claim_nonce,
+            keypair,
+        );
+        DeathVerification::new(
+            subject.clone(),
+            initiated_by.clone(),
+            required_confirmations,
+            authorized_trustees,
+            claim_nonce,
+            signature,
+        )
+        .unwrap()
+    }
+
+    fn confirmation_signature(
+        verification: &DeathVerification,
+        trustee_did: &Did,
+        keypair: &KeyPair,
+    ) -> Signature {
+        let payload = verification
+            .confirmation_signing_payload(trustee_did)
+            .unwrap();
+        sign(&payload, keypair.secret_key())
+    }
+
     #[test]
-    fn new_verification_has_initiator_confirmation() {
-        let dv = DeathVerification::new(did("alice"), did("bob"), 3);
+    fn initiator_confirmation_requires_valid_signature() {
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let nonce = b"r6-claim-1".to_vec();
+
+        let result = DeathVerification::new(
+            subject.clone(),
+            bob.clone(),
+            2,
+            authorized.clone(),
+            nonce.clone(),
+            Signature::Empty,
+        );
+        assert!(matches!(
+            result,
+            Err(MessagingError::SignatureVerificationFailed)
+        ));
+
+        let signature = initial_signature(&subject, &bob, 2, &authorized, &nonce, &bob_key);
+        let dv =
+            DeathVerification::new(subject, bob.clone(), 2, authorized, nonce, signature).unwrap();
         assert_eq!(dv.confirmations.len(), 1);
         assert_eq!(dv.confirmations[0].trustee_did, did("bob"));
+        assert_eq!(dv.confirmations[0].public_key, *bob_key.public_key());
         assert_eq!(dv.status, DeathVerificationStatus::Pending);
-        assert_eq!(dv.confirmations_remaining(), 2);
+        assert_eq!(dv.confirmations_remaining(), 1);
+    }
+
+    #[test]
+    fn unknown_trustee_confirmation_rejected() {
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let mallory = did("mallory");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let mallory_key = keypair(9);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized,
+            b"r6-claim-2".to_vec(),
+            &bob_key,
+        );
+
+        let result = dv.confirm(mallory.clone(), *mallory_key.public_key(), Signature::Empty);
+        assert!(matches!(
+            result,
+            Err(MessagingError::UnauthorizedTrustee(trustee)) if trustee == mallory.as_str()
+        ));
+    }
+
+    #[test]
+    fn wrong_key_confirmation_rejected() {
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let wrong_key = keypair(9);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized,
+            b"r6-claim-3".to_vec(),
+            &bob_key,
+        );
+        let signature = confirmation_signature(&dv, &carol, &wrong_key);
+
+        let result = dv.confirm(carol, *wrong_key.public_key(), signature);
+        assert!(matches!(
+            result,
+            Err(MessagingError::SignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn replayed_confirmation_for_different_claim_nonce_rejected() {
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let dv_a = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized.clone(),
+            b"r6-claim-a".to_vec(),
+            &bob_key,
+        );
+        let mut dv_b = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized,
+            b"r6-claim-b".to_vec(),
+            &bob_key,
+        );
+        let replayed_signature = confirmation_signature(&dv_a, &carol, &carol_key);
+
+        let result = dv_b.confirm(carol, *carol_key.public_key(), replayed_signature);
+        assert!(matches!(
+            result,
+            Err(MessagingError::SignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn tampered_verification_state_rejects_previous_signature() {
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized,
+            b"r6-claim-4".to_vec(),
+            &bob_key,
+        );
+        let signature = confirmation_signature(&dv, &carol, &carol_key);
+        dv.subject_did = did("mallory");
+
+        let result = dv.confirm(carol, *carol_key.public_key(), signature);
+        assert!(matches!(
+            result,
+            Err(MessagingError::SignatureVerificationFailed)
+        ));
     }
 
     #[test]
     fn threshold_met_triggers_verified() {
-        let mut dv = DeathVerification::new(did("alice"), did("bob"), 3);
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let dave = did("dave");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let dave_key = keypair(3);
+        let authorized =
+            authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key), (&dave, &dave_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            3,
+            authorized,
+            b"r6-claim-5".to_vec(),
+            &bob_key,
+        );
 
-        let met = dv.confirm(did("carol")).unwrap();
+        let carol_signature = confirmation_signature(&dv, &carol, &carol_key);
+        let met = dv
+            .confirm(carol.clone(), *carol_key.public_key(), carol_signature)
+            .unwrap();
         assert!(!met);
         assert_eq!(dv.confirmations_remaining(), 1);
 
-        let met = dv.confirm(did("dave")).unwrap();
+        let dave_signature = confirmation_signature(&dv, &dave, &dave_key);
+        let met = dv
+            .confirm(dave, *dave_key.public_key(), dave_signature)
+            .unwrap();
         assert!(met);
         assert_eq!(dv.status, DeathVerificationStatus::Verified);
         assert!(dv.should_release());
@@ -170,19 +592,59 @@ mod tests {
 
     #[test]
     fn duplicate_confirmation_rejected() {
-        let mut dv = DeathVerification::new(did("alice"), did("bob"), 3);
-        let result = dv.confirm(did("bob"));
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let dave = did("dave");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let dave_key = keypair(3);
+        let authorized =
+            authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key), (&dave, &dave_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            3,
+            authorized,
+            b"r6-claim-6".to_vec(),
+            &bob_key,
+        );
+        let signature = confirmation_signature(&dv, &carol, &carol_key);
+        dv.confirm(carol.clone(), *carol_key.public_key(), signature.clone())
+            .unwrap();
+
+        let result = dv.confirm(carol.clone(), *carol_key.public_key(), signature);
         assert!(matches!(
             result,
-            Err(MessagingError::DuplicateConfirmation(_))
+            Err(MessagingError::DuplicateConfirmation(trustee)) if trustee == carol.as_str()
         ));
     }
 
     #[test]
     fn cannot_confirm_after_resolved() {
-        let mut dv = DeathVerification::new(did("alice"), did("bob"), 2);
-        dv.confirm(did("carol")).unwrap(); // threshold met
-        let result = dv.confirm(did("dave"));
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let dave = did("dave");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let dave_key = keypair(3);
+        let authorized =
+            authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key), (&dave, &dave_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized,
+            b"r6-claim-7".to_vec(),
+            &bob_key,
+        );
+        let carol_signature = confirmation_signature(&dv, &carol, &carol_key);
+        dv.confirm(carol, *carol_key.public_key(), carol_signature)
+            .unwrap();
+
+        let dave_signature = confirmation_signature(&dv, &dave, &dave_key);
+        let result = dv.confirm(dave, *dave_key.public_key(), dave_signature);
         assert!(matches!(
             result,
             Err(MessagingError::DeathTriggerAlreadyResolved)
@@ -191,12 +653,26 @@ mod tests {
 
     #[test]
     fn reject_prevents_further_confirmations() {
-        let mut dv = DeathVerification::new(did("alice"), did("bob"), 3);
+        let subject = did("alice");
+        let bob = did("bob");
+        let carol = did("carol");
+        let bob_key = keypair(1);
+        let carol_key = keypair(2);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let mut dv = signed_verification(
+            &subject,
+            &bob,
+            2,
+            authorized,
+            b"r6-claim-8".to_vec(),
+            &bob_key,
+        );
         dv.reject().unwrap();
         assert_eq!(dv.status, DeathVerificationStatus::Rejected);
         assert!(!dv.should_release());
 
-        let result = dv.confirm(did("carol"));
+        let carol_signature = confirmation_signature(&dv, &carol, &carol_key);
+        let result = dv.confirm(carol, *carol_key.public_key(), carol_signature);
         assert!(matches!(
             result,
             Err(MessagingError::DeathTriggerAlreadyResolved)
@@ -205,14 +681,44 @@ mod tests {
 
     #[test]
     fn full_pace_4_trustee_flow() {
-        // Simulates the 3-of-4 PACE trustee death verification
-        let mut dv = DeathVerification::new(did("subject"), did("primary"), 3);
+        let subject = did("subject");
+        let primary = did("primary");
+        let alternate = did("alternate");
+        let contingency = did("contingency");
+        let observer = did("observer");
+        let primary_key = keypair(1);
+        let alternate_key = keypair(2);
+        let contingency_key = keypair(3);
+        let observer_key = keypair(4);
+        let authorized = authorized_trustees(&[
+            (&primary, &primary_key),
+            (&alternate, &alternate_key),
+            (&contingency, &contingency_key),
+            (&observer, &observer_key),
+        ]);
+        let mut dv = signed_verification(
+            &subject,
+            &primary,
+            3,
+            authorized,
+            b"r6-claim-9".to_vec(),
+            &primary_key,
+        );
         assert_eq!(dv.confirmations_remaining(), 2);
 
-        dv.confirm(did("alternate")).unwrap();
+        let alternate_signature = confirmation_signature(&dv, &alternate, &alternate_key);
+        dv.confirm(alternate, *alternate_key.public_key(), alternate_signature)
+            .unwrap();
         assert_eq!(dv.confirmations_remaining(), 1);
 
-        let verified = dv.confirm(did("contingency")).unwrap();
+        let contingency_signature = confirmation_signature(&dv, &contingency, &contingency_key);
+        let verified = dv
+            .confirm(
+                contingency,
+                *contingency_key.public_key(),
+                contingency_signature,
+            )
+            .unwrap();
         assert!(verified);
         assert!(dv.should_release());
         assert_eq!(dv.confirmations_remaining(), 0);

@@ -497,15 +497,14 @@ jobs:
       - name: Build WASM
         run: wasm-pack build crates/exochain-wasm --target nodejs --out-dir ../../packages/exochain-wasm/wasm
       - name: Verify WASM exports
-        # Expected export count = 136. Baseline was 110 before
+        # Expected export count = 140. Baseline was 110 before
         # decision-forum, messaging, death-trigger, and franchise/NewCo
-        # scaffold were added. See Initiative `wasm-bridge-test-coverage`
-        # — 26 new exports still need JS-side bridge_verification.mjs
-        # coverage; they are built and exported, but not round-tripped.
+        # scaffold were added. Remaining bridge coverage debt is tracked in
+        # Initiative `wasm-bridge-test-coverage`.
         run: |
           COUNT=$(grep -c "module.exports.wasm_" packages/exochain-wasm/wasm/exochain_wasm.js)
           echo "Found $COUNT WASM exports"
-          [ "$COUNT" -eq 137 ] || (echo "Expected 137 exports, got $COUNT" && exit 1)
+          [ "$COUNT" -eq 140 ] || (echo "Expected 140 exports, got $COUNT" && exit 1)
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
@@ -540,14 +539,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify Rust exports match JS expectations
-        # Expected #[wasm_bindgen] count = 136. Baseline was 110 before the
+        # Expected #[wasm_bindgen] count = 140. Baseline was 110 before the
         # Sprint-4 additions (decision-forum, messaging, death-trigger,
-        # franchise/NewCo scaffold). See initiative `wasm-bridge-test-coverage`
-        # — 26 new functions still need bridge_verification.mjs coverage.
+        # franchise/NewCo scaffold). Remaining bridge coverage debt is tracked
+        # in initiative `wasm-bridge-test-coverage`.
         run: |
           RUST_COUNT=$(grep -r '#\[wasm_bindgen\]' crates/exochain-wasm/src/ | wc -l | tr -d ' ')
           echo "Rust #[wasm_bindgen] exports: $RUST_COUNT"
-          [ "$RUST_COUNT" -eq 137 ] || (echo "WASM export count changed from 137 to $RUST_COUNT — update bridge tests" && exit 1)
+          [ "$RUST_COUNT" -eq 140 ] || (echo "WASM export count changed from 140 to $RUST_COUNT — update bridge tests" && exit 1)
 
   # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
