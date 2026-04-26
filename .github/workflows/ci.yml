@@ -237,6 +237,8 @@ jobs:
         run: bash tools/test_repo_truth.sh
       - name: CR-001 status consistency
         run: bash tools/test_cr001_status.sh
+      - name: GAP registry truth
+        run: bash tools/test_gap_registry_truth.sh
 
   # -----------------------------------------------------------------------
   # Gate 10: SBOM (dry-run generation — no upload, validates toolchain)
