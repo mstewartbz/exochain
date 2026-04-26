@@ -1313,7 +1313,8 @@ test('wasm_verify_quorum_precondition', () => {
   return wasm.wasm_verify_quorum_precondition(
     JSON.stringify(registry),
     JSON.stringify('Operational'),
-    3
+    3,
+    1
   );
 });
 

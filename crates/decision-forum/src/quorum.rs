@@ -153,16 +153,18 @@ pub fn check_quorum(
 }
 
 /// Verify quorum preconditions BEFORE a vote is initiated (TNC-07).
-/// Returns true if enough eligible voters exist to potentially meet quorum.
+/// Returns true if enough eligible voters and eligible human voters exist to
+/// potentially meet quorum.
 pub fn verify_quorum_precondition(
     registry: &QuorumRegistry,
     class: DecisionClass,
     eligible_voters: usize,
+    eligible_human_voters: usize,
 ) -> Result<bool> {
     let req = registry
         .requirement_for(class)
         .ok_or(ForumError::QuorumPolicyMissing)?;
-    Ok(eligible_voters >= req.min_votes)
+    Ok(eligible_voters >= req.min_votes && eligible_human_voters >= req.min_human_votes)
 }
 
 #[cfg(test)]
@@ -319,9 +321,30 @@ mod tests {
     #[test]
     fn verify_precondition() {
         let reg = QuorumRegistry::with_defaults();
-        assert!(verify_quorum_precondition(&reg, DecisionClass::Routine, 1).expect("ok"));
-        assert!(!verify_quorum_precondition(&reg, DecisionClass::Operational, 2).expect("ok"));
-        assert!(verify_quorum_precondition(&reg, DecisionClass::Operational, 3).expect("ok"));
+        assert!(verify_quorum_precondition(&reg, DecisionClass::Routine, 1, 0).expect("ok"));
+        assert!(!verify_quorum_precondition(&reg, DecisionClass::Operational, 2, 1).expect("ok"));
+        assert!(!verify_quorum_precondition(&reg, DecisionClass::Operational, 3, 0).expect("ok"));
+        assert!(verify_quorum_precondition(&reg, DecisionClass::Operational, 3, 1).expect("ok"));
+    }
+
+    #[test]
+    fn strategic_precondition_rejects_when_human_floor_is_impossible() {
+        let reg = QuorumRegistry::with_defaults();
+
+        assert!(
+            !verify_quorum_precondition(&reg, DecisionClass::Strategic, 5, 0).expect("ok"),
+            "strategic class requires three eligible human voters"
+        );
+    }
+
+    #[test]
+    fn constitutional_precondition_rejects_when_human_floor_is_impossible() {
+        let reg = QuorumRegistry::with_defaults();
+
+        assert!(
+            !verify_quorum_precondition(&reg, DecisionClass::Constitutional, 7, 4).expect("ok"),
+            "constitutional class requires five eligible human voters"
+        );
     }
 
     #[test]

@@ -71,7 +71,7 @@ fn vote_accepted_quorum_status_met() {
 
     // Verify precondition: 1 eligible voter satisfies Routine (min 1).
     let precondition_ok =
-        verify_quorum_precondition(&registry, decision.class, 1).expect("precondition ok");
+        verify_quorum_precondition(&registry, decision.class, 1, 1).expect("precondition ok");
     assert!(
         precondition_ok,
         "precondition should pass with 1 eligible voter"

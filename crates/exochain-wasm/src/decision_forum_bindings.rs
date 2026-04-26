@@ -552,11 +552,17 @@ pub fn wasm_verify_quorum_precondition(
     registry_json: &str,
     class_json: &str,
     eligible_voters: usize,
+    eligible_human_voters: usize,
 ) -> Result<bool, JsValue> {
     let registry: decision_forum::quorum::QuorumRegistry = from_json_str(registry_json)?;
     let class: decision_forum::decision_object::DecisionClass = from_json_str(class_json)?;
-    decision_forum::quorum::verify_quorum_precondition(&registry, class, eligible_voters)
-        .map_err(|e| JsValue::from_str(&format!("Precondition error: {e}")))
+    decision_forum::quorum::verify_quorum_precondition(
+        &registry,
+        class,
+        eligible_voters,
+        eligible_human_voters,
+    )
+    .map_err(|e| JsValue::from_str(&format!("Precondition error: {e}")))
 }
 
 // ── Emergency Protocol ───────────────────────────────────────────
