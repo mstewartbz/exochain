@@ -1,7 +1,7 @@
 # EXOCHAIN Architecture
 
 > **Version:** 0.1.0 | **Status:** Living Document | **Last verified:** 2026-03-18
-> **Codebase:** 16 crates | 18,705 lines of Rust | 111 source files | 1,846 tests | 0 failures
+> **Codebase:** 20 workspace packages | 111606 lines of Rust under `crates/` | 273 Rust source files | 2,687 listed tests
 
 ---
 

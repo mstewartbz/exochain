@@ -69,7 +69,7 @@ All refactor work flows through the Syntaxis Builder system:
 - [x] Implement Section 8 work orders from CR-001
 - [x] Achieve release-blocking acceptance standard (CR-001 Section 9)
 
-> **Completion notes**: All CR-001 Section 8 work orders implemented. 16 crates, 29,587 LOC, 1,846 tests, 0 failures. Traceability matrix 75/75 complete. Threat matrix 13/13 mitigated. 90% coverage target enforced via CI. Post-quantum signature support (Ed25519/PostQuantum/Hybrid) implemented.
+> **Completion notes**: Historical March 2026 completion claim; superseded numerically by Wave E Basalt. Current measured state is 20 workspace packages, 111606 Rust LOC under `crates/`, 2,687 listed workspace tests, 20 numbered CI gates plus aggregator, traceability rows at 83 implemented / 1 partial / 2 planned, and threat matrix rows at 14 implemented / 0 partial / 0 planned. Post-quantum signature support (Ed25519/PostQuantum/Hybrid) is implemented.
 
 ## Active Resolutions
 
