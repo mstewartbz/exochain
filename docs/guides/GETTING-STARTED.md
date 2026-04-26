@@ -252,7 +252,7 @@ A new operation type must be:
 
 ## Running the full quality gate locally
 
-Before pushing, run all 8 gates CI enforces per [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] §8.8:
+Before pushing, run the core local checks behind the CI gates tracked against [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] §8.8:
 
 ```bash
 cargo build --workspace --release

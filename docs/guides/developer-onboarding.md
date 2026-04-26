@@ -450,7 +450,7 @@ CR-001:
 |---------------------------------------------------------|---------------------------------------------------------|
 | [`../../governance/traceability_matrix.md`](../../governance/traceability_matrix.md) | 87 requirements, each mapped to crate/module/tests/status |
 | [`../../governance/threat_matrix.md`](../../governance/threat_matrix.md) | 14 threats with mitigation references                    |
-| [`../../governance/quality_gates.md`](../../governance/quality_gates.md) | The 16 CI-enforced gates                                 |
+| [`../../governance/quality_gates.md`](../../governance/quality_gates.md) | The 20 numbered CI gates plus required aggregator         |
 | [`../../governance/resolutions/CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY.md`](../../governance/resolutions/CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY.md) | The AEGIS / SYBIL resolution (draft, pending ratification) |
 | [`../../governance/sub_agents.md`](../../governance/sub_agents.md) | 11 sub-agent charters with ownership boundaries          |
 | [`../../governance/EXOCHAIN-REFACTOR-PLAN.md`](../../governance/EXOCHAIN-REFACTOR-PLAN.md) | Active refactor roadmap                                  |

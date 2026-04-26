@@ -42,7 +42,7 @@ All gates are automated in `.github/workflows/ci.yml`. PRs cannot merge until al
 
 ### CR-001 Section 8.8 Release-Blocking Gates
 
-The following gates are release-blocking per the ratified CR-001 resolution:
+The following gates are release-blocking per the draft CR-001 release-blocking criteria:
 
 * 90% minimum line coverage across all crates
 * Zero test failures across the full workspace

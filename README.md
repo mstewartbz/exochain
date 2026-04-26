@@ -84,7 +84,7 @@ Layer 5: ExoForge           (exoforge/)
 1. **Identity Adjudication** — Decentralized identity with cryptographic proof, not administrative fiat.
 2. **Data Sovereignty** — Data belongs to its subject; consent is explicit, revocable, and auditable.
 3. **Deterministic Finality** — Every operation is reproducible and verifiable; no floating-point arithmetic permitted.
-4. **Constitutional Governance** — All system behavior is governed by ratified resolutions (CR-001 AEGIS/SYBIL framework).
+4. **Constitutional Governance** — System behavior is governed by the constitutional specification and draft CR-001 AEGIS/SYBIL framework pending council ratification.
 5. **Authentic Plurality** — Sybil-resistant participation ensuring one-entity-one-voice integrity.
 
 ## Repository Structure
@@ -118,7 +118,7 @@ Layer 5: ExoForge           (exoforge/)
 
 * **`governance/`** — Council resolutions, sub-agent charters, traceability matrices, quality gates
 * **`docs/`** — Architecture, guides, council panel reports, proofs, reference documentation
-* **`.github/workflows/`** — CI pipeline (16 quality gates), release workflow, ExoForge triage
+* **`.github/workflows/`** — CI pipeline (20 numbered quality gates plus required aggregator), release workflow, ExoForge triage
 
 ## Governance & Compliance
 
