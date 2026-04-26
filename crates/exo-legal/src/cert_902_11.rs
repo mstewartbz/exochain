@@ -190,6 +190,7 @@ fn compute_cert_hash(
 #[cfg(test)]
 mod tests {
     use exo_core::{Did, Timestamp};
+    use uuid::Uuid;
 
     use super::*;
     use crate::evidence::create_evidence;
@@ -204,6 +205,7 @@ mod tests {
 
     fn make_evidence() -> Evidence {
         create_evidence(
+            Uuid::from_u128(0x90211),
             b"board-minutes",
             &did("secretary"),
             "board-minutes",
@@ -325,7 +327,14 @@ mod tests {
         let mut ev = make_evidence();
         let cert_before = generate_902_11_cert(&ev, SYSTEM_DESC, 1_000).unwrap();
 
-        transfer_custody(&mut ev, &did("secretary"), &did("counsel")).unwrap();
+        transfer_custody(
+            &mut ev,
+            &did("secretary"),
+            &did("counsel"),
+            real_ts(1_700_000_000_100),
+            "certification transfer",
+        )
+        .unwrap();
         let cert_after = generate_902_11_cert(&ev, SYSTEM_DESC, 2_000).unwrap();
 
         assert_ne!(

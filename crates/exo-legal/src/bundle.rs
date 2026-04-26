@@ -729,6 +729,8 @@ pub fn sign(
 mod tests {
     use std::collections::BTreeMap;
 
+    use uuid::Uuid;
+
     use super::*;
     use crate::{cert_902_11::generate_902_11_cert, evidence::create_evidence};
 
@@ -779,7 +781,14 @@ mod tests {
     }
 
     fn make_evidence_item() -> Evidence {
-        create_evidence(b"test-data", &did("bob"), "document", ts(900)).unwrap()
+        create_evidence(
+            Uuid::from_u128(0x900),
+            b"test-data",
+            &did("bob"),
+            "document",
+            ts(900),
+        )
+        .unwrap()
     }
 
     fn make_anchor() -> DagAnchor {

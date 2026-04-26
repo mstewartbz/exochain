@@ -411,8 +411,14 @@ fn test_create_emergency_action_round_trip() {
 
 #[wasm_bindgen_test]
 fn test_create_record_active_disposition() {
-    let result = exochain_wasm::wasm_create_record(b"document contents", "Confidential", 365)
-        .expect("create_record");
+    let result = exochain_wasm::wasm_create_record(
+        b"document contents",
+        "Confidential",
+        365,
+        "00000000-0000-0000-0000-000000000365",
+        1_700_000_000_000,
+    )
+    .expect("create_record");
     let json = js_to_json(result);
     assert_eq!(json["retention_period_days"].as_u64().unwrap(), 365);
     assert_eq!(json["disposition"].as_str().unwrap(), "Active");

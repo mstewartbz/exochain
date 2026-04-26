@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn period_filtering_applies() {
         let mut log = McpAuditLog::new();
-        // records will get Timestamp::now_utc() which is >> ts(500)
+        // MCP audit records use caller-supplied HLC timestamps that are beyond ts(500).
         let r = create_record(
             &log,
             McpRule::Mcp001BctsScope,
