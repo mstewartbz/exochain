@@ -895,16 +895,28 @@ mod tests {
 
     #[test]
     fn challenges_message_with_hold() {
-        use exo_escalation::challenge::{self, SybilChallengeGround};
+        use exo_escalation::challenge::{
+            self, ChallengeAdmission, SybilChallengeGround, sign_challenge_admission,
+        };
 
         let store: SharedChallengeStore = Arc::new(Mutex::new(ChallengeStore::new()));
         {
             let mut st = store.lock().unwrap();
+            let keypair = exo_core::crypto::KeyPair::from_secret_bytes([7u8; 32]).unwrap();
+            let admission = ChallengeAdmission {
+                hold_id: uuid::Uuid::from_bytes([1u8; 16]),
+                action_id: [1u8; 32],
+                ground: SybilChallengeGround::QuorumContamination,
+                admitted_at: exo_core::types::Timestamp::new(1000, 0),
+                admitted_by: Did::new("did:exo:reviewer").unwrap(),
+                admitter_public_key: *keypair.public_key(),
+                evidence_hash: [0xEEu8; 32],
+                authority_chain_hash: [0xACu8; 32],
+            };
             let hold = challenge::admit_challenge(
-                &[1u8; 32],
-                SybilChallengeGround::QuorumContamination,
-                exo_core::types::Timestamp::new(1000, 0),
-            );
+                sign_challenge_admission(admission, keypair.secret_key()).unwrap(),
+            )
+            .unwrap();
             st.insert(hold);
         }
         let (text, _) = build_challenges_message(&store);
