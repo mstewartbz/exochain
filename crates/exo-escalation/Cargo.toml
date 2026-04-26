@@ -15,6 +15,7 @@ workspace = true
 exo-core = { path = "../exo-core" }
 exo-identity = { path = "../exo-identity" }
 exo-governance = { path = "../exo-governance" }
+ciborium = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

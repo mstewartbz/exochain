@@ -12,10 +12,15 @@
 
 use exo_core::{Did, Timestamp};
 use exo_escalation::{
-    challenge::{ContestStatus, SybilChallengeGround, admit_challenge, begin_review, resolve_hold},
+    challenge::{
+        ChallengeAdmission, ContestStatus, SignedChallengeAdmission, SybilChallengeGround,
+        admit_challenge, begin_review, resolve_hold, sign_challenge_admission,
+    },
     completeness::{CompletenessResult, check_completeness},
     detector::{DetectionSignal, Severity, SignalType, evaluate_signals},
-    escalation::{EscalationPath, SybilStage, advance_sybil_stage, escalate, reinstate},
+    escalation::{
+        EscalationCaseInput, EscalationPath, SybilStage, advance_sybil_stage, escalate, reinstate,
+    },
     triage::{TriageLevel, triage},
 };
 use exo_gatekeeper::{
@@ -39,6 +44,51 @@ fn did(s: &str) -> Did {
 
 fn ts(ms: u64) -> Timestamp {
     Timestamp::new(ms, 0)
+}
+
+fn uuid(byte: u8) -> uuid::Uuid {
+    uuid::Uuid::from_bytes([byte; 16])
+}
+
+fn keypair(seed: u8) -> exo_core::crypto::KeyPair {
+    exo_core::crypto::KeyPair::from_secret_bytes([seed; 32]).expect("valid keypair")
+}
+
+fn escalation_input(
+    id_marker: u8,
+    signal: DetectionSignal,
+    path: EscalationPath,
+    created_ms: u64,
+) -> EscalationCaseInput {
+    EscalationCaseInput {
+        id: uuid(id_marker),
+        created: ts(created_ms),
+        signal,
+        path,
+    }
+}
+
+fn signed_challenge(
+    hold_marker: u8,
+    action_id: [u8; 32],
+    ground: SybilChallengeGround,
+    admitted_at: Timestamp,
+) -> SignedChallengeAdmission {
+    let keypair = keypair(7);
+    sign_challenge_admission(
+        ChallengeAdmission {
+            hold_id: uuid(hold_marker),
+            action_id,
+            ground,
+            admitted_at,
+            admitted_by: did("did:exo:reviewer"),
+            admitter_public_key: *keypair.public_key(),
+            evidence_hash: [0xEEu8; 32],
+            authority_chain_hash: [0xACu8; 32],
+        },
+        keypair.secret_key(),
+    )
+    .expect("valid challenge admission")
 }
 
 /// Build a fully valid `AdjudicationContext`.  Pass `Some(reason)` to inject
@@ -116,7 +166,13 @@ fn full_detection_to_reinstatement_flow() {
     );
 
     // ── Open escalation case (Detection stage logged) ─────────────────────────
-    let mut case = escalate(&signal, &EscalationPath::SybilAdjudication);
+    let mut case = escalate(escalation_input(
+        1,
+        signal.clone(),
+        EscalationPath::SybilAdjudication,
+        1_050,
+    ))
+    .unwrap();
     assert!(case.stages_completed.contains(&"Detection".to_string()));
 
     // ── Stage 2 (case): Triage ────────────────────────────────────────────────
@@ -124,11 +180,13 @@ fn full_detection_to_reinstatement_flow() {
 
     // ── Stage 3: Quarantine — admit challenge hold ────────────────────────────
     let action_id = [0x01u8; 32];
-    let mut hold = admit_challenge(
-        &action_id,
+    let mut hold = admit_challenge(signed_challenge(
+        2,
+        action_id,
         SybilChallengeGround::ConcealedCommonControl,
         ts(1_100),
-    );
+    ))
+    .unwrap();
     assert_eq!(hold.status, ContestStatus::PauseEligible);
     advance_sybil_stage(&mut case, SybilStage::Quarantine).unwrap();
 
@@ -194,11 +252,13 @@ fn quarantine_pauses_contested_actions_via_kernel() {
 
     // Admit challenge → derive escalation reason
     let action_id = [0x02u8; 32];
-    let hold = admit_challenge(
-        &action_id,
+    let hold = admit_challenge(signed_challenge(
+        3,
+        action_id,
         SybilChallengeGround::QuorumContamination,
         ts(2_000),
-    );
+    ))
+    .unwrap();
     let reason = hold.escalation_reason();
     assert!(reason.contains("SybilChallenge"));
 
@@ -238,7 +298,13 @@ fn reinstatement_refuses_zero_hash_evidence() {
         evidence_hash: [0x01u8; 32],
         timestamp: ts(3_000),
     };
-    let mut case = escalate(&signal, &EscalationPath::SybilAdjudication);
+    let mut case = escalate(escalation_input(
+        4,
+        signal,
+        EscalationPath::SybilAdjudication,
+        3_100,
+    ))
+    .unwrap();
     for stage in [
         SybilStage::Triage,
         SybilStage::Quarantine,

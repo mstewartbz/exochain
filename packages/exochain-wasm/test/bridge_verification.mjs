@@ -43,6 +43,7 @@ function setup(fn) {
 // Convenience constants
 const ZERO_32_HEX   = '0'.repeat(64);
 const ZERO_32_BYTES = Array.from({ length: 32 }, () => 0);
+const EVIDENCE_32_BYTES = Array.from({ length: 32 }, () => 0xee);
 const TEST_DID      = 'did:exo:test-actor';
 const TEST_DID_2    = 'did:exo:test-actor-2';
 const TEST_DID_3    = 'did:exo:test-actor-3';
@@ -607,12 +608,16 @@ test('wasm_escalate', () => {
     source: TEST_DID,
     signal_type: 'AnomalousPattern',
     confidence: 80,
-    evidence_hash: ZERO_32_BYTES,
+    evidence_hash: EVIDENCE_32_BYTES,
     timestamp: NOW_TS
   };
-  // EscalationPath is an enum: Standard, SybilAdjudication, Emergency, Constitutional
-  const path = JSON.stringify('Standard');
-  return wasm.wasm_escalate(JSON.stringify(signal), path);
+  const input = {
+    id: '11111111-1111-1111-1111-111111111111',
+    created: NOW_TS,
+    signal,
+    path: 'Standard'
+  };
+  return wasm.wasm_escalate(JSON.stringify(input));
 });
 
 const escCase = setup(() => {
@@ -620,12 +625,16 @@ const escCase = setup(() => {
     source: TEST_DID,
     signal_type: 'AnomalousPattern',
     confidence: 80,
-    evidence_hash: ZERO_32_BYTES,
+    evidence_hash: EVIDENCE_32_BYTES,
     timestamp: NOW_TS
   };
-  // EscalationPath is an enum: Standard, SybilAdjudication, Emergency, Constitutional
-  const path = JSON.stringify('Standard');
-  return wasm.wasm_escalate(JSON.stringify(signal), path);
+  const input = {
+    id: '22222222-2222-2222-2222-222222222222',
+    created: NOW_TS,
+    signal,
+    path: 'Standard'
+  };
+  return wasm.wasm_escalate(JSON.stringify(input));
 });
 
 test('wasm_check_completeness', () => {
