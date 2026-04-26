@@ -8,7 +8,6 @@
  */
 
 import { createRequire } from 'node:module';
-import { randomUUID }    from 'node:crypto';
 const require = createRequire(import.meta.url);
 const wasm = require('../wasm/exochain_wasm.js');
 
@@ -42,6 +41,7 @@ function setup(fn) {
 
 // Convenience constants
 const ZERO_32_HEX   = '0'.repeat(64);
+const NONZERO_32_HEX = '11'.repeat(32);
 const ZERO_32_BYTES = Array.from({ length: 32 }, () => 0);
 const EVIDENCE_32_BYTES = Array.from({ length: 32 }, () => 0xee);
 const TEST_DID      = 'did:exo:test-actor';
@@ -54,8 +54,10 @@ const TEXT_BYTES     = new TextEncoder().encode('hello');
 const DUMMY_SECRET_HEX = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
 const DUMMY_SECRET_HEX_2 = '1111111111111111111111111111111111111111111111111111111111111111';
 const DUMMY_SECRET_HEX_3 = '2222222222222222222222222222222222222222222222222222222222222222';
-const UUID_1 = randomUUID();
-const UUID_2 = randomUUID();
+const UUID_1 = '00000000-0000-0000-0000-000000000001';
+const UUID_2 = '00000000-0000-0000-0000-000000000002';
+const UUID_3 = '00000000-0000-0000-0000-000000000003';
+const UUID_4 = '00000000-0000-0000-0000-000000000004';
 
 // Pre-compute a valid Ed25519 keypair result for reuse
 const ephResult = wasm.wasm_sign_with_ephemeral_key(TEXT_BYTES);
@@ -264,10 +266,10 @@ test('wasm_death_verification_confirm', () => {
 console.log('\n--- Legal / Records / Evidence ---');
 
 test('wasm_create_record', () =>
-  wasm.wasm_create_record(TEXT_BYTES, 'Confidential', BigInt(365)));
+  wasm.wasm_create_record(TEXT_BYTES, 'Confidential', BigInt(365), UUID_1, NOW_MS));
 
 test('wasm_apply_retention', () => {
-  const rec = wasm.wasm_create_record(TEXT_BYTES, 'Confidential', BigInt(365));
+  const rec = wasm.wasm_create_record(TEXT_BYTES, 'Confidential', BigInt(365), UUID_2, NOW_MS);
   const policy = {
     default_retention_days: 365,
     rules: { Confidential: 365 }
@@ -280,24 +282,25 @@ test('wasm_apply_retention', () => {
 });
 
 test('wasm_create_evidence', () =>
-  wasm.wasm_create_evidence(TEXT_BYTES, 'Document', TEST_DID));
+  wasm.wasm_create_evidence(TEXT_BYTES, 'Document', TEST_DID, UUID_3, NOW_MS));
 
 const evidence = setup(() =>
-  wasm.wasm_create_evidence(TEXT_BYTES, 'Document', TEST_DID));
+  wasm.wasm_create_evidence(TEXT_BYTES, 'Document', TEST_DID, UUID_3, NOW_MS));
 
 test('wasm_verify_chain_of_custody', () => {
   if (!evidence) throw new Error('skipped -- no evidence from setup');
   return wasm.wasm_verify_chain_of_custody(JSON.stringify(evidence));
 });
 
-const evidenceId = (evidence && evidence.evidence_id) || UUID_1;
+const evidenceId = (evidence && evidence.id) || UUID_3;
 
 test('wasm_assert_privilege', () =>
   wasm.wasm_assert_privilege(
     evidenceId,
     JSON.stringify('AttorneyClient'),
     TEST_DID,
-    'Legal advice communication'
+    'Legal advice communication',
+    NOW_MS
   ));
 
 const assertion = setup(() =>
@@ -305,7 +308,8 @@ const assertion = setup(() =>
     evidenceId,
     JSON.stringify('AttorneyClient'),
     TEST_DID,
-    'Legal advice communication'
+    'Legal advice communication',
+    NOW_MS
   ));
 
 test('wasm_challenge_privilege', () => {
@@ -313,7 +317,8 @@ test('wasm_challenge_privilege', () => {
   return wasm.wasm_challenge_privilege(
     JSON.stringify(assertion),
     TEST_DID_2,
-    'Crime-fraud exception'
+    'Crime-fraud exception',
+    NOW_MS
   );
 });
 
@@ -356,20 +361,22 @@ console.log('\n--- Safe Harbor ---');
 
 test('wasm_initiate_safe_harbor', () =>
   wasm.wasm_initiate_safe_harbor(
+    UUID_4,
     TEST_DID,
     TEST_DID_2,
     'Board member is counterparty',
-    ZERO_32_HEX,
+    NONZERO_32_HEX,
     JSON.stringify('BoardApproval'),
     NOW_MS
   ));
 
 const shTxn = setup(() =>
   wasm.wasm_initiate_safe_harbor(
+    UUID_4,
     TEST_DID,
     TEST_DID_2,
     'Board member is counterparty',
-    ZERO_32_HEX,
+    NONZERO_32_HEX,
     JSON.stringify('BoardApproval'),
     NOW_MS
   ));

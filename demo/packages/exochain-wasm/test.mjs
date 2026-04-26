@@ -253,7 +253,9 @@ test('create_evidence produces evidence object', () => {
   const evidence = wasm.wasm_create_evidence(
     new Uint8Array([10, 20, 30]),
     'document',
-    'did:exo:creator'
+    'did:exo:creator',
+    '00000000-0000-0000-0000-000000000010',
+    BigInt(1700000000000)
   );
   assert(evidence, 'should return evidence');
 });
