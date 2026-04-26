@@ -38,6 +38,12 @@ pub enum CatapultError {
     FranchiseAlreadyExists(Uuid),
     #[error("newco already exists: {0}")]
     NewcoAlreadyExists(Uuid),
+    #[error("invalid franchise receipt: {reason}")]
+    InvalidReceipt { reason: String },
+    #[error("franchise receipt serialization failed: {reason}")]
+    ReceiptSerializationFailed { reason: String },
+    #[error("franchise receipt chain broken at index {index}")]
+    ReceiptChainBroken { index: usize },
 }
 
 /// Convenience alias for results with [`CatapultError`].
@@ -74,6 +80,13 @@ mod tests {
             CatapultError::DuplicateGoal(Uuid::nil()),
             CatapultError::FranchiseAlreadyExists(Uuid::nil()),
             CatapultError::NewcoAlreadyExists(Uuid::nil()),
+            CatapultError::InvalidReceipt {
+                reason: "bad receipt".into(),
+            },
+            CatapultError::ReceiptSerializationFailed {
+                reason: "bad cbor".into(),
+            },
+            CatapultError::ReceiptChainBroken { index: 3 },
         ];
         for e in &es {
             assert!(!e.to_string().is_empty());

@@ -39,4 +39,4 @@ pub use heartbeat::{HeartbeatMonitor, HeartbeatRecord, HeartbeatStatus};
 pub use newco::{Newco, NewcoStatus};
 pub use oda::{MosCode, OdaSlot};
 pub use phase::OperationalPhase;
-pub use receipt::{FranchiseOperation, FranchiseReceipt};
+pub use receipt::{FranchiseOperation, FranchiseReceipt, FranchiseReceiptInput, ReceiptChain};

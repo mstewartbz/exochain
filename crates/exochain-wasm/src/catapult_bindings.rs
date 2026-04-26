@@ -323,31 +323,21 @@ pub fn wasm_goal_alignment_score(tree_json: &str) -> Result<u32, JsValue> {
 /// Generate a franchise trust receipt for an operation.
 #[wasm_bindgen]
 pub fn wasm_generate_franchise_receipt(
-    newco_id: &str,
-    operation_json: &str,
-    actor_did: &str,
+    _newco_id: &str,
+    _operation_json: &str,
+    _actor_did: &str,
 ) -> Result<JsValue, JsValue> {
-    let id: uuid::Uuid = newco_id
-        .parse()
-        .map_err(|e| JsValue::from_str(&format!("UUID error: {e}")))?;
-    let operation: exo_catapult::FranchiseOperation = from_json_str(operation_json)?;
-    let actor =
-        exo_core::Did::new(actor_did).map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-
-    let receipt = exo_catapult::FranchiseReceipt::new(
-        id,
-        operation,
-        actor,
-        exo_core::Timestamp::ZERO,
-        exo_core::Hash256::digest(b"state"),
-        exo_core::Hash256::ZERO,
-    );
-    to_js_value(&receipt)
+    Err(JsValue::from_str(
+        "wasm_generate_franchise_receipt requires a server-side Ed25519 signer \
+         and is disabled by default; see Initiatives/fix-scaffold-r1-catapult-receipt-signing.md",
+    ))
 }
 
 /// Verify a franchise receipt chain's integrity.
 #[wasm_bindgen]
 pub fn wasm_verify_franchise_receipt_chain(chain_json: &str) -> Result<bool, JsValue> {
     let chain: exo_catapult::receipt::ReceiptChain = from_json_str(chain_json)?;
-    Ok(chain.verify_chain())
+    chain
+        .verify_chain()
+        .map_err(|e| JsValue::from_str(&format!("Receipt chain verification error: {e}")))
 }

@@ -1330,6 +1330,7 @@ dependencies = [
 name = "exo-catapult"
 version = "0.1.0-beta"
 dependencies = [
+ "ciborium",
  "exo-authority",
  "exo-consent",
  "exo-core",
