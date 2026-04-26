@@ -19,6 +19,12 @@ pub enum ConsensusError {
 
     #[error("State error: {0}")]
     StateError(String),
+
+    #[error("Hash serialization failed for {context}: {source}")]
+    HashSerialization {
+        context: &'static str,
+        source: exo_core::error::ExoError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ConsensusError>;
