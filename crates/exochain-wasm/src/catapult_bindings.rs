@@ -4,6 +4,61 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+fn parse_uuid(value: &str, label: &str) -> Result<uuid::Uuid, JsValue> {
+    let id: uuid::Uuid = value
+        .parse()
+        .map_err(|e| JsValue::from_str(&format!("{label} UUID error: {e}")))?;
+    if id.is_nil() {
+        return Err(JsValue::from_str(&format!(
+            "{label} UUID must be caller-supplied and non-nil"
+        )));
+    }
+    Ok(id)
+}
+
+fn parse_hash_hex(value: &str, label: &str) -> Result<exo_core::Hash256, JsValue> {
+    let hash_bytes =
+        hex::decode(value).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?;
+    let hash_arr: [u8; 32] = hash_bytes
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!("{label} hash must be 32 bytes")))?;
+    let hash = exo_core::Hash256::from_bytes(hash_arr);
+    if hash.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(JsValue::from_str(&format!(
+            "{label} hash must be caller-supplied and nonzero"
+        )));
+    }
+    Ok(hash)
+}
+
+fn parse_timestamp(
+    physical_ms: u64,
+    logical: u32,
+    label: &str,
+) -> Result<exo_core::Timestamp, JsValue> {
+    if physical_ms == 0 && logical == 0 {
+        return Err(JsValue::from_str(&format!(
+            "{label} timestamp must be caller-supplied HLC"
+        )));
+    }
+    Ok(exo_core::Timestamp {
+        physical_ms,
+        logical,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct WasmNewcoInstantiationInput {
+    name: String,
+    newco_id: String,
+    tenant_id: String,
+    dag_anchor_hex: String,
+    created_physical_ms: u64,
+    created_logical: u32,
+    hr_did: String,
+    researcher_did: String,
+}
+
 // ---------------------------------------------------------------------------
 // Franchise Blueprints
 // ---------------------------------------------------------------------------
@@ -14,28 +69,26 @@ pub fn wasm_create_franchise_blueprint(
     name: &str,
     business_model_json: &str,
     constitution_hash_hex: &str,
+    blueprint_id: &str,
+    description: &str,
+    created_physical_ms: u64,
+    created_logical: u32,
 ) -> Result<JsValue, JsValue> {
     let business_model: exo_catapult::BusinessModel = from_json_str(business_model_json)?;
-    let hash_bytes =
-        hex::decode(constitution_hash_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let hash_arr: [u8; 32] = hash_bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("constitution hash must be 32 bytes"))?;
-    let constitution_hash = exo_core::Hash256::from_bytes(hash_arr);
-
-    let blueprint = exo_catapult::FranchiseBlueprint {
-        id: uuid::Uuid::new_v4(),
+    let constitution_hash = parse_hash_hex(constitution_hash_hex, "constitution")?;
+    let blueprint = exo_catapult::FranchiseBlueprint::new(exo_catapult::FranchiseBlueprintInput {
+        id: parse_uuid(blueprint_id, "blueprint")?,
         name: name.to_owned(),
         version: exo_core::Version::ZERO.next(),
-        description: String::new(),
+        description: description.to_owned(),
         business_model,
         constitution_hash,
         required_slots: exo_catapult::OdaSlot::ALL.to_vec(),
         budget_template: exo_catapult::budget::BudgetTemplate::default(),
         goal_template: exo_catapult::goal::GoalTemplate::default(),
-        created: exo_core::Timestamp::ZERO,
-        content_hash: exo_core::Hash256::ZERO,
-    };
+        created: parse_timestamp(created_physical_ms, created_logical, "blueprint created")?,
+    })
+    .map_err(|e| JsValue::from_str(&format!("Blueprint error: {e}")))?;
     to_js_value(&blueprint)
 }
 
@@ -53,26 +106,38 @@ pub fn wasm_list_franchise_blueprints(registry_json: &str) -> Result<JsValue, Js
 
 /// Instantiate a new company from a franchise blueprint with founding agents.
 #[wasm_bindgen]
-pub fn wasm_instantiate_newco(
-    blueprint_json: &str,
-    name: &str,
-    hr_did: &str,
-    researcher_did: &str,
-) -> Result<JsValue, JsValue> {
+pub fn wasm_instantiate_newco(blueprint_json: &str, input_json: &str) -> Result<JsValue, JsValue> {
     let blueprint: exo_catapult::FranchiseBlueprint = from_json_str(blueprint_json)?;
-    let hr =
-        exo_core::Did::new(hr_did).map_err(|e| JsValue::from_str(&format!("HR DID error: {e}")))?;
-    let researcher = exo_core::Did::new(researcher_did)
+    let input: WasmNewcoInstantiationInput = from_json_str(input_json)?;
+    if !blueprint
+        .verify_content_hash()
+        .map_err(|e| JsValue::from_str(&format!("Blueprint verification error: {e}")))?
+    {
+        return Err(JsValue::from_str(
+            "Blueprint content hash does not match canonical payload",
+        ));
+    }
+    let hr = exo_core::Did::new(&input.hr_did)
+        .map_err(|e| JsValue::from_str(&format!("HR DID error: {e}")))?;
+    let researcher = exo_core::Did::new(&input.researcher_did)
         .map_err(|e| JsValue::from_str(&format!("Researcher DID error: {e}")))?;
+    let created = parse_timestamp(
+        input.created_physical_ms,
+        input.created_logical,
+        "newco created",
+    )?;
 
-    let mut newco = exo_catapult::newco::Newco::new(
-        name.to_owned(),
-        blueprint.id,
-        uuid::Uuid::new_v4(),
-        blueprint.constitution_hash,
-        hr.clone(),
-        exo_core::Timestamp::ZERO,
-    );
+    let mut newco = exo_catapult::newco::Newco::new(exo_catapult::newco::NewcoInput {
+        id: parse_uuid(&input.newco_id, "newco")?,
+        name: input.name,
+        franchise_id: blueprint.id,
+        tenant_id: parse_uuid(&input.tenant_id, "tenant")?,
+        constitution_hash: blueprint.constitution_hash,
+        authority_chain_root: hr.clone(),
+        dag_anchor: parse_hash_hex(&input.dag_anchor_hex, "DAG anchor")?,
+        created,
+    })
+    .map_err(|e| JsValue::from_str(&format!("Newco error: {e}")))?;
 
     // Hire founding agents
     let hr_agent = exo_catapult::CatapultAgent {
@@ -81,10 +146,10 @@ pub fn wasm_instantiate_newco(
         display_name: "HR / People Ops 1".into(),
         capabilities: vec!["assessment".into(), "selection".into(), "talent".into()],
         status: exo_catapult::AgentStatus::Active,
-        last_heartbeat: exo_core::Timestamp::ZERO,
+        last_heartbeat: created,
         budget_spent_cents: 0,
         budget_limit_cents: 1_000_000,
-        hired_at: exo_core::Timestamp::ZERO,
+        hired_at: created,
         hired_by: hr.clone(),
         commandbase_profile: None,
     };
@@ -102,10 +167,10 @@ pub fn wasm_instantiate_newco(
             "market-research".into(),
         ],
         status: exo_catapult::AgentStatus::Active,
-        last_heartbeat: exo_core::Timestamp::ZERO,
+        last_heartbeat: created,
         budget_spent_cents: 0,
         budget_limit_cents: 1_000_000,
-        hired_at: exo_core::Timestamp::ZERO,
+        hired_at: created,
         hired_by: hr,
         commandbase_profile: None,
     };
@@ -340,4 +405,27 @@ pub fn wasm_verify_franchise_receipt_chain(chain_json: &str) -> Result<bool, JsV
     chain
         .verify_chain()
         .map_err(|e| JsValue::from_str(&format!("Receipt chain verification error: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn catapult_exports_do_not_fabricate_spawn_metadata() {
+        let source = std::fs::read_to_string("src/catapult_bindings.rs").unwrap_or_else(|_| {
+            std::fs::read_to_string("crates/exochain-wasm/src/catapult_bindings.rs")
+                .expect("catapult bindings source must be readable")
+        });
+        let forbidden = [
+            concat!("Uuid", "::", "new_v4"),
+            concat!("Timestamp", "::", "ZERO"),
+            concat!("Hash256", "::", "ZERO"),
+        ];
+
+        for pattern in forbidden {
+            assert!(
+                !source.contains(pattern),
+                "Catapult WASM exports must not fabricate placeholder metadata: {pattern}"
+            );
+        }
+    }
 }

@@ -60,33 +60,71 @@ pub struct Newco {
     pub status: NewcoStatus,
 }
 
+/// Caller-supplied deterministic metadata for creating a newco.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewcoInput {
+    pub id: Uuid,
+    pub name: String,
+    pub franchise_id: Uuid,
+    pub tenant_id: Uuid,
+    pub constitution_hash: Hash256,
+    pub authority_chain_root: Did,
+    pub dag_anchor: Hash256,
+    pub created: Timestamp,
+}
+
 impl Newco {
     /// Create a new newco in Assessment phase.
-    #[must_use]
-    pub fn new(
-        name: String,
-        franchise_id: Uuid,
-        tenant_id: Uuid,
-        constitution_hash: Hash256,
-        authority_chain_root: Did,
-        created: Timestamp,
-    ) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            name,
-            franchise_id,
-            tenant_id,
-            constitution_hash,
+    ///
+    /// # Errors
+    /// Returns [`CatapultError`] if the input contains placeholder metadata.
+    pub fn new(input: NewcoInput) -> Result<Self> {
+        validate_newco_input(&input)?;
+        Ok(Self {
+            id: input.id,
+            name: input.name,
+            franchise_id: input.franchise_id,
+            tenant_id: input.tenant_id,
+            constitution_hash: input.constitution_hash,
             phase: OperationalPhase::Assessment,
             roster: AgentRoster::new(),
             budget: BudgetLedger::new(),
             goals: GoalTree::new(),
-            authority_chain_root,
-            dag_anchor: Hash256::ZERO,
-            created,
-            last_heartbeat: created,
+            authority_chain_root: input.authority_chain_root,
+            dag_anchor: input.dag_anchor,
+            created: input.created,
+            last_heartbeat: input.created,
             status: NewcoStatus::Provisioning,
+        })
+    }
+
+    /// Validate externally supplied or deserialized newco metadata.
+    ///
+    /// # Errors
+    /// Returns [`CatapultError`] when the newco contains placeholder identity,
+    /// timestamp, or provenance metadata.
+    pub fn validate(&self) -> Result<()> {
+        validate_newco_input(&NewcoInput {
+            id: self.id,
+            name: self.name.clone(),
+            franchise_id: self.franchise_id,
+            tenant_id: self.tenant_id,
+            constitution_hash: self.constitution_hash,
+            authority_chain_root: self.authority_chain_root.clone(),
+            dag_anchor: self.dag_anchor,
+            created: self.created,
+        })?;
+        if self.last_heartbeat == Timestamp::ZERO {
+            return Err(CatapultError::InvalidNewco {
+                reason: "newco last heartbeat must not be zero".into(),
+            });
         }
+        if self.last_heartbeat < self.created {
+            return Err(CatapultError::InvalidNewco {
+                reason: "newco last heartbeat must not precede creation timestamp".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Advance to the next operational phase.
@@ -184,6 +222,7 @@ impl NewcoRegistry {
 
     /// Register a new newco.
     pub fn register(&mut self, newco: Newco) -> Result<Uuid> {
+        newco.validate()?;
         let id = newco.id;
         if self.newcos.contains_key(&id) {
             return Err(CatapultError::NewcoAlreadyExists(id));
@@ -236,24 +275,137 @@ impl NewcoRegistry {
     }
 }
 
+fn validate_newco_input(input: &NewcoInput) -> Result<()> {
+    if input.id.is_nil() {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco id must be caller-supplied and non-nil".into(),
+        });
+    }
+    if input.name.trim().is_empty() {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco name must not be empty".into(),
+        });
+    }
+    if input.franchise_id.is_nil() {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco franchise id must be non-nil".into(),
+        });
+    }
+    if input.tenant_id.is_nil() {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco tenant id must be non-nil".into(),
+        });
+    }
+    if input.constitution_hash == Hash256::ZERO {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco constitution hash must not be zero".into(),
+        });
+    }
+    if input.dag_anchor == Hash256::ZERO {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco DAG anchor must not be zero".into(),
+        });
+    }
+    if input.created == Timestamp::ZERO {
+        return Err(CatapultError::InvalidNewco {
+            reason: "newco created timestamp must be caller-supplied HLC".into(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::AgentStatus;
 
+    fn test_uuid(byte: u8) -> Uuid {
+        Uuid::from_bytes([byte; 16])
+    }
+
+    fn test_hash(label: &str) -> Hash256 {
+        Hash256::digest(label.as_bytes())
+    }
+
+    fn test_timestamp() -> Timestamp {
+        Timestamp {
+            physical_ms: 1_765_000_000_000,
+            logical: 4,
+        }
+    }
+
     fn test_did() -> Did {
         Did::new("did:exo:test-root").unwrap()
     }
 
+    fn test_newco_input() -> NewcoInput {
+        NewcoInput {
+            id: test_uuid(1),
+            name: "Test Co".into(),
+            franchise_id: test_uuid(2),
+            tenant_id: test_uuid(3),
+            constitution_hash: test_hash("constitution"),
+            authority_chain_root: test_did(),
+            dag_anchor: test_hash("dag-anchor"),
+            created: test_timestamp(),
+        }
+    }
+
     fn make_newco() -> Newco {
-        Newco::new(
-            "Test Co".into(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Hash256::ZERO,
-            test_did(),
-            Timestamp::ZERO,
-        )
+        Newco::new(test_newco_input()).unwrap()
+    }
+
+    #[test]
+    fn newco_new_requires_caller_supplied_identity_and_provenance() {
+        let newco = Newco::new(test_newco_input()).unwrap();
+
+        assert_eq!(newco.id, test_uuid(1));
+        assert_eq!(newco.franchise_id, test_uuid(2));
+        assert_eq!(newco.tenant_id, test_uuid(3));
+        assert_ne!(newco.constitution_hash, Hash256::ZERO);
+        assert_ne!(newco.dag_anchor, Hash256::ZERO);
+        assert_ne!(newco.created, Timestamp::ZERO);
+        assert_eq!(newco.last_heartbeat, newco.created);
+    }
+
+    #[test]
+    fn newco_rejects_placeholder_metadata() {
+        let mut input = test_newco_input();
+        input.id = Uuid::nil();
+        assert!(Newco::new(input).is_err());
+
+        let mut input = test_newco_input();
+        input.name = " ".into();
+        assert!(Newco::new(input).is_err());
+
+        let mut input = test_newco_input();
+        input.franchise_id = Uuid::nil();
+        assert!(Newco::new(input).is_err());
+
+        let mut input = test_newco_input();
+        input.tenant_id = Uuid::nil();
+        assert!(Newco::new(input).is_err());
+
+        let mut input = test_newco_input();
+        input.constitution_hash = Hash256::ZERO;
+        assert!(Newco::new(input).is_err());
+
+        let mut input = test_newco_input();
+        input.dag_anchor = Hash256::ZERO;
+        assert!(Newco::new(input).is_err());
+
+        let mut input = test_newco_input();
+        input.created = Timestamp::ZERO;
+        assert!(Newco::new(input).is_err());
+    }
+
+    #[test]
+    fn registry_register_rejects_direct_placeholder_newco() {
+        let mut reg = NewcoRegistry::new();
+        let mut newco = make_newco();
+        newco.dag_anchor = Hash256::ZERO;
+
+        assert!(reg.register(newco).is_err());
     }
 
     fn make_agent(slot: OdaSlot) -> CatapultAgent {

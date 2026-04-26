@@ -75,6 +75,20 @@ function signatureHexFromJson(signatureJson) {
   return Buffer.from(bytes).toString('hex');
 }
 
+function hashBytes(hashValue) {
+  if (Array.isArray(hashValue)) return hashValue;
+  if (hashValue && Array.isArray(hashValue[0])) return hashValue[0];
+  if (hashValue && Array.isArray(hashValue.bytes)) return hashValue.bytes;
+  throw new Error('expected serialized Hash256 bytes');
+}
+
+function assertNonZeroHash(hashValue, label) {
+  const bytes = hashBytes(hashValue);
+  if (bytes.length !== 32 || bytes.every((byte) => byte === 0)) {
+    throw new Error(`${label} must be a nonzero Hash256`);
+  }
+}
+
 // =========================================================================
 // Module 1 — BCTS (Bounded-Context Transition System)
 // =========================================================================
@@ -528,6 +542,63 @@ test('wasm_pace_resolve', () => {
     JSON.stringify(config),
     JSON.stringify('Normal')
   );
+});
+
+// =========================================================================
+// Module 8b — Catapult
+// =========================================================================
+
+console.log('\n--- Catapult ---');
+
+test('wasm_create_franchise_blueprint', () => {
+  const blueprint = wasm.wasm_create_franchise_blueprint(
+    'Bridge Franchise',
+    JSON.stringify('SaaS'),
+    NONZERO_32_HEX,
+    UUID_4,
+    'Bridge-test franchise blueprint',
+    NOW_MS,
+    1
+  );
+  if (blueprint.id !== UUID_4) throw new Error('blueprint id must be caller-supplied');
+  assertNonZeroHash(blueprint.content_hash, 'blueprint content_hash');
+  return blueprint;
+});
+
+const catapultBlueprint = setup(() =>
+  wasm.wasm_create_franchise_blueprint(
+    'Bridge Franchise',
+    JSON.stringify('SaaS'),
+    NONZERO_32_HEX,
+    UUID_4,
+    'Bridge-test franchise blueprint',
+    NOW_MS,
+    1
+  ));
+
+test('wasm_instantiate_newco', () => {
+  if (!catapultBlueprint) throw new Error('skipped -- no Catapult blueprint from setup');
+  const newco = wasm.wasm_instantiate_newco(
+    JSON.stringify(catapultBlueprint),
+    JSON.stringify({
+      name: 'Bridge Newco',
+      newco_id: UUID_1,
+      tenant_id: UUID_2,
+      dag_anchor_hex: '22'.repeat(32),
+      created_physical_ms: NOW_NUM,
+      created_logical: 2,
+      hr_did: TEST_DID,
+      researcher_did: TEST_DID_2
+    })
+  );
+  if (newco.id !== UUID_1) throw new Error('newco id must be caller-supplied');
+  if (newco.tenant_id !== UUID_2) throw new Error('tenant id must be caller-supplied');
+  assertNonZeroHash(newco.constitution_hash, 'newco constitution_hash');
+  assertNonZeroHash(newco.dag_anchor, 'newco dag_anchor');
+  if (newco.created.physical_ms !== NOW_NUM || newco.created.logical !== 2) {
+    throw new Error('newco created timestamp must be caller-supplied HLC');
+  }
+  return newco;
 });
 
 // =========================================================================

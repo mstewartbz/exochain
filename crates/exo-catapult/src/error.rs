@@ -38,6 +38,10 @@ pub enum CatapultError {
     FranchiseAlreadyExists(Uuid),
     #[error("newco already exists: {0}")]
     NewcoAlreadyExists(Uuid),
+    #[error("invalid franchise blueprint: {reason}")]
+    InvalidFranchiseBlueprint { reason: String },
+    #[error("invalid newco: {reason}")]
+    InvalidNewco { reason: String },
     #[error("invalid franchise receipt: {reason}")]
     InvalidReceipt { reason: String },
     #[error("franchise receipt serialization failed: {reason}")]
@@ -80,6 +84,12 @@ mod tests {
             CatapultError::DuplicateGoal(Uuid::nil()),
             CatapultError::FranchiseAlreadyExists(Uuid::nil()),
             CatapultError::NewcoAlreadyExists(Uuid::nil()),
+            CatapultError::InvalidFranchiseBlueprint {
+                reason: "bad blueprint".into(),
+            },
+            CatapultError::InvalidNewco {
+                reason: "bad newco".into(),
+            },
             CatapultError::InvalidReceipt {
                 reason: "bad receipt".into(),
             },
