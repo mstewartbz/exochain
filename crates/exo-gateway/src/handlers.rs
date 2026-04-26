@@ -330,15 +330,22 @@ pub async fn vote_handler(
     }
 
     // Verify quorum precondition (TNC-07): enough eligible voters must exist
-    // before accepting the vote. Use the registered DID count as the eligible
-    // voter count since the gateway does not maintain a separate voter registry.
+    // before accepting the vote. This gateway registry currently stores
+    // voter DIDs, so its cardinality is both the total and human-eligible
+    // count supplied to the decision-forum precondition.
     let registry = QuorumRegistry::with_defaults();
     let eligible_voters = state
         .registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .len();
-    match verify_quorum_precondition(&registry, decision.class, eligible_voters) {
+    let eligible_human_voters = eligible_voters;
+    match verify_quorum_precondition(
+        &registry,
+        decision.class,
+        eligible_voters,
+        eligible_human_voters,
+    ) {
         Ok(true) => { /* enough eligible voters — proceed */ }
         Ok(false) => {
             return (
