@@ -259,8 +259,10 @@ mod nist_compliance {
         );
 
         // 6. ComplianceReport hash is deterministic.
-        let cr1 = build_report(&report, &ComplianceReportMode::Full, ts(99_000));
-        let cr2 = build_report(&report, &ComplianceReportMode::Full, ts(99_000));
+        let cr1 = build_report(&report, &ComplianceReportMode::Full, ts(99_000))
+            .expect("compliance report hash must build");
+        let cr2 = build_report(&report, &ComplianceReportMode::Full, ts(99_000))
+            .expect("compliance report hash must build");
         assert_eq!(
             cr1.report_hash, cr2.report_hash,
             "ComplianceReport hash must be deterministic (same inputs → same hash)"
@@ -409,7 +411,8 @@ mod nist_compliance {
                 redaction_salt: salt,
             },
             ts(5000),
-        );
+        )
+        .expect("compliance report hash must build");
         let acv = cr
             .attestations
             .iter()
