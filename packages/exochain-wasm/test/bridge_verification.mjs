@@ -1071,9 +1071,12 @@ console.log('\n--- TNC Enforcement ---');
 
 const minDecision = setup(() =>
   wasm.wasm_create_decision(
+    UUID_1,
     'Test Decision',
     JSON.stringify('Operational'),
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 const tncFlags = {
@@ -1152,18 +1155,24 @@ console.log('\n--- Challenge Lifecycle ---');
 
 test('wasm_file_challenge', () =>
   wasm.wasm_file_challenge(
+    UUID_2,
     TEST_DID,
     UUID_1,
     JSON.stringify('ProceduralError'),
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 const challenge = setup(() =>
   wasm.wasm_file_challenge(
+    UUID_2,
     TEST_DID,
     UUID_1,
     JSON.stringify('ProceduralError'),
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 test('wasm_begin_review', () => {
@@ -1189,16 +1198,22 @@ console.log('\n--- Decision Lifecycle ---');
 
 test('wasm_create_decision', () =>
   wasm.wasm_create_decision(
+    UUID_3,
     'Bridge Test Decision',
     JSON.stringify('Operational'),
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 const decision = setup(() =>
   wasm.wasm_create_decision(
+    UUID_3,
     'Bridge Test Decision',
     JSON.stringify('Operational'),
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 const decJson = decision ? JSON.stringify(decision) : '{}';
@@ -1235,7 +1250,9 @@ test('wasm_transition_decision', () =>
   wasm.wasm_transition_decision(
     decJson,
     JSON.stringify('Submitted'),
-    TEST_DID
+    TEST_DID,
+    BigInt(NOW_NUM + 1),
+    0
   ));
 
 test('wasm_check_quorum', () => {
@@ -1373,20 +1390,26 @@ console.log('\n--- Accountability ---');
 
 test('wasm_propose_accountability', () =>
   wasm.wasm_propose_accountability(
+    UUID_4,
     TEST_DID_2,
     TEST_DID,
     JSON.stringify('Censure'),
     'Violation of governance protocol',
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 const accAction = setup(() =>
   wasm.wasm_propose_accountability(
+    UUID_4,
     TEST_DID_2,
     TEST_DID,
     JSON.stringify('Censure'),
     'Violation of governance protocol',
-    ZERO_32_HEX
+    NONZERO_32_HEX,
+    NOW_MS,
+    0
   ));
 
 test('wasm_begin_due_process', () => {
@@ -1441,24 +1464,28 @@ const emergencyPolicy = {
 
 test('wasm_create_emergency_action', () =>
   wasm.wasm_create_emergency_action(
+    UUID_1,
     JSON.stringify('SystemHalt'),
     TEST_DID,
     'Critical security breach',
     BigInt(50000),
-    ZERO_32_HEX,
+    NONZERO_32_HEX,
     JSON.stringify(emergencyPolicy),
-    NOW_MS
+    NOW_MS,
+    0
   ));
 
 const emergencyAction = setup(() =>
   wasm.wasm_create_emergency_action(
+    UUID_1,
     JSON.stringify('SystemHalt'),
     TEST_DID,
     'Critical security breach',
     BigInt(50000),
-    ZERO_32_HEX,
+    NONZERO_32_HEX,
     JSON.stringify(emergencyPolicy),
-    NOW_MS
+    NOW_MS,
+    0
   ));
 
 test('wasm_check_expiry', () => {

@@ -26,6 +26,9 @@ function assert(condition, msg) {
   if (!condition) throw new Error(msg || 'Assertion failed');
 }
 
+const TEST_DID = 'did:exo:test-actor';
+const DUMMY_SECRET_HEX = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+
 // ═══════════════════════════════════════════════════════════════
 // CORE BINDINGS
 // ═══════════════════════════════════════════════════════════════
@@ -46,23 +49,22 @@ test('hash_structured produces deterministic hash', () => {
 test('generate_keypair returns pub+secret', () => {
   const kp = wasm.wasm_generate_keypair();
   assert(kp.public_key, 'should have public_key');
-  assert(kp.secret_key, 'should have secret_key');
   assert(kp.public_key.length === 64, `public key should be 64 hex chars, got ${kp.public_key.length}`);
 });
 
 test('sign + verify round-trip', () => {
-  const kp = wasm.wasm_generate_keypair();
+  const publicKey = wasm.wasm_ed25519_public_from_secret(DUMMY_SECRET_HEX);
   const msg = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
-  const sig = wasm.wasm_sign(msg, kp.secret_key);
-  const valid = wasm.wasm_verify(msg, sig, kp.public_key);
+  const sig = wasm.wasm_sign(msg, DUMMY_SECRET_HEX);
+  const valid = wasm.wasm_verify(msg, sig, publicKey);
   assert(valid === true, 'signature should verify');
 });
 
 test('verify rejects bad signature', () => {
-  const kp = wasm.wasm_generate_keypair();
+  const publicKey = wasm.wasm_ed25519_public_from_secret(DUMMY_SECRET_HEX);
   const msg = new Uint8Array([1, 2, 3]);
-  const sig = wasm.wasm_sign(msg, kp.secret_key);
-  const bad = wasm.wasm_verify(new Uint8Array([4, 5, 6]), sig, kp.public_key);
+  const sig = wasm.wasm_sign(msg, DUMMY_SECRET_HEX);
+  const bad = wasm.wasm_verify(new Uint8Array([4, 5, 6]), sig, publicKey);
   assert(bad === false, 'bad message should not verify');
 });
 
@@ -81,14 +83,13 @@ test('bcts_is_terminal — Closed is terminal', () => {
 });
 
 test('create_signed_event', () => {
-  const kp = wasm.wasm_generate_keypair();
   const evt = wasm.wasm_create_signed_event(
     '"GovernanceDecision"',
     new Uint8Array([1, 2, 3]),
-    'did:exo:test-actor',
-    kp.secret_key,
+    TEST_DID,
+    DUMMY_SECRET_HEX,
   );
-  assert(evt.source_did === 'did:exo:test-actor', `source_did should be did:exo:test-actor, got ${evt.source_did}`);
+  assert(evt.source_did === TEST_DID, `source_did should be ${TEST_DID}, got ${evt.source_did}`);
 });
 
 test('merkle_root computes root from 32-byte hex leaves', () => {
@@ -111,10 +112,28 @@ test('mcp_rules returns rule list', () => {
   assert(rules[0].description, 'each rule should have "description" field');
 });
 
-test('enforce_invariants returns 8 constitutional invariants', () => {
-  const result = wasm.wasm_enforce_invariants('{"test": true}');
-  assert(result.invariants, 'should have invariants');
-  assert(result.invariants.length === 8, `should have 8 invariants, got ${result.invariants.length}`);
+test('enforce_invariants evaluates a structured request', () => {
+  const request = {
+    actor: TEST_DID,
+    actor_roles: [],
+    bailment_state: {
+      Active: {
+        bailor: 'did:exo:bailor',
+        bailee: TEST_DID,
+        scope: 'data',
+      },
+    },
+    consent_records: [{
+      subject: 'did:exo:subject',
+      granted_to: TEST_DID,
+      scope: 'data',
+      active: true,
+    }],
+    authority_chain: { links: [] },
+  };
+  const result = wasm.wasm_enforce_invariants(JSON.stringify(request));
+  assert(result.passed === false, 'empty authority/provenance request should fail');
+  assert(Array.isArray(result.violations), 'should return violations');
 });
 
 test('workflow_stages returns stage list', () => {
@@ -176,26 +195,43 @@ test('audit_append creates entry', () => {
 console.log('\n── Decision Forum Bindings ──');
 
 test('create_decision produces DecisionObject', () => {
-  const constitutionHash = '0'.repeat(64);
+  const constitutionHash = '11'.repeat(32);
   const decision = wasm.wasm_create_decision(
+    '00000000-0000-0000-0000-000000000001',
     'Test Budget Approval',
     '"Operational"',
-    constitutionHash
+    constitutionHash,
+    1000n,
+    0
   );
   assert(decision.title === 'Test Budget Approval', `title should match, got ${decision.title}`);
-  assert(decision.id, 'should have UUID id');
+  assert(decision.id === '00000000-0000-0000-0000-000000000001', `id should match, got ${decision.id}`);
 });
 
 test('decision_is_terminal — new decision is not terminal', () => {
-  const constitutionHash = '0'.repeat(64);
-  const decision = wasm.wasm_create_decision('Test', '"Operational"', constitutionHash);
+  const constitutionHash = '11'.repeat(32);
+  const decision = wasm.wasm_create_decision(
+    '00000000-0000-0000-0000-000000000002',
+    'Test',
+    '"Operational"',
+    constitutionHash,
+    1100n,
+    0
+  );
   const json = JSON.stringify(decision);
   assert(wasm.wasm_decision_is_terminal(json) === false, 'new decision should not be terminal');
 });
 
 test('decision_content_hash produces hash', () => {
-  const constitutionHash = '0'.repeat(64);
-  const decision = wasm.wasm_create_decision('Hash Test', '"Operational"', constitutionHash);
+  const constitutionHash = '11'.repeat(32);
+  const decision = wasm.wasm_create_decision(
+    '00000000-0000-0000-0000-000000000003',
+    'Hash Test',
+    '"Operational"',
+    constitutionHash,
+    1200n,
+    0
+  );
   const hash = wasm.wasm_decision_content_hash(JSON.stringify(decision));
   assert(typeof hash === 'string', 'should return string');
   assert(hash.length === 64, `should be 64-char hex, got length ${hash.length}`);
