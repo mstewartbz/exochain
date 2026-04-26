@@ -18,7 +18,10 @@ fi
 
 err_file=$(mktemp)
 json_file=$(mktemp)
-trap 'rm -f "$err_file" "$json_file" /tmp/repo_truth_portability.txt' EXIT
+fake_err_file=$(mktemp)
+fake_json_file=$(mktemp)
+fake_bin_dir=$(mktemp -d)
+trap 'rm -f "$err_file" "$json_file" "$fake_err_file" "$fake_json_file" /tmp/repo_truth_portability.txt; rm -rf "$fake_bin_dir"' EXIT
 
 if ! bash tools/repo_truth.sh --json --skip-tests >"$json_file" 2>"$err_file"; then
   cat "$err_file" >&2
@@ -31,6 +34,32 @@ if [ -s "$err_file" ]; then
 fi
 
 jq -e . "$json_file" >/dev/null
+
+real_cargo=$(command -v cargo)
+cat >"$fake_bin_dir/cargo" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "+nightly" ] && [ "\${2:-}" = "fmt" ]; then
+  echo "nightly formatter unavailable"
+  echo "rustup formatter error" >&2
+  exit 1
+fi
+exec "$real_cargo" "\$@"
+EOF
+chmod +x "$fake_bin_dir/cargo"
+
+if ! PATH="$fake_bin_dir:$PATH" bash tools/repo_truth.sh --json --skip-tests >"$fake_json_file" 2>"$fake_err_file"; then
+  cat "$fake_err_file" >&2
+  fail "tools/repo_truth.sh must still emit JSON when formatter check fails"
+fi
+
+if [ -s "$fake_err_file" ]; then
+  cat "$fake_err_file" >&2
+  fail "formatter check output must not leak to stderr in JSON mode"
+fi
+
+jq -e . "$fake_json_file" >/dev/null
+fake_fmt_clean=$(jq -r '.fmt_clean' "$fake_json_file")
+[ "$fake_fmt_clean" = "false" ] || fail "formatter failure should report fmt_clean=false, got $fake_fmt_clean"
 
 expected_crates=$(cargo metadata --no-deps --format-version 1 | jq '.packages | length')
 actual_crates=$(jq '.crates' "$json_file")
