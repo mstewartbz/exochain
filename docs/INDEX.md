@@ -159,7 +159,7 @@ tags: [exochain, documentation, index]
 
 ## CI/CD
 
-- `.github/workflows/ci.yml` — 9 quality gates per CR-001 §8.8.
+- `.github/workflows/ci.yml` — 20 numbered quality gates plus required aggregator per CR-001 §8.8.
 - `.github/workflows/release.yml` — Release with manual approval + provenance attestation.
 - `.github/workflows/exoforge-triage.yml` — Automatic ExoForge triage for GitHub issues.
 - `.github/ISSUE_TEMPLATE/` — Structured issue templates (bug report, feature request).

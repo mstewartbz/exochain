@@ -235,6 +235,8 @@ jobs:
           echo "✓ No GAP stubs remaining in code"
       - name: Repo truth and public claims
         run: bash tools/test_repo_truth.sh
+      - name: CR-001 status consistency
+        run: bash tools/test_cr001_status.sh
 
   # -----------------------------------------------------------------------
   # Gate 10: SBOM (dry-run generation — no upload, validates toolchain)
