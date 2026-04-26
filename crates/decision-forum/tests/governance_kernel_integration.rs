@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use decision_forum::{
     decision_object::{
-        ActorKind, AuthorityLink as ForumAuthorityLink, DecisionClass, DecisionObject, EvidenceItem,
+        ActorKind, AuthorityLink as ForumAuthorityLink, DecisionClass, DecisionObject,
+        DecisionObjectInput, EvidenceItem,
     },
     tnc_enforcer::{TncContext, enforce_all as enforce_tnc_all},
 };
@@ -43,6 +44,7 @@ use exo_gatekeeper::{
         GovernmentBranch, Permission, PermissionSet, Provenance, QuorumEvidence, QuorumVote, Role,
     },
 };
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Shared constants & helpers
@@ -71,7 +73,14 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
     let actor = did("did:exo:governance-author");
     let const_hash = Hash256::digest(CONSTITUTION);
 
-    let mut d = DecisionObject::new("Integration Test Decision", class, const_hash, clock);
+    let mut d = DecisionObject::new(DecisionObjectInput {
+        id: Uuid::from_u128(500),
+        title: "Integration Test Decision".into(),
+        class,
+        constitutional_hash: const_hash,
+        created_at: clock.now(),
+    })
+    .expect("valid decision");
 
     // Attach a human authority link so TNC-01 is satisfied.
     d.add_authority_link(ForumAuthorityLink {
@@ -100,7 +109,8 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
         BctsState::Governed,
         BctsState::Approved,
     ] {
-        d.transition(state, &actor, clock)
+        let ts = clock.now();
+        d.transition_at(state, &actor, ts)
             .expect("lifecycle transition");
     }
 
@@ -323,12 +333,14 @@ fn full_lifecycle_adjudicated_at_each_transition() {
     let actor = did("did:exo:lifecycle-actor");
     let const_hash = Hash256::digest(CONSTITUTION);
 
-    let mut d = DecisionObject::new(
-        "Lifecycle Test",
-        DecisionClass::Operational,
-        const_hash,
-        &mut clock,
-    );
+    let mut d = DecisionObject::new(DecisionObjectInput {
+        id: Uuid::from_u128(501),
+        title: "Lifecycle Test".into(),
+        class: DecisionClass::Operational,
+        constitutional_hash: const_hash,
+        created_at: clock.now(),
+    })
+    .expect("valid decision");
     d.add_authority_link(ForumAuthorityLink {
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
@@ -360,7 +372,8 @@ fn full_lifecycle_adjudicated_at_each_transition() {
     ];
 
     for state in transitions {
-        d.transition(state, &actor, &mut clock)
+        let ts = clock.now();
+        d.transition_at(state, &actor, ts)
             .expect("lifecycle transition");
         let verdict = kernel.adjudicate(&action, &context);
         assert!(
@@ -562,12 +575,14 @@ fn denied_forum_decision_correlates_with_kernel_denial() {
     let const_hash = Hash256::digest(CONSTITUTION);
 
     // Build a decision that gets denied in the forum layer (transition to Denied).
-    let mut d = DecisionObject::new(
-        "Denied Decision",
-        DecisionClass::Operational,
-        const_hash,
-        &mut clock,
-    );
+    let mut d = DecisionObject::new(DecisionObjectInput {
+        id: Uuid::from_u128(502),
+        title: "Denied Decision".into(),
+        class: DecisionClass::Operational,
+        constitutional_hash: const_hash,
+        created_at: clock.now(),
+    })
+    .expect("valid decision");
     d.add_authority_link(ForumAuthorityLink {
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
@@ -575,9 +590,11 @@ fn denied_forum_decision_correlates_with_kernel_denial() {
         timestamp: clock.now(),
     })
     .expect("add link");
-    d.transition(BctsState::Submitted, &actor, &mut clock)
+    let ts = clock.now();
+    d.transition_at(BctsState::Submitted, &actor, ts)
         .expect("submit");
-    d.transition(BctsState::Denied, &actor, &mut clock)
+    let ts = clock.now();
+    d.transition_at(BctsState::Denied, &actor, ts)
         .expect("deny");
     assert_eq!(d.state, BctsState::Denied);
 

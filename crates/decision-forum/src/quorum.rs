@@ -173,6 +173,7 @@ mod tests {
         hlc::HybridClock,
         types::{Did, Hash256},
     };
+    use uuid::Uuid;
 
     use super::*;
     use crate::decision_object::*;
@@ -215,11 +216,22 @@ mod tests {
         }
     }
 
+    fn make_decision(title: &str, class: DecisionClass, clock: &mut HybridClock) -> DecisionObject {
+        DecisionObject::new(DecisionObjectInput {
+            id: Uuid::from_u128(200),
+            title: title.into(),
+            class,
+            constitutional_hash: Hash256::digest(b"constitution"),
+            created_at: clock.now(),
+        })
+        .expect("valid decision")
+    }
+
     #[test]
     fn routine_quorum_met() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new("test", DecisionClass::Routine, Hash256::ZERO, &mut clock);
+        let mut d = make_decision("test", DecisionClass::Routine, &mut clock);
         d.add_vote(human_approve_vote("alice", &mut clock))
             .expect("ok");
         match check_quorum(&reg, &d).expect("ok") {
@@ -232,12 +244,7 @@ mod tests {
     fn operational_needs_three_votes() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new(
-            "test",
-            DecisionClass::Operational,
-            Hash256::ZERO,
-            &mut clock,
-        );
+        let mut d = make_decision("test", DecisionClass::Operational, &mut clock);
         d.add_vote(human_approve_vote("alice", &mut clock))
             .expect("ok");
         match check_quorum(&reg, &d).expect("ok") {
@@ -257,12 +264,7 @@ mod tests {
     fn operational_quorum_met() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new(
-            "test",
-            DecisionClass::Operational,
-            Hash256::ZERO,
-            &mut clock,
-        );
+        let mut d = make_decision("test", DecisionClass::Operational, &mut clock);
         d.add_vote(human_approve_vote("alice", &mut clock))
             .expect("ok");
         d.add_vote(ai_approve_vote("bot1", &mut clock)).expect("ok");
@@ -284,12 +286,7 @@ mod tests {
     fn insufficient_approval_pct() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d = DecisionObject::new(
-            "test",
-            DecisionClass::Operational,
-            Hash256::ZERO,
-            &mut clock,
-        );
+        let mut d = make_decision("test", DecisionClass::Operational, &mut clock);
         d.add_vote(human_approve_vote("alice", &mut clock))
             .expect("ok");
         d.add_vote(reject_vote("bob", &mut clock)).expect("ok");
@@ -306,8 +303,7 @@ mod tests {
     fn strategic_needs_human_votes() {
         let mut clock = test_clock();
         let reg = QuorumRegistry::with_defaults();
-        let mut d =
-            DecisionObject::new("test", DecisionClass::Strategic, Hash256::ZERO, &mut clock);
+        let mut d = make_decision("test", DecisionClass::Strategic, &mut clock);
         for i in 0..5 {
             d.add_vote(ai_approve_vote(&format!("bot{i}"), &mut clock))
                 .expect("ok");
