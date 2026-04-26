@@ -616,17 +616,17 @@ pub async fn insert_enrollment(
 pub async fn insert_livesafe_identity(
     pool: &PgPool,
     did: &str,
-    odentity_composite: f64,
+    odentity_composite_basis_points: i32,
     pace_status: &str,
     card_status: &str,
     created_at_ms: i64,
     exochain_anchor: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO livesafe_identities (did, odentity_composite, pace_status, card_status, created_at_ms, exochain_anchor)
+        "INSERT INTO livesafe_identities (did, odentity_composite_basis_points, pace_status, card_status, created_at_ms, exochain_anchor)
          VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (did) DO UPDATE SET odentity_composite = $2, pace_status = $3, card_status = $4, exochain_anchor = $6"
-    ).bind(did).bind(odentity_composite).bind(pace_status).bind(card_status)
+         ON CONFLICT (did) DO UPDATE SET odentity_composite_basis_points = $2, pace_status = $3, card_status = $4, exochain_anchor = $6"
+    ).bind(did).bind(odentity_composite_basis_points).bind(pace_status).bind(card_status)
     .bind(created_at_ms).bind(exochain_anchor)
     .execute(pool).await?;
     Ok(())
@@ -638,7 +638,7 @@ pub async fn get_livesafe_identity(
     did: &str,
 ) -> Result<Option<LiveSafeIdentityRow>, sqlx::Error> {
     sqlx::query_as::<_, LiveSafeIdentityRow>(
-        "SELECT did, odentity_composite, pace_status, card_status, created_at_ms, exochain_anchor FROM livesafe_identities WHERE did = $1"
+        "SELECT did, odentity_composite_basis_points, pace_status, card_status, created_at_ms, exochain_anchor FROM livesafe_identities WHERE did = $1"
     ).bind(did).fetch_optional(pool).await
 }
 
@@ -646,7 +646,7 @@ pub async fn get_livesafe_identity(
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LiveSafeIdentityRow {
     pub did: String,
-    pub odentity_composite: f64,
+    pub odentity_composite_basis_points: i32,
     pub pace_status: String,
     pub card_status: String,
     pub created_at_ms: i64,
