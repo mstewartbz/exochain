@@ -242,7 +242,7 @@ pub fn wasm_verify_independence(
     actors_json: &str,
     registry_json: &str,
 ) -> Result<JsValue, JsValue> {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     let did_strs: Vec<String> = from_json_str(actors_json)?;
     let mut actors = Vec::with_capacity(did_strs.len());
@@ -264,13 +264,13 @@ pub fn wasm_verify_independence(
     }
     let input: RegistryInput = from_json_str(registry_json)?;
 
-    let mut signing_keys = HashMap::new();
+    let mut signing_keys = BTreeMap::new();
     for (did_str, key) in &input.signing_keys {
         let did = exo_core::Did::new(did_str)
             .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
         signing_keys.insert(did, key.clone());
     }
-    let mut attestation_roots = HashMap::new();
+    let mut attestation_roots = BTreeMap::new();
     for (did_str, root_str) in &input.attestation_roots {
         let did = exo_core::Did::new(did_str)
             .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
@@ -278,7 +278,7 @@ pub fn wasm_verify_independence(
             .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
         attestation_roots.insert(did, root);
     }
-    let mut control_metadata = HashMap::new();
+    let mut control_metadata = BTreeMap::new();
     for (did_str, meta) in &input.control_metadata {
         let did = exo_core::Did::new(did_str)
             .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
