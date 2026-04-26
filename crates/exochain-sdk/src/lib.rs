@@ -129,11 +129,17 @@
 //!
 //! ## Cross-language notes
 //!
-//! The Rust SDK derives DIDs from `BLAKE3(public_key)[..8]`. The TypeScript
-//! SDK uses `SHA-256` because Web Crypto does not ship BLAKE3, and the Python
-//! SDK uses `SHA-256` for the same reason. Applications that need canonical
-//! DIDs across all three SDKs should resolve the DID from the fabric rather
-//! than deriving it locally.
+//! The SDK distinguishes local deterministic IDs from canonical fabric IDs.
+//! [`identity::Identity::generate`] and [`identity::Identity::from_keypair`]
+//! derive local Rust SDK DIDs from `BLAKE3(public_key)[..8]`. Other language
+//! SDKs may use different local-only derivation primitives for zero-dependency
+//! client operation.
+//!
+//! Applications that need canonical DIDs across languages should resolve the
+//! DID from the fabric, then construct the local signing handle with
+//! [`identity::Identity::from_resolved_keypair`]. That path preserves the
+//! fabric DID and verifies that the supplied secret key matches the supplied
+//! public key before constructing the identity.
 
 #![deny(missing_docs)]
 
