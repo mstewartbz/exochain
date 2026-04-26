@@ -1,8 +1,17 @@
 //! Messaging bindings: X25519 key exchange, message encrypt/decrypt, death verification
 
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
+
+#[derive(Deserialize)]
+struct WasmAuthorizedTrustee {
+    did: String,
+    public_key_hex: String,
+}
 
 /// Generate a new X25519 keypair for Diffie-Hellman key exchange.
 /// Returns `{ public_key_hex, secret_key_hex }`.
@@ -159,25 +168,133 @@ pub fn wasm_verify_message_signature(
     ))
 }
 
+fn parse_ed25519_public_key_hex(label: &str, value: &str) -> Result<exo_core::PublicKey, JsValue> {
+    let bytes =
+        hex::decode(value).map_err(|e| JsValue::from_str(&format!("invalid {label} hex: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(JsValue::from_str(&format!("{label} must be 32 bytes")));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(exo_core::PublicKey::from_bytes(arr))
+}
+
+fn parse_ed25519_signature_hex(label: &str, value: &str) -> Result<exo_core::Signature, JsValue> {
+    let bytes =
+        hex::decode(value).map_err(|e| JsValue::from_str(&format!("invalid {label} hex: {e}")))?;
+    if bytes.len() != 64 {
+        return Err(JsValue::from_str(&format!("{label} must be 64 bytes")));
+    }
+    let mut arr = [0u8; 64];
+    arr.copy_from_slice(&bytes);
+    Ok(exo_core::Signature::from_bytes(arr))
+}
+
+fn parse_authorized_trustees_json(
+    authorized_trustees_json: &str,
+) -> Result<BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
+    let trustees: Vec<WasmAuthorizedTrustee> = from_json_str(authorized_trustees_json)?;
+    let mut authorized = BTreeMap::new();
+    for trustee in trustees {
+        let did = exo_core::Did::new(&trustee.did)
+            .map_err(|e| JsValue::from_str(&format!("invalid trustee DID: {e}")))?;
+        let public_key =
+            parse_ed25519_public_key_hex("trustee Ed25519 public key", &trustee.public_key_hex)?;
+        if authorized.insert(did.clone(), public_key).is_some() {
+            return Err(JsValue::from_str(&format!(
+                "duplicate authorized trustee: {}",
+                did.as_str()
+            )));
+        }
+    }
+    Ok(authorized)
+}
+
+/// Compute the canonical death-verification initial confirmation payload.
+///
+/// Returns the CBOR bytes that `initiated_by_did` signs before calling
+/// [`wasm_death_verification_new`].
+#[wasm_bindgen]
+pub fn wasm_death_verification_initial_signing_payload(
+    subject_did: &str,
+    initiated_by_did: &str,
+    required_confirmations: u8,
+    authorized_trustees_json: &str,
+    claim_nonce_hex: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let subject = exo_core::Did::new(subject_did)
+        .map_err(|e| JsValue::from_str(&format!("invalid subject DID: {e}")))?;
+    let initiator = exo_core::Did::new(initiated_by_did)
+        .map_err(|e| JsValue::from_str(&format!("invalid initiator DID: {e}")))?;
+    let authorized_trustees = parse_authorized_trustees_json(authorized_trustees_json)?;
+    let claim_nonce = hex::decode(claim_nonce_hex)
+        .map_err(|e| JsValue::from_str(&format!("invalid claim nonce hex: {e}")))?;
+
+    exo_messaging::death_trigger::initial_confirmation_signing_payload(
+        &subject,
+        &initiator,
+        required_confirmations,
+        &authorized_trustees,
+        &claim_nonce,
+    )
+    .map_err(|e| JsValue::from_str(&format!("death verification signing payload failed: {e}")))
+}
+
 /// Create a new death verification request.
+///
+/// `authorized_trustees_json` must be an array of
+/// `{ "did": "...", "public_key_hex": "..." }` objects. `claim_nonce_hex`
+/// and `initiator_signature_hex` bind the initiator's first confirmation to
+/// this claim instance.
 /// Returns the verification state as JSON.
 #[wasm_bindgen]
 pub fn wasm_death_verification_new(
     subject_did: &str,
     initiated_by_did: &str,
     required_confirmations: u8,
+    authorized_trustees_json: &str,
+    claim_nonce_hex: &str,
+    initiator_signature_hex: &str,
 ) -> Result<JsValue, JsValue> {
     let subject = exo_core::Did::new(subject_did)
         .map_err(|e| JsValue::from_str(&format!("invalid subject DID: {e}")))?;
     let initiator = exo_core::Did::new(initiated_by_did)
         .map_err(|e| JsValue::from_str(&format!("invalid initiator DID: {e}")))?;
+    let authorized_trustees = parse_authorized_trustees_json(authorized_trustees_json)?;
+    let claim_nonce = hex::decode(claim_nonce_hex)
+        .map_err(|e| JsValue::from_str(&format!("invalid claim nonce hex: {e}")))?;
+    let initiator_signature =
+        parse_ed25519_signature_hex("initiator confirmation signature", initiator_signature_hex)?;
 
     let dv = exo_messaging::death_trigger::DeathVerification::new(
         subject,
         initiator,
         required_confirmations,
-    );
+        authorized_trustees,
+        claim_nonce,
+        initiator_signature,
+    )
+    .map_err(|e| JsValue::from_str(&format!("death verification creation failed: {e}")))?;
     to_js_value(&dv)
+}
+
+/// Compute the canonical trustee confirmation payload for an existing claim.
+///
+/// Returns the CBOR bytes that `trustee_did` signs before calling
+/// [`wasm_death_verification_confirm`].
+#[wasm_bindgen]
+pub fn wasm_death_verification_confirmation_signing_payload(
+    state_json: &str,
+    trustee_did: &str,
+) -> Result<Vec<u8>, JsValue> {
+    let dv: exo_messaging::death_trigger::DeathVerification = from_json_str(state_json)?;
+    let trustee = exo_core::Did::new(trustee_did)
+        .map_err(|e| JsValue::from_str(&format!("invalid trustee DID: {e}")))?;
+    dv.confirmation_signing_payload(&trustee).map_err(|e| {
+        JsValue::from_str(&format!(
+            "death verification confirmation payload failed: {e}"
+        ))
+    })
 }
 
 /// Add a trustee confirmation to a death verification.
@@ -186,13 +303,18 @@ pub fn wasm_death_verification_new(
 pub fn wasm_death_verification_confirm(
     state_json: &str,
     trustee_did: &str,
+    trustee_public_key_hex: &str,
+    signature_hex: &str,
 ) -> Result<JsValue, JsValue> {
     let mut dv: exo_messaging::death_trigger::DeathVerification = from_json_str(state_json)?;
     let trustee = exo_core::Did::new(trustee_did)
         .map_err(|e| JsValue::from_str(&format!("invalid trustee DID: {e}")))?;
+    let trustee_public_key =
+        parse_ed25519_public_key_hex("trustee Ed25519 public key", trustee_public_key_hex)?;
+    let signature = parse_ed25519_signature_hex("trustee confirmation signature", signature_hex)?;
 
     let verified = dv
-        .confirm(trustee)
+        .confirm(trustee, trustee_public_key, signature)
         .map_err(|e| JsValue::from_str(&format!("confirmation failed: {e}")))?;
 
     to_js_value(&serde_json::json!({

@@ -1,8 +1,8 @@
 /**
  * Bridge Verification Test — WASM binding smoke-test harness
  *
- * Calls every one of the 110 exported wasm_ functions with valid minimal
- * inputs and verifies each returns without throwing.
+ * Calls the covered exported wasm_ bridge functions with valid minimal inputs
+ * and verifies each returns without throwing.
  *
  * Run:  node packages/exochain-wasm/test/bridge_verification.mjs
  */
@@ -51,11 +51,26 @@ const NOW_NUM       = Number(NOW_MS);
 const NOW_TS        = { physical_ms: NOW_NUM, logical: 0 };  // HLC Timestamp
 const TEXT_BYTES     = new TextEncoder().encode('hello');
 const DUMMY_SECRET_HEX = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+const DUMMY_SECRET_HEX_2 = '1111111111111111111111111111111111111111111111111111111111111111';
+const DUMMY_SECRET_HEX_3 = '2222222222222222222222222222222222222222222222222222222222222222';
 const UUID_1 = randomUUID();
 const UUID_2 = randomUUID();
 
 // Pre-compute a valid Ed25519 keypair result for reuse
 const ephResult = wasm.wasm_sign_with_ephemeral_key(TEXT_BYTES);
+
+function publicKeyForSecret(secretHex) {
+  return wasm.wasm_ed25519_public_from_secret(secretHex);
+}
+
+function signatureHexFromJson(signatureJson) {
+  const signature = typeof signatureJson === 'string' ? JSON.parse(signatureJson) : signatureJson;
+  const bytes = signature.Ed25519;
+  if (!Array.isArray(bytes) || bytes.length !== 64) {
+    throw new Error('expected Ed25519 signature bytes');
+  }
+  return Buffer.from(bytes).toString('hex');
+}
 
 // =========================================================================
 // Module 1 — BCTS (Bounded-Context Transition System)
@@ -112,6 +127,9 @@ test('wasm_verify', () =>
 test('wasm_sign', () =>
   wasm.wasm_sign(TEXT_BYTES, DUMMY_SECRET_HEX));
 
+test('wasm_ed25519_public_from_secret', () =>
+  wasm.wasm_ed25519_public_from_secret(DUMMY_SECRET_HEX));
+
 test('wasm_compute_event_id', () =>
   wasm.wasm_compute_event_id());
 
@@ -141,6 +159,101 @@ test('wasm_verify_event', () => {
   if (!signedEvent) throw new Error('skipped -- no signed event from setup');
   const pubKey = signedEvent.public_key || signedEvent.source_public_key || ephResult.public_key;
   return wasm.wasm_verify_event(JSON.stringify(signedEvent), pubKey);
+});
+
+// =========================================================================
+// Module 3b — Messaging / Death Verification
+// =========================================================================
+
+console.log('\n--- Messaging / Death Verification ---');
+
+const initiatorPublicKey = setup(() => publicKeyForSecret(DUMMY_SECRET_HEX_2));
+const trusteePublicKey = setup(() => publicKeyForSecret(DUMMY_SECRET_HEX_3));
+const deathTrusteesJson = setup(() => {
+  if (!initiatorPublicKey || !trusteePublicKey) {
+    throw new Error('missing death-verification public keys');
+  }
+  return JSON.stringify([
+    { did: TEST_DID_2, public_key_hex: initiatorPublicKey },
+    { did: TEST_DID_3, public_key_hex: trusteePublicKey },
+  ]);
+});
+const deathClaimNonceHex = Buffer.from('bridge-death-claim').toString('hex');
+
+test('wasm_death_verification_initial_signing_payload', () => {
+  if (!deathTrusteesJson) throw new Error('skipped -- no trustee set');
+  return wasm.wasm_death_verification_initial_signing_payload(
+    TEST_DID,
+    TEST_DID_2,
+    2,
+    deathTrusteesJson,
+    deathClaimNonceHex
+  );
+});
+
+const deathInitialPayload = setup(() =>
+  deathTrusteesJson && wasm.wasm_death_verification_initial_signing_payload(
+    TEST_DID,
+    TEST_DID_2,
+    2,
+    deathTrusteesJson,
+    deathClaimNonceHex
+  ));
+const deathInitialSignatureHex = setup(() =>
+  deathInitialPayload && signatureHexFromJson(wasm.wasm_sign(deathInitialPayload, DUMMY_SECRET_HEX_2)));
+
+test('wasm_death_verification_new', () => {
+  if (!deathTrusteesJson || !deathInitialSignatureHex) {
+    throw new Error('skipped -- no signed initial payload');
+  }
+  return wasm.wasm_death_verification_new(
+    TEST_DID,
+    TEST_DID_2,
+    2,
+    deathTrusteesJson,
+    deathClaimNonceHex,
+    deathInitialSignatureHex
+  );
+});
+
+const deathState = setup(() =>
+  deathTrusteesJson && deathInitialSignatureHex && wasm.wasm_death_verification_new(
+    TEST_DID,
+    TEST_DID_2,
+    2,
+    deathTrusteesJson,
+    deathClaimNonceHex,
+    deathInitialSignatureHex
+  ));
+
+test('wasm_death_verification_confirmation_signing_payload', () => {
+  if (!deathState) throw new Error('skipped -- no death-verification state');
+  return wasm.wasm_death_verification_confirmation_signing_payload(
+    JSON.stringify(deathState),
+    TEST_DID_3
+  );
+});
+
+const deathConfirmationPayload = setup(() =>
+  deathState && wasm.wasm_death_verification_confirmation_signing_payload(
+    JSON.stringify(deathState),
+    TEST_DID_3
+  ));
+const deathConfirmationSignatureHex = setup(() =>
+  deathConfirmationPayload && signatureHexFromJson(
+    wasm.wasm_sign(deathConfirmationPayload, DUMMY_SECRET_HEX_3)
+  ));
+
+test('wasm_death_verification_confirm', () => {
+  if (!deathState || !trusteePublicKey || !deathConfirmationSignatureHex) {
+    throw new Error('skipped -- no signed confirmation payload');
+  }
+  return wasm.wasm_death_verification_confirm(
+    JSON.stringify(deathState),
+    TEST_DID_3,
+    trusteePublicKey,
+    deathConfirmationSignatureHex
+  );
 });
 
 // =========================================================================

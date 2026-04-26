@@ -7,11 +7,14 @@
 
 import init, {
   wasm_generate_x25519_keypair,
+  wasm_ed25519_public_from_secret,
   wasm_encrypt_message,
   wasm_decrypt_message,
   wasm_verify_message_signature,
   wasm_shamir_split,
+  wasm_death_verification_initial_signing_payload,
   wasm_death_verification_new,
+  wasm_death_verification_confirmation_signing_payload,
   wasm_death_verification_confirm,
 } from '@/wasm/exochain_wasm';
 
@@ -22,6 +25,11 @@ export async function initCrypto(): Promise<void> {
   if (initialized) return;
   await init();
   initialized = true;
+}
+
+/** Derive an Ed25519 public key hex string from a caller-held secret key. */
+export function ed25519PublicFromSecret(secretKeyHex: string): string {
+  return wasm_ed25519_public_from_secret(secretKeyHex);
 }
 
 /** Check if WASM is initialized. */
@@ -133,23 +141,77 @@ export interface DeathVerificationState {
   subject_did: string;
   initiated_by: string;
   required_confirmations: number;
-  confirmations: Array<{ trustee_did: string; confirmed_at: object }>;
+  authorized_trustees: Record<string, number[]>;
+  claim_nonce: number[];
+  confirmations: Array<{
+    trustee_did: string;
+    public_key: number[];
+    signature: { Ed25519: number[] } | { Hybrid: unknown } | { PostQuantum: number[] } | 'Empty';
+    confirmed_at: object;
+  }>;
   status: 'Pending' | 'Verified' | 'Rejected';
+}
+
+export interface AuthorizedDeathVerificationTrustee {
+  did: string;
+  public_key_hex: string;
+}
+
+/** Compute the bytes the initiating trustee must sign for a death claim. */
+export function deathVerificationInitialSigningPayload(
+  subjectDid: string,
+  initiatedByDid: string,
+  authorizedTrustees: AuthorizedDeathVerificationTrustee[],
+  claimNonceHex: string,
+  requiredConfirmations: number = 3,
+): Uint8Array {
+  return wasm_death_verification_initial_signing_payload(
+    subjectDid,
+    initiatedByDid,
+    requiredConfirmations,
+    JSON.stringify(authorizedTrustees),
+    claimNonceHex,
+  );
 }
 
 /** Create a new death verification request. */
 export function createDeathVerification(
   subjectDid: string,
   initiatedByDid: string,
+  authorizedTrustees: AuthorizedDeathVerificationTrustee[],
+  claimNonceHex: string,
+  initiatorSignatureHex: string,
   requiredConfirmations: number = 3,
 ): DeathVerificationState {
-  return wasm_death_verification_new(subjectDid, initiatedByDid, requiredConfirmations);
+  return wasm_death_verification_new(
+    subjectDid,
+    initiatedByDid,
+    requiredConfirmations,
+    JSON.stringify(authorizedTrustees),
+    claimNonceHex,
+    initiatorSignatureHex,
+  );
+}
+
+/** Compute the bytes a trustee must sign to confirm an existing death claim. */
+export function deathVerificationConfirmationSigningPayload(
+  stateJson: string,
+  trusteeDid: string,
+): Uint8Array {
+  return wasm_death_verification_confirmation_signing_payload(stateJson, trusteeDid);
 }
 
 /** Add a trustee confirmation to a death verification. */
 export function confirmDeathVerification(
   stateJson: string,
   trusteeDid: string,
+  trusteePublicKeyHex: string,
+  signatureHex: string,
 ): { verified: boolean; confirmations_remaining: number; state: DeathVerificationState } {
-  return wasm_death_verification_confirm(stateJson, trusteeDid);
+  return wasm_death_verification_confirm(
+    stateJson,
+    trusteeDid,
+    trusteePublicKeyHex,
+    signatureHex,
+  );
 }
