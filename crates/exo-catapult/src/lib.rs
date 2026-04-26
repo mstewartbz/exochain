@@ -33,10 +33,12 @@ pub mod receipt;
 pub use agent::{AgentRoster, AgentStatus, CatapultAgent};
 pub use budget::{BudgetLedger, BudgetPolicy, BudgetScope, BudgetVerdict, CostEvent};
 pub use error::{CatapultError, Result};
-pub use franchise::{BusinessModel, FranchiseBlueprint, FranchiseRegistry};
+pub use franchise::{
+    BusinessModel, FranchiseBlueprint, FranchiseBlueprintInput, FranchiseRegistry,
+};
 pub use goal::{Goal, GoalLevel, GoalStatus, GoalTree};
 pub use heartbeat::{HeartbeatMonitor, HeartbeatRecord, HeartbeatStatus};
-pub use newco::{Newco, NewcoStatus};
+pub use newco::{Newco, NewcoInput, NewcoStatus};
 pub use oda::{MosCode, OdaSlot};
 pub use phase::OperationalPhase;
 pub use receipt::{FranchiseOperation, FranchiseReceipt, FranchiseReceiptInput, ReceiptChain};

@@ -125,21 +125,30 @@ mod tests {
     use exo_core::{Hash256, Timestamp};
 
     use super::*;
-    use crate::agent::{AgentStatus, CatapultAgent};
+    use crate::{
+        agent::{AgentStatus, CatapultAgent},
+        newco::NewcoInput,
+    };
 
     fn test_did(name: &str) -> Did {
         Did::new(&format!("did:exo:test-{name}")).unwrap()
     }
 
     fn make_newco() -> Newco {
-        Newco::new(
-            "Test Co".into(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Hash256::ZERO,
-            test_did("root"),
-            Timestamp::ZERO,
-        )
+        Newco::new(NewcoInput {
+            id: Uuid::from_bytes([1; 16]),
+            name: "Test Co".into(),
+            franchise_id: Uuid::from_bytes([2; 16]),
+            tenant_id: Uuid::from_bytes([3; 16]),
+            constitution_hash: Hash256::digest(b"constitution"),
+            authority_chain_root: test_did("root"),
+            dag_anchor: Hash256::digest(b"dag-anchor"),
+            created: Timestamp {
+                physical_ms: 1_765_000_000_000,
+                logical: 1,
+            },
+        })
+        .unwrap()
     }
 
     fn make_agent(slot: OdaSlot, name: &str) -> CatapultAgent {
