@@ -55,6 +55,8 @@ pub struct Bailment {
     pub expires: Option<Timestamp>,
     pub status: BailmentStatus,
     pub signature: Signature,
+    #[serde(default)]
+    pub bailee_public_key: Option<PublicKey>,
 }
 
 /// Propose a new bailment. Returns a bailment in `Proposed` status.
@@ -87,6 +89,7 @@ pub fn propose(
         expires: None,
         status: BailmentStatus::Proposed,
         signature: Signature::empty(),
+        bailee_public_key: None,
     })
 }
 
@@ -188,8 +191,34 @@ pub fn accept(
     }
 
     bailment.signature = bailee_signature.clone();
+    bailment.bailee_public_key = Some(*bailee_public_key);
     bailment.status = BailmentStatus::Active;
     Ok(())
+}
+
+/// Verify that an active bailment carries a cryptographic acceptance proof.
+///
+/// A status bit alone is not consent. Active bailments must retain the bailee
+/// public key used at acceptance and the stored signature must still verify
+/// over the canonical acceptance payload.
+#[must_use]
+pub fn has_valid_acceptance_proof(bailment: &Bailment) -> bool {
+    if bailment.status != BailmentStatus::Active {
+        return false;
+    }
+    if bailment.signature.is_empty() {
+        return false;
+    }
+    if bailment.signature.as_bytes().iter().all(|b| *b == 0) {
+        return false;
+    }
+    let Some(bailee_public_key) = bailment.bailee_public_key else {
+        return false;
+    };
+    let Ok(payload) = signing_payload(bailment) else {
+        return false;
+    };
+    crypto::verify(&payload, &bailment.signature, &bailee_public_key)
 }
 
 /// Terminate a bailment. Either bailor or bailee may terminate.
@@ -217,6 +246,9 @@ pub fn terminate(bailment: &mut Bailment, actor: &Did) -> Result<(), ConsentErro
 #[must_use]
 pub fn is_active(bailment: &Bailment, now: &Timestamp) -> bool {
     if bailment.status != BailmentStatus::Active {
+        return false;
+    }
+    if !has_valid_acceptance_proof(bailment) {
         return false;
     }
     match &bailment.expires {
@@ -307,6 +339,7 @@ mod tests {
         assert_eq!(b.id, "bailment-explicit");
         assert_eq!(b.created, ts(1234));
         assert!(b.signature.is_empty());
+        assert!(b.bailee_public_key.is_none());
         assert!(b.expires.is_none());
     }
 
@@ -360,6 +393,8 @@ mod tests {
         assert!(accept(&mut b, &pk, &sig).is_ok());
         assert_eq!(b.status, BailmentStatus::Active);
         assert!(!b.signature.is_empty());
+        assert_eq!(b.bailee_public_key, Some(pk));
+        assert!(has_valid_acceptance_proof(&b));
     }
 
     #[test]
@@ -572,6 +607,30 @@ mod tests {
         accept(&mut b, &pk, &sig).ok();
         b.expires = Some(ts(1000));
         assert!(!is_active(&b, &ts(5000)));
+    }
+
+    #[test]
+    fn is_active_rejects_status_forged_empty_signature() {
+        let mut b = propose_test(b"t", BailmentType::Custody);
+        b.status = BailmentStatus::Active;
+        b.signature = Signature::Empty;
+
+        assert!(
+            !is_active(&b, &ts(1000)),
+            "active bailments must not be trusted without a verifiable acceptance signature"
+        );
+    }
+
+    #[test]
+    fn is_active_rejects_status_forged_junk_signature() {
+        let mut b = propose_test(b"t", BailmentType::Custody);
+        b.status = BailmentStatus::Active;
+        b.signature = Signature::from_bytes([0xAB; 64]);
+
+        assert!(
+            !is_active(&b, &ts(1000)),
+            "active bailments must not trust non-empty signatures without the bailee key proof"
+        );
     }
 
     #[test]

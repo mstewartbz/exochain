@@ -266,6 +266,31 @@ mod tests {
     }
 
     #[test]
+    fn check_denies_status_forged_active_bailment() {
+        let mut g = ConsentGate::new(strict_policy());
+        let mut b = bailment::propose(
+            &alice(),
+            &bob(),
+            b"gt",
+            BailmentType::Custody,
+            "forged",
+            ts(1000),
+        )
+        .expect("test bailment proposal");
+        b.status = bailment::BailmentStatus::Active;
+        b.signature = exo_core::Signature::from_bytes([0xAB; 64]);
+        g.register_consent(&bob(), "read", "data-owner", 1, b);
+
+        assert!(
+            matches!(
+                g.check(&bob(), "read", &now()),
+                ConsentDecision::Denied { .. }
+            ),
+            "ConsentGate must not grant on a status-forged active bailment"
+        );
+    }
+
+    #[test]
     fn policy_accessor() {
         let g = ConsentGate::new(strict_policy());
         assert_eq!(g.policy().id, "strict");
