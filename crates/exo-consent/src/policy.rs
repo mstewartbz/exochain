@@ -337,6 +337,38 @@ mod tests {
     }
 
     #[test]
+    fn forged_active_bailment_does_not_satisfy_policy() {
+        let e = PolicyEngine::new();
+        let mut b = bailment::propose(
+            &alice(),
+            &bob(),
+            b"terms",
+            BailmentType::Custody,
+            "forged-active",
+            ts(1000),
+        )
+        .expect("test bailment proposal");
+        b.status = bailment::BailmentStatus::Active;
+        b.signature = exo_core::Signature::from_bytes([0xAB; 64]);
+        let c = vec![consent(&alice(), "read", "data-owner", 1, b)];
+
+        let d = e.evaluate(
+            &read_policy(),
+            &c,
+            &ActionRequest {
+                actor: bob(),
+                action_type: "read".into(),
+            },
+            &now(),
+        );
+
+        assert!(
+            matches!(d, ConsentDecision::Denied { .. }),
+            "policy must deny forged active bailments without verified acceptance proof"
+        );
+    }
+
+    #[test]
     fn grant_no_requirements_permissive() {
         let e = PolicyEngine::new();
         let p = ConsentPolicy {
