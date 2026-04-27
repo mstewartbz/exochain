@@ -40,9 +40,12 @@ use std::{
     time::Duration,
 };
 
-use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt};
+use exo_core::{
+    hash::hash_structured,
+    types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt},
+};
 use exo_dag::{
-    consensus::{self, ConsensusConfig, ConsensusState, Vote},
+    consensus::{self, CommitCertificate, ConsensusConfig, ConsensusState, Vote},
     dag::{Dag, DagNode, HybridClock, append},
 };
 use tokio::sync::mpsc;
@@ -55,6 +58,58 @@ use crate::{
         GovernanceEventType, WireMessage, topics,
     },
 };
+
+#[derive(serde::Serialize)]
+struct CommitReceiptAuthorityPayload<'a> {
+    domain: &'static str,
+    certificate: &'a CommitCertificate,
+}
+
+fn commit_receipt_authority_hash(cert: &CommitCertificate) -> Result<Hash256, String> {
+    hash_structured(&CommitReceiptAuthorityPayload {
+        domain: "exo.reactor.commit_certificate_authority.v1",
+        certificate: cert,
+    })
+    .map_err(|e| format!("commit certificate authority hash: {e}"))
+}
+
+fn stored_node_timestamp_for_receipt(
+    store: &Arc<Mutex<SqliteDagStore>>,
+    hash: &Hash256,
+) -> Result<Timestamp, String> {
+    let st = store
+        .lock()
+        .map_err(|_| "Store mutex poisoned while loading committed node timestamp".to_string())?;
+    let node = st
+        .get_sync(hash)
+        .map_err(|e| format!("load committed DAG node {hash}: {e}"))?
+        .ok_or_else(|| format!("committed DAG node {hash} not found for trust receipt"))?;
+
+    Ok(node.timestamp)
+}
+
+fn commit_receipt_from_certificate(
+    state: &SharedReactorState,
+    store: &Arc<Mutex<SqliteDagStore>>,
+    cert: &CommitCertificate,
+) -> Result<TrustReceipt, String> {
+    let timestamp = stored_node_timestamp_for_receipt(store, &cert.node_hash)?;
+    let authority_hash = commit_receipt_authority_hash(cert)?;
+    let s = state
+        .lock()
+        .map_err(|_| "Reactor state mutex poisoned while building commit receipt".to_string())?;
+
+    Ok(TrustReceipt::new(
+        s.node_did.clone(),
+        authority_hash,
+        None,
+        "dag.commit".to_string(),
+        cert.node_hash,
+        ReceiptOutcome::Executed,
+        timestamp,
+        &*s.sign_fn,
+    ))
+}
 
 // ---------------------------------------------------------------------------
 // Reactor state
@@ -593,7 +648,7 @@ async fn handle_commit(
         }
     }
 
-    let commit_info = {
+    let (cert, commit_info) = {
         let Ok(mut s) = state.lock() else {
             tracing::error!("Reactor state mutex poisoned in handle_commit (process)");
             return;
@@ -608,10 +663,10 @@ async fn handle_commit(
         // Apply the commit certificate.
         let round = cert.round;
         let hash = cert.node_hash;
-        consensus::commit(&mut s.consensus, cert);
+        consensus::commit(&mut s.consensus, cert.clone());
 
         let height = s.consensus.committed.len() as u64;
-        (hash, height, round)
+        (cert, (hash, height, round))
     }; // MutexGuard dropped here
 
     let (hash, height, round) = commit_info;
@@ -624,34 +679,17 @@ async fn handle_commit(
         };
         if let Err(e) = st.mark_committed_sync(&hash, height) {
             tracing::warn!(err = %e, "Failed to mark committed in store");
+            return;
         }
     }
 
     // Emit a trust receipt for the network-received commit.
-    let receipt = {
-        let Ok(s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_commit (receipt)");
+    let receipt = match commit_receipt_from_certificate(state, store, &cert) {
+        Ok(receipt) => receipt,
+        Err(e) => {
+            tracing::warn!(err = %e, "Failed to build trust receipt for network commit");
             return;
-        };
-        #[allow(clippy::as_conversions)]
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let ts = Timestamp {
-            physical_ms: now_ms,
-            logical: 0,
-        };
-        TrustReceipt::new(
-            s.node_did.clone(),
-            Hash256::ZERO,
-            None,
-            "dag.commit".to_string(),
-            hash,
-            ReceiptOutcome::Executed,
-            ts,
-            &*s.sign_fn,
-        )
+        }
     };
     {
         let Ok(mut st) = store.lock() else {
@@ -730,6 +768,7 @@ async fn check_and_commit(
             };
             if let Err(e) = st.mark_committed_sync(&hash, height) {
                 tracing::warn!(err = %e, "Failed to mark committed");
+                return;
             }
             if let Err(e) = st.save_certificate(&cert) {
                 tracing::warn!(err = %e, "Failed to persist certificate");
@@ -737,30 +776,12 @@ async fn check_and_commit(
         }
 
         // Emit a trust receipt recording the commit action.
-        let receipt = {
-            let Ok(s) = state.lock() else {
-                tracing::error!("Reactor state mutex poisoned in check_and_commit (receipt)");
+        let receipt = match commit_receipt_from_certificate(state, store, &cert) {
+            Ok(receipt) => receipt,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to build trust receipt for commit");
                 return;
-            };
-            #[allow(clippy::as_conversions)]
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let ts = Timestamp {
-                physical_ms: now_ms,
-                logical: 0,
-            };
-            TrustReceipt::new(
-                s.node_did.clone(),
-                Hash256::ZERO,
-                None,
-                "dag.commit".to_string(),
-                hash,
-                ReceiptOutcome::Executed,
-                ts,
-                &*s.sign_fn,
-            )
+            }
         };
         {
             let Ok(mut st) = store.lock() else {
@@ -1037,6 +1058,70 @@ mod tests {
     }
 
     #[test]
+    fn commit_receipt_uses_certificate_authority_and_node_timestamp() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let node_did = validator_vec[0].clone();
+        let config = ReactorConfig {
+            node_did: node_did.clone(),
+            is_validator: true,
+            validators,
+            round_timeout_ms: 5000,
+        };
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, sign_fn.clone(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
+
+        let mut dag = Dag::new();
+        let mut clock = HybridClock::with_time(42_000);
+        let node = append(
+            &mut dag,
+            &[],
+            b"receipt-timestamp-source",
+            &node_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+
+        let cert = CommitCertificate {
+            node_hash: node.hash,
+            votes: validator_vec
+                .iter()
+                .take(3)
+                .map(|voter| Vote {
+                    voter: voter.clone(),
+                    round: 0,
+                    node_hash: node.hash,
+                    signature: sign_fn(node.hash.0.as_slice()),
+                })
+                .collect(),
+            round: 0,
+        };
+
+        let receipt = commit_receipt_from_certificate(&state, &store, &cert).unwrap();
+        let expected_authority = commit_receipt_authority_hash(&cert).unwrap();
+
+        assert_eq!(receipt.timestamp, node.timestamp);
+        assert_eq!(receipt.authority_chain_hash, expected_authority);
+        assert_ne!(receipt.authority_chain_hash, Hash256::ZERO);
+        assert_eq!(receipt.action_hash, node.hash);
+        assert!(!receipt.signature.is_empty());
+    }
+
+    #[test]
+    fn commit_receipt_timestamp_rejects_missing_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
+
+        let err = stored_node_timestamp_for_receipt(&store, &Hash256::ZERO).unwrap_err();
+
+        assert!(err.contains("not found for trust receipt"));
+    }
+
+    #[test]
     fn full_consensus_flow_local() {
         // Simulate a 4-validator consensus flow entirely in-process
         let validators = make_validators(4);
@@ -1269,5 +1354,16 @@ mod tests {
         };
         let err = validate_vote(&msg, &validators).unwrap_err();
         assert!(err.contains("empty signature"));
+    }
+
+    #[test]
+    fn reactor_commit_receipts_do_not_use_local_wall_clock() {
+        let source = include_str!("reactor.rs");
+        let forbidden = concat!("System", "Time::now");
+
+        assert!(
+            !source.contains(forbidden),
+            "reactor commit receipts must derive timestamps from protocol or stored DAG metadata"
+        );
     }
 }
