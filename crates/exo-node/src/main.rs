@@ -162,7 +162,7 @@ async fn start_node(
 
     // Open local DAG store.
     let dag_store = store::SqliteDagStore::open(data_dir)?;
-    let height = dag_store.committed_height_value();
+    let height = dag_store.committed_height_value()?;
     tracing::info!(height, "DAG store opened");
 
     // Open 0dentity store (shares the same dag.db, applies zerodentity migration).
@@ -805,7 +805,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let dag_store = store::SqliteDagStore::open(&data_dir)?;
 
             println!("Node:   {}", node_identity.did);
-            println!("Height: {}", dag_store.committed_height_value());
+            println!("Height: {}", dag_store.committed_height_value()?);
             println!("Data:   {}", data_dir.display());
 
             Ok(())

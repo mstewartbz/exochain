@@ -488,8 +488,18 @@ pub fn build_status_message(
     };
 
     let store_height = match store.lock() {
-        Ok(st) => st.committed_height_value(),
-        Err(_) => 0,
+        Ok(st) => match st.committed_height_value() {
+            Ok(height) => height,
+            Err(e) => {
+                return (format!("\u{274c} Store height unavailable: {e}"), vec![]);
+            }
+        },
+        Err(_) => {
+            return (
+                "\u{274c} Store state temporarily unavailable".to_string(),
+                vec![],
+            );
+        }
     };
 
     let role = if is_validator {
@@ -871,6 +881,27 @@ mod tests {
         assert!(text.contains("Validators:"));
         assert!(text.contains("Validator")); // role
         assert!(!keyboard.is_empty());
+    }
+
+    #[test]
+    fn status_message_fails_closed_on_store_height_error() {
+        let reactor = test_reactor();
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteDagStore::open(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("dag.db")).unwrap();
+        let hash = [0xA5u8; 32];
+        conn.execute(
+            "INSERT INTO committed (hash, height) VALUES (?1, ?2)",
+            rusqlite::params![hash.as_slice(), -1_i64],
+        )
+        .unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (text, keyboard) = build_status_message(&reactor, &store);
+
+        assert!(text.contains("Store height unavailable"));
+        assert!(text.contains("committed.height"));
+        assert!(keyboard.is_empty());
     }
 
     #[test]

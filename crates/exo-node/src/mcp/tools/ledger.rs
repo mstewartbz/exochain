@@ -335,7 +335,15 @@ pub fn execute_get_checkpoint(params: &Value, context: &NodeContext) -> ToolResu
     // Prefer live store-reported height if we have one.
     if let Some(store) = context.store.as_ref() {
         let height = match store.lock() {
-            Ok(guard) => guard.committed_height_value(),
+            Ok(guard) => match guard.committed_height_value() {
+                Ok(height) => height,
+                Err(e) => {
+                    return ToolResult::error(
+                        json!({"error": format!("store committed height unavailable: {e}")})
+                            .to_string(),
+                    );
+                }
+            },
             Err(_) => {
                 return ToolResult::error(json!({"error": "store mutex poisoned"}).to_string());
             }
@@ -577,5 +585,29 @@ mod tests {
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
         assert!(v["last_finalized_at"].is_null());
         assert_eq!(v["last_finalized_at_source"], "unavailable_no_store");
+    }
+
+    #[test]
+    fn execute_get_checkpoint_fails_closed_on_store_height_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::SqliteDagStore::open(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("dag.db")).unwrap();
+        let hash = [0xA5u8; 32];
+        conn.execute(
+            "INSERT INTO committed (hash, height) VALUES (?1, ?2)",
+            rusqlite::params![hash.as_slice(), -1_i64],
+        )
+        .unwrap();
+        let context = NodeContext {
+            store: Some(std::sync::Arc::new(std::sync::Mutex::new(store))),
+            ..NodeContext::empty()
+        };
+
+        let result = execute_get_checkpoint(&json!({}), &context);
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("store committed height unavailable"));
+        assert!(text.contains("committed.height"));
     }
 }
