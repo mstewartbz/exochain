@@ -7,8 +7,28 @@ import type {
 
 const API_BASE = '/api/v1'
 
+/**
+ * HTTP methods that mutate server state and therefore require a CSRF
+ * token. GET / HEAD / OPTIONS are read-only and excluded. (A-082)
+ */
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 function getToken(): string | null {
   return localStorage.getItem('df_token')
+}
+
+/**
+ * Read the XSRF-TOKEN cookie and echo it back in an X-CSRF-Token header
+ * on mutating requests. The gateway rejects mutations when that cookie is
+ * present and the header is absent or mismatched. (A-082)
+ */
+function getCsrfToken(): string | null {
+  const cookie = document.cookie
+    .split(';')
+    .map(c => c.trim())
+    .find(c => c.startsWith('XSRF-TOKEN='))
+  if (!cookie) return null
+  return decodeURIComponent(cookie.slice('XSRF-TOKEN='.length))
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -16,6 +36,13 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
+  }
+
+  // Attach CSRF token on mutating requests (double-submit pattern, A-082).
+  const method = (init?.method ?? 'GET').toUpperCase()
+  if (MUTATING_METHODS.has(method)) {
+    const csrf = getCsrfToken()
+    if (csrf !== null) headers['X-CSRF-Token'] = csrf
   }
 
   const res = await fetch(`${API_BASE}${path}`, {
