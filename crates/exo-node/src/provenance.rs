@@ -150,7 +150,7 @@ pub fn provenance_router(state: Arc<ProvenanceState>) -> Router {
 mod tests {
     use axum::{body::Body, http::Request};
     use exo_core::types::{Did, Signature};
-    use exo_dag::dag::{Dag, HybridClock, append};
+    use exo_dag::dag::{Dag, DeterministicDagClock, append};
     use tower::ServiceExt;
 
     use super::*;
@@ -169,7 +169,7 @@ mod tests {
         let mut store = SqliteDagStore::open(dir.path()).unwrap();
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").unwrap();
         let sign_fn = make_sign_fn();
 

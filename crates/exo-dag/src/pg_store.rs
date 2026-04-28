@@ -249,7 +249,7 @@ impl DagStore for PostgresStore {
 mod tests {
     use super::*;
     use crate::{
-        dag::{Dag, HybridClock, append},
+        dag::{Dag, DeterministicDagClock, append},
         store::MemoryStore,
     };
 
@@ -266,7 +266,7 @@ mod tests {
 
     fn make_test_node() -> DagNode {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
         append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap()
@@ -382,7 +382,7 @@ mod tests {
         let mut store = PostgresStore::new(pool).await.unwrap();
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -410,7 +410,7 @@ mod tests {
         let mut store = PostgresStore::new(pool).await.unwrap();
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -492,7 +492,7 @@ mod tests {
         let mut store = PostgresStore::new(pool).await.unwrap();
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -561,7 +561,7 @@ mod tests {
         let mut mem_store = MemoryStore::new();
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 

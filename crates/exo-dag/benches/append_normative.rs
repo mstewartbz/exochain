@@ -19,7 +19,7 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use exo_core::types::{Did, Hash256, Signature};
 use exo_dag::{
     consensus::{ConsensusConfig, ConsensusState, Vote, check_commit, commit, propose, vote},
-    dag::{Dag, HybridClock, ancestors, append, tips},
+    dag::{Dag, DeterministicDagClock, ancestors, append, tips},
     store::MemoryStore,
 };
 
@@ -43,7 +43,7 @@ fn creator() -> Did {
 fn linear_dag(depth: usize) -> (Dag, Hash256) {
     let c = creator();
     let mut dag = Dag::new();
-    let mut clock = HybridClock::new();
+    let mut clock = DeterministicDagClock::new();
     let genesis = append(&mut dag, &[], b"genesis", &c, &sign_fn, &mut clock).expect("genesis");
     let mut tip = genesis.hash;
     for i in 0..depth {
@@ -76,7 +76,7 @@ fn bench_dag_append(c: &mut Criterion) {
             |b, &n| {
                 b.iter(|| {
                     let mut dag = Dag::new();
-                    let mut clock = HybridClock::new();
+                    let mut clock = DeterministicDagClock::new();
                     let genesis = append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock)
                         .expect("genesis");
                     let mut tip = genesis.hash;
@@ -96,7 +96,7 @@ fn bench_dag_append(c: &mut Criterion) {
     group.bench_function("diamond_merge", |b| {
         b.iter(|| {
             let mut dag = Dag::new();
-            let mut clock = HybridClock::new();
+            let mut clock = DeterministicDagClock::new();
             let g = append(&mut dag, &[], b"g", &cr, &sign_fn, &mut clock).expect("g");
             let left =
                 append(&mut dag, &[g.hash], b"left", &cr, &sign_fn, &mut clock).expect("left");
@@ -162,7 +162,7 @@ fn bench_store_checkpoint(c: &mut Criterion) {
         // Pre-build nodes outside the timed section.
         let nodes: Vec<_> = {
             let mut dag = Dag::new();
-            let mut clock = HybridClock::new();
+            let mut clock = DeterministicDagClock::new();
             let genesis =
                 append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock).expect("genesis");
             let mut tip = genesis.hash;
@@ -230,7 +230,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
         // Build a genesis DAG node to propose.
         let cr = creator();
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let node = append(&mut dag, &[], b"genesis", &cr, &sign_fn, &mut clock).expect("genesis");
 
         group.bench_with_input(
@@ -260,7 +260,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
         // Multi-round: advance through 10 rounds, each with a fresh proposal.
         let nodes: Vec<_> = {
             let mut d = Dag::new();
-            let mut clk = HybridClock::new();
+            let mut clk = DeterministicDagClock::new();
             let g = append(&mut d, &[], b"r0", &cr, &sign_fn, &mut clk).expect("g");
             let mut tip = g.hash;
             let mut out = vec![g];

@@ -699,7 +699,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use exo_core::types::{Did, Signature};
-    use exo_dag::dag::{Dag, HybridClock, append};
+    use exo_dag::dag::{Dag, DeterministicDagClock, append};
 
     use super::*;
 
@@ -716,7 +716,7 @@ mod tests {
 
     fn make_test_node() -> DagNode {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
         append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap()
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn tips_with_children() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -1294,7 +1294,7 @@ mod tests {
     #[test]
     fn multiple_tips() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 

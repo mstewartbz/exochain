@@ -154,7 +154,7 @@ mod tests {
     use exo_core::types::{Did, Signature};
 
     use super::*;
-    use crate::dag::{Dag, HybridClock, append};
+    use crate::dag::{Dag, DeterministicDagClock, append};
 
     type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
 
@@ -169,7 +169,7 @@ mod tests {
 
     fn make_test_node() -> DagNode {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
         append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap()
@@ -234,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn tips_with_children() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(store.committed_height().await.unwrap(), 1);
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test2").expect("valid");
         let sign_fn = make_sign_fn();
         let node2 = append(&mut dag, &[], b"other", &creator, &*sign_fn, &mut clock).unwrap();
@@ -288,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_tips() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
 
