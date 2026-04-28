@@ -511,7 +511,7 @@ pub fn is_finalized(state: &ConsensusState, hash: &Hash256) -> bool {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, HybridClock, append};
+    use crate::dag::{Dag, DeterministicDagClock, append};
 
     type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
 
@@ -541,7 +541,7 @@ mod tests {
 
     fn setup_dag_with_node() -> (Dag, DagNode) {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:proposer").expect("valid");
         let sign_fn = make_sign_fn();
         let node = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap();
@@ -764,7 +764,7 @@ mod tests {
         let mut state = ConsensusState::new(config);
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:proposer").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -819,7 +819,7 @@ mod tests {
         let mut state = ConsensusState::new(config);
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:proposer").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -869,7 +869,7 @@ mod tests {
         let mut state = ConsensusState::new(config);
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:proposer").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -918,7 +918,7 @@ mod tests {
         let mut state = ConsensusState::new(config);
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = Did::new("did:exo:proposer").expect("valid");
         let sign_fn = make_sign_fn();
 
@@ -950,7 +950,7 @@ mod tests {
     /// not depend on signing details.
     fn make_node(seed: &str) -> (DagNode, (), ()) {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let did = Did::new("did:exo:proposer").unwrap();
         let sf = make_sign_fn();
         let node = append(&mut dag, &[], seed.as_bytes(), &did, &*sf, &mut clock)

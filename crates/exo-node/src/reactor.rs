@@ -46,7 +46,7 @@ use exo_core::{
 };
 use exo_dag::{
     consensus::{self, CommitCertificate, ConsensusConfig, ConsensusState, Vote},
-    dag::{Dag, DagNode, HybridClock, append},
+    dag::{Dag, DagNode, DeterministicDagClock, append},
 };
 use tokio::sync::mpsc;
 
@@ -122,9 +122,9 @@ pub struct ReactorState {
     /// The local DAG — used by submit_proposal via struct destructuring.
     #[allow(dead_code)]
     pub dag: Dag,
-    /// The hybrid logical clock — used by submit_proposal via struct destructuring.
+    /// The deterministic DAG append clock — used by submit_proposal via struct destructuring.
     #[allow(dead_code)]
-    pub clock: HybridClock,
+    pub clock: DeterministicDagClock,
     /// This node's DID.
     pub node_did: Did,
     /// Whether this node is a validator.
@@ -197,7 +197,7 @@ pub fn create_reactor_state(
                 return Arc::new(Mutex::new(ReactorState {
                     consensus: consensus_state,
                     dag: Dag::new(),
-                    clock: HybridClock::new(),
+                    clock: DeterministicDagClock::new(),
                     node_did: config.node_did.clone(),
                     is_validator: config.is_validator,
                     sign_fn,
@@ -258,7 +258,7 @@ pub fn create_reactor_state(
     Arc::new(Mutex::new(ReactorState {
         consensus: consensus_state,
         dag: Dag::new(),
-        clock: HybridClock::new(),
+        clock: DeterministicDagClock::new(),
         node_did: config.node_did.clone(),
         is_validator: config.is_validator,
         sign_fn,
@@ -1074,7 +1074,7 @@ mod tests {
         let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::with_time(42_000);
+        let mut clock = DeterministicDagClock::with_time(42_000);
         let node = append(
             &mut dag,
             &[],
@@ -1131,7 +1131,7 @@ mod tests {
         let config = ConsensusConfig::new(validators.clone(), 5000);
         let mut consensus_state = ConsensusState::new(config);
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
 
         // Create a DAG node
         let node = append(
@@ -1211,9 +1211,9 @@ mod tests {
         let mut state = ConsensusState::new(config); // quorum = 5
 
         let mut honest_dag = Dag::new();
-        let mut honest_clock = HybridClock::new();
+        let mut honest_clock = DeterministicDagClock::new();
         let mut byzantine_dag = Dag::new();
-        let mut byzantine_clock = HybridClock::new();
+        let mut byzantine_clock = DeterministicDagClock::new();
 
         let honest_node = append(
             &mut honest_dag,
@@ -1277,7 +1277,7 @@ mod tests {
     fn make_node_for_test() -> exo_dag::dag::DagNode {
         use exo_dag::dag::{Dag, append};
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let did = Did::new("did:exo:v0").unwrap();
         let sf = make_sign_fn();
         append(&mut dag, &[], b"x", &did, &*sf, &mut clock).unwrap()

@@ -536,7 +536,7 @@ pub async fn run_sync_engine(mut engine: SyncEngine, mut net_events: mpsc::Recei
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use exo_core::types::{Did, Signature};
-    use exo_dag::dag::{Dag, HybridClock, append};
+    use exo_dag::dag::{Dag, DeterministicDagClock, append};
     use tokio::sync::mpsc;
 
     use super::*;
@@ -564,7 +564,7 @@ mod tests {
         let did = test_did();
 
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let mut hashes = Vec::new();
 
         let mut parents = vec![];
@@ -726,7 +726,7 @@ mod tests {
         let sign_fn = make_sign_fn();
         let did = test_did();
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
 
         let node1 = append(&mut dag, &[], b"synced-1", &did, &*sign_fn, &mut clock).unwrap();
         let node2 = append(

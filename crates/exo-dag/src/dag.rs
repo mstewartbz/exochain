@@ -13,16 +13,21 @@ use serde::{Deserialize, Serialize};
 use crate::error::{DagError, Result};
 
 // ---------------------------------------------------------------------------
-// HybridClock — monotonic logical clock for deterministic timestamps
+// DeterministicDagClock — logical clock for deterministic DAG append tests
 // ---------------------------------------------------------------------------
 
-/// Hybrid Logical Clock for deterministic, monotonic timestamps.
+/// Deterministic logical clock for DAG append operations.
+///
+/// This is intentionally not `exo_core::hlc::HybridClock`: DAG append tests and
+/// deterministic constructors need caller-controlled timestamps without reading
+/// a wall clock. Runtime paths that need network HLC drift handling should use
+/// `exo_core::hlc::HybridClock` before calling into the DAG layer.
 #[derive(Debug, Clone)]
-pub struct HybridClock {
+pub struct DeterministicDagClock {
     latest: Timestamp,
 }
 
-impl HybridClock {
+impl DeterministicDagClock {
     /// Create a new clock starting at time zero.
     #[must_use]
     pub fn new() -> Self {
@@ -54,7 +59,7 @@ impl HybridClock {
     }
 }
 
-impl Default for HybridClock {
+impl Default for DeterministicDagClock {
     fn default() -> Self {
         Self::new()
     }
@@ -75,7 +80,7 @@ pub struct DagNode {
     pub payload_hash: Hash256,
     /// DID of the creator.
     pub creator_did: Did,
-    /// Deterministic timestamp from hybrid clock.
+    /// Deterministic timestamp supplied by the DAG append clock.
     pub timestamp: Timestamp,
     /// Signature over the node hash.
     pub signature: Signature,
@@ -155,7 +160,7 @@ pub fn append(
     payload: &[u8],
     creator: &Did,
     sign_fn: &dyn Fn(&[u8]) -> Signature,
-    clock: &mut HybridClock,
+    clock: &mut DeterministicDagClock,
 ) -> Result<DagNode> {
     // Genesis node can have empty parents only when DAG is empty
     if parents.is_empty() && !dag.is_empty() {
@@ -365,6 +370,25 @@ mod tests {
     type SignFn = Box<dyn Fn(&[u8]) -> Signature>;
     type VerifyFn = Box<dyn Fn(&[u8], &Signature) -> bool>;
 
+    #[test]
+    fn dag_module_does_not_define_local_hybrid_clock() {
+        let source = include_str!("dag.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section exists");
+
+        assert!(
+            !production.contains("pub struct HybridClock")
+                && !production.contains("impl HybridClock"),
+            "exo-dag must not define a local HybridClock that name-collides with exo_core::hlc::HybridClock"
+        );
+        assert!(
+            production.contains("pub struct DeterministicDagClock"),
+            "exo-dag append tests/helpers should use an explicitly deterministic DAG clock type"
+        );
+    }
+
     fn test_did(name: &str) -> Did {
         Did::new(name).expect("valid DID")
     }
@@ -398,7 +422,7 @@ mod tests {
     #[test]
     fn genesis_node() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -412,7 +436,7 @@ mod tests {
     #[test]
     fn append_with_parents() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -434,7 +458,7 @@ mod tests {
     #[test]
     fn empty_parents_non_genesis_rejected() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -446,7 +470,7 @@ mod tests {
     #[test]
     fn orphan_parent_rejected() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -466,7 +490,7 @@ mod tests {
     #[test]
     fn parents_sorted_and_deduped() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -486,7 +510,7 @@ mod tests {
     #[test]
     fn get_node() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -498,7 +522,7 @@ mod tests {
     #[test]
     fn tips_computation() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -529,7 +553,7 @@ mod tests {
     #[test]
     fn ancestors_topological() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -547,7 +571,7 @@ mod tests {
     #[test]
     fn ancestors_empty_for_genesis() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -564,7 +588,7 @@ mod tests {
     #[test]
     fn verify_node_valid() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
         let verify_fn = make_verify_fn();
@@ -576,7 +600,7 @@ mod tests {
     #[test]
     fn verify_node_bad_signature() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -593,7 +617,7 @@ mod tests {
     #[test]
     fn verify_node_bad_hash() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
         let verify_fn = make_verify_fn();
@@ -609,7 +633,7 @@ mod tests {
     #[test]
     fn verify_node_unsorted_parents() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
         let verify_fn = make_verify_fn();
@@ -627,7 +651,7 @@ mod tests {
     #[test]
     fn diamond_dag() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did("did:exo:alice");
         let sign_fn = make_sign_fn();
 
@@ -652,8 +676,8 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_clock_monotonic() {
-        let mut clock = HybridClock::new();
+    fn deterministic_dag_clock_monotonic() {
+        let mut clock = DeterministicDagClock::new();
         let t1 = clock.tick();
         let t2 = clock.tick();
         let t3 = clock.tick();
@@ -662,8 +686,8 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_clock_advance() {
-        let mut clock = HybridClock::with_time(100);
+    fn deterministic_dag_clock_advance() {
+        let mut clock = DeterministicDagClock::with_time(100);
         let t1 = clock.advance(200);
         assert_eq!(t1.physical_ms, 200);
         assert_eq!(t1.logical, 1);
@@ -674,8 +698,8 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_clock_default() {
-        let clock = HybridClock::default();
+    fn deterministic_dag_clock_default() {
+        let clock = DeterministicDagClock::default();
         assert_eq!(clock.latest, Timestamp::ZERO);
     }
 
@@ -738,7 +762,7 @@ mod tests {
     #[test]
     fn multiple_creators() {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let alice = test_did("did:exo:alice");
         let bob = test_did("did:exo:bob");
         let sign_fn = make_sign_fn();

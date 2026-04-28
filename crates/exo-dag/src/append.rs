@@ -109,7 +109,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        dag::{Dag, DagNode, HybridClock, append},
+        dag::{Dag, DagNode, DeterministicDagClock, append},
         store::MemoryStore,
     };
 
@@ -130,7 +130,7 @@ mod tests {
 
     fn make_test_node() -> DagNode {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did();
         let sign_fn = make_sign_fn();
         append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).expect("genesis")
@@ -138,7 +138,7 @@ mod tests {
 
     fn make_child_node(parent: &DagNode) -> DagNode {
         let mut dag = Dag::new();
-        let mut clock = HybridClock::new();
+        let mut clock = DeterministicDagClock::new();
         let creator = test_did();
         let sign_fn = make_sign_fn();
 
