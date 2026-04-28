@@ -33,8 +33,12 @@ use axum::{
 #[cfg(any(test, feature = "unaudited-admin-governance-shortcut"))]
 use exo_core::types::Did;
 use exo_core::types::Hash256;
+#[cfg(feature = "unaudited-admin-governance-shortcut")]
+use exo_core::types::PublicKey;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "unaudited-admin-governance-shortcut")]
+use crate::identity;
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
 use crate::wire::ValidatorChange;
 use crate::{
@@ -88,6 +92,7 @@ pub struct BroadcastRequest {
 pub struct ValidatorChangeRequest {
     pub action: String, // "add" or "remove"
     pub did: String,
+    pub public_key_hex: Option<String>,
 }
 
 /// Response representing a single trust receipt.
@@ -142,6 +147,25 @@ pub struct NodeStatusResponse {
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "unaudited-admin-governance-shortcut")]
+fn parse_validator_public_key_hex(value: &str) -> Result<PublicKey, (StatusCode, String)> {
+    let bytes = hex::decode(value).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid public_key_hex: {e}"),
+        )
+    })?;
+    if bytes.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("public_key_hex must be 32 bytes, got {}", bytes.len()),
+        ));
+    }
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(&bytes);
+    Ok(PublicKey::from_bytes(public_key))
+}
 
 /// `POST /api/v1/governance/propose` — submit a governance proposal for BFT consensus.
 async fn handle_propose(
@@ -291,6 +315,31 @@ async fn handle_validator_change(
         let did = Did::new(&req.did)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
 
+        let add_public_key = if req.action == "add" {
+            let public_key_hex = req.public_key_hex.as_deref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "public_key_hex is required when adding a validator".to_string(),
+                )
+            })?;
+            let public_key = parse_validator_public_key_hex(public_key_hex)?;
+            let derived_did = identity::did_from_public_key(&public_key).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("public_key_hex does not derive a valid validator DID: {e}"),
+                )
+            })?;
+            if derived_did != did {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("public_key_hex derives {derived_did}, not {did}"),
+                ));
+            }
+            Some(public_key)
+        } else {
+            None
+        };
+
         let change = match req.action.as_str() {
             "add" => ValidatorChange::AddValidator { did },
             "remove" => ValidatorChange::RemoveValidator { did },
@@ -313,6 +362,9 @@ async fn handle_validator_change(
             match &change {
                 ValidatorChange::AddValidator { did } => {
                     s.consensus.config.validators.insert(did.clone());
+                    if let Some(public_key) = add_public_key {
+                        s.validator_public_keys.insert(did.clone(), public_key);
+                    }
                 }
                 ValidatorChange::RemoveValidator { did } => {
                     if s.consensus.config.validators.len() <= 4 {
@@ -323,6 +375,7 @@ async fn handle_validator_change(
                         ));
                     }
                     s.consensus.config.validators.remove(did);
+                    s.validator_public_keys.remove(did);
                 }
             }
             (
@@ -487,7 +540,7 @@ mod tests {
     };
 
     use axum::{body::Body, http::Request};
-    use exo_core::types::Signature;
+    use exo_core::{crypto::KeyPair, types::Signature};
     use tower::ServiceExt;
 
     use super::*;
@@ -497,12 +550,23 @@ mod tests {
     };
 
     fn make_sign_fn() -> Arc<dyn Fn(&[u8]) -> Signature + Send + Sync> {
-        Arc::new(|data: &[u8]| {
-            let h = blake3::hash(data);
-            let mut sig = [0u8; 64];
-            sig[..32].copy_from_slice(h.as_bytes());
-            Signature::from_bytes(sig)
-        })
+        let keypair = KeyPair::from_secret_bytes([1u8; 32]).unwrap();
+        Arc::new(move |data: &[u8]| keypair.sign(data))
+    }
+
+    fn validator_public_keys(
+        validators: &BTreeSet<Did>,
+    ) -> std::collections::BTreeMap<Did, exo_core::types::PublicKey> {
+        validators
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, did)| {
+                let seed = u8::try_from(idx + 1).unwrap();
+                let keypair = KeyPair::from_secret_bytes([seed; 32]).unwrap();
+                (did, *keypair.public_key())
+            })
+            .collect()
     }
 
     fn test_api_state() -> Arc<NodeApiState> {
@@ -513,6 +577,7 @@ mod tests {
         let config = ReactorConfig {
             node_did: Did::new("did:exo:v0").unwrap(),
             is_validator: true,
+            validator_public_keys: validator_public_keys(&validators),
             validators,
             round_timeout_ms: 5000,
         };
@@ -611,10 +676,13 @@ mod tests {
     async fn validator_add_increases_count() {
         let state = test_api_state();
         let app = governance_router(Arc::clone(&state));
+        let keypair = KeyPair::from_secret_bytes([50u8; 32]).unwrap();
+        let did = crate::identity::did_from_public_key(keypair.public_key()).unwrap();
 
         let body = serde_json::json!({
             "action": "add",
-            "did": "did:exo:new-validator",
+            "did": did.to_string(),
+            "public_key_hex": hex::encode(keypair.public_key().as_bytes()),
         });
 
         let resp = app

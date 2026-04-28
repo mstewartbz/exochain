@@ -7,45 +7,31 @@
 //! 4. Broadcasts outbound consensus messages via the network handle
 //! 5. Drives round advancement on timeout
 //!
-//! This module wires the existing fully-tested consensus code (`propose()`,
-//! `vote()`, `check_commit()`, `commit()`) into a network-aware reactor
-//! without modifying the consensus protocol itself.
+//! This module wires the fully-tested verified consensus API
+//! (`propose_verified()`, `vote_verified()`, `check_commit()`,
+//! `commit_verified()`) into a network-aware reactor.
 //!
 //! # GAP-014 note
 //!
-//! The GAP-014 fix (commit 254e8dc) introduced `propose_verified`,
-//! `vote_verified`, and `commit_verified` in `exo_dag::consensus` which
-//! enforce signature verification. This reactor still calls the legacy
-//! `propose` / `vote` / `commit` — wiring the reactor's handle_* paths
-//! to the verified variants requires a `PublicKeyResolver` backed by
-//! the identity registry, which is the follow-up initiative
-//! `exochain-api-migration-gap` (tracked separately).
-//!
-//! Until that wiring lands, the legacy API is permitted here via
-//! `#[allow(deprecated)]`. As defense-in-depth, `validate_proposal` /
-//! `validate_vote` / `validate_commit` below reject all-zero signature
-//! sentinels so a trivial-forge attacker still can't inject bogus
-//! messages through this path.
+//! The reactor keeps an explicit validator DID → Ed25519 public-key map and
+//! rejects proposals, votes, and commit certificates that cannot be verified
+//! against that resolver. Local proposal and self-vote signatures are produced
+//! over the canonical CBOR payloads defined by `exo-dag::consensus`.
 
-#![allow(
-    clippy::as_conversions,
-    clippy::type_complexity,
-    clippy::single_match,
-    deprecated
-)]
+#![allow(clippy::as_conversions, clippy::type_complexity, clippy::single_match)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use exo_core::{
     hash::hash_structured,
-    types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt},
+    types::{Did, Hash256, PublicKey, ReceiptOutcome, Signature, Timestamp, TrustReceipt},
 };
 use exo_dag::{
-    consensus::{self, CommitCertificate, ConsensusConfig, ConsensusState, Vote},
+    consensus::{self, CommitCertificate, ConsensusConfig, ConsensusState, Proposal, Vote},
     dag::{Dag, DagNode, DeterministicDagClock, append},
 };
 use tokio::sync::mpsc;
@@ -111,9 +97,84 @@ fn commit_receipt_from_certificate(
     ))
 }
 
+fn sign_proposal(
+    proposal: &Proposal,
+    sign_fn: &(dyn Fn(&[u8]) -> Signature + Send + Sync),
+) -> Result<Signature, String> {
+    let payload = proposal
+        .signing_payload()
+        .map_err(|e| format!("proposal signing payload: {e}"))?;
+    Ok(sign_fn(&payload))
+}
+
+fn signed_vote(
+    voter: Did,
+    round: u64,
+    node_hash: Hash256,
+    sign_fn: &(dyn Fn(&[u8]) -> Signature + Send + Sync),
+) -> Result<Vote, String> {
+    let mut vote = Vote {
+        voter,
+        round,
+        node_hash,
+        signature: Signature::empty(),
+    };
+    let payload = vote
+        .signing_payload()
+        .map_err(|e| format!("vote signing payload: {e}"))?;
+    vote.signature = sign_fn(&payload);
+    Ok(vote)
+}
+
 // ---------------------------------------------------------------------------
 // Reactor state
 // ---------------------------------------------------------------------------
+
+/// Deterministic validator public-key resolver used by the reactor.
+///
+/// Consensus verification must resolve keys from explicit configuration or
+/// persisted governance state; it cannot infer a public key from a DID.
+#[derive(Debug, Clone, Default)]
+pub struct ValidatorPublicKeys {
+    keys: BTreeMap<Did, PublicKey>,
+}
+
+impl ValidatorPublicKeys {
+    #[must_use]
+    pub fn new(keys: BTreeMap<Did, PublicKey>) -> Self {
+        Self { keys }
+    }
+
+    #[must_use]
+    pub fn as_map(&self) -> &BTreeMap<Did, PublicKey> {
+        &self.keys
+    }
+
+    #[cfg_attr(not(feature = "unaudited-admin-governance-shortcut"), allow(dead_code))]
+    pub fn insert(&mut self, did: Did, public_key: PublicKey) {
+        self.keys.insert(did, public_key);
+    }
+
+    #[cfg_attr(not(feature = "unaudited-admin-governance-shortcut"), allow(dead_code))]
+    pub fn remove(&mut self, did: &Did) {
+        self.keys.remove(did);
+    }
+
+    #[must_use]
+    pub fn missing_for(&self, validators: &BTreeSet<Did>) -> Vec<Did> {
+        validators
+            .iter()
+            .filter(|did| !self.keys.contains_key(*did))
+            .cloned()
+            .collect()
+    }
+}
+
+impl consensus::PublicKeyResolver for ValidatorPublicKeys {
+    fn resolve(&self, did: &Did) -> Option<PublicKey> {
+        self.keys.get(did).copied()
+    }
+}
 
 /// Shared state for the consensus reactor, accessible from the API layer.
 pub struct ReactorState {
@@ -131,6 +192,8 @@ pub struct ReactorState {
     pub is_validator: bool,
     /// Sign function using this node's key.
     sign_fn: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+    /// Public keys for validators in the current consensus set.
+    pub validator_public_keys: ValidatorPublicKeys,
 }
 
 impl std::fmt::Debug for ReactorState {
@@ -139,6 +202,14 @@ impl std::fmt::Debug for ReactorState {
             .field("consensus", &self.consensus)
             .field("node_did", &self.node_did)
             .field("is_validator", &self.is_validator)
+            .field(
+                "validator_public_keys",
+                &self
+                    .validator_public_keys
+                    .as_map()
+                    .keys()
+                    .collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -170,6 +241,8 @@ pub struct ReactorConfig {
     pub is_validator: bool,
     /// Initial validator set DIDs.
     pub validators: BTreeSet<Did>,
+    /// Ed25519 public keys for every validator DID.
+    pub validator_public_keys: BTreeMap<Did, PublicKey>,
     /// Round timeout in milliseconds.
     pub round_timeout_ms: u64,
 }
@@ -187,6 +260,7 @@ pub fn create_reactor_state(
 ) -> SharedReactorState {
     let consensus_config = ConsensusConfig::new(config.validators.clone(), config.round_timeout_ms);
     let mut consensus_state = ConsensusState::new(consensus_config);
+    let validator_public_keys = ValidatorPublicKeys::new(config.validator_public_keys.clone());
 
     // Restore persisted consensus state if a store is provided.
     if let Some(store_arc) = store {
@@ -201,6 +275,7 @@ pub fn create_reactor_state(
                     node_did: config.node_did.clone(),
                     is_validator: config.is_validator,
                     sign_fn,
+                    validator_public_keys,
                 }));
             }
         };
@@ -215,12 +290,39 @@ pub fn create_reactor_state(
             }
         }
 
+        // Restore persisted validator set (may have been changed via governance).
+        if let Ok(persisted_validators) = st.load_validator_set() {
+            if !persisted_validators.is_empty() {
+                consensus_state.config.validators = persisted_validators;
+                tracing::info!(
+                    validators = consensus_state.config.validators.len(),
+                    "Restored validator set from store"
+                );
+            }
+        }
+
+        let missing_public_keys =
+            validator_public_keys.missing_for(&consensus_state.config.validators);
+        if !missing_public_keys.is_empty() {
+            tracing::warn!(
+                missing = ?missing_public_keys,
+                "Consensus validator public-key resolver is incomplete; \
+                 unverifiable restored votes/certificates and network messages will be rejected"
+            );
+        }
+
         // Restore commit certificates.
         if let Ok(certs) = st.load_certificates() {
             let count = certs.len();
             for cert in certs {
                 if !consensus::is_finalized(&consensus_state, &cert.node_hash) {
-                    consensus::commit(&mut consensus_state, cert);
+                    if let Err(e) = consensus::commit_verified(
+                        &mut consensus_state,
+                        cert,
+                        &validator_public_keys,
+                    ) {
+                        tracing::warn!(err = %e, "Skipped unverifiable restored commit certificate");
+                    }
                 }
             }
             if count > 0 {
@@ -232,24 +334,17 @@ pub fn create_reactor_state(
         if let Ok(votes) = st.load_votes_for_round(consensus_state.current_round) {
             let count = votes.len();
             for vote in votes {
-                let _ = consensus::vote(&mut consensus_state, vote);
+                if let Err(e) =
+                    consensus::vote_verified(&mut consensus_state, vote, &validator_public_keys)
+                {
+                    tracing::warn!(err = %e, "Skipped unverifiable restored pending vote");
+                }
             }
             if count > 0 {
                 tracing::info!(
                     count,
                     round = consensus_state.current_round,
                     "Restored pending votes"
-                );
-            }
-        }
-
-        // Restore persisted validator set (may have been changed via governance).
-        if let Ok(persisted_validators) = st.load_validator_set() {
-            if !persisted_validators.is_empty() {
-                consensus_state.config.validators = persisted_validators;
-                tracing::info!(
-                    validators = consensus_state.config.validators.len(),
-                    "Restored validator set from store"
                 );
             }
         }
@@ -262,6 +357,7 @@ pub fn create_reactor_state(
         node_did: config.node_did.clone(),
         is_validator: config.is_validator,
         sign_fn,
+        validator_public_keys,
     }))
 }
 
@@ -353,34 +449,28 @@ pub async fn run_reactor(
 
 /// Validate a consensus proposal before processing.
 ///
-/// Checks: proposer is in the current validator set, the attached
-/// signature is non-empty, is not a zero-byte sentinel, and the
-/// node hash matches the proposal's node_hash.
-///
-/// **Note (GAP-014 defense-in-depth):** This function is a structural
-/// guard only. Until the reactor is wired to a real
-/// `PublicKeyResolver` (see initiative
-/// `fix-gap-014-consensus-sig-verify.md`), the actual cryptographic
-/// verification lives in `consensus::*_verified` but is NOT yet called
-/// from this reactor. This validator does the maximum amount of
-/// structural filtering possible without a resolver: it rejects
-/// empty and all-zero signatures, blocking the most obvious forgery
-/// shapes. It does NOT yet reject forgeries that use arbitrary
-/// non-zero bytes.
-fn validate_proposal(msg: &ConsensusProposalMsg, validators: &BTreeSet<Did>) -> Result<(), String> {
+/// Checks: proposer is in the current validator set, the attached signature
+/// verifies against the configured proposer public key, and the node hash
+/// matches the proposal's node_hash.
+fn validate_proposal<R: consensus::PublicKeyResolver>(
+    msg: &ConsensusProposalMsg,
+    validators: &BTreeSet<Did>,
+    resolver: &R,
+) -> Result<(), String> {
     if !validators.contains(&msg.proposal.proposer) {
         return Err(format!(
             "proposer {} is not in the validator set",
             msg.proposal.proposer
         ));
     }
-    if msg.signature.is_empty() {
-        return Err("proposal carries empty signature".into());
-    }
-    // GAP-014 defense-in-depth: reject the null-signature attack shape.
-    let raw = msg.signature.as_bytes();
-    if !raw.is_empty() && raw.iter().all(|b| *b == 0) {
-        return Err("proposal carries zero-byte signature (null-sig attack shape)".into());
+    let Some(public_key) = resolver.resolve(&msg.proposal.proposer) else {
+        return Err(format!(
+            "proposer {} has no configured public key",
+            msg.proposal.proposer
+        ));
+    };
+    if !msg.proposal.verify_signature(&public_key, &msg.signature) {
+        return Err("proposal carries invalid signature".into());
     }
     if msg.node.hash != msg.proposal.node_hash {
         return Err(format!(
@@ -393,36 +483,41 @@ fn validate_proposal(msg: &ConsensusProposalMsg, validators: &BTreeSet<Did>) -> 
 
 /// Validate a consensus vote before processing.
 ///
-/// Checks: voter is a known validator, signature is non-empty, and
-/// signature is not a zero-byte sentinel.
-///
-/// See `validate_proposal` for the GAP-014 caveat.
-fn validate_vote(msg: &ConsensusVoteMsg, validators: &BTreeSet<Did>) -> Result<(), String> {
+/// Checks: voter is a known validator and the signature verifies against the
+/// configured voter public key.
+fn validate_vote<R: consensus::PublicKeyResolver>(
+    msg: &ConsensusVoteMsg,
+    validators: &BTreeSet<Did>,
+    resolver: &R,
+) -> Result<(), String> {
     if !validators.contains(&msg.vote.voter) {
         return Err(format!(
             "voter {} is not in the validator set",
             msg.vote.voter
         ));
     }
-    if msg.vote.signature.is_empty() {
-        return Err("vote carries empty signature".into());
-    }
-    // GAP-014 defense-in-depth: reject the null-signature attack shape.
-    let raw = msg.vote.signature.as_bytes();
-    if !raw.is_empty() && raw.iter().all(|b| *b == 0) {
-        return Err("vote carries zero-byte signature (null-sig attack shape)".into());
+    let Some(public_key) = resolver.resolve(&msg.vote.voter) else {
+        return Err(format!(
+            "voter {} has no configured public key",
+            msg.vote.voter
+        ));
+    };
+    if !msg.vote.verify_signature(&public_key) {
+        return Err("vote carries invalid signature".into());
     }
     Ok(())
 }
 
 /// Validate a commit certificate before processing.
 ///
-/// Checks: every vote in the certificate is from a known validator,
-/// carries a non-empty, non-zero-sentinel signature, and references
-/// the certificate's node hash.
-///
-/// See `validate_proposal` for the GAP-014 caveat.
-fn validate_commit(msg: &ConsensusCommitMsg, validators: &BTreeSet<Did>) -> Result<(), String> {
+/// Checks: every vote in the certificate is from a known validator, references
+/// the certificate node hash, and verifies against the configured voter public
+/// key.
+fn validate_commit<R: consensus::PublicKeyResolver>(
+    msg: &ConsensusCommitMsg,
+    validators: &BTreeSet<Did>,
+    resolver: &R,
+) -> Result<(), String> {
     for vote in &msg.certificate.votes {
         if !validators.contains(&vote.voter) {
             return Err(format!(
@@ -430,23 +525,21 @@ fn validate_commit(msg: &ConsensusCommitMsg, validators: &BTreeSet<Did>) -> Resu
                 vote.voter
             ));
         }
-        if vote.signature.is_empty() {
-            return Err(format!(
-                "certificate vote from {} has empty signature",
-                vote.voter
-            ));
-        }
-        // GAP-014 defense-in-depth: reject the null-signature attack shape.
-        let raw = vote.signature.as_bytes();
-        if !raw.is_empty() && raw.iter().all(|b| *b == 0) {
-            return Err(format!(
-                "certificate vote from {} has zero-byte signature (null-sig attack shape)",
-                vote.voter
-            ));
-        }
         if vote.node_hash != msg.certificate.node_hash {
             return Err(format!(
                 "certificate vote from {} references wrong node hash",
+                vote.voter
+            ));
+        }
+        let Some(public_key) = resolver.resolve(&vote.voter) else {
+            return Err(format!(
+                "certificate vote from {} has no configured public key",
+                vote.voter
+            ));
+        };
+        if !vote.verify_signature(&public_key) {
+            return Err(format!(
+                "certificate vote from {} has invalid signature",
                 vote.voter
             ));
         }
@@ -501,7 +594,11 @@ async fn handle_proposal(
             tracing::error!("Reactor state mutex poisoned in handle_proposal (validate)");
             return;
         };
-        if let Err(reason) = validate_proposal(&msg, &s.consensus.config.validators) {
+        if let Err(reason) = validate_proposal(
+            &msg,
+            &s.consensus.config.validators,
+            &s.validator_public_keys,
+        ) {
             tracing::warn!(err = %reason, "Rejected invalid proposal from network");
             return;
         }
@@ -526,8 +623,15 @@ async fn handle_proposal(
             }
         }
 
-        // Register the proposal in consensus state.
-        if let Err(e) = consensus::propose(&mut s.consensus, &msg.node, &msg.proposal.proposer) {
+        // Register the proposal in consensus state after cryptographic verification.
+        let resolver = s.validator_public_keys.clone();
+        if let Err(e) = consensus::propose_verified(
+            &mut s.consensus,
+            &msg.node,
+            &msg.proposal.proposer,
+            &msg.signature,
+            &resolver,
+        ) {
             tracing::warn!(err = %e, proposer = %msg.proposal.proposer, "Invalid proposal");
             return;
         }
@@ -541,14 +645,21 @@ async fn handle_proposal(
 
         // If we are a validator, vote for the proposal.
         if s.is_validator {
-            let vote = Vote {
-                voter: s.node_did.clone(),
-                round: s.consensus.current_round,
-                node_hash: msg.node.hash,
-                signature: (s.sign_fn)(msg.node.hash.0.as_slice()),
+            let vote = match signed_vote(
+                s.node_did.clone(),
+                s.consensus.current_round,
+                msg.node.hash,
+                &*s.sign_fn,
+            ) {
+                Ok(vote) => vote,
+                Err(e) => {
+                    tracing::warn!(err = %e, "Failed to sign own consensus vote");
+                    return;
+                }
             };
 
-            if let Err(e) = consensus::vote(&mut s.consensus, vote.clone()) {
+            let resolver = s.validator_public_keys.clone();
+            if let Err(e) = consensus::vote_verified(&mut s.consensus, vote.clone(), &resolver) {
                 tracing::warn!(err = %e, "Failed to cast own vote");
                 return;
             }
@@ -584,7 +695,11 @@ async fn handle_vote(
             tracing::error!("Reactor state mutex poisoned in handle_vote (validate)");
             return;
         };
-        if let Err(reason) = validate_vote(&msg, &s.consensus.config.validators) {
+        if let Err(reason) = validate_vote(
+            &msg,
+            &s.consensus.config.validators,
+            &s.validator_public_keys,
+        ) {
             tracing::warn!(err = %reason, "Rejected invalid vote from network");
             return;
         }
@@ -596,7 +711,8 @@ async fn handle_vote(
             return;
         };
 
-        if let Err(e) = consensus::vote(&mut s.consensus, msg.vote.clone()) {
+        let resolver = s.validator_public_keys.clone();
+        if let Err(e) = consensus::vote_verified(&mut s.consensus, msg.vote.clone(), &resolver) {
             tracing::debug!(
                 err = %e,
                 voter = %msg.vote.voter,
@@ -642,7 +758,11 @@ async fn handle_commit(
             tracing::error!("Reactor state mutex poisoned in handle_commit (validate)");
             return;
         };
-        if let Err(reason) = validate_commit(&msg, &s.consensus.config.validators) {
+        if let Err(reason) = validate_commit(
+            &msg,
+            &s.consensus.config.validators,
+            &s.validator_public_keys,
+        ) {
             tracing::warn!(err = %reason, "Rejected invalid commit certificate from network");
             return;
         }
@@ -660,10 +780,14 @@ async fn handle_commit(
             return;
         }
 
-        // Apply the commit certificate.
+        // Apply the commit certificate after verifying every certificate vote.
         let round = cert.round;
         let hash = cert.node_hash;
-        consensus::commit(&mut s.consensus, cert.clone());
+        let resolver = s.validator_public_keys.clone();
+        if let Err(e) = consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver) {
+            tracing::warn!(err = %e, "Invalid commit certificate");
+            return;
+        }
 
         let height = s.consensus.committed.len() as u64;
         (cert, (hash, height, round))
@@ -748,7 +872,13 @@ async fn check_and_commit(
                 return;
             };
             if !consensus::is_finalized(&s.consensus, &hash) {
-                consensus::commit(&mut s.consensus, cert.clone());
+                let resolver = s.validator_public_keys.clone();
+                if let Err(e) =
+                    consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver)
+                {
+                    tracing::warn!(err = %e, "Failed to verify local commit certificate");
+                    return;
+                }
             }
         }
 
@@ -873,21 +1003,32 @@ pub async fn submit_proposal(
                 .map_err(|e| anyhow::anyhow!("put: {e}"))?;
         }
 
-        // Create the proposal.
+        // Create and sign the proposal over the canonical consensus payload.
         let proposer_did = s.node_did.clone();
-        let proposal = consensus::propose(&mut s.consensus, &node, &proposer_did)
-            .map_err(|e| anyhow::anyhow!("propose: {e}"))?;
-
-        // Vote for our own proposal.
-        let vote = Vote {
-            voter: s.node_did.clone(),
+        let proposal_to_sign = Proposal {
+            proposer: proposer_did.clone(),
             round: s.consensus.current_round,
             node_hash: node.hash,
-            signature: (s.sign_fn)(node.hash.0.as_slice()),
         };
-        consensus::vote(&mut s.consensus, vote).map_err(|e| anyhow::anyhow!("self-vote: {e}"))?;
+        let sig = sign_proposal(&proposal_to_sign, &*s.sign_fn)
+            .map_err(|e| anyhow::anyhow!("proposal signature: {e}"))?;
+        let resolver = s.validator_public_keys.clone();
+        let proposal =
+            consensus::propose_verified(&mut s.consensus, &node, &proposer_did, &sig, &resolver)
+                .map_err(|e| anyhow::anyhow!("propose: {e}"))?;
 
-        let sig = (s.sign_fn)(node.hash.0.as_slice());
+        // Vote for our own proposal.
+        let vote = signed_vote(
+            s.node_did.clone(),
+            s.consensus.current_round,
+            node.hash,
+            &*s.sign_fn,
+        )
+        .map_err(|e| anyhow::anyhow!("self-vote signature: {e}"))?;
+        let resolver = s.validator_public_keys.clone();
+        consensus::vote_verified(&mut s.consensus, vote, &resolver)
+            .map_err(|e| anyhow::anyhow!("self-vote: {e}"))?;
+
         (node, proposal, sig)
     };
 
@@ -942,17 +1083,105 @@ pub async fn broadcast_governance_event(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 mod tests {
+    use exo_core::crypto::KeyPair;
+
     use super::*;
 
     fn make_sign_fn() -> Arc<dyn Fn(&[u8]) -> Signature + Send + Sync> {
-        Arc::new(|data: &[u8]| {
-            let h = blake3::hash(data);
-            let mut sig = [0u8; 64];
-            sig[..32].copy_from_slice(h.as_bytes());
-            Signature::from_bytes(sig)
-        })
+        let keypair = validator_keypair(0);
+        Arc::new(move |data: &[u8]| keypair.sign(data))
+    }
+
+    fn validator_keypair(index: usize) -> KeyPair {
+        let seed = u8::try_from(index + 1).expect("test validator index fits in u8");
+        KeyPair::from_secret_bytes([seed; 32]).expect("deterministic validator keypair")
+    }
+
+    fn make_validator_public_keys(validators: &BTreeSet<Did>) -> BTreeMap<Did, PublicKey> {
+        validators
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, did)| {
+                let keypair = validator_keypair(idx);
+                (did, *keypair.public_key())
+            })
+            .collect()
+    }
+
+    fn sign_vote_for_index(mut vote: Vote, index: usize) -> Vote {
+        let keypair = validator_keypair(index);
+        let payload = vote.signing_payload().expect("vote payload");
+        vote.signature = keypair.sign(&payload);
+        vote
+    }
+
+    fn sign_proposal_for_index(proposal: &Proposal, index: usize) -> Signature {
+        let keypair = validator_keypair(index);
+        let payload = proposal.signing_payload().expect("proposal payload");
+        keypair.sign(&payload)
+    }
+
+    fn config_for(node_did: Did, is_validator: bool, validators: BTreeSet<Did>) -> ReactorConfig {
+        ReactorConfig {
+            node_did,
+            is_validator,
+            validator_public_keys: make_validator_public_keys(&validators),
+            validators,
+            round_timeout_ms: 5000,
+        }
+    }
+
+    fn vote_for(did: &Did, index: usize, round: u64, node_hash: Hash256) -> Vote {
+        sign_vote_for_index(
+            Vote {
+                voter: did.clone(),
+                round,
+                node_hash,
+                signature: Signature::empty(),
+            },
+            index,
+        )
+    }
+
+    fn proposal_msg_for(
+        proposer: Did,
+        proposer_index: usize,
+        round: u64,
+        node: DagNode,
+    ) -> ConsensusProposalMsg {
+        let proposal = Proposal {
+            proposer,
+            round,
+            node_hash: node.hash,
+        };
+        let signature = sign_proposal_for_index(&proposal, proposer_index);
+        ConsensusProposalMsg {
+            proposal,
+            node,
+            signature,
+        }
+    }
+
+    fn validator_keys_for_single(did: &Did, public_key: PublicKey) -> ValidatorPublicKeys {
+        let mut keys = BTreeMap::new();
+        keys.insert(did.clone(), public_key);
+        ValidatorPublicKeys::new(keys)
+    }
+
+    fn key_for_validator_index(index: usize) -> PublicKey {
+        *validator_keypair(index).public_key()
+    }
+
+    fn sign_with_wrong_key(payload: &[u8]) -> Signature {
+        let wrong_keypair = KeyPair::from_secret_bytes([91u8; 32]).unwrap();
+        wrong_keypair.sign(payload)
+    }
+
+    fn signature_is_invalid_error(err: &str) -> bool {
+        err.contains("invalid signature") || err.contains("empty") || err.contains("zero-byte")
     }
 
     fn make_validators(n: usize) -> BTreeSet<Did> {
@@ -964,12 +1193,7 @@ mod tests {
     #[test]
     fn create_reactor_state_initializes() {
         let validators = make_validators(4);
-        let config = ReactorConfig {
-            node_did: Did::new("did:exo:v0").unwrap(),
-            is_validator: true,
-            validators: validators.clone(),
-            round_timeout_ms: 5000,
-        };
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators.clone());
 
         let state = create_reactor_state(&config, make_sign_fn(), None);
         let s = state.lock().unwrap();
@@ -981,12 +1205,7 @@ mod tests {
 
     #[test]
     fn reactor_state_round_advancement() {
-        let config = ReactorConfig {
-            node_did: Did::new("did:exo:v0").unwrap(),
-            is_validator: true,
-            validators: make_validators(4),
-            round_timeout_ms: 5000,
-        };
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, make_validators(4));
 
         let state = create_reactor_state(&config, make_sign_fn(), None);
         {
@@ -1000,12 +1219,7 @@ mod tests {
     #[tokio::test]
     async fn submit_proposal_creates_dag_node() {
         let validators = make_validators(4);
-        let config = ReactorConfig {
-            node_did: Did::new("did:exo:v0").unwrap(),
-            is_validator: true,
-            validators,
-            round_timeout_ms: 5000,
-        };
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
 
         let state = create_reactor_state(&config, make_sign_fn(), None);
         let dir = tempfile::tempdir().unwrap();
@@ -1035,12 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn submit_proposal_non_validator_rejected() {
         let validators = make_validators(4);
-        let config = ReactorConfig {
-            node_did: Did::new("did:exo:outsider").unwrap(),
-            is_validator: false,
-            validators,
-            round_timeout_ms: 5000,
-        };
+        let config = config_for(Did::new("did:exo:outsider").unwrap(), false, validators);
 
         let state = create_reactor_state(&config, make_sign_fn(), None);
         let dir = tempfile::tempdir().unwrap();
@@ -1062,12 +1271,7 @@ mod tests {
         let validators = make_validators(4);
         let validator_vec: Vec<Did> = validators.iter().cloned().collect();
         let node_did = validator_vec[0].clone();
-        let config = ReactorConfig {
-            node_did: node_did.clone(),
-            is_validator: true,
-            validators,
-            round_timeout_ms: 5000,
-        };
+        let config = config_for(node_did.clone(), true, validators);
         let sign_fn = make_sign_fn();
         let state = create_reactor_state(&config, sign_fn.clone(), None);
         let dir = tempfile::tempdir().unwrap();
@@ -1287,6 +1491,7 @@ mod tests {
     fn validate_proposal_rejects_zero_byte_signature() {
         let validators = make_validators(1);
         let proposer = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&proposer, key_for_validator_index(0));
         let node = make_node_for_test();
         let msg = ConsensusProposalMsg {
             proposal: exo_dag::consensus::Proposal {
@@ -1297,17 +1502,29 @@ mod tests {
             node,
             signature: Signature::from_bytes([0u8; 64]),
         };
-        let err = validate_proposal(&msg, &validators).unwrap_err();
+        let err = validate_proposal(&msg, &validators, &resolver).unwrap_err();
         // Signature::Ed25519([0u8; 64]) hits is_empty() first (ex_core types.rs:325)
         // so the "empty" message fires before the explicit null-sig check.
         // Either message proves rejection — both are defense in depth.
-        assert!(err.contains("empty") || err.contains("zero-byte"));
+        assert!(signature_is_invalid_error(&err));
+    }
+
+    #[test]
+    fn validate_proposal_accepts_signed_message() {
+        let validators = make_validators(1);
+        let proposer = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&proposer, key_for_validator_index(0));
+        let node = make_node_for_test();
+        let msg = proposal_msg_for(proposer, 0, 0, node);
+
+        validate_proposal(&msg, &validators, &resolver).unwrap();
     }
 
     #[test]
     fn validate_vote_rejects_zero_byte_signature() {
         let validators = make_validators(1);
         let voter = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&voter, key_for_validator_index(0));
         let msg = ConsensusVoteMsg {
             vote: exo_dag::consensus::Vote {
                 voter,
@@ -1316,14 +1533,27 @@ mod tests {
                 signature: Signature::from_bytes([0u8; 64]),
             },
         };
-        let err = validate_vote(&msg, &validators).unwrap_err();
-        assert!(err.contains("empty") || err.contains("zero-byte"));
+        let err = validate_vote(&msg, &validators, &resolver).unwrap_err();
+        assert!(signature_is_invalid_error(&err));
+    }
+
+    #[test]
+    fn validate_vote_accepts_signed_vote() {
+        let validators = make_validators(1);
+        let voter = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&voter, key_for_validator_index(0));
+        let msg = ConsensusVoteMsg {
+            vote: vote_for(&voter, 0, 0, exo_core::types::Hash256([9u8; 32])),
+        };
+
+        validate_vote(&msg, &validators, &resolver).unwrap();
     }
 
     #[test]
     fn validate_commit_rejects_zero_byte_vote_in_cert() {
         let validators = make_validators(1);
         let voter = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&voter, key_for_validator_index(0));
         let hash = exo_core::types::Hash256([7u8; 32]);
         let cert = exo_dag::consensus::CommitCertificate {
             node_hash: hash,
@@ -1336,14 +1566,15 @@ mod tests {
             round: 0,
         };
         let msg = ConsensusCommitMsg { certificate: cert };
-        let err = validate_commit(&msg, &validators).unwrap_err();
-        assert!(err.contains("empty") || err.contains("zero-byte"));
+        let err = validate_commit(&msg, &validators, &resolver).unwrap_err();
+        assert!(signature_is_invalid_error(&err));
     }
 
     #[test]
     fn validate_vote_rejects_empty_signature() {
         let validators = make_validators(1);
         let voter = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&voter, key_for_validator_index(0));
         let msg = ConsensusVoteMsg {
             vote: exo_dag::consensus::Vote {
                 voter,
@@ -1352,8 +1583,27 @@ mod tests {
                 signature: Signature::empty(),
             },
         };
-        let err = validate_vote(&msg, &validators).unwrap_err();
-        assert!(err.contains("empty signature"));
+        let err = validate_vote(&msg, &validators, &resolver).unwrap_err();
+        assert!(signature_is_invalid_error(&err));
+    }
+
+    #[test]
+    fn validate_vote_rejects_forged_nonzero_signature() {
+        let validators = make_validators(1);
+        let voter = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&voter, key_for_validator_index(0));
+        let mut vote = exo_dag::consensus::Vote {
+            voter,
+            round: 0,
+            node_hash: exo_core::types::Hash256([9u8; 32]),
+            signature: Signature::empty(),
+        };
+        let payload = vote.signing_payload().unwrap();
+        vote.signature = sign_with_wrong_key(&payload);
+
+        let msg = ConsensusVoteMsg { vote };
+        let err = validate_vote(&msg, &validators, &resolver).unwrap_err();
+        assert!(err.contains("signature"));
     }
 
     #[test]
@@ -1364,6 +1614,28 @@ mod tests {
         assert!(
             !source.contains(forbidden),
             "reactor commit receipts must derive timestamps from protocol or stored DAG metadata"
+        );
+    }
+
+    #[test]
+    fn reactor_production_paths_do_not_call_legacy_consensus_api() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("reactor source has production section");
+
+        assert!(
+            !production.contains("consensus::propose("),
+            "production reactor paths must call propose_verified"
+        );
+        assert!(
+            !production.contains("consensus::vote("),
+            "production reactor paths must call vote_verified"
+        );
+        assert!(
+            !production.contains("consensus::commit("),
+            "production reactor paths must call commit_verified"
         );
     }
 }

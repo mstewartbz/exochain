@@ -474,6 +474,7 @@ mod tests {
             node_did: Did::new("did:exo:v0").unwrap(),
             is_validator: true,
             validators,
+            validator_public_keys: std::collections::BTreeMap::new(),
             round_timeout_ms: 5000,
         };
 

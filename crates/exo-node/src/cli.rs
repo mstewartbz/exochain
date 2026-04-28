@@ -52,6 +52,12 @@ pub enum Command {
         /// If not provided, this node's DID is used as the sole validator.
         #[arg(long, value_delimiter = ',')]
         validators: Option<Vec<String>>,
+
+        /// Validator public keys as `did:exo:...=<64 hex bytes>` entries.
+        /// Required for every non-local validator DID because consensus
+        /// proposals/votes/certificates are verified against these keys.
+        #[arg(long = "validator-public-key", value_delimiter = ',')]
+        validator_public_keys: Option<Vec<String>>,
     },
 
     /// Join an existing network via seed node(s).
@@ -84,6 +90,12 @@ pub enum Command {
         /// Validator DIDs for the initial validator set (comma-separated).
         #[arg(long, value_delimiter = ',')]
         validators: Option<Vec<String>>,
+
+        /// Validator public keys as `did:exo:...=<64 hex bytes>` entries.
+        /// Required for every non-local validator DID because consensus
+        /// proposals/votes/certificates are verified against these keys.
+        #[arg(long = "validator-public-key", value_delimiter = ',')]
+        validator_public_keys: Option<Vec<String>>,
     },
 
     /// Show node status.

@@ -412,6 +412,7 @@ mod tests {
             node_did: this_did.clone(),
             is_validator: true,
             validators,
+            validator_public_keys: std::collections::BTreeMap::new(),
             round_timeout_ms: 5000,
         };
         let sign_fn: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync> =
