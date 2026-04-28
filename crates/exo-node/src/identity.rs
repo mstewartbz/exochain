@@ -44,6 +44,17 @@ impl NodeIdentity {
     }
 }
 
+/// Derive the EXOCHAIN DID bound to a raw Ed25519 public key.
+///
+/// The node DID format is `did:exo:<base58(blake3(pubkey))>`. Validator
+/// public-key configuration uses this derivation as a consistency check before
+/// a key can be accepted for consensus signature verification.
+pub fn did_from_public_key(public_key: &PublicKey) -> anyhow::Result<Did> {
+    let hash = blake3::hash(public_key.as_bytes());
+    let encoded = bs58_encode(hash.as_bytes());
+    Did::new(&format!("did:exo:{encoded}")).map_err(Into::into)
+}
+
 /// Load an existing identity from the data directory, or generate a new one.
 pub fn load_or_create(data_dir: &Path) -> anyhow::Result<NodeIdentity> {
     let key_path = data_dir.join("identity.key");
@@ -78,15 +89,11 @@ pub fn load_or_create(data_dir: &Path) -> anyhow::Result<NodeIdentity> {
         let keypair = KeyPair::generate();
         let public_key = *keypair.public_key();
 
-        // DID = did:exo:<base58(blake3(pubkey))>
-        let hash = blake3::hash(&public_key.0);
-        let encoded = bs58_encode(hash.as_bytes());
-        let did_str = format!("did:exo:{encoded}");
-        let did = Did::new(&did_str)?;
+        let did = did_from_public_key(&public_key)?;
 
         // Persist secret key (mode 0600).
         write_secret(&key_path, keypair.secret_key().as_bytes())?;
-        std::fs::write(&did_path, did_str.as_bytes())?;
+        std::fs::write(&did_path, did.as_str().as_bytes())?;
 
         tracing::info!(did = %did, "Generated new node identity");
 
@@ -181,6 +188,17 @@ mod tests {
 
         assert_eq!(first.did, second.did);
         assert_eq!(first.public_key_bytes(), second.public_key_bytes());
+    }
+
+    #[test]
+    fn did_from_public_key_matches_node_identity_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = load_or_create(dir.path()).unwrap();
+
+        assert_eq!(
+            did_from_public_key(identity.public_key()).unwrap(),
+            identity.did
+        );
     }
 
     #[test]

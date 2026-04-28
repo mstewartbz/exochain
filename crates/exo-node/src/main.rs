@@ -40,13 +40,13 @@ mod wire;
 mod zerodentity;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
 use clap::Parser;
 use cli::{Cli, Command};
-use exo_core::types::Did;
+use exo_core::types::{Did, PublicKey};
 #[cfg(feature = "unaudited-infrastructure-holons")]
 use holons::{HolonEvent, HolonManagerConfig};
 use network::{NetworkConfig, NetworkEvent, NetworkHandle};
@@ -84,6 +84,63 @@ fn parse_validator_set(cli_validators: &Option<Vec<String>>, node_did: &Did) -> 
         set.insert(node_did.clone());
         set
     }
+}
+
+fn parse_public_key_hex(value: &str) -> anyhow::Result<PublicKey> {
+    let bytes = hex::decode(value)?;
+    if bytes.len() != 32 {
+        anyhow::bail!("validator public key must be 32 bytes, got {}", bytes.len());
+    }
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(&bytes);
+    Ok(PublicKey::from_bytes(public_key))
+}
+
+fn parse_validator_public_key_entry(entry: &str) -> anyhow::Result<(Did, PublicKey)> {
+    let (did_str, public_key_hex) = entry.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!("validator public key must be did:exo:...=<64 hex bytes>")
+    })?;
+    let did = Did::new(did_str)?;
+    let public_key = parse_public_key_hex(public_key_hex)?;
+    let derived_did = identity::did_from_public_key(&public_key)?;
+    if derived_did != did {
+        anyhow::bail!("validator public key does not derive DID {did}; derived {derived_did}");
+    }
+    Ok((did, public_key))
+}
+
+fn resolve_validator_public_keys(
+    entries: &Option<Vec<String>>,
+    node_identity: &identity::NodeIdentity,
+    validators: &BTreeSet<Did>,
+) -> anyhow::Result<BTreeMap<Did, PublicKey>> {
+    let mut keys = BTreeMap::new();
+    keys.insert(node_identity.did.clone(), node_identity.public_key);
+
+    if let Some(entries) = entries {
+        for entry in entries {
+            let (did, public_key) = parse_validator_public_key_entry(entry)?;
+            if let Some(previous) = keys.insert(did.clone(), public_key) {
+                if previous != public_key {
+                    anyhow::bail!("conflicting public keys supplied for validator {did}");
+                }
+            }
+        }
+    }
+
+    let missing: Vec<String> = validators
+        .iter()
+        .filter(|did| !keys.contains_key(*did))
+        .map(ToString::to_string)
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "missing public keys for validators: {}. Pass --validator-public-key did:exo:...=<64 hex bytes> for every non-local validator.",
+            missing.join(", ")
+        );
+    }
+
+    Ok(keys)
 }
 
 /// Spawn the event fan-out task that dispatches network events to both
@@ -138,7 +195,7 @@ fn spawn_event_fanout(
 #[allow(clippy::too_many_arguments)]
 // 8 args is the minimum for a node bootstrap entry point:
 // data_dir, api_host, api_port, p2p_port, validator, validators,
-// seed_addrs, is_join. Each is a distinct bootstrap parameter
+// validator_public_keys, seed_addrs, is_join. Each is a distinct bootstrap parameter
 // that came in through CLI parsing; bundling them behind a
 // struct would add a layer of boilerplate with no safety benefit
 // since this is the single call site from `main()`.
@@ -149,6 +206,7 @@ async fn start_node(
     p2p_port: u16,
     validator: bool,
     validators: &Option<Vec<String>>,
+    validator_public_key_entries: &Option<Vec<String>>,
     seed_addrs: Vec<libp2p::Multiaddr>,
     is_join: bool,
 ) -> anyhow::Result<()> {
@@ -226,10 +284,16 @@ async fn start_node(
 
     // --- Consensus reactor ---
     let validator_set = parse_validator_set(validators, &node_identity.did);
+    let validator_public_keys = resolve_validator_public_keys(
+        validator_public_key_entries,
+        &node_identity,
+        &validator_set,
+    )?;
     let reactor_config = ReactorConfig {
         node_did: node_identity.did.clone(),
         is_validator: validator,
         validators: validator_set.clone(),
+        validator_public_keys,
         round_timeout_ms: 5000,
     };
 
@@ -746,6 +810,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             data_dir,
             validator,
             validators,
+            validator_public_keys,
         } => {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let cfg = config::load_or_create(&data_dir)?;
@@ -763,6 +828,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 p2p_port,
                 validator,
                 &validators,
+                &validator_public_keys,
                 vec![],
                 false,
             )
@@ -777,6 +843,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             data_dir,
             validator,
             validators,
+            validator_public_keys,
         } => {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let cfg = config::load_or_create(&data_dir)?;
@@ -812,6 +879,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 p2p_port,
                 validator,
                 &validators,
+                &validator_public_keys,
                 seed_addrs,
                 true,
             )
