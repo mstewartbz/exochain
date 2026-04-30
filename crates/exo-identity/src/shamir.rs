@@ -87,13 +87,15 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
         })
         .collect();
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
 
     for &secret_byte in secret {
         let mut coeffs = vec![0u8; k];
         coeffs[0] = secret_byte;
         for coeff in coeffs.iter_mut().skip(1) {
-            *coeff = rand::Rng::r#gen(&mut rng);
+            let mut random_byte = [0u8; 1];
+            rand::RngCore::fill_bytes(&mut rng, &mut random_byte);
+            *coeff = random_byte[0];
         }
 
         for share in shares.iter_mut() {
@@ -111,6 +113,70 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
     Ok(shares)
 }
 
+fn validate_shares(
+    shares: &[Share],
+    config: &ShamirConfig,
+) -> Result<([u8; 32], usize), IdentityError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let expected_commitment = shares[0].commitment;
+    let expected_len = shares[0].data.len();
+
+    for share in shares {
+        if share.index == 0 {
+            return Err(IdentityError::InvalidShareIndex(0));
+        }
+        if share.index > config.shares {
+            return Err(IdentityError::ShareIndexOutOfRange {
+                index: share.index,
+                shares: config.shares,
+            });
+        }
+        if !seen.insert(share.index) {
+            return Err(IdentityError::DuplicateShareIndices);
+        }
+        if share.data.len() != expected_len {
+            return Err(IdentityError::InvalidShareLength {
+                index: share.index,
+                expected: expected_len,
+                got: share.data.len(),
+            });
+        }
+        if share.commitment != expected_commitment {
+            return Err(IdentityError::ShareCommitmentMismatch {
+                index: share.index,
+                expected: expected_commitment,
+                got: share.commitment,
+            });
+        }
+    }
+
+    Ok((expected_commitment, expected_len))
+}
+
+fn interpolate_byte_at(shares: &[Share], byte_idx: usize, x: u8) -> u8 {
+    let mut value: u8 = 0;
+
+    for (i, share_i) in shares.iter().enumerate() {
+        let xi = share_i.index;
+        let yi = share_i.data[byte_idx];
+
+        let mut basis: u8 = 1;
+        for (j, share_j) in shares.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let xj = share_j.index;
+            let num = x ^ xj;
+            let den = xi ^ xj;
+            basis = gf256_mul(basis, gf256_mul(num, gf256_inv(den)));
+        }
+
+        value ^= gf256_mul(yi, basis);
+    }
+
+    value
+}
+
 /// Reconstruct a secret from at least `config.threshold` shares using Lagrange interpolation.
 pub fn reconstruct(shares: &[Share], config: &ShamirConfig) -> Result<Vec<u8>, IdentityError> {
     config.validate()?;
@@ -124,45 +190,34 @@ pub fn reconstruct(shares: &[Share], config: &ShamirConfig) -> Result<Vec<u8>, I
         });
     }
 
-    for s in shares {
-        if s.index == 0 {
-            return Err(IdentityError::InvalidShareIndex(0));
-        }
-    }
-
-    let mut seen = std::collections::BTreeSet::new();
-    for s in shares {
-        if !seen.insert(s.index) {
-            return Err(IdentityError::DuplicateShareIndices);
-        }
-    }
-
+    let (expected_commitment, secret_len) = validate_shares(shares, config)?;
     let used = &shares[..k];
-    let secret_len = used[0].data.len();
     let mut secret = vec![0u8; secret_len];
 
     for (byte_idx, out_byte) in secret.iter_mut().enumerate().take(secret_len) {
-        let mut value: u8 = 0;
+        *out_byte = interpolate_byte_at(used, byte_idx, 0);
+    }
 
-        for (i, share_i) in used.iter().enumerate() {
-            let xi = share_i.index;
-            let yi = share_i.data[byte_idx];
+    let reconstructed_commitment: [u8; 32] = *blake3::hash(&secret).as_bytes();
+    if reconstructed_commitment != expected_commitment {
+        return Err(IdentityError::ReconstructedSecretCommitmentMismatch {
+            expected: expected_commitment,
+            got: reconstructed_commitment,
+        });
+    }
 
-            let mut basis: u8 = 1;
-            for (j, share_j) in used.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-                let xj = share_j.index;
-                let num = xj;
-                let den = xj ^ xi;
-                basis = gf256_mul(basis, gf256_mul(num, gf256_inv(den)));
+    for share in shares {
+        for (byte_idx, &got) in share.data.iter().enumerate() {
+            let expected = interpolate_byte_at(used, byte_idx, share.index);
+            if expected != got {
+                return Err(IdentityError::InvalidShareValue {
+                    index: share.index,
+                    byte_index: byte_idx,
+                    expected,
+                    got,
+                });
             }
-
-            value ^= gf256_mul(yi, basis);
         }
-
-        *out_byte = value;
     }
 
     Ok(secret)
@@ -348,6 +403,162 @@ mod tests {
         ];
         let err = reconstruct(&shares, &config).unwrap_err();
         assert!(matches!(err, IdentityError::DuplicateShareIndices));
+    }
+
+    fn split_for_test(secret: &[u8], config: &ShamirConfig) -> Vec<Share> {
+        match split(secret, config) {
+            Ok(shares) => shares,
+            Err(err) => panic!("test split must succeed: {err}"),
+        }
+    }
+
+    fn reconstruct_error_for_test(shares: &[Share], config: &ShamirConfig) -> IdentityError {
+        match reconstruct(shares, config) {
+            Ok(secret) => panic!("test reconstruction must fail, got {secret:?}"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn reconstruct_rejects_share_index_above_config() {
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+        let shares = vec![
+            Share {
+                index: 1,
+                data: vec![1],
+                commitment: [0; 32],
+            },
+            Share {
+                index: 4,
+                data: vec![2],
+                commitment: [0; 32],
+            },
+        ];
+
+        let err = reconstruct_error_for_test(&shares, &config);
+        assert!(matches!(
+            err,
+            IdentityError::ShareIndexOutOfRange {
+                index: 4,
+                shares: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn reconstruct_rejects_inconsistent_lengths_without_panic() {
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+        let shares = vec![
+            Share {
+                index: 1,
+                data: vec![1, 2],
+                commitment: [0; 32],
+            },
+            Share {
+                index: 2,
+                data: vec![3],
+                commitment: [0; 32],
+            },
+        ];
+
+        let result = std::panic::catch_unwind(|| reconstruct(&shares, &config));
+        match result {
+            Ok(Err(IdentityError::InvalidShareLength {
+                index: 2,
+                expected: 2,
+                got: 1,
+            })) => {}
+            other => panic!("expected typed share-length error without panic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_rejects_mismatched_share_commitments() {
+        let secret = b"commitment mismatch";
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+        let mut shares = split_for_test(secret, &config);
+        let expected = shares[0].commitment;
+        shares[1].commitment[0] ^= 0x01;
+        let got = shares[1].commitment;
+
+        let err = reconstruct_error_for_test(&shares[..2], &config);
+        assert!(matches!(
+            err,
+            IdentityError::ShareCommitmentMismatch {
+                index: 2,
+                expected: actual_expected,
+                got: actual_got,
+            } if actual_expected == expected && actual_got == got
+        ));
+    }
+
+    #[test]
+    fn reconstruct_rejects_tampered_share_data_with_original_commitment() {
+        let secret = b"tamper-resistant shares";
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+        let mut shares = split_for_test(secret, &config);
+        let expected = shares[0].commitment;
+        shares[0].data[0] ^= 0x01;
+
+        let err = reconstruct_error_for_test(&shares[..2], &config);
+        assert!(matches!(
+            err,
+            IdentityError::ReconstructedSecretCommitmentMismatch {
+                expected: actual_expected,
+                got,
+            } if actual_expected == expected && got != expected
+        ));
+    }
+
+    #[test]
+    fn reconstruct_rejects_tampered_extra_share_not_used_for_threshold() {
+        let secret = b"extra share consistency";
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+        let mut shares = split_for_test(secret, &config);
+        let got = shares[2].data[0] ^ 0x01;
+        shares[2].data[0] = got;
+
+        let err = reconstruct_error_for_test(&shares, &config);
+        assert!(matches!(
+            err,
+            IdentityError::InvalidShareValue {
+                index: 3,
+                byte_index: 0,
+                expected,
+                got: actual_got,
+            } if expected != actual_got && actual_got == got
+        ));
+    }
+
+    #[test]
+    fn split_uses_operating_system_csprng_for_coefficients() {
+        let source = include_str!("shamir.rs");
+        let forbidden_rng = ["thread", "_rng"].concat();
+        let required_rng = ["Os", "Rng"].concat();
+
+        assert!(
+            !source.contains(&forbidden_rng),
+            "Shamir coefficients must not use an ambient thread RNG"
+        );
+        assert!(
+            source.contains(&required_rng),
+            "Shamir coefficients must be generated with the operating-system CSPRNG"
+        );
     }
 
     #[test]

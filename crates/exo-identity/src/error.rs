@@ -45,6 +45,36 @@ pub enum IdentityError {
     #[error("invalid share index: {0}")]
     InvalidShareIndex(u8),
 
+    #[error("share index {index} exceeds configured share count {shares}")]
+    ShareIndexOutOfRange { index: u8, shares: u8 },
+
+    #[error("invalid share length for index {index}: expected {expected}, got {got}")]
+    InvalidShareLength {
+        index: u8,
+        expected: usize,
+        got: usize,
+    },
+
+    #[error("share commitment mismatch at index {index}: expected {expected:?}, got {got:?}")]
+    ShareCommitmentMismatch {
+        index: u8,
+        expected: [u8; 32],
+        got: [u8; 32],
+    },
+
+    #[error("reconstructed secret commitment mismatch: expected {expected:?}, got {got:?}")]
+    ReconstructedSecretCommitmentMismatch { expected: [u8; 32], got: [u8; 32] },
+
+    #[error(
+        "invalid share value at index {index}, byte {byte_index}: expected {expected}, got {got}"
+    )]
+    InvalidShareValue {
+        index: u8,
+        byte_index: usize,
+        expected: u8,
+        got: u8,
+    },
+
     #[error("duplicate share indices")]
     DuplicateShareIndices,
 
