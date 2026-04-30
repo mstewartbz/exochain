@@ -50,7 +50,7 @@ pub const CHECKPOINT_DOMAIN_SEP: &[u8] = b"EXOCHAIN-CHECKPOINT-v1";
 /// Compute the normative checkpoint signing preimage (EXOCHAIN Specification v2.2 §9.4).
 ///
 /// The preimage layout is:
-/// `[domain_sep | event_root | state_root | height_le | finalized_events_le | frontier...]`
+/// `[domain_sep | event_root | state_root | height_le | finalized_events_le | frontier_len_le | frontier...]`
 ///
 /// Validators sign this preimage to attest to the checkpoint.
 #[must_use]
@@ -61,6 +61,8 @@ pub fn checkpoint_signing_preimage(cp: &CheckpointPayload) -> Vec<u8> {
     preimage.extend_from_slice(cp.state_root.as_bytes());
     preimage.extend_from_slice(&cp.height.to_le_bytes());
     preimage.extend_from_slice(&cp.finalized_events.to_le_bytes());
+    let frontier_len = u64::try_from(cp.frontier.len()).unwrap_or(u64::MAX);
+    preimage.extend_from_slice(&frontier_len.to_le_bytes());
     for frontier_hash in &cp.frontier {
         preimage.extend_from_slice(frontier_hash.as_bytes());
     }
@@ -128,6 +130,7 @@ mod proptests {
                 + 32  // state_root
                 + 8   // height (le64)
                 + 8   // finalized_events (le64)
+                + 8   // frontier length (le64)
                 + 32 * cp.frontier.len();
             let preimage = checkpoint_signing_preimage(&cp);
             prop_assert_eq!(preimage.len(), expected);
@@ -252,6 +255,27 @@ mod tests {
             checkpoint_signing_preimage(&cp_without),
             "frontier must affect preimage"
         );
+    }
+
+    #[test]
+    fn preimage_encodes_frontier_length_before_frontier_hashes() {
+        let tip1 = Hash256::digest(b"frontier-tip-1");
+        let tip2 = Hash256::digest(b"frontier-tip-2");
+        let cp = CheckpointPayload {
+            event_root: Hash256::digest(b"events"),
+            state_root: Hash256::digest(b"state"),
+            height: 7,
+            finalized_events: 11,
+            frontier: vec![tip1, tip2],
+            validator_sigs: vec![],
+        };
+
+        let preimage = checkpoint_signing_preimage(&cp);
+        let offset = CHECKPOINT_DOMAIN_SEP.len() + 32 + 32 + 8 + 8;
+
+        assert_eq!(&preimage[offset..offset + 8], &2u64.to_le_bytes());
+        assert_eq!(&preimage[offset + 8..offset + 40], tip1.as_bytes());
+        assert_eq!(&preimage[offset + 40..offset + 72], tip2.as_bytes());
     }
 
     #[test]
