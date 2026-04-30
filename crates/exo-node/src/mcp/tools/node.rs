@@ -12,6 +12,10 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
+fn count_as_u64(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // exochain_node_status
 // ---------------------------------------------------------------------------
@@ -44,7 +48,7 @@ pub fn execute_node_status(_params: &Value, context: &NodeContext) -> ToolResult
         match reactor.lock() {
             Ok(state) => {
                 let consensus_round = state.consensus.current_round;
-                let committed_height = state.consensus.committed.len() as u64;
+                let committed_height = count_as_u64(state.consensus.committed.len());
                 let validators: Vec<String> = state
                     .consensus
                     .config

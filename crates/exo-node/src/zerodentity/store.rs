@@ -781,7 +781,7 @@ impl ZerodentityStore {
     /// Remove expired OTP challenges that are still in `Pending` state.
     ///
     /// Returns the number of challenges cleaned up.
-    pub fn cleanup_expired_otp(&mut self, now_ms: u64) -> u32 {
+    pub fn cleanup_expired_otp(&mut self, now_ms: u64) -> usize {
         let before = self.otp_challenges.len();
         self.otp_challenges.retain(|_, ch| {
             let expired = now_ms > ch.dispatched_ms.saturating_add(ch.ttl_ms);
@@ -789,7 +789,7 @@ impl ZerodentityStore {
             // Remove if both expired and still pending
             !(expired && pending)
         });
-        (before - self.otp_challenges.len()) as u32
+        before - self.otp_challenges.len()
     }
 }
 

@@ -33,8 +33,9 @@ fn required_nonzero_u64(params: &Value, name: &str) -> std::result::Result<u64, 
 
 fn required_u32(params: &Value, name: &str) -> std::result::Result<u32, ToolResult> {
     match params.get(name).and_then(Value::as_u64) {
-        Some(value) if value <= u64::from(u32::MAX) => Ok(value as u32),
-        Some(_) => Err(tool_error(format!("{name} must fit in u32"))),
+        Some(value) => {
+            u32::try_from(value).map_err(|_| tool_error(format!("{name} must fit in u32")))
+        }
         None => Err(tool_error(format!("missing required parameter: {name}"))),
     }
 }
@@ -88,10 +89,8 @@ fn required_transfer_u32(
     name: &str,
 ) -> std::result::Result<u32, ToolResult> {
     match transfer.get(name).and_then(Value::as_u64) {
-        Some(value) if value <= u64::from(u32::MAX) => Ok(value as u32),
-        Some(_) => Err(tool_error(format!(
-            "chain entry {index}: {name} must fit in u32"
-        ))),
+        Some(value) => u32::try_from(value)
+            .map_err(|_| tool_error(format!("chain entry {index}: {name} must fit in u32"))),
         None => Err(tool_error(format!(
             "chain entry {index}: missing required field: {name}"
         ))),
@@ -524,7 +523,14 @@ pub fn execute_generate_merkle_proof(params: &Value, _context: &NodeContext) -> 
         }
     };
     let target_index = match params.get("target_index").and_then(Value::as_u64) {
-        Some(n) => n as usize,
+        Some(n) => match usize::try_from(n) {
+            Ok(index) => index,
+            Err(_) => {
+                return ToolResult::error(
+                    json!({"error": "target_index must fit in usize"}).to_string(),
+                );
+            }
+        },
         None => {
             return ToolResult::error(
                 json!({"error": "missing required parameter: target_index (must be a number)"})
