@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ApiError, Result};
 
 const P2P_MESSAGE_SIGNING_DOMAIN: &str = "exo.p2p.message.v1";
+const MAX_BOOTSTRAP_DISCOVERY_PEERS: usize = 4_096;
 const MAX_DIVERSE_SELECTION_PEERS: usize = 4_096;
 
 /// Unique identifier for a peer in the P2P mesh, wrapping a DID.
@@ -189,7 +190,17 @@ pub fn verify_message(msg: &Message, sender_public_key: &PublicKey) -> Result<()
 
 /// Discover new peers from bootstrap addresses and register them.
 pub fn discover_peers(registry: &mut PeerRegistry, bootstrap: &[String]) -> Result<Vec<PeerId>> {
-    let mut discovered = Vec::new();
+    if bootstrap.len() > MAX_BOOTSTRAP_DISCOVERY_PEERS {
+        return Err(ApiError::InvalidSchema {
+            reason: format!(
+                "bootstrap peer list length {} exceeds maximum {}",
+                bootstrap.len(),
+                MAX_BOOTSTRAP_DISCOVERY_PEERS
+            ),
+        });
+    }
+
+    let mut discovered = Vec::with_capacity(bootstrap.len());
     for addr in bootstrap {
         let did = Did::new(&format!(
             "did:exo:peer-{}",
@@ -550,6 +561,19 @@ mod tests {
         discover_peers(&mut r, &["a".into()]).unwrap();
         let d = discover_peers(&mut r, &["a".into()]).unwrap();
         assert!(d.is_empty());
+    }
+    #[test]
+    fn discover_peers_rejects_oversized_bootstrap_before_mutating_registry() {
+        const MAX_BOOTSTRAP_PEERS: usize = 4_096;
+        let bootstrap: Vec<String> = (0..(MAX_BOOTSTRAP_PEERS + 1))
+            .map(|i| format!("addr-{i}"))
+            .collect();
+        let mut registry = PeerRegistry::new();
+
+        let err = discover_peers(&mut registry, &bootstrap).unwrap_err();
+
+        assert!(matches!(err, ApiError::InvalidSchema { .. }));
+        assert_eq!(registry.len(), 0);
     }
     #[test]
     fn rate_limiter() {
