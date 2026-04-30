@@ -60,6 +60,74 @@ pub struct ProvenanceResponse {
     pub depth: u32,
 }
 
+fn build_provenance_response(
+    store: &SqliteDagStore,
+    hash: &Hash256,
+) -> Result<ProvenanceResponse, (StatusCode, String)> {
+    let node = store
+        .get_sync(hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "node not found in DAG".into()))?;
+
+    let children = store
+        .children(hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let committed_height = store
+        .committed_height_for(hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Walk parents to compute depth (max 1000 to avoid infinite loops).
+    let mut depth = 0u32;
+    let mut frontier = node.parents.clone();
+    let mut max_iters = 1000u32;
+    while !frontier.is_empty() && max_iters > 0 {
+        depth += 1;
+        max_iters -= 1;
+        let mut next_frontier = Vec::new();
+        for parent_hash in &frontier {
+            if let Ok(Some(parent_node)) = store.get_sync(parent_hash) {
+                next_frontier.extend_from_slice(&parent_node.parents);
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    Ok(ProvenanceResponse {
+        hash: hex::encode(node.hash.0),
+        creator: node.creator_did.to_string(),
+        parents: node.parents.iter().map(|h| hex::encode(h.0)).collect(),
+        children: children.iter().map(|h| hex::encode(h.0)).collect(),
+        committed: committed_height.is_some(),
+        committed_height,
+        timestamp_ms: node.timestamp.physical_ms,
+        payload_hash_size: node.payload_hash.as_bytes().len(),
+        depth,
+    })
+}
+
+async fn load_provenance_response(
+    state: Arc<ProvenanceState>,
+    hash: Hash256,
+) -> Result<ProvenanceResponse, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let store = state.store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Store unavailable".to_string(),
+            )
+        })?;
+        build_provenance_response(&store, &hash)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Store task failed: {e}"),
+        )
+    })?
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -81,53 +149,7 @@ async fn handle_provenance(
     arr.copy_from_slice(&hash_bytes);
     let hash = Hash256::from_bytes(arr);
 
-    let st = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Store unavailable".to_string(),
-        )
-    })?;
-
-    let node = st
-        .get_sync(&hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "node not found in DAG".into()))?;
-
-    let children = st
-        .children(&hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let committed_height = st
-        .committed_height_for(&hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Walk parents to compute depth (max 1000 to avoid infinite loops).
-    let mut depth = 0u32;
-    let mut frontier = node.parents.clone();
-    let mut max_iters = 1000u32;
-    while !frontier.is_empty() && max_iters > 0 {
-        depth += 1;
-        max_iters -= 1;
-        let mut next_frontier = Vec::new();
-        for parent_hash in &frontier {
-            if let Ok(Some(parent_node)) = st.get_sync(parent_hash) {
-                next_frontier.extend_from_slice(&parent_node.parents);
-            }
-        }
-        frontier = next_frontier;
-    }
-
-    Ok(Json(ProvenanceResponse {
-        hash: hex::encode(node.hash.0),
-        creator: node.creator_did.to_string(),
-        parents: node.parents.iter().map(|h| hex::encode(h.0)).collect(),
-        children: children.iter().map(|h| hex::encode(h.0)).collect(),
-        committed: committed_height.is_some(),
-        committed_height,
-        timestamp_ms: node.timestamp.physical_ms,
-        payload_hash_size: node.payload_hash.as_bytes().len(),
-        depth,
-    }))
+    load_provenance_response(state, hash).await.map(Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +184,31 @@ mod tests {
             sig[..32].copy_from_slice(h.as_bytes());
             Signature::from_bytes(sig)
         })
+    }
+
+    #[test]
+    fn provenance_handler_store_access_uses_spawn_blocking() {
+        let source = include_str!("provenance.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "provenance handler must isolate synchronous store I/O from Tokio workers"
+        );
+        let handler = production
+            .split("async fn handle_provenance")
+            .nth(1)
+            .expect("handler present")
+            .split("// ---------------------------------------------------------------------------\n// Router")
+            .next()
+            .expect("router marker present");
+        assert!(
+            !handler.contains("state.store.lock()"),
+            "provenance async handler must not directly block on the store mutex"
+        );
     }
 
     fn test_state_with_dag() -> (Arc<ProvenanceState>, Hash256, Hash256) {
