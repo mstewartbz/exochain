@@ -260,6 +260,10 @@ pub fn verify_proof(mmr_root: &Hash256, leaf: &Hash256, position: usize, proof: 
 
     let mut current = hash_leaf(leaf);
     let depth = proof.siblings.len();
+    let max_shift = usize::try_from(usize::BITS).unwrap_or(usize::MAX);
+    if depth >= max_shift {
+        return false;
+    }
     let tree_leaves = 1usize << depth;
     let local_idx = position % tree_leaves;
 
@@ -489,6 +493,17 @@ mod tests {
         let proof = MmrProof {
             siblings: Vec::new(),
             peak_index: 5,
+            peaks: vec![Hash256::ZERO],
+        };
+        assert!(!verify_proof(&Hash256::ZERO, &Hash256::ZERO, 0, &proof));
+    }
+
+    #[test]
+    fn verify_rejects_proof_depth_that_would_shift_overflow() {
+        let overflowing_depth = usize::try_from(usize::BITS).unwrap_or(usize::MAX);
+        let proof = MmrProof {
+            siblings: vec![Hash256::ZERO; overflowing_depth],
+            peak_index: 0,
             peaks: vec![Hash256::ZERO],
         };
         assert!(!verify_proof(&Hash256::ZERO, &Hash256::ZERO, 0, &proof));

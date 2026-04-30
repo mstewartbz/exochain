@@ -519,6 +519,12 @@ fn validate_commit<R: consensus::PublicKeyResolver>(
     validators: &BTreeSet<Did>,
     resolver: &R,
 ) -> Result<(), String> {
+    let quorum = ConsensusConfig::new(validators.clone(), 0).quorum_size();
+    if quorum == 0 {
+        return Err("commit certificate cannot be validated with an empty validator set".into());
+    }
+
+    let mut distinct_voters = BTreeSet::new();
     for vote in &msg.certificate.votes {
         if !validators.contains(&vote.voter) {
             return Err(format!(
@@ -526,10 +532,22 @@ fn validate_commit<R: consensus::PublicKeyResolver>(
                 vote.voter
             ));
         }
+        if vote.round != msg.certificate.round {
+            return Err(format!(
+                "certificate vote from {} is for round {}, expected {}",
+                vote.voter, vote.round, msg.certificate.round
+            ));
+        }
         if vote.node_hash != msg.certificate.node_hash {
             return Err(format!(
                 "certificate vote from {} references wrong node hash",
                 vote.voter
+            ));
+        }
+        if !distinct_voters.insert(vote.voter.clone()) {
+            return Err(format!(
+                "certificate contains duplicate vote from {} in round {}",
+                vote.voter, vote.round
             ));
         }
         let Some(public_key) = resolver.resolve(&vote.voter) else {
@@ -545,6 +563,15 @@ fn validate_commit<R: consensus::PublicKeyResolver>(
             ));
         }
     }
+
+    if distinct_voters.len() < quorum {
+        return Err(format!(
+            "commit certificate has insufficient quorum: required {}, got {}",
+            quorum,
+            distinct_voters.len()
+        ));
+    }
+
     Ok(())
 }
 
@@ -1332,6 +1359,7 @@ mod tests {
         let validators = make_validators(4);
         let sign_fn = make_sign_fn();
         let v: Vec<Did> = validators.iter().cloned().collect();
+        let resolver = ValidatorPublicKeys::new(make_validator_public_keys(&validators));
 
         let config = ConsensusConfig::new(validators.clone(), 5000);
         let mut consensus_state = ConsensusState::new(config);
@@ -1350,17 +1378,25 @@ mod tests {
         .unwrap();
 
         // Propose
-        let _proposal = consensus::propose(&mut consensus_state, &node, &v[0]).unwrap();
+        let proposal = Proposal {
+            proposer: v[0].clone(),
+            round: 0,
+            node_hash: node.hash,
+        };
+        let proposal_sig = sign_proposal_for_index(&proposal, 0);
+        let _proposal = consensus::propose_verified(
+            &mut consensus_state,
+            &node,
+            &v[0],
+            &proposal_sig,
+            &resolver,
+        )
+        .unwrap();
 
         // 3 out of 4 validators vote (quorum = 3)
-        for voter in &v[0..3] {
-            let vote = Vote {
-                voter: voter.clone(),
-                round: 0,
-                node_hash: node.hash,
-                signature: sign_fn(node.hash.0.as_slice()),
-            };
-            consensus::vote(&mut consensus_state, vote).unwrap();
+        for (index, voter) in v.iter().enumerate().take(3) {
+            let vote = vote_for(voter, index, 0, node.hash);
+            consensus::vote_verified(&mut consensus_state, vote, &resolver).unwrap();
         }
 
         // Check commit — should reach quorum
@@ -1372,7 +1408,7 @@ mod tests {
         assert_eq!(cert.round, 0);
 
         // Commit
-        consensus::commit(&mut consensus_state, cert);
+        consensus::commit_verified(&mut consensus_state, cert, &resolver).unwrap();
         assert!(consensus::is_finalized(&consensus_state, &node.hash));
         assert_eq!(consensus_state.committed.len(), 1);
 
@@ -1388,19 +1424,27 @@ mod tests {
         )
         .unwrap();
 
-        let _proposal2 = consensus::propose(&mut consensus_state, &node2, &v[1]).unwrap();
-        for voter in v.iter().take(4) {
-            let vote = Vote {
-                voter: voter.clone(),
-                round: 1,
-                node_hash: node2.hash,
-                signature: sign_fn(node2.hash.0.as_slice()),
-            };
-            consensus::vote(&mut consensus_state, vote).unwrap();
+        let proposal2 = Proposal {
+            proposer: v[1].clone(),
+            round: 1,
+            node_hash: node2.hash,
+        };
+        let proposal2_sig = sign_proposal_for_index(&proposal2, 1);
+        let _proposal2 = consensus::propose_verified(
+            &mut consensus_state,
+            &node2,
+            &v[1],
+            &proposal2_sig,
+            &resolver,
+        )
+        .unwrap();
+        for (index, voter) in v.iter().enumerate().take(4) {
+            let vote = vote_for(voter, index, 1, node2.hash);
+            consensus::vote_verified(&mut consensus_state, vote, &resolver).unwrap();
         }
 
         let cert2 = consensus::check_commit(&consensus_state, &node2.hash).unwrap();
-        consensus::commit(&mut consensus_state, cert2);
+        consensus::commit_verified(&mut consensus_state, cert2, &resolver).unwrap();
         assert!(consensus::is_finalized(&consensus_state, &node2.hash));
         assert_eq!(consensus_state.committed.len(), 2);
     }
@@ -1411,8 +1455,9 @@ mod tests {
         let validators = make_validators(7);
         let sign_fn = make_sign_fn();
         let v: Vec<Did> = validators.iter().cloned().collect();
+        let resolver = ValidatorPublicKeys::new(make_validator_public_keys(&validators));
 
-        let config = ConsensusConfig::new(validators, 5000);
+        let config = ConsensusConfig::new(validators.clone(), 5000);
         let mut state = ConsensusState::new(config); // quorum = 5
 
         let mut honest_dag = Dag::new();
@@ -1440,29 +1485,39 @@ mod tests {
         .unwrap();
 
         // Both get proposed
-        consensus::propose(&mut state, &honest_node, &v[0]).unwrap();
-        consensus::propose(&mut state, &byzantine_node, &v[5]).unwrap();
+        let honest_proposal = Proposal {
+            proposer: v[0].clone(),
+            round: 0,
+            node_hash: honest_node.hash,
+        };
+        let honest_sig = sign_proposal_for_index(&honest_proposal, 0);
+        consensus::propose_verified(&mut state, &honest_node, &v[0], &honest_sig, &resolver)
+            .unwrap();
+        let byzantine_proposal = Proposal {
+            proposer: v[5].clone(),
+            round: 0,
+            node_hash: byzantine_node.hash,
+        };
+        let byzantine_sig = sign_proposal_for_index(&byzantine_proposal, 5);
+        consensus::propose_verified(
+            &mut state,
+            &byzantine_node,
+            &v[5],
+            &byzantine_sig,
+            &resolver,
+        )
+        .unwrap();
 
         // 5 honest validators vote for honest_node
-        for voter in &v[0..5] {
-            let vote = Vote {
-                voter: voter.clone(),
-                round: 0,
-                node_hash: honest_node.hash,
-                signature: sign_fn(honest_node.hash.0.as_slice()),
-            };
-            consensus::vote(&mut state, vote).unwrap();
+        for (index, voter) in v.iter().enumerate().take(5) {
+            let vote = vote_for(voter, index, 0, honest_node.hash);
+            consensus::vote_verified(&mut state, vote, &resolver).unwrap();
         }
 
         // 2 Byzantine validators vote for byzantine_node
-        for voter in &v[5..7] {
-            let vote = Vote {
-                voter: voter.clone(),
-                round: 0,
-                node_hash: byzantine_node.hash,
-                signature: sign_fn(byzantine_node.hash.0.as_slice()),
-            };
-            consensus::vote(&mut state, vote).unwrap();
+        for (index, voter) in v.iter().enumerate().skip(5).take(2) {
+            let vote = vote_for(voter, index, 0, byzantine_node.hash);
+            consensus::vote_verified(&mut state, vote, &resolver).unwrap();
         }
 
         // Honest node reaches quorum
@@ -1471,8 +1526,7 @@ mod tests {
         assert!(consensus::check_commit(&state, &byzantine_node.hash).is_none());
 
         let cert = consensus::check_commit(&state, &honest_node.hash).unwrap();
-        #[allow(deprecated)]
-        consensus::commit(&mut state, cert);
+        consensus::commit_verified(&mut state, cert, &resolver).unwrap();
         assert!(consensus::is_finalized(&state, &honest_node.hash));
         assert!(!consensus::is_finalized(&state, &byzantine_node.hash));
     }

@@ -1,10 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Bench suite exists to measure baseline perf of the legacy
-// consensus API (propose/vote/commit). The GAP-014 fix added
-// _verified counterparts and marked the legacy path deprecated —
-// benching the legacy path is still valuable for perf regression
-// tracking and defense-in-depth testing.
-#![allow(deprecated)]
 //! exo-dag benchmark suite.
 //!
 //! Covers the four operation families mandated by EXOCHAIN-REM-004:
@@ -13,12 +7,18 @@
 //!   3. Checkpoint-equivalent store operations (MemoryStore put + mark_committed)
 //!   4. BFT consensus rounds (propose → vote × n → check_commit → commit)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use exo_core::types::{Did, Hash256, Signature};
+use exo_core::{
+    crypto::KeyPair,
+    types::{Did, Hash256, PublicKey, Signature},
+};
 use exo_dag::{
-    consensus::{ConsensusConfig, ConsensusState, Vote, check_commit, commit, propose, vote},
+    consensus::{
+        ConsensusConfig, ConsensusState, Proposal, Vote, check_commit, commit_verified,
+        propose_verified, vote_verified,
+    },
     dag::{Dag, DeterministicDagClock, ancestors, append, tips},
     store::MemoryStore,
 };
@@ -59,6 +59,50 @@ fn validators(n: usize) -> BTreeSet<Did> {
     (0..n)
         .map(|i| Did::new(&format!("did:exo:v{i}")).expect("valid"))
         .collect()
+}
+
+fn validator_keypair(index: usize) -> KeyPair {
+    let seed = u8::try_from(index + 1).expect("validator index fits in deterministic seed");
+    KeyPair::from_secret_bytes([seed; 32]).expect("valid deterministic validator keypair")
+}
+
+fn validator_public_keys(validators: &[Did]) -> BTreeMap<Did, PublicKey> {
+    validators
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, did)| {
+            let keypair = validator_keypair(index);
+            (did, *keypair.public_key())
+        })
+        .collect()
+}
+
+fn signed_proposal_for(
+    proposer: &Did,
+    proposer_index: usize,
+    round: u64,
+    node_hash: Hash256,
+) -> Signature {
+    let proposal = Proposal {
+        proposer: proposer.clone(),
+        round,
+        node_hash,
+    };
+    let payload = proposal.signing_payload().expect("proposal payload");
+    validator_keypair(proposer_index).sign(&payload)
+}
+
+fn signed_vote_for(voter: &Did, voter_index: usize, round: u64, node_hash: Hash256) -> Vote {
+    let mut vote = Vote {
+        voter: voter.clone(),
+        round,
+        node_hash,
+        signature: Signature::empty(),
+    };
+    let payload = vote.signing_payload().expect("vote payload");
+    vote.signature = validator_keypair(voter_index).sign(&payload);
+    vote
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +269,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
 
     for n_validators in [4usize, 7, 13] {
         let vs: Vec<Did> = validators(n_validators).into_iter().collect();
+        let public_keys = validator_public_keys(&vs);
         let config = ConsensusConfig::new(vs.iter().cloned().collect(), 1_000);
 
         // Build a genesis DAG node to propose.
@@ -235,23 +280,26 @@ fn bench_consensus_rounds(c: &mut Criterion) {
 
         group.bench_with_input(
             BenchmarkId::new("propose_vote_commit", n_validators),
-            &(config.clone(), node.clone(), vs.clone()),
-            |b, (cfg, n, v)| {
+            &(
+                config.clone(),
+                node.clone(),
+                vs.clone(),
+                public_keys.clone(),
+            ),
+            |b, (cfg, n, v, keys)| {
                 b.iter(|| {
                     let mut state = ConsensusState::new(cfg.clone());
-                    propose(&mut state, n, &v[0]).expect("propose");
+                    let resolver = |did: &Did| keys.get(did).copied();
+                    let proposal_sig = signed_proposal_for(&v[0], 0, 0, n.hash);
+                    propose_verified(&mut state, n, &v[0], &proposal_sig, &resolver)
+                        .expect("propose");
                     let quorum = cfg.quorum_size();
-                    for voter in v.iter().take(quorum) {
-                        let vt = Vote {
-                            voter: voter.clone(),
-                            round: 0,
-                            node_hash: n.hash,
-                            signature: Signature::from_bytes([1u8; 64]),
-                        };
-                        vote(&mut state, vt).expect("vote");
+                    for (index, voter) in v.iter().enumerate().take(quorum) {
+                        let vt = signed_vote_for(voter, index, 0, n.hash);
+                        vote_verified(&mut state, vt, &resolver).expect("vote");
                     }
                     let cert = check_commit(&state, &n.hash).expect("cert");
-                    commit(&mut state, cert);
+                    commit_verified(&mut state, cert, &resolver).expect("commit");
                     black_box(state.committed.len())
                 });
             },
@@ -275,24 +323,28 @@ fn bench_consensus_rounds(c: &mut Criterion) {
 
         group.bench_with_input(
             BenchmarkId::new("multi_round_10", n_validators),
-            &(config.clone(), nodes.clone(), vs.clone()),
-            |b, (cfg, ns, v)| {
+            &(
+                config.clone(),
+                nodes.clone(),
+                vs.clone(),
+                public_keys.clone(),
+            ),
+            |b, (cfg, ns, v, keys)| {
                 let quorum = cfg.quorum_size();
                 b.iter(|| {
                     let mut state = ConsensusState::new(cfg.clone());
                     for node in ns {
-                        propose(&mut state, node, &v[0]).expect("propose");
-                        for voter in v.iter().take(quorum) {
-                            let vt = Vote {
-                                voter: voter.clone(),
-                                round: state.current_round,
-                                node_hash: node.hash,
-                                signature: Signature::from_bytes([1u8; 64]),
-                            };
-                            vote(&mut state, vt).expect("vote");
+                        let resolver = |did: &Did| keys.get(did).copied();
+                        let proposal_sig =
+                            signed_proposal_for(&v[0], 0, state.current_round, node.hash);
+                        propose_verified(&mut state, node, &v[0], &proposal_sig, &resolver)
+                            .expect("propose");
+                        for (index, voter) in v.iter().enumerate().take(quorum) {
+                            let vt = signed_vote_for(voter, index, state.current_round, node.hash);
+                            vote_verified(&mut state, vt, &resolver).expect("vote");
                         }
                         if let Some(cert) = check_commit(&state, &node.hash) {
-                            commit(&mut state, cert);
+                            commit_verified(&mut state, cert, &resolver).expect("commit");
                         }
                         state.advance_round();
                     }

@@ -4,6 +4,51 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+const HASH256_HEX_LEN: usize = 64;
+const MAX_WASM_MERKLE_LEAVES: usize = 16_384;
+const MAX_WASM_MERKLE_PROOF_HASHES: usize = 256;
+const MAX_WASM_MERKLE_LEAVES_JSON_BYTES: usize = (HASH256_HEX_LEN + 4) * MAX_WASM_MERKLE_LEAVES + 2;
+const MAX_WASM_MERKLE_PROOF_JSON_BYTES: usize =
+    (HASH256_HEX_LEN + 4) * MAX_WASM_MERKLE_PROOF_HASHES + 2;
+
+fn parse_hash256_array(
+    json: &str,
+    label: &str,
+    max_items: usize,
+    max_json_bytes: usize,
+) -> Result<Vec<exo_core::Hash256>, JsValue> {
+    if json.len() > max_json_bytes {
+        return Err(JsValue::from_str(&format!(
+            "{label} JSON exceeds maximum size of {max_json_bytes} bytes"
+        )));
+    }
+
+    let hex_values: Vec<String> = from_json_str(json)?;
+    if hex_values.len() > max_items {
+        return Err(JsValue::from_str(&format!(
+            "{label} contains {} hashes, maximum is {max_items}",
+            hex_values.len()
+        )));
+    }
+
+    hex_values
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            if h.len() != HASH256_HEX_LEN {
+                return Err(JsValue::from_str(&format!(
+                    "{label}[{idx}] must be a 32-byte hash encoded as 64 hex characters"
+                )));
+            }
+            let bytes = hex::decode(h).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                JsValue::from_str(&format!("{label}[{idx}] must decode to 32 bytes"))
+            })?;
+            Ok(exo_core::Hash256::from_bytes(arr))
+        })
+        .collect()
+}
+
 // ── Hashing ──────────────────────────────────────────────────────
 
 #[wasm_bindgen]
@@ -24,16 +69,12 @@ pub fn wasm_hash_structured(json: &str) -> Result<String, JsValue> {
 
 #[wasm_bindgen]
 pub fn wasm_merkle_root(leaves_json: &str) -> Result<String, JsValue> {
-    let hex_leaves: Vec<String> = from_json_str(leaves_json)?;
-    let leaves: Vec<exo_core::Hash256> = hex_leaves
-        .iter()
-        .map(|h| {
-            let bytes = hex::decode(h).map_err(|e| format!("hex: {e}"))?;
-            let arr: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
-            Ok(exo_core::Hash256::from_bytes(arr))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|e| JsValue::from_str(&e))?;
+    let leaves = parse_hash256_array(
+        leaves_json,
+        "merkle leaves",
+        MAX_WASM_MERKLE_LEAVES,
+        MAX_WASM_MERKLE_LEAVES_JSON_BYTES,
+    )?;
     let root = exo_core::hash::merkle_root(&leaves);
     Ok(hex::encode(root.as_bytes()))
 }
@@ -129,16 +170,12 @@ pub fn wasm_verify(
 /// Returns a JSON array of hex-encoded sibling hashes (the proof path).
 #[wasm_bindgen]
 pub fn wasm_merkle_proof(leaves_json: &str, index: usize) -> Result<JsValue, JsValue> {
-    let hex_leaves: Vec<String> = from_json_str(leaves_json)?;
-    let leaves: Vec<exo_core::Hash256> = hex_leaves
-        .iter()
-        .map(|h| {
-            let bytes = hex::decode(h).map_err(|e| format!("hex: {e}"))?;
-            let arr: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
-            Ok(exo_core::Hash256::from_bytes(arr))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|e| JsValue::from_str(&e))?;
+    let leaves = parse_hash256_array(
+        leaves_json,
+        "merkle leaves",
+        MAX_WASM_MERKLE_LEAVES,
+        MAX_WASM_MERKLE_LEAVES_JSON_BYTES,
+    )?;
 
     let proof = exo_core::hash::merkle_proof(&leaves, index)
         .map_err(|e| JsValue::from_str(&format!("Proof error: {e}")))?;
@@ -171,16 +208,12 @@ pub fn wasm_verify_merkle_proof(
         .map_err(|_| JsValue::from_str("leaf must be 32 bytes"))?;
     let leaf = exo_core::Hash256::from_bytes(leaf_arr);
 
-    let hex_proof: Vec<String> = from_json_str(proof_json)?;
-    let proof: Vec<exo_core::Hash256> = hex_proof
-        .iter()
-        .map(|h| {
-            let bytes = hex::decode(h).map_err(|e| format!("hex: {e}"))?;
-            let arr: [u8; 32] = bytes.try_into().map_err(|_| "not 32 bytes")?;
-            Ok(exo_core::Hash256::from_bytes(arr))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|e| JsValue::from_str(&e))?;
+    let proof = parse_hash256_array(
+        proof_json,
+        "merkle proof",
+        MAX_WASM_MERKLE_PROOF_HASHES,
+        MAX_WASM_MERKLE_PROOF_JSON_BYTES,
+    )?;
 
     Ok(exo_core::hash::verify_merkle_proof(
         &root, &leaf, &proof, index,

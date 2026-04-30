@@ -4,6 +4,8 @@
 //! Complex governance objects (DecisionObject, Delegation) are stored as
 //! JSONB payloads with indexed scalar columns for efficient queries.
 
+use std::fmt;
+
 use serde_json::Value as JsonValue;
 use sqlx::{
     Row,
@@ -132,7 +134,7 @@ pub async fn count_users(pool: &PgPool) -> Result<i64, sqlx::Error> {
 }
 
 /// Row representation of a user record from the `users` table.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct UserRow {
     pub did: String,
     pub display_name: String,
@@ -145,6 +147,24 @@ pub struct UserRow {
     pub password_hash: String,
     pub salt: String,
     pub mfa_enabled: bool,
+}
+
+impl fmt::Debug for UserRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserRow")
+            .field("did", &self.did)
+            .field("display_name", &self.display_name)
+            .field("email", &self.email)
+            .field("roles", &self.roles)
+            .field("tenant_id", &self.tenant_id)
+            .field("created_at", &self.created_at)
+            .field("status", &self.status)
+            .field("pace_status", &self.pace_status)
+            .field("password_hash", &"<redacted>")
+            .field("salt", &"<redacted>")
+            .field("mfa_enabled", &self.mfa_enabled)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,4 +1099,31 @@ pub async fn update_feedback_issue_status(
     .bind(updated_at).bind(id).bind(reporter_did)
     .execute(pool).await?;
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_row_debug_redacts_password_hash_and_salt() {
+        let row = UserRow {
+            did: "did:exo:user".to_owned(),
+            display_name: "User".to_owned(),
+            email: "user@example.invalid".to_owned(),
+            roles: serde_json::json!(["member"]),
+            tenant_id: "tenant".to_owned(),
+            created_at: 1,
+            status: "active".to_owned(),
+            pace_status: "normal".to_owned(),
+            password_hash: "argon2id-secret-hash".to_owned(),
+            salt: "secret-salt".to_owned(),
+            mfa_enabled: true,
+        };
+
+        let debug = format!("{row:?}");
+        assert!(!debug.contains("argon2id-secret-hash"));
+        assert!(!debug.contains("secret-salt"));
+        assert!(debug.contains("<redacted>"));
+    }
 }

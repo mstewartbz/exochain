@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::{
     errors::GovernanceError,
-    quorum::{Approval, IndependenceAttestation, QuorumPolicy, QuorumResult, Role, compute_quorum},
+    quorum::{
+        Approval, IndependenceAttestation, PublicKeyResolver, QuorumPolicy, QuorumResult, Role,
+        compute_quorum, compute_quorum_verified,
+    },
 };
 
 /// A participant's stance on a deliberation proposal.
@@ -22,8 +25,16 @@ pub enum Position {
 pub struct Vote {
     pub voter_did: Did,
     pub position: Position,
+    #[serde(default = "default_vote_role")]
+    pub role: Role,
     pub reasoning_hash: [u8; 32],
     pub signature: Signature,
+    #[serde(default)]
+    pub independence_attestation: Option<IndependenceAttestation>,
+}
+
+fn default_vote_role() -> Role {
+    Role::Contributor
 }
 
 /// Lifecycle state of a deliberation: Open, Closed, or Cancelled.
@@ -98,6 +109,16 @@ pub fn cast_vote(delib: &mut Deliberation, vote: Vote) -> Result<(), GovernanceE
     if delib.status != DeliberationStatus::Open {
         return Err(GovernanceError::DeliberationNotOpen);
     }
+    if !delib
+        .participants
+        .iter()
+        .any(|participant| participant == &vote.voter_did)
+    {
+        return Err(GovernanceError::ConstitutionalViolation {
+            constraint_id: "deliberation.participant_membership".into(),
+            reason: format!("{} is not a deliberation participant", vote.voter_did),
+        });
+    }
     if delib.votes.iter().any(|v| v.voter_did == vote.voter_did) {
         return Err(GovernanceError::DuplicateVote(vote.voter_did.to_string()));
     }
@@ -105,9 +126,17 @@ pub fn cast_vote(delib: &mut Deliberation, vote: Vote) -> Result<(), GovernanceE
     Ok(())
 }
 
-/// Close a deliberation, tally votes, and return the result based on quorum policy.
-pub fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> DeliberationResult {
-    delib.status = DeliberationStatus::Closed;
+fn not_open_result(delib: &Deliberation) -> Option<DeliberationResult> {
+    if delib.status == DeliberationStatus::Open {
+        None
+    } else {
+        Some(DeliberationResult::NoQuorum {
+            reason: format!("deliberation not open: {:?}", delib.status),
+        })
+    }
+}
+
+fn tally_votes(delib: &Deliberation) -> (usize, usize, usize) {
     let votes_for = delib
         .votes
         .iter()
@@ -123,27 +152,31 @@ pub fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> Delibera
         .iter()
         .filter(|v| v.position == Position::Abstain)
         .count();
+    (votes_for, votes_against, abstentions)
+}
 
-    let approvals: Vec<Approval> = delib
+fn approvals_from_for_votes(delib: &Deliberation) -> Vec<Approval> {
+    delib
         .votes
         .iter()
         .filter(|v| v.position == Position::For)
         .map(|v| Approval {
             approver_did: v.voter_did.clone(),
-            role: Role::Contributor,
+            role: v.role.clone(),
             timestamp: delib.created,
             signature: v.signature.clone(),
-            independence_attestation: Some(IndependenceAttestation {
-                attester_did: v.voter_did.clone(),
-                no_common_control: true,
-                no_coordination: true,
-                identity_verified: true,
-                signature: v.signature.clone(),
-            }),
+            independence_attestation: v.independence_attestation.clone(),
         })
-        .collect();
+        .collect()
+}
 
-    match compute_quorum(&approvals, quorum_policy) {
+fn result_from_quorum(
+    quorum_result: QuorumResult,
+    votes_for: usize,
+    votes_against: usize,
+    abstentions: usize,
+) -> DeliberationResult {
+    match quorum_result {
         QuorumResult::Met { .. } => {
             if votes_for > votes_against {
                 DeliberationResult::Approved {
@@ -166,8 +199,46 @@ pub fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> Delibera
     }
 }
 
+/// Close a deliberation, tally votes, and return the result based on quorum policy.
+pub fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> DeliberationResult {
+    if let Some(result) = not_open_result(delib) {
+        return result;
+    }
+
+    let (votes_for, votes_against, abstentions) = tally_votes(delib);
+    let approvals = approvals_from_for_votes(delib);
+    let quorum_result = compute_quorum(&approvals, quorum_policy);
+    delib.status = DeliberationStatus::Closed;
+    result_from_quorum(quorum_result, votes_for, votes_against, abstentions)
+}
+
+/// Close a deliberation using cryptographically verified approval and independence evidence.
+///
+/// `Vote.signature` must be a signature over the canonical quorum
+/// [`Approval::signing_payload`] produced from the vote's DID, role, created
+/// timestamp, and independence attestation. This keeps deliberation closure on
+/// the same verified quorum path as direct quorum computation.
+pub fn close_verified<R: PublicKeyResolver>(
+    delib: &mut Deliberation,
+    quorum_policy: &QuorumPolicy,
+    resolver: &R,
+) -> DeliberationResult {
+    if let Some(result) = not_open_result(delib) {
+        return result;
+    }
+
+    let (votes_for, votes_against, abstentions) = tally_votes(delib);
+    let approvals = approvals_from_for_votes(delib);
+    let quorum_result = compute_quorum_verified(&approvals, quorum_policy, resolver);
+    delib.status = DeliberationStatus::Closed;
+    result_from_quorum(quorum_result, votes_for, votes_against, abstentions)
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use exo_core::crypto;
 
     use super::*;
@@ -201,10 +272,74 @@ mod tests {
         Vote {
             voter_did: did(name),
             position: pos,
+            role: Role::Contributor,
             reasoning_hash: [0u8; 32],
             signature: test_sig(),
+            independence_attestation: Some(IndependenceAttestation {
+                attester_did: did(name),
+                no_common_control: true,
+                no_coordination: true,
+                identity_verified: true,
+                signature: test_sig(),
+            }),
         }
     }
+
+    fn keypair(seed: u8) -> crypto::KeyPair {
+        crypto::KeyPair::from_secret_bytes([seed; 32]).expect("deterministic test key")
+    }
+
+    fn resolver(
+        keys: &BTreeMap<Did, exo_core::PublicKey>,
+    ) -> impl Fn(&Did) -> Option<exo_core::PublicKey> + '_ {
+        |did| keys.get(did).copied()
+    }
+
+    fn signed_attestation(name: &str, keypair: &crypto::KeyPair) -> IndependenceAttestation {
+        let mut attestation = IndependenceAttestation {
+            attester_did: did(name),
+            no_common_control: true,
+            no_coordination: true,
+            identity_verified: true,
+            signature: Signature::Empty,
+        };
+        let payload = attestation
+            .signing_payload()
+            .expect("attestation payload encodes");
+        attestation.signature = keypair.sign(&payload);
+        attestation
+    }
+
+    fn signed_vote(
+        name: &str,
+        pos: Position,
+        role: Role,
+        keypair: &crypto::KeyPair,
+        timestamp: Timestamp,
+    ) -> Vote {
+        let attestation = signed_attestation(name, keypair);
+        let mut approval = Approval {
+            approver_did: did(name),
+            role: role.clone(),
+            timestamp,
+            signature: Signature::Empty,
+            independence_attestation: Some(attestation.clone()),
+        };
+        let payload = approval
+            .signing_payload()
+            .expect("approval payload encodes");
+        approval.signature = keypair.sign(&payload);
+
+        Vote {
+            voter_did: did(name),
+            position: pos,
+            role,
+            reasoning_hash: [0u8; 32],
+            signature: approval.signature,
+            independence_attestation: Some(attestation),
+        }
+    }
+
     fn policy(min: usize) -> QuorumPolicy {
         QuorumPolicy {
             min_approvals: min,
@@ -283,6 +418,15 @@ mod tests {
         assert_eq!(d.votes.len(), 1);
     }
     #[test]
+    fn cast_vote_rejects_non_participant() {
+        let mut d = open(b"p", &[did("alice")]);
+        assert!(
+            cast_vote(&mut d, vote("mallory", Position::For)).is_err(),
+            "only declared deliberation participants may vote"
+        );
+        assert!(d.votes.is_empty());
+    }
+    #[test]
     fn duplicate_vote_rejected() {
         let mut d = open(b"p", &[did("alice")]);
         cast_vote(&mut d, vote("alice", Position::For)).unwrap();
@@ -349,6 +493,104 @@ mod tests {
                 abstentions: 1
             }
         ));
+    }
+    #[test]
+    fn close_uses_vote_role_for_required_roles() {
+        let alice_key = keypair(1);
+        let mut d = open(b"p", &[did("alice")]);
+        let created = d.created;
+        cast_vote(
+            &mut d,
+            signed_vote("alice", Position::For, Role::Steward, &alice_key, created),
+        )
+        .unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 0,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        assert!(matches!(
+            close(&mut d, &quorum_policy),
+            DeliberationResult::Approved {
+                votes_for: 1,
+                votes_against: 0,
+                abstentions: 0
+            }
+        ));
+    }
+    #[test]
+    fn close_verified_rejects_forged_vote_signature() {
+        let alice_key = keypair(1);
+        let alice = did("alice");
+        let mut keys = BTreeMap::new();
+        keys.insert(alice, *alice_key.public_key());
+
+        let mut d = open(b"p", &[did("alice")]);
+        let created = d.created;
+        let mut forged = signed_vote("alice", Position::For, Role::Steward, &alice_key, created);
+        forged.signature = test_sig();
+        cast_vote(&mut d, forged).unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match close_verified(&mut d, &quorum_policy, &resolver(&keys)) {
+            DeliberationResult::NoQuorum { reason } => {
+                assert!(reason.contains("verified"));
+            }
+            other => panic!("forged vote must not close deliberation: {other:?}"),
+        }
+    }
+    #[test]
+    fn close_verified_accepts_distinct_valid_steward_vote() {
+        let alice_key = keypair(1);
+        let alice = did("alice");
+        let mut keys = BTreeMap::new();
+        keys.insert(alice, *alice_key.public_key());
+
+        let mut d = open(b"p", &[did("alice")]);
+        let created = d.created;
+        cast_vote(
+            &mut d,
+            signed_vote("alice", Position::For, Role::Steward, &alice_key, created),
+        )
+        .unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        assert!(matches!(
+            close_verified(&mut d, &quorum_policy, &resolver(&keys)),
+            DeliberationResult::Approved {
+                votes_for: 1,
+                votes_against: 0,
+                abstentions: 0
+            }
+        ));
+    }
+    #[test]
+    fn close_does_not_overwrite_cancelled_deliberation() {
+        let mut d = open(b"p", &[did("a")]);
+        d.status = DeliberationStatus::Cancelled;
+
+        match close(&mut d, &policy(0)) {
+            DeliberationResult::NoQuorum { reason } => {
+                assert!(reason.contains("not open"));
+            }
+            other => panic!("cancelled deliberation must not close: {other:?}"),
+        }
+        assert_eq!(d.status, DeliberationStatus::Cancelled);
     }
     #[test]
     fn cancelled_rejects_votes() {

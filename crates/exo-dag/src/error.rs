@@ -29,6 +29,13 @@ pub enum DagError {
     #[error("invalid round: expected {expected}, got {got}")]
     InvalidRound { expected: u64, got: u64 },
 
+    #[error("insufficient quorum in round {round}: required {required}, got {actual}")]
+    InsufficientQuorum {
+        required: usize,
+        actual: usize,
+        round: u64,
+    },
+
     #[error("node not found: {0}")]
     NodeNotFound(Hash256),
 

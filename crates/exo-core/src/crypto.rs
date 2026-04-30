@@ -103,7 +103,7 @@ impl KeyPair {
 
 impl Drop for KeyPair {
     fn drop(&mut self) {
-        self.secret.0.zeroize();
+        self.secret.zeroize();
     }
 }
 

@@ -117,7 +117,7 @@ function renderTable() {
   const count = document.getElementById('resultCount');
 
   if (allReceipts.length === 0) {
-    tbody.innerHTML = '';
+    tbody.replaceChildren();
     empty.style.display = 'block';
     empty.textContent = 'No receipts found for this actor.';
     count.textContent = '';
@@ -127,15 +127,19 @@ function renderTable() {
   empty.style.display = 'none';
   count.textContent = allReceipts.length + ' receipt(s)';
 
-  tbody.innerHTML = allReceipts.map((r, i) => `
-    <tr class="clickable" onclick="showDetail(${i})">
-      <td class="hash">${r.receipt_hash.slice(0, 16)}...</td>
-      <td>${r.actor_did}</td>
-      <td>${r.action_type}</td>
-      <td class="outcome-${r.outcome}">${r.outcome}</td>
-      <td>${new Date(r.timestamp_ms).toISOString().replace('T', ' ').slice(0, 19)}</td>
-    </tr>
-  `).join('');
+  const rows = allReceipts.map((r, i) => {
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.addEventListener('click', () => showDetail(i));
+
+    appendCell(tr, `${String(r.receipt_hash || '').slice(0, 16)}...`, 'hash');
+    appendCell(tr, r.actor_did || '');
+    appendCell(tr, r.action_type || '');
+    appendCell(tr, r.outcome || '', outcomeClass(r.outcome));
+    appendCell(tr, formatTimestamp(r.timestamp_ms));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 function showDetail(idx) {
@@ -156,12 +160,45 @@ function showDetail(idx) {
     ['Timestamp (ms)', r.timestamp_ms],
   ];
 
-  content.innerHTML = fields.map(([k, v]) =>
-    `<div class="detail-row"><span class="detail-label">${k}</span><span class="detail-value">${v}</span></div>`
-  ).join('');
+  const rows = fields.map(([k, v]) => {
+    const row = document.createElement('div');
+    row.className = 'detail-row';
+    appendSpan(row, k, 'detail-label');
+    appendSpan(row, v, 'detail-value');
+    return row;
+  });
+  content.replaceChildren(...rows);
 
   panel.classList.add('active');
   panel.scrollIntoView({ behavior: 'smooth' });
+}
+
+function appendCell(row, value, className = '') {
+  const td = document.createElement('td');
+  if (className) { td.className = className; }
+  td.textContent = String(value ?? '');
+  row.appendChild(td);
+}
+
+function appendSpan(row, value, className) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = String(value ?? '');
+  row.appendChild(span);
+}
+
+function outcomeClass(outcome) {
+  const normalized = String(outcome || '').toLowerCase();
+  if (['executed', 'denied', 'escalated', 'pending'].includes(normalized)) {
+    return `outcome-${normalized}`;
+  }
+  return 'outcome-pending';
+}
+
+function formatTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) { return '(invalid timestamp)'; }
+  return date.toISOString().replace('T', ' ').slice(0, 19);
 }
 
 function closeDetail() {
@@ -265,5 +302,21 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("text/html"));
+    }
+
+    #[test]
+    fn receipt_dashboard_uses_text_content_for_api_fields() {
+        assert!(
+            RECEIPT_DASHBOARD_HTML.contains("textContent"),
+            "API response fields must be written through textContent"
+        );
+        assert!(
+            !RECEIPT_DASHBOARD_HTML.contains("tbody.innerHTML = allReceipts.map"),
+            "receipt rows must not be rendered by injecting API data through innerHTML"
+        );
+        assert!(
+            !RECEIPT_DASHBOARD_HTML.contains("content.innerHTML = fields.map"),
+            "receipt details must not be rendered by injecting API data through innerHTML"
+        );
     }
 }

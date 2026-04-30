@@ -191,6 +191,8 @@ impl AsRef<[u8]> for Hash256 {
 /// This enum enables migration from Ed25519 to post-quantum schemes
 /// (e.g., Dilithium) or hybrid classical+PQ signatures without breaking
 /// existing chains.
+const ML_DSA_65_SIGNATURE_MAX_BYTES: usize = 3_309;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum Signature {
     /// Classical Ed25519 signature (64 bytes).
@@ -247,7 +249,10 @@ impl<'de> Deserialize<'de> for Signature {
                 buf.copy_from_slice(&b);
                 Ok(Self::Ed25519(buf))
             }
-            SignatureProxy::PostQuantum(b) => Ok(Self::PostQuantum(b)),
+            SignatureProxy::PostQuantum(b) => {
+                validate_pq_signature_len::<D::Error>(b.len())?;
+                Ok(Self::PostQuantum(b))
+            }
             SignatureProxy::Hybrid { classical, pq } => {
                 if classical.len() != 64 {
                     return Err(serde::de::Error::invalid_length(
@@ -255,6 +260,7 @@ impl<'de> Deserialize<'de> for Signature {
                         &"64 bytes for classical",
                     ));
                 }
+                validate_pq_signature_len::<D::Error>(pq.len())?;
                 let mut buf = [0u8; 64];
                 buf.copy_from_slice(&classical);
                 Ok(Self::Hybrid { classical: buf, pq })
@@ -262,6 +268,16 @@ impl<'de> Deserialize<'de> for Signature {
             SignatureProxy::Empty => Ok(Self::Empty),
         }
     }
+}
+
+fn validate_pq_signature_len<E: serde::de::Error>(len: usize) -> core::result::Result<(), E> {
+    if len > ML_DSA_65_SIGNATURE_MAX_BYTES {
+        return Err(serde::de::Error::invalid_length(
+            len,
+            &"at most 3309 bytes for ML-DSA-65 signature material",
+        ));
+    }
+    Ok(())
 }
 
 impl Signature {
@@ -444,7 +460,7 @@ impl fmt::Display for PublicKey {
 /// An Ed25519 secret (signing) key.  Zeroized on drop.
 #[derive(Clone, Zeroize)]
 #[zeroize(drop)]
-pub struct SecretKey(pub [u8; 32]);
+pub struct SecretKey([u8; 32]);
 
 impl SecretKey {
     #[must_use]
@@ -464,11 +480,17 @@ impl fmt::Debug for SecretKey {
     }
 }
 
+fn constant_time_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for idx in 0..32 {
+        diff |= left[idx] ^ right[idx];
+    }
+    diff == 0
+}
+
 impl PartialEq for SecretKey {
     fn eq(&self, other: &Self) -> bool {
-        // Constant-time comparison would be ideal but for PartialEq trait
-        // we do a simple byte compare — the secret is zeroized on drop.
-        self.0 == other.0
+        constant_time_eq_32(&self.0, &other.0)
     }
 }
 
@@ -1372,6 +1394,31 @@ mod tests {
     }
 
     #[test]
+    fn signature_deserialization_rejects_oversized_post_quantum_bytes() {
+        let oversized = Signature::PostQuantum(vec![0u8; 3_310]);
+        let json = serde_json::to_string(&oversized).expect("ser");
+        let result: std::result::Result<Signature, _> = serde_json::from_str(&json);
+        assert!(
+            result.is_err(),
+            "post-quantum signature bytes must be bounded"
+        );
+    }
+
+    #[test]
+    fn hybrid_signature_deserialization_rejects_oversized_post_quantum_bytes() {
+        let oversized = Signature::Hybrid {
+            classical: [0xab; 64],
+            pq: vec![0u8; 3_310],
+        };
+        let json = serde_json::to_string(&oversized).expect("ser");
+        let result: std::result::Result<Signature, _> = serde_json::from_str(&json);
+        assert!(
+            result.is_err(),
+            "hybrid post-quantum signature bytes must be bounded"
+        );
+    }
+
+    #[test]
     fn signature_empty_variant() {
         assert!(Signature::Empty.is_empty());
         assert!(Signature::empty().is_empty());
@@ -1457,6 +1504,30 @@ mod tests {
         let c = SecretKey::from_bytes([2; 32]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn secret_key_storage_is_not_public() {
+        let source = include_str!("types.rs");
+        let forbidden = ["pub struct SecretKey", "(pub"].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "SecretKey inner bytes must not be publicly constructible"
+        );
+    }
+
+    #[test]
+    fn secret_key_equality_uses_constant_time_comparison() {
+        let source = include_str!("types.rs");
+        assert!(
+            source.contains("constant_time_eq_32"),
+            "SecretKey equality must use a constant-time byte comparison helper"
+        );
+        let forbidden = ["self.0", " == ", "other.0"].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "SecretKey equality must not use short-circuiting slice equality"
+        );
     }
 
     #[test]

@@ -1,8 +1,15 @@
 //! Governance bindings: quorum, clearance, conflict, challenge, audit
 
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
+
+#[derive(Deserialize)]
+struct WasmClearanceRegistryEntry {
+    did: String,
+    level: exo_governance::clearance::ClearanceLevel,
+}
 
 fn parse_uuid(value: &str, label: &str) -> Result<uuid::Uuid, JsValue> {
     let id: uuid::Uuid = value
@@ -32,12 +39,53 @@ fn parse_timestamp(
     })
 }
 
-/// Compute quorum result from approvals and policy
+fn parse_public_key_map(
+    public_keys_json: &str,
+) -> Result<std::collections::BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
+    let key_pairs: Vec<(String, String)> = from_json_str(public_keys_json)?;
+    let mut keys = std::collections::BTreeMap::new();
+    for (did_str, public_key_hex) in &key_pairs {
+        let did = exo_core::Did::new(did_str)
+            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+        let bytes =
+            hex::decode(public_key_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| JsValue::from_str("public key must be 32 bytes"))?;
+        keys.insert(did, exo_core::PublicKey::from_bytes(arr));
+    }
+    Ok(keys)
+}
+
+fn parse_clearance_registry(
+    registry_json: &str,
+) -> Result<exo_governance::clearance::ClearanceRegistry, JsValue> {
+    let entries: Vec<WasmClearanceRegistryEntry> = from_json_str(registry_json)?;
+    let mut registry = exo_governance::clearance::ClearanceRegistry::default();
+    for entry in entries {
+        let did = exo_core::Did::new(&entry.did)
+            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+        if registry.entries.insert(did.clone(), entry.level).is_some() {
+            return Err(JsValue::from_str(&format!(
+                "duplicate clearance registry entry for {did}"
+            )));
+        }
+    }
+    Ok(registry)
+}
+
+/// Compute cryptographically verified quorum result from approvals, policy, and signer keys.
 #[wasm_bindgen]
-pub fn wasm_compute_quorum(approvals_json: &str, policy_json: &str) -> Result<JsValue, JsValue> {
+pub fn wasm_compute_quorum(
+    approvals_json: &str,
+    policy_json: &str,
+    public_keys_json: &str,
+) -> Result<JsValue, JsValue> {
     let approvals: Vec<exo_governance::quorum::Approval> = from_json_str(approvals_json)?;
     let policy: exo_governance::quorum::QuorumPolicy = from_json_str(policy_json)?;
-    let result = exo_governance::quorum::compute_quorum(&approvals, &policy);
+    let public_keys = parse_public_key_map(public_keys_json)?;
+    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
+    let result = exo_governance::quorum::compute_quorum_verified(&approvals, &policy, &resolver);
     // QuorumResult doesn't derive Serialize, so format it manually
     let json = match result {
         exo_governance::quorum::QuorumResult::Met {
@@ -62,17 +110,12 @@ pub fn wasm_check_clearance(
     actor_did: &str,
     action: &str,
     policy_json: &str,
+    registry_json: &str,
 ) -> Result<JsValue, JsValue> {
     let actor =
         exo_core::Did::new(actor_did).map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let policy: exo_governance::clearance::ClearancePolicy = from_json_str(policy_json)?;
-    // ClearanceRegistry doesn't derive Deserialize, so we build a default one
-    // with the actor set to Governor level for checking purposes
-    let mut registry = exo_governance::clearance::ClearanceRegistry::default();
-    registry.set_level(
-        actor.clone(),
-        exo_governance::clearance::ClearanceLevel::Governor,
-    );
+    let registry = parse_clearance_registry(registry_json)?;
     let decision = exo_governance::clearance::check_clearance(&actor, action, &policy, &registry);
     // ClearanceDecision doesn't derive Serialize, format manually
     let json = match decision {
@@ -218,12 +261,15 @@ pub fn wasm_cast_vote(deliberation_json: &str, vote_json: &str) -> Result<JsValu
 pub fn wasm_close_deliberation(
     deliberation_json: &str,
     quorum_policy_json: &str,
+    public_keys_json: &str,
 ) -> Result<JsValue, JsValue> {
     use exo_governance::deliberation::DeliberationResult;
 
     let mut delib: exo_governance::deliberation::Deliberation = from_json_str(deliberation_json)?;
     let policy: exo_governance::quorum::QuorumPolicy = from_json_str(quorum_policy_json)?;
-    let result = exo_governance::deliberation::close(&mut delib, &policy);
+    let public_keys = parse_public_key_map(public_keys_json)?;
+    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
+    let result = exo_governance::deliberation::close_verified(&mut delib, &policy, &resolver);
 
     let json = match result {
         DeliberationResult::Approved {

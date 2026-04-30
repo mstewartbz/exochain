@@ -753,27 +753,13 @@ async fn handle_auth_register(
 
 /// GET /api/v1/auth/me — resolve the caller's DID document.
 ///
-/// Requires `X-Actor-Did: did:exo:<id>` request header.
+/// Requires `Authorization: Bearer <token>` and
+/// `x-exo-auth-observed-at-ms`. The actor DID is resolved from the session
+/// token; caller-supplied DID headers are ignored.
 async fn handle_auth_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let did_str = match headers.get("x-actor-did").and_then(|v| v.to_str().ok()) {
-        Some(s) => s.to_owned(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "missing X-Actor-Did header" })),
-            )
-                .into_response();
-        }
-    };
-    let did = match Did::new(&did_str) {
-        Ok(d) => d,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "invalid DID format" })),
-            )
-                .into_response();
-        }
+    let did = match require_authenticated_session_actor_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
     };
     let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
     match reg.resolve(&did) {
@@ -2579,7 +2565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_me_missing_header_returns_400() {
+    async fn auth_me_missing_bearer_returns_401() {
         let app = build_router(state());
         let resp = app
             .oneshot(
@@ -2590,11 +2576,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn auth_me_known_did_returns_200() {
+    async fn auth_me_x_actor_did_header_without_session_is_rejected() {
         let doc = minimal_doc("did:exo:me-test");
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
@@ -2610,11 +2596,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn auth_me_unknown_did_returns_404() {
+    async fn auth_me_unknown_x_actor_did_header_without_session_is_rejected() {
         let app = build_router(state());
         let resp = app
             .oneshot(
@@ -2626,7 +2612,83 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_me_uses_session_actor_not_spoofed_header() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        sqlx::query("DELETE FROM sessions WHERE token IN ($1, $2)")
+            .bind("auth-me-alice-token")
+            .bind("auth-me-bob-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let alice_doc = minimal_doc("did:exo:auth-me-alice");
+        let bob_doc = minimal_doc("did:exo:auth-me-bob");
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        {
+            let mut guard = registry.write().unwrap();
+            guard.register(alice_doc).unwrap();
+            guard.register(bob_doc).unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind("auth-me-alice-token")
+        .bind("did:exo:auth-me-alice")
+        .bind(10_000_i64)
+        .bind(20_000_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = build_router(AppState::new(Some(pool.clone()), registry));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .header("authorization", "Bearer auth-me-alice-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .header("x-actor-did", "did:exo:auth-me-bob")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["id"], "did:exo:auth-me-alice");
+
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("auth-me-alice-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn auth_me_handler_uses_session_actor_not_x_actor_did() {
+        let source = include_str!("server.rs");
+        let handler = source_between(source, "async fn handle_auth_me", "/// GET /api/v1/agents");
+
+        assert!(
+            handler.contains("require_authenticated_session_actor_from_header"),
+            "auth/me must resolve the DID from the authenticated bearer session"
+        );
+        assert!(
+            !handler.contains("x-actor-did"),
+            "auth/me must not trust spoofable x-actor-did headers"
+        );
     }
 
     #[tokio::test]

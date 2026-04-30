@@ -565,16 +565,32 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       document.getElementById('quorum-info').textContent =
         gov.validator_count + ' validators / quorum ' + quorum;
 
+      vList.replaceChildren();
       if (gov.validators && gov.validators.length > 0) {
-        vList.innerHTML = gov.validators.map(function(did, i) {
+        const validatorItems = gov.validators.map(function(did, i) {
           const isSelf = gov.is_validator && i === 0 && gov.validator_count === 1;
-          const selfCls = isSelf ? ' self' : '';
-          const selfTag = isSelf ? '<span class="self-tag">this node</span>' : '';
-          return '<li class="validator-item' + selfCls + '">' +
-            '<span class="validator-dot"></span>' +
-            '<span title="' + did + '">' + truncateDid(did) + '</span>' +
-            selfTag + '</li>';
-        }).join('');
+          const item = document.createElement('li');
+          item.className = isSelf ? 'validator-item self' : 'validator-item';
+
+          const dot = document.createElement('span');
+          dot.className = 'validator-dot';
+          item.appendChild(dot);
+
+          const didLabel = document.createElement('span');
+          didLabel.title = String(did || '');
+          didLabel.textContent = truncateDid(String(did || ''));
+          item.appendChild(didLabel);
+
+          if (isSelf) {
+            const selfTag = document.createElement('span');
+            selfTag.className = 'self-tag';
+            selfTag.textContent = 'this node';
+            item.appendChild(selfTag);
+          }
+
+          return item;
+        });
+        vList.replaceChildren(...validatorItems);
       }
 
       // First successful poll
@@ -659,5 +675,17 @@ mod tests {
         assert!(html.contains("/health"));
         assert!(html.contains("/metrics"));
         assert!(html.contains("/api/v1/governance/status"));
+    }
+
+    #[test]
+    fn dashboard_validator_list_does_not_inject_dids_as_html() {
+        assert!(
+            DASHBOARD_HTML.contains("textContent"),
+            "dashboard must write validator DIDs through textContent"
+        );
+        assert!(
+            !DASHBOARD_HTML.contains("vList.innerHTML = gov.validators.map"),
+            "validator DID data must not be interpolated into innerHTML"
+        );
     }
 }
