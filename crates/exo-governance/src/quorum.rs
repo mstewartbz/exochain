@@ -174,9 +174,46 @@ fn duplicate_approver(approvals: &[Approval]) -> Option<Did> {
     None
 }
 
-/// Compute whether a quorum is met given a set of approvals and a policy.
+fn verified_quorum_required() -> QuorumResult {
+    QuorumResult::NotMet {
+        reason: "verified quorum required: use compute_quorum_verified with a PublicKeyResolver"
+            .into(),
+    }
+}
+
+fn invalid_quorum_policy(reason: impl Into<String>) -> QuorumResult {
+    QuorumResult::NotMet {
+        reason: format!("invalid quorum policy: {}", reason.into()),
+    }
+}
+
+fn validate_policy(policy: &QuorumPolicy) -> Option<QuorumResult> {
+    if policy.min_approvals == 0 {
+        return Some(invalid_quorum_policy(
+            "min_approvals must be greater than zero",
+        ));
+    }
+    if policy.min_independent > policy.min_approvals {
+        return Some(invalid_quorum_policy(
+            "min_independent must not exceed min_approvals",
+        ));
+    }
+    None
+}
+
+/// Perform only fail-closed structural quorum checks.
+///
+/// This legacy API can prove rejection conditions such as duplicates,
+/// insufficient approval count, or missing required roles. It cannot prove
+/// quorum success because it has no public-key resolver and therefore cannot
+/// verify approval signatures or independence-attestation signatures. Use
+/// [`compute_quorum_verified`] for any path that may approve a quorum.
 #[must_use]
 pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumResult {
+    if let Some(invalid) = validate_policy(policy) {
+        return invalid;
+    }
+
     if let Some(duplicate) = duplicate_approver(approvals) {
         return QuorumResult::NotMet {
             reason: format!("duplicate approver DID: {duplicate}"),
@@ -200,6 +237,10 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
                 reason: format!("missing required role: {required_role:?}"),
             };
         }
+    }
+
+    if !approvals.is_empty() || policy.min_approvals > 0 || policy.min_independent > 0 {
+        return verified_quorum_required();
     }
 
     let independent_count = approvals
@@ -295,6 +336,10 @@ pub fn compute_quorum_verified<R: PublicKeyResolver>(
     policy: &QuorumPolicy,
     resolver: &R,
 ) -> QuorumResult {
+    if let Some(invalid) = validate_policy(policy) {
+        return invalid;
+    }
+
     if let Some(duplicate) = duplicate_approver(approvals) {
         return QuorumResult::NotMet {
             reason: format!("duplicate approver DID: {duplicate}"),
@@ -463,36 +508,33 @@ mod tests {
         }
     }
 
+    fn assert_verified_quorum_required(result: QuorumResult) {
+        match result {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("verified quorum"));
+            }
+            other => panic!("expected verified quorum fail-closed result, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn quorum_met_with_sufficient_independent_approvals() {
+    fn compute_quorum_without_resolver_rejects_sufficient_structural_approvals() {
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
             make_approval("bob", Role::Reviewer, true),
             make_approval("carol", Role::Contributor, true),
         ];
-        assert_eq!(
-            compute_quorum(&approvals, &default_policy()),
-            QuorumResult::Met {
-                independent_count: 3,
-                total_count: 3
-            }
-        );
+        assert_verified_quorum_required(compute_quorum(&approvals, &default_policy()));
     }
 
     #[test]
-    fn quorum_fails_with_sufficient_approvals_but_insufficient_independence() {
+    fn compute_quorum_without_resolver_rejects_sufficient_unverified_approvals() {
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
             make_approval("bob", Role::Reviewer, false),
             make_approval("carol", Role::Contributor, false),
         ];
-        match compute_quorum(&approvals, &default_policy()) {
-            QuorumResult::NotMet { reason } => {
-                assert!(reason.contains("insufficient independence"));
-                assert!(reason.contains("theater, not legitimacy"));
-            }
-            other => panic!("expected NotMet, got {other:?}"),
-        }
+        assert_verified_quorum_required(compute_quorum(&approvals, &default_policy()));
     }
 
     #[test]
@@ -529,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn quorum_with_invalid_attestation_counts_as_non_independent() {
+    fn compute_quorum_without_resolver_rejects_invalid_structural_attestation_set() {
         let d = did("dave");
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
@@ -542,13 +584,7 @@ mod tests {
                 independence_attestation: Some(invalid_attestation(&d)),
             },
         ];
-        assert_eq!(
-            compute_quorum(&approvals, &default_policy()),
-            QuorumResult::Met {
-                independent_count: 2,
-                total_count: 3
-            }
-        );
+        assert_verified_quorum_required(compute_quorum(&approvals, &default_policy()));
     }
 
     #[test]
@@ -581,10 +617,7 @@ mod tests {
             timeout: Timestamp::new(999_999, 0),
         };
         let approvals = vec![make_approval("alice", Role::Contributor, true)];
-        assert!(matches!(
-            compute_quorum(&approvals, &policy),
-            QuorumResult::Met { .. }
-        ));
+        assert_verified_quorum_required(compute_quorum(&approvals, &policy));
     }
 
     #[test]
@@ -666,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_challenge_does_not_block_quorum() {
+    fn resolved_challenge_delegates_to_fail_closed_quorum() {
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
             make_approval("bob", Role::Reviewer, true),
@@ -674,9 +707,10 @@ mod tests {
         ];
         let mut ch = make_challenge(0x9003, ChallengeGround::SybilAllegation, b"");
         ch.status = ChallengeStatus::Overruled;
-        assert!(matches!(
-            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
-            QuorumResult::Met { .. }
+        assert_verified_quorum_required(compute_quorum_with_challenges(
+            &approvals,
+            &default_policy(),
+            &[&ch],
         ));
     }
 
@@ -694,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn withdrawn_challenge_does_not_block_quorum() {
+    fn withdrawn_challenge_delegates_to_fail_closed_quorum() {
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
             make_approval("bob", Role::Reviewer, true),
@@ -702,18 +736,20 @@ mod tests {
         ];
         let mut ch = make_challenge(0x9004, ChallengeGround::SybilAllegation, b"");
         ch.status = ChallengeStatus::Withdrawn;
-        assert!(matches!(
-            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
-            QuorumResult::Met { .. }
+        assert_verified_quorum_required(compute_quorum_with_challenges(
+            &approvals,
+            &default_policy(),
+            &[&ch],
         ));
     }
 
     // ── SPR2-04: quorum hardening edge cases ─────────────────────────────────
 
     /// Challenge filed mid-vote → Contested; moves to UnderReview → still
-    /// Contested; then resolved (Overruled) → quorum proceeds to Met.
+    /// Contested; then resolved (Overruled) → quorum proceeds to the
+    /// fail-closed structural quorum result.
     #[test]
-    fn challenge_filed_mid_vote_resolved_then_quorum_proceeds() {
+    fn challenge_filed_mid_vote_resolved_then_quorum_requires_verification() {
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
             make_approval("bob", Role::Reviewer, true),
@@ -738,19 +774,21 @@ mod tests {
             QuorumResult::Contested { .. }
         ));
 
-        // Phase 3: Overruled → quorum re-runs and succeeds
+        // Phase 3: Overruled → quorum re-runs and still cannot approve
+        // without cryptographic verification.
         adjudicate(&mut ch, ChallengeVerdict::Overrule).expect("adjudicate ok");
         assert_eq!(ch.status, ChallengeStatus::Overruled);
-        assert!(matches!(
-            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
-            QuorumResult::Met { .. }
+        assert_verified_quorum_required(compute_quorum_with_challenges(
+            &approvals,
+            &default_policy(),
+            &[&ch],
         ));
     }
 
     /// A Sustained challenge (upheld) is a terminal state; it is no longer
-    /// Filed/UnderReview, so it must not block the quorum gate.
+    /// Filed/UnderReview, so it must delegate to the fail-closed quorum gate.
     #[test]
-    fn sustained_challenge_does_not_block_quorum() {
+    fn sustained_challenge_delegates_to_fail_closed_quorum() {
         let approvals = vec![
             make_approval("alice", Role::Steward, true),
             make_approval("bob", Role::Reviewer, true),
@@ -759,9 +797,10 @@ mod tests {
         let mut ch = make_challenge(0x9006, ChallengeGround::QuorumViolation, b"");
         adjudicate(&mut ch, ChallengeVerdict::Sustain).expect("adjudicate ok");
         assert_eq!(ch.status, ChallengeStatus::Sustained);
-        assert!(matches!(
-            compute_quorum_with_challenges(&approvals, &default_policy(), &[&ch]),
-            QuorumResult::Met { .. }
+        assert_verified_quorum_required(compute_quorum_with_challenges(
+            &approvals,
+            &default_policy(),
+            &[&ch],
         ));
     }
 
@@ -919,14 +958,8 @@ mod tests {
             timeout: Timestamp::new(20_000, 0),
         };
 
-        // Structural-only counts both. (This is the bug.)
-        assert!(matches!(
-            compute_quorum(&approvals, &policy),
-            QuorumResult::Met {
-                independent_count: 2,
-                ..
-            }
-        ));
+        // Structural-only cannot prove either signature, so it must fail closed.
+        assert_verified_quorum_required(compute_quorum(&approvals, &policy));
 
         // Verified variant counts ONLY Alice.
         let resolver = |did: &Did| -> Option<exo_core::types::PublicKey> {
@@ -1008,6 +1041,80 @@ mod tests {
                 assert!(reason.contains("duplicate approver"));
             }
             other => panic!("duplicate approver must not inflate quorum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_without_resolver_fails_closed_for_signed_approvals() {
+        let approvals = vec![make_approval("alice", Role::Steward, true)];
+        let policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match compute_quorum(&approvals, &policy) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("verified quorum"));
+            }
+            other => panic!("structural quorum must not approve without verification: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_rejects_zero_min_approvals_policy() {
+        let policy = QuorumPolicy {
+            min_approvals: 0,
+            min_independent: 0,
+            required_roles: vec![],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match compute_quorum(&[], &policy) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("invalid quorum policy"));
+                assert!(reason.contains("min_approvals"));
+            }
+            other => panic!("zero-approval policy must not meet quorum: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_verified_rejects_zero_min_approvals_policy() {
+        let policy = QuorumPolicy {
+            min_approvals: 0,
+            min_independent: 0,
+            required_roles: vec![],
+            timeout: Timestamp::new(999_999, 0),
+        };
+        let resolver = |_did: &Did| -> Option<PublicKey> { None };
+
+        match compute_quorum_verified(&[], &policy, &resolver) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("invalid quorum policy"));
+                assert!(reason.contains("min_approvals"));
+            }
+            other => panic!("zero-approval verified policy must not meet quorum: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_verified_rejects_impossible_independence_policy() {
+        let policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 2,
+            required_roles: vec![],
+            timeout: Timestamp::new(999_999, 0),
+        };
+        let resolver = |_did: &Did| -> Option<PublicKey> { None };
+
+        match compute_quorum_verified(&[], &policy, &resolver) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("invalid quorum policy"));
+                assert!(reason.contains("min_independent"));
+            }
+            other => panic!("impossible independence policy must not reach quorum: {other:?}"),
         }
     }
 
