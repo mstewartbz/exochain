@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Validators collectively attest to a finalized DAG state by signing
 /// the canonical preimage computed by [`checkpoint_signing_preimage`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CheckpointPayload {
     /// MMR root over finalized event IDs.
     pub event_root: Hash256,
@@ -33,8 +33,21 @@ pub struct CheckpointPayload {
     pub validator_sigs: Vec<ValidatorSignature>,
 }
 
+impl std::fmt::Debug for CheckpointPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckpointPayload")
+            .field("event_root", &self.event_root)
+            .field("state_root", &self.state_root)
+            .field("height", &self.height)
+            .field("finalized_events", &self.finalized_events)
+            .field("frontier", &self.frontier)
+            .field("validator_sig_count", &self.validator_sigs.len())
+            .finish()
+    }
+}
+
 /// A single validator's attestation to a checkpoint.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     /// DID of the validating entity.
     pub validator_did: Did,
@@ -42,6 +55,16 @@ pub struct ValidatorSignature {
     pub key_version: u64,
     /// Cryptographic signature over the checkpoint preimage.
     pub signature: Signature,
+}
+
+impl std::fmt::Debug for ValidatorSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatorSignature")
+            .field("validator_did", &self.validator_did)
+            .field("key_version", &self.key_version)
+            .field("signature", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Domain separation tag for checkpoint signing (EXOCHAIN Specification v2.2 §9.4).
@@ -276,6 +299,43 @@ mod tests {
         assert_eq!(&preimage[offset..offset + 8], &2u64.to_le_bytes());
         assert_eq!(&preimage[offset + 8..offset + 40], tip1.as_bytes());
         assert_eq!(&preimage[offset + 40..offset + 72], tip2.as_bytes());
+    }
+
+    #[test]
+    fn checkpoint_debug_redacts_validator_signature_material() {
+        let checkpoint = CheckpointPayload {
+            event_root: Hash256::digest(b"events"),
+            state_root: Hash256::digest(b"state"),
+            height: 7,
+            finalized_events: 11,
+            frontier: vec![Hash256::digest(b"frontier-tip")],
+            validator_sigs: vec![ValidatorSignature {
+                validator_did: test_did(),
+                key_version: 1,
+                signature: Signature::from_bytes([0xAB; 64]),
+            }],
+        };
+
+        let checkpoint_debug = format!("{checkpoint:?}");
+        let validator_debug = format!("{:?}", checkpoint.validator_sigs[0]);
+
+        assert!(
+            checkpoint_debug.contains("validator_sig_count: 1"),
+            "Checkpoint Debug output should expose signature count, not signature bodies"
+        );
+        assert!(
+            validator_debug.contains("signature: \"<redacted>\""),
+            "ValidatorSignature Debug output must explicitly redact signature material"
+        );
+        assert!(
+            !checkpoint_debug.contains("Signature::Ed25519")
+                && !validator_debug.contains("Signature::Ed25519"),
+            "Debug output must not delegate to Signature Debug for checkpoint signatures"
+        );
+        assert!(
+            !checkpoint_debug.contains("abab") && !validator_debug.contains("abab"),
+            "Debug output must not expose validator signature byte prefixes"
+        );
     }
 
     #[test]
