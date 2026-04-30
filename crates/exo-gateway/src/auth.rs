@@ -19,6 +19,7 @@ use std::{collections::BTreeMap, fmt};
 use exo_core::{Did, Hash256, Signature, Timestamp};
 use exo_identity::{did_verification::verify_did_signature, registry::DidRegistry};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::error::{GatewayError, Result};
 
@@ -87,10 +88,10 @@ pub enum Credential {
     },
     /// API key authentication (convenience, DID-bound).
     /// The key is a random 256-bit token that maps to a DID in the key registry.
-    ApiKey(String),
+    ApiKey(Zeroizing<String>),
     /// Bearer token authentication (HTTP-friendly, DID-bound).
     /// A bearer token that maps to a DID in the session registry.
-    BearerToken(String),
+    BearerToken(Zeroizing<String>),
 }
 
 impl fmt::Debug for Credential {
@@ -199,13 +200,13 @@ impl ApiKeyRegistry {
         did: Did,
         label: String,
         metadata: ApiKeyMetadata,
-    ) -> (String, ApiKeyRecord) {
+    ) -> (Zeroizing<String>, ApiKeyRecord) {
         // Generate 32 random bytes via getrandom.
-        let mut key_bytes = [0u8; 32];
-        getrandom::getrandom(&mut key_bytes).expect("OS entropy source unavailable");
+        let mut key_bytes = Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(&mut *key_bytes).expect("OS entropy source unavailable");
 
-        let plaintext_hex = hex::encode(key_bytes);
-        let key_hash = Hash256::digest(&key_bytes);
+        let plaintext_hex = Zeroizing::new(hex::encode(&key_bytes[..]));
+        let key_hash = Hash256::digest(&key_bytes[..]);
 
         let record = ApiKeyRecord {
             key_hash,
@@ -225,8 +226,8 @@ impl ApiKeyRegistry {
     /// Returns `None` if the key is not found.
     #[must_use]
     pub fn resolve(&self, api_key: &str) -> Option<&ApiKeyRecord> {
-        let key_bytes = hex::decode(api_key).ok()?;
-        let key_hash = Hash256::digest(&key_bytes);
+        let key_bytes = Zeroizing::new(hex::decode(api_key).ok()?);
+        let key_hash = Hash256::digest(&key_bytes[..]);
         let mut matched = None;
         for record in self.keys.values() {
             if constant_time_eq(key_hash.as_bytes(), record.key_hash.as_bytes()) {
@@ -777,7 +778,7 @@ mod tests {
     fn credential_api_key_unknown() {
         let did_reg = LocalDidRegistry::new();
         let api_reg = ApiKeyRegistry::new();
-        let cred = Credential::ApiKey("deadbeef".repeat(8));
+        let cred = Credential::ApiKey("deadbeef".repeat(8).into());
         let err = resolve_credential(&cred, &did_reg, &api_reg, auth_metadata()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown"), "expected 'unknown' in: {msg}");
@@ -804,7 +805,7 @@ mod tests {
 
         // Plaintext is 64 hex chars (32 bytes).
         assert_eq!(plaintext.len(), 64);
-        assert!(hex::decode(&plaintext).is_ok());
+        assert!(hex::decode(plaintext.as_str()).is_ok());
 
         // Record fields are set correctly.
         assert_eq!(record.did, did);
@@ -855,12 +856,12 @@ mod tests {
         let (plaintext, record) = reg.register(did, "test".into(), api_key_metadata());
 
         // The plaintext key, when hashed with BLAKE3, must equal the stored key_hash.
-        let key_bytes = hex::decode(&plaintext).unwrap();
+        let key_bytes = hex::decode(plaintext.as_str()).unwrap();
         let computed_hash = Hash256::digest(&key_bytes);
         assert_eq!(computed_hash, record.key_hash);
 
         // Resolve round-trips through the same hash.
-        let resolved = reg.resolve(&plaintext).unwrap();
+        let resolved = reg.resolve(plaintext.as_str()).unwrap();
         assert_eq!(resolved.key_hash, record.key_hash);
     }
 
@@ -895,12 +896,28 @@ mod tests {
         let api_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let bearer = "bearer-token-that-must-not-appear-in-debug";
 
-        let api_debug = format!("{:?}", Credential::ApiKey(api_key.to_owned()));
-        let bearer_debug = format!("{:?}", Credential::BearerToken(bearer.to_owned()));
+        let api_debug = format!("{:?}", Credential::ApiKey(api_key.to_owned().into()));
+        let bearer_debug = format!("{:?}", Credential::BearerToken(bearer.to_owned().into()));
 
         assert!(!api_debug.contains(api_key));
         assert!(!bearer_debug.contains(bearer));
         assert!(api_debug.contains("<redacted>"));
         assert!(bearer_debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn credential_secret_material_uses_zeroizing_storage() {
+        let source = include_str!("auth.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(production.contains("use zeroize::Zeroizing;"));
+        assert!(production.contains("ApiKey(Zeroizing<String>)"));
+        assert!(production.contains("BearerToken(Zeroizing<String>)"));
+        assert!(production.contains(") -> (Zeroizing<String>, ApiKeyRecord)"));
+        assert!(production.contains("let mut key_bytes = Zeroizing::new([0u8; 32]);"));
+        assert!(production.contains("let key_bytes = Zeroizing::new(hex::decode(api_key).ok()?);"));
     }
 }
