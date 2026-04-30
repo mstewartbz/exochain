@@ -541,7 +541,7 @@ impl fmt::Display for PqPublicKey {
 /// dropped.
 #[derive(Clone, Zeroize)]
 #[zeroize(drop)]
-pub struct PqSecretKey(pub Vec<u8>);
+pub struct PqSecretKey(Vec<u8>);
 
 impl PqSecretKey {
     /// Create from raw encoded key bytes.
@@ -1535,6 +1535,16 @@ mod tests {
         let a = SecretKey::from_bytes([5; 32]);
         let b = a.clone();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pq_secret_key_storage_is_not_public() {
+        let source = include_str!("types.rs");
+        let forbidden = ["pub struct PqSecretKey", "(pub"].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "PqSecretKey inner bytes must not be publicly constructible"
+        );
     }
 
     // -- Did ---------------------------------------------------------------
