@@ -12,9 +12,8 @@
 //! - Input slices must be sorted by `created_ms` ascending before calling
 //!   `compute()`.  The caller is responsible for this invariant.
 // The scoring engine performs extensive integer arithmetic with safe `as`
-// casts between bounded integer types (e.g. `usize` → `u32` for counts
-// that are capped by `.min()` before conversion).  All values are in
-// basis-points (0–10_000) so overflow is impossible in practice.
+// casts between bounded integer types. External basis-point inputs are clamped
+// before arithmetic, and aggregate sums use widened accumulators.
 #![allow(
     clippy::as_conversions,
     clippy::unwrap_used,
@@ -37,6 +36,37 @@ use super::{
 // ---------------------------------------------------------------------------
 // Integer math helpers
 // ---------------------------------------------------------------------------
+
+const MAX_BASIS_POINTS: u32 = 10_000;
+
+fn clamp_basis_points(value: u32) -> u32 {
+    value.min(MAX_BASIS_POINTS)
+}
+
+fn average_basis_points(values: impl Iterator<Item = u32>) -> Option<u32> {
+    let mut sum = 0_u64;
+    let mut count = 0_u64;
+
+    for value in values {
+        sum = sum.saturating_add(u64::from(clamp_basis_points(value)));
+        count = count.saturating_add(1);
+    }
+
+    sum.checked_div(count)
+        .map(|average| average.min(u64::from(MAX_BASIS_POINTS)) as u32)
+}
+
+fn average_axis_values(axes: &[u32; 8]) -> u32 {
+    let sum = axes
+        .iter()
+        .copied()
+        .fold(0_u64, |acc, axis| acc.saturating_add(u64::from(axis)));
+    (sum / 8).min(u64::from(u32::MAX)) as u32
+}
+
+fn average_basis_point_axes(axes: &[u32; 8]) -> u32 {
+    average_basis_points(axes.iter().copied()).unwrap_or(0)
+}
 
 /// Integer floor of `ln(x) * 1000` for `x >= 1`.
 ///
@@ -113,7 +143,7 @@ impl ZerodentityScore {
         };
 
         let axis_values = axes.as_array();
-        let composite = axis_values.iter().copied().sum::<u32>() / 8;
+        let composite = average_basis_point_axes(&axis_values);
         let symmetry = compute_symmetry(&axis_values);
         let dag_state_hash = hash_claim_set(claims);
         let claim_count = claims
@@ -221,6 +251,7 @@ fn score_device_trust(fingerprints: &[DeviceFingerprint]) -> u32 {
 
     // Consistency score.
     if let Some(consistency_bp) = latest.consistency_score_bp {
+        let consistency_bp = clamp_basis_points(consistency_bp);
         score += consistency_bp * 2 / 5; // consistency * 40/100 → * 2/5
     } else {
         score += 1600; // first session — partial credit
@@ -228,12 +259,11 @@ fn score_device_trust(fingerprints: &[DeviceFingerprint]) -> u32 {
 
     // Multi-session consistency bonus.
     if fingerprints.len() >= 3 {
-        let with_score: Vec<u32> = fingerprints
-            .iter()
-            .filter_map(|f| f.consistency_score_bp)
-            .collect();
-        if !with_score.is_empty() {
-            let avg_bp = with_score.iter().copied().sum::<u32>() / with_score.len() as u32;
+        if let Some(avg_bp) = average_basis_points(
+            fingerprints
+                .iter()
+                .filter_map(|fingerprint| fingerprint.consistency_score_bp),
+        ) {
             score += avg_bp * 3 / 20; // avg_consistency * 15/100 → * 3/20
         }
     }
@@ -255,15 +285,14 @@ fn score_behavioral(samples: &[BehavioralSample]) -> u32 {
     score += ((signal_types.len() as u32) * 600).min(1800);
 
     // Baseline similarity.
-    let similarities: Vec<u32> = samples
-        .iter()
-        .filter_map(|s| s.baseline_similarity_bp)
-        .collect();
-    if similarities.is_empty() {
-        score += 1600; // first session — establishing baseline
-    } else {
-        let avg_bp = similarities.iter().copied().sum::<u32>() / similarities.len() as u32;
+    if let Some(avg_bp) = average_basis_points(
+        samples
+            .iter()
+            .filter_map(|sample| sample.baseline_similarity_bp),
+    ) {
         score += avg_bp * 2 / 5; // avg_similarity * 40/100 → * 2/5
+    } else {
+        score += 1600; // first session — establishing baseline
     }
 
     // Sample volume: ln(count) * 500 bp, capped at 1600.
@@ -445,19 +474,18 @@ fn score_constitutional_standing(claims: &[IdentityClaim]) -> u32 {
 ///
 /// Formula: `symmetry = 1 − (σ / μ)` in basis points.
 pub(crate) fn compute_symmetry(axes: &[u32; 8]) -> u32 {
-    let sum: u32 = axes.iter().copied().sum();
-    let mean = sum / 8;
+    let mean = average_axis_values(axes);
     if mean == 0 {
         return 0;
     }
-    let variance: u64 = axes
+    let variance_sum: u128 = axes
         .iter()
         .map(|&a| {
-            let diff = a.abs_diff(mean);
-            (diff as u64) * (diff as u64)
+            let diff = u128::from(a.abs_diff(mean));
+            diff * diff
         })
-        .sum::<u64>()
-        / 8;
+        .sum();
+    let variance = (variance_sum / 8).min(u128::from(u64::MAX)) as u64;
     let std_dev = isqrt(variance) as u32;
     let cv_bp = (std_dev as u64 * 10_000 / mean as u64) as u32;
     10_000u32.saturating_sub(cv_bp)
@@ -630,6 +658,33 @@ mod tests {
     }
 
     #[test]
+    fn device_trust_average_consistency_uses_wide_accumulator() {
+        let fingerprints = vec![
+            DeviceFingerprint {
+                composite_hash: h(),
+                signal_hashes: std::collections::BTreeMap::new(),
+                captured_ms: 1000,
+                consistency_score_bp: Some(10_000),
+            };
+            429_497
+        ];
+
+        assert_eq!(score_device_trust(&fingerprints), 7500);
+    }
+
+    #[test]
+    fn device_trust_clamps_deserialized_consistency_basis_points() {
+        let fp = DeviceFingerprint {
+            composite_hash: h(),
+            signal_hashes: std::collections::BTreeMap::new(),
+            captured_ms: 1000,
+            consistency_score_bp: Some(u32::MAX),
+        };
+
+        assert_eq!(score_device_trust(&[fp]), 6000);
+    }
+
+    #[test]
     fn behavioral_no_samples() {
         assert_eq!(score_behavioral(&[]), 0);
     }
@@ -656,6 +711,21 @@ mod tests {
     }
 
     #[test]
+    fn behavioral_average_similarity_uses_wide_accumulator() {
+        let samples =
+            vec![behavioral_sample(BehavioralSignalType::KeystrokeDynamics, 10_000); 429_497];
+
+        assert_eq!(score_behavioral(&samples), 7200);
+    }
+
+    #[test]
+    fn behavioral_clamps_deserialized_similarity_basis_points() {
+        let sample = behavioral_sample(BehavioralSignalType::KeystrokeDynamics, u32::MAX);
+
+        assert_eq!(score_behavioral(&[sample]), 5600);
+    }
+
+    #[test]
     fn network_reputation_base() {
         assert_eq!(score_network_reputation(&[]), 1000);
     }
@@ -676,6 +746,20 @@ mod tests {
     fn symmetry_uniform() {
         let axes = [5000u32; 8];
         assert_eq!(compute_symmetry(&axes), 10_000);
+    }
+
+    #[test]
+    fn symmetry_uses_wide_axis_sum() {
+        let axes = [u32::MAX; 8];
+
+        assert_eq!(compute_symmetry(&axes), 10_000);
+    }
+
+    #[test]
+    fn symmetry_uses_wide_variance_sum() {
+        let axes = [u32::MAX, u32::MAX, u32::MAX, u32::MAX, 0, 0, 0, 0];
+
+        assert_eq!(compute_symmetry(&axes), 0);
     }
 
     #[test]
