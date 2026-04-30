@@ -73,7 +73,14 @@ pub struct RateLimiter {
     counts: BTreeMap<PeerId, u32>,
 }
 impl RateLimiter {
+    /// Maximum number of distinct peers tracked in one rate-limit window.
+    ///
+    /// Distinct peer IDs are attacker-controlled at the network boundary. Keep
+    /// this bounded so a stream of one-shot IDs cannot grow memory without
+    /// limit before the next window reset.
+    pub const MAX_TRACKED_PEERS: usize = 4096;
     const MAX_PER_WINDOW: u32 = 100;
+
     /// Create a new rate limiter with zero counts.
     #[must_use]
     pub fn new() -> Self {
@@ -83,6 +90,12 @@ impl RateLimiter {
     }
     /// Increment the request count for a peer, returning an error if the limit is exceeded.
     pub fn check_and_increment(&mut self, peer: &PeerId) -> Result<()> {
+        if !self.counts.contains_key(peer) && self.counts.len() >= Self::MAX_TRACKED_PEERS {
+            return Err(ApiError::RateLimited {
+                peer_id: format!("{:?}", peer),
+            });
+        }
+
         let c = self.counts.entry(peer.clone()).or_insert(0);
         if *c >= Self::MAX_PER_WINDOW {
             return Err(ApiError::RateLimited {
@@ -550,6 +563,22 @@ mod tests {
         }
         rl.reset();
         assert!(rl.check_and_increment(&pid("a")).is_ok());
+    }
+    #[test]
+    fn rate_limiter_bounds_distinct_peer_tracking() {
+        let mut rl = RateLimiter::new();
+        for i in 0..RateLimiter::MAX_TRACKED_PEERS {
+            rl.check_and_increment(&pid(&format!("peer-{i}"))).unwrap();
+        }
+
+        assert_eq!(rl.counts.len(), RateLimiter::MAX_TRACKED_PEERS);
+        assert!(rl.check_and_increment(&pid("overflow-peer")).is_err());
+        assert_eq!(
+            rl.counts.len(),
+            RateLimiter::MAX_TRACKED_PEERS,
+            "refused peers must not grow the limiter state"
+        );
+        assert!(rl.check_and_increment(&pid("peer-0")).is_ok());
     }
     #[test]
     fn peer_id_ord() {
