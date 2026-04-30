@@ -59,27 +59,51 @@ fn commit_receipt_authority_hash(cert: &CommitCertificate) -> Result<Hash256, St
     .map_err(|e| format!("commit certificate authority hash: {e}"))
 }
 
-fn stored_node_timestamp_for_receipt(
+async fn with_store_blocking<T, F>(
+    store: Arc<Mutex<SqliteDagStore>>,
+    context: &'static str,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut SqliteDagStore) -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut store = store
+            .lock()
+            .map_err(|_| format!("Store mutex poisoned in {context}"))?;
+        operation(&mut store)
+    })
+    .await
+    .map_err(|e| format!("Store blocking task failed in {context}: {e}"))?
+}
+
+async fn stored_node_timestamp_for_receipt(
     store: &Arc<Mutex<SqliteDagStore>>,
     hash: &Hash256,
 ) -> Result<Timestamp, String> {
-    let st = store
-        .lock()
-        .map_err(|_| "Store mutex poisoned while loading committed node timestamp".to_string())?;
-    let node = st
-        .get_sync(hash)
-        .map_err(|e| format!("load committed DAG node {hash}: {e}"))?
-        .ok_or_else(|| format!("committed DAG node {hash} not found for trust receipt"))?;
+    let hash = *hash;
+    let node = with_store_blocking(
+        Arc::clone(store),
+        "stored_node_timestamp_for_receipt",
+        move |store| {
+            store
+                .get_sync(&hash)
+                .map_err(|e| format!("load committed DAG node {hash}: {e}"))?
+                .ok_or_else(|| format!("committed DAG node {hash} not found for trust receipt"))
+        },
+    )
+    .await?;
 
     Ok(node.timestamp)
 }
 
-fn commit_receipt_from_certificate(
+async fn commit_receipt_from_certificate(
     state: &SharedReactorState,
     store: &Arc<Mutex<SqliteDagStore>>,
     cert: &CommitCertificate,
 ) -> Result<TrustReceipt, String> {
-    let timestamp = stored_node_timestamp_for_receipt(store, &cert.node_hash)?;
+    let timestamp = stored_node_timestamp_for_receipt(store, &cert.node_hash).await?;
     let authority_hash = commit_receipt_authority_hash(cert)?;
     let s = state
         .lock()
@@ -411,14 +435,18 @@ pub async fn run_reactor(
                 };
 
                 // Persist the new round number.
+                if let Err(e) = with_store_blocking(
+                    Arc::clone(&store),
+                    "reactor_round_persist",
+                    move |store| {
+                        store
+                            .save_consensus_round(round)
+                            .map_err(|e| format!("persist round {round}: {e}"))
+                    },
+                )
+                .await
                 {
-                    let Ok(mut st) = store.lock() else {
-                        tracing::error!("Store mutex poisoned in round persist");
-                        continue;
-                    };
-                    if let Err(e) = st.save_consensus_round(round) {
-                        tracing::warn!(err = %e, "Failed to persist round");
-                    }
+                    tracing::warn!(err = %e, "Failed to persist round");
                 }
 
                 tracing::debug!(round, "Consensus round advanced");
@@ -622,24 +650,26 @@ async fn handle_proposal(
         }
     }
 
+    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_proposal_put", {
+        let node = msg.node.clone();
+        move |store| {
+            store
+                .put_sync(node)
+                .map_err(|e| format!("store proposed node: {e}"))
+        }
+    })
+    .await
+    {
+        tracing::warn!(err = %e, "Failed to store proposed node");
+        return;
+    }
+
     // All synchronous work in a block so MutexGuard is dropped before any .await.
     let vote_msg_opt = {
         let Ok(mut s) = state.lock() else {
             tracing::error!("Reactor state mutex poisoned in handle_proposal (process)");
             return;
         };
-
-        // Store the proposed DAG node locally.
-        {
-            let Ok(mut st) = store.lock() else {
-                tracing::error!("Store mutex poisoned in handle_proposal");
-                return;
-            };
-            if let Err(e) = st.put_sync(msg.node.clone()) {
-                tracing::warn!(err = %e, "Failed to store proposed node");
-                return;
-            }
-        }
 
         // Register the proposal in consensus state after cryptographic verification.
         let resolver = s.validator_public_keys.clone();
@@ -749,14 +779,17 @@ async fn handle_vote(
     }
 
     // Persist the vote.
-    {
-        let Ok(mut st) = store.lock() else {
-            tracing::error!("Store mutex poisoned in handle_vote (persist)");
-            return;
-        };
-        if let Err(e) = st.save_vote(&msg.vote) {
-            tracing::warn!(err = %e, "Failed to persist vote");
+    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_vote_persist", {
+        let vote = msg.vote.clone();
+        move |store| {
+            store
+                .save_vote(&vote)
+                .map_err(|e| format!("persist vote: {e}"))
         }
+    })
+    .await
+    {
+        tracing::warn!(err = %e, "Failed to persist vote");
     }
 
     // Check if this vote completed a quorum.
@@ -814,33 +847,36 @@ async fn handle_commit(
     let (hash, height, round) = commit_info;
 
     // Mark committed in the persistent store.
+    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_commit_mark", move |store| {
+        store
+            .mark_committed_sync(&hash, height)
+            .map_err(|e| format!("mark committed {hash} at height {height}: {e}"))
+    })
+    .await
     {
-        let Ok(mut st) = store.lock() else {
-            tracing::error!("Store mutex poisoned in handle_commit (mark)");
-            return;
-        };
-        if let Err(e) = st.mark_committed_sync(&hash, height) {
-            tracing::warn!(err = %e, "Failed to mark committed in store");
-            return;
-        }
+        tracing::warn!(err = %e, "Failed to mark committed in store");
+        return;
     }
 
     // Emit a trust receipt for the network-received commit.
-    let receipt = match commit_receipt_from_certificate(state, store, &cert) {
+    let receipt = match commit_receipt_from_certificate(state, store, &cert).await {
         Ok(receipt) => receipt,
         Err(e) => {
             tracing::warn!(err = %e, "Failed to build trust receipt for network commit");
             return;
         }
     };
-    {
-        let Ok(mut st) = store.lock() else {
-            tracing::error!("Store mutex poisoned in handle_commit (save receipt)");
-            return;
-        };
-        if let Err(e) = st.save_receipt(&receipt) {
-            tracing::warn!(err = %e, "Failed to persist trust receipt for network commit");
+    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_commit_save_receipt", {
+        let receipt = receipt.clone();
+        move |store| {
+            store
+                .save_receipt(&receipt)
+                .map_err(|e| format!("save network commit receipt: {e}"))
         }
+    })
+    .await
+    {
+        tracing::warn!(err = %e, "Failed to persist trust receipt for network commit");
     }
 
     tracing::info!(
@@ -909,36 +945,42 @@ async fn check_and_commit(
         };
 
         // Persist to store.
+        if let Err(e) = with_store_blocking(Arc::clone(store), "check_and_commit_persist", {
+            let cert = cert.clone();
+            move |store| {
+                store
+                    .mark_committed_sync(&hash, height)
+                    .map_err(|e| format!("mark committed {hash} at height {height}: {e}"))?;
+                store
+                    .save_certificate(&cert)
+                    .map_err(|e| format!("persist certificate for {hash}: {e}"))
+            }
+        })
+        .await
         {
-            let Ok(mut st) = store.lock() else {
-                tracing::error!("Store mutex poisoned in check_and_commit (persist)");
-                return;
-            };
-            if let Err(e) = st.mark_committed_sync(&hash, height) {
-                tracing::warn!(err = %e, "Failed to mark committed");
-                return;
-            }
-            if let Err(e) = st.save_certificate(&cert) {
-                tracing::warn!(err = %e, "Failed to persist certificate");
-            }
+            tracing::warn!(err = %e, "Failed to persist commit state");
+            return;
         }
 
         // Emit a trust receipt recording the commit action.
-        let receipt = match commit_receipt_from_certificate(state, store, &cert) {
+        let receipt = match commit_receipt_from_certificate(state, store, &cert).await {
             Ok(receipt) => receipt,
             Err(e) => {
                 tracing::warn!(err = %e, "Failed to build trust receipt for commit");
                 return;
             }
         };
-        {
-            let Ok(mut st) = store.lock() else {
-                tracing::error!("Store mutex poisoned in check_and_commit (save receipt)");
-                return;
-            };
-            if let Err(e) = st.save_receipt(&receipt) {
-                tracing::warn!(err = %e, "Failed to persist trust receipt for commit");
+        if let Err(e) = with_store_blocking(Arc::clone(store), "check_and_commit_save_receipt", {
+            let receipt = receipt.clone();
+            move |store| {
+                store
+                    .save_receipt(&receipt)
+                    .map_err(|e| format!("save local commit receipt: {e}"))
             }
+        })
+        .await
+        {
+            tracing::warn!(err = %e, "Failed to persist trust receipt for commit");
         }
 
         tracing::info!(%hash, height, round, "Node committed — quorum reached");
@@ -976,28 +1018,32 @@ pub async fn submit_proposal(
     net_handle: &NetworkHandle,
     payload: &[u8],
 ) -> anyhow::Result<DagNode> {
-    let (node, proposal, signature) = {
-        let mut s = state
+    {
+        let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in submit_proposal"))?;
 
         if !s.is_validator {
             anyhow::bail!("This node is not a validator — cannot propose");
         }
+    }
 
-        // Get current tips as parents.
-        let tips = {
-            let st = store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Store mutex poisoned in submit_proposal (tips)"))?;
-            st.tips_sync().map_err(|e| anyhow::anyhow!("tips: {e}"))?
-        };
-        let parents: Vec<Hash256> = if tips.is_empty() {
-            vec![] // genesis
-        } else {
-            tips
-        };
+    // Get current tips as parents.
+    let tips = with_store_blocking(Arc::clone(store), "submit_proposal_tips", |store| {
+        store.tips_sync().map_err(|e| format!("tips: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let parents: Vec<Hash256> = if tips.is_empty() {
+        vec![] // genesis
+    } else {
+        tips
+    };
 
+    let node = {
+        let mut s = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in submit_proposal"))?;
         // Destructure to avoid borrow conflicts: `append` needs &mut dag
         // and &mut clock simultaneously, which can't be done through `s`.
         let ReactorState {
@@ -1009,18 +1055,25 @@ pub async fn submit_proposal(
         } = *s;
 
         // Create the DAG node.
-        let node = append(dag, &parents, payload, node_did, &**sign_fn, clock)
-            .map_err(|e| anyhow::anyhow!("append: {e}"))?;
+        append(dag, &parents, payload, node_did, &**sign_fn, clock)
+            .map_err(|e| anyhow::anyhow!("append: {e}"))?
+    };
 
-        // Store it locally.
-        {
-            let mut st = store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Store mutex poisoned in submit_proposal (put)"))?;
-            st.put_sync(node.clone())
-                .map_err(|e| anyhow::anyhow!("put: {e}"))?;
+    // Store it locally.
+    with_store_blocking(Arc::clone(store), "submit_proposal_put", {
+        let node = node.clone();
+        move |store| store.put_sync(node).map_err(|e| format!("put: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let (proposal, signature) = {
+        let mut s = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in submit_proposal"))?;
+        if !s.is_validator {
+            anyhow::bail!("This node is not a validator — cannot propose");
         }
-
         // Create and sign the proposal over the canonical consensus payload.
         let proposer_did = s.node_did.clone();
         let proposal_to_sign = Proposal {
@@ -1047,7 +1100,7 @@ pub async fn submit_proposal(
         consensus::vote_verified(&mut s.consensus, vote, &resolver)
             .map_err(|e| anyhow::anyhow!("self-vote: {e}"))?;
 
-        (node, proposal, sig)
+        (proposal, sig)
     };
 
     // Broadcast the proposal.
@@ -1209,6 +1262,31 @@ mod tests {
     }
 
     #[test]
+    fn reactor_async_store_access_uses_spawn_blocking() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "reactor must isolate synchronous store I/O from Tokio workers"
+        );
+        for forbidden in [
+            "let Ok(mut st) = store.lock()",
+            "let Ok(st) = store.lock()",
+            "store\n                .lock()",
+            "store.lock().map_err",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "async reactor path still directly locks the store: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn create_reactor_state_initializes() {
         let validators = make_validators(4);
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators.clone());
@@ -1284,8 +1362,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_receipt_uses_certificate_authority_and_node_timestamp() {
+    #[tokio::test]
+    async fn commit_receipt_uses_certificate_authority_and_node_timestamp() {
         let validators = make_validators(4);
         let validator_vec: Vec<Did> = validators.iter().cloned().collect();
         let node_did = validator_vec[0].clone();
@@ -1323,7 +1401,9 @@ mod tests {
             round: 0,
         };
 
-        let receipt = commit_receipt_from_certificate(&state, &store, &cert).unwrap();
+        let receipt = commit_receipt_from_certificate(&state, &store, &cert)
+            .await
+            .unwrap();
         let expected_authority = commit_receipt_authority_hash(&cert).unwrap();
 
         assert_eq!(receipt.timestamp, node.timestamp);
@@ -1333,12 +1413,14 @@ mod tests {
         assert!(!receipt.signature.is_empty());
     }
 
-    #[test]
-    fn commit_receipt_timestamp_rejects_missing_node() {
+    #[tokio::test]
+    async fn commit_receipt_timestamp_rejects_missing_node() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
 
-        let err = stored_node_timestamp_for_receipt(&store, &Hash256::ZERO).unwrap_err();
+        let err = stored_node_timestamp_for_receipt(&store, &Hash256::ZERO)
+            .await
+            .unwrap_err();
 
         assert!(err.contains("not found for trust receipt"));
     }
