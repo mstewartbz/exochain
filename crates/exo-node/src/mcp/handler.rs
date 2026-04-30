@@ -24,6 +24,12 @@ use super::{
     tools::ToolRegistry,
 };
 
+/// Maximum accepted JSON-RPC message size for all MCP transports.
+///
+/// The limit is intentionally well below Axum's default body limit so the
+/// protocol handler and HTTP transport enforce the same deterministic bound.
+pub const MAX_JSON_RPC_MESSAGE_BYTES: usize = 64 * 1024;
+
 fn serialize_json_rpc_response(response: &JsonRpcResponse) -> String {
     match serde_json::to_string(response) {
         Ok(serialized) => serialized,
@@ -141,10 +147,20 @@ impl McpServer {
     /// and `None` for notifications (messages without an `id`).
     #[must_use]
     pub fn handle_message(&self, message: &str) -> Option<String> {
+        if message.len() > MAX_JSON_RPC_MESSAGE_BYTES {
+            let resp = JsonRpcResponse::error(None, INVALID_REQUEST, "request too large".into());
+            return Some(serialize_json_rpc_response(&resp));
+        }
+
         let request: JsonRpcRequest = match serde_json::from_str(message) {
             Ok(req) => req,
             Err(e) => {
-                let resp = JsonRpcResponse::error(None, PARSE_ERROR, format!("parse error: {e}"));
+                tracing::debug!(err = %e, "failed to parse MCP JSON-RPC request");
+                let resp = JsonRpcResponse::error(
+                    None,
+                    PARSE_ERROR,
+                    "parse error: invalid JSON-RPC request".into(),
+                );
                 return Some(serialize_json_rpc_response(&resp));
             }
         };
@@ -696,7 +712,22 @@ mod tests {
         let response = server.handle_message("not json at all{{{").unwrap();
         let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
         assert!(parsed.error.is_some());
-        assert_eq!(parsed.error.unwrap().code, PARSE_ERROR);
+        let error = parsed.error.unwrap();
+        assert_eq!(error.code, PARSE_ERROR);
+        assert_eq!(error.message, "parse error: invalid JSON-RPC request");
+    }
+
+    #[test]
+    fn handler_rejects_oversized_json_rpc_message_before_parsing() {
+        let server = test_server();
+        let oversized = " ".repeat((64 * 1024) + 1);
+
+        let response = server.handle_message(&oversized).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        let error = parsed.error.expect("oversized message must fail");
+
+        assert_eq!(error.code, INVALID_REQUEST);
+        assert_eq!(error.message, "request too large");
     }
 
     #[test]

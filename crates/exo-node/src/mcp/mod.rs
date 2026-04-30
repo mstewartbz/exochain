@@ -26,7 +26,7 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 use async_stream::stream;
 use axum::{
     Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::{
         IntoResponse,
@@ -37,7 +37,7 @@ use axum::{
 #[allow(unused_imports)]
 pub use context::NodeContext;
 use futures::stream::Stream;
-pub use handler::McpServer;
+pub use handler::{MAX_JSON_RPC_MESSAGE_BYTES, McpServer};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     time::sleep,
@@ -117,6 +117,7 @@ pub fn build_sse_router(state: SseState) -> Router {
         .route("/mcp/message", post(handle_message))
         .route("/mcp/events", get(handle_events))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_JSON_RPC_MESSAGE_BYTES))
 }
 
 async fn handle_health() -> &'static str {
@@ -225,5 +226,23 @@ mod sse_tests {
             text.contains("\"tools\""),
             "expected tools array in tools/list response, got: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn sse_message_rejects_oversized_body_before_handler() {
+        let router = test_router();
+        let oversized_client_name = "a".repeat(64 * 1024);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"{oversized_client_name}","version":"0.0.0"}}}}}}"#
+        );
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp/message")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
