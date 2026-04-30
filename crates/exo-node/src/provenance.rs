@@ -10,7 +10,11 @@
 
 #![allow(clippy::needless_borrows_for_generic_args)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeSet,
+    fmt::Display,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -22,6 +26,9 @@ use exo_core::types::Hash256;
 use serde::Serialize;
 
 use crate::store::SqliteDagStore;
+
+const MAX_PROVENANCE_TRAVERSAL_HASHES: usize = 1024;
+const MAX_PROVENANCE_DEPTH: u32 = 1000;
 
 // ---------------------------------------------------------------------------
 // State
@@ -66,32 +73,20 @@ fn build_provenance_response(
 ) -> Result<ProvenanceResponse, (StatusCode, String)> {
     let node = store
         .get_sync(hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|error| provenance_store_error("Store read failed", error))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "node not found in DAG".into()))?;
+    ensure_provenance_hash_count("parent", node.parents.len())?;
 
     let children = store
         .children(hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|error| provenance_store_error("Store child lookup failed", error))?;
+    ensure_provenance_hash_count("child", children.len())?;
 
     let committed_height = store
         .committed_height_for(hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|error| provenance_store_error("Store commit lookup failed", error))?;
 
-    // Walk parents to compute depth (max 1000 to avoid infinite loops).
-    let mut depth = 0u32;
-    let mut frontier = node.parents.clone();
-    let mut max_iters = 1000u32;
-    while !frontier.is_empty() && max_iters > 0 {
-        depth += 1;
-        max_iters -= 1;
-        let mut next_frontier = Vec::new();
-        for parent_hash in &frontier {
-            if let Ok(Some(parent_node)) = store.get_sync(parent_hash) {
-                next_frontier.extend_from_slice(&parent_node.parents);
-            }
-        }
-        frontier = next_frontier;
-    }
+    let depth = compute_provenance_depth(store, &node.parents)?;
 
     Ok(ProvenanceResponse {
         hash: hex::encode(node.hash.0),
@@ -104,6 +99,70 @@ fn build_provenance_response(
         payload_hash_size: node.payload_hash.as_bytes().len(),
         depth,
     })
+}
+
+fn compute_provenance_depth(
+    store: &SqliteDagStore,
+    parent_hashes: &[Hash256],
+) -> Result<u32, (StatusCode, String)> {
+    let mut depth = 0u32;
+    let mut visited = BTreeSet::new();
+    let mut frontier = parent_hashes.iter().copied().collect::<BTreeSet<_>>();
+
+    while !frontier.is_empty() {
+        if depth >= MAX_PROVENANCE_DEPTH {
+            return Err(provenance_traversal_limit_error("maximum depth exceeded"));
+        }
+        depth += 1;
+
+        let mut next_frontier = BTreeSet::new();
+        for parent_hash in &frontier {
+            if !visited.insert(*parent_hash) {
+                continue;
+            }
+            ensure_provenance_hash_count("ancestor", visited.len())?;
+
+            let Some(parent_node) = store
+                .get_sync(parent_hash)
+                .map_err(|error| provenance_store_error("Store traversal failed", error))?
+            else {
+                continue;
+            };
+            ensure_provenance_hash_count("ancestor parent", parent_node.parents.len())?;
+
+            for grandparent_hash in parent_node.parents {
+                if visited.contains(&grandparent_hash) {
+                    continue;
+                }
+                next_frontier.insert(grandparent_hash);
+                ensure_provenance_hash_count("frontier", next_frontier.len())?;
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    Ok(depth)
+}
+
+fn ensure_provenance_hash_count(label: &str, count: usize) -> Result<(), (StatusCode, String)> {
+    if count > MAX_PROVENANCE_TRAVERSAL_HASHES {
+        return Err(provenance_traversal_limit_error(&format!(
+            "{label} hash count exceeds {MAX_PROVENANCE_TRAVERSAL_HASHES}: {count}"
+        )));
+    }
+    Ok(())
+}
+
+fn provenance_traversal_limit_error(detail: &str) -> (StatusCode, String) {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!("provenance traversal limit exceeded: {detail}"),
+    )
+}
+
+fn provenance_store_error(context: &'static str, error: impl Display) -> (StatusCode, String) {
+    tracing::error!(%error, context, "provenance store operation failed");
+    (StatusCode::INTERNAL_SERVER_ERROR, context.to_string())
 }
 
 async fn load_provenance_response(
@@ -120,10 +179,11 @@ async fn load_provenance_response(
         build_provenance_response(&store, &hash)
     })
     .await
-    .map_err(|e| {
+    .map_err(|error| {
+        tracing::error!(%error, "provenance store task failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Store task failed: {e}"),
+            "Store task failed".to_string(),
         )
     })?
 }
@@ -171,8 +231,8 @@ pub fn provenance_router(state: Arc<ProvenanceState>) -> Router {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use axum::{body::Body, http::Request};
-    use exo_core::types::{Did, Signature};
-    use exo_dag::dag::{Dag, DeterministicDagClock, append};
+    use exo_core::types::{Did, Signature, Timestamp};
+    use exo_dag::dag::{Dag, DagNode, DeterministicDagClock, append};
     use tower::ServiceExt;
 
     use super::*;
@@ -184,6 +244,27 @@ mod tests {
             sig[..32].copy_from_slice(h.as_bytes());
             Signature::from_bytes(sig)
         })
+    }
+
+    fn indexed_hash(index: usize) -> Hash256 {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(
+            &u64::try_from(index)
+                .expect("test index fits in u64")
+                .to_be_bytes(),
+        );
+        Hash256::from_bytes(bytes)
+    }
+
+    fn test_node(hash: Hash256, parents: Vec<Hash256>) -> DagNode {
+        DagNode {
+            hash,
+            parents,
+            payload_hash: indexed_hash(9_000),
+            creator_did: Did::new("did:exo:test").unwrap(),
+            timestamp: Timestamp::new(1_000, 1),
+            signature: Signature::from_bytes([7u8; 64]),
+        }
     }
 
     #[test]
@@ -208,6 +289,24 @@ mod tests {
         assert!(
             !handler.contains("state.store.lock()"),
             "provenance async handler must not directly block on the store mutex"
+        );
+    }
+
+    #[test]
+    fn provenance_store_errors_are_not_reflected_to_clients() {
+        let source = include_str!("provenance.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            !production.contains("e.to_string()"),
+            "store error internals must be logged, not reflected to HTTP clients"
+        );
+        assert!(
+            !production.contains("format!(\"Store task failed: {e}\")"),
+            "spawn_blocking join errors must be redacted from HTTP clients"
         );
     }
 
@@ -338,5 +437,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn provenance_rejects_excessive_parent_fanout_during_depth_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SqliteDagStore::open(dir.path()).unwrap();
+
+        let fanout_parent_hash = indexed_hash(42);
+        let fanout_parents = (10_000..11_025).map(indexed_hash).collect();
+        let fanout_parent = test_node(fanout_parent_hash, fanout_parents);
+        let queried = test_node(indexed_hash(43), vec![fanout_parent_hash]);
+
+        store.put_sync(fanout_parent).unwrap();
+        store.put_sync(queried.clone()).unwrap();
+
+        let state = Arc::new(ProvenanceState {
+            store: Arc::new(Mutex::new(store)),
+        });
+        let app = provenance_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!(
+                        "/api/v1/provenance/{}",
+                        hex::encode(queried.hash.0)
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body_text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_text.contains("provenance traversal limit"));
     }
 }
