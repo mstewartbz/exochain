@@ -40,7 +40,7 @@
 //! ```
 
 use exo_core::Did;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::error::{ExoError, ExoResult};
 
@@ -163,35 +163,8 @@ impl AuthorityChainBuilder {
     /// assert!(matches!(err, ExoError::Authority(_)));
     /// ```
     pub fn build(self, terminal_actor: &Did) -> ExoResult<ValidatedChain> {
-        if self.links.is_empty() {
-            return Err(ExoError::Authority("authority chain is empty".into()));
-        }
-
-        // Each grantee must match the next grantor.
-        for window in self.links.windows(2) {
-            let a = &window[0];
-            let b = &window[1];
-            if a.grantee != b.grantor {
-                return Err(ExoError::Authority(format!(
-                    "broken delegation: {} != {}",
-                    a.grantee, b.grantor
-                )));
-            }
-        }
-
-        // The terminal grantee must equal the claimed terminal actor.
-        let last = self
-            .links
-            .last()
-            .ok_or_else(|| ExoError::Authority("authority chain is empty".into()))?;
-        if &last.grantee != terminal_actor {
-            return Err(ExoError::Authority(format!(
-                "terminal mismatch: chain ends at {} but terminal_actor is {}",
-                last.grantee, terminal_actor
-            )));
-        }
-
         let depth = self.links.len();
+        validate_chain_parts(depth, &self.links, terminal_actor).map_err(ExoError::Authority)?;
         Ok(ValidatedChain {
             depth,
             links: self.links,
@@ -212,7 +185,7 @@ pub struct ChainLink {
 }
 
 /// A validated authority chain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ValidatedChain {
     /// Number of links in the chain.
     pub depth: usize,
@@ -220,6 +193,60 @@ pub struct ValidatedChain {
     pub links: Vec<ChainLink>,
     /// The terminal actor the chain delegates authority to.
     pub terminal: Did,
+}
+
+impl<'de> Deserialize<'de> for ValidatedChain {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireValidatedChain {
+            depth: usize,
+            links: Vec<ChainLink>,
+            terminal: Did,
+        }
+
+        let wire = WireValidatedChain::deserialize(deserializer)?;
+        validate_chain_parts(wire.depth, &wire.links, &wire.terminal).map_err(de::Error::custom)?;
+        Ok(Self {
+            depth: wire.depth,
+            links: wire.links,
+            terminal: wire.terminal,
+        })
+    }
+}
+
+fn validate_chain_parts(depth: usize, links: &[ChainLink], terminal: &Did) -> Result<(), String> {
+    if links.is_empty() {
+        return Err("authority chain is empty".into());
+    }
+    if depth != links.len() {
+        return Err(format!(
+            "authority chain depth {depth} does not match link count {}",
+            links.len()
+        ));
+    }
+
+    for window in links.windows(2) {
+        let a = &window[0];
+        let b = &window[1];
+        if a.grantee != b.grantor {
+            return Err(format!("broken delegation: {} != {}", a.grantee, b.grantor));
+        }
+    }
+
+    let Some(last) = links.last() else {
+        return Err("authority chain is empty".into());
+    };
+    if &last.grantee != terminal {
+        return Err(format!(
+            "terminal mismatch: chain ends at {} but terminal_actor is {}",
+            last.grantee, terminal
+        ));
+    }
+
+    Ok(())
 }
 
 // ===========================================================================
@@ -308,6 +335,52 @@ mod tests {
         let json = serde_json::to_string(&chain).expect("serialize");
         let decoded: ValidatedChain = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(chain, decoded);
+    }
+
+    #[test]
+    fn validated_chain_deserialization_rejects_broken_topology() {
+        let json = serde_json::json!({
+            "depth": 2,
+            "links": [
+                {
+                    "grantor": "did:exo:root",
+                    "grantee": "did:exo:mid",
+                    "permissions": ["read"]
+                },
+                {
+                    "grantor": "did:exo:other",
+                    "grantee": "did:exo:leaf",
+                    "permissions": ["read"]
+                }
+            ],
+            "terminal": "did:exo:leaf"
+        });
+
+        let result = serde_json::from_value::<ValidatedChain>(json);
+
+        assert!(
+            result.is_err(),
+            "deserialization must enforce authority-chain continuity"
+        );
+    }
+
+    #[test]
+    fn validated_chain_deserialization_rejects_depth_mismatch() {
+        let root = did("did:exo:root");
+        let leaf = did("did:exo:leaf");
+        let chain = AuthorityChainBuilder::new()
+            .add_link(root, leaf.clone(), vec!["read".into()])
+            .build(&leaf)
+            .expect("valid");
+        let mut json = serde_json::to_value(&chain).expect("serialize");
+        json["depth"] = serde_json::json!(usize::MAX);
+
+        let result = serde_json::from_value::<ValidatedChain>(json);
+
+        assert!(
+            result.is_err(),
+            "deserialization must reject forged depth metadata"
+        );
     }
 
     #[test]
