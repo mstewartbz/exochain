@@ -51,6 +51,9 @@ pub struct ApiState {
     pub store: Arc<Mutex<ZerodentityStore>>,
 }
 
+type ApiError = (StatusCode, Json<serde_json::Value>);
+type ApiResult<T> = Result<T, ApiError>;
+
 // ---------------------------------------------------------------------------
 // Query params
 // ---------------------------------------------------------------------------
@@ -202,6 +205,25 @@ fn store_error(error: impl std::fmt::Display) -> (StatusCode, Json<serde_json::V
     )
 }
 
+async fn with_store_blocking<T, F>(state: ApiState, operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut ZerodentityStore) -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "lock poisoned"))?;
+        operation(&mut store)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "0dentity store task failed");
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, "Store task failed")
+    })?
+}
+
 fn path_and_query(uri: &axum::http::Uri) -> String {
     uri.path_and_query()
         .map_or_else(|| uri.path().to_owned(), |value| value.as_str().to_owned())
@@ -234,74 +256,74 @@ fn validate_nonce(nonce: &str) -> Result<(), (StatusCode, Json<serde_json::Value
     Ok(())
 }
 
-fn verify_signed_write(
-    state: &ApiState,
+async fn verify_signed_write_blocking(
+    state: ApiState,
     headers: &HeaderMap,
-    expected_did: &Did,
-    method: &str,
-    path_and_query: &str,
-    body: &[u8],
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    expected_did: Did,
+    method: &'static str,
+    path_and_query: String,
+    body: Bytes,
+) -> ApiResult<String> {
     let token = extract_session_token(headers)
         .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Bearer session token required"))?;
 
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "lock poisoned"))?;
-    let session = store
-        .get_session(&token)
-        .map_err(|e| {
+    let headers = headers.clone();
+    with_store_blocking(state, move |store| {
+        let session = store
+            .get_session(&token)
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Store error: {e}"),
+                )
+            })?
+            .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
+
+        if session.subject_did.as_str() != expected_did.as_str() {
+            return Err(json_error(StatusCode::FORBIDDEN, "Access denied"));
+        }
+
+        let nonce = require_header(&headers, "x-exo-nonce", "X-Exo-Nonce header required")?;
+        validate_nonce(nonce)?;
+        let signature_hex = require_header(&headers, "x-exo-sig", "X-Exo-Sig header required")?;
+        let signature = signature_from_hex(signature_hex)
+            .map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
+        if signature.is_empty() {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "X-Exo-Sig must not be empty",
+            ));
+        }
+
+        let public_key = public_key_from_session_bytes(&session.public_key)
+            .map_err(|e| json_error(StatusCode::UNAUTHORIZED, e))?;
+        let body_hash = Hash256::digest(&body);
+        let payload = request_signing_payload(method, &path_and_query, &token, nonce, &body_hash)
+            .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        if !crypto::verify(&payload, &signature, &public_key) {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "X-Exo-Sig verification failed",
+            ));
+        }
+
+        let nonce_is_new = store.consume_session_nonce(&token, nonce).map_err(|e| {
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Store error: {e}"),
             )
-        })?
-        .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
+        })?;
+        if !nonce_is_new {
+            return Err(json_error(
+                StatusCode::CONFLICT,
+                "X-Exo-Nonce has already been used for this session",
+            ));
+        }
 
-    if session.subject_did.as_str() != expected_did.as_str() {
-        return Err(json_error(StatusCode::FORBIDDEN, "Access denied"));
-    }
-
-    let nonce = require_header(headers, "x-exo-nonce", "X-Exo-Nonce header required")?;
-    validate_nonce(nonce)?;
-    let signature_hex = require_header(headers, "x-exo-sig", "X-Exo-Sig header required")?;
-    let signature =
-        signature_from_hex(signature_hex).map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
-    if signature.is_empty() {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "X-Exo-Sig must not be empty",
-        ));
-    }
-
-    let public_key = public_key_from_session_bytes(&session.public_key)
-        .map_err(|e| json_error(StatusCode::UNAUTHORIZED, e))?;
-    let body_hash = Hash256::digest(body);
-    let payload = request_signing_payload(method, path_and_query, &token, nonce, &body_hash)
-        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    if !crypto::verify(&payload, &signature, &public_key) {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "X-Exo-Sig verification failed",
-        ));
-    }
-
-    let nonce_is_new = store.consume_session_nonce(&token, nonce).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Store error: {e}"),
-        )
-    })?;
-    if !nonce_is_new {
-        return Err(json_error(
-            StatusCode::CONFLICT,
-            "X-Exo-Nonce has already been used for this session",
-        ));
-    }
-
-    Ok(token)
+        Ok(token)
+    })
+    .await
 }
 
 fn hex_hash(h: &Hash256) -> String {
@@ -431,43 +453,41 @@ pub async fn get_score(
 ) -> Result<Json<ScoreResponse>, (StatusCode, Json<serde_json::Value>)> {
     let did = parse_did(&did_str)?;
 
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "lock poisoned"})),
-        )
-    })?;
+    let response = with_store_blocking(state, move |store| {
+        // Check if DID exists
+        let claims_raw = store.get_claims(&did).map_err(store_error)?;
+        if claims_raw.is_empty() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "DID not found"})),
+            ));
+        }
 
-    // Check if DID exists
-    let claims_raw = store.get_claims(&did).map_err(store_error)?;
-    if claims_raw.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "DID not found"})),
-        ));
-    }
+        let claims: Vec<IdentityClaim> = claims_raw.into_iter().map(|(_, c)| c).collect();
+        let fingerprints = store.get_fingerprints(&did).map_err(store_error)?;
+        let behavioral = store.get_behavioral_samples(&did).map_err(store_error)?;
+        let as_of_ms = score_as_of_ms(&claims, &fingerprints, &behavioral, params.as_of_ms)?;
 
-    let claims: Vec<IdentityClaim> = claims_raw.into_iter().map(|(_, c)| c).collect();
-    let fingerprints = store.get_fingerprints(&did).map_err(store_error)?;
-    let behavioral = store.get_behavioral_samples(&did).map_err(store_error)?;
-    let as_of_ms = score_as_of_ms(&claims, &fingerprints, &behavioral, params.as_of_ms)?;
+        let score = ZerodentityScore::compute(&did, &claims, &fingerprints, &behavioral, as_of_ms);
 
-    let score = ZerodentityScore::compute(&did, &claims, &fingerprints, &behavioral, as_of_ms);
+        let history = store
+            .get_score_history(&did, None, None)
+            .map_err(store_error)?;
 
-    let history = store
-        .get_score_history(&did, None, None)
-        .map_err(store_error)?;
+        Ok(ScoreResponse {
+            subject_did: did.to_string(),
+            composite: score.composite,
+            symmetry: score.symmetry,
+            axes: axes_from_score(&score),
+            computed_ms: score.computed_ms,
+            dag_state_hash: hex_hash(&score.dag_state_hash),
+            claim_count: score.claim_count,
+            history_available: !history.is_empty(),
+        })
+    })
+    .await?;
 
-    Ok(Json(ScoreResponse {
-        subject_did: did.to_string(),
-        composite: score.composite,
-        symmetry: score.symmetry,
-        axes: axes_from_score(&score),
-        computed_ms: score.computed_ms,
-        dag_state_hash: hex_hash(&score.dag_state_hash),
-        claim_count: score.claim_count,
-        history_available: !history.is_empty(),
-    }))
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -492,14 +512,8 @@ pub async fn list_claims(
         )
     })?;
 
-    // Verify session belongs to this DID
-    {
-        let store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "lock poisoned"})),
-            )
-        })?;
+    let response = with_store_blocking(state, move |store| {
+        // Verify session belongs to this DID.
         let session = store
             .get_session(&token)
             .map_err(store_error)?
@@ -515,63 +529,60 @@ pub async fn list_claims(
                 Json(serde_json::json!({"error": "Access denied"})),
             ));
         }
-    }
 
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "lock poisoned"})),
-        )
-    })?;
-    let all_claims = store.get_claims(&did).map_err(store_error)?;
+        let all_claims = store.get_claims(&did).map_err(store_error)?;
 
-    // Filter by status
-    let filtered: Vec<(String, IdentityClaim)> = all_claims
-        .into_iter()
-        .filter(|(_, c)| {
-            if let Some(ref s) = params.status {
-                return c.status.to_string().to_lowercase() == s.to_lowercase();
-            }
-            true
+        // Filter by status
+        let filtered: Vec<(String, IdentityClaim)> = all_claims
+            .into_iter()
+            .filter(|(_, c)| {
+                if let Some(ref s) = params.status {
+                    return c.status.to_string().to_lowercase() == s.to_lowercase();
+                }
+                true
+            })
+            .filter(|(_, c)| {
+                if let Some(ref t) = params.claim_type {
+                    return c
+                        .claim_type
+                        .to_string()
+                        .to_lowercase()
+                        .contains(&t.to_lowercase());
+                }
+                true
+            })
+            .collect();
+
+        let total = filtered.len();
+        let offset = params.offset.unwrap_or(0) as usize;
+        let limit = params.limit.unwrap_or(50) as usize;
+
+        let page: Vec<ClaimItem> = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(cid, c)| ClaimItem {
+                claim_id: cid,
+                claim_type: c.claim_type.to_string(),
+                claim_hash: hex::encode(c.claim_hash.as_bytes()),
+                status: c.status.to_string(),
+                created_ms: c.created_ms,
+                verified_ms: c.verified_ms,
+                expires_ms: c.expires_ms,
+                dag_node_hash: hex::encode(c.dag_node_hash.as_bytes()),
+            })
+            .collect();
+
+        Ok(ClaimsResponse {
+            claims: page,
+            total,
+            limit: params.limit.unwrap_or(50),
+            offset: params.offset.unwrap_or(0),
         })
-        .filter(|(_, c)| {
-            if let Some(ref t) = params.claim_type {
-                return c
-                    .claim_type
-                    .to_string()
-                    .to_lowercase()
-                    .contains(&t.to_lowercase());
-            }
-            true
-        })
-        .collect();
+    })
+    .await?;
 
-    let total = filtered.len();
-    let offset = params.offset.unwrap_or(0) as usize;
-    let limit = params.limit.unwrap_or(50) as usize;
-
-    let page: Vec<ClaimItem> = filtered
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|(cid, c)| ClaimItem {
-            claim_id: cid,
-            claim_type: c.claim_type.to_string(),
-            claim_hash: hex::encode(c.claim_hash.as_bytes()),
-            status: c.status.to_string(),
-            created_ms: c.created_ms,
-            verified_ms: c.verified_ms,
-            expires_ms: c.expires_ms,
-            dag_node_hash: hex::encode(c.dag_node_hash.as_bytes()),
-        })
-        .collect();
-
-    Ok(Json(ClaimsResponse {
-        claims: page,
-        total,
-        limit: params.limit.unwrap_or(50),
-        offset: params.offset.unwrap_or(0),
-    }))
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -586,27 +597,26 @@ pub async fn score_history(
 ) -> Result<Json<HistoryResponse>, (StatusCode, Json<serde_json::Value>)> {
     let did = parse_did(&did_str)?;
 
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "lock poisoned"})),
-        )
-    })?;
-    let snapshots = store
-        .get_score_history(&did, params.from_ms, params.to_ms)
-        .map_err(store_error)?;
+    let response = with_store_blocking(state, move |store| {
+        let snapshots = store
+            .get_score_history(&did, params.from_ms, params.to_ms)
+            .map_err(store_error)?;
 
-    let items: Vec<HistorySnapshot> = snapshots
-        .iter()
-        .map(|s| HistorySnapshot {
-            computed_ms: s.computed_ms,
-            composite: s.composite,
-            axes: axes_from_score(s),
-            claim_count: s.claim_count,
-        })
-        .collect();
+        let items: Vec<HistorySnapshot> = snapshots
+            .iter()
+            .map(|s| HistorySnapshot {
+                computed_ms: s.computed_ms,
+                composite: s.composite,
+                axes: axes_from_score(s),
+                claim_count: s.claim_count,
+            })
+            .collect();
 
-    Ok(Json(HistoryResponse { snapshots: items }))
+        Ok(HistoryResponse { snapshots: items })
+    })
+    .await?;
+
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -634,13 +644,7 @@ pub async fn list_fingerprints(
         )
     })?;
 
-    {
-        let store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "lock poisoned"})),
-            )
-        })?;
+    let response = with_store_blocking(state, move |store| {
         let session = store
             .get_session(&token)
             .map_err(store_error)?
@@ -656,28 +660,25 @@ pub async fn list_fingerprints(
                 Json(serde_json::json!({"error": "Access denied"})),
             ));
         }
-    }
 
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "lock poisoned"})),
-        )
-    })?;
-    let fps = store.get_fingerprints(&did).map_err(store_error)?;
-    let items: Vec<FingerprintItem> = fps
-        .iter()
-        .map(|fp| FingerprintItem {
-            composite_hash: hex::encode(fp.composite_hash.as_bytes()),
-            captured_ms: fp.captured_ms,
-            consistency_score: fp.consistency_score_bp,
-            signal_count: fp.signal_hashes.len(),
+        let fps = store.get_fingerprints(&did).map_err(store_error)?;
+        let items: Vec<FingerprintItem> = fps
+            .iter()
+            .map(|fp| FingerprintItem {
+                composite_hash: hex::encode(fp.composite_hash.as_bytes()),
+                captured_ms: fp.captured_ms,
+                consistency_score: fp.consistency_score_bp,
+                signal_count: fp.signal_hashes.len(),
+            })
+            .collect();
+
+        Ok(FingerprintsResponse {
+            fingerprints: items,
         })
-        .collect();
+    })
+    .await?;
 
-    Ok(Json(FingerprintsResponse {
-        fingerprints: items,
-    }))
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -698,14 +699,15 @@ pub async fn create_peer_attestation(
     let target_did = parse_did(&req.target_did)?;
 
     let request_path = path_and_query(&uri);
-    let _token = verify_signed_write(
-        &state,
+    let _token = verify_signed_write_blocking(
+        state.clone(),
         &headers,
-        &attester_did,
+        attester_did.clone(),
         "POST",
-        &request_path,
-        &body,
-    )?;
+        request_path,
+        body.clone(),
+    )
+    .await?;
 
     let attestation_type = AttestationType::from_str(&req.attestation_type).map_err(|_| {
         (
@@ -721,103 +723,94 @@ pub async fn create_peer_attestation(
     let attester_public_key = parse_public_key(req.attester_public_key.as_deref())?;
     let signature = parse_signature(req.signature.as_deref())?;
 
-    let mut store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "lock poisoned"})),
-        )
-    })?;
-    let attester_claims: Vec<IdentityClaim> = store
-        .get_claims(&attester_did)
-        .map_err(store_error)?
-        .into_iter()
-        .map(|(_, c)| c)
-        .collect();
-    let already_exists = store
-        .attestation_exists(&attester_did, &target_did)
-        .map_err(store_error)?;
+    let response = with_store_blocking(state, move |store| {
+        let attester_claims: Vec<IdentityClaim> = store
+            .get_claims(&attester_did)
+            .map_err(store_error)?
+            .into_iter()
+            .map(|(_, c)| c)
+            .collect();
+        let already_exists = store
+            .attestation_exists(&attester_did, &target_did)
+            .map_err(store_error)?;
 
-    validate_attestation(&attester_did, &target_did, &attester_claims, already_exists).map_err(
-        |e| {
+        validate_attestation(&attester_did, &target_did, &attester_claims, already_exists)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+            })?;
+
+        let target_claim_hash = target_claim_hash(&attester_did, &target_did).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+        let dag_node_hash = store
+            .next_claim_dag_node_hash(target_claim_hash, Timestamp::new(created_ms, 0))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                )
+            })?;
+
+        let attestation = create_attestation(CreateAttestationInput {
+            attester_did: &attester_did,
+            target_did: &target_did,
+            attestation_type,
+            message_hash,
+            dag_node_hash,
+            created_ms,
+            attester_public_key,
+            signature,
+        })
+        .map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": e.to_string()})),
             )
-        },
-    )?;
-
-    let target_claim_hash = target_claim_hash(&attester_did, &target_did).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
-    let dag_node_hash = store
-        .next_claim_dag_node_hash(target_claim_hash, Timestamp::new(created_ms, 0))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Store error: {e}")})),
-            )
         })?;
-
-    let attestation = create_attestation(CreateAttestationInput {
-        attester_did: &attester_did,
-        target_did: &target_did,
-        attestation_type,
-        message_hash,
-        dag_node_hash,
-        created_ms,
-        attester_public_key,
-        signature,
-    })
-    .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
-    let target_claim =
-        build_target_claim(&attestation, dag_node_hash, created_ms).map_err(|e| {
+        let target_claim = build_target_claim(&attestation, dag_node_hash, created_ms).map_err(
+            |e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+            },
+        )?;
+        let claim_id = target_claim_id(&attestation).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?;
-    let claim_id = target_claim_id(&attestation).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
-    let evidence = store
-        .save_claim_with_evidence(&claim_id, &target_claim)
-        .map_err(|e| {
+        let evidence = store
+            .save_claim_with_evidence(&claim_id, &target_claim)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                )
+            })?;
+        store.insert_attestation(&attestation).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("Store error: {e}")})),
             )
         })?;
-    store.insert_attestation(&attestation).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Store error: {e}")})),
-        )
-    })?;
-    let receipt_hash = evidence.receipt_hash.ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Store error: verified attestation claim did not emit a trust receipt"})),
-        )
-    })?;
-    let receipt_hash = hex::encode(receipt_hash.as_bytes());
+        let receipt_hash = evidence.receipt_hash.ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Store error: verified attestation claim did not emit a trust receipt"})),
+            )
+        })?;
+        let receipt_hash = hex::encode(receipt_hash.as_bytes());
 
-    let att_id = attestation.attestation_id.clone();
-
-    Ok((
-        StatusCode::CREATED,
-        Json(AttestResponse {
-            attestation_id: att_id,
+        Ok(AttestResponse {
+            attestation_id: attestation.attestation_id.clone(),
             receipt_hash,
             attester_score_impact: serde_json::json!({
                 "network_reputation": format!("+{}", attester_score_impact())
@@ -825,8 +818,11 @@ pub async fn create_peer_attestation(
             target_score_impact: serde_json::json!({
                 "network_reputation": format!("+{}", target_score_impact())
             }),
-        }),
-    ))
+        })
+    })
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 // ---------------------------------------------------------------------------
@@ -865,7 +861,15 @@ pub async fn delete_identity(
     let did = parse_did(&did_str)?;
 
     let request_path = path_and_query(&uri);
-    let _token = verify_signed_write(&state, &headers, &did, "DELETE", &request_path, &body)?;
+    let _token = verify_signed_write_blocking(
+        state.clone(),
+        &headers,
+        did.clone(),
+        "DELETE",
+        request_path,
+        body.clone(),
+    )
+    .await?;
     let req: ErasureRequest = serde_json::from_slice(&body)
         .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))?;
     let erased_ms = req
@@ -875,13 +879,8 @@ pub async fn delete_identity(
         return Err(bad_request("erased_ms must be greater than 0"));
     }
 
-    let erasure_evidence = {
-        let mut store = state.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "lock poisoned"})),
-            )
-        })?;
+    let subject_did = did.to_string();
+    let erasure_evidence = with_store_blocking(state, move |store| {
         store
             .erase_did_with_evidence(&did, Timestamp::new(erased_ms, 0))
             .map_err(|e| {
@@ -889,13 +888,14 @@ pub async fn delete_identity(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": format!("Erasure failed: {e}")})),
                 )
-            })?
-    };
+            })
+    })
+    .await?;
 
     let receipt_hash = hex::encode(erasure_evidence.receipt_hash.as_bytes());
 
     Ok(Json(ErasureResponse {
-        subject_did: did.to_string(),
+        subject_did,
         claims_revoked: erasure_evidence.claims_revoked,
         receipt_hash,
         message: "Identity erased. All sessions revoked, claims marked Revoked, scores zeroed, fingerprints removed, DAG nodes tombstoned.".into(),
@@ -1022,6 +1022,34 @@ mod tests {
         assert!(!production.contains(".unwrap_or_default()"));
         assert!(!production.contains(".unwrap_or(false)"));
         assert!(!production.contains(".ok().flatten()"));
+    }
+
+    #[test]
+    fn api_async_handlers_use_blocking_store_access() {
+        let source = include_str!("api.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "0dentity API handlers must isolate synchronous store access from Tokio workers"
+        );
+
+        let handlers = production
+            .split("// GET /api/v1/0dentity/:did/score\n// ---------------------------------------------------------------------------")
+            .nth(1)
+            .and_then(|section| section.split("// ---------------------------------------------------------------------------\n// Router").next())
+            .unwrap();
+        assert!(
+            !handlers.contains("state.store.lock()"),
+            "0dentity async handlers must not lock the store mutex directly"
+        );
+        assert!(
+            !handlers.contains("verify_signed_write("),
+            "0dentity async handlers must use the blocking signed-write verifier"
+        );
     }
 
     #[test]
