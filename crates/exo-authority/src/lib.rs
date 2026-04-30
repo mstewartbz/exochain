@@ -3,6 +3,8 @@
 //! Authority chains track the delegation of permissions from root to leaf.
 //! Scope can only narrow through delegation, never widen.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod cache;
 pub mod chain;
 pub mod delegation;
