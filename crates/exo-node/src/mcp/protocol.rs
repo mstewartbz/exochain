@@ -118,12 +118,35 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
+pub const AI_OUTPUT_MARKING: &str = "exo-mcp-ai-generated-v1";
+pub const AI_OUTPUT_GENERATOR: &str = "exo-mcp";
+
+/// Metadata that marks MCP tool results as AI-generated protocol output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultMetadata {
+    pub output_marking: String,
+    pub generated_by: String,
+}
+
+impl ToolResultMetadata {
+    #[must_use]
+    pub fn ai_generated() -> Self {
+        Self {
+            output_marking: AI_OUTPUT_MARKING.to_owned(),
+            generated_by: AI_OUTPUT_GENERATOR.to_owned(),
+        }
+    }
+}
+
 /// MCP Tool call result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub content: Vec<ToolContent>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ToolResultMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +174,7 @@ impl ToolResult {
         Self {
             content: vec![ToolContent::Text { text: text.into() }],
             is_error: false,
+            metadata: Some(ToolResultMetadata::ai_generated()),
         }
     }
 
@@ -160,6 +184,7 @@ impl ToolResult {
         Self {
             content: vec![ToolContent::Text { text: text.into() }],
             is_error: true,
+            metadata: Some(ToolResultMetadata::ai_generated()),
         }
     }
 
@@ -450,12 +475,7 @@ mod tests {
 
     #[test]
     fn tool_result_no_error_skips_field() {
-        let result = ToolResult {
-            content: vec![ToolContent::Text {
-                text: "hello".into(),
-            }],
-            is_error: false,
-        };
+        let result = ToolResult::success("hello");
         let json = serde_json::to_string(&result).unwrap();
         assert!(!json.contains("is_error"));
         assert!(!json.contains("isError"));
@@ -463,12 +483,7 @@ mod tests {
 
     #[test]
     fn tool_result_with_error() {
-        let result = ToolResult {
-            content: vec![ToolContent::Text {
-                text: "error occurred".into(),
-            }],
-            is_error: true,
-        };
+        let result = ToolResult::error("error occurred");
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["is_error"], true);
     }

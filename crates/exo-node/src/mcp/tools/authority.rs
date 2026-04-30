@@ -295,7 +295,7 @@ fn parse_provenance(value: &Value) -> Result<Provenance, String> {
     })
 }
 
-fn parse_verified_adjudication_context(
+pub(crate) fn parse_verified_adjudication_context(
     context_value: &Value,
     actor: &Did,
 ) -> Result<AdjudicationContext, String> {

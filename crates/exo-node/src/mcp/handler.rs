@@ -18,8 +18,7 @@ use super::{
     protocol::{
         INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, InitializeParams, InitializeResult,
         JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR, PromptsCapability,
-        ResourcesCapability, ServerCapabilities, ServerInfo, ToolContent, ToolResult,
-        ToolsCapability,
+        ResourcesCapability, ServerCapabilities, ServerInfo, ToolResult, ToolsCapability,
     },
     resources::ResourceRegistry,
     tools::ToolRegistry,
@@ -273,13 +272,11 @@ impl McpServer {
             .unwrap_or_else(|| serde_json::json!({}));
 
         // Constitutional enforcement before tool execution.
-        if let Err(e) = self.middleware.enforce(&self.actor_did, tool_name) {
-            let error_result = ToolResult {
-                content: vec![ToolContent::Text {
-                    text: format!("Constitutional enforcement failed: {e}"),
-                }],
-                is_error: true,
-            };
+        if let Err(e) = self
+            .middleware
+            .enforce_tool_call(&self.actor_did, tool_name, params)
+        {
+            let error_result = ToolResult::error(format!("Constitutional enforcement failed: {e}"));
             return match serde_json::to_value(&error_result) {
                 Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
                 Err(ser_err) => JsonRpcResponse::error(
@@ -304,12 +301,7 @@ impl McpServer {
                 ),
             },
             Err(McpError::ToolNotFound(name)) => {
-                let error_result = ToolResult {
-                    content: vec![ToolContent::Text {
-                        text: format!("Tool not found: {name}"),
-                    }],
-                    is_error: true,
-                };
+                let error_result = ToolResult::error(format!("Tool not found: {name}"));
                 match serde_json::to_value(&error_result) {
                     Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
                     Err(ser_err) => JsonRpcResponse::error(
@@ -492,6 +484,7 @@ impl McpServer {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::mcp::protocol::{AI_OUTPUT_GENERATOR, AI_OUTPUT_MARKING};
 
     fn test_server() -> McpServer {
         let did = Did::new("did:exo:test-ai-agent").expect("valid DID");
@@ -504,6 +497,92 @@ mod tests {
             public_key,
             Arc::new(move |message: &[u8]| exo_core::crypto::sign(message, &secret_key)),
         )
+    }
+
+    fn constitutional_context(actor_did: &str, action: &str) -> Value {
+        let actor = Did::new(actor_did).expect("valid DID");
+        let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x4D; 32]).unwrap();
+        let public_key = *keypair.public_key();
+        let secret_key = keypair.secret_key().clone();
+        let public_key_hex = hex::encode(public_key.as_bytes());
+        let permissions = ["mcp:tool_call"];
+
+        let mut authority_payload = Vec::new();
+        authority_payload.extend_from_slice(actor.as_str().as_bytes());
+        authority_payload.push(0x00);
+        authority_payload.extend_from_slice(actor.as_str().as_bytes());
+        authority_payload.push(0x00);
+        for permission in &permissions {
+            authority_payload.extend_from_slice(permission.as_bytes());
+            authority_payload.push(0x00);
+        }
+        let authority_message = exo_core::Hash256::digest(&authority_payload);
+        let authority_signature = exo_core::crypto::sign(authority_message.as_bytes(), &secret_key);
+
+        let timestamp = exo_core::Timestamp::new(1_777_000_000_000, 7).to_string();
+        let action_hash = exo_core::Hash256::digest(action.as_bytes());
+        let mut provenance_payload = Vec::new();
+        provenance_payload.extend_from_slice(actor.as_str().as_bytes());
+        provenance_payload.push(0x00);
+        provenance_payload.extend_from_slice(action_hash.as_bytes());
+        provenance_payload.push(0x00);
+        provenance_payload.extend_from_slice(timestamp.as_bytes());
+        let provenance_message = exo_core::Hash256::digest(&provenance_payload);
+        let provenance_signature =
+            exo_core::crypto::sign(provenance_message.as_bytes(), &secret_key);
+
+        serde_json::json!({
+            "bcts_scope": action,
+            "capabilities": ["mcp:tool_call"],
+            "output_marking": AI_OUTPUT_MARKING,
+            "forging_identity": false,
+            "self_escalation": false,
+            "adjudication_context": {
+                "actor_roles": [
+                    { "name": "mcp-agent", "branch": "Judicial" }
+                ],
+                "authority_chain": [
+                    {
+                        "grantor": actor.as_str(),
+                        "grantee": actor.as_str(),
+                        "permissions": permissions,
+                        "signature": hex::encode(authority_signature.to_bytes()),
+                        "grantor_public_key": public_key_hex,
+                    }
+                ],
+                "consent_records": [
+                    {
+                        "subject": actor.as_str(),
+                        "granted_to": actor.as_str(),
+                        "scope": "mcp:tools",
+                        "active": true,
+                    }
+                ],
+                "bailment_state": {
+                    "state": "Active",
+                    "bailor": actor.as_str(),
+                    "bailee": actor.as_str(),
+                    "scope": "mcp:tools",
+                },
+                "human_override_preserved": true,
+                "actor_permissions": ["mcp:tool_call"],
+                "provenance": {
+                    "actor": actor.as_str(),
+                    "timestamp": timestamp,
+                    "action_hash": hex::encode(action_hash.as_bytes()),
+                    "signature": hex::encode(provenance_signature.to_bytes()),
+                    "public_key": public_key_hex,
+                }
+            }
+        })
+    }
+
+    fn tool_call_params(name: &str, arguments: Value) -> Value {
+        serde_json::json!({
+            "name": name,
+            "arguments": arguments,
+            "constitutional_context": constitutional_context("did:exo:test-ai-agent", name),
+        })
     }
 
     #[test]
@@ -573,10 +652,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {
-                "name": "exochain_node_status",
-                "arguments": {}
-            }
+            "params": tool_call_params("exochain_node_status", serde_json::json!({}))
         })
         .to_string();
 
@@ -600,10 +676,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 4,
             "method": "tools/call",
-            "params": {
-                "name": "nonexistent_tool",
-                "arguments": {}
-            }
+            "params": tool_call_params("nonexistent_tool", serde_json::json!({}))
         })
         .to_string();
 
@@ -921,10 +994,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 10,
             "method": "tools/call",
-            "params": {
-                "name": "exochain_list_invariants",
-                "arguments": {}
-            }
+            "params": tool_call_params("exochain_list_invariants", serde_json::json!({}))
         })
         .to_string();
 
@@ -943,10 +1013,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 11,
             "method": "tools/call",
-            "params": {
-                "name": "exochain_list_mcp_rules",
-                "arguments": {}
-            }
+            "params": tool_call_params("exochain_list_mcp_rules", serde_json::json!({}))
         })
         .to_string();
 
@@ -956,5 +1023,24 @@ mod tests {
         let result = parsed.result.unwrap();
         // is_error is skipped when false, so the field is absent.
         assert!(result.get("is_error").is_none() || result["is_error"] == false);
+    }
+
+    #[test]
+    fn handler_tools_call_marks_result_as_ai_generated() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": tool_call_params("exochain_list_mcp_rules", serde_json::json!({}))
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.unwrap();
+        assert_eq!(result["metadata"]["generatedBy"], AI_OUTPUT_GENERATOR);
+        assert_eq!(result["metadata"]["outputMarking"], AI_OUTPUT_MARKING);
     }
 }
