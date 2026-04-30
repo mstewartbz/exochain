@@ -5,6 +5,8 @@
 //!   2. Vote handler MUST call `Kernel::adjudicate` and gate on `Verdict::Permitted` (TNC-01)
 //!   3. `write_audit` MUST use `ciborium::into_writer` before blake3, not serde_json (TransparencyAccountability)
 
+use std::io::{self, Write};
+
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use decision_forum::{
     decision_object::{ActorKind, DecisionObject, Vote, VoteChoice},
@@ -26,14 +28,61 @@ use crate::server::AppState;
 
 // ── Violation 3 fix: CBOR canonical hashing ──────────────────────────────
 
+const MAX_CANONICAL_CBOR_HASH_BYTES: usize = 64 * 1024;
+
+struct CanonicalHashWriter {
+    hasher: blake3::Hasher,
+    bytes_written: usize,
+}
+
+impl CanonicalHashWriter {
+    fn new() -> Self {
+        Self {
+            hasher: blake3::Hasher::new(),
+            bytes_written: 0,
+        }
+    }
+
+    fn finalize(self) -> blake3::Hash {
+        self.hasher.finalize()
+    }
+}
+
+impl Write for CanonicalHashWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let next = self.bytes_written.checked_add(buf.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical CBOR payload size overflowed hash budget accounting",
+            )
+        })?;
+        if next > MAX_CANONICAL_CBOR_HASH_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "canonical CBOR payload exceeds {MAX_CANONICAL_CBOR_HASH_BYTES} byte hash budget"
+                ),
+            ));
+        }
+
+        self.hasher.update(buf);
+        self.bytes_written = next;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Serialize `payload` using canonical CBOR then hash with blake3.
 /// This is deterministic across all deployments regardless of field insertion order.
 /// NEVER replace with serde_json::to_vec — JSON key ordering is non-deterministic.
 fn canonical_cbor_hash(payload: &impl Serialize) -> Result<blake3::Hash, String> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(payload, &mut buf)
+    let mut writer = CanonicalHashWriter::new();
+    ciborium::into_writer(payload, &mut writer)
         .map_err(|e| format!("CBOR serialization failed: {e}"))?;
-    Ok(blake3::hash(&buf))
+    Ok(writer.finalize())
 }
 
 fn canonical_hash(payload: &Value) -> Result<blake3::Hash, String> {
@@ -629,6 +678,18 @@ mod tests {
         let json_bytes = serde_json::to_vec(&payload).expect("json ok");
         let json_hash = blake3::hash(&json_bytes);
         assert_ne!(cbor_hash, json_hash, "CBOR and JSON hashes must differ");
+    }
+
+    #[test]
+    fn canonical_hash_rejects_payloads_above_hash_budget() {
+        let payload = serde_json::json!({"event": "vote_recorded", "body": "x".repeat(70_000)});
+        let err = canonical_hash(&payload)
+            .expect_err("oversized CBOR payload must be rejected before unbounded buffering");
+
+        assert!(
+            err.contains("canonical CBOR payload exceeds"),
+            "error should identify the canonical CBOR hash budget: {err}"
+        );
     }
 
     #[test]
