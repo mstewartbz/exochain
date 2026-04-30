@@ -80,8 +80,8 @@ pub fn verify_did_signature(
     }
 
     // Decode multibase base58btc public key (prefix 'z')
-    let pub_key_bytes = if method.public_key_multibase.starts_with('z') {
-        bs58::decode(&method.public_key_multibase[1..])
+    let pub_key_bytes = if let Some(encoded_key) = method.public_key_multibase.strip_prefix('z') {
+        bs58::decode(encoded_key)
             .into_vec()
             .map_err(|e| DidVerificationError::CryptoError(format!("base58 decode: {e}")))?
     } else {
@@ -134,13 +134,18 @@ pub fn rotate_verification_key(
         .position(|m| m.id == old_key_id)
         .ok_or_else(|| DidVerificationError::MethodNotFound(old_key_id.to_string()))?;
 
-    // Deactivate old key
     let old_version = doc.verification_methods[old_method_idx].version;
+    let new_version = old_version.checked_add(1).ok_or_else(|| {
+        DidVerificationError::CryptoError(format!(
+            "verification method version overflow for key {old_key_id}"
+        ))
+    })?;
+
+    // Deactivate old key
     doc.verification_methods[old_method_idx].active = false;
     doc.verification_methods[old_method_idx].revoked_at = Some(current_time_ms);
 
     // Create new method with incremented version
-    let new_version = old_version + 1;
     let new_id = format!("{}#key-{}", doc.id, new_version);
     let multibase = format!("z{}", bs58::encode(new_public_key).into_string());
 
@@ -322,6 +327,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DidVerificationError::MethodNotFound(_)));
+    }
+
+    #[test]
+    fn rotate_key_version_overflow_fails_without_mutating_document() {
+        let (pk, _sk) = generate_keypair();
+        let did = test_did();
+        let mut doc = make_doc_with_verification(did.clone(), pk);
+        doc.verification_methods[0].version = u64::MAX;
+        let original_doc = doc.clone();
+
+        let (new_pk, _) = generate_keypair();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rotate_verification_key(
+                &mut doc,
+                &format!("{}#key-1", did),
+                new_pk.as_bytes(),
+                &did,
+                2000,
+            )
+        }));
+
+        assert!(
+            result.is_ok(),
+            "version overflow must return an error instead of panicking"
+        );
+        let rotation_result = match result {
+            Ok(rotation_result) => rotation_result,
+            Err(_) => unreachable!("asserted above"),
+        };
+        assert!(
+            matches!(
+                rotation_result,
+                Err(DidVerificationError::CryptoError(ref reason))
+                    if reason.contains("version overflow")
+            ),
+            "unexpected rotation result: {rotation_result:?}"
+        );
+        assert_eq!(
+            doc, original_doc,
+            "failed rotation must not revoke the old key or append a replacement"
+        );
+    }
+
+    #[test]
+    fn multibase_decoding_uses_prefix_stripping_instead_of_byte_slicing() {
+        let source = include_str!("did_verification.rs");
+        let direct_slice = concat!("public_key_multibase", "[1..]");
+        assert!(
+            source.contains("strip_prefix('z')"),
+            "multibase decoding should strip the ASCII prefix without direct byte slicing"
+        );
+        assert!(
+            !source.contains(direct_slice),
+            "multibase decoding must not slice the key string by byte index"
+        );
     }
 
     #[test]
