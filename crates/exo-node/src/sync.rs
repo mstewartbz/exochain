@@ -33,6 +33,27 @@ use crate::{
     },
 };
 
+const MAX_SNAPSHOT_CHUNK_SIZE: u32 = 500;
+
+fn normalized_snapshot_chunk_size(chunk_size: u32) -> u32 {
+    chunk_size.clamp(1, MAX_SNAPSHOT_CHUNK_SIZE)
+}
+
+fn next_sync_from_height(local_height: u64) -> anyhow::Result<u64> {
+    local_height
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("cannot advance committed height past u64::MAX"))
+}
+
+fn snapshot_chunk_to_height(current_from: u64, chunk_size: u32, local_height: u64) -> u64 {
+    let span = u64::from(normalized_snapshot_chunk_size(chunk_size)).saturating_sub(1);
+    current_from.saturating_add(span).min(local_height)
+}
+
+fn next_snapshot_from_height(to_height: u64) -> Option<u64> {
+    to_height.checked_add(1)
+}
+
 // ---------------------------------------------------------------------------
 // Sync configuration
 // ---------------------------------------------------------------------------
@@ -129,11 +150,12 @@ impl SyncEngine {
 
         tracing::info!(local_height, "Requesting state snapshot from network");
 
+        let from_height = next_sync_from_height(local_height)?;
         self.syncing = true;
 
         let request = WireMessage::StateSnapshotRequest(StateSnapshotRequestMsg {
             sender: self.config.node_did.clone(),
-            from_height: local_height + 1,
+            from_height,
             chunk_size: self.config.chunk_size,
         });
 
@@ -226,10 +248,10 @@ impl SyncEngine {
 
         // Send committed nodes in chunks.
         let mut current_from = msg.from_height;
-        let chunk_size = msg.chunk_size.max(1).min(500); // Clamp to [1, 500]
+        let chunk_size = normalized_snapshot_chunk_size(msg.chunk_size);
 
         loop {
-            let to_height = (current_from + u64::from(chunk_size) - 1).min(local_height);
+            let to_height = snapshot_chunk_to_height(current_from, chunk_size, local_height);
 
             let nodes = match with_store_blocking(
                 Arc::clone(&self.store),
@@ -291,7 +313,11 @@ impl SyncEngine {
             if !has_more {
                 break;
             }
-            current_from = to_height + 1;
+            let Some(next_from) = next_snapshot_from_height(to_height) else {
+                tracing::warn!(to_height, "Snapshot range cannot advance without overflow");
+                break;
+            };
+            current_from = next_from;
         }
     }
 
@@ -613,6 +639,26 @@ mod tests {
             !production.contains("self.store.lock()"),
             "async sync-engine paths must not directly block on the store mutex"
         );
+    }
+
+    #[test]
+    fn next_sync_from_height_rejects_u64_max() {
+        let err = next_sync_from_height(u64::MAX).expect_err("u64::MAX cannot advance");
+
+        assert!(err.to_string().contains("cannot advance committed height"));
+    }
+
+    #[test]
+    fn snapshot_chunk_to_height_saturates_without_overflow() {
+        let to_height = snapshot_chunk_to_height(u64::MAX - 1, 500, u64::MAX);
+
+        assert_eq!(to_height, u64::MAX);
+    }
+
+    #[test]
+    fn next_snapshot_from_height_rejects_u64_max() {
+        assert_eq!(next_snapshot_from_height(u64::MAX), None);
+        assert_eq!(next_snapshot_from_height(41), Some(42));
     }
 
     /// Build a store with `n` committed DAG nodes and return it.
