@@ -213,8 +213,8 @@ pub struct ConsensusState {
     pub pending: BTreeMap<u64, BTreeMap<Hash256, Vec<Vote>>>,
     /// Committed certificates.
     pub certificates: BTreeMap<Hash256, CommitCertificate>,
-    /// Track which validators have voted in each round to prevent double-voting.
-    pub voted_in_round: BTreeMap<u64, BTreeSet<Did>>,
+    /// Track each validator's voted node per round to detect equivocation.
+    pub voted_in_round: BTreeMap<u64, BTreeMap<Did, Hash256>>,
 }
 
 impl ConsensusState {
@@ -235,6 +235,27 @@ impl ConsensusState {
     pub fn advance_round(&mut self) {
         self.current_round += 1;
     }
+}
+
+fn record_vote_target(state: &mut ConsensusState, vote: &Vote) -> Result<()> {
+    let round_votes = state.voted_in_round.entry(vote.round).or_default();
+    if let Some(first_node) = round_votes.get(&vote.voter) {
+        if *first_node == vote.node_hash {
+            return Err(DagError::DuplicateVote {
+                voter: vote.voter.to_string(),
+                round: vote.round,
+            });
+        }
+        return Err(DagError::EquivocationDetected {
+            voter: vote.voter.to_string(),
+            round: vote.round,
+            first_node: *first_node,
+            conflicting_node: vote.node_hash,
+        });
+    }
+
+    round_votes.insert(vote.voter.clone(), vote.node_hash);
+    Ok(())
 }
 
 /// Propose a node for commitment.
@@ -288,15 +309,7 @@ pub fn vote(state: &mut ConsensusState, v: Vote) -> Result<()> {
         });
     }
 
-    let round_voters = state.voted_in_round.entry(v.round).or_default();
-    if round_voters.contains(&v.voter) {
-        return Err(DagError::DuplicateVote {
-            voter: v.voter.to_string(),
-            round: v.round,
-        });
-    }
-
-    round_voters.insert(v.voter.clone());
+    record_vote_target(state, &v)?;
 
     state
         .pending
@@ -445,15 +458,7 @@ pub fn vote_verified<R: PublicKeyResolver>(
         return Err(DagError::InvalidSignature(v.node_hash));
     }
 
-    let round_voters = state.voted_in_round.entry(v.round).or_default();
-    if round_voters.contains(&v.voter) {
-        return Err(DagError::DuplicateVote {
-            voter: v.voter.to_string(),
-            round: v.round,
-        });
-    }
-
-    round_voters.insert(v.voter.clone());
+    record_vote_target(state, &v)?;
 
     state
         .pending
@@ -1464,7 +1469,7 @@ mod tests {
         assert!(state.pending.get(&0).is_none_or(|m| m.is_empty()));
     }
 
-    // Covers vote_verified lines 437-440: duplicate vote by same voter in same round.
+    // Covers vote_verified duplicate rejection: retransmitting the same vote in the same round.
     #[test]
     fn vote_verified_rejects_duplicate_vote_same_round() {
         let (pk_a, sk_a) = crypto::generate_keypair();
@@ -1473,19 +1478,57 @@ mod tests {
         vs.insert(a.clone());
         let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
         let (n1, _, _) = make_node("x");
-        let (n2, _, _) = make_node("y");
         let resolver = |_d: &Did| Some(pk_a);
         // First vote succeeds.
         let v1 = signed_vote(&a, 0, n1.hash, &sk_a);
         assert!(vote_verified(&mut state, v1, &resolver).is_ok());
-        // Second signed vote in the same round — even for a different
-        // node — must be rejected as a duplicate.
-        let v2 = signed_vote(&a, 0, n2.hash, &sk_a);
+        // Same signed vote in the same round is a duplicate retransmission.
+        let v2 = signed_vote(&a, 0, n1.hash, &sk_a);
         let res = vote_verified(&mut state, v2, &resolver);
         assert!(matches!(res, Err(DagError::DuplicateVote { .. })));
         // Only the first vote is recorded.
         let voters = state.voted_in_round.get(&0).expect("round tracked");
         assert_eq!(voters.len(), 1);
+    }
+
+    #[test]
+    fn vote_verified_detects_equivocation_for_different_node_same_round() {
+        let (pk_a, sk_a) = crypto::generate_keypair();
+        let a = Did::new("did:exo:alice").unwrap();
+        let mut vs = BTreeSet::new();
+        vs.insert(a.clone());
+        let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
+        let (n1, _, _) = make_node("x");
+        let (n2, _, _) = make_node("y");
+        let resolver = |_d: &Did| Some(pk_a);
+
+        let first = signed_vote(&a, 0, n1.hash, &sk_a);
+        assert!(vote_verified(&mut state, first, &resolver).is_ok());
+        let conflicting = signed_vote(&a, 0, n2.hash, &sk_a);
+        let res = vote_verified(&mut state, conflicting, &resolver);
+
+        assert!(matches!(
+            res,
+            Err(DagError::EquivocationDetected {
+                round: 0,
+                first_node,
+                conflicting_node,
+                ..
+            }) if first_node == n1.hash && conflicting_node == n2.hash
+        ));
+        assert!(
+            state
+                .voted_in_round
+                .get(&0)
+                .is_some_and(|votes| votes.get(&a) == Some(&n1.hash))
+        );
+        assert!(
+            state
+                .pending
+                .get(&0)
+                .and_then(|round| round.get(&n2.hash))
+                .is_none_or(Vec::is_empty)
+        );
     }
 
     // Covers commit_verified line 478: a vote in the cert is not from a validator.

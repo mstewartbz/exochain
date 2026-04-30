@@ -23,6 +23,16 @@ pub enum DagError {
     #[error("duplicate vote from {voter} in round {round}")]
     DuplicateVote { voter: String, round: u64 },
 
+    #[error(
+        "equivocation detected for {voter} in round {round}: first node {first_node}, conflicting node {conflicting_node}"
+    )]
+    EquivocationDetected {
+        voter: String,
+        round: u64,
+        first_node: Hash256,
+        conflicting_node: Hash256,
+    },
+
     #[error("voter {0} is not a validator")]
     NotAValidator(String),
 
