@@ -1,6 +1,7 @@
 //! Identity bindings: DID management, PACE continuity, risk assessment, Shamir
 
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
@@ -14,14 +15,18 @@ struct RiskAssessmentMetadata {
 }
 
 fn parse_secret_key_hex(label: &str, value: &str) -> Result<exo_core::SecretKey, JsValue> {
-    let bytes = hex::decode(value).map_err(|e| JsValue::from_str(&format!("{label}: {e}")))?;
+    let bytes = Zeroizing::new(
+        hex::decode(value).map_err(|e| JsValue::from_str(&format!("{label}: {e}")))?,
+    );
     let arr: [u8; 32] = bytes
+        .as_slice()
         .try_into()
         .map_err(|_| JsValue::from_str(&format!("{label} must be 32 bytes")))?;
     if arr.iter().all(|byte| *byte == 0) {
         return Err(JsValue::from_str(&format!("{label} must not be all-zero")));
     }
-    Ok(exo_core::SecretKey::from_bytes(arr))
+    let arr = Zeroizing::new(arr);
+    Ok(exo_core::SecretKey::from_bytes(*arr))
 }
 
 fn parse_public_key_hex(label: &str, value: &str) -> Result<exo_core::PublicKey, JsValue> {
@@ -128,25 +133,27 @@ pub fn wasm_assess_risk(
     let attester = exo_core::Did::new(attester_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let level: exo_identity::risk::RiskLevel = from_json_str(level_json)?;
-    let metadata: RiskAssessmentMetadata = from_json_str(metadata_json)?;
-    if metadata.validity_ms == 0 {
+    let RiskAssessmentMetadata {
+        validity_ms,
+        attester_secret_hex,
+        now_physical_ms,
+        now_logical,
+    } = from_json_str(metadata_json)?;
+    let attester_secret_hex = Zeroizing::new(attester_secret_hex);
+    if validity_ms == 0 {
         return Err(JsValue::from_str("validity_ms must be positive"));
     }
-    let now = parse_timestamp(
-        metadata.now_physical_ms,
-        metadata.now_logical,
-        "risk attestation",
-    )?;
+    let now = parse_timestamp(now_physical_ms, now_logical, "risk attestation")?;
     now.physical_ms
-        .checked_add(metadata.validity_ms)
+        .checked_add(validity_ms)
         .ok_or_else(|| JsValue::from_str("risk attestation expiry timestamp overflows u64"))?;
-    let secret_key = parse_secret_key_hex("attester_secret_hex", &metadata.attester_secret_hex)?;
+    let secret_key = parse_secret_key_hex("attester_secret_hex", &attester_secret_hex)?;
 
     let context = exo_identity::risk::RiskContext {
         attester_did: attester,
         evidence: evidence.to_vec(),
         now,
-        validity_ms: metadata.validity_ms,
+        validity_ms,
         level,
     };
 

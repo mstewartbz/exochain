@@ -1,6 +1,7 @@
 //! Core bindings: crypto, hashing, BCTS state machine, events, HLC
 
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
@@ -47,6 +48,28 @@ fn parse_hash256_array(
             Ok(exo_core::Hash256::from_bytes(arr))
         })
         .collect()
+}
+
+fn parse_ed25519_secret_array_hex(
+    label: &str,
+    secret_hex: &str,
+) -> Result<Zeroizing<[u8; 32]>, JsValue> {
+    let secret_bytes = Zeroizing::new(
+        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?,
+    );
+    let arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!("{label} must be 32 bytes")))?;
+    Ok(Zeroizing::new(arr))
+}
+
+fn parse_ed25519_signing_seed_hex(
+    label: &str,
+    secret_hex: &str,
+) -> Result<exo_core::SecretKey, JsValue> {
+    let secret_arr = parse_ed25519_secret_array_hex(label, secret_hex)?;
+    Ok(exo_core::SecretKey::from_bytes(*secret_arr))
 }
 
 // ── Hashing ──────────────────────────────────────────────────────
@@ -123,12 +146,7 @@ pub fn wasm_sign_with_ephemeral_key(message: &[u8]) -> Result<JsValue, JsValue> 
 
 #[wasm_bindgen]
 pub fn wasm_sign(message: &[u8], secret_hex: &str) -> Result<String, JsValue> {
-    let secret_bytes =
-        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = secret_bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("secret key must be 32 bytes"))?;
-    let secret = exo_core::SecretKey::from_bytes(arr);
+    let secret = parse_ed25519_signing_seed_hex("secret key", secret_hex)?;
     let sig = exo_core::crypto::sign(message, &secret);
     let sig_json =
         serde_json::to_string(&sig).map_err(|e| JsValue::from_str(&format!("serialize: {e}")))?;
@@ -137,12 +155,8 @@ pub fn wasm_sign(message: &[u8], secret_hex: &str) -> Result<String, JsValue> {
 
 #[wasm_bindgen]
 pub fn wasm_ed25519_public_from_secret(secret_hex: &str) -> Result<String, JsValue> {
-    let secret_bytes =
-        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = secret_bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("secret key must be 32 bytes"))?;
-    let keypair = exo_core::crypto::KeyPair::from_secret_bytes(arr)
+    let secret_arr = parse_ed25519_secret_array_hex("secret key", secret_hex)?;
+    let keypair = exo_core::crypto::KeyPair::from_secret_bytes(*secret_arr)
         .map_err(|e| JsValue::from_str(&format!("keypair: {e}")))?;
     Ok(hex::encode(keypair.public_key().as_bytes()))
 }
@@ -314,12 +328,7 @@ pub fn wasm_create_signed_event(
     let event_type: exo_core::events::EventType = from_json_str(event_type_json)?;
     let did = exo_core::Did::new(source_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-    let secret_bytes =
-        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = secret_bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("secret key must be 32 bytes"))?;
-    let secret = exo_core::SecretKey::from_bytes(arr);
+    let secret = parse_ed25519_signing_seed_hex("secret key", secret_hex)?;
 
     let corr = caller_event_id(event_id)?;
     let ts = caller_timestamp(timestamp_physical_ms, timestamp_logical, "event timestamp")?;

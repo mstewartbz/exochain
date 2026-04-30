@@ -225,4 +225,35 @@ mod source_guard_tests {
             "WASM Merkle verification must cap caller-supplied proof arrays"
         );
     }
+
+    #[test]
+    fn wasm_secret_key_decoding_zeroizes_rust_owned_buffers() {
+        let sources = [
+            ("core_bindings.rs", include_str!("core_bindings.rs")),
+            ("identity_bindings.rs", include_str!("identity_bindings.rs")),
+            (
+                "messaging_bindings.rs",
+                include_str!("messaging_bindings.rs"),
+            ),
+        ];
+
+        for (path, source) in sources {
+            assert!(
+                source.contains("Zeroizing"),
+                "{path} must wrap decoded secret-key buffers in zeroize::Zeroizing"
+            );
+        }
+
+        let core = include_str!("core_bindings.rs");
+        assert!(
+            core.contains("parse_ed25519_signing_seed_hex"),
+            "core WASM signing functions must share a zeroizing Ed25519 signing-seed parser"
+        );
+
+        let messaging = include_str!("messaging_bindings.rs");
+        assert!(
+            messaging.contains("parse_ed25519_signing_seed_hex"),
+            "messaging WASM encryption must use a zeroizing Ed25519 signing-seed parser"
+        );
+    }
 }
