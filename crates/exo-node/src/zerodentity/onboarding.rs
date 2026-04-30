@@ -233,12 +233,13 @@ fn derive_resend_secret(
     challenge: &OtpChallenge,
     now_ms: u64,
 ) -> Result<[u8; 32], (StatusCode, Json<serde_json::Value>)> {
-    let mut mac = HmacSha256::new_from_slice(&challenge.hmac_secret).map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "OTP resend secret derivation failed",
-        )
-    })?;
+    let mut mac =
+        HmacSha256::new_from_slice(challenge.hmac_secret.expose_secret()).map_err(|_| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "OTP resend secret derivation failed",
+            )
+        })?;
     mac.update(OTP_RESEND_DERIVATION_DOMAIN);
     mac.update(challenge.challenge_id.as_bytes());
     mac.update(challenge.subject_did.as_str().as_bytes());
@@ -563,7 +564,7 @@ pub async fn verify_otp(
                     &challenge.subject_did,
                     &bootstrap.public_key,
                     &bootstrap.signature,
-                    &challenge.hmac_secret,
+                    challenge.hmac_secret.expose_secret(),
                 )
                 .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
                 let session = IdentitySession {

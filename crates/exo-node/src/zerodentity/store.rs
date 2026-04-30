@@ -831,7 +831,7 @@ mod tests {
 
     use super::*;
     use crate::zerodentity::types::{
-        ClaimStatus, ClaimType, IdentityClaim, PolarAxes, ZerodentityScore,
+        ClaimStatus, ClaimType, IdentityClaim, OtpHmacSecret, PolarAxes, ZerodentityScore,
     };
 
     fn did(s: &str) -> Did {
@@ -840,6 +840,10 @@ mod tests {
 
     fn h() -> Hash256 {
         Hash256::digest(b"t")
+    }
+
+    fn otp_secret(seed: u8) -> OtpHmacSecret {
+        OtpHmacSecret::new([seed; 32]).unwrap()
     }
 
     fn signed_store(seed: u8) -> (ZerodentityStore, Did, PublicKey) {
@@ -1175,7 +1179,7 @@ mod tests {
             challenge_id: "ch-001".to_string(),
             subject_did: d,
             channel: OtpChannel::Email,
-            hmac_secret: [0u8; 32],
+            hmac_secret: otp_secret(1),
             dispatched_ms: 1_000_000,
             ttl_ms: 600_000,
             attempts: 0,
@@ -1375,7 +1379,7 @@ mod tests {
             challenge_id: "exp-001".into(),
             subject_did: d.clone(),
             channel: OtpChannel::Email,
-            hmac_secret: [0u8; 32],
+            hmac_secret: otp_secret(2),
             dispatched_ms: 1_000_000,
             ttl_ms: 300_000, // 5 min
             attempts: 0,
@@ -1389,7 +1393,7 @@ mod tests {
             challenge_id: "fresh-001".into(),
             subject_did: d.clone(),
             channel: OtpChannel::Sms,
-            hmac_secret: [0u8; 32],
+            hmac_secret: otp_secret(3),
             dispatched_ms: 100_000_000, // far future
             ttl_ms: 300_000,
             attempts: 0,
@@ -1403,7 +1407,7 @@ mod tests {
             challenge_id: "ver-001".into(),
             subject_did: d,
             channel: OtpChannel::Email,
-            hmac_secret: [0u8; 32],
+            hmac_secret: otp_secret(4),
             dispatched_ms: 1_000_000,
             ttl_ms: 300_000,
             attempts: 1,

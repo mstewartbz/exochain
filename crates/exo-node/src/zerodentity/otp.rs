@@ -12,11 +12,14 @@
 use exo_core::types::{Did, Hash256};
 use hmac::{Hmac, Mac};
 #[cfg(any(test, feature = "unaudited-zerodentity-first-touch-onboarding"))]
-use rand::RngCore;
+use rand::{CryptoRng, RngCore};
 use sha2::Sha256;
 use thiserror::Error;
+use zeroize::Zeroize;
+#[cfg(any(test, feature = "unaudited-zerodentity-first-touch-onboarding"))]
+use zeroize::Zeroizing;
 
-use super::types::{OtpChallenge, OtpChannel, OtpState};
+use super::types::{OtpChallenge, OtpChannel, OtpHmacSecret, OtpState};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -80,17 +83,19 @@ impl OtpChallenge {
     /// - `now_ms`: current epoch time in milliseconds (from HLC)
     /// - `rng`: caller-provided RNG (must not be `SystemRng` in test contexts)
     #[cfg(any(test, feature = "unaudited-zerodentity-first-touch-onboarding"))]
-    pub fn new(
+    pub fn new<R>(
         subject_did: &Did,
         channel: OtpChannel,
         now_ms: u64,
-        rng: &mut dyn RngCore,
-    ) -> Result<(Self, String), OtpError> {
-        // Generate 32-byte HMAC secret
-        let mut secret = [0u8; 32];
-        rng.fill_bytes(&mut secret);
+        rng: &mut R,
+    ) -> Result<(Self, String), OtpError>
+    where
+        R: RngCore + CryptoRng + ?Sized,
+    {
+        let mut secret = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(secret.as_mut());
 
-        Self::from_secret(subject_did, channel, now_ms, secret)
+        Self::from_zeroizing_secret(subject_did, channel, now_ms, secret)
     }
 
     /// Create an OTP challenge from caller-supplied HMAC secret material.
@@ -103,19 +108,40 @@ impl OtpChallenge {
         now_ms: u64,
         hmac_secret: [u8; 32],
     ) -> Result<(Self, String), OtpError> {
-        if hmac_secret == [0u8; 32] {
-            return Err(OtpError::InvalidSecret);
-        }
+        let hmac_secret = OtpHmacSecret::new(hmac_secret).ok_or(OtpError::InvalidSecret)?;
 
-        let code = derive_code(&hmac_secret, subject_did.as_str(), now_ms)?;
+        Self::from_wrapped_secret(subject_did, channel, now_ms, hmac_secret)
+    }
+
+    #[cfg(any(test, feature = "unaudited-zerodentity-first-touch-onboarding"))]
+    fn from_zeroizing_secret(
+        subject_did: &Did,
+        channel: OtpChannel,
+        now_ms: u64,
+        hmac_secret: Zeroizing<[u8; 32]>,
+    ) -> Result<(Self, String), OtpError> {
+        let hmac_secret =
+            OtpHmacSecret::from_zeroizing(hmac_secret).ok_or(OtpError::InvalidSecret)?;
+
+        Self::from_wrapped_secret(subject_did, channel, now_ms, hmac_secret)
+    }
+
+    fn from_wrapped_secret(
+        subject_did: &Did,
+        channel: OtpChannel,
+        now_ms: u64,
+        hmac_secret: OtpHmacSecret,
+    ) -> Result<(Self, String), OtpError> {
+        let code = derive_code(hmac_secret.expose_secret(), subject_did.as_str(), now_ms)?;
         let code_str = format!("{code:06}");
 
         // Derive challenge_id from BLAKE3 of (subject_did || now_ms || secret)
         let mut id_input = Vec::with_capacity(100);
         id_input.extend_from_slice(subject_did.as_str().as_bytes());
         id_input.extend_from_slice(&now_ms.to_le_bytes());
-        id_input.extend_from_slice(&hmac_secret);
+        id_input.extend_from_slice(hmac_secret.expose_secret());
         let id_hash = Hash256::digest(&id_input);
+        id_input.zeroize();
         let challenge_id = hex::encode(id_hash.as_bytes());
         let ttl_ms = channel.ttl_ms();
 
@@ -173,7 +199,7 @@ impl OtpChallenge {
 
         // Derive expected code
         let expected = match derive_code(
-            &self.hmac_secret,
+            self.hmac_secret.expose_secret(),
             self.subject_did.as_str(),
             self.dispatched_ms, // use dispatched_ms, not now_ms — code was derived at creation
         ) {
@@ -243,11 +269,11 @@ fn derive_code(secret: &[u8; 32], subject_did: &str, dispatched_ms: u64) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use rand::{SeedableRng, rngs::StdRng};
+    use rand::{CryptoRng, RngCore, SeedableRng, rngs::StdRng};
 
     use super::*;
 
-    fn test_rng() -> impl RngCore {
+    fn test_rng() -> impl RngCore + CryptoRng {
         // Seeded RNG for reproducible tests
         StdRng::seed_from_u64(0xDEAD_BEEF)
     }
@@ -327,6 +353,48 @@ mod tests {
             .expect_err("zero secret must fail");
 
         assert!(matches!(err, OtpError::InvalidSecret));
+    }
+
+    #[test]
+    fn otp_challenge_debug_redacts_hmac_secret_material() {
+        let did = test_did();
+        let (challenge, _) =
+            OtpChallenge::from_secret(&did, OtpChannel::Email, 42_000, [7u8; 32]).expect("new ok");
+
+        let debug = format!("{challenge:?}");
+
+        assert!(
+            debug.contains("<redacted>"),
+            "debug output must explicitly redact OTP HMAC material: {debug}"
+        );
+        assert!(
+            !debug.contains("7, 7, 7"),
+            "debug output must not expose OTP HMAC bytes: {debug}"
+        );
+    }
+
+    #[test]
+    fn otp_secret_storage_and_rng_source_are_hardened_in_source() {
+        let otp_source = include_str!("otp.rs");
+        let types_source = include_str!("types.rs");
+        let arbitrary_rng_signature = concat!("rng: &mut dyn ", "RngCore");
+
+        assert!(
+            otp_source.contains("CryptoRng"),
+            "OTP runtime challenge generation must require a cryptographic RNG"
+        );
+        assert!(
+            !otp_source.contains(arbitrary_rng_signature),
+            "OTP runtime challenge generation must not accept arbitrary RngCore implementations"
+        );
+        assert!(
+            types_source.contains("Zeroizing<[u8; 32]>"),
+            "OTP HMAC secret storage must zeroize memory on drop"
+        );
+        assert!(
+            !types_source.contains("pub hmac_secret: [u8; 32]"),
+            "OtpChallenge must not expose the HMAC secret as a plain byte array"
+        );
     }
 
     #[test]
