@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -36,6 +36,7 @@ use exo_core::types::Hash256;
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
 use exo_core::types::PublicKey;
 use serde::{Deserialize, Serialize};
+use tower::limit::ConcurrencyLimitLayer;
 
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
 use crate::identity;
@@ -47,6 +48,13 @@ use crate::{
     store::SqliteDagStore,
     wire::GovernanceEventType,
 };
+
+const MAX_GOVERNANCE_API_BODY_BYTES: usize = 64 * 1024;
+const MAX_GOVERNANCE_API_CONCURRENT_REQUESTS: usize = 64;
+
+fn internal_error_response(message: &'static str) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, message.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // Shared application state for the governance API
@@ -183,7 +191,7 @@ async fn handle_propose(
         })),
         Err(e) => {
             tracing::error!(err = %e, "Proposal submission failed");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+            Err(internal_error_response("Proposal submission failed"))
         }
     }
 }
@@ -215,7 +223,10 @@ async fn handle_broadcast(
 
     reactor::broadcast_governance_event(&api.reactor_state, &api.net_handle, event_type, payload)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(err = %e, "Governance event broadcast failed");
+            internal_error_response("Governance event broadcast failed")
+        })?;
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -231,9 +242,16 @@ async fn handle_status(
                 "Reactor state unavailable".to_string(),
             )
         })?;
+        let committed_height = u64::try_from(s.consensus.committed.len()).map_err(|_| {
+            tracing::error!(
+                committed_len = s.consensus.committed.len(),
+                "Committed height cannot be represented as u64"
+            );
+            internal_error_response("Consensus status unavailable")
+        })?;
         (
             s.consensus.current_round,
-            s.consensus.committed.len() as u64,
+            committed_height,
             s.consensus
                 .config
                 .validators
@@ -423,8 +441,10 @@ async fn handle_receipt_by_hash(
                 "Store unavailable".to_string(),
             )
         })?;
-        st.load_receipt(&hash)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        st.load_receipt(&hash).map_err(|e| {
+            tracing::error!(err = %e, "Receipt lookup failed");
+            internal_error_response("Receipt lookup failed")
+        })?
     };
 
     match receipt {
@@ -454,8 +474,10 @@ async fn handle_receipts_list(
                 "Store unavailable".to_string(),
             )
         })?;
-        st.load_receipts_by_actor(&actor, limit)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        st.load_receipts_by_actor(&actor, limit).map_err(|e| {
+            tracing::error!(err = %e, actor = %actor, "Receipt list failed");
+            internal_error_response("Receipt list failed")
+        })?
     };
 
     Ok(Json(
@@ -480,6 +502,10 @@ pub fn governance_router(state: Arc<NodeApiState>) -> Router {
         .route("/api/v1/receipts/:hash", get(handle_receipt_by_hash))
         .route("/api/v1/receipts", get(handle_receipts_list))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_GOVERNANCE_API_BODY_BYTES))
+        .layer(ConcurrencyLimitLayer::new(
+            MAX_GOVERNANCE_API_CONCURRENT_REQUESTS,
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -524,14 +550,14 @@ mod tests {
             .collect()
     }
 
-    fn test_api_state() -> Arc<NodeApiState> {
+    fn test_api_state_with_validator_flag(is_validator: bool) -> Arc<NodeApiState> {
         let validators: BTreeSet<Did> = (0..4)
             .map(|i| Did::new(&format!("did:exo:v{i}")).unwrap())
             .collect();
 
         let config = ReactorConfig {
             node_did: Did::new("did:exo:v0").unwrap(),
-            is_validator: true,
+            is_validator,
             validator_public_keys: validator_public_keys(&validators),
             validators,
             round_timeout_ms: 5000,
@@ -550,6 +576,10 @@ mod tests {
             store,
             net_handle,
         })
+    }
+
+    fn test_api_state() -> Arc<NodeApiState> {
+        test_api_state_with_validator_flag(true)
     }
 
     #[tokio::test]
@@ -600,6 +630,93 @@ mod tests {
         // is mutated. In production, the network loop would be running.
         // Let's accept either 200 or 500 and check that the DAG was modified.
         let _status = resp.status();
+    }
+
+    #[tokio::test]
+    async fn propose_endpoint_redacts_internal_submission_errors() {
+        let state = test_api_state_with_validator_flag(false);
+        let app = governance_router(state);
+
+        let body = serde_json::json!({ "payload_hex": hex::encode(b"not from validator") });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/governance/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let text = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            !text.contains("not a validator"),
+            "internal reactor errors must not be echoed to HTTP clients: {text}"
+        );
+        assert!(
+            text.contains("Proposal submission failed"),
+            "client should receive a generic proposal failure, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_endpoint_rejects_oversized_body_before_handler() {
+        let state = test_api_state();
+        let app = governance_router(state);
+        let oversized_payload = "ab".repeat(70 * 1024);
+        let body = serde_json::json!({ "payload_hex": oversized_payload });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/governance/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn status_height_conversion_does_not_use_truncating_cast() {
+        let source = include_str!("api.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(".committed.len() as u64"),
+            "status committed height must use checked conversion, not a truncating cast"
+        );
+    }
+
+    #[test]
+    fn governance_router_applies_local_admission_layers() {
+        let source = include_str!("api.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("DefaultBodyLimit::max(MAX_GOVERNANCE_API_BODY_BYTES)"),
+            "governance router must cap request body size locally"
+        );
+        assert!(
+            production.contains("ConcurrencyLimitLayer::new(")
+                && production.contains("MAX_GOVERNANCE_API_CONCURRENT_REQUESTS"),
+            "governance router must apply local request admission control"
+        );
     }
 
     #[tokio::test]
