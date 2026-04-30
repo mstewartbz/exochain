@@ -47,7 +47,7 @@ impl std::fmt::Display for BailmentStatus {
 }
 
 /// A bailment record — the binding consent agreement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Bailment {
     pub id: String,
     pub bailor_did: Did,
@@ -60,6 +60,23 @@ pub struct Bailment {
     pub signature: Signature,
     #[serde(default)]
     pub bailee_public_key: Option<PublicKey>,
+}
+
+impl std::fmt::Debug for Bailment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bailment")
+            .field("id", &self.id)
+            .field("bailor_did", &self.bailor_did)
+            .field("bailee_did", &self.bailee_did)
+            .field("bailment_type", &self.bailment_type)
+            .field("terms_hash", &self.terms_hash)
+            .field("created", &self.created)
+            .field("expires", &self.expires)
+            .field("status", &self.status)
+            .field("signature", &"<redacted>")
+            .field("bailee_public_key", &self.bailee_public_key)
+            .finish()
+    }
 }
 
 /// Propose a new bailment. Returns a bailment in `Proposed` status.
@@ -445,6 +462,32 @@ mod tests {
         assert!(
             !source.contains(&direct_terms_digest_pattern),
             "bailment proposals must hash terms through a domain-separated canonical-CBOR boundary"
+        );
+    }
+
+    #[test]
+    fn bailment_debug_redacts_signature_material() {
+        let mut b = propose_test_with_metadata(
+            b"terms",
+            BailmentType::Custody,
+            "bailment-debug-redaction",
+            ts(1234),
+        );
+        b.signature = Signature::from_bytes([0xAB; 64]);
+
+        let debug = format!("{b:?}");
+
+        assert!(
+            debug.contains("signature: \"<redacted>\""),
+            "Debug output must explicitly redact the acceptance signature field"
+        );
+        assert!(
+            !debug.contains("Signature::Ed25519"),
+            "Debug output must not delegate to Signature Debug for bailment signatures"
+        );
+        assert!(
+            !debug.contains("abab"),
+            "Debug output must not expose signature byte prefixes"
         );
     }
 
