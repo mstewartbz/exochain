@@ -377,6 +377,8 @@ const ALERT_COMPOSITE_DROP_BP: u32 = 1_500;
 const ALERT_FINGERPRINT_LOW_BP: u32 = 2_000;
 /// OTP lockout window: 24 hours in ms.
 const ALERT_OTP_WINDOW_MS: u64 = 86_400_000;
+/// Maximum scored DIDs scanned for one `/0dentity-alerts` request.
+const MAX_ZERODENTITY_ALERT_SCAN_DIDS: usize = 1_000;
 
 /// Build the `/0dentity-alerts` response.
 ///
@@ -399,14 +401,51 @@ pub fn build_zerodentity_alerts_message(
             );
         }
     };
-    let dids = zstore.sample_scored_dids(usize::MAX);
+    let scored_did_count = zstore.scored_did_count();
+    let dids = zstore.sample_scored_dids(MAX_ZERODENTITY_ALERT_SCAN_DIDS);
+    drop(zstore);
 
     let since_ms = now_ms().saturating_sub(ALERT_OTP_WINDOW_MS);
     let mut alerts: Vec<String> = Vec::new();
 
     for did in &dids {
+        let (current_score, previous_score, fingerprints, has_recent_otp_lockout) = {
+            let zstore = match zerodentity.lock() {
+                Ok(s) => s,
+                Err(_) => {
+                    return (
+                        "\u{274c} 0dentity store temporarily unavailable".to_string(),
+                        vec![],
+                    );
+                }
+            };
+            let current_score = zstore.get_score(did).cloned();
+            let previous_score = zstore.get_previous_score(did).cloned();
+            let fingerprints = match zstore.get_fingerprints(did) {
+                Ok(fps) => fps,
+                Err(e) => {
+                    return (
+                        format!(
+                            "\u{274c} <b>0dentity Alerts</b>\n\
+                             0dentity alert scan unavailable while reading fingerprints for <code>{}</code>: {e}",
+                            did.as_str()
+                        ),
+                        vec![],
+                    );
+                }
+            };
+            let has_recent_otp_lockout = zstore.has_otp_lockout_since(did, since_ms);
+
+            (
+                current_score,
+                previous_score,
+                fingerprints,
+                has_recent_otp_lockout,
+            )
+        };
+
         // 1. Score regression.
-        if let (Some(curr), Some(prev)) = (zstore.get_score(did), zstore.get_previous_score(did)) {
+        if let (Some(curr), Some(prev)) = (current_score, previous_score) {
             if prev.composite > curr.composite
                 && prev.composite - curr.composite > ALERT_COMPOSITE_DROP_BP
             {
@@ -421,20 +460,7 @@ pub fn build_zerodentity_alerts_message(
         }
 
         // 2. Fingerprint consistency.
-        let fps = match zstore.get_fingerprints(did) {
-            Ok(fps) => fps,
-            Err(e) => {
-                return (
-                    format!(
-                        "\u{274c} <b>0dentity Alerts</b>\n\
-                         0dentity alert scan unavailable while reading fingerprints for <code>{}</code>: {e}",
-                        did.as_str()
-                    ),
-                    vec![],
-                );
-            }
-        };
-        if let Some(latest) = fps.last() {
+        if let Some(latest) = fingerprints.last() {
             if let Some(consistency) = latest.consistency_score_bp {
                 if consistency < ALERT_FINGERPRINT_LOW_BP {
                     alerts.push(format!(
@@ -447,7 +473,7 @@ pub fn build_zerodentity_alerts_message(
         }
 
         // 3. OTP lockout in last 24h.
-        if zstore.has_otp_lockout_since(did, since_ms) {
+        if has_recent_otp_lockout {
             alerts.push(format!(
                 "\u{1f512} <code>{}</code> OTP lockout in last 24h",
                 did.as_str(),
@@ -455,11 +481,21 @@ pub fn build_zerodentity_alerts_message(
         }
     }
 
+    let scan_limit_note = if scored_did_count > dids.len() {
+        format!(
+            "\nScan limited to first {} of {} scored DIDs.",
+            dids.len(),
+            scored_did_count
+        )
+    } else {
+        String::new()
+    };
+
     let text = if alerts.is_empty() {
-        String::from(
+        format!(
             "\u{2705} <b>0dentity Alerts</b>\n\
              \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
-             No 0dentity alerts.",
+             No 0dentity alerts.{scan_limit_note}",
         )
     } else {
         let count = alerts.len();
@@ -469,7 +505,7 @@ pub fn build_zerodentity_alerts_message(
              \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
              {body}\n\
              \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
-             {count} alert(s) found."
+             {count} alert(s) found.{scan_limit_note}"
         )
     };
 
@@ -919,6 +955,17 @@ mod tests {
         })
     }
 
+    fn score_snapshot(
+        did: &Did,
+        composite: u32,
+        computed_ms: u64,
+    ) -> crate::zerodentity::types::ZerodentityScore {
+        let mut score =
+            crate::zerodentity::types::ZerodentityScore::compute(did, &[], &[], &[], computed_ms);
+        score.composite = composite;
+        score
+    }
+
     fn test_reactor() -> SharedReactorState {
         let validators: BTreeSet<Did> = (0..4)
             .map(|i| Did::new(&format!("did:exo:v{i}")).unwrap())
@@ -947,6 +994,70 @@ mod tests {
             .unwrap();
 
         assert!(!alerts.contains(".unwrap_or_default()"));
+    }
+
+    #[test]
+    fn zerodentity_alerts_do_not_request_unbounded_score_sample() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let alerts = production
+            .split("pub fn build_zerodentity_alerts_message")
+            .nth(1)
+            .and_then(|section| section.split("/// Build the /status response.").next())
+            .unwrap();
+
+        assert!(
+            !alerts.contains("sample_scored_dids(usize::MAX)"),
+            "Telegram 0dentity alerts must never request an unbounded score sample"
+        );
+    }
+
+    #[test]
+    fn zerodentity_alerts_release_initial_store_lock_before_scanning_dids() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let alerts = production
+            .split("pub fn build_zerodentity_alerts_message")
+            .nth(1)
+            .and_then(|section| section.split("/// Build the /status response.").next())
+            .unwrap();
+        let sample_index = alerts
+            .find("sample_scored_dids")
+            .expect("alert builder samples scored DIDs");
+        let loop_index = alerts
+            .find("for did in &dids")
+            .expect("alert builder iterates sampled DIDs");
+
+        assert!(
+            alerts[sample_index..loop_index].contains("drop(zstore)"),
+            "Telegram 0dentity alerts must drop the initial store lock before per-DID scanning"
+        );
+    }
+
+    #[test]
+    fn zerodentity_alerts_scan_only_bounded_prefix() {
+        let zerodentity = crate::zerodentity::store::new_shared_store();
+        let scan_limit = 1_000;
+        {
+            let mut store = zerodentity.lock().unwrap();
+            for i in 0..=scan_limit {
+                let did = Did::new(&format!("did:exo:alert{i:04}")).unwrap();
+                store.put_score(score_snapshot(&did, 9_000, 1000));
+                store.put_score(score_snapshot(&did, 7_000, 2000));
+            }
+        }
+
+        let (text, keyboard) = build_zerodentity_alerts_message(&zerodentity);
+
+        assert!(text.contains("1000 alert(s) found."));
+        assert!(!text.contains("did:exo:alert1000"));
+        assert!(!keyboard.is_empty());
     }
 
     #[test]
