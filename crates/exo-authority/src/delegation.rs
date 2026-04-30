@@ -274,7 +274,17 @@ impl DelegationRegistry {
         }
 
         let scope = canonical_scope(scope)?;
-        let depth = self.compute_depth(from);
+        let depth = self.compute_depth(from)?;
+        let chain_depth = depth.checked_add(1).ok_or(AuthorityError::DepthExceeded {
+            depth,
+            max_depth: DEFAULT_MAX_DEPTH,
+        })?;
+        if chain_depth > DEFAULT_MAX_DEPTH {
+            return Err(AuthorityError::DepthExceeded {
+                depth: chain_depth,
+                max_depth: DEFAULT_MAX_DEPTH,
+            });
+        }
 
         let mut link = AuthorityLink {
             delegator_did: from.clone(),
@@ -395,31 +405,30 @@ impl DelegationRegistry {
     // -- Private helpers --
 
     fn has_path(&self, from: &Did, to: &Did) -> bool {
-        let mut visited = std::collections::BTreeSet::new();
-        self.has_path_inner(from, to, &mut visited)
-    }
-
-    fn has_path_inner(
-        &self,
-        current: &Did,
-        target: &Did,
-        visited: &mut std::collections::BTreeSet<String>,
-    ) -> bool {
-        if current == target {
+        if from == to {
             return true;
         }
-        if !visited.insert(current.as_str().to_owned()) {
-            return false;
-        }
-        if let Some(ids) = self.by_delegator.get(current.as_str()) {
-            for id in ids {
-                if let Some(link) = self.links.get(id) {
-                    if self.has_path_inner(&link.delegate_did, target, visited) {
-                        return true;
+        let mut visited = BTreeSet::new();
+        let mut stack = vec![from.as_str().to_owned()];
+
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if let Some(ids) = self.by_delegator.get(current.as_str()) {
+                for id in ids.iter().rev() {
+                    if let Some(link) = self.links.get(id) {
+                        if link.delegate_did == *to {
+                            return true;
+                        }
+                        if !visited.contains(link.delegate_did.as_str()) {
+                            stack.push(link.delegate_did.as_str().to_owned());
+                        }
                     }
                 }
             }
         }
+
         false
     }
 
@@ -451,16 +460,28 @@ impl DelegationRegistry {
         false
     }
 
-    fn compute_depth(&self, did: &Did) -> usize {
-        // Depth = number of links in the chain to this DID as delegate
+    fn compute_depth(&self, did: &Did) -> Result<usize, AuthorityError> {
+        let mut max_depth = 0usize;
         if let Some(ids) = self.by_delegate.get(did.as_str()) {
-            if let Some(id) = ids.first() {
+            for id in ids {
                 if let Some(link) = self.links.get(id) {
-                    return link.depth + 1;
+                    let candidate =
+                        link.depth
+                            .checked_add(1)
+                            .ok_or(AuthorityError::DepthExceeded {
+                                depth: link.depth,
+                                max_depth: DEFAULT_MAX_DEPTH,
+                            })?;
+                    if candidate > max_depth {
+                        max_depth = candidate;
+                    }
+                    if max_depth >= DEFAULT_MAX_DEPTH {
+                        return Ok(max_depth);
+                    }
                 }
             }
         }
-        0
+        Ok(max_depth)
     }
 }
 
@@ -521,6 +542,32 @@ mod tests {
             },
             |payload| signer.sign(payload),
         )
+    }
+
+    fn raw_link(from: &str, to: &str, depth: usize) -> AuthorityLink {
+        AuthorityLink {
+            delegator_did: did(from),
+            delegate_did: did(to),
+            scope: vec![Permission::Read],
+            created: now(),
+            expires: Some(ts(10000)),
+            signature: Signature::Empty,
+            depth,
+            delegatee_kind: DelegateeKind::Human,
+        }
+    }
+
+    fn insert_raw_link(reg: &mut DelegationRegistry, link: AuthorityLink) {
+        let id = link.id().expect("raw authority link id");
+        reg.by_delegator
+            .entry(link.delegator_did.as_str().to_owned())
+            .or_default()
+            .push(id);
+        reg.by_delegate
+            .entry(link.delegate_did.as_str().to_owned())
+            .or_default()
+            .push(id);
+        reg.links.insert(id, link);
     }
 
     #[test]
@@ -696,6 +743,86 @@ mod tests {
             &charlie_key,
         );
         assert!(matches!(result, Err(AuthorityError::CircularDelegation(_))));
+    }
+
+    #[test]
+    fn cycle_detection_uses_iterative_traversal() {
+        let production = include_str!("delegation.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("fn has_path_inner("),
+            "cycle detection must not recurse on attacker-controlled graph depth"
+        );
+        assert!(
+            !production.contains("self.has_path_inner("),
+            "cycle detection must not recurse on attacker-controlled graph depth"
+        );
+    }
+
+    #[test]
+    fn cycle_detection_handles_long_existing_paths() {
+        let mut reg = DelegationRegistry::new();
+
+        for i in 0..512 {
+            insert_raw_link(
+                &mut reg,
+                raw_link(&format!("node-{i}"), &format!("node-{}", i + 1), i),
+            );
+        }
+
+        assert!(reg.has_path(&did("node-0"), &did("node-512")));
+        assert!(!reg.has_path(&did("node-0"), &did("missing")));
+    }
+
+    #[test]
+    fn delegate_uses_max_parent_depth_for_multi_parent_delegator() {
+        let mut reg = DelegationRegistry::new();
+        let key = KeyPair::generate();
+
+        signed_delegate(&mut reg, "root-a", "shared", &[Permission::Read], &key).unwrap();
+        signed_delegate(&mut reg, "root-b", "mid", &[Permission::Read], &key).unwrap();
+        signed_delegate(&mut reg, "mid", "deep", &[Permission::Read], &key).unwrap();
+        signed_delegate(&mut reg, "deep", "shared", &[Permission::Read], &key).unwrap();
+
+        let link = signed_delegate(&mut reg, "shared", "leaf", &[Permission::Read], &key).unwrap();
+
+        assert_eq!(link.depth, 3);
+    }
+
+    #[test]
+    fn delegate_rejects_chain_beyond_default_max_depth() {
+        let mut reg = DelegationRegistry::new();
+        let key = KeyPair::generate();
+
+        for i in 0..DEFAULT_MAX_DEPTH {
+            signed_delegate(
+                &mut reg,
+                &format!("node-{i}"),
+                &format!("node-{}", i + 1),
+                &[Permission::Read],
+                &key,
+            )
+            .unwrap();
+        }
+
+        let result = signed_delegate(
+            &mut reg,
+            &format!("node-{DEFAULT_MAX_DEPTH}"),
+            "too-deep",
+            &[Permission::Read],
+            &key,
+        );
+
+        assert!(matches!(
+            result,
+            Err(AuthorityError::DepthExceeded {
+                depth: 6,
+                max_depth: DEFAULT_MAX_DEPTH
+            })
+        ));
     }
 
     #[test]
