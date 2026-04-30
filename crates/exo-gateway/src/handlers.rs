@@ -295,12 +295,10 @@ pub async fn vote_handler(
     let declarations = match state.load_conflict_declarations(&voter_did).await {
         Ok(declarations) => declarations,
         Err(e) => {
+            tracing::error!(error = %e, "failed to load conflict declarations");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "conflict register unavailable",
-                    "details": e.to_string()
-                })),
+                Json(serde_json::json!({"error": "conflict register unavailable"})),
             )
                 .into_response();
         }
@@ -355,9 +353,10 @@ pub async fn vote_handler(
     let db = match state.require_db() {
         Ok(pool) => pool,
         Err(e) => {
+            tracing::error!(error = %e, "vote handler database pool unavailable");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -365,11 +364,10 @@ pub async fn vote_handler(
     let mut tx = match db.begin().await {
         Ok(tx) => tx,
         Err(e) => {
+            tracing::error!(error = %e, "failed to start vote transaction");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": format!("failed to start vote transaction: {e}")}),
-                ),
+                Json(serde_json::json!({"error": "vote transaction unavailable"})),
             )
                 .into_response();
         }
@@ -385,9 +383,10 @@ pub async fn vote_handler(
             let tenant_id = match r.try_get::<String, _>("tenant_id") {
                 Ok(t) => t,
                 Err(e) => {
+                    tracing::error!(error = %e, "decision row missing tenant_id");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": e.to_string()})),
+                        Json(serde_json::json!({"error": "decision record unavailable"})),
                     )
                         .into_response();
                 }
@@ -395,9 +394,10 @@ pub async fn vote_handler(
             let payload = match r.try_get::<Value, _>("payload") {
                 Ok(p) => p,
                 Err(e) => {
+                    tracing::error!(error = %e, "decision row missing payload");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": e.to_string()})),
+                        Json(serde_json::json!({"error": "decision record unavailable"})),
                     )
                         .into_response();
                 }
@@ -412,9 +412,10 @@ pub async fn vote_handler(
                 .into_response();
         }
         Err(e) => {
+            tracing::error!(error = %e, "failed to load decision for vote");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": "decision lookup failed"})),
             )
                 .into_response();
         }
@@ -423,9 +424,10 @@ pub async fn vote_handler(
     let mut decision: DecisionObject = match serde_json::from_value(payload_val) {
         Ok(d) => d,
         Err(e) => {
+            tracing::error!(error = %e, "failed to deserialize decision payload");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("failed to deserialize decision: {e}")})),
+                Json(serde_json::json!({"error": "decision payload invalid"})),
             )
                 .into_response();
         }
@@ -466,9 +468,10 @@ pub async fn vote_handler(
                 .into_response();
         }
         Err(e) => {
+            tracing::error!(error = %e, "quorum precondition check failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": "quorum precondition failed"})),
             )
                 .into_response();
         }
@@ -497,9 +500,10 @@ pub async fn vote_handler(
 
     // Add vote — rejects duplicates (TNC-07 voter independence).
     if let Err(e) = decision.add_vote(vote) {
+        tracing::error!(error = %e, "decision rejected vote");
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(serde_json::json!({"error": "vote rejected"})),
         )
             .into_response();
     }
@@ -508,9 +512,10 @@ pub async fn vote_handler(
     let quorum_result = match check_quorum(&registry, &decision) {
         Ok(r) => r,
         Err(e) => {
+            tracing::error!(error = %e, "quorum evaluation failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": "quorum evaluation failed"})),
             )
                 .into_response();
         }
@@ -520,9 +525,10 @@ pub async fn vote_handler(
     let updated_payload = match serde_json::to_value(&decision) {
         Ok(v) => v,
         Err(e) => {
+            tracing::error!(error = %e, "failed to serialize decision payload");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("serialization failed: {e}")})),
+                Json(serde_json::json!({"error": "decision serialization failed"})),
             )
                 .into_response();
         }
@@ -535,16 +541,18 @@ pub async fn vote_handler(
         .execute(&mut *tx)
         .await
     {
+        tracing::error!(error = %e, "failed to persist vote");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to persist vote: {e}")})),
+            Json(serde_json::json!({"error": "decision persistence failed"})),
         )
             .into_response();
     }
     if let Err(e) = tx.commit().await {
+        tracing::error!(error = %e, "failed to commit vote transaction");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to commit vote transaction: {e}")})),
+            Json(serde_json::json!({"error": "decision persistence failed"})),
         )
             .into_response();
     }
@@ -570,10 +578,10 @@ pub async fn vote_handler(
     )
     .await
     {
-        tracing::error!("audit write failed for voter {}: {e}", body.voter_did);
+        tracing::error!(error = %e, voter_did = %body.voter_did, "audit write failed");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("audit write failed: {e}")})),
+            Json(serde_json::json!({"error": "audit write failed"})),
         )
             .into_response();
     }
@@ -628,11 +636,17 @@ pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse 
                 Json(serde_json::json!({"status": "ok", "db": "connected"})),
             )
                 .into_response(),
-            Err(e) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"status": "degraded", "error": e.to_string()})),
-            )
-                .into_response(),
+            Err(e) => {
+                tracing::error!(error = %e, "database health check failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "status": "degraded",
+                        "error": "database health check failed"
+                    })),
+                )
+                    .into_response()
+            }
         },
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -690,6 +704,33 @@ mod tests {
             err.contains("canonical CBOR payload exceeds"),
             "error should identify the canonical CBOR hash budget: {err}"
         );
+    }
+
+    #[test]
+    fn handlers_do_not_expose_raw_internal_errors_in_http_bodies() {
+        let source = include_str!("handlers.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+        let prohibited = [
+            r#""details": e.to_string()"#,
+            r#"Json(serde_json::json!({"error": e.to_string()}))"#,
+            r#"Json(serde_json::json!({"status": "degraded", "error": e.to_string()}))"#,
+            r#"format!("failed to start vote transaction: {e}")"#,
+            r#"format!("failed to deserialize decision: {e}")"#,
+            r#"format!("serialization failed: {e}")"#,
+            r#"format!("failed to persist vote: {e}")"#,
+            r#"format!("failed to commit vote transaction: {e}")"#,
+            r#"format!("audit write failed: {e}")"#,
+        ];
+
+        for pattern in prohibited {
+            assert!(
+                !production.contains(pattern),
+                "HTTP response bodies must not expose raw internal error details: {pattern}"
+            );
+        }
     }
 
     #[test]
