@@ -174,9 +174,9 @@ impl AppState {
 
     /// Return the DB pool or a 503 if none is configured.
     pub fn require_db(&self) -> Result<&sqlx::PgPool> {
-        self.pool.as_ref().ok_or_else(|| {
-            GatewayError::Internal("no database configured — start with DATABASE_URL".into())
-        })
+        self.pool
+            .as_ref()
+            .ok_or_else(|| GatewayError::Internal("database unavailable".into()))
     }
 
     /// Load conflict declarations for an actor from the DB-backed standing
@@ -1047,10 +1047,7 @@ async fn handle_decision_get(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "database not configured",
-                    "message": "Start the gateway with DATABASE_URL to enable decision queries."
-                })),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -1093,10 +1090,7 @@ async fn handle_audit_trail(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "database not configured",
-                    "message": "Start the gateway with DATABASE_URL to enable audit queries."
-                })),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -1199,10 +1193,7 @@ async fn handle_auth_login(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "database not configured",
-                    "message": "Start the gateway with DATABASE_URL to enable session auth."
-                })),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -1321,10 +1312,7 @@ async fn handle_auth_refresh(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "database not configured",
-                    "message": "Start the gateway with DATABASE_URL to enable session refresh."
-                })),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -1385,10 +1373,7 @@ async fn handle_auth_logout(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "database not configured",
-                    "message": "Start the gateway with DATABASE_URL to enable session logout."
-                })),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -1491,10 +1476,7 @@ async fn handle_advance_pace(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "database not configured",
-                    "message": "Start the gateway with DATABASE_URL to enable pace advancement."
-                })),
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
                 .into_response();
         }
@@ -1668,12 +1650,9 @@ fn auth_boundary_error_response(err: GatewayError) -> Response {
             Json(serde_json::json!({ "error": reason })),
         )
             .into_response(),
-        GatewayError::Internal(reason) if reason.contains("no database configured") => (
+        GatewayError::Internal(reason) if reason.contains("database unavailable") => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "database not configured",
-                "message": reason,
-            })),
+            Json(serde_json::json!({"error": "database unavailable"})),
         )
             .into_response(),
         other => (
@@ -1779,7 +1758,7 @@ async fn handle_layout_template_put(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "database not configured" })),
+                Json(serde_json::json!({ "error": "database unavailable" })),
             )
                 .into_response();
         }
@@ -1852,7 +1831,7 @@ async fn handle_layout_template_delete(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "database not configured" })),
+                Json(serde_json::json!({ "error": "database unavailable" })),
             )
                 .into_response();
         }
@@ -1890,7 +1869,7 @@ async fn handle_layout_templates_list(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "database not configured" })),
+                Json(serde_json::json!({ "error": "database unavailable" })),
             )
                 .into_response();
         }
@@ -1944,7 +1923,7 @@ async fn handle_feedback_issue_create(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "database not configured" })),
+                Json(serde_json::json!({ "error": "database unavailable" })),
             )
                 .into_response();
         }
@@ -2031,7 +2010,7 @@ async fn handle_feedback_issues_list(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "database not configured" })),
+                Json(serde_json::json!({ "error": "database unavailable" })),
             )
                 .into_response();
         }
@@ -2088,7 +2067,7 @@ async fn handle_feedback_issue_update(
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "database not configured" })),
+                Json(serde_json::json!({ "error": "database unavailable" })),
             )
                 .into_response();
         }
@@ -2902,6 +2881,31 @@ mod tests {
                 "\"/api/v1/agents/enroll\",post(handle_agents_enroll).layer(DefaultBodyLimit::max(MAX_DID_DOCUMENT_BODY_BYTES))"
             ),
             "agents/enroll must apply the DID document body budget at the route"
+        );
+    }
+
+    #[test]
+    fn database_unavailable_responses_do_not_expose_env_config_details() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        for needle in [
+            "start with DATABASE_URL",
+            "Start the gateway with DATABASE_URL",
+            "\"error\": \"database not configured\"",
+            "no database configured",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "database-unavailable responses must not expose deployment config details: {needle}"
+            );
+        }
+        assert!(
+            production.contains("\"error\": \"database unavailable\""),
+            "database-unavailable responses should use a generic client-facing error"
         );
     }
 
