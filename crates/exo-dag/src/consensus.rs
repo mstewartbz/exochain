@@ -245,6 +245,7 @@ impl ConsensusState {
 ///
 /// Retained only to avoid breaking the legacy test suite; production
 /// callers MUST migrate. Will be removed in a future release.
+#[cfg(test)]
 #[deprecated(
     note = "GAP-014: use propose_verified; this variant does not verify the proposer signature"
 )]
@@ -273,6 +274,7 @@ pub fn propose(state: &mut ConsensusState, node: &DagNode, proposer: &Did) -> Re
 ///
 /// **⚠️ DEPRECATED (GAP-014):** This function does not verify the
 /// voter's signature. Use [`vote_verified`] instead.
+#[cfg(test)]
 #[deprecated(note = "GAP-014: use vote_verified; this variant does not verify the voter signature")]
 pub fn vote(state: &mut ConsensusState, v: Vote) -> Result<()> {
     if !state.config.validators.contains(&v.voter) {
@@ -317,10 +319,22 @@ pub fn check_commit(state: &ConsensusState, node_hash: &Hash256) -> Option<Commi
 
     if let Some(round_votes) = state.pending.get(&state.current_round) {
         if let Some(votes) = round_votes.get(node_hash) {
-            if votes.len() >= quorum {
+            let mut seen_voters = BTreeSet::new();
+            let quorum_votes: Vec<Vote> = votes
+                .iter()
+                .filter(|vote| {
+                    vote.node_hash == *node_hash
+                        && vote.round == state.current_round
+                        && state.config.validators.contains(&vote.voter)
+                        && seen_voters.insert(vote.voter.clone())
+                })
+                .cloned()
+                .collect();
+
+            if seen_voters.len() >= quorum {
                 return Some(CommitCertificate {
                     node_hash: *node_hash,
-                    votes: votes.clone(),
+                    votes: quorum_votes,
                     round: state.current_round,
                 });
             }
@@ -334,6 +348,7 @@ pub fn check_commit(state: &ConsensusState, node_hash: &Hash256) -> Option<Commi
 ///
 /// **⚠️ DEPRECATED (GAP-014):** This function does not verify any
 /// vote signatures in the certificate. Use [`commit_verified`] instead.
+#[cfg(test)]
 #[deprecated(
     note = "GAP-014: use commit_verified; this variant does not verify certificate signatures"
 )]
@@ -457,9 +472,17 @@ pub fn vote_verified<R: PublicKeyResolver>(
 /// must:
 ///   - reference `cert.node_hash`
 ///   - come from a validator in the current set
+///   - belong to the current consensus round
+///   - be unique by voter
 ///   - carry a signature that verifies against the voter's current key
+///   - reach the configured quorum with distinct validators
 ///
 /// # Errors
+/// - `InsufficientQuorum` if the certificate has fewer distinct validator
+///   votes than the configured quorum.
+/// - `InvalidRound` if the certificate round does not match the state round,
+///   or a vote round does not match the certificate round.
+/// - `DuplicateVote` if the same validator appears more than once.
 /// - `InvalidSignature(cert.node_hash)` if any vote fails verification
 ///   or references a different node.
 /// - `NotAValidator` if any voter is not in the validator set.
@@ -468,12 +491,41 @@ pub fn commit_verified<R: PublicKeyResolver>(
     cert: CommitCertificate,
     resolver: &R,
 ) -> Result<()> {
+    if cert.round != state.current_round {
+        return Err(DagError::InvalidRound {
+            expected: state.current_round,
+            got: cert.round,
+        });
+    }
+
+    let quorum = state.config.quorum_size();
+    if quorum == 0 || cert.votes.len() < quorum {
+        return Err(DagError::InsufficientQuorum {
+            required: quorum,
+            actual: cert.votes.len(),
+            round: cert.round,
+        });
+    }
+
+    let mut seen_voters = BTreeSet::new();
     for v in &cert.votes {
         if v.node_hash != cert.node_hash {
             return Err(DagError::InvalidSignature(cert.node_hash));
         }
+        if v.round != cert.round {
+            return Err(DagError::InvalidRound {
+                expected: cert.round,
+                got: v.round,
+            });
+        }
         if !state.config.validators.contains(&v.voter) {
             return Err(DagError::NotAValidator(v.voter.to_string()));
+        }
+        if !seen_voters.insert(v.voter.clone()) {
+            return Err(DagError::DuplicateVote {
+                voter: v.voter.to_string(),
+                round: v.round,
+            });
         }
         let Some(key) = resolver.resolve(&v.voter) else {
             return Err(DagError::InvalidSignature(cert.node_hash));
@@ -482,6 +534,15 @@ pub fn commit_verified<R: PublicKeyResolver>(
             return Err(DagError::InvalidSignature(cert.node_hash));
         }
     }
+
+    if seen_voters.len() < quorum {
+        return Err(DagError::InsufficientQuorum {
+            required: quorum,
+            actual: seen_voters.len(),
+            round: cert.round,
+        });
+    }
+
     let hash = cert.node_hash;
     state.committed.push(hash);
     state.certificates.insert(hash, cert);
@@ -1309,6 +1370,43 @@ mod tests {
         assert!(check_commit(&state, &node.hash).is_none());
     }
 
+    #[test]
+    fn check_commit_counts_distinct_validators_only() {
+        let validators = make_validators(4);
+        let config = ConsensusConfig::new(validators.clone(), 1000);
+        let mut state = ConsensusState::new(config);
+        let (_dag, node) = setup_dag_with_node();
+        let v: Vec<Did> = validators.iter().cloned().collect();
+
+        state
+            .pending
+            .entry(0)
+            .or_default()
+            .entry(node.hash)
+            .or_default()
+            .extend([
+                make_vote(&v[0], 0, &node.hash),
+                make_vote(&v[0], 0, &node.hash),
+                make_vote(&v[1], 0, &node.hash),
+            ]);
+        assert!(
+            check_commit(&state, &node.hash).is_none(),
+            "duplicate votes by one validator must not satisfy a 3-validator quorum"
+        );
+
+        state
+            .pending
+            .entry(0)
+            .or_default()
+            .entry(node.hash)
+            .or_default()
+            .push(make_vote(&v[2], 0, &node.hash));
+        let cert = check_commit(&state, &node.hash).expect("distinct quorum");
+        assert_eq!(cert.votes.len(), 3);
+        let distinct: BTreeSet<_> = cert.votes.iter().map(|vote| vote.voter.clone()).collect();
+        assert_eq!(distinct.len(), 3);
+    }
+
     // Covers propose_verified line 375: proposer not in validator set.
     #[test]
     fn propose_verified_rejects_non_validator() {
@@ -1434,6 +1532,130 @@ mod tests {
         let null_resolver = |_d: &Did| None;
         let res = commit_verified(&mut state, cert, &null_resolver);
         assert!(matches!(res, Err(DagError::InvalidSignature(_))));
+        assert!(state.committed.is_empty());
+    }
+
+    #[test]
+    fn commit_verified_rejects_insufficient_quorum() {
+        let (pk_a, sk_a) = crypto::generate_keypair();
+        let (pk_b, _sk_b) = crypto::generate_keypair();
+        let (pk_c, _sk_c) = crypto::generate_keypair();
+        let a = Did::new("did:exo:alice").unwrap();
+        let b = Did::new("did:exo:bob").unwrap();
+        let c = Did::new("did:exo:carol").unwrap();
+        let mut vs = BTreeSet::new();
+        vs.insert(a.clone());
+        vs.insert(b.clone());
+        vs.insert(c.clone());
+        let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
+        let (n, _, _) = make_node("x");
+        let cert = CommitCertificate {
+            node_hash: n.hash,
+            votes: vec![signed_vote(&a, 0, n.hash, &sk_a)],
+            round: 0,
+        };
+        let resolver = move |d: &Did| -> Option<exo_core::types::PublicKey> {
+            if *d == a {
+                Some(pk_a)
+            } else if *d == b {
+                Some(pk_b)
+            } else if *d == c {
+                Some(pk_c)
+            } else {
+                None
+            }
+        };
+        let res = commit_verified(&mut state, cert, &resolver);
+        assert!(matches!(
+            res,
+            Err(DagError::InsufficientQuorum {
+                required: 3,
+                actual: 1,
+                round: 0
+            })
+        ));
+        assert!(state.committed.is_empty());
+    }
+
+    #[test]
+    fn commit_verified_rejects_duplicate_voter_in_certificate() {
+        let (pk_a, sk_a) = crypto::generate_keypair();
+        let (pk_b, _sk_b) = crypto::generate_keypair();
+        let a = Did::new("did:exo:alice").unwrap();
+        let b = Did::new("did:exo:bob").unwrap();
+        let mut vs = BTreeSet::new();
+        vs.insert(a.clone());
+        vs.insert(b.clone());
+        let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
+        let (n, _, _) = make_node("x");
+        let duplicate_a = signed_vote(&a, 0, n.hash, &sk_a);
+        let cert = CommitCertificate {
+            node_hash: n.hash,
+            votes: vec![duplicate_a.clone(), duplicate_a],
+            round: 0,
+        };
+        let resolver = move |d: &Did| -> Option<exo_core::types::PublicKey> {
+            if *d == a {
+                Some(pk_a)
+            } else if *d == b {
+                Some(pk_b)
+            } else {
+                None
+            }
+        };
+        let res = commit_verified(&mut state, cert, &resolver);
+        assert!(matches!(res, Err(DagError::DuplicateVote { round: 0, .. })));
+        assert!(state.committed.is_empty());
+    }
+
+    #[test]
+    fn commit_verified_rejects_vote_round_mismatch() {
+        let (pk_a, sk_a) = crypto::generate_keypair();
+        let a = Did::new("did:exo:alice").unwrap();
+        let mut vs = BTreeSet::new();
+        vs.insert(a.clone());
+        let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
+        let (n, _, _) = make_node("x");
+        let cert = CommitCertificate {
+            node_hash: n.hash,
+            votes: vec![signed_vote(&a, 1, n.hash, &sk_a)],
+            round: 0,
+        };
+        let resolver = |_d: &Did| Some(pk_a);
+        let res = commit_verified(&mut state, cert, &resolver);
+        assert!(matches!(
+            res,
+            Err(DagError::InvalidRound {
+                expected: 0,
+                got: 1
+            })
+        ));
+        assert!(state.committed.is_empty());
+    }
+
+    #[test]
+    fn commit_verified_rejects_stale_certificate_round() {
+        let (pk_a, sk_a) = crypto::generate_keypair();
+        let a = Did::new("did:exo:alice").unwrap();
+        let mut vs = BTreeSet::new();
+        vs.insert(a.clone());
+        let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
+        state.advance_round();
+        let (n, _, _) = make_node("x");
+        let cert = CommitCertificate {
+            node_hash: n.hash,
+            votes: vec![signed_vote(&a, 0, n.hash, &sk_a)],
+            round: 0,
+        };
+        let resolver = |_d: &Did| Some(pk_a);
+        let res = commit_verified(&mut state, cert, &resolver);
+        assert!(matches!(
+            res,
+            Err(DagError::InvalidRound {
+                expected: 1,
+                got: 0
+            })
+        ));
         assert!(state.committed.is_empty());
     }
 }

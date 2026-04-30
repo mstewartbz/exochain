@@ -7,6 +7,8 @@ use crate::{
     snark, stark, zkml,
 };
 
+const MAX_VERIFIER_CBOR_BYTES: usize = 1_048_576;
+
 // ---------------------------------------------------------------------------
 // ProofType
 // ---------------------------------------------------------------------------
@@ -39,6 +41,15 @@ pub struct StarkBundle {
     pub proof: stark::StarkProof,
 }
 
+/// Public STARK statement supplied by the verifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StarkPublicInputs {
+    /// Public inputs, currently the first row of the committed trace.
+    pub inputs: Vec<u64>,
+    /// Public transition constraints the proof must satisfy.
+    pub constraints: Vec<stark::StarkConstraint>,
+}
+
 /// A serialized ZKML verification bundle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZkmlBundle {
@@ -66,6 +77,11 @@ pub fn verify_any(
 }
 
 fn decode_cbor<T: DeserializeOwned>(bytes: &[u8], label: &'static str) -> Result<T> {
+    if bytes.len() > MAX_VERIFIER_CBOR_BYTES {
+        return Err(ProofError::DeserializationError(format!(
+            "{label}: canonical CBOR input exceeds maximum size of {MAX_VERIFIER_CBOR_BYTES} bytes"
+        )));
+    }
     ciborium::from_reader(bytes).map_err(|e| {
         ProofError::DeserializationError(format!("{label}: canonical CBOR decode failed: {e}"))
     })
@@ -80,9 +96,13 @@ fn verify_snark(proof_bytes: &[u8], public_inputs_bytes: &[u8]) -> Result<bool> 
 
 fn verify_stark(proof_bytes: &[u8], public_inputs_bytes: &[u8]) -> Result<bool> {
     let bundle: StarkBundle = decode_cbor(proof_bytes, "stark proof bundle")?;
-    let public_inputs: Vec<u64> = decode_cbor(public_inputs_bytes, "stark public inputs")?;
+    let public_inputs: StarkPublicInputs = decode_cbor(public_inputs_bytes, "stark public inputs")?;
 
-    stark::verify_stark(&bundle.proof, &public_inputs)
+    stark::verify_stark_with_constraints(
+        &bundle.proof,
+        &public_inputs.inputs,
+        &public_inputs.constraints,
+    )
 }
 
 fn verify_zkml(proof_bytes: &[u8]) -> Result<bool> {
@@ -112,6 +132,16 @@ mod canonical_encoding_contract_tests {
         assert!(
             production.contains("ciborium::from_reader"),
             "proof verifier must decode proof bundles and public inputs as canonical CBOR"
+        );
+    }
+
+    #[test]
+    fn decode_cbor_rejects_oversized_inputs_before_deserialization() {
+        let oversized = vec![0u8; 1_048_577];
+        let err = super::decode_cbor::<Vec<u8>>(&oversized, "oversized proof").unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "oversized proof input must fail before CBOR decode: {err}"
         );
     }
 }
@@ -219,7 +249,10 @@ mod tests {
 
         let bundle = StarkBundle { proof };
         let proof_bytes = serde_json::to_vec(&bundle).unwrap();
-        let public_inputs_bytes = cbor_bytes(&vec![1u64, 2u64]);
+        let public_inputs_bytes = cbor_bytes(&StarkPublicInputs {
+            inputs: vec![1u64, 2u64],
+            constraints: Vec::new(),
+        });
 
         let err = verify_any(ProofType::Stark, &proof_bytes, &public_inputs_bytes).unwrap_err();
         assert!(matches!(err, ProofError::DeserializationError(_)));
@@ -263,7 +296,10 @@ mod tests {
 
         let bundle = StarkBundle { proof };
         let proof_bytes = cbor_bytes(&bundle);
-        let public_inputs_bytes = cbor_bytes(&vec![1u64, 2u64]);
+        let public_inputs_bytes = cbor_bytes(&StarkPublicInputs {
+            inputs: vec![1u64, 2u64],
+            constraints: Vec::new(),
+        });
 
         let result = verify_any(ProofType::Stark, &proof_bytes, &public_inputs_bytes).unwrap();
         assert!(result);
@@ -348,6 +384,8 @@ mod tests {
         let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
         let bundle = StarkBundle { proof };
         let proof_bytes = cbor_bytes(&bundle);
+        // Legacy bare public-input arrays are rejected because STARK
+        // verification now requires caller-supplied public constraints.
         let legacy_json_inputs = serde_json::to_vec(&vec![1u64, 2u64]).unwrap();
         let err = verify_any(ProofType::Stark, &proof_bytes, &legacy_json_inputs).unwrap_err();
         assert!(matches!(err, ProofError::DeserializationError(_)));

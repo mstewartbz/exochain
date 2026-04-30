@@ -10,10 +10,40 @@ use axum::{Router, extract::Path, response::Html, routing::get};
 
 /// Route: `GET /0dentity/dashboard/:did`
 pub async fn zerodentity_dashboard(Path(did): Path<String>) -> Html<String> {
-    // Escape DID for safe inline use — DIDs only contain alphanumeric chars
-    // and colons, so this is a formatting concern rather than XSS risk.
-    let escaped = did.replace('"', "&quot;");
-    Html(DASHBOARD_HTML.replace("{DID}", &escaped))
+    let html_did = escape_html_text(&did);
+    let js_did = escape_js_string_literal(&did);
+    Html(
+        DASHBOARD_HTML
+            .replace("{DID_HTML}", &html_did)
+            .replace("{DID_JS}", &js_did),
+    )
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn escape_js_string_literal(value: &str) -> String {
+    let json = match serde_json::to_string(value) {
+        Ok(json) => json,
+        Err(_) => "\"\"".to_string(),
+    };
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 /// Router for the 0dentity dashboard endpoint.
@@ -220,7 +250,7 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 <div class="header">
   <div>
     <div class="header-brand">◈ 0dentity</div>
-    <div class="header-did" id="headerDid" title="{DID}">{DID}</div>
+    <div class="header-did" id="headerDid" title="{DID_HTML}">{DID_HTML}</div>
   </div>
   <div class="header-right">
     <span class="status-dot" id="statusDot"></span>
@@ -317,7 +347,7 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 (function() {
   'use strict';
 
-  const DID = "{DID}";
+  const DID = {DID_JS};
   const POLL_INTERVAL_MS = 5000;
 
   // Axis order matches PolarAxes struct field order in spec §2.2
@@ -749,6 +779,30 @@ mod tests {
         assert!(
             !html.contains("{DID}"),
             "dashboard must not contain raw {{DID}} template placeholder"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_escapes_did_in_html_and_script_contexts() {
+        let did = "</script><script>alert(1)</script>";
+        let response = zerodentity_dashboard(Path(did.to_string())).await;
+        let html = response.0;
+
+        assert!(
+            !html.contains(did),
+            "dashboard must not contain raw DID markup"
+        );
+        assert!(
+            !html.contains("</script><script>"),
+            "DID must not be able to break out of the inline script"
+        );
+        assert!(
+            html.contains("&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "HTML DID contexts must be entity-escaped"
+        );
+        assert!(
+            html.contains(r#"\u003c/script\u003e\u003cscript\u003ealert(1)\u003c/script\u003e"#),
+            "JavaScript DID string must escape script-breaking angle brackets"
         );
     }
 

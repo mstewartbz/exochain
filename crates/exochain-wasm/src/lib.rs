@@ -93,6 +93,32 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_governance_close_uses_verified_deliberation_quorum() {
+        let source = include_str!("governance_bindings.rs");
+        assert!(
+            source.contains("close_verified"),
+            "WASM deliberation close must use cryptographically verified quorum closure"
+        );
+        assert!(
+            !source.contains("deliberation::close(&mut delib"),
+            "WASM deliberation close must not call the structural-only close path"
+        );
+    }
+
+    #[test]
+    fn wasm_governance_clearance_requires_caller_supplied_registry() {
+        let source = include_str!("governance_bindings.rs");
+        assert!(
+            source.contains("registry_json"),
+            "WASM clearance checks must accept caller-supplied clearance registry data"
+        );
+        assert!(
+            !source.contains("ClearanceLevel::Governor"),
+            "WASM clearance checks must not fabricate Governor clearance"
+        );
+    }
+
+    #[test]
     fn wasm_messaging_bridge_requires_caller_supplied_envelope_metadata() {
         let source = include_str!("messaging_bindings.rs");
         assert!(
@@ -169,5 +195,18 @@ mod source_guard_tests {
                 "core WASM event bindings must not fabricate event metadata with {pattern}"
             );
         }
+    }
+
+    #[test]
+    fn wasm_core_merkle_bindings_bound_untrusted_arrays() {
+        let source = include_str!("core_bindings.rs");
+        assert!(
+            source.contains("MAX_WASM_MERKLE_LEAVES"),
+            "WASM Merkle root/proof bindings must cap caller-supplied leaf arrays"
+        );
+        assert!(
+            source.contains("MAX_WASM_MERKLE_PROOF_HASHES"),
+            "WASM Merkle verification must cap caller-supplied proof arrays"
+        );
     }
 }

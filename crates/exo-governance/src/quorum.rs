@@ -3,6 +3,8 @@
 //! Constitutional principle: "Numerical multiplicity without attributable
 //! independence is theater, not legitimacy."
 
+use std::collections::BTreeSet;
+
 use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +107,39 @@ pub struct Approval {
     pub independence_attestation: Option<IndependenceAttestation>,
 }
 
+impl Approval {
+    /// Canonical CBOR payload that the approver signs.
+    ///
+    /// The approval signature binds the approver, role, timestamp, and attached
+    /// independence attestation. The `signature` field itself is excluded.
+    pub fn signing_payload(&self) -> Result<Vec<u8>, GovernanceError> {
+        let tuple = (
+            "exo.governance.quorum.approval.v1",
+            &self.approver_did,
+            &self.role,
+            &self.timestamp,
+            &self.independence_attestation,
+        );
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&tuple, &mut buf).map_err(|e| {
+            GovernanceError::Serialization(format!("approval canonical encoding failed: {e}"))
+        })?;
+        Ok(buf)
+    }
+
+    /// Verify the approval signature over its canonical payload.
+    #[must_use]
+    pub fn verify_signature(&self, public_key: &PublicKey) -> bool {
+        if self.signature.is_empty() || self.signature.ed25519_component_is_zero() {
+            return false;
+        }
+        let Ok(payload) = self.signing_payload() else {
+            return false;
+        };
+        crypto::verify(&payload, &self.signature, public_key)
+    }
+}
+
 /// Policy defining what constitutes a valid quorum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuorumPolicy {
@@ -129,9 +164,25 @@ pub enum QuorumResult {
     },
 }
 
+fn duplicate_approver(approvals: &[Approval]) -> Option<Did> {
+    let mut seen = BTreeSet::new();
+    for approval in approvals {
+        if !seen.insert(approval.approver_did.clone()) {
+            return Some(approval.approver_did.clone());
+        }
+    }
+    None
+}
+
 /// Compute whether a quorum is met given a set of approvals and a policy.
 #[must_use]
 pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumResult {
+    if let Some(duplicate) = duplicate_approver(approvals) {
+        return QuorumResult::NotMet {
+            reason: format!("duplicate approver DID: {duplicate}"),
+        };
+    }
+
     let total_count = approvals.len();
 
     if total_count < policy.min_approvals {
@@ -156,7 +207,7 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
         .filter(|a| {
             a.independence_attestation
                 .as_ref()
-                .is_some_and(|att| att.is_valid())
+                .is_some_and(|att| att.attester_did == a.approver_did && att.is_valid())
         })
         .count();
 
@@ -244,33 +295,58 @@ pub fn compute_quorum_verified<R: PublicKeyResolver>(
     policy: &QuorumPolicy,
     resolver: &R,
 ) -> QuorumResult {
-    let total_count = approvals.len();
+    if let Some(duplicate) = duplicate_approver(approvals) {
+        return QuorumResult::NotMet {
+            reason: format!("duplicate approver DID: {duplicate}"),
+        };
+    }
+
+    if approvals.len() < policy.min_approvals {
+        return QuorumResult::NotMet {
+            reason: format!(
+                "insufficient approvals: {} < {}",
+                approvals.len(),
+                policy.min_approvals
+            ),
+        };
+    }
+
+    let verified_approvals: Vec<&Approval> = approvals
+        .iter()
+        .filter(|approval| {
+            resolver
+                .resolve(&approval.approver_did)
+                .is_some_and(|key| approval.verify_signature(&key))
+        })
+        .collect();
+
+    let total_count = verified_approvals.len();
 
     if total_count < policy.min_approvals {
         return QuorumResult::NotMet {
             reason: format!(
-                "insufficient approvals: {total_count} < {}",
+                "insufficient verified approvals: {total_count} verified of {} required",
                 policy.min_approvals
             ),
         };
     }
 
     for required_role in &policy.required_roles {
-        if !approvals.iter().any(|a| &a.role == required_role) {
+        if !verified_approvals.iter().any(|a| &a.role == required_role) {
             return QuorumResult::NotMet {
                 reason: format!("missing required role: {required_role:?}"),
             };
         }
     }
 
-    let independent_count = approvals
+    let independent_count = verified_approvals
         .iter()
         .filter(|a| {
             a.independence_attestation.as_ref().is_some_and(|att| {
-                match resolver.resolve(&att.attester_did) {
-                    Some(key) => att.is_fully_valid(&key),
-                    None => false,
-                }
+                att.attester_did == a.approver_did
+                    && resolver
+                        .resolve(&att.attester_did)
+                        .is_some_and(|key| att.is_fully_valid(&key))
             })
         })
         .count();
@@ -803,7 +879,7 @@ mod tests {
     #[test]
     fn compute_quorum_verified_counts_only_signed_attestations() {
         let (pk_alice, sk_alice) = crypto::generate_keypair();
-        let (pk_bob, _sk_bob) = crypto::generate_keypair();
+        let (pk_bob, sk_bob) = crypto::generate_keypair();
         let d_alice = did("alice");
         let d_bob = did("bob");
 
@@ -820,20 +896,20 @@ mod tests {
         };
 
         let approvals = vec![
-            Approval {
-                approver_did: d_alice.clone(),
-                role: Role::Steward,
-                timestamp: Timestamp::new(10_000, 0),
-                signature: test_sig(),
-                independence_attestation: Some(alice_att),
-            },
-            Approval {
-                approver_did: d_bob.clone(),
-                role: Role::Governor,
-                timestamp: Timestamp::new(10_001, 0),
-                signature: test_sig(),
-                independence_attestation: Some(bob_att),
-            },
+            signed_approval_with_attestation(
+                &d_alice,
+                Role::Steward,
+                Timestamp::new(10_000, 0),
+                &sk_alice,
+                Some(alice_att),
+            ),
+            signed_approval_with_attestation(
+                &d_bob,
+                Role::Governor,
+                Timestamp::new(10_001, 0),
+                &sk_bob,
+                Some(bob_att),
+            ),
         ];
 
         let policy = QuorumPolicy {
@@ -868,6 +944,166 @@ mod tests {
                 assert!(reason.contains("1 verified-independent of 2"));
             }
             other => panic!("expected NotMet (only Alice verified) but got {other:?}"),
+        }
+    }
+
+    fn approval_signing_payload_for_test(approval: &Approval) -> Vec<u8> {
+        let tuple = (
+            "exo.governance.quorum.approval.v1",
+            &approval.approver_did,
+            &approval.role,
+            &approval.timestamp,
+            &approval.independence_attestation,
+        );
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&tuple, &mut buf).expect("approval payload");
+        buf
+    }
+
+    fn properly_signed_approval(
+        did: &Did,
+        role: Role,
+        timestamp: Timestamp,
+        sk: &exo_core::types::SecretKey,
+    ) -> Approval {
+        let att = properly_signed_attestation(did, sk);
+        signed_approval_with_attestation(did, role, timestamp, sk, Some(att))
+    }
+
+    fn signed_approval_with_attestation(
+        did: &Did,
+        role: Role,
+        timestamp: Timestamp,
+        sk: &exo_core::types::SecretKey,
+        attestation: Option<IndependenceAttestation>,
+    ) -> Approval {
+        let mut approval = Approval {
+            approver_did: did.clone(),
+            role,
+            timestamp,
+            signature: Signature::Empty,
+            independence_attestation: attestation,
+        };
+        let payload = approval_signing_payload_for_test(&approval);
+        approval.signature = crypto::sign(&payload, sk);
+        approval
+    }
+
+    #[test]
+    fn compute_quorum_rejects_duplicate_approver_dids() {
+        let alice = make_approval("alice", Role::Steward, true);
+        let duplicate = Approval {
+            timestamp: Timestamp::new(1001, 0),
+            ..alice.clone()
+        };
+        let policy = QuorumPolicy {
+            min_approvals: 2,
+            min_independent: 2,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match compute_quorum(&[alice, duplicate], &policy) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("duplicate approver"));
+            }
+            other => panic!("duplicate approver must not inflate quorum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_verified_rejects_duplicate_approver_dids() {
+        let (pk_alice, sk_alice) = crypto::generate_keypair();
+        let alice = did("alice");
+        let first =
+            properly_signed_approval(&alice, Role::Steward, Timestamp::new(1000, 0), &sk_alice);
+        let second =
+            properly_signed_approval(&alice, Role::Reviewer, Timestamp::new(1001, 0), &sk_alice);
+        let resolver =
+            |d: &Did| -> Option<PublicKey> { if *d == alice { Some(pk_alice) } else { None } };
+        let policy = QuorumPolicy {
+            min_approvals: 2,
+            min_independent: 2,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match compute_quorum_verified(&[first, second], &policy, &resolver) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("duplicate approver"));
+            }
+            other => panic!("duplicate approver must not inflate verified quorum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_verified_requires_valid_approval_signature() {
+        let (pk_alice, sk_alice) = crypto::generate_keypair();
+        let alice = did("alice");
+        let att = properly_signed_attestation(&alice, &sk_alice);
+        let approval = Approval {
+            approver_did: alice.clone(),
+            role: Role::Steward,
+            timestamp: Timestamp::new(1000, 0),
+            signature: Signature::Ed25519([9u8; 64]),
+            independence_attestation: Some(att),
+        };
+        let resolver =
+            |d: &Did| -> Option<PublicKey> { if *d == alice { Some(pk_alice) } else { None } };
+        let policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match compute_quorum_verified(&[approval], &policy, &resolver) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("verified"));
+            }
+            other => panic!("forged approval signature must not count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_quorum_verified_requires_attestation_from_approver() {
+        let (pk_alice, sk_alice) = crypto::generate_keypair();
+        let (pk_bob, sk_bob) = crypto::generate_keypair();
+        let alice = did("alice");
+        let bob = did("bob");
+        let alice_att = properly_signed_attestation(&alice, &sk_alice);
+        let mut bob_approval = Approval {
+            approver_did: bob.clone(),
+            role: Role::Steward,
+            timestamp: Timestamp::new(1000, 0),
+            signature: Signature::Empty,
+            independence_attestation: Some(alice_att),
+        };
+        let payload = approval_signing_payload_for_test(&bob_approval);
+        bob_approval.signature = crypto::sign(&payload, &sk_bob);
+        let resolver = |d: &Did| -> Option<PublicKey> {
+            if *d == alice {
+                Some(pk_alice)
+            } else if *d == bob {
+                Some(pk_bob)
+            } else {
+                None
+            }
+        };
+        let policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match compute_quorum_verified(&[bob_approval], &policy, &resolver) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("verified"));
+            }
+            other => panic!(
+                "borrowed attestation must not count for a different approver, got {other:?}"
+            ),
         }
     }
 
@@ -956,7 +1192,23 @@ mod tests {
     // Covers compute_quorum_verified's `missing required role` NotMet branch.
     #[test]
     fn compute_quorum_verified_missing_required_role_branch() {
-        let resolver = |_d: &Did| -> Option<PublicKey> { None };
+        let (pk_alice, sk_alice) = crypto::generate_keypair();
+        let (pk_bob, sk_bob) = crypto::generate_keypair();
+        let (pk_carol, sk_carol) = crypto::generate_keypair();
+        let d_alice = did("alice");
+        let d_bob = did("bob");
+        let d_carol = did("carol");
+        let resolver = |d: &Did| -> Option<PublicKey> {
+            if *d == d_alice {
+                Some(pk_alice)
+            } else if *d == d_bob {
+                Some(pk_bob)
+            } else if *d == d_carol {
+                Some(pk_carol)
+            } else {
+                None
+            }
+        };
         let policy = QuorumPolicy {
             min_approvals: 1,
             min_independent: 0,
@@ -965,9 +1217,27 @@ mod tests {
         };
         // Three Reviewer approvals — no Governor.
         let approvals = vec![
-            make_approval("alice", Role::Reviewer, false),
-            make_approval("bob", Role::Reviewer, false),
-            make_approval("carol", Role::Reviewer, false),
+            signed_approval_with_attestation(
+                &d_alice,
+                Role::Reviewer,
+                Timestamp::new(1000, 0),
+                &sk_alice,
+                None,
+            ),
+            signed_approval_with_attestation(
+                &d_bob,
+                Role::Reviewer,
+                Timestamp::new(1001, 0),
+                &sk_bob,
+                None,
+            ),
+            signed_approval_with_attestation(
+                &d_carol,
+                Role::Reviewer,
+                Timestamp::new(1002, 0),
+                &sk_carol,
+                None,
+            ),
         ];
         match compute_quorum_verified(&approvals, &policy, &resolver) {
             QuorumResult::NotMet { reason } => {
@@ -985,24 +1255,9 @@ mod tests {
         let (pk_bob, sk_bob) = crypto::generate_keypair();
         let d_alice = did("alice");
         let d_bob = did("bob");
-        let alice_att = properly_signed_attestation(&d_alice, &sk_alice);
-        let bob_att = properly_signed_attestation(&d_bob, &sk_bob);
-
         let approvals = vec![
-            Approval {
-                approver_did: d_alice.clone(),
-                role: Role::Steward,
-                timestamp: Timestamp::new(1000, 0),
-                signature: test_sig(),
-                independence_attestation: Some(alice_att),
-            },
-            Approval {
-                approver_did: d_bob.clone(),
-                role: Role::Reviewer,
-                timestamp: Timestamp::new(1000, 0),
-                signature: test_sig(),
-                independence_attestation: Some(bob_att),
-            },
+            properly_signed_approval(&d_alice, Role::Steward, Timestamp::new(1000, 0), &sk_alice),
+            properly_signed_approval(&d_bob, Role::Reviewer, Timestamp::new(1001, 0), &sk_bob),
         ];
         let policy = QuorumPolicy {
             min_approvals: 2,
@@ -1028,20 +1283,19 @@ mod tests {
         );
     }
 
-    // Covers compute_quorum_verified's None-from-resolver match arm path (attestation not counted).
+    // Covers compute_quorum_verified's None-from-resolver path (approval not counted).
     #[test]
     fn compute_quorum_verified_none_resolver_excludes_but_totals_pass() {
         let (_pk_alice, sk_alice) = crypto::generate_keypair();
         let d_alice = did("alice");
-        let att = properly_signed_attestation(&d_alice, &sk_alice);
-        let approvals = vec![Approval {
-            approver_did: d_alice.clone(),
-            role: Role::Steward,
-            timestamp: Timestamp::new(1000, 0),
-            signature: test_sig(),
-            independence_attestation: Some(att),
-        }];
-        // min_independent=0 so Met is reached even with unresolvable DID.
+        let approvals = vec![properly_signed_approval(
+            &d_alice,
+            Role::Steward,
+            Timestamp::new(1000, 0),
+            &sk_alice,
+        )];
+        // Even with min_independent=0, unresolved approvers cannot count
+        // toward verified approval quorum.
         let policy = QuorumPolicy {
             min_approvals: 1,
             min_independent: 0,
@@ -1049,13 +1303,12 @@ mod tests {
             timeout: Timestamp::new(999_999, 0),
         };
         let null_resolver = |_d: &Did| -> Option<PublicKey> { None };
-        assert_eq!(
-            compute_quorum_verified(&approvals, &policy, &null_resolver),
-            QuorumResult::Met {
-                independent_count: 0,
-                total_count: 1,
+        match compute_quorum_verified(&approvals, &policy, &null_resolver) {
+            QuorumResult::NotMet { reason } => {
+                assert!(reason.contains("insufficient verified approvals"));
             }
-        );
+            other => panic!("expected NotMet for unresolved approver, got {other:?}"),
+        }
     }
 
     // Covers compute_quorum_with_challenges_verified: open Filed challenge short-circuits to Contested.
@@ -1063,14 +1316,12 @@ mod tests {
     fn compute_quorum_with_challenges_verified_filed_blocks() {
         let (pk_alice, sk_alice) = crypto::generate_keypair();
         let d_alice = did("alice");
-        let att = properly_signed_attestation(&d_alice, &sk_alice);
-        let approvals = vec![Approval {
-            approver_did: d_alice.clone(),
-            role: Role::Steward,
-            timestamp: Timestamp::new(1000, 0),
-            signature: test_sig(),
-            independence_attestation: Some(att),
-        }];
+        let approvals = vec![properly_signed_approval(
+            &d_alice,
+            Role::Steward,
+            Timestamp::new(1000, 0),
+            &sk_alice,
+        )];
         let policy = QuorumPolicy {
             min_approvals: 1,
             min_independent: 1,
@@ -1095,14 +1346,12 @@ mod tests {
     fn compute_quorum_with_challenges_verified_under_review_blocks() {
         let (pk_alice, sk_alice) = crypto::generate_keypair();
         let d_alice = did("alice");
-        let att = properly_signed_attestation(&d_alice, &sk_alice);
-        let approvals = vec![Approval {
-            approver_did: d_alice.clone(),
-            role: Role::Steward,
-            timestamp: Timestamp::new(1000, 0),
-            signature: test_sig(),
-            independence_attestation: Some(att),
-        }];
+        let approvals = vec![properly_signed_approval(
+            &d_alice,
+            Role::Steward,
+            Timestamp::new(1000, 0),
+            &sk_alice,
+        )];
         let policy = QuorumPolicy {
             min_approvals: 1,
             min_independent: 1,
@@ -1125,14 +1374,12 @@ mod tests {
     fn compute_quorum_with_challenges_verified_delegates_to_verified_on_clean() {
         let (pk_alice, sk_alice) = crypto::generate_keypair();
         let d_alice = did("alice");
-        let att = properly_signed_attestation(&d_alice, &sk_alice);
-        let approvals = vec![Approval {
-            approver_did: d_alice.clone(),
-            role: Role::Steward,
-            timestamp: Timestamp::new(1000, 0),
-            signature: test_sig(),
-            independence_attestation: Some(att),
-        }];
+        let approvals = vec![properly_signed_approval(
+            &d_alice,
+            Role::Steward,
+            Timestamp::new(1000, 0),
+            &sk_alice,
+        )];
         let policy = QuorumPolicy {
             min_approvals: 1,
             min_independent: 1,
@@ -1156,14 +1403,12 @@ mod tests {
     fn compute_quorum_with_challenges_verified_resolved_challenge_passes_through() {
         let (pk_alice, sk_alice) = crypto::generate_keypair();
         let d_alice = did("alice");
-        let att = properly_signed_attestation(&d_alice, &sk_alice);
-        let approvals = vec![Approval {
-            approver_did: d_alice.clone(),
-            role: Role::Steward,
-            timestamp: Timestamp::new(1000, 0),
-            signature: test_sig(),
-            independence_attestation: Some(att),
-        }];
+        let approvals = vec![properly_signed_approval(
+            &d_alice,
+            Role::Steward,
+            Timestamp::new(1000, 0),
+            &sk_alice,
+        )];
         let policy = QuorumPolicy {
             min_approvals: 1,
             min_independent: 1,

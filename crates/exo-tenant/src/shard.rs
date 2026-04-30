@@ -42,9 +42,18 @@ pub fn replica_shards(primary: usize, config: &ShardConfig) -> Result<Vec<usize>
             ),
         });
     }
-    Ok((0..config.replication_factor)
-        .map(|i| (primary + i) % config.num_shards)
-        .collect())
+    let mut replicas = Vec::with_capacity(config.replication_factor);
+    for offset in 0..config.replication_factor {
+        let raw_shard = primary
+            .checked_add(offset)
+            .ok_or_else(|| TenantError::ShardError {
+                reason: format!(
+                    "primary shard {primary} plus replica offset {offset} overflows usize"
+                ),
+            })?;
+        replicas.push(raw_shard % config.num_shards);
+    }
+    Ok(replicas)
 }
 
 /// Compute which shards a key migrates between when shard count changes.
@@ -167,6 +176,14 @@ mod tests {
             replication_factor: 3,
         };
         assert!(replica_shards(0, &c).is_err());
+    }
+    #[test]
+    fn replicas_reject_primary_plus_offset_overflow() {
+        let c = ShardConfig {
+            num_shards: usize::MAX,
+            replication_factor: 3,
+        };
+        assert!(replica_shards(usize::MAX - 1, &c).is_err());
     }
     #[test]
     fn migration() {

@@ -14,7 +14,7 @@
 //! `resolve_credential` accepts any [`Credential`] variant (DID signature, API key,
 //! or bearer token) and resolves it to an [`AuthenticatedActor`].  Every credential
 //! resolves to a DID — there is no identity outside the DID system.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use exo_core::{Did, Hash256, Signature, Timestamp};
 use exo_identity::{did_verification::verify_did_signature, registry::DidRegistry};
@@ -75,7 +75,7 @@ impl AuthenticationMetadata {
 
 /// Supported authentication credential types.
 /// All credentials resolve to a DID — there is no identity outside the DID system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Credential {
     /// Direct DID signature authentication (strongest).
     /// The actor signs a challenge with their DID key.
@@ -93,12 +93,33 @@ pub enum Credential {
     BearerToken(String),
 }
 
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DidSignature {
+                actor_did,
+                body_hash,
+                timestamp,
+                ..
+            } => f
+                .debug_struct("DidSignature")
+                .field("actor_did", actor_did)
+                .field("body_hash", body_hash)
+                .field("timestamp", timestamp)
+                .field("signature", &"<redacted>")
+                .finish(),
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::BearerToken(_) => f.debug_tuple("BearerToken").field(&"<redacted>").finish(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // API key registry
 // ---------------------------------------------------------------------------
 
 /// A registered API key bound to a DID.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
     /// BLAKE3 hash of the plaintext API key.
     pub key_hash: Hash256,
@@ -112,6 +133,19 @@ pub struct ApiKeyRecord {
     pub expires_at: Option<Timestamp>,
     /// Whether this key has been revoked.
     pub revoked: bool,
+}
+
+impl fmt::Debug for ApiKeyRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiKeyRecord")
+            .field("key_hash", &"<redacted>")
+            .field("did", &self.did)
+            .field("label", &self.label)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("revoked", &self.revoked)
+            .finish()
+    }
 }
 
 /// Caller-supplied metadata for API key creation.
@@ -193,7 +227,13 @@ impl ApiKeyRegistry {
     pub fn resolve(&self, api_key: &str) -> Option<&ApiKeyRecord> {
         let key_bytes = hex::decode(api_key).ok()?;
         let key_hash = Hash256::digest(&key_bytes);
-        self.keys.get(&key_hash)
+        let mut matched = None;
+        for record in self.keys.values() {
+            if constant_time_eq(key_hash.as_bytes(), record.key_hash.as_bytes()) {
+                matched = Some(record);
+            }
+        }
+        matched
     }
 
     /// Revoke a key by its hash.  Returns `true` if the key existed (and was
@@ -381,6 +421,17 @@ fn check_freshness(ts: &Timestamp, observed_at: &Timestamp) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for idx in 0..left.len() {
+        diff |= left[idx] ^ right[idx];
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +722,27 @@ mod tests {
     }
 
     #[test]
+    fn api_key_registry_resolve_does_not_use_tree_lookup_for_secret_hash() {
+        let source = include_str!("auth.rs");
+        let resolve_start = source
+            .find("pub fn resolve(&self, api_key: &str)")
+            .expect("resolve source exists");
+        let resolve_end = source[resolve_start..]
+            .find("/// Revoke a key")
+            .expect("revoke marker exists");
+        let resolve_body = &source[resolve_start..resolve_start + resolve_end];
+        let forbidden = [".keys", ".get(&key_hash)"].concat();
+        assert!(
+            !resolve_body.contains(&forbidden),
+            "API key resolution must not branch through a tree lookup on secret-derived hashes"
+        );
+        assert!(
+            resolve_body.contains("constant_time_eq"),
+            "API key resolution must compare stored hashes in constant time"
+        );
+    }
+
+    #[test]
     fn credential_api_key_revoked() {
         let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
@@ -816,5 +888,19 @@ mod tests {
         let actor = resolve_credential(&cred, &did_reg, &api_reg, auth_metadata).unwrap();
 
         assert_eq!(actor.authenticated_at, Timestamp::new(2_000, 0));
+    }
+
+    #[test]
+    fn credential_debug_redacts_token_material() {
+        let api_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let bearer = "bearer-token-that-must-not-appear-in-debug";
+
+        let api_debug = format!("{:?}", Credential::ApiKey(api_key.to_owned()));
+        let bearer_debug = format!("{:?}", Credential::BearerToken(bearer.to_owned()));
+
+        assert!(!api_debug.contains(api_key));
+        assert!(!bearer_debug.contains(bearer));
+        assert!(api_debug.contains("<redacted>"));
+        assert!(bearer_debug.contains("<redacted>"));
     }
 }

@@ -3,7 +3,12 @@
 //! Uses blake3 for all commitments (no elliptic curves).
 //! This is a pedagogical implementation demonstrating the STARK structure.
 
-use exo_core::types::Hash256;
+use std::collections::BTreeSet;
+
+use exo_core::{
+    hash::{merkle_proof, merkle_root, verify_merkle_proof},
+    types::Hash256,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ProofError, Result};
@@ -43,7 +48,7 @@ impl StarkConfig {
 ///
 /// Constraints are transition rules: given `row[i]` and `row[i+1]`,
 /// the constraint function must evaluate to 0.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StarkConstraint {
     /// Human-readable name.
     pub name: String,
@@ -68,6 +73,21 @@ pub struct FriProof {
     pub query_values: Vec<Vec<u64>>,
 }
 
+/// Merkle-authenticated trace row opened by a STARK query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceQueryProof {
+    /// Query index in the committed trace.
+    pub index: usize,
+    /// Trace row value at `index`.
+    pub row: Vec<u64>,
+    /// Merkle authentication path from `hash_row(row)` to the trace root.
+    pub authentication_path: Vec<Hash256>,
+    /// Trace row value at `index + 1`, used for transition constraints.
+    pub next_row: Vec<u64>,
+    /// Merkle authentication path from `hash_row(next_row)` to the trace root.
+    pub next_authentication_path: Vec<Hash256>,
+}
+
 // ---------------------------------------------------------------------------
 // StarkProof
 // ---------------------------------------------------------------------------
@@ -89,6 +109,12 @@ pub struct StarkProof {
     pub trace_length: usize,
     /// Hash of the public inputs (first row of trace) for verification.
     pub public_input_hash: Hash256,
+    /// Public transition constraints for the statement being proven.
+    pub constraints: Vec<StarkConstraint>,
+    /// Merkle authentication path from the public input row to trace root.
+    pub public_input_authentication_path: Vec<Hash256>,
+    /// Merkle-authenticated trace openings for every Fiat-Shamir query.
+    pub trace_query_proofs: Vec<TraceQueryProof>,
 }
 
 impl PartialEq for StarkConfig {
@@ -141,7 +167,7 @@ pub fn prove_stark(
         let next = &window[1];
 
         for constraint in constraints {
-            let val = evaluate_constraint(constraint, current, next, config.field_size);
+            let val = evaluate_constraint(constraint, current, next, config.field_size)?;
             if val != 0 {
                 return Err(ProofError::ProofGenerationFailed(format!(
                     "constraint '{}' not satisfied at row {row_idx}",
@@ -151,18 +177,20 @@ pub fn prove_stark(
         }
     }
 
+    let trace_leaves = trace_leaf_hashes(trace);
+
     // Step 2: Commit to the trace
-    let trace_commitment = commit_trace(trace);
+    let trace_commitment = commit_trace_from_leaves(&trace_leaves);
 
     // Step 3: Commit to the constraint polynomial
-    let constraint_commitment = commit_constraints(trace, constraints, config.field_size);
+    let constraint_commitment = commit_constraints(trace, constraints, config.field_size)?;
 
     // Step 4: Derive query indices (Fiat-Shamir)
     let query_indices = derive_queries(
         &trace_commitment,
         &constraint_commitment,
         config.num_queries,
-        trace.len(),
+        trace.len() - 1,
     )?;
 
     // Step 5: Build FRI proof
@@ -173,6 +201,12 @@ pub fn prove_stark(
         &trace_commitment,
         &constraint_commitment,
     );
+    let public_input_authentication_path = merkle_proof(&trace_leaves, 0).map_err(|_| {
+        ProofError::ProofGenerationFailed(
+            "failed to build public input authentication path".to_string(),
+        )
+    })?;
+    let trace_query_proofs = build_trace_query_proofs(trace, &trace_leaves, &query_indices)?;
 
     Ok(StarkProof {
         trace_commitment,
@@ -182,6 +216,9 @@ pub fn prove_stark(
         config: config.clone(),
         trace_length: trace.len(),
         public_input_hash: hash_row(&trace[0]),
+        constraints: constraints.to_vec(),
+        public_input_authentication_path,
+        trace_query_proofs,
     })
 }
 
@@ -197,12 +234,33 @@ pub fn prove_stark(
 /// Returns `Err(UnauditedImplementation)` when the feature is disabled.
 pub fn verify_stark(proof: &StarkProof, public_inputs: &[u64]) -> Result<bool> {
     crate::guard_unaudited("stark::verify_stark")?;
+    let _ = (proof, public_inputs);
+    Err(ProofError::VerificationFailed(
+        "stark::verify_stark requires caller-supplied public constraints; use verify_stark_with_constraints".to_string(),
+    ))
+}
+
+/// Verify a STARK proof for caller-supplied public constraints.
+///
+/// Prefer this API when the verifier knows the statement constraints out of
+/// band. [`verify_stark`] remains available for serialized proof bundles that
+/// embed their public constraints.
+pub fn verify_stark_with_constraints(
+    proof: &StarkProof,
+    public_inputs: &[u64],
+    constraints: &[StarkConstraint],
+) -> Result<bool> {
+    crate::guard_unaudited("stark::verify_stark")?;
+    if proof.trace_length < 2 || proof.constraints != constraints {
+        return Ok(false);
+    }
+
     // Step 1: Re-derive query indices from commitments (Fiat-Shamir)
     let expected_queries = match derive_queries(
         &proof.trace_commitment,
         &proof.constraint_commitment,
         proof.config.num_queries,
-        proof.trace_length,
+        proof.trace_length - 1,
     ) {
         Ok(q) => q,
         Err(_) => return Ok(false),
@@ -222,8 +280,77 @@ pub fn verify_stark(proof: &StarkProof, public_inputs: &[u64]) -> Result<bool> {
     if public_hash != proof.public_input_hash {
         return Ok(false);
     }
+    if !verify_merkle_proof(
+        &proof.trace_commitment,
+        &proof.public_input_hash,
+        &proof.public_input_authentication_path,
+        0,
+    ) {
+        return Ok(false);
+    }
 
-    // Step 4: Verify consistency between trace commitment, constraint commitment,
+    // Step 4: Verify every Fiat-Shamir trace opening against the trace
+    // commitment and the query values carried by the FRI component.
+    if proof.trace_query_proofs.len() != proof.query_indices.len()
+        || proof.fri_proof.query_values.len() != proof.query_indices.len()
+    {
+        return Ok(false);
+    }
+
+    for ((expected_index, query_proof), query_values) in proof
+        .query_indices
+        .iter()
+        .zip(&proof.trace_query_proofs)
+        .zip(&proof.fri_proof.query_values)
+    {
+        if query_proof.index != *expected_index || query_values != &query_proof.row {
+            return Ok(false);
+        }
+
+        let Some(next_index) = query_proof.index.checked_add(1) else {
+            return Ok(false);
+        };
+        if next_index >= proof.trace_length {
+            return Ok(false);
+        }
+
+        let leaf = hash_row(&query_proof.row);
+        if !verify_merkle_proof(
+            &proof.trace_commitment,
+            &leaf,
+            &query_proof.authentication_path,
+            query_proof.index,
+        ) {
+            return Ok(false);
+        }
+
+        let next_leaf = hash_row(&query_proof.next_row);
+        if !verify_merkle_proof(
+            &proof.trace_commitment,
+            &next_leaf,
+            &query_proof.next_authentication_path,
+            next_index,
+        ) {
+            return Ok(false);
+        }
+
+        for constraint in constraints {
+            let constraint_value = match evaluate_constraint(
+                constraint,
+                &query_proof.row,
+                &query_proof.next_row,
+                proof.config.field_size,
+            ) {
+                Ok(value) => value,
+                Err(_) => return Ok(false),
+            };
+            if constraint_value != 0 {
+                return Ok(false);
+            }
+        }
+    }
+
+    // Step 5: Verify consistency between trace commitment, constraint commitment,
     // and FRI proof.
     let expected_fri_base =
         compute_fri_base_commitment(&proof.trace_commitment, &proof.constraint_commitment);
@@ -232,7 +359,7 @@ pub fn verify_stark(proof: &StarkProof, public_inputs: &[u64]) -> Result<bool> {
         return Ok(false);
     }
 
-    // Step 5: Verify FRI layer transitions
+    // Step 6: Verify FRI layer transitions
     for window in proof.fri_proof.layer_commitments.windows(2) {
         let mut h = blake3::Hasher::new();
         h.update(b"stark:fri:fold:");
@@ -255,8 +382,15 @@ fn evaluate_constraint(
     current: &[u64],
     next: &[u64],
     field_size: u64,
-) -> u64 {
-    let mut sum: u64 = 0;
+) -> Result<u64> {
+    if field_size == 0 {
+        return Err(ProofError::ProofGenerationFailed(
+            "field_size must be non-zero".to_string(),
+        ));
+    }
+
+    let modulus = u128::from(field_size);
+    let mut sum: u128 = 0;
     for (i, &col_idx) in constraint.column_indices.iter().enumerate() {
         if i < constraint.coefficients.len() {
             let (curr_coeff, next_coeff) = constraint.coefficients[i];
@@ -270,11 +404,14 @@ fn evaluate_constraint(
             } else {
                 0
             };
-            sum = (sum + curr_coeff.wrapping_mul(curr_val) + next_coeff.wrapping_mul(next_val))
-                % field_size;
+            let curr_term = (u128::from(curr_coeff) * u128::from(curr_val)) % modulus;
+            let next_term = (u128::from(next_coeff) * u128::from(next_val)) % modulus;
+            sum = (sum + curr_term + next_term) % modulus;
         }
     }
-    sum
+    u64::try_from(sum).map_err(|_| {
+        ProofError::ProofGenerationFailed("constraint evaluation overflowed u64".to_string())
+    })
 }
 
 fn hash_row(row: &[u64]) -> Hash256 {
@@ -286,30 +423,27 @@ fn hash_row(row: &[u64]) -> Hash256 {
     Hash256::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn commit_trace(trace: &[Vec<u64>]) -> Hash256 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"stark:trace:");
-    for row in trace {
-        let row_hash = hash_row(row);
-        hasher.update(row_hash.as_bytes());
-    }
-    Hash256::from_bytes(*hasher.finalize().as_bytes())
+fn trace_leaf_hashes(trace: &[Vec<u64>]) -> Vec<Hash256> {
+    trace.iter().map(|row| hash_row(row)).collect()
 }
 
+fn commit_trace_from_leaves(leaves: &[Hash256]) -> Hash256 {
+    merkle_root(leaves)
+}
 fn commit_constraints(
     trace: &[Vec<u64>],
     constraints: &[StarkConstraint],
     field_size: u64,
-) -> Hash256 {
+) -> Result<Hash256> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"stark:constraints:");
     for window in trace.windows(2) {
         for constraint in constraints {
-            let val = evaluate_constraint(constraint, &window[0], &window[1], field_size);
+            let val = evaluate_constraint(constraint, &window[0], &window[1], field_size)?;
             hasher.update(&val.to_le_bytes());
         }
     }
-    Hash256::from_bytes(*hasher.finalize().as_bytes())
+    Ok(Hash256::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 fn derive_queries(
@@ -321,27 +455,48 @@ fn derive_queries(
     if trace_len == 0 {
         return Ok(Vec::new());
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"stark:queries:");
-    hasher.update(trace_commitment.as_bytes());
-    hasher.update(constraint_commitment.as_bytes());
-    let seed = hasher.finalize();
-    let seed_bytes = seed.as_bytes();
-
+    let trace_len_u64 = u64::try_from(trace_len).map_err(|_| {
+        ProofError::ProofGenerationFailed(format!("trace length {trace_len} overflows u64"))
+    })?;
+    let require_unique = num_queries <= trace_len;
+    let mut seen = BTreeSet::new();
     let mut indices = Vec::with_capacity(num_queries);
+
     for i in 0..num_queries {
-        let byte_offset = (i * 4) % 32;
-        let mut idx_bytes = [0u8; 4];
-        for j in 0..4 {
-            idx_bytes[j] = seed_bytes[(byte_offset + j) % 32];
-        }
-        let raw = u32::from_le_bytes(idx_bytes);
-        let raw_usize = usize::try_from(raw).map_err(|_| {
-            ProofError::ProofGenerationFailed(format!("query index {raw} overflows usize"))
+        let query_round = u64::try_from(i).map_err(|_| {
+            ProofError::ProofGenerationFailed(format!("query round {i} overflows u64"))
         })?;
-        let idx = raw_usize % trace_len;
-        indices.push(idx);
+        let mut attempt = 0u64;
+
+        loop {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"stark:query_index:");
+            hasher.update(trace_commitment.as_bytes());
+            hasher.update(constraint_commitment.as_bytes());
+            hasher.update(&query_round.to_le_bytes());
+            hasher.update(&attempt.to_le_bytes());
+            let seed = hasher.finalize();
+            let mut idx_bytes = [0u8; 8];
+            idx_bytes.copy_from_slice(&seed.as_bytes()[..8]);
+
+            let idx_u64 = u64::from_le_bytes(idx_bytes) % trace_len_u64;
+            let idx = usize::try_from(idx_u64).map_err(|_| {
+                ProofError::ProofGenerationFailed(format!("query index {idx_u64} overflows usize"))
+            })?;
+
+            if !require_unique || seen.insert(idx) {
+                indices.push(idx);
+                break;
+            }
+
+            attempt = attempt.checked_add(1).ok_or_else(|| {
+                ProofError::ProofGenerationFailed(format!(
+                    "query index derivation exhausted attempts for round {i}"
+                ))
+            })?;
+        }
     }
+
     Ok(indices)
 }
 
@@ -396,6 +551,52 @@ fn build_fri_proof(
     }
 }
 
+fn build_trace_query_proofs(
+    trace: &[Vec<u64>],
+    trace_leaves: &[Hash256],
+    query_indices: &[usize],
+) -> Result<Vec<TraceQueryProof>> {
+    query_indices
+        .iter()
+        .map(|&idx| {
+            let Some(row) = trace.get(idx) else {
+                return Err(ProofError::ProofGenerationFailed(format!(
+                    "query index {idx} is outside trace length {}",
+                    trace.len()
+                )));
+            };
+            let Some(next_idx) = idx.checked_add(1) else {
+                return Err(ProofError::ProofGenerationFailed(format!(
+                    "query index {idx} cannot address a successor row"
+                )));
+            };
+            let Some(next_row) = trace.get(next_idx) else {
+                return Err(ProofError::ProofGenerationFailed(format!(
+                    "query index {idx} has no successor row in trace length {}",
+                    trace.len()
+                )));
+            };
+            let authentication_path = merkle_proof(trace_leaves, idx).map_err(|_| {
+                ProofError::ProofGenerationFailed(format!(
+                    "failed to build trace authentication path for query index {idx}"
+                ))
+            })?;
+            let next_authentication_path = merkle_proof(trace_leaves, next_idx).map_err(|_| {
+                ProofError::ProofGenerationFailed(format!(
+                    "failed to build trace authentication path for successor query index {next_idx}"
+                ))
+            })?;
+            Ok(TraceQueryProof {
+                index: idx,
+                row: row.clone(),
+                authentication_path,
+                next_row: next_row.clone(),
+                next_authentication_path,
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -429,6 +630,15 @@ mod tests {
         }
     }
 
+    fn equality_constraint() -> StarkConstraint {
+        let field_size = (1u64 << 31) - 1;
+        StarkConstraint {
+            name: "same-value".to_string(),
+            column_indices: vec![0],
+            coefficients: vec![(1, field_size - 1)],
+        }
+    }
+
     #[test]
     fn prove_and_verify_fibonacci() {
         let config = StarkConfig::default_config();
@@ -437,7 +647,19 @@ mod tests {
 
         let proof = prove_stark(&trace, &constraints, &config).unwrap();
         let public_inputs = &trace[0];
-        assert!(verify_stark(&proof, public_inputs).unwrap());
+        assert!(verify_stark_with_constraints(&proof, public_inputs, &constraints).unwrap());
+    }
+
+    #[test]
+    fn verify_stark_refuses_without_caller_supplied_constraints() {
+        let config = StarkConfig::default_config();
+        let trace = make_fibonacci_trace(16, config.field_size);
+        let constraints = vec![fib_constraint()];
+
+        let proof = prove_stark(&trace, &constraints, &config).unwrap();
+        let err = verify_stark(&proof, &trace[0]).unwrap_err();
+
+        assert!(matches!(err, ProofError::VerificationFailed(_)));
     }
 
     #[test]
@@ -469,6 +691,40 @@ mod tests {
         let constraints = vec![fib_constraint()];
         let err = prove_stark(&trace, &constraints, &config).unwrap_err();
         assert!(matches!(err, ProofError::ProofGenerationFailed(_)));
+    }
+
+    #[test]
+    fn zero_field_size_rejected_without_panic() {
+        let config = StarkConfig {
+            field_size: 0,
+            expansion_factor: 4,
+            num_queries: 2,
+        };
+        let trace = vec![vec![1], vec![1]];
+        let constraints = vec![equality_constraint()];
+
+        let err = prove_stark(&trace, &constraints, &config).unwrap_err();
+
+        assert!(matches!(err, ProofError::ProofGenerationFailed(_)));
+    }
+
+    #[test]
+    fn large_constraint_terms_do_not_overflow_before_modular_reduction() {
+        let config = StarkConfig {
+            field_size: u64::MAX - 58,
+            expansion_factor: 4,
+            num_queries: 2,
+        };
+        let trace = vec![vec![1, 1], vec![1, 1]];
+        let constraint = StarkConstraint {
+            name: "large-terms".to_string(),
+            column_indices: vec![0, 1],
+            coefficients: vec![(u64::MAX, 0), (u64::MAX, 0)],
+        };
+
+        let result = prove_stark(&trace, &[constraint], &config);
+
+        assert!(matches!(result, Err(ProofError::ProofGenerationFailed(_))));
     }
 
     #[test]
@@ -510,7 +766,87 @@ mod tests {
 
         let proof = prove_stark(&trace, &constraints, &config).unwrap();
         // Wrong public inputs
-        assert!(!verify_stark(&proof, &[99, 99]).unwrap());
+        assert!(!verify_stark_with_constraints(&proof, &[99, 99], &constraints).unwrap());
+    }
+
+    #[test]
+    fn verify_rejects_public_inputs_not_bound_to_trace_commitment() {
+        let config = StarkConfig::default_config();
+        let trace = make_fibonacci_trace(8, config.field_size);
+        let constraints = vec![fib_constraint()];
+
+        let mut proof = prove_stark(&trace, &constraints, &config).unwrap();
+        let forged_public_inputs = vec![99, 99];
+        proof.public_input_hash = hash_row(&forged_public_inputs);
+
+        assert!(
+            !verify_stark_with_constraints(&proof, &forged_public_inputs, &constraints).unwrap()
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_query_values() {
+        let config = StarkConfig::default_config();
+        let trace = make_fibonacci_trace(8, config.field_size);
+        let constraints = vec![fib_constraint()];
+
+        let mut proof = prove_stark(&trace, &constraints, &config).unwrap();
+        proof.fri_proof.query_values = vec![vec![u64::MAX; 4]; config.num_queries];
+
+        assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
+    }
+
+    #[test]
+    fn verify_with_constraints_rejects_authenticated_trace_that_violates_constraints() {
+        let config = StarkConfig::default_config();
+        let constraints = vec![equality_constraint()];
+        let trace = vec![vec![0], vec![1], vec![2], vec![3], vec![4], vec![5]];
+        let trace_leaves = trace_leaf_hashes(&trace);
+        let trace_commitment = commit_trace_from_leaves(&trace_leaves);
+        let constraint_commitment =
+            commit_constraints(&trace, &constraints, config.field_size).unwrap();
+        let query_indices = derive_queries(
+            &trace_commitment,
+            &constraint_commitment,
+            config.num_queries,
+            trace.len() - 1,
+        )
+        .unwrap();
+        let fri_proof = build_fri_proof(
+            &trace,
+            &query_indices,
+            &config,
+            &trace_commitment,
+            &constraint_commitment,
+        );
+        let public_input_authentication_path = merkle_proof(&trace_leaves, 0).unwrap();
+        let trace_query_proofs =
+            build_trace_query_proofs(&trace, &trace_leaves, &query_indices).unwrap();
+        let proof = StarkProof {
+            trace_commitment,
+            constraint_commitment,
+            query_indices,
+            fri_proof,
+            config,
+            trace_length: trace.len(),
+            public_input_hash: hash_row(&trace[0]),
+            constraints: constraints.clone(),
+            public_input_authentication_path,
+            trace_query_proofs,
+        };
+
+        assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
+    }
+
+    #[test]
+    fn derive_queries_produces_unique_indices_when_domain_permits() {
+        let trace_commitment = Hash256::from_bytes([1u8; 32]);
+        let constraint_commitment = Hash256::from_bytes([2u8; 32]);
+        let queries = derive_queries(&trace_commitment, &constraint_commitment, 16, 64).unwrap();
+        let unique: std::collections::BTreeSet<usize> = queries.iter().copied().collect();
+
+        assert_eq!(queries.len(), 16);
+        assert_eq!(unique.len(), queries.len());
     }
 
     #[test]
@@ -521,15 +857,16 @@ mod tests {
 
         let mut proof = prove_stark(&trace, &constraints, &config).unwrap();
         proof.trace_commitment = Hash256::ZERO;
-        assert!(!verify_stark(&proof, &trace[0]).unwrap());
+        assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
     }
 
     #[test]
     fn no_constraints_trace() {
         let config = StarkConfig::default_config();
         let trace = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
-        let proof = prove_stark(&trace, &[], &config).unwrap();
-        assert!(verify_stark(&proof, &trace[0]).unwrap());
+        let constraints = Vec::new();
+        let proof = prove_stark(&trace, &constraints, &config).unwrap();
+        assert!(verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
     }
 
     #[test]
@@ -565,8 +902,9 @@ mod tests {
             column_indices: vec![5], // beyond trace width → curr_val and next_val both become 0
             coefficients: vec![(1, 1)], // non-zero: 1*0 + 1*0 == 0, but would be non-zero if OOB returned column data
         };
-        let proof = prove_stark(&trace, &[constraint], &config).unwrap();
-        assert!(verify_stark(&proof, &trace[0]).unwrap());
+        let constraints = vec![constraint];
+        let proof = prove_stark(&trace, &constraints, &config).unwrap();
+        assert!(verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
     }
 
     #[test]
@@ -585,7 +923,8 @@ mod tests {
             column_indices: vec![0, 1], // two indices
             coefficients: vec![(1, 1)], // non-zero, one entry — index 1 is silently skipped
         };
-        let proof = prove_stark(&trace, &[constraint], &config).unwrap();
-        assert!(verify_stark(&proof, &trace[0]).unwrap());
+        let constraints = vec![constraint];
+        let proof = prove_stark(&trace, &constraints, &config).unwrap();
+        assert!(verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
     }
 }

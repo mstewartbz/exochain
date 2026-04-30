@@ -3,14 +3,28 @@
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
+pub const MAX_JSON_INPUT_BYTES: usize = 1_048_576;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn bridge_error(_message: &str) -> JsValue {
+    JsValue::NULL
+}
+
+#[cfg(not(all(test, not(target_arch = "wasm32"))))]
+fn bridge_error(message: &str) -> JsValue {
+    JsValue::from_str(message)
+}
+
 pub fn from_json_str<T: DeserializeOwned>(json: &str) -> Result<T, JsValue> {
-    serde_json::from_str(json).map_err(|e| JsValue::from_str(&format!("JSON parse error: {e}")))
+    if json.len() > MAX_JSON_INPUT_BYTES {
+        return Err(bridge_error("JSON input exceeds maximum size"));
+    }
+    serde_json::from_str(json).map_err(|_| bridge_error("JSON parse error"))
 }
 
 pub fn to_js_value<T: Serialize>(val: &T) -> Result<JsValue, JsValue> {
     // Go through JSON string → js_sys::JSON::parse to get plain JS objects (not Maps)
-    let json = serde_json::to_string(val)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))?;
+    let json = serde_json::to_string(val).map_err(|_| bridge_error("Serialization error"))?;
     js_sys::JSON::parse(&json)
 }
 
@@ -71,6 +85,22 @@ mod tests {
         assert!(
             result.is_err(),
             "missing required field must return an error"
+        );
+    }
+
+    #[test]
+    fn from_json_str_rejects_oversized_inputs_before_deserialization() {
+        let oversized = format!("[{}0]", "0,".repeat(600_000));
+        let result: Result<Vec<u8>, _> = super::from_json_str(&oversized);
+        assert!(result.is_err(), "oversized JSON must be rejected");
+    }
+
+    #[test]
+    fn from_json_str_does_not_forward_serde_error_details() {
+        let source = include_str!("serde_bridge.rs");
+        assert!(
+            !source.contains("format!(\"JSON parse error"),
+            "serde_json error details must not cross the WASM boundary"
         );
     }
 

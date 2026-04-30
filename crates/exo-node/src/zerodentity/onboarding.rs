@@ -171,10 +171,15 @@ const FIRST_TOUCH_ONBOARDING_FEATURE: &str = "unaudited-zerodentity-first-touch-
 const FIRST_TOUCH_ONBOARDING_INITIATIVE: &str = "fix-onyx-4-r1-onboarding-auth.md";
 
 #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
-fn build_rng() -> StdRng {
+fn build_rng() -> Result<StdRng, (StatusCode, Json<serde_json::Value>)> {
     let mut seed = [0u8; 32];
-    let _ = getrandom(&mut seed);
-    StdRng::from_seed(seed)
+    getrandom(&mut seed).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("OTP entropy unavailable: {e}"),
+        )
+    })?;
+    Ok(StdRng::from_seed(seed))
 }
 
 #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
@@ -465,7 +470,7 @@ pub async fn submit_claim(
         let channel = parse_otp_channel(channel_str)?;
         let ttl = channel.ttl_ms();
 
-        let mut rng = build_rng();
+        let mut rng = build_rng()?;
         let (challenge, _code) = OtpChallenge::new(&subject_did, channel, created_ms, &mut rng)
             .map_err(|_| {
                 (
@@ -482,7 +487,12 @@ pub async fn submit_claim(
                     Json(serde_json::json!({"error": "Store lock error"})),
                 )
             })?;
-            let _ = store.insert_otp_challenge(&challenge);
+            store.insert_otp_challenge(&challenge).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
+                )
+            })?;
         }
         (Some(cid), Some(ttl))
     } else {
@@ -803,6 +813,51 @@ mod tests {
         assert!(
             !resend.contains("let now = now_ms()"),
             "resend must read time through OnboardingState's injected HLC"
+        );
+    }
+
+    #[test]
+    fn first_touch_rng_entropy_errors_are_propagated() {
+        let source = include_str!("onboarding.rs");
+        let rng_builder = source
+            .split("fn build_rng")
+            .nth(1)
+            .and_then(|section| section.split("fn parse_did").next())
+            .expect("build_rng must have an explicit function body");
+
+        assert!(
+            rng_builder.contains("-> Result<StdRng"),
+            "feature-on RNG construction must return a Result"
+        );
+        assert!(
+            !rng_builder.contains("let _ = getrandom"),
+            "feature-on RNG construction must not ignore entropy failures"
+        );
+        assert!(
+            rng_builder.contains("getrandom(&mut seed).map_err"),
+            "feature-on RNG construction must convert entropy errors into closed failures"
+        );
+    }
+
+    #[test]
+    fn first_touch_submit_claim_propagates_otp_challenge_store_error() {
+        let source = include_str!("onboarding.rs");
+        let submit_claim = source
+            .split(
+                "#[cfg(feature = \"unaudited-zerodentity-first-touch-onboarding\")]\n\
+                 pub async fn submit_claim",
+            )
+            .nth(1)
+            .and_then(|section| section.split("// POST /api/v1/0dentity/verify").next())
+            .expect("feature-on submit_claim must have an explicit function body");
+
+        assert!(
+            !submit_claim.contains("let _ = store.insert_otp_challenge"),
+            "OTP challenge persistence failures must not be swallowed"
+        );
+        assert!(
+            submit_claim.contains("insert_otp_challenge(&challenge).map_err"),
+            "OTP challenge persistence failures must be returned as closed errors"
         );
     }
 

@@ -199,32 +199,32 @@ pub fn wasm_workflow_stages() -> Result<JsValue, JsValue> {
 ///
 /// `signatures_json` — JSON array of `[did_str, signature_hex]` pairs.
 /// `quorum_json`     — JSON `{required_signatures, required_fraction_pct}`.
+/// `public_keys_json` — JSON array of `[did_str, public_key_hex]` eligible signer pairs.
 #[wasm_bindgen]
 pub fn wasm_ratify_constitution(
     corpus_json: &str,
     signatures_json: &str,
     quorum_json: &str,
+    public_keys_json: &str,
     timestamp_ms: u64,
 ) -> Result<JsValue, JsValue> {
     let mut corpus: decision_forum::constitution::ConstitutionCorpus = from_json_str(corpus_json)?;
     let quorum: decision_forum::constitution::ConstitutionQuorum = from_json_str(quorum_json)?;
-    let sig_pairs: Vec<(String, String)> = from_json_str(signatures_json)?;
-
-    let mut sigs: Vec<(exo_core::Did, exo_core::Signature)> = Vec::new();
-    for (did_str, sig_hex) in &sig_pairs {
-        let did = exo_core::Did::new(did_str)
-            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-        let sig_bytes =
-            hex::decode(sig_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-        let arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| JsValue::from_str("signature must be 64 bytes"))?;
-        sigs.push((did, exo_core::Signature::from_bytes(arr)));
-    }
+    let sigs = parse_signature_pairs(signatures_json)?;
+    let public_keys = parse_public_key_pairs(public_keys_json)?;
+    let eligible: std::collections::BTreeSet<exo_core::Did> = public_keys.keys().cloned().collect();
+    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
 
     let ts = exo_core::types::Timestamp::new(timestamp_ms, 0);
-    decision_forum::constitution::ratify(&mut corpus, &sigs, &quorum, ts)
-        .map_err(|e| JsValue::from_str(&format!("Ratify error: {e}")))?;
+    decision_forum::constitution::ratify_verified(
+        &mut corpus,
+        &sigs,
+        &quorum,
+        ts,
+        &eligible,
+        &resolver,
+    )
+    .map_err(|e| JsValue::from_str(&format!("Ratify error: {e}")))?;
     to_js_value(&corpus)
 }
 
@@ -232,30 +232,33 @@ pub fn wasm_ratify_constitution(
 ///
 /// `amendment_json`  — JSON `Article` object.
 /// `signatures_json` — JSON array of `[did_str, signature_hex]` pairs.
+/// `quorum_json`     — JSON `{required_signatures, required_fraction_pct}`.
+/// `public_keys_json` — JSON array of `[did_str, public_key_hex]` eligible signer pairs.
 #[wasm_bindgen]
 pub fn wasm_amend_constitution(
     corpus_json: &str,
     amendment_json: &str,
     signatures_json: &str,
+    quorum_json: &str,
+    public_keys_json: &str,
 ) -> Result<JsValue, JsValue> {
     let mut corpus: decision_forum::constitution::ConstitutionCorpus = from_json_str(corpus_json)?;
     let amendment: decision_forum::constitution::Article = from_json_str(amendment_json)?;
-    let sig_pairs: Vec<(String, String)> = from_json_str(signatures_json)?;
+    let quorum: decision_forum::constitution::ConstitutionQuorum = from_json_str(quorum_json)?;
+    let sigs = parse_signature_pairs(signatures_json)?;
+    let public_keys = parse_public_key_pairs(public_keys_json)?;
+    let eligible: std::collections::BTreeSet<exo_core::Did> = public_keys.keys().cloned().collect();
+    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
 
-    let mut sigs: Vec<(exo_core::Did, exo_core::Signature)> = Vec::new();
-    for (did_str, sig_hex) in &sig_pairs {
-        let did = exo_core::Did::new(did_str)
-            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-        let sig_bytes =
-            hex::decode(sig_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-        let arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| JsValue::from_str("signature must be 64 bytes"))?;
-        sigs.push((did, exo_core::Signature::from_bytes(arr)));
-    }
-
-    decision_forum::constitution::amend(&mut corpus, amendment, &sigs)
-        .map_err(|e| JsValue::from_str(&format!("Amend error: {e}")))?;
+    decision_forum::constitution::amend_verified(
+        &mut corpus,
+        amendment,
+        &sigs,
+        &quorum,
+        &eligible,
+        &resolver,
+    )
+    .map_err(|e| JsValue::from_str(&format!("Amend error: {e}")))?;
     to_js_value(&corpus)
 }
 
@@ -756,6 +759,42 @@ fn parse_hash(value: &str, label: &str) -> Result<exo_core::Hash256, JsValue> {
         .try_into()
         .map_err(|_| JsValue::from_str(&format!("{label} must be 32 bytes")))?;
     Ok(exo_core::Hash256::from_bytes(arr))
+}
+
+fn parse_signature_pairs(
+    signatures_json: &str,
+) -> Result<Vec<(exo_core::Did, exo_core::Signature)>, JsValue> {
+    let sig_pairs: Vec<(String, String)> = from_json_str(signatures_json)?;
+    let mut sigs = Vec::new();
+    for (did_str, sig_hex) in &sig_pairs {
+        let did = exo_core::Did::new(did_str)
+            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+        let sig_bytes =
+            hex::decode(sig_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+        let arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| JsValue::from_str("signature must be 64 bytes"))?;
+        sigs.push((did, exo_core::Signature::from_bytes(arr)));
+    }
+    Ok(sigs)
+}
+
+fn parse_public_key_pairs(
+    public_keys_json: &str,
+) -> Result<std::collections::BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
+    let key_pairs: Vec<(String, String)> = from_json_str(public_keys_json)?;
+    let mut public_keys = std::collections::BTreeMap::new();
+    for (did_str, public_key_hex) in &key_pairs {
+        let did = exo_core::Did::new(did_str)
+            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+        let bytes =
+            hex::decode(public_key_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| JsValue::from_str("public key must be 32 bytes"))?;
+        public_keys.insert(did, exo_core::PublicKey::from_bytes(arr));
+    }
+    Ok(public_keys)
 }
 
 #[cfg(test)]

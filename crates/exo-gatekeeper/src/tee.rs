@@ -192,11 +192,46 @@ fn synthetic_signature_allowed(attestation: &TeeAttestation, policy: &TeePolicy)
 // Attestation verification
 // ---------------------------------------------------------------------------
 
-/// Verify a TEE attestation against a policy.
-pub fn verify_attestation(
+/// Platform-specific verifier for a hardware TEE quote.
+///
+/// The verifier is called only after deterministic policy checks pass and only
+/// for non-synthetic hardware attestations. Simulated TEEs keep using the local
+/// deterministic fixture signature path for tests.
+pub trait TeeQuoteVerifier {
+    /// Verify the platform quote carried in an attestation.
+    ///
+    /// Implementations should perform the platform-specific checks for SGX,
+    /// SEV, or TrustZone quote material and return a detailed [`GatekeeperError`]
+    /// on failure.
+    fn verify_quote(
+        &self,
+        attestation: &TeeAttestation,
+        policy: &TeePolicy,
+    ) -> Result<(), GatekeeperError>;
+}
+
+impl<F> TeeQuoteVerifier for F
+where
+    F: Fn(&TeeAttestation, &TeePolicy) -> Result<(), GatekeeperError>,
+{
+    fn verify_quote(
+        &self,
+        attestation: &TeeAttestation,
+        policy: &TeePolicy,
+    ) -> Result<(), GatekeeperError> {
+        self(attestation, policy)
+    }
+}
+
+enum AttestationSignatureKind {
+    SimulatedFixture,
+    HardwareQuote,
+}
+
+fn check_attestation_policy(
     attestation: &TeeAttestation,
     policy: &TeePolicy,
-) -> Result<(), GatekeeperError> {
+) -> Result<AttestationSignatureKind, GatekeeperError> {
     // Check platform (includes production gate for Simulated).
     if !is_platform_allowed(&attestation.platform, policy) {
         return Err(GatekeeperError::TeeError(format!(
@@ -242,7 +277,7 @@ pub fn verify_attestation(
 
     if attestation.signature == synthetic_sig {
         if synthetic_signature_allowed(attestation, policy) {
-            return Ok(());
+            return Ok(AttestationSignatureKind::SimulatedFixture);
         }
         return Err(GatekeeperError::TeeError(
             "synthetic TEE attestation signatures are only accepted for simulated TEEs in explicitly allowed environments".into(),
@@ -255,10 +290,40 @@ pub fn verify_attestation(
         ));
     }
 
-    Err(GatekeeperError::TeeError(format!(
-        "Hardware TEE attestation for platform {:?} requires a platform quote verifier",
-        attestation.platform
-    )))
+    Ok(AttestationSignatureKind::HardwareQuote)
+}
+
+/// Verify a TEE attestation against a policy.
+pub fn verify_attestation(
+    attestation: &TeeAttestation,
+    policy: &TeePolicy,
+) -> Result<(), GatekeeperError> {
+    match check_attestation_policy(attestation, policy)? {
+        AttestationSignatureKind::SimulatedFixture => Ok(()),
+        AttestationSignatureKind::HardwareQuote => Err(GatekeeperError::TeeError(format!(
+            "Hardware TEE attestation for platform {:?} requires a platform quote verifier",
+            attestation.platform
+        ))),
+    }
+}
+
+/// Verify a TEE attestation with an explicit hardware quote verifier.
+///
+/// This preserves the fail-closed behavior of [`verify_attestation`] for
+/// callers that do not provide platform quote verification, while allowing
+/// production integrations to plug in audited SGX/SEV/TrustZone quote checks.
+pub fn verify_attestation_with_quote_verifier<V>(
+    attestation: &TeeAttestation,
+    policy: &TeePolicy,
+    verifier: &V,
+) -> Result<(), GatekeeperError>
+where
+    V: TeeQuoteVerifier + ?Sized,
+{
+    match check_attestation_policy(attestation, policy)? {
+        AttestationSignatureKind::SimulatedFixture => Ok(()),
+        AttestationSignatureKind::HardwareQuote => verifier.verify_quote(attestation, policy),
+    }
 }
 
 // ===========================================================================
@@ -289,6 +354,33 @@ mod tests {
             current_time_ms: TIMESTAMP,
             environment: TeeEnvironment::Testing,
         }
+    }
+
+    fn accepting_sgx_quote_verifier(
+        verified_att: &TeeAttestation,
+        _policy: &TeePolicy,
+    ) -> Result<(), GatekeeperError> {
+        if verified_att.platform == TeePlatform::Sgx && verified_att.signature == vec![0xA5; 64] {
+            Ok(())
+        } else {
+            Err(GatekeeperError::TeeError(
+                "unexpected quote material".into(),
+            ))
+        }
+    }
+
+    fn revoked_quote_verifier(
+        _attestation: &TeeAttestation,
+        _policy: &TeePolicy,
+    ) -> Result<(), GatekeeperError> {
+        Err(GatekeeperError::TeeError("quote revoked".into()))
+    }
+
+    fn panic_quote_verifier(
+        _attestation: &TeeAttestation,
+        _policy: &TeePolicy,
+    ) -> Result<(), GatekeeperError> {
+        panic!("synthetic hardware attestations must not reach quote verifier")
     }
 
     // --- Generation ---
@@ -576,6 +668,44 @@ mod tests {
         let result = verify_attestation(&att, &policy);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("quote verifier"));
+    }
+
+    #[test]
+    fn hardware_non_synthetic_signature_is_accepted_when_quote_verifier_accepts() {
+        let mut att = generate_attestation(&TeePlatform::Sgx, MEASUREMENT, TIMESTAMP);
+        att.signature = vec![0xA5; 64];
+        let mut policy = TeePolicy::production();
+        policy.current_time_ms = TIMESTAMP;
+
+        let result =
+            verify_attestation_with_quote_verifier(&att, &policy, &accepting_sgx_quote_verifier);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn hardware_quote_verifier_error_is_propagated() {
+        let mut att = generate_attestation(&TeePlatform::Sgx, MEASUREMENT, TIMESTAMP);
+        att.signature = vec![0xA5; 64];
+        let mut policy = TeePolicy::production();
+        policy.current_time_ms = TIMESTAMP;
+
+        let result = verify_attestation_with_quote_verifier(&att, &policy, &revoked_quote_verifier);
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("quote revoked"));
+    }
+
+    #[test]
+    fn synthetic_hardware_attestation_is_rejected_before_quote_verifier() {
+        let att = generate_attestation(&TeePlatform::Sgx, MEASUREMENT, TIMESTAMP);
+        let mut policy = TeePolicy::production();
+        policy.current_time_ms = TIMESTAMP;
+
+        let result = verify_attestation_with_quote_verifier(&att, &policy, &panic_quote_verifier);
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("synthetic"));
     }
 
     #[test]

@@ -308,7 +308,7 @@ impl Constitution {
                 threshold_pct,
             } => {
                 if decision_class == class {
-                    let met = approval_threshold.is_none_or(|t| t >= *threshold_pct);
+                    let met = approval_threshold.is_some_and(|t| t >= *threshold_pct);
                     (
                         met,
                         format!("Approval threshold {}% required", threshold_pct),
@@ -322,23 +322,32 @@ impl Constitution {
                 max_cents,
             } => {
                 if decision_class == class {
-                    let met = monetary_amount.is_none_or(|a| a <= *max_cents);
-                    (
-                        met,
-                        if met {
+                    match monetary_amount {
+                        Some(amount) if amount <= *max_cents => (
+                            true,
                             format!(
                                 "Within monetary cap of ${}.{:02}",
                                 *max_cents / 100,
                                 *max_cents % 100
-                            )
-                        } else {
+                            ),
+                        ),
+                        Some(_) => (
+                            false,
                             format!(
                                 "Exceeds monetary cap of ${}.{:02}",
                                 *max_cents / 100,
                                 *max_cents % 100
-                            )
-                        },
-                    )
+                            ),
+                        ),
+                        None => (
+                            false,
+                            format!(
+                                "Missing monetary amount for cap of ${}.{:02}",
+                                *max_cents / 100,
+                                *max_cents % 100
+                            ),
+                        ),
+                    }
                 } else {
                     (true, "Not applicable".to_string())
                 }
@@ -801,9 +810,9 @@ mod tests {
         assert_eq!(r.message, "Not applicable to this decision class");
     }
 
-    // RequireApprovalThreshold: approval_threshold = None => is_none_or = true (satisfied)
+    // RequireApprovalThreshold: missing approval evidence must fail closed.
     #[test]
-    fn test_approval_threshold_none_is_satisfied() {
+    fn test_approval_threshold_none_blocks() {
         let c = constitution_with(vec![Constraint {
             id: "AT-1".to_string(),
             description: "Threshold 66%".to_string(),
@@ -815,9 +824,17 @@ mod tests {
         }]);
         let results = c.evaluate_constraints(&DecisionClass::Strategic, 0, None, None, None, true);
         assert_eq!(results.len(), 1);
-        assert!(results[0].satisfied);
+        assert!(!results[0].satisfied);
         assert_eq!(results[0].message, "Approval threshold 66% required");
-        assert!(results[0].failure_action.is_none());
+        assert_eq!(results[0].failure_action, Some(FailureAction::Block));
+
+        let err = c
+            .check_blocking_constraints(&DecisionClass::Strategic, 0, None, None, None, true)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GovernanceError::ConstitutionalViolation { constraint_id, .. } if constraint_id == "AT-1"
+        ));
     }
 
     // RequireApprovalThreshold: met when threshold >= required
@@ -880,9 +897,9 @@ mod tests {
         assert_eq!(results[0].message, "Not applicable");
     }
 
-    // RequireMonetaryCap: monetary_amount = None satisfied (is_none_or true) with formatted cap
+    // RequireMonetaryCap: missing amount evidence must fail closed.
     #[test]
-    fn test_monetary_cap_none_amount_within_cap_message() {
+    fn test_monetary_cap_none_amount_blocks() {
         let c = constitution_with(vec![Constraint {
             id: "MC-1".to_string(),
             description: "Cap $1,234.56".to_string(),
@@ -893,8 +910,20 @@ mod tests {
             failure_action: FailureAction::Block,
         }]);
         let results = c.evaluate_constraints(&DecisionClass::Strategic, 0, None, None, None, true);
-        assert!(results[0].satisfied);
-        assert_eq!(results[0].message, "Within monetary cap of $1234.56");
+        assert!(!results[0].satisfied);
+        assert_eq!(
+            results[0].message,
+            "Missing monetary amount for cap of $1234.56"
+        );
+        assert_eq!(results[0].failure_action, Some(FailureAction::Block));
+
+        let err = c
+            .check_blocking_constraints(&DecisionClass::Strategic, 0, None, None, None, true)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GovernanceError::ConstitutionalViolation { constraint_id, .. } if constraint_id == "MC-1"
+        ));
     }
 
     // RequireMonetaryCap: amount exactly == cap is satisfied; message formats cents padded

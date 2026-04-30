@@ -64,7 +64,7 @@ impl HybridClock {
             self.physical = wall;
             self.logical = 0;
         } else {
-            self.logical = self.logical.saturating_add(1);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
         }
         Timestamp::new(self.physical, self.logical)
     }
@@ -95,14 +95,16 @@ impl HybridClock {
             self.logical = 0;
         } else if self.physical == remote.physical_ms {
             // Same physical — advance logical past both
-            self.logical = self.logical.max(remote.logical).saturating_add(1);
+            self.logical = self.logical.max(remote.logical);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
         } else if remote.physical_ms > self.physical {
             // Remote is ahead — adopt remote physical, advance logical
             self.physical = remote.physical_ms;
-            self.logical = remote.logical.saturating_add(1);
+            self.logical = remote.logical;
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
         } else {
             // Local is ahead — advance own logical
-            self.logical = self.logical.saturating_add(1);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
         }
 
         Ok(Timestamp::new(self.physical, self.logical))
@@ -118,6 +120,17 @@ impl HybridClock {
     #[must_use]
     pub fn current(&self) -> Timestamp {
         Timestamp::new(self.physical, self.logical)
+    }
+}
+
+fn advance_logical_or_carry_physical(physical: &mut u64, logical: &mut u32) {
+    if *logical == u32::MAX {
+        if let Some(next_physical) = physical.checked_add(1) {
+            *physical = next_physical;
+            *logical = 0;
+        }
+    } else {
+        *logical += 1;
     }
 }
 
@@ -338,6 +351,32 @@ mod tests {
         let ts = clock.now();
         assert!(ts > last);
         assert_eq!(ts.physical_ms, 200);
+        assert_eq!(ts.logical, 0);
+    }
+
+    #[test]
+    fn now_remains_monotonic_when_logical_counter_is_exhausted() {
+        let (mut clock, _wall) = test_clock(1000);
+        clock.physical = 1000;
+        clock.logical = u32::MAX;
+
+        let ts = clock.now();
+
+        assert!(ts > Timestamp::new(1000, u32::MAX));
+        assert_eq!(ts.physical_ms, 1001);
+        assert_eq!(ts.logical, 0);
+    }
+
+    #[test]
+    fn update_remains_monotonic_when_logical_counter_is_exhausted() {
+        let (mut clock, _wall) = test_clock(1000);
+        clock.physical = 1000;
+        clock.logical = u32::MAX;
+
+        let ts = clock.update(&Timestamp::new(1000, u32::MAX)).expect("ok");
+
+        assert!(ts > Timestamp::new(1000, u32::MAX));
+        assert_eq!(ts.physical_ms, 1001);
         assert_eq!(ts.logical, 0);
     }
 
