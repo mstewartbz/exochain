@@ -12,6 +12,8 @@
 //! which verifies the requesting actor's authority chain before any report
 //! can be generated.
 
+use std::fmt;
+
 use exo_authority::{AuthorityChain, AuthorityLink, AuthorityRevocation, DelegateeKind, chain};
 use exo_core::{Did, PublicKey, Timestamp, hash::hash_structured};
 use exo_gatekeeper::mcp_audit::{
@@ -28,13 +30,14 @@ const AI_DELEGATION_GRANT_SCHEMA_VERSION: u16 = 1;
 const AI_DELEGATION_REVOCATION_DOMAIN: &str =
     "exo.legal.ai_transparency.ai_delegation_revocation.v1";
 const AI_DELEGATION_REVOCATION_SCHEMA_VERSION: u16 = 1;
+const DEBUG_REDACTED: &str = "<redacted>";
 
 // ---------------------------------------------------------------------------
 // Report structures
 // ---------------------------------------------------------------------------
 
 /// Verified authority-chain evidence authorizing report generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityClearanceEvidence {
     pub requester: Did,
     pub verified_at: Timestamp,
@@ -42,6 +45,19 @@ pub struct AuthorityClearanceEvidence {
     pub chain_leaf: Did,
     pub chain_depth: usize,
     pub chain_hash: [u8; 32],
+}
+
+impl fmt::Debug for AuthorityClearanceEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthorityClearanceEvidence")
+            .field("requester", &DEBUG_REDACTED)
+            .field("verified_at", &self.verified_at)
+            .field("chain_root", &DEBUG_REDACTED)
+            .field("chain_leaf", &DEBUG_REDACTED)
+            .field("chain_depth", &self.chain_depth)
+            .field("chain_hash", &self.chain_hash)
+            .finish()
+    }
 }
 
 /// Authority clearance artifact that can only be created by successful chain
@@ -60,7 +76,7 @@ impl VerifiedAuthorityClearance {
 }
 
 /// Summary of a single AI agent delegation event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AiDelegationEvent {
     pub delegator: Did,
     pub delegatee: Did,
@@ -74,6 +90,24 @@ pub struct AiDelegationEvent {
     pub authority_chain_depth: usize,
     pub authority_chain_hash: [u8; 32],
     pub authority_link_hash: [u8; 32],
+}
+
+impl fmt::Debug for AiDelegationEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiDelegationEvent")
+            .field("delegator", &DEBUG_REDACTED)
+            .field("delegatee", &DEBUG_REDACTED)
+            .field("model_id", &DEBUG_REDACTED)
+            .field("granted_at", &self.granted_at)
+            .field("expires_at", &self.expires_at)
+            .field("depth", &self.depth)
+            .field("authority_chain_root", &DEBUG_REDACTED)
+            .field("authority_chain_leaf", &DEBUG_REDACTED)
+            .field("authority_chain_depth", &self.authority_chain_depth)
+            .field("authority_chain_hash", &self.authority_chain_hash)
+            .field("authority_link_hash", &self.authority_link_hash)
+            .finish()
+    }
 }
 
 /// Verified AI delegation artifact that can only be created by authority-chain
@@ -92,7 +126,7 @@ impl VerifiedAiDelegationGrant {
 }
 
 /// Summary of a verified AI agent delegation revocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AiDelegationRevocationEvent {
     pub delegator: Did,
     pub delegatee: Did,
@@ -109,6 +143,27 @@ pub struct AiDelegationRevocationEvent {
     pub authority_chain_hash: [u8; 32],
     pub authority_link_hash: [u8; 32],
     pub revocation_hash: [u8; 32],
+}
+
+impl fmt::Debug for AiDelegationRevocationEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiDelegationRevocationEvent")
+            .field("delegator", &DEBUG_REDACTED)
+            .field("delegatee", &DEBUG_REDACTED)
+            .field("model_id", &DEBUG_REDACTED)
+            .field("granted_at", &self.granted_at)
+            .field("expires_at", &self.expires_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("revoker", &DEBUG_REDACTED)
+            .field("depth", &self.depth)
+            .field("authority_chain_root", &DEBUG_REDACTED)
+            .field("authority_chain_leaf", &DEBUG_REDACTED)
+            .field("authority_chain_depth", &self.authority_chain_depth)
+            .field("authority_chain_hash", &self.authority_chain_hash)
+            .field("authority_link_hash", &self.authority_link_hash)
+            .field("revocation_hash", &self.revocation_hash)
+            .finish()
+    }
 }
 
 /// Verified AI delegation revocation artifact that can only be created by
@@ -141,7 +196,7 @@ pub struct McpOutcomeSummary {
 /// Satisfies EU AI Act Article 13 (transparency) and provides the record
 /// required by GDPR Article 22(4) for automated decision-making with
 /// significant effects.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AiTransparencyReport {
     pub tenant_id: Did,
     pub period_start: Timestamp,
@@ -161,6 +216,23 @@ pub struct AiTransparencyReport {
     pub mcp_audit_head_hash: [u8; 32],
     /// Verified report-generation authority evidence.
     pub authority_clearance: AuthorityClearanceEvidence,
+}
+
+impl fmt::Debug for AiTransparencyReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiTransparencyReport")
+            .field("tenant_id", &DEBUG_REDACTED)
+            .field("period_start", &self.period_start)
+            .field("period_end", &self.period_end)
+            .field("legal_jurisdiction", &self.legal_jurisdiction)
+            .field("ai_agent_action_count", &self.ai_agent_action_count)
+            .field("ai_delegation_grants", &self.ai_delegation_grants)
+            .field("ai_delegation_revocations", &self.ai_delegation_revocations)
+            .field("mcp_rule_outcomes", &self.mcp_rule_outcomes)
+            .field("mcp_audit_head_hash", &self.mcp_audit_head_hash)
+            .field("authority_clearance", &self.authority_clearance)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,9 +586,9 @@ fn aggregate_mcp_outcomes(
         let rule_key = format!("{:?}", record.rule);
         let entry = counts.entry(rule_key).or_insert((0, 0, 0));
         match record.outcome {
-            McpEnforcementOutcome::Allowed => entry.0 += 1,
-            McpEnforcementOutcome::Blocked => entry.1 += 1,
-            McpEnforcementOutcome::Escalated => entry.2 += 1,
+            McpEnforcementOutcome::Allowed => entry.0 = entry.0.saturating_add(1),
+            McpEnforcementOutcome::Blocked => entry.1 = entry.1.saturating_add(1),
+            McpEnforcementOutcome::Escalated => entry.2 = entry.2.saturating_add(1),
         }
     }
 
@@ -857,6 +929,143 @@ mod tests {
         assert!(
             !report_params.contains("ai_delegation_revocations: u64"),
             "ReportParams must require verified AI delegation revocation artifacts, not raw counts"
+        );
+    }
+
+    #[test]
+    fn aggregate_mcp_outcomes_uses_saturating_counter_arithmetic() {
+        let source = include_str!("ai_transparency.rs");
+        let production = match source
+            .split("// ===========================================================================")
+            .next()
+        {
+            Some(production) => production,
+            None => panic!("tests section marker must be present"),
+        };
+        let aggregate = match production.split("fn aggregate_mcp_outcomes").nth(1) {
+            Some(aggregate) => aggregate,
+            None => panic!("aggregate_mcp_outcomes definition must be present"),
+        };
+        let aggregate = match aggregate.split("#[derive(Serialize)]").next() {
+            Some(aggregate) => aggregate,
+            None => panic!("aggregate_mcp_outcomes boundary must be present"),
+        };
+
+        assert!(
+            aggregate.contains("saturating_add(1)"),
+            "MCP outcome counters must saturate instead of overflowing"
+        );
+        assert!(
+            !aggregate.contains("+= 1"),
+            "MCP outcome counters must not use direct += arithmetic"
+        );
+    }
+
+    #[test]
+    fn ai_delegation_event_debug_redacts_model_and_identity_fields() {
+        let event = AiDelegationEvent {
+            delegator: did("sensitive-delegator"),
+            delegatee: did("sensitive-agent"),
+            model_id: "sensitive-model-v2".into(),
+            granted_at: ts(1_000),
+            expires_at: Some(ts(2_000)),
+            depth: 1,
+            authority_chain_root: did("sensitive-root"),
+            authority_chain_leaf: did("sensitive-leaf"),
+            authority_chain_depth: 2,
+            authority_chain_hash: [0xA1; 32],
+            authority_link_hash: [0xB2; 32],
+        };
+
+        let debug = format!("{event:?}");
+
+        for leaked in [
+            "sensitive-model-v2",
+            "did:exo:sensitive-delegator",
+            "did:exo:sensitive-agent",
+            "did:exo:sensitive-root",
+            "did:exo:sensitive-leaf",
+        ] {
+            assert!(
+                !debug.contains(leaked),
+                "Debug output must redact sensitive value {leaked}"
+            );
+        }
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug output must make redaction explicit"
+        );
+    }
+
+    #[test]
+    fn ai_transparency_report_debug_redacts_nested_model_and_identity_fields() {
+        let tenant = did("sensitive-tenant");
+        let report = AiTransparencyReport {
+            tenant_id: tenant,
+            period_start: ts(1_000),
+            period_end: ts(2_000),
+            legal_jurisdiction: "EU-AI-ACT".into(),
+            ai_agent_action_count: 1,
+            ai_delegation_grants: vec![AiDelegationEvent {
+                delegator: did("report-sensitive-delegator"),
+                delegatee: did("report-sensitive-agent"),
+                model_id: "report-sensitive-model".into(),
+                granted_at: ts(1_100),
+                expires_at: None,
+                depth: 1,
+                authority_chain_root: did("report-sensitive-root"),
+                authority_chain_leaf: did("report-sensitive-leaf"),
+                authority_chain_depth: 2,
+                authority_chain_hash: [0xC3; 32],
+                authority_link_hash: [0xD4; 32],
+            }],
+            ai_delegation_revocations: vec![AiDelegationRevocationEvent {
+                delegator: did("revocation-sensitive-delegator"),
+                delegatee: did("revocation-sensitive-agent"),
+                model_id: "revocation-sensitive-model".into(),
+                granted_at: ts(1_100),
+                expires_at: None,
+                revoked_at: ts(1_500),
+                revoker: did("revocation-sensitive-revoker"),
+                depth: 1,
+                authority_chain_root: did("revocation-sensitive-root"),
+                authority_chain_leaf: did("revocation-sensitive-leaf"),
+                authority_chain_depth: 2,
+                authority_chain_hash: [0xE5; 32],
+                authority_link_hash: [0xF6; 32],
+                revocation_hash: [0x07; 32],
+            }],
+            mcp_rule_outcomes: vec![],
+            mcp_audit_head_hash: [0x18; 32],
+            authority_clearance: AuthorityClearanceEvidence {
+                requester: did("clearance-sensitive-requester"),
+                verified_at: ts(1_200),
+                chain_root: did("clearance-sensitive-root"),
+                chain_leaf: did("clearance-sensitive-leaf"),
+                chain_depth: 2,
+                chain_hash: [0x29; 32],
+            },
+        };
+
+        let debug = format!("{report:?}");
+
+        for leaked in [
+            "did:exo:sensitive-tenant",
+            "report-sensitive-model",
+            "did:exo:report-sensitive-delegator",
+            "did:exo:report-sensitive-agent",
+            "revocation-sensitive-model",
+            "did:exo:revocation-sensitive-revoker",
+            "did:exo:clearance-sensitive-requester",
+        ] {
+            assert!(
+                !debug.contains(leaked),
+                "report Debug output must redact sensitive value {leaked}"
+            );
+        }
+        assert!(
+            debug.contains("<redacted>"),
+            "report Debug output must make redaction explicit"
         );
     }
 
