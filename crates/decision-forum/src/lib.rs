@@ -22,6 +22,8 @@
 //! - [`terms`] — Terms & conditions management
 //! - [`error`] — Error types
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod accountability;
 pub mod authority;
 pub mod authority_matrix;
