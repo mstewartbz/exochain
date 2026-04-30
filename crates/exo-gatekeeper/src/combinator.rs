@@ -19,6 +19,9 @@ pub const MAX_COMBINATOR_DEPTH: usize = 128;
 /// Maximum children allowed in any sequence, parallel, or choice branch list.
 pub const MAX_COMBINATOR_BRANCH_WIDTH: usize = 256;
 
+/// Maximum total nodes allowed in a combinator tree.
+pub const MAX_COMBINATOR_NODE_COUNT: usize = 10_000;
+
 /// Maximum retry budget accepted for a retry combinator.
 pub const MAX_RETRY_ATTEMPTS: u32 = 100;
 
@@ -137,15 +140,23 @@ pub enum Combinator {
 
 thread_local! {
     static COMBINATOR_DESERIALIZE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static COMBINATOR_DESERIALIZE_NODE_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-struct CombinatorDeserializeDepthGuard;
+struct CombinatorDeserializeDepthGuard {
+    is_root: bool,
+}
 
 impl Drop for CombinatorDeserializeDepthGuard {
     fn drop(&mut self) {
         COMBINATOR_DESERIALIZE_DEPTH.with(|depth| {
             depth.set(depth.get().saturating_sub(1));
         });
+        if self.is_root {
+            COMBINATOR_DESERIALIZE_NODE_COUNT.with(|nodes| {
+                nodes.set(0);
+            });
+        }
     }
 }
 
@@ -155,14 +166,28 @@ where
 {
     COMBINATOR_DESERIALIZE_DEPTH.with(|depth| {
         let current = depth.get();
+        let is_root = current == 0;
         if current > MAX_COMBINATOR_DEPTH {
             return Err(de::Error::custom(format!(
                 "maximum combinator nesting depth exceeded during deserialization: {} > {}",
                 current, MAX_COMBINATOR_DEPTH
             )));
         }
-        depth.set(current + 1);
-        Ok(CombinatorDeserializeDepthGuard)
+        COMBINATOR_DESERIALIZE_NODE_COUNT.with(|nodes| {
+            if is_root {
+                nodes.set(0);
+            }
+            let current_nodes = nodes.get();
+            if current_nodes >= MAX_COMBINATOR_NODE_COUNT {
+                return Err(de::Error::custom(format!(
+                    "maximum combinator node count exceeded during deserialization: more than {}",
+                    MAX_COMBINATOR_NODE_COUNT
+                )));
+            }
+            nodes.set(current_nodes + 1);
+            depth.set(current + 1);
+            Ok(CombinatorDeserializeDepthGuard { is_root })
+        })
     })
 }
 
@@ -326,7 +351,64 @@ pub fn reduce(
     combinator: &Combinator,
     input: &CombinatorInput,
 ) -> Result<CombinatorOutput, GatekeeperError> {
+    validate_combinator_structure(combinator)?;
     reduce_inner(combinator, input, 0)
+}
+
+fn validate_combinator_structure(combinator: &Combinator) -> Result<(), GatekeeperError> {
+    let mut stack = vec![(combinator, 0usize)];
+    let mut node_count = 0usize;
+
+    while let Some((current, depth)) = stack.pop() {
+        if depth > MAX_COMBINATOR_DEPTH {
+            return Err(GatekeeperError::CombinatorError(format!(
+                "maximum combinator nesting depth exceeded: {} > {}",
+                depth, MAX_COMBINATOR_DEPTH
+            )));
+        }
+
+        if node_count >= MAX_COMBINATOR_NODE_COUNT {
+            return Err(GatekeeperError::CombinatorError(format!(
+                "maximum combinator node count exceeded: more than {}",
+                MAX_COMBINATOR_NODE_COUNT
+            )));
+        }
+        node_count += 1;
+
+        match current {
+            Combinator::Identity => {}
+            Combinator::Sequence(combinators) => {
+                enforce_branch_width("Sequence", combinators.len())?;
+                for child in combinators.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            Combinator::Parallel(combinators) => {
+                enforce_branch_width("Parallel", combinators.len())?;
+                for child in combinators.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            Combinator::Choice(combinators) => {
+                enforce_branch_width("Choice", combinators.len())?;
+                for child in combinators.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            Combinator::Guard(inner, _) | Combinator::Transform(inner, _) => {
+                stack.push((inner, depth + 1));
+            }
+            Combinator::Retry(inner, policy) => {
+                policy.validate()?;
+                stack.push((inner, depth + 1));
+            }
+            Combinator::Timeout(inner, _) | Combinator::Checkpoint(inner, _) => {
+                stack.push((inner, depth + 1));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn reduce_inner(
@@ -474,6 +556,41 @@ mod tests {
         CombinatorInput::new()
             .with("name", "alice")
             .with("role", "judge")
+    }
+
+    fn branch_bounded_sequence(total_leaves: usize) -> Combinator {
+        let mut remaining = total_leaves;
+        let mut branches = Vec::new();
+        while remaining > 0 {
+            let chunk = remaining.min(MAX_COMBINATOR_BRANCH_WIDTH);
+            branches.push(Combinator::Sequence(vec![Combinator::Identity; chunk]));
+            remaining -= chunk;
+        }
+        Combinator::Sequence(branches)
+    }
+
+    fn branch_bounded_sequence_json(total_leaves: usize) -> String {
+        let mut remaining = total_leaves;
+        let mut json = String::from("{\"Sequence\":[");
+        let mut outer_idx = 0;
+        while remaining > 0 {
+            if outer_idx > 0 {
+                json.push(',');
+            }
+            let chunk = remaining.min(MAX_COMBINATOR_BRANCH_WIDTH);
+            json.push_str("{\"Sequence\":[");
+            for inner_idx in 0..chunk {
+                if inner_idx > 0 {
+                    json.push(',');
+                }
+                json.push_str("\"Identity\"");
+            }
+            json.push_str("]}");
+            remaining -= chunk;
+            outer_idx += 1;
+        }
+        json.push_str("]}");
+        json
     }
 
     // --- Identity ---
@@ -805,6 +922,21 @@ mod tests {
     }
 
     #[test]
+    fn reduce_rejects_excessive_total_node_count() {
+        let input = sample_input();
+        let combinator = branch_bounded_sequence(MAX_COMBINATOR_NODE_COUNT + 1);
+
+        let err = match reduce(&combinator, &input) {
+            Ok(_) => panic!("excessive node count must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("maximum combinator node count"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn combinator_deserialization_is_not_directly_derived() {
         let source = include_str!("combinator.rs");
         assert!(
@@ -831,6 +963,20 @@ mod tests {
         };
         assert!(
             err.to_string().contains("maximum combinator branch width"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_excessive_total_node_count() {
+        let json = branch_bounded_sequence_json(MAX_COMBINATOR_NODE_COUNT + 1);
+
+        let err = match serde_json::from_str::<Combinator>(&json) {
+            Ok(_) => panic!("oversized combinator tree must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("maximum combinator node count"),
             "unexpected error: {err}"
         );
     }
