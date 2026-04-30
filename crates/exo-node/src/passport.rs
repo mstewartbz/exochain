@@ -28,8 +28,13 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    reactor::SharedReactorState, store::SqliteDagStore, zerodentity::store::SharedZerodentityStore,
+    reactor::{ReactorState, SharedReactorState},
+    store::SqliteDagStore,
+    zerodentity::store::{SharedZerodentityStore, ZerodentityStore},
 };
+
+type PassportError = (StatusCode, String);
+type PassportResult<T> = Result<T, PassportError>;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -44,6 +49,60 @@ pub struct PassportApiState {
     pub store: Arc<Mutex<SqliteDagStore>>,
     /// 0dentity store for sovereign identity score lookup.
     pub zerodentity_store: SharedZerodentityStore,
+}
+
+async fn with_reactor_state_blocking<T, F>(
+    state: Arc<PassportApiState>,
+    operation: F,
+) -> PassportResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&ReactorState) -> PassportResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let reactor = state.reactor_state.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Reactor state unavailable".to_string(),
+            )
+        })?;
+        operation(&reactor)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "passport reactor state task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Reactor state task failed".to_string(),
+        )
+    })?
+}
+
+async fn with_zerodentity_store_blocking<T, F>(
+    state: Arc<PassportApiState>,
+    operation: F,
+) -> PassportResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&ZerodentityStore) -> PassportResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let zd = state.zerodentity_store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Zerodentity store unavailable".to_string(),
+            )
+        })?;
+        operation(&zd)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "passport 0dentity store task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Zerodentity store task failed".to_string(),
+        )
+    })?
 }
 
 // ---------------------------------------------------------------------------
@@ -191,54 +250,46 @@ async fn handle_passport(
     State(state): State<Arc<PassportApiState>>,
     Path(did): Path<String>,
 ) -> Result<Json<AgentPassport>, (StatusCode, String)> {
-    let (known, is_validator) = {
-        let s = state.reactor_state.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Reactor state unavailable".to_string(),
-            )
-        })?;
-        let did_obj = exo_core::types::Did::new(&did)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
-        let is_val = s.consensus.config.validators.contains(&did_obj);
-        // A DID is "known" if it's in the validator set or is this node's own DID.
-        let known = is_val || s.node_did.to_string() == did;
-        (known, is_val)
-    };
-
-    // Look up 0dentity data: score and claims.
     let did_obj = exo_core::types::Did::new(&did)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
-    let (zerodentity, standing) = {
-        let zd = state.zerodentity_store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Zerodentity store unavailable".to_string(),
-            )
-        })?;
+    let did_for_reactor = did.clone();
+    let did_obj_for_reactor = did_obj.clone();
+    let (known, is_validator) = with_reactor_state_blocking(state.clone(), move |s| {
+        let is_val = s.consensus.config.validators.contains(&did_obj_for_reactor);
+        // A DID is "known" if it's in the validator set or is this node's own DID.
+        let known = is_val || s.node_did.to_string() == did_for_reactor;
+        Ok((known, is_val))
+    })
+    .await?;
 
-        let score_profile = zd.get_score(&did_obj).map(|s| ZerodentityProfile {
-            composite_bp: s.composite,
-            axes: ZerodentityAxes {
-                communication: s.axes.communication,
-                credential_depth: s.axes.credential_depth,
-                device_trust: s.axes.device_trust,
-                behavioral_signature: s.axes.behavioral_signature,
-                network_reputation: s.axes.network_reputation,
-                temporal_stability: s.axes.temporal_stability,
-                cryptographic_strength: s.axes.cryptographic_strength,
-                constitutional_standing: s.axes.constitutional_standing,
-            },
-            claim_count: s.claim_count,
-            symmetry_bp: s.symmetry,
-            computed_ms: s.computed_ms,
-        });
+    // Look up 0dentity data: score and claims.
+    let did_obj_for_store = did_obj;
+    let (zerodentity, standing) = with_zerodentity_store_blocking(state.clone(), move |zd| {
+        let score_profile = zd
+            .get_score(&did_obj_for_store)
+            .map(|s| ZerodentityProfile {
+                composite_bp: s.composite,
+                axes: ZerodentityAxes {
+                    communication: s.axes.communication,
+                    credential_depth: s.axes.credential_depth,
+                    device_trust: s.axes.device_trust,
+                    behavioral_signature: s.axes.behavioral_signature,
+                    network_reputation: s.axes.network_reputation,
+                    temporal_stability: s.axes.temporal_stability,
+                    cryptographic_strength: s.axes.cryptographic_strength,
+                    constitutional_standing: s.axes.constitutional_standing,
+                },
+                claim_count: s.claim_count,
+                symmetry_bp: s.symmetry,
+                computed_ms: s.computed_ms,
+            });
 
-        let standing = build_standing_profile(known, &did_obj, &zd)
+        let standing = build_standing_profile(known, &did_obj_for_store, zd)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-        (score_profile, standing)
-    };
+        Ok((score_profile, standing))
+    })
+    .await?;
 
     let passport = AgentPassport {
         did: did.clone(),
@@ -300,24 +351,20 @@ async fn handle_standing(
     let did_obj = exo_core::types::Did::new(&did)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
 
-    let known = {
-        let s = state.reactor_state.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Reactor state unavailable".to_string(),
-            )
-        })?;
-        s.consensus.config.validators.contains(&did_obj) || s.node_did.to_string() == did
-    };
+    let did_for_reactor = did.clone();
+    let did_obj_for_reactor = did_obj.clone();
+    let known = with_reactor_state_blocking(state.clone(), move |s| {
+        Ok(s.consensus.config.validators.contains(&did_obj_for_reactor)
+            || s.node_did.to_string() == did_for_reactor)
+    })
+    .await?;
 
-    let zd = state.zerodentity_store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Zerodentity store unavailable".to_string(),
-        )
-    })?;
-    let standing = build_standing_profile(known, &did_obj, &zd)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let did_obj_for_store = did_obj;
+    let standing = with_zerodentity_store_blocking(state, move |zd| {
+        build_standing_profile(known, &did_obj_for_store, zd)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+    })
+    .await?;
 
     Ok(Json(StandingResponse {
         did,
@@ -486,6 +533,33 @@ mod tests {
             .unwrap();
 
         assert!(!standing_profile.contains(".unwrap_or_default()"));
+    }
+
+    #[test]
+    fn passport_async_handlers_use_blocking_state_access() {
+        let source = include_str!("passport.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "passport handlers must isolate synchronous store access from Tokio workers"
+        );
+
+        let handlers = production
+            .split("// Route handlers\n// ---------------------------------------------------------------------------")
+            .nth(1)
+            .and_then(|section| {
+                section.split("// ---------------------------------------------------------------------------\n// Profile builders")
+                    .next()
+            })
+            .unwrap();
+        assert!(
+            !handlers.contains(".lock()"),
+            "passport async handlers must not lock std::sync::Mutex values directly"
+        );
     }
 
     fn test_passport_state() -> Arc<PassportApiState> {
