@@ -82,6 +82,9 @@ pub struct CustomConstraint {
     pub expression: Expr,
 }
 
+/// Maximum permitted depth for recursive custom constraint expressions.
+pub const MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH: usize = 64;
+
 pub struct CustomConstraintEvaluator;
 
 impl CustomConstraintEvaluator {
@@ -89,6 +92,23 @@ impl CustomConstraintEvaluator {
         expr: &Expr,
         context: &exo_core::DeterministicMap<String, String>,
     ) -> Result<String, GovernanceError> {
+        Self::evaluate_expr_at_depth(expr, context, 0)
+    }
+
+    fn evaluate_expr_at_depth(
+        expr: &Expr,
+        context: &exo_core::DeterministicMap<String, String>,
+        depth: usize,
+    ) -> Result<String, GovernanceError> {
+        if depth > MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH {
+            return Err(GovernanceError::ConstitutionalViolation {
+                constraint_id: "EXPR_TOO_DEEP".to_string(),
+                reason: format!(
+                    "Custom constraint expression exceeds maximum depth of {MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH}"
+                ),
+            });
+        }
+
         match expr {
             Expr::Variable(name) => {
                 context
@@ -101,8 +121,9 @@ impl CustomConstraintEvaluator {
             }
             Expr::Literal(val) => Ok(val.clone()),
             Expr::Eq(left, right) => {
-                let l = Self::evaluate_expr(left, context)?;
-                let r = Self::evaluate_expr(right, context)?;
+                let next_depth = depth + 1;
+                let l = Self::evaluate_expr_at_depth(left, context, next_depth)?;
+                let r = Self::evaluate_expr_at_depth(right, context, next_depth)?;
                 if l == r {
                     Ok("true".to_string())
                 } else {
@@ -110,10 +131,11 @@ impl CustomConstraintEvaluator {
                 }
             }
             Expr::GreaterThan(left, right) => {
-                let l = Self::evaluate_expr(left, context)?;
-                let r = Self::evaluate_expr(right, context)?;
-                let l_num: u64 = l.parse().unwrap_or(0);
-                let r_num: u64 = r.parse().unwrap_or(0);
+                let next_depth = depth + 1;
+                let l = Self::evaluate_expr_at_depth(left, context, next_depth)?;
+                let r = Self::evaluate_expr_at_depth(right, context, next_depth)?;
+                let l_num = Self::parse_u64_operand("left", &l)?;
+                let r_num = Self::parse_u64_operand("right", &r)?;
                 if l_num > r_num {
                     Ok("true".to_string())
                 } else {
@@ -121,8 +143,9 @@ impl CustomConstraintEvaluator {
                 }
             }
             Expr::Contains(left, right) => {
-                let l = Self::evaluate_expr(left, context)?;
-                let r = Self::evaluate_expr(right, context)?;
+                let next_depth = depth + 1;
+                let l = Self::evaluate_expr_at_depth(left, context, next_depth)?;
+                let r = Self::evaluate_expr_at_depth(right, context, next_depth)?;
                 if l.contains(&r) {
                     Ok("true".to_string())
                 } else {
@@ -130,6 +153,15 @@ impl CustomConstraintEvaluator {
                 }
             }
         }
+    }
+
+    fn parse_u64_operand(side: &str, value: &str) -> Result<u64, GovernanceError> {
+        value
+            .parse::<u64>()
+            .map_err(|_| GovernanceError::ConstitutionalViolation {
+                constraint_id: "INVALID_NUMERIC_VALUE".to_string(),
+                reason: format!("GreaterThan {side} operand must be a valid unsigned integer"),
+            })
     }
 }
 
@@ -1153,19 +1185,58 @@ mod tests {
         assert_eq!(out, "false");
     }
 
-    // CustomConstraintEvaluator: GreaterThan with non-numeric strings falls back to 0 vs 0 => false
+    // CustomConstraintEvaluator: GreaterThan rejects non-numeric operands instead of silently
+    // treating them as zero.
     #[test]
-    fn test_custom_expr_gt_non_numeric_parse_fallback() {
+    fn test_custom_expr_gt_non_numeric_parse_rejected() {
         let ctx = exo_core::DeterministicMap::new();
-        let out = CustomConstraintEvaluator::evaluate_expr(
+        let err = CustomConstraintEvaluator::evaluate_expr(
             &Expr::GreaterThan(
                 Box::new(Expr::Literal("abc".to_string())),
                 Box::new(Expr::Literal("xyz".to_string())),
             ),
             &ctx,
         )
-        .expect("gt non-numeric ok");
-        assert_eq!(out, "false");
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            GovernanceError::ConstitutionalViolation { constraint_id, .. }
+                if constraint_id == "INVALID_NUMERIC_VALUE"
+        ));
+    }
+
+    fn nested_eq_expression(depth: usize) -> Expr {
+        let mut expr = Expr::Literal("same".to_string());
+        for _ in 0..depth {
+            expr = Expr::Eq(Box::new(expr), Box::new(Expr::Literal("same".to_string())));
+        }
+        expr
+    }
+
+    #[test]
+    fn test_custom_expr_rejects_excessive_depth() {
+        let ctx = exo_core::DeterministicMap::new();
+        assert!(
+            CustomConstraintEvaluator::evaluate_expr(
+                &nested_eq_expression(MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH),
+                &ctx
+            )
+            .is_ok(),
+            "configured maximum expression depth must remain valid"
+        );
+
+        let err = CustomConstraintEvaluator::evaluate_expr(
+            &nested_eq_expression(MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH + 1),
+            &ctx,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            GovernanceError::ConstitutionalViolation { constraint_id, .. }
+                if constraint_id == "EXPR_TOO_DEEP"
+        ));
     }
 
     // CustomConstraintEvaluator: Contains returns "false" when substring absent
