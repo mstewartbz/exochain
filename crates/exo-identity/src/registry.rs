@@ -127,6 +127,7 @@ impl DidRegistry for LocalDidRegistry {
             });
         }
 
+        doc.public_keys.clear();
         doc.public_keys.push(*new_key);
         doc.updated = updated;
         Ok(())
@@ -191,8 +192,8 @@ mod tests {
     }
 
     #[test]
-    fn test_add_verification_method() {
-        // We'll test rotate_key which adds a new public key.
+    fn test_rotate_key_replaces_public_key() {
+        // We'll test rotate_key which replaces the active public key.
         let (pk, sk) = generate_keypair();
         let did = make_did("charlie");
         let doc = make_doc(did.clone(), pk);
@@ -207,8 +208,45 @@ mod tests {
             .unwrap();
 
         let resolved = reg.resolve(&did).unwrap();
-        assert_eq!(resolved.public_keys.len(), 2);
+        assert_eq!(resolved.public_keys, vec![new_pk]);
         assert_eq!(resolved.updated, Timestamp::new(1001, 0));
+    }
+
+    #[test]
+    fn rotate_key_replaces_active_public_key_and_rejects_rotated_key_for_next_rotation() {
+        let (pk, sk) = generate_keypair();
+        let did = make_did("rotated-key-pruned");
+        let doc = make_doc(did.clone(), pk);
+
+        let mut reg = LocalDidRegistry::new();
+        reg.register(doc).unwrap();
+
+        let (new_pk, new_sk) = generate_keypair();
+        let proof = sign(new_pk.as_bytes(), &sk);
+        reg.rotate_key(&did, &new_pk, &proof, Timestamp::new(1001, 0))
+            .unwrap();
+
+        let resolved = reg.resolve(&did).unwrap();
+        assert_eq!(
+            resolved.public_keys,
+            vec![new_pk],
+            "rotation must leave only the new active public key"
+        );
+
+        let (third_pk, _) = generate_keypair();
+        let rotated_out_proof = sign(third_pk.as_bytes(), &sk);
+        let err = reg
+            .rotate_key(&did, &third_pk, &rotated_out_proof, Timestamp::new(1002, 0))
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidSignature));
+
+        let active_proof = sign(third_pk.as_bytes(), &new_sk);
+        reg.rotate_key(&did, &third_pk, &active_proof, Timestamp::new(1002, 0))
+            .unwrap();
+
+        let resolved = reg.resolve(&did).unwrap();
+        assert_eq!(resolved.public_keys, vec![third_pk]);
+        assert_eq!(resolved.updated, Timestamp::new(1002, 0));
     }
 
     #[test]

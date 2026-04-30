@@ -258,7 +258,7 @@ mod tests {
             .unwrap();
 
         let resolved = reg.resolve(&did).unwrap();
-        assert_eq!(resolved.public_keys.len(), 2);
+        assert_eq!(resolved.public_keys, vec![new_pk]);
         assert!(resolved.updated.physical_ms > 1000);
     }
 
