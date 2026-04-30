@@ -11,27 +11,37 @@ use sqlx::{
     Row,
     postgres::{PgPool, PgPoolOptions},
 };
+use thiserror::Error;
+
+pub const MAX_DB_LIST_ROWS: i64 = 1_000;
+
+#[derive(Debug, Error)]
+pub enum DbInitError {
+    #[error("failed to connect to PostgreSQL: {source}")]
+    Connect { source: sqlx::Error },
+    #[error("failed to run database migrations: {source}")]
+    Migrate { source: sqlx::migrate::MigrateError },
+}
 
 // ---------------------------------------------------------------------------
 // Pool initialization
 // ---------------------------------------------------------------------------
 
 /// Create a connection pool and run migrations.
-#[allow(clippy::expect_used)]
-pub async fn init_pool(database_url: &str) -> PgPool {
+pub async fn init_pool(database_url: &str) -> Result<PgPool, DbInitError> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(database_url)
         .await
-        .expect("Failed to connect to PostgreSQL");
+        .map_err(|source| DbInitError::Connect { source })?;
 
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
-        .expect("Failed to run migrations");
+        .map_err(|source| DbInitError::Migrate { source })?;
 
     println!("[DB] Connected to PostgreSQL, migrations applied");
-    pool
+    Ok(pool)
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +108,8 @@ pub async fn find_user_by_did(pool: &PgPool, did: &str) -> Result<Option<UserRow
 /// List all users ordered by creation time.
 pub async fn list_users_db(pool: &PgPool) -> Result<Vec<PublicUserRow>, sqlx::Error> {
     sqlx::query_as::<_, PublicUserRow>(
-        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, mfa_enabled FROM users ORDER BY created_at"
-    ).fetch_all(pool).await
+        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, mfa_enabled FROM users ORDER BY created_at LIMIT $1"
+    ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Update a user's PACE enrollment status.
@@ -229,12 +239,12 @@ pub async fn list_agents_db(
 ) -> Result<Vec<AgentRow>, sqlx::Error> {
     if let Some(tid) = tenant_id {
         sqlx::query_as::<_, AgentRow>(
-            "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents WHERE tenant_id = $1 ORDER BY created_at"
-        ).bind(tid).fetch_all(pool).await
+            "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents WHERE tenant_id = $1 ORDER BY created_at LIMIT $2"
+        ).bind(tid).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
     } else {
         sqlx::query_as::<_, AgentRow>(
-            "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents ORDER BY created_at"
-        ).fetch_all(pool).await
+            "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents ORDER BY created_at LIMIT $1"
+        ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
     }
 }
 
@@ -341,8 +351,8 @@ pub async fn find_decision(
 /// List all decisions ordered by creation timestamp.
 pub async fn list_decisions_db(pool: &PgPool) -> Result<Vec<DecisionRow>, sqlx::Error> {
     sqlx::query_as::<_, DecisionRow>(
-        "SELECT id_hash, tenant_id, status, title, decision_class, author, created_at_ms, constitution_version, payload FROM decisions ORDER BY created_at_ms"
-    ).fetch_all(pool).await
+        "SELECT id_hash, tenant_id, status, title, decision_class, author, created_at_ms, constitution_version, payload FROM decisions ORDER BY created_at_ms LIMIT $1"
+    ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Update a decision's status and JSONB payload by its content hash.
@@ -369,9 +379,11 @@ pub async fn list_conflict_declaration_payloads_db(
     let rows = sqlx::query(
         "SELECT payload FROM conflict_declarations
          WHERE declarant_did = $1
-         ORDER BY timestamp_physical_ms, timestamp_logical, id_hash",
+         ORDER BY timestamp_physical_ms, timestamp_logical, id_hash
+         LIMIT $2",
     )
     .bind(declarant_did)
+    .bind(MAX_DB_LIST_ROWS)
     .fetch_all(pool)
     .await?;
 
@@ -424,8 +436,8 @@ pub async fn insert_delegation(
 /// List all delegations ordered by creation timestamp.
 pub async fn list_delegations_db(pool: &PgPool) -> Result<Vec<DelegationRow>, sqlx::Error> {
     sqlx::query_as::<_, DelegationRow>(
-        "SELECT id_hash, tenant_id, delegator, delegatee, created_at_ms, expires_at, revoked_at, constitution_version, payload FROM delegations ORDER BY created_at_ms"
-    ).fetch_all(pool).await
+        "SELECT id_hash, tenant_id, delegator, delegatee, created_at_ms, expires_at, revoked_at, constitution_version, payload FROM delegations ORDER BY created_at_ms LIMIT $1"
+    ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Check whether the given DID has an active (non-revoked) delegation as delegatee.
@@ -494,8 +506,8 @@ pub async fn insert_audit_entry(
 /// List all audit entries ordered by sequence number.
 pub async fn list_audit_entries(pool: &PgPool) -> Result<Vec<AuditRow>, sqlx::Error> {
     sqlx::query_as::<_, AuditRow>(
-        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash FROM audit_entries ORDER BY sequence"
-    ).fetch_all(pool).await
+        "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash FROM audit_entries ORDER BY sequence LIMIT $1"
+    ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// List audit entries for one decision ordered by sequence number.
@@ -505,9 +517,10 @@ pub async fn list_audit_entries_for_decision(
 ) -> Result<Vec<AuditRow>, sqlx::Error> {
     sqlx::query_as::<_, AuditRow>(
         "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash
-         FROM audit_entries WHERE decision_id = $1 ORDER BY sequence",
+         FROM audit_entries WHERE decision_id = $1 ORDER BY sequence LIMIT $2",
     )
     .bind(decision_id)
+    .bind(MAX_DB_LIST_ROWS)
     .fetch_all(pool)
     .await
 }
@@ -734,8 +747,8 @@ pub async fn list_scan_receipts(
     subscriber_did: &str,
 ) -> Result<Vec<ScanReceiptRow>, sqlx::Error> {
     sqlx::query_as::<_, ScanReceiptRow>(
-        "SELECT scan_id, subscriber_did, responder_did, location, scanned_at_ms, consent_expires_at_ms, audit_receipt_hash, anchor_receipt FROM scan_receipts WHERE subscriber_did = $1 ORDER BY scanned_at_ms DESC"
-    ).bind(subscriber_did).fetch_all(pool).await
+        "SELECT scan_id, subscriber_did, responder_did, location, scanned_at_ms, consent_expires_at_ms, audit_receipt_hash, anchor_receipt FROM scan_receipts WHERE subscriber_did = $1 ORDER BY scanned_at_ms DESC LIMIT $2"
+    ).bind(subscriber_did).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Row representation of a scan receipt from the `scan_receipts` table.
@@ -778,8 +791,8 @@ pub async fn list_consent_anchors(
     subscriber_did: &str,
 ) -> Result<Vec<ConsentAnchorRow>, sqlx::Error> {
     sqlx::query_as::<_, ConsentAnchorRow>(
-        "SELECT consent_id, subscriber_did, provider_did, scope, granted_at_ms, expires_at_ms, revoked_at_ms, audit_receipt_hash FROM consent_anchors WHERE subscriber_did = $1 ORDER BY granted_at_ms DESC"
-    ).bind(subscriber_did).fetch_all(pool).await
+        "SELECT consent_id, subscriber_did, provider_did, scope, granted_at_ms, expires_at_ms, revoked_at_ms, audit_receipt_hash FROM consent_anchors WHERE subscriber_did = $1 ORDER BY granted_at_ms DESC LIMIT $2"
+    ).bind(subscriber_did).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Row representation of a consent anchor from the `consent_anchors` table.
@@ -817,8 +830,8 @@ pub async fn list_trustee_shards(
     subscriber_did: &str,
 ) -> Result<Vec<TrusteeShardRow>, sqlx::Error> {
     sqlx::query_as::<_, TrusteeShardRow>(
-        "SELECT subscriber_did, trustee_did, role, shard_confirmed, accepted_at_ms FROM trustee_shard_status WHERE subscriber_did = $1"
-    ).bind(subscriber_did).fetch_all(pool).await
+        "SELECT subscriber_did, trustee_did, role, shard_confirmed, accepted_at_ms FROM trustee_shard_status WHERE subscriber_did = $1 LIMIT $2"
+    ).bind(subscriber_did).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Row representation of a trustee shard from the `trustee_shard_status` table.
@@ -880,10 +893,12 @@ pub async fn load_agent_roles(
          FROM agent_roles \
          WHERE agent_did = $1 \
            AND valid_from <= $2 \
-           AND (expires_at IS NULL OR expires_at > $2)",
+           AND (expires_at IS NULL OR expires_at > $2) \
+         LIMIT $3",
     )
     .bind(actor_did)
     .bind(now_ms)
+    .bind(MAX_DB_LIST_ROWS)
     .fetch_all(pool)
     .await
 }
@@ -900,10 +915,12 @@ pub async fn load_consent_records(
          WHERE actor_did = $1 \
            AND status = 'active' \
            AND created_at <= $2 \
-           AND (expires_at IS NULL OR expires_at > $2)",
+           AND (expires_at IS NULL OR expires_at > $2) \
+         LIMIT $3",
     )
     .bind(actor_did)
     .bind(now_ms)
+    .bind(MAX_DB_LIST_ROWS)
     .fetch_all(pool)
     .await
 }
@@ -979,13 +996,13 @@ pub async fn list_layout_templates(
     if let Some(uid) = user_did {
         sqlx::query_as::<_, LayoutTemplateRow>(
             "SELECT id, user_did, name, layout_json, hidden_panels, is_built_in, created_at, updated_at \
-             FROM layout_templates WHERE user_did = $1 OR is_built_in = true ORDER BY created_at"
-        ).bind(uid).fetch_all(pool).await
+             FROM layout_templates WHERE user_did = $1 OR is_built_in = true ORDER BY created_at LIMIT $2"
+        ).bind(uid).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
     } else {
         sqlx::query_as::<_, LayoutTemplateRow>(
             "SELECT id, user_did, name, layout_json, hidden_panels, is_built_in, created_at, updated_at \
-             FROM layout_templates ORDER BY created_at"
-        ).fetch_all(pool).await
+             FROM layout_templates ORDER BY created_at LIMIT $1"
+        ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
     }
 }
 
@@ -1068,29 +1085,29 @@ pub async fn list_feedback_issues(
             sqlx::query_as::<_, FeedbackIssueRow>(
                 "SELECT id, title, description, severity, category, status, source_widget_id, source_module_type, \
                  reporter_did, assigned_agent_team, widget_state, browser_info, resolution_notes, created_at, updated_at \
-                 FROM feedback_issues WHERE reporter_did = $1 AND status = $2 ORDER BY created_at DESC"
-            ).bind(reporter).bind(status).fetch_all(pool).await
+                 FROM feedback_issues WHERE reporter_did = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3"
+            ).bind(reporter).bind(status).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
         }
         (Some(reporter), None) => {
             sqlx::query_as::<_, FeedbackIssueRow>(
                 "SELECT id, title, description, severity, category, status, source_widget_id, source_module_type, \
                  reporter_did, assigned_agent_team, widget_state, browser_info, resolution_notes, created_at, updated_at \
-                 FROM feedback_issues WHERE reporter_did = $1 ORDER BY created_at DESC"
-            ).bind(reporter).fetch_all(pool).await
+                 FROM feedback_issues WHERE reporter_did = $1 ORDER BY created_at DESC LIMIT $2"
+            ).bind(reporter).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
         }
         (None, Some(status)) => {
             sqlx::query_as::<_, FeedbackIssueRow>(
                 "SELECT id, title, description, severity, category, status, source_widget_id, source_module_type, \
                  reporter_did, assigned_agent_team, widget_state, browser_info, resolution_notes, created_at, updated_at \
-                 FROM feedback_issues WHERE status = $1 ORDER BY created_at DESC"
-            ).bind(status).fetch_all(pool).await
+                 FROM feedback_issues WHERE status = $1 ORDER BY created_at DESC LIMIT $2"
+            ).bind(status).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
         }
         (None, None) => {
             sqlx::query_as::<_, FeedbackIssueRow>(
                 "SELECT id, title, description, severity, category, status, source_widget_id, source_module_type, \
                  reporter_did, assigned_agent_team, widget_state, browser_info, resolution_notes, created_at, updated_at \
-                 FROM feedback_issues ORDER BY created_at DESC"
-            ).fetch_all(pool).await
+                 FROM feedback_issues ORDER BY created_at DESC LIMIT $1"
+            ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
         }
     }
 }
@@ -1118,6 +1135,86 @@ pub async fn update_feedback_issue_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn production_source() -> &'static str {
+        let source = include_str!("db.rs");
+        source.split("#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
+        let signature = format!("pub async fn {name}");
+        let start = source
+            .find(&signature)
+            .unwrap_or_else(|| panic!("{name} source must be present"));
+        let after_start = &source[start..];
+        let end = after_start.find("\n/// ").unwrap_or(after_start.len());
+        &after_start[..end]
+    }
+
+    #[test]
+    fn init_pool_returns_result_without_panic_paths() {
+        let source = production_source();
+        let init_pool_source = function_source(source, "init_pool");
+
+        assert!(
+            source.contains("pub enum DbInitError"),
+            "database initialization failures must use a typed error"
+        );
+        assert!(
+            init_pool_source.contains("-> Result<PgPool, DbInitError>"),
+            "init_pool must return a typed Result instead of panicking"
+        );
+        assert!(
+            !init_pool_source.contains(".expect("),
+            "init_pool must not panic on connection or migration failure"
+        );
+        assert!(
+            !init_pool_source.contains("#[allow(clippy::expect_used)]"),
+            "init_pool must not suppress panic linting"
+        );
+    }
+
+    #[test]
+    fn fetch_all_database_helpers_have_explicit_row_limits() {
+        let source = production_source();
+        assert!(
+            source.contains("pub const MAX_DB_LIST_ROWS: i64"),
+            "database list limits must be centralized"
+        );
+
+        for (name, expected_limit_clauses) in [
+            ("list_users_db", 1),
+            ("list_agents_db", 2),
+            ("list_decisions_db", 1),
+            ("list_conflict_declaration_payloads_db", 1),
+            ("list_delegations_db", 1),
+            ("list_audit_entries", 1),
+            ("list_audit_entries_for_decision", 1),
+            ("list_scan_receipts", 1),
+            ("list_consent_anchors", 1),
+            ("list_trustee_shards", 1),
+            ("load_agent_roles", 1),
+            ("load_consent_records", 1),
+            ("list_layout_templates", 2),
+            ("list_feedback_issues", 4),
+        ] {
+            let body = function_source(source, name);
+            assert!(
+                body.matches(".fetch_all(pool)").count() >= expected_limit_clauses,
+                "{name} must keep using reviewed pool fetch paths"
+            );
+            assert_eq!(
+                body.matches("LIMIT $").count(),
+                expected_limit_clauses,
+                "{name} must apply an explicit SQL LIMIT to every fetch_all query"
+            );
+            assert_eq!(
+                body.matches(".bind(MAX_DB_LIST_ROWS)").count(),
+                expected_limit_clauses,
+                "{name} must bind the centralized row limit for every fetch_all query"
+            );
+        }
+    }
 
     #[test]
     fn user_row_debug_redacts_password_hash_and_salt() {
