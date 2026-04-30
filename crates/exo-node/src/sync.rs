@@ -120,14 +120,12 @@ impl SyncEngine {
     ///
     /// Called when a node first joins or detects it's behind.
     pub async fn request_sync(&mut self) -> anyhow::Result<()> {
-        let local_height = {
-            let st = self
-                .store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Store mutex poisoned in request_sync"))?;
-            st.committed_height_value()
-                .map_err(|e| anyhow::anyhow!("committed height: {e}"))?
-        };
+        let local_height = with_store_blocking(Arc::clone(&self.store), "request_sync", |store| {
+            store
+                .committed_height_value()
+                .map_err(|e| anyhow::anyhow!("committed height: {e}"))
+        })
+        .await?;
 
         tracing::info!(local_height, "Requesting state snapshot from network");
 
@@ -150,13 +148,10 @@ impl SyncEngine {
 
     /// Request incremental DAG sync by exchanging tip hashes.
     pub async fn request_dag_sync(&self) -> anyhow::Result<()> {
-        let tips = {
-            let st = self
-                .store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Store mutex poisoned in request_dag_sync"))?;
-            st.tips_sync().map_err(|e| anyhow::anyhow!("tips: {e}"))?
-        };
+        let tips = with_store_blocking(Arc::clone(&self.store), "request_dag_sync", |store| {
+            store.tips_sync().map_err(|e| anyhow::anyhow!("tips: {e}"))
+        })
+        .await?;
 
         let request = WireMessage::DagSyncRequest(DagSyncRequestMsg {
             sender: self.config.node_did.clone(),
@@ -193,17 +188,21 @@ impl SyncEngine {
 
     /// Serve a state snapshot to a requesting peer.
     async fn handle_snapshot_request(&self, msg: StateSnapshotRequestMsg) {
-        let local_height = {
-            let Ok(st) = self.store.lock() else {
-                tracing::error!("Store mutex poisoned in handle_snapshot_request");
+        let local_height = match with_store_blocking(
+            Arc::clone(&self.store),
+            "handle_snapshot_request",
+            |store| {
+                store
+                    .committed_height_value()
+                    .map_err(|e| anyhow::anyhow!("committed height: {e}"))
+            },
+        )
+        .await
+        {
+            Ok(height) => height,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to read committed height for snapshot request");
                 return;
-            };
-            match st.committed_height_value() {
-                Ok(height) => height,
-                Err(e) => {
-                    tracing::warn!(err = %e, "Failed to read committed height for snapshot request");
-                    return;
-                }
             }
         };
 
@@ -232,17 +231,23 @@ impl SyncEngine {
         loop {
             let to_height = (current_from + u64::from(chunk_size) - 1).min(local_height);
 
-            let nodes = {
-                let Ok(st) = self.store.lock() else {
-                    tracing::error!("Store mutex poisoned in handle_snapshot_request (chunk)");
+            let nodes = match with_store_blocking(
+                Arc::clone(&self.store),
+                "handle_snapshot_request_chunk",
+                move |store| {
+                    store
+                        .committed_dag_nodes_in_range(current_from, to_height)
+                        .map_err(|e| {
+                            anyhow::anyhow!("committed nodes {current_from}..={to_height}: {e}")
+                        })
+                },
+            )
+            .await
+            {
+                Ok(nodes) => nodes,
+                Err(e) => {
+                    tracing::warn!(err = %e, "Failed to query committed nodes");
                     return;
-                };
-                match st.committed_dag_nodes_in_range(current_from, to_height) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        tracing::warn!(err = %e, "Failed to query committed nodes");
-                        return;
-                    }
                 }
             };
 
@@ -307,24 +312,32 @@ impl SyncEngine {
         );
 
         // Store the nodes and mark them as committed.
+        let from_height = msg.from_height;
+        let nodes = msg.nodes;
+        if let Err(e) = with_store_blocking(
+            Arc::clone(&self.store),
+            "handle_snapshot_chunk",
+            move |store| {
+                for (i, node) in nodes.into_iter().enumerate() {
+                    let hash = node.hash;
+
+                    if let Err(e) = store.put_sync(node) {
+                        tracing::warn!(err = %e, %hash, "Failed to store synced node");
+                        continue;
+                    }
+
+                    let height = from_height.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
+                    if let Err(e) = store.mark_committed_sync(&hash, height) {
+                        tracing::warn!(err = %e, %hash, height, "Failed to mark committed");
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await
         {
-            let Ok(mut st) = self.store.lock() else {
-                tracing::error!("Store mutex poisoned in handle_snapshot_chunk");
-                return;
-            };
-            for (i, node) in msg.nodes.into_iter().enumerate() {
-                let hash = node.hash;
-
-                if let Err(e) = st.put_sync(node) {
-                    tracing::warn!(err = %e, %hash, "Failed to store synced node");
-                    continue;
-                }
-
-                let height = msg.from_height + i as u64;
-                if let Err(e) = st.mark_committed_sync(&hash, height) {
-                    tracing::warn!(err = %e, %hash, height, "Failed to mark committed");
-                }
-            }
+            tracing::error!(err = %e, "Store access failed in handle_snapshot_chunk");
+            return;
         }
 
         if msg.to_height > self.sync_target_height {
@@ -347,17 +360,21 @@ impl SyncEngine {
         if !msg.has_more {
             self.syncing = false;
 
-            let committed_height = {
-                let Ok(st) = self.store.lock() else {
-                    tracing::error!("Store mutex poisoned in handle_snapshot_chunk (complete)");
+            let committed_height = match with_store_blocking(
+                Arc::clone(&self.store),
+                "handle_snapshot_chunk_complete",
+                |store| {
+                    store
+                        .committed_height_value()
+                        .map_err(|e| anyhow::anyhow!("committed height after snapshot: {e}"))
+                },
+            )
+            .await
+            {
+                Ok(height) => height,
+                Err(e) => {
+                    tracing::warn!(err = %e, "Failed to read committed height after snapshot");
                     return;
-                };
-                match st.committed_height_value() {
-                    Ok(height) => height,
-                    Err(e) => {
-                        tracing::warn!(err = %e, "Failed to read committed height after snapshot");
-                        return;
-                    }
                 }
             };
 
@@ -376,62 +393,61 @@ impl SyncEngine {
 
     /// Serve missing DAG nodes to a requesting peer.
     async fn handle_dag_sync_request(&self, msg: DagSyncRequestMsg) {
-        let (nodes, has_more) = {
-            let Ok(st) = self.store.lock() else {
-                tracing::error!("Store mutex poisoned in handle_dag_sync_request");
-                return;
-            };
+        let tip_hashes = msg.tip_hashes.clone();
+        let max_nodes = msg.max_nodes;
+        let (nodes, has_more) = match with_store_blocking(
+            Arc::clone(&self.store),
+            "handle_dag_sync_request",
+            move |store| {
+                // Find nodes the requester is missing by comparing tips.
+                // Strategy: send all our committed nodes that are not in the
+                // requester's tip set (simple but effective for small DAGs).
+                let our_tips = store
+                    .tips_sync()
+                    .map_err(|e| anyhow::anyhow!("tips for sync: {e}"))?;
 
-            // Find nodes the requester is missing by comparing tips.
-            // Strategy: send all our committed nodes that are not in the
-            // requester's tip set (simple but effective for small DAGs).
-            let our_tips = match st.tips_sync() {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(err = %e, "Failed to get tips for sync");
-                    return;
+                // If our tips are the same, nothing to sync.
+                if our_tips == tip_hashes {
+                    return Ok(None);
                 }
-            };
 
-            // If our tips are the same, nothing to sync.
-            if our_tips == msg.tip_hashes {
+                // Get nodes the peer is missing — nodes we have that descend
+                // from their tips. For simplicity, we send our committed nodes
+                // above the peer's implicit height.
+                let local_height = store
+                    .committed_height_value()
+                    .map_err(|e| anyhow::anyhow!("committed height for DAG sync: {e}"))?;
+                let max_nodes_u64 = u64::from(max_nodes.min(500));
+                let send_height = if local_height > max_nodes_u64 {
+                    local_height - max_nodes_u64
+                } else {
+                    1
+                };
+
+                let nodes = store
+                    .committed_dag_nodes_in_range(send_height, local_height)
+                    .map_err(|e| anyhow::anyhow!("nodes for sync: {e}"))?;
+
+                let total = nodes.len();
+                let max_nodes_usize = usize::try_from(max_nodes).unwrap_or(usize::MAX);
+                let truncated = total > max_nodes_usize;
+                let nodes = if truncated {
+                    nodes.into_iter().take(max_nodes_usize).collect()
+                } else {
+                    nodes
+                };
+
+                Ok(Some((nodes, truncated)))
+            },
+        )
+        .await
+        {
+            Ok(Some(response)) => response,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to prepare sync response");
                 return;
             }
-
-            // Get nodes the peer is missing — nodes we have that descend
-            // from their tips. For simplicity, we send our committed nodes
-            // above the peer's implicit height.
-            let local_height = match st.committed_height_value() {
-                Ok(height) => height,
-                Err(e) => {
-                    tracing::warn!(err = %e, "Failed to read committed height for DAG sync");
-                    return;
-                }
-            };
-            let max_nodes = msg.max_nodes.min(500) as u64;
-            let send_height = if local_height > max_nodes {
-                local_height - max_nodes
-            } else {
-                1
-            };
-
-            let nodes = match st.committed_dag_nodes_in_range(send_height, local_height) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(err = %e, "Failed to query nodes for sync");
-                    return;
-                }
-            };
-
-            let total = nodes.len();
-            let truncated = total > msg.max_nodes as usize;
-            let nodes = if truncated {
-                nodes.into_iter().take(msg.max_nodes as usize).collect()
-            } else {
-                nodes
-            };
-
-            (nodes, truncated)
         };
 
         let nodes_count = nodes.len();
@@ -473,21 +489,29 @@ impl SyncEngine {
             "Received DAG sync response"
         );
 
-        {
-            let Ok(mut st) = self.store.lock() else {
-                tracing::error!("Store mutex poisoned in handle_dag_sync_response");
-                return;
-            };
-            for node in msg.nodes {
-                let hash = node.hash;
-                if let Err(e) = st.put_sync(node) {
-                    tracing::warn!(err = %e, %hash, "Failed to store synced node");
+        let has_more = msg.has_more;
+        let nodes = msg.nodes;
+        if let Err(e) = with_store_blocking(
+            Arc::clone(&self.store),
+            "handle_dag_sync_response",
+            move |store| {
+                for node in nodes {
+                    let hash = node.hash;
+                    if let Err(e) = store.put_sync(node) {
+                        tracing::warn!(err = %e, %hash, "Failed to store synced node");
+                    }
                 }
-            }
+                Ok(())
+            },
+        )
+        .await
+        {
+            tracing::error!(err = %e, "Store access failed in handle_dag_sync_response");
+            return;
         }
 
         // If there are more nodes, request the next batch.
-        if msg.has_more {
+        if has_more {
             if let Err(e) = self.request_dag_sync().await {
                 tracing::warn!(err = %e, "Failed to request next sync batch");
             }
@@ -499,6 +523,25 @@ impl SyncEngine {
     pub fn needs_sync(&self) -> bool {
         self.syncing
     }
+}
+
+async fn with_store_blocking<T, F>(
+    store: Arc<Mutex<SqliteDagStore>>,
+    context: &'static str,
+    operation: F,
+) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut SqliteDagStore) -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut store = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Store mutex poisoned in {context}"))?;
+        operation(&mut store)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Store blocking task failed in {context}: {e}"))?
 }
 
 /// Run the sync engine as a background task.
@@ -552,6 +595,24 @@ mod tests {
 
     fn test_did() -> Did {
         Did::new("did:exo:test-sync").unwrap()
+    }
+
+    #[test]
+    fn sync_engine_store_access_uses_spawn_blocking() {
+        let source = include_str!("sync.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "sync engine must isolate synchronous store I/O from Tokio workers"
+        );
+        assert!(
+            !production.contains("self.store.lock()"),
+            "async sync-engine paths must not directly block on the store mutex"
+        );
     }
 
     /// Build a store with `n` committed DAG nodes and return it.
