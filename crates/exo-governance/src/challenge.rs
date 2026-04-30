@@ -34,6 +34,9 @@ pub enum ChallengeVerdict {
     Overrule,
 }
 
+/// Maximum inline evidence bytes accepted for a filed challenge.
+pub const MAX_CHALLENGE_EVIDENCE_BYTES: usize = 1024 * 1024;
+
 /// A formal governance challenge contesting a prior action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Challenge {
@@ -74,6 +77,15 @@ pub fn file_challenge(
         return Err(GovernanceError::InvalidGovernanceMetadata {
             field: "challenge.created".into(),
             reason: "must be caller-supplied and non-zero".into(),
+        });
+    }
+    if evidence.len() > MAX_CHALLENGE_EVIDENCE_BYTES {
+        return Err(GovernanceError::InvalidGovernanceMetadata {
+            field: "challenge.evidence".into(),
+            reason: format!(
+                "must not exceed {MAX_CHALLENGE_EVIDENCE_BYTES} bytes; got {} bytes",
+                evidence.len()
+            ),
         });
     }
 
@@ -256,6 +268,40 @@ mod tests {
             b"ev",
         )
         .expect_err("zero challenge created timestamp must be rejected");
+
+        assert!(matches!(
+            err,
+            GovernanceError::InvalidGovernanceMetadata { .. }
+        ));
+    }
+    #[test]
+    fn file_rejects_evidence_above_governance_bound() {
+        let at_bound = vec![0xA5; MAX_CHALLENGE_EVIDENCE_BYTES];
+        let accepted = file_challenge(
+            challenge_id(0xC013),
+            ts(10_013),
+            &challenger(),
+            &target(),
+            ChallengeGround::ProceduralError,
+            &at_bound,
+        )
+        .unwrap_or_else(|err| {
+            panic!("challenge evidence at the governance bound must be accepted: {err}")
+        });
+        assert_eq!(accepted.evidence.len(), MAX_CHALLENGE_EVIDENCE_BYTES);
+
+        let above_bound = vec![0xA5; MAX_CHALLENGE_EVIDENCE_BYTES + 1];
+        let oversized = file_challenge(
+            challenge_id(0xC014),
+            ts(10_014),
+            &challenger(),
+            &target(),
+            ChallengeGround::ProceduralError,
+            &above_bound,
+        );
+        let Err(err) = oversized else {
+            panic!("oversized challenge evidence must be rejected before allocation");
+        };
 
         assert!(matches!(
             err,
