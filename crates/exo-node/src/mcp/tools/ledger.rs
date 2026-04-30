@@ -11,6 +11,8 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
+const MAX_MERKLE_PROOF_HASHES: usize = 64;
+
 // ---------------------------------------------------------------------------
 // exochain_submit_event
 // ---------------------------------------------------------------------------
@@ -267,6 +269,7 @@ pub fn verify_inclusion_definition() -> ToolDefinition {
                 },
                 "proof_hashes": {
                     "type": "array",
+                    "maxItems": MAX_MERKLE_PROOF_HASHES,
                     "items": { "type": "string" },
                     "description": "Ordered array of hex-encoded sibling hashes forming the proof path."
                 },
@@ -343,6 +346,16 @@ pub fn execute_verify_inclusion(params: &Value, _context: &NodeContext) -> ToolR
             );
         }
     };
+    if proof_hashes.len() > MAX_MERKLE_PROOF_HASHES {
+        return ToolResult::error(
+            json!({
+                "error": format!(
+                    "proof_hashes may contain at most {MAX_MERKLE_PROOF_HASHES} hashes"
+                )
+            })
+            .to_string(),
+        );
+    }
     let root_hash_raw = match params.get("root_hash").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -376,7 +389,7 @@ pub fn execute_verify_inclusion(params: &Value, _context: &NodeContext) -> ToolR
         Err(error) => return ToolResult::error(json!({"error": error}).to_string()),
     };
 
-    let mut proof: Vec<Hash256> = Vec::new();
+    let mut proof: Vec<Hash256> = Vec::with_capacity(proof_hashes.len());
     for (i, ph) in proof_hashes.iter().enumerate() {
         match ph.as_str() {
             Some(s) => match decode_hash256_hex(&format!("proof_hash at index {i}"), s) {
@@ -865,6 +878,36 @@ mod tests {
         assert!(result.is_error);
         assert!(result.content[0].text().contains("proof_hash at index 0"));
         assert!(result.content[0].text().contains("32-byte"));
+    }
+
+    #[test]
+    fn execute_verify_inclusion_rejects_excessive_proof_hashes() {
+        let proof_hashes: Vec<String> = (0..=MAX_MERKLE_PROOF_HASHES)
+            .map(|idx| Hash256::digest(format!("proof:{idx}").as_bytes()).to_string())
+            .collect();
+        let params = json!({
+            "event_hash": Hash256::digest(b"event").to_string(),
+            "proof_hashes": proof_hashes,
+            "root_hash": Hash256::digest(b"root").to_string(),
+            "target_index": 0,
+        });
+
+        let result = execute_verify_inclusion(&params, &NodeContext::empty());
+
+        assert!(result.is_error);
+        assert!(result.content[0].text().contains(&format!(
+            "proof_hashes may contain at most {MAX_MERKLE_PROOF_HASHES} hashes"
+        )));
+    }
+
+    #[test]
+    fn verify_inclusion_definition_bounds_proof_hashes() {
+        let def = verify_inclusion_definition();
+
+        assert_eq!(
+            def.input_schema["properties"]["proof_hashes"]["maxItems"],
+            MAX_MERKLE_PROOF_HASHES
+        );
     }
 
     #[test]
