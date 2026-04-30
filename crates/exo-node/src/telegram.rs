@@ -377,10 +377,12 @@ impl Adjutant {
             crate::sentinels::Severity::Warning => "\u{26a0}\u{fe0f}", // ⚠️
             crate::sentinels::Severity::Info => "\u{2139}\u{fe0f}", // ℹ️
         };
+        let check = escape_telegram_html(&alert.check.to_string());
+        let message = escape_telegram_html(&alert.message);
 
         let text = format!(
             "{emoji} <b>SENTINEL: {}</b>\n{}\n\nSeverity: {:?}",
-            alert.check, alert.message, alert.severity
+            check, message, alert.severity
         );
 
         let keyboard = vec![vec![
@@ -395,6 +397,22 @@ impl Adjutant {
 // ---------------------------------------------------------------------------
 // Message builders
 // ---------------------------------------------------------------------------
+
+/// Escape dynamic text inserted into Telegram messages sent with HTML parse mode.
+fn escape_telegram_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
 
 /// Format basis-point value as "XX.YY" (e.g. 5250 → "52.50").
 fn fmt_bp(bp: u32) -> String {
@@ -416,12 +434,14 @@ pub fn build_zerodentity_score_message(
     let did = match Did::new(did_str) {
         Ok(d) => d,
         Err(_) => {
+            let did_html = escape_telegram_html(did_str);
             return (
-                format!("\u{274c} Invalid DID: <code>{did_str}</code>"),
+                format!("\u{274c} Invalid DID: <code>{did_html}</code>"),
                 vec![],
             );
         }
     };
+    let did_html = escape_telegram_html(did.as_str());
 
     let zstore = match zerodentity.lock() {
         Ok(s) => s,
@@ -438,7 +458,7 @@ pub fn build_zerodentity_score_message(
             return (
                 format!(
                     "\u{1f194} <b>0dentity Score</b>\n\
-                     No score data for <code>{did_str}</code>"
+                     No score data for <code>{did_html}</code>"
                 ),
                 vec![],
             );
@@ -449,7 +469,7 @@ pub fn build_zerodentity_score_message(
     let a = &score.axes;
     let text = format!(
         "\u{1f194} <b>0dentity Score</b>\n\
-         <code>{did_str}</code>\n\
+         <code>{did_html}</code>\n\
          \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
          Communication:       {}\n\
          CredentialDepth:     {}\n\
@@ -537,11 +557,13 @@ pub fn build_zerodentity_alerts_message(
             let fingerprints = match zstore.get_fingerprints(did) {
                 Ok(fps) => fps,
                 Err(e) => {
+                    let did_html = escape_telegram_html(did.as_str());
+                    let error_html = escape_telegram_html(&e.to_string());
                     return (
                         format!(
                             "\u{274c} <b>0dentity Alerts</b>\n\
-                             0dentity alert scan unavailable while reading fingerprints for <code>{}</code>: {e}",
-                            did.as_str()
+                             0dentity alert scan unavailable while reading fingerprints for <code>{}</code>: {}",
+                            did_html, error_html
                         ),
                         vec![],
                     );
@@ -562,9 +584,10 @@ pub fn build_zerodentity_alerts_message(
             if prev.composite > curr.composite
                 && prev.composite - curr.composite > ALERT_COMPOSITE_DROP_BP
             {
+                let did_html = escape_telegram_html(did.as_str());
                 alerts.push(format!(
                     "\u{26a0}\u{fe0f} <code>{}</code> score dropped {} bp ({}\u{2192}{})",
-                    did.as_str(),
+                    did_html,
                     prev.composite - curr.composite,
                     fmt_bp(prev.composite),
                     fmt_bp(curr.composite),
@@ -576,9 +599,10 @@ pub fn build_zerodentity_alerts_message(
         if let Some(latest) = fingerprints.last() {
             if let Some(consistency) = latest.consistency_score_bp {
                 if consistency < ALERT_FINGERPRINT_LOW_BP {
+                    let did_html = escape_telegram_html(did.as_str());
                     alerts.push(format!(
                         "\u{26a0}\u{fe0f} <code>{}</code> fingerprint consistency low: {}",
-                        did.as_str(),
+                        did_html,
                         fmt_bp(consistency),
                     ));
                 }
@@ -587,9 +611,10 @@ pub fn build_zerodentity_alerts_message(
 
         // 3. OTP lockout in last 24h.
         if has_recent_otp_lockout {
+            let did_html = escape_telegram_html(did.as_str());
             alerts.push(format!(
                 "\u{1f512} <code>{}</code> OTP lockout in last 24h",
-                did.as_str(),
+                did_html,
             ));
         }
     }
@@ -655,7 +680,11 @@ pub fn build_status_message(
         Ok(st) => match st.committed_height_value() {
             Ok(height) => height,
             Err(e) => {
-                return (format!("\u{274c} Store height unavailable: {e}"), vec![]);
+                let error_html = escape_telegram_html(&e.to_string());
+                return (
+                    format!("\u{274c} Store height unavailable: {error_html}"),
+                    vec![],
+                );
             }
         },
         Err(_) => {
@@ -717,7 +746,9 @@ pub fn build_sentinels_message(
     } else {
         for s in statuses.iter() {
             let icon = if s.healthy { "\u{2705}" } else { "\u{274c}" };
-            text.push_str(&format!("{icon} <b>{}</b>: {}\n", s.check, s.message));
+            let check = escape_telegram_html(&s.check.to_string());
+            let message = escape_telegram_html(&s.message);
+            text.push_str(&format!("{icon} <b>{check}</b>: {message}\n"));
         }
     }
 
@@ -752,11 +783,12 @@ pub fn build_challenges_message(
         text.push_str("No active challenges.");
     } else {
         for h in holds {
+            let id = h.id.to_string();
+            let id_short = escape_telegram_html(&id[..8]);
+            let ground = escape_telegram_html(&h.ground.to_string());
+            let status = escape_telegram_html(&format!("{:?}", h.status));
             text.push_str(&format!(
-                "\u{2022} <code>{}</code>\n  Ground: {}\n  Status: {:?}\n\n",
-                &h.id.to_string()[..8],
-                h.ground,
-                h.status
+                "\u{2022} <code>{id_short}</code>\n  Ground: {ground}\n  Status: {status}\n\n",
             ));
         }
     }
@@ -1110,6 +1142,42 @@ mod tests {
             round_timeout_ms: 5000,
         };
         create_reactor_state(&config, make_sign_fn(), None)
+    }
+
+    #[test]
+    fn telegram_html_escape_encodes_special_chars() {
+        assert_eq!(
+            escape_telegram_html("<b>owned</b>&\"'"),
+            "&lt;b&gt;owned&lt;/b&gt;&amp;&quot;&#39;"
+        );
+    }
+
+    #[test]
+    fn zerodentity_score_message_escapes_invalid_did_html() {
+        let zerodentity = crate::zerodentity::store::new_shared_store();
+
+        let (text, keyboard) =
+            build_zerodentity_score_message(&zerodentity, "did:exo:<b>owned</b>&x");
+
+        assert!(keyboard.is_empty());
+        assert!(text.contains("&lt;b&gt;owned&lt;/b&gt;&amp;x"));
+        assert!(!text.contains("<b>owned</b>&x"));
+    }
+
+    #[test]
+    fn sentinels_message_escapes_status_text_html() {
+        let sentinel_state = Arc::new(Mutex::new(vec![SentinelStatus {
+            check: SentinelCheck::Liveness,
+            healthy: false,
+            message: "<b>owned</b>&\"'".to_string(),
+            last_run_ms: 1,
+        }]));
+
+        let (text, keyboard) = build_sentinels_message(&sentinel_state);
+
+        assert!(!keyboard.is_empty());
+        assert!(text.contains("&lt;b&gt;owned&lt;/b&gt;&amp;&quot;&#39;"));
+        assert!(!text.contains("<b>owned</b>&\"'"));
     }
 
     #[test]
