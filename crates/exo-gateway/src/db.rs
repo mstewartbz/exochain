@@ -96,9 +96,9 @@ pub async fn find_user_by_did(pool: &PgPool, did: &str) -> Result<Option<UserRow
 }
 
 /// List all users ordered by creation time.
-pub async fn list_users_db(pool: &PgPool) -> Result<Vec<UserRow>, sqlx::Error> {
-    sqlx::query_as::<_, UserRow>(
-        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, password_hash, salt, mfa_enabled FROM users ORDER BY created_at"
+pub async fn list_users_db(pool: &PgPool) -> Result<Vec<PublicUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, PublicUserRow>(
+        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, mfa_enabled FROM users ORDER BY created_at"
     ).fetch_all(pool).await
 }
 
@@ -146,6 +146,20 @@ pub struct UserRow {
     pub pace_status: String,
     pub password_hash: String,
     pub salt: String,
+    pub mfa_enabled: bool,
+}
+
+/// Non-secret user projection for list APIs and administrative directories.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PublicUserRow {
+    pub did: String,
+    pub display_name: String,
+    pub email: String,
+    pub roles: JsonValue,
+    pub tenant_id: String,
+    pub created_at: i64,
+    pub status: String,
+    pub pace_status: String,
     pub mfa_enabled: bool,
 }
 
@@ -1125,5 +1139,52 @@ mod tests {
         assert!(!debug.contains("argon2id-secret-hash"));
         assert!(!debug.contains("secret-salt"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn public_user_row_has_no_password_material() {
+        let row = PublicUserRow {
+            did: "did:exo:user".to_owned(),
+            display_name: "User".to_owned(),
+            email: "user@example.invalid".to_owned(),
+            roles: serde_json::json!(["member"]),
+            tenant_id: "tenant".to_owned(),
+            created_at: 1,
+            status: "active".to_owned(),
+            pace_status: "normal".to_owned(),
+            mfa_enabled: true,
+        };
+
+        let debug = format!("{row:?}");
+        assert!(!debug.contains("password"));
+        assert!(!debug.contains("salt"));
+        assert!(debug.contains("did:exo:user"));
+    }
+
+    #[test]
+    fn list_users_db_never_selects_password_material() {
+        let source = include_str!("db.rs");
+        let Some(fn_start) = source.find("pub async fn list_users_db") else {
+            panic!("list_users_db source must be present");
+        };
+        let after_list_users = &source[fn_start..];
+        let Some(fn_end) = after_list_users.find("/// Update a user's PACE enrollment status.")
+        else {
+            panic!("list_users_db source terminator must be present");
+        };
+        let list_users_source = &after_list_users[..fn_end];
+
+        assert!(
+            !list_users_source.contains("password_hash"),
+            "list_users_db must not select password hashes"
+        );
+        assert!(
+            !list_users_source.contains("salt"),
+            "list_users_db must not select password salts"
+        );
+        assert!(
+            list_users_source.contains("Result<Vec<PublicUserRow>"),
+            "list_users_db must return the public user projection"
+        );
     }
 }
