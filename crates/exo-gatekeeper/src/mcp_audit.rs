@@ -17,6 +17,7 @@ use crate::{error::GatekeeperError, mcp::McpRule};
 
 const MCP_AUDIT_RECORD_HASH_DOMAIN: &str = "exo.gatekeeper.mcp_audit_record.v1";
 const MCP_AUDIT_RECORD_HASH_SCHEMA_VERSION: u16 = 1;
+pub const MAX_MCP_AUDIT_RECORDS: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize)]
 struct McpAuditRecordHashPayload {
@@ -148,6 +149,15 @@ impl McpAuditLog {
 /// does not match the current log head — indicating either an ordering error
 /// or tampering.
 pub fn append(log: &mut McpAuditLog, record: McpAuditRecord) -> Result<(), GatekeeperError> {
+    if log.records.len() >= MAX_MCP_AUDIT_RECORDS {
+        return Err(GatekeeperError::McpAuditInvalidRecord {
+            reason: format!(
+                "MCP audit log capacity exceeded: {} >= {}",
+                log.records.len(),
+                MAX_MCP_AUDIT_RECORDS
+            ),
+        });
+    }
     if record.chain_hash != log.head_hash()? {
         return Err(GatekeeperError::McpAuditChainBroken {
             index: log.records.len(),
@@ -509,5 +519,30 @@ mod tests {
             McpEnforcementOutcome::Blocked,
         );
         assert_eq!(log.records[0].outcome, McpEnforcementOutcome::Blocked);
+    }
+
+    #[test]
+    fn append_rejects_log_at_capacity_without_growing_records() {
+        let mut log = McpAuditLog {
+            records: vec![sample_record(); MAX_MCP_AUDIT_RECORDS],
+        };
+        let record = create_record(
+            &log,
+            record_id(0xF001),
+            ts(30_000),
+            McpRule::Mcp001BctsScope,
+            did("agent"),
+            McpEnforcementOutcome::Allowed,
+            None,
+        )
+        .expect("capacity regression record has valid deterministic metadata");
+
+        let err = append(&mut log, record).expect_err("full MCP audit log must reject append");
+
+        assert_eq!(log.len(), MAX_MCP_AUDIT_RECORDS);
+        assert!(
+            err.to_string().contains("capacity"),
+            "capacity rejection should be explicit: {err}"
+        );
     }
 }
