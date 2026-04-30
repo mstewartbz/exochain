@@ -46,19 +46,46 @@ fn get_bit(key: &Hash256, pos: usize) -> bool {
     (key.0[byte_idx] >> bit_idx) & 1 == 1
 }
 
-fn bits_to_key(bits: &[bool]) -> Hash256 {
-    let mut bytes = [0u8; 32];
-    for (i, &bit) in bits.iter().enumerate() {
-        if i >= 256 {
-            break;
-        }
-        if bit {
-            let byte_idx = i / 8;
-            let bit_idx = 7 - (i % 8);
-            bytes[byte_idx] |= 1 << bit_idx;
+fn set_bit(key: &mut Hash256, pos: usize, value: bool) {
+    let byte_idx = pos / 8;
+    let bit_idx = 7 - (pos % 8);
+    let mask = 1u8 << bit_idx;
+    if value {
+        key.0[byte_idx] |= mask;
+    } else {
+        key.0[byte_idx] &= !mask;
+    }
+}
+
+fn prefix_key(key: &Hash256, prefix_len: usize) -> Hash256 {
+    if prefix_len >= TREE_DEPTH {
+        return *key;
+    }
+
+    let mut bytes = key.0;
+    let full_bytes = prefix_len / 8;
+    let remaining_bits = prefix_len % 8;
+
+    if full_bytes < bytes.len() {
+        if remaining_bits == 0 {
+            bytes[full_bytes..].fill(0);
+        } else {
+            let mask = 0xFFu8 << (8 - remaining_bits);
+            bytes[full_bytes] &= mask;
+            bytes[full_bytes + 1..].fill(0);
         }
     }
+
     Hash256::from_bytes(bytes)
+}
+
+fn with_bit(mut key: Hash256, pos: usize, value: bool) -> Hash256 {
+    set_bit(&mut key, pos, value);
+    key
+}
+
+fn empty_layers() -> Vec<BTreeMap<Hash256, Hash256>> {
+    (0..=TREE_DEPTH).map(|_| BTreeMap::new()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -81,9 +108,21 @@ pub struct MerkleProof {
 // ---------------------------------------------------------------------------
 
 /// A Sparse Merkle Tree with 256-bit key space.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SparseMerkleTree {
     leaves: BTreeMap<Hash256, Vec<u8>>,
+    layers: Vec<BTreeMap<Hash256, Hash256>>,
+    root: Hash256,
+}
+
+impl Default for SparseMerkleTree {
+    fn default() -> Self {
+        Self {
+            leaves: BTreeMap::new(),
+            layers: empty_layers(),
+            root: default_hash(TREE_DEPTH),
+        }
+    }
 }
 
 impl SparseMerkleTree {
@@ -96,10 +135,7 @@ impl SparseMerkleTree {
     /// Get the root hash.
     #[must_use]
     pub fn root(&self) -> Hash256 {
-        if self.leaves.is_empty() {
-            return default_hash(TREE_DEPTH);
-        }
-        self.compute_node(TREE_DEPTH, &[])
+        self.root
     }
 
     /// Number of entries.
@@ -114,55 +150,56 @@ impl SparseMerkleTree {
         self.leaves.is_empty()
     }
 
-    fn compute_node(&self, level: usize, path_bits: &[bool]) -> Hash256 {
-        if level == 0 {
-            if path_bits.len() == TREE_DEPTH {
-                let key = bits_to_key(path_bits);
-                if let Some(value) = self.leaves.get(&key) {
-                    return hash_leaf(value);
-                }
-            }
-            return default_hash(0);
-        }
-
-        if !self.has_leaf_with_prefix(path_bits) {
-            return default_hash(level);
-        }
-
-        let mut left_path = path_bits.to_vec();
-        left_path.push(false);
-        let left = self.compute_node(level - 1, &left_path);
-
-        let mut right_path = path_bits.to_vec();
-        right_path.push(true);
-        let right = self.compute_node(level - 1, &right_path);
-
-        hash_pair(&left, &right)
+    fn set_leaf(&mut self, key: &Hash256, value: &[u8]) {
+        self.leaves.insert(*key, value.to_vec());
+        self.layers[0].insert(*key, hash_leaf(value));
+        self.update_ancestors(key);
     }
 
-    fn has_leaf_with_prefix(&self, prefix: &[bool]) -> bool {
-        for key in self.leaves.keys() {
-            let mut matches = true;
-            for (i, &bit) in prefix.iter().enumerate() {
-                if get_bit(key, i) != bit {
-                    matches = false;
-                    break;
-                }
+    fn update_ancestors(&mut self, key: &Hash256) {
+        let mut child_key = *key;
+        for layer in 0..TREE_DEPTH {
+            let child_prefix_len = TREE_DEPTH - layer;
+            let parent_prefix_len = child_prefix_len - 1;
+            let parent_key = prefix_key(&child_key, parent_prefix_len);
+            let right_key = with_bit(parent_key, parent_prefix_len, true);
+            let left = self.layers[layer]
+                .get(&parent_key)
+                .copied()
+                .unwrap_or_else(|| default_hash(layer));
+            let right = self.layers[layer]
+                .get(&right_key)
+                .copied()
+                .unwrap_or_else(|| default_hash(layer));
+            let parent_hash = hash_pair(&left, &right);
+
+            if parent_hash == default_hash(layer + 1) {
+                self.layers[layer + 1].remove(&parent_key);
+            } else {
+                self.layers[layer + 1].insert(parent_key, parent_hash);
             }
-            if matches {
-                return true;
-            }
+
+            child_key = parent_key;
         }
-        false
+
+        self.root = self.layers[TREE_DEPTH]
+            .get(&Hash256::ZERO)
+            .copied()
+            .unwrap_or_else(|| default_hash(TREE_DEPTH));
     }
 
-    fn sibling_hash(&self, key: &Hash256, level: usize) -> Hash256 {
-        let depth = TREE_DEPTH - level;
-        let mut path_bits: Vec<bool> = (0..depth).map(|i| get_bit(key, i)).collect();
-        if let Some(last) = path_bits.last_mut() {
-            *last = !*last;
-        }
-        self.compute_node(level, &path_bits)
+    fn sibling_hash(&self, key: &Hash256, layer: usize) -> Hash256 {
+        let prefix_len = TREE_DEPTH - layer;
+        let branch_bit = prefix_len - 1;
+        let sibling_key = with_bit(
+            prefix_key(key, prefix_len),
+            branch_bit,
+            !get_bit(key, branch_bit),
+        );
+        self.layers[layer]
+            .get(&sibling_key)
+            .copied()
+            .unwrap_or_else(|| default_hash(layer))
     }
 }
 
@@ -175,7 +212,7 @@ pub fn insert(tree: &mut SparseMerkleTree, key: &Hash256, value: &[u8]) -> Resul
     if value.is_empty() {
         return Err(DagError::SmtError("empty value".to_string()));
     }
-    tree.leaves.insert(*key, value.to_vec());
+    tree.set_leaf(key, value);
     Ok(tree.root())
 }
 
@@ -391,11 +428,21 @@ mod tests {
     }
 
     #[test]
-    fn bits_to_key_roundtrip() {
+    fn prefix_key_preserves_full_depth_key() {
         let key = Hash256::digest(b"test_key");
-        let bits: Vec<bool> = (0..256).map(|i| get_bit(&key, i)).collect();
-        let reconstructed = bits_to_key(&bits);
-        assert_eq!(key, reconstructed);
+        assert_eq!(key, prefix_key(&key, TREE_DEPTH));
+    }
+
+    #[test]
+    fn prefix_key_masks_trailing_bits() {
+        let key = Hash256::from_bytes([0xFF; 32]);
+        let prefix = prefix_key(&key, 9);
+
+        assert!(get_bit(&prefix, 0));
+        assert!(get_bit(&prefix, 8));
+        for bit in 9..TREE_DEPTH {
+            assert!(!get_bit(&prefix, bit));
+        }
     }
 
     #[test]
@@ -418,6 +465,22 @@ mod tests {
             value: Some(b"val".to_vec()),
         };
         assert!(!verify_proof(&root, &key, Some(b"val"), &proof));
+    }
+
+    #[test]
+    fn source_has_no_prefix_scan_recomputation_path() {
+        let source = include_str!("smt.rs");
+        let prefix_scan = ["has_leaf", "_with_prefix"].concat();
+        let recursive_node = ["compute", "_node"].concat();
+
+        assert!(
+            !source.contains(&prefix_scan),
+            "SMT root/proof generation must not scan all leaves for each prefix"
+        );
+        assert!(
+            !source.contains(&recursive_node),
+            "SMT root/proof generation must use cached layers instead of recursive full-tree recomputation"
+        );
     }
 }
 
