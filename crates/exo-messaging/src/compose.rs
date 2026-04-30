@@ -103,7 +103,7 @@ pub fn lock_and_send(
         id: metadata.id.to_string(),
         sender_did: sender_did.clone(),
         recipient_did: recipient_did.clone(),
-        ephemeral_public_key: ephemeral.public.0,
+        ephemeral_public_key: *ephemeral.public.as_bytes(),
         ciphertext,
         content_type,
         signature: exo_core::Signature::empty(),
