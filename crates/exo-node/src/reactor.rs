@@ -151,16 +151,6 @@ impl ValidatorPublicKeys {
         &self.keys
     }
 
-    #[cfg_attr(not(feature = "unaudited-admin-governance-shortcut"), allow(dead_code))]
-    pub fn insert(&mut self, did: Did, public_key: PublicKey) {
-        self.keys.insert(did, public_key);
-    }
-
-    #[cfg_attr(not(feature = "unaudited-admin-governance-shortcut"), allow(dead_code))]
-    pub fn remove(&mut self, did: &Did) {
-        self.keys.remove(did);
-    }
-
     #[must_use]
     pub fn missing_for(&self, validators: &BTreeSet<Did>) -> Vec<Did> {
         validators
