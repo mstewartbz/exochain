@@ -117,7 +117,15 @@ pub fn execute_evaluate_threat(params: &Value, _context: &NodeContext) -> ToolRe
     }
 
     // Integer average: truncated division is fine for a threat bucket.
-    let signal_count = signals.len() as i64;
+    let signal_count = match i64::try_from(signals.len()) {
+        Ok(count) => count,
+        Err(_) => {
+            return ToolResult::error(
+                json!({"error": "signals array is too large to evaluate deterministically"})
+                    .to_string(),
+            );
+        }
+    };
     let avg_severity = total_severity / signal_count;
 
     // Aggregate threat level based on max and average severity.

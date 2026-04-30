@@ -14,7 +14,7 @@
 //! exochain peers                           # list connected peers
 //! ```
 
-#![allow(clippy::as_conversions, clippy::type_complexity)]
+#![allow(clippy::type_complexity)]
 
 mod api;
 mod auth;
@@ -251,6 +251,10 @@ impl BackgroundTasks {
     }
 }
 
+fn count_metric_value(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
 fn spawn_event_fanout(
     tasks: &mut BackgroundTasks,
     mut event_rx: mpsc::Receiver<NetworkEvent>,
@@ -434,7 +438,7 @@ async fn start_node(
         .is_validator
         .store(u64::from(validator), std::sync::atomic::Ordering::Relaxed);
     node_metrics.validator_count.store(
-        validator_set.len() as u64,
+        count_metric_value(validator_set.len()),
         std::sync::atomic::Ordering::Relaxed,
     );
 
@@ -623,9 +627,10 @@ async fn start_node(
                         diversity_score_bp,
                         recommendation,
                     } => {
-                        holon_metrics
-                            .peer_count
-                            .store(peer_count as u64, std::sync::atomic::Ordering::Relaxed);
+                        holon_metrics.peer_count.store(
+                            count_metric_value(peer_count),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         tracing::info!(
                             peer_count,
                             diversity_score_bp,
@@ -638,9 +643,10 @@ async fn start_node(
                         node_count,
                         recommendation,
                     } => {
-                        holon_metrics
-                            .validator_count
-                            .store(validator_count as u64, std::sync::atomic::Ordering::Relaxed);
+                        holon_metrics.validator_count.store(
+                            count_metric_value(validator_count),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         tracing::info!(
                             validator_count,
                             node_count,
@@ -1147,6 +1153,21 @@ mod tests {
 
         assert!(text.contains("65535"));
         assert!(text.contains("QUIC"));
+    }
+
+    #[test]
+    fn main_crate_does_not_globally_suppress_as_conversion_lints() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(
+            !production.contains("#![allow(clippy::as_conversions"),
+            "main.rs must not globally suppress checked conversion lints"
+        );
+        assert!(
+            !production.contains(".len() as u64"),
+            "startup metrics must use checked length conversions"
+        );
     }
 
     #[tokio::test]

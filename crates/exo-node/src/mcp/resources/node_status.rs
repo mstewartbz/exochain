@@ -12,6 +12,10 @@ use crate::mcp::{
     protocol::{ResourceContent, ResourceDefinition},
 };
 
+fn count_as_u64(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
 /// Build the resource definition.
 #[must_use]
 pub fn definition() -> ResourceDefinition {
@@ -34,7 +38,7 @@ fn build_payload(context: &NodeContext) -> Value {
     if let Some(reactor) = context.reactor_state.as_ref() {
         if let Ok(state) = reactor.lock() {
             let consensus_round = state.consensus.current_round;
-            let committed_height = state.consensus.committed.len() as u64;
+            let committed_height = count_as_u64(state.consensus.committed.len());
             let validators: Vec<String> = state
                 .consensus
                 .config
