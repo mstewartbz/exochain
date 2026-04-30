@@ -5,11 +5,13 @@
 //! symmetric key suitable for XChaCha20-Poly1305.
 
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 use crate::error::MessagingError;
+
+const X25519_HKDF_SALT_DOMAIN: &[u8] = b"exo.messaging.x25519.hkdf.salt.v1";
 
 /// An X25519 public key (32 bytes).
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -57,7 +59,7 @@ impl core::fmt::Debug for X25519PublicKey {
 /// An X25519 secret key (32 bytes). Zeroized on drop.
 #[derive(Clone, Zeroize)]
 #[zeroize(drop)]
-pub struct X25519SecretKey(pub [u8; 32]);
+pub struct X25519SecretKey([u8; 32]);
 
 impl X25519SecretKey {
     #[must_use]
@@ -65,15 +67,12 @@ impl X25519SecretKey {
         Self(bytes)
     }
 
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
     /// Create from hex string.
     pub fn from_hex(hex: &str) -> Result<Self, MessagingError> {
-        let bytes = hex::decode(hex)
-            .map_err(|e| MessagingError::KeyExchangeFailed(format!("invalid hex: {e}")))?;
+        let bytes = zeroize::Zeroizing::new(
+            hex::decode(hex)
+                .map_err(|e| MessagingError::KeyExchangeFailed(format!("invalid hex: {e}")))?,
+        );
         if bytes.len() != 32 {
             return Err(MessagingError::KeyExchangeFailed(format!(
                 "expected 32 bytes, got {}",
@@ -85,10 +84,16 @@ impl X25519SecretKey {
         Ok(Self(arr))
     }
 
-    /// Encode as hex string.
+    /// Derive the public key corresponding to this secret key.
     #[must_use]
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+    pub fn public_key(&self) -> X25519PublicKey {
+        let secret = StaticSecret::from(self.0);
+        let public = PublicKey::from(&secret);
+        X25519PublicKey(public.to_bytes())
+    }
+
+    fn static_secret(&self) -> StaticSecret {
+        StaticSecret::from(self.0)
     }
 }
 
@@ -140,16 +145,33 @@ pub fn derive_shared_key(
     their_public: &X25519PublicKey,
     context: &[u8],
 ) -> Result<[u8; 32], MessagingError> {
-    let secret = StaticSecret::from(our_secret.0);
+    let secret = our_secret.static_secret();
     let public = PublicKey::from(their_public.0);
     let shared_secret = secret.diffie_hellman(&public);
+    let our_public = X25519PublicKey(PublicKey::from(&secret).to_bytes());
+    let salt = hkdf_salt(&our_public, their_public);
 
-    // HKDF-SHA256: extract from shared secret, expand with context
-    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+    // HKDF-SHA256: extract from shared secret with a deterministic transcript
+    // salt, then expand with caller-supplied context.
+    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret.as_bytes());
     let mut okm = [0u8; 32];
     hk.expand(context, &mut okm)
         .map_err(|e| MessagingError::KeyExchangeFailed(e.to_string()))?;
     Ok(okm)
+}
+
+fn hkdf_salt(our_public: &X25519PublicKey, their_public: &X25519PublicKey) -> [u8; 32] {
+    let (first, second) = if our_public.as_bytes() <= their_public.as_bytes() {
+        (our_public.as_bytes(), their_public.as_bytes())
+    } else {
+        (their_public.as_bytes(), our_public.as_bytes())
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(X25519_HKDF_SALT_DOMAIN);
+    hasher.update(first);
+    hasher.update(second);
+    hasher.finalize().into()
 }
 
 /// Generate an ephemeral X25519 keypair for one-time use in message encryption.
@@ -202,8 +224,12 @@ mod tests {
 
     #[test]
     fn from_secret_bytes_deterministic() {
-        let kp1 = X25519KeyPair::generate();
-        let kp2 = X25519KeyPair::from_secret_bytes(kp1.secret.0);
+        let secret = X25519SecretKey::from_bytes([7u8; 32]);
+        let kp1 = X25519KeyPair::from_secret_bytes([7u8; 32]);
+        let kp2 = X25519KeyPair {
+            public: secret.public_key(),
+            secret,
+        };
 
         assert_eq!(kp1.public.0, kp2.public.0, "same secret → same public");
     }
@@ -214,5 +240,39 @@ mod tests {
         let hex = kp.public.to_hex();
         let recovered = X25519PublicKey::from_hex(&hex).expect("from_hex");
         assert_eq!(kp.public, recovered);
+    }
+
+    #[test]
+    fn x25519_secret_key_source_does_not_expose_inner_bytes_or_plain_hex() {
+        let source = include_str!("kex.rs");
+        let secret_impl = source
+            .split("impl X25519SecretKey {")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("impl core::fmt::Debug for X25519SecretKey")
+                    .next()
+            })
+            .expect("secret-key impl block must be present");
+        assert!(
+            !source.contains(&["pub struct X25519SecretKey", "(pub"].concat()),
+            "X25519 secret key bytes must not be exposed through a public tuple field"
+        );
+        assert!(
+            !secret_impl.contains(&["pub fn to_", "hex(&self) -> String"].concat()),
+            "X25519 secret keys must not expose a plain String hex encoder"
+        );
+        assert!(
+            !source.contains(&["our_secret", ".0"].concat()),
+            "internal key exchange must use the bounded secret-key accessor"
+        );
+    }
+
+    #[test]
+    fn derive_shared_key_uses_protocol_bound_hkdf_salt() {
+        let source = include_str!("kex.rs");
+        assert!(
+            !source.contains(&["Hkdf::<Sha256>::new", "(None"].concat()),
+            "X25519 shared-secret HKDF extraction must use a protocol-bound salt"
+        );
     }
 }
