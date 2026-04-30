@@ -270,7 +270,8 @@ fn pct(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {
         return 100;
     }
-    (numerator * 100) / denominator
+    let pct = (u128::from(numerator) * 100) / u128::from(denominator);
+    u64::try_from(pct.min(100)).unwrap_or(100)
 }
 
 /// Compute the 95th percentile of a latency distribution.
@@ -359,6 +360,13 @@ mod tests {
         }
         m.record_evidence_check(false);
         assert_eq!(m.m3_evidence_pct(), 99);
+    }
+
+    #[test]
+    fn pct_handles_deserialized_overflow_shapes_without_panicking() {
+        assert_eq!(pct(u64::MAX, 1), 100);
+        assert_eq!(pct(u64::MAX, u64::MAX), 100);
+        assert_eq!(pct(u64::MAX - 1, u64::MAX), 99);
     }
 
     #[test]

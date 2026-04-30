@@ -69,8 +69,7 @@ impl QuorumRegistry {
     /// Look up the quorum requirement for a decision class.
     #[must_use]
     pub fn requirement_for(&self, class: DecisionClass) -> Option<&QuorumRequirement> {
-        let key = format!("{class:?}");
-        self.policies.get(&key)
+        self.policies.get(&class.quorum_policy_key().to_owned())
     }
 }
 
@@ -354,5 +353,21 @@ mod tests {
         assert!(reg.requirement_for(DecisionClass::Operational).is_some());
         assert!(reg.requirement_for(DecisionClass::Strategic).is_some());
         assert!(reg.requirement_for(DecisionClass::Constitutional).is_some());
+    }
+
+    #[test]
+    fn requirement_lookup_does_not_depend_on_debug_format() {
+        let source = include_str!("quorum.rs");
+        let Some(after_lookup) = source.split("pub fn requirement_for").nth(1) else {
+            panic!("requirement_for exists");
+        };
+        let Some(lookup_body) = after_lookup.split("/// Result of a quorum check").next() else {
+            panic!("lookup body exists");
+        };
+
+        assert!(
+            !lookup_body.contains("format!(\"{class:?}\")"),
+            "quorum policy lookup must use an explicit stable key, not Debug output"
+        );
     }
 }

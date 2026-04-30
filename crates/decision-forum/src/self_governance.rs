@@ -108,7 +108,9 @@ impl ComplianceTracker {
         if self.total_modifications == 0 {
             return 100;
         }
-        (self.compliant_modifications * 100) / self.total_modifications
+        let pct =
+            (u128::from(self.compliant_modifications) * 100) / u128::from(self.total_modifications);
+        u64::try_from(pct.min(100)).unwrap_or(100)
     }
 }
 
@@ -276,6 +278,16 @@ mod tests {
         t.record(false);
         assert_eq!(t.compliance_rate_pct(), 66); // 2/3
         assert_eq!(t.total_modifications, 3);
+    }
+
+    #[test]
+    fn compliance_tracker_clamps_deserialized_overflow_shape() {
+        let t = ComplianceTracker {
+            total_modifications: 1,
+            compliant_modifications: u64::MAX,
+        };
+
+        assert_eq!(t.compliance_rate_pct(), 100);
     }
 
     #[test]
