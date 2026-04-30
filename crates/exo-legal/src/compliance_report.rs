@@ -14,6 +14,8 @@
 //!   `BLAKE3(tenant_id || model_id || redaction_salt)`. For public disclosure
 //!   or external auditors. Prevents AI model fingerprinting.
 
+use std::fmt;
+
 use exo_core::{Did, Timestamp, hash::hash_structured};
 use exo_gatekeeper::invariants::{ConstitutionalInvariant, InvariantSet};
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,7 @@ const COMPLIANCE_REPORT_HASH_DOMAIN: &str = "exo.legal.compliance_report.v1";
 
 /// Controls whether sensitive fields (e.g. `model_id`) appear in plaintext
 /// or as BLAKE3 hashes in the generated report.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ComplianceReportMode {
     /// All fields included in plaintext.
     Full,
@@ -42,6 +44,18 @@ pub enum ComplianceReportMode {
         /// Per-tenant salt stored in the Constitution. Must be 32 bytes.
         redaction_salt: [u8; 32],
     },
+}
+
+impl fmt::Debug for ComplianceReportMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full => f.write_str("Full"),
+            Self::Redacted { .. } => f
+                .debug_struct("Redacted")
+                .field("redaction_salt", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,11 +224,11 @@ fn derive_status_and_evidence(
         }
 
         ConstitutionalInvariant::ProvenanceVerifiable => {
-            let mcp_count: u64 = report
-                .mcp_rule_outcomes
-                .iter()
-                .map(|o| o.allowed + o.blocked + o.escalated)
-                .sum();
+            let mcp_count = report.mcp_rule_outcomes.iter().fold(0u64, |acc, outcome| {
+                acc.saturating_add(outcome.allowed)
+                    .saturating_add(outcome.blocked)
+                    .saturating_add(outcome.escalated)
+            });
             if mcp_count == 0 {
                 (
                     AttestationStatus::NotApplicable,
@@ -354,8 +368,8 @@ mod tests {
 
     use super::*;
     use crate::ai_transparency::{
-        AiTransparencyReport, ReportParams, VerifiedAuthorityClearance, generate_report,
-        verify_authority_clearance,
+        AiTransparencyReport, McpOutcomeSummary, ReportParams, VerifiedAuthorityClearance,
+        generate_report, verify_authority_clearance,
     };
 
     fn did(s: &str) -> Did {
@@ -436,6 +450,50 @@ mod tests {
         )
         .expect("ok");
         assert_eq!(report.report_mode, "Redacted");
+    }
+
+    #[test]
+    fn compliance_report_mode_debug_redacts_redaction_salt() {
+        let mode = ComplianceReportMode::Redacted {
+            redaction_salt: [7u8; 32],
+        };
+
+        let debug = format!("{mode:?}");
+
+        assert!(
+            !debug.contains("7, 7"),
+            "Debug output must not expose redaction_salt bytes"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug output must make redaction explicit"
+        );
+    }
+
+    #[test]
+    fn mcp_count_saturates_without_overflowing() {
+        let tenant = did("tenant");
+        let mut tr = empty_report(&tenant);
+        tr.mcp_rule_outcomes = vec![McpOutcomeSummary {
+            rule: "MCP-001".to_owned(),
+            allowed: u64::MAX,
+            blocked: 1,
+            escalated: 1,
+        }];
+
+        let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000))
+            .expect("overflowing MCP counts must not panic or fail report generation");
+        let provenance = report
+            .attestations
+            .iter()
+            .find(|a| a.invariant == "ProvenanceVerifiable")
+            .expect("ProvenanceVerifiable must appear in attestations");
+
+        assert_eq!(provenance.status, AttestationStatus::Compliant);
+        assert!(
+            provenance.evidence_summary.contains(&u64::MAX.to_string()),
+            "MCP event count should saturate at u64::MAX instead of wrapping"
+        );
     }
 
     #[test]
