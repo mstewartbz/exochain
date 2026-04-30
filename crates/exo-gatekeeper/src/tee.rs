@@ -188,6 +188,25 @@ fn synthetic_signature_allowed(attestation: &TeeAttestation, policy: &TeePolicy)
     }
 }
 
+fn measurement_hash_eq_ct(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
+        diff |= left_byte ^ right_byte;
+    }
+    diff == 0
+}
+
+fn required_measurement_matches(
+    required_measurements: &[[u8; 32]],
+    measurement: &[u8; 32],
+) -> bool {
+    let mut matched = 0u8;
+    for required in required_measurements {
+        matched |= u8::from(measurement_hash_eq_ct(required, measurement));
+    }
+    matched != 0
+}
+
 // ---------------------------------------------------------------------------
 // Attestation verification
 // ---------------------------------------------------------------------------
@@ -242,9 +261,10 @@ fn check_attestation_policy(
 
     // Check measurement (if policy specifies required measurements).
     if !policy.required_measurements.is_empty()
-        && !policy
-            .required_measurements
-            .contains(&attestation.measurement_hash)
+        && !required_measurement_matches(
+            &policy.required_measurements,
+            &attestation.measurement_hash,
+        )
     {
         return Err(GatekeeperError::TeeError(
             "Measurement hash does not match any required measurement".into(),
@@ -596,6 +616,38 @@ mod tests {
             environment: TeeEnvironment::Testing,
         };
         assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn required_measurement_matcher_handles_empty_match_and_mismatch() {
+        let att = valid_attestation();
+
+        assert!(!required_measurement_matches(&[], &att.measurement_hash));
+        assert!(required_measurement_matches(
+            &[[0u8; 32], att.measurement_hash, [1u8; 32]],
+            &att.measurement_hash
+        ));
+        assert!(!required_measurement_matches(
+            &[[0u8; 32], [1u8; 32]],
+            &att.measurement_hash
+        ));
+    }
+
+    #[test]
+    fn measurement_policy_does_not_use_short_circuit_contains() {
+        let source = include_str!("tee.rs");
+        let start = source
+            .find("fn check_attestation_policy(")
+            .expect("check_attestation_policy source exists");
+        let end = source[start..]
+            .find("// Check signature is non-empty.")
+            .expect("signature check marker exists");
+        let measurement_check = &source[start..start + end];
+
+        assert!(
+            !measurement_check.contains(".contains(&attestation.measurement_hash)"),
+            "measurement hash matching must not use short-circuiting Vec::contains"
+        );
     }
 
     // --- Production TEE gate tests ---
