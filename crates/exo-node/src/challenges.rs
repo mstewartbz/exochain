@@ -75,6 +75,35 @@ impl ChallengeStore {
 
 /// Shared state for challenge endpoints.
 pub type SharedChallengeStore = Arc<Mutex<ChallengeStore>>;
+type ChallengeError = (StatusCode, String);
+type ChallengeResult<T> = Result<T, ChallengeError>;
+
+async fn with_challenge_store_blocking<T, F>(
+    store: SharedChallengeStore,
+    operation: F,
+) -> ChallengeResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut ChallengeStore) -> ChallengeResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut store = store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Challenge store unavailable".to_string(),
+            )
+        })?;
+        operation(&mut store)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "challenge store task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Challenge store task failed".to_string(),
+        )
+    })?
+}
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -140,18 +169,15 @@ pub struct DismissChallengeRequest {
 async fn handle_list(
     State(store): State<SharedChallengeStore>,
 ) -> Result<Json<Vec<ChallengeResponse>>, (StatusCode, String)> {
-    let st = store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Challenge store unavailable".to_string(),
-        )
-    })?;
-    Ok(Json(
-        st.list()
+    let challenges = with_challenge_store_blocking(store, |st| {
+        Ok(st
+            .list()
             .iter()
             .map(|h| ChallengeResponse::from(*h))
-            .collect(),
-    ))
+            .collect())
+    })
+    .await?;
+    Ok(Json(challenges))
 }
 
 /// `GET /api/v1/challenges/:id` — get a single challenge.
@@ -161,16 +187,13 @@ async fn handle_get(
 ) -> Result<Json<ChallengeResponse>, (StatusCode, String)> {
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
-    let st = store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Challenge store unavailable".to_string(),
-        )
-    })?;
-    match st.get(&id) {
-        Some(hold) => Ok(Json(ChallengeResponse::from(hold))),
-        None => Err((StatusCode::NOT_FOUND, "challenge not found".into())),
-    }
+    let challenge = with_challenge_store_blocking(store, move |st| {
+        st.get(&id)
+            .map(ChallengeResponse::from)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))
+    })
+    .await?;
+    Ok(Json(challenge))
 }
 
 /// `POST /api/v1/challenges` — file a new Sybil challenge.
@@ -182,15 +205,11 @@ async fn handle_file(
         challenge::admit_challenge(req).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let resp = ChallengeResponse::from(&hold);
 
-    {
-        let mut st = store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Challenge store unavailable".to_string(),
-            )
-        })?;
+    with_challenge_store_blocking(store, move |st| {
         st.insert(hold);
-    }
+        Ok(())
+    })
+    .await?;
 
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -204,19 +223,16 @@ async fn handle_begin_review(
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
 
-    let mut st = store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Challenge store unavailable".to_string(),
-        )
-    })?;
-    let hold = st
-        .get_mut(&id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
+    let challenge = with_challenge_store_blocking(store, move |st| {
+        let hold = st
+            .get_mut(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
+        challenge::begin_review(hold, req.at).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+        Ok(ChallengeResponse::from(&*hold))
+    })
+    .await?;
 
-    challenge::begin_review(hold, req.at).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-
-    Ok(Json(ChallengeResponse::from(&*hold)))
+    Ok(Json(challenge))
 }
 
 /// `POST /api/v1/challenges/:id/resolve` — resolve a challenge.
@@ -228,20 +244,17 @@ async fn handle_resolve(
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
 
-    let mut st = store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Challenge store unavailable".to_string(),
-        )
-    })?;
-    let hold = st
-        .get_mut(&id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
+    let challenge = with_challenge_store_blocking(store, move |st| {
+        let hold = st
+            .get_mut(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
+        challenge::resolve_hold(hold, req.at, &req.outcome)
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+        Ok(ChallengeResponse::from(&*hold))
+    })
+    .await?;
 
-    challenge::resolve_hold(hold, req.at, &req.outcome)
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-
-    Ok(Json(ChallengeResponse::from(&*hold)))
+    Ok(Json(challenge))
 }
 
 /// `POST /api/v1/challenges/:id/dismiss` — dismiss a challenge.
@@ -253,20 +266,17 @@ async fn handle_dismiss(
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
 
-    let mut st = store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Challenge store unavailable".to_string(),
-        )
-    })?;
-    let hold = st
-        .get_mut(&id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
+    let challenge = with_challenge_store_blocking(store, move |st| {
+        let hold = st
+            .get_mut(&id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
+        challenge::dismiss_hold(hold, req.at, &req.reason)
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+        Ok(ChallengeResponse::from(&*hold))
+    })
+    .await?;
 
-    challenge::dismiss_hold(hold, req.at, &req.reason)
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-
-    Ok(Json(ChallengeResponse::from(&*hold)))
+    Ok(Json(challenge))
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +333,34 @@ mod tests {
 
     fn keypair(seed: u8) -> exo_core::crypto::KeyPair {
         exo_core::crypto::KeyPair::from_secret_bytes([seed; 32]).unwrap()
+    }
+
+    #[test]
+    fn challenge_async_handlers_use_blocking_store_access() {
+        let source = include_str!("challenges.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "challenge handlers must isolate synchronous store access from Tokio workers"
+        );
+
+        let handlers = production
+            .split("// Handlers\n// ---------------------------------------------------------------------------")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("// ---------------------------------------------------------------------------\n// Router")
+                    .next()
+            })
+            .unwrap();
+        assert!(
+            !handlers.contains(".lock()"),
+            "challenge async handlers must not lock std::sync::Mutex values directly"
+        );
     }
 
     fn signed_challenge(
