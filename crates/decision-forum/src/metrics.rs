@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_LATENCY_SAMPLES: usize = 4_096;
+
 /// All 12 governance metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsCollector {
@@ -178,7 +180,7 @@ impl MetricsCollector {
 
     /// Record a revocation latency measurement.
     pub fn record_revocation_latency(&mut self, ms: u64) {
-        self.revocation_latencies_ms.push(ms);
+        push_bounded_latency_sample(&mut self.revocation_latencies_ms, ms);
     }
 
     /// Record an evidence completeness check.
@@ -215,7 +217,7 @@ impl MetricsCollector {
 
     /// Record a challenge resolution time.
     pub fn record_challenge_resolution(&mut self, ms: u64) {
-        self.challenge_resolution_times_ms.push(ms);
+        push_bounded_latency_sample(&mut self.challenge_resolution_times_ms, ms);
     }
 
     /// Record an emergency action.
@@ -274,12 +276,24 @@ fn pct(numerator: u64, denominator: u64) -> u64 {
     u64::try_from(pct.min(100)).unwrap_or(100)
 }
 
+fn push_bounded_latency_sample(values: &mut Vec<u64>, value: u64) {
+    let projected_len = values.len().saturating_add(1);
+    if projected_len > MAX_LATENCY_SAMPLES {
+        let excess = projected_len - MAX_LATENCY_SAMPLES;
+        let drain_end = excess.min(values.len());
+        drop(values.drain(0..drain_end));
+    }
+    values.push(value);
+}
+
 /// Compute the 95th percentile of a latency distribution.
 fn percentile_95(values: &[u64]) -> u64 {
-    if values.is_empty() {
+    let window_start = values.len().saturating_sub(MAX_LATENCY_SAMPLES);
+    let recent_values = &values[window_start..];
+    if recent_values.is_empty() {
         return 0;
     }
-    let mut sorted = values.to_vec();
+    let mut sorted = recent_values.to_vec();
     sorted.sort_unstable();
     // Integer 95th-percentile: index = ceil(len * 95 / 100) - 1, clamped to last element.
     let idx = ((sorted.len() * 95).div_ceil(100)).min(sorted.len()) - 1;
@@ -322,6 +336,45 @@ mod tests {
         let m = MetricsCollector::new();
         assert_eq!(m.m2_revocation_p95_ms(), 0);
         assert_eq!(m.m7_challenge_p95_ms(), 0);
+    }
+
+    #[test]
+    fn latency_recorders_retain_only_bounded_recent_samples() {
+        const EXPECTED_SAMPLE_LIMIT: usize = 4_096;
+        const SAMPLE_COUNT: u64 = 4_101;
+
+        let mut m = MetricsCollector::new();
+        for latency in 0..SAMPLE_COUNT {
+            m.record_revocation_latency(latency);
+            m.record_challenge_resolution(latency + 10_000);
+        }
+
+        assert_eq!(m.revocation_latencies_ms.len(), EXPECTED_SAMPLE_LIMIT);
+        assert_eq!(m.challenge_resolution_times_ms.len(), EXPECTED_SAMPLE_LIMIT);
+        assert_eq!(m.revocation_latencies_ms.first().copied(), Some(5));
+        assert_eq!(m.revocation_latencies_ms.last().copied(), Some(4_100));
+        assert_eq!(
+            m.challenge_resolution_times_ms.first().copied(),
+            Some(10_005)
+        );
+    }
+
+    #[test]
+    fn latency_percentiles_use_bounded_recent_window_for_public_vectors() {
+        const EXPECTED_SAMPLE_LIMIT: usize = 4_096;
+
+        let mut m = MetricsCollector::new();
+        m.revocation_latencies_ms
+            .extend(std::iter::repeat_n(1_000_000, EXPECTED_SAMPLE_LIMIT));
+        m.revocation_latencies_ms
+            .extend(std::iter::repeat_n(10, EXPECTED_SAMPLE_LIMIT));
+        m.challenge_resolution_times_ms
+            .extend(std::iter::repeat_n(2_000_000, EXPECTED_SAMPLE_LIMIT));
+        m.challenge_resolution_times_ms
+            .extend(std::iter::repeat_n(20, EXPECTED_SAMPLE_LIMIT));
+
+        assert_eq!(m.m2_revocation_p95_ms(), 10);
+        assert_eq!(m.m7_challenge_p95_ms(), 20);
     }
 
     #[test]
