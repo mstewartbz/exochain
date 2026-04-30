@@ -3,6 +3,8 @@
 //! Detection, triage, escalation (including Sybil adjudication), kanban,
 //! feedback loops, and completeness checking.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod challenge;
 pub mod completeness;
 pub mod detector;

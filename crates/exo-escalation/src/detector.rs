@@ -73,7 +73,7 @@ pub fn evaluate_signals(signals: &[DetectionSignal]) -> ThreatAssessment {
 
     let (severity, action) = if has_emergency || max_confidence >= 90 {
         (Severity::Critical, RecommendedAction::EmergencyShutdown)
-    } else if has_sybil && max_confidence >= 70 || max_confidence >= 80 {
+    } else if (has_sybil && max_confidence >= 70) || max_confidence >= 80 {
         (Severity::High, RecommendedAction::Quarantine)
     } else if signal_count >= 3 || max_confidence >= 50 {
         (Severity::Medium, RecommendedAction::Investigate)
@@ -124,6 +124,20 @@ mod tests {
         let a = evaluate_signals(&[signal(SignalType::UnauthorizedAccess, 85)]);
         assert_eq!(a.overall_severity, Severity::High);
         assert_eq!(a.recommended_action, RecommendedAction::Quarantine);
+    }
+    #[test]
+    fn high_severity_condition_has_explicit_precedence() {
+        let production = include_str!("detector.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+
+        assert!(
+            production.contains(
+                "} else if (has_sybil && max_confidence >= 70) || max_confidence >= 80 {"
+            ),
+            "High severity condition must make &&/|| precedence explicit"
+        );
     }
     #[test]
     fn emergency_is_critical() {
