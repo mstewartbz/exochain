@@ -246,7 +246,8 @@ impl DeliberationSession {
                         "Missing structured consensus claims: {}",
                         missing_claims.join(", ")
                     )],
-                    divergence_score_bps: 10000 - last_round.convergence_score_bps,
+                    divergence_score_bps: 10_000u64
+                        .saturating_sub(last_round.convergence_score_bps),
                 });
             }
         }
@@ -678,6 +679,35 @@ mod tests {
             result.devil_advocate_summary.as_deref(),
             Some("The prose says serious and fatal but the structured flag is false.")
         );
+    }
+
+    #[test]
+    fn finalize_saturates_minority_divergence_when_convergence_exceeds_bps_ceiling() {
+        let panel = Panel::default_panel(DecisionClass::Routine);
+        let responses = BTreeMap::from([
+            (
+                "claude-3-haiku".to_string(),
+                response("shared position", &["shared claim"]),
+            ),
+            (
+                "gpt-4o-mini".to_string(),
+                response("also shared", &["shared claim"]),
+            ),
+            (
+                "gemini-1.5-flash".to_string(),
+                response("minority position", &["minority claim"]),
+            ),
+        ]);
+        let provider = DeterministicResponseProvider::with_positions(responses);
+        let mut session = DeliberationSession::new("s".into(), panel, "Q?".into(), provider);
+
+        session.execute_round(timing(1)).unwrap();
+        session.rounds[0].convergence_score_bps = 10_001;
+
+        let result = session.finalize(finalization_timing()).unwrap();
+
+        assert_eq!(result.minority_reports.len(), 1);
+        assert_eq!(result.minority_reports[0].divergence_score_bps, 0);
     }
 
     #[test]
