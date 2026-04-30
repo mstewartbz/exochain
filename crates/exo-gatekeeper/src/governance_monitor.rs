@@ -14,6 +14,8 @@
 //! This module is a pure validation library — no database or I/O dependency.
 //! The persistence layer is the caller's concern.
 
+use std::collections::BTreeMap;
+
 use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto};
 
 // ---------------------------------------------------------------------------
@@ -115,8 +117,8 @@ pub const CIRCUIT_BREAKER_WINDOW_MS: u64 = 86_400_000;
 /// been recorded within [`CIRCUIT_BREAKER_WINDOW_MS`].
 #[derive(Debug, Clone)]
 pub struct GovernanceCircuitBreaker {
-    /// Timestamps (physical_ms) of recent Critical findings.
-    critical_timestamps: Vec<u64>,
+    /// Recent Critical findings grouped by timestamp (physical_ms).
+    critical_timestamps: BTreeMap<u64, u64>,
     /// The threshold above which the breaker trips.
     threshold: u64,
     /// Window duration in milliseconds.
@@ -134,7 +136,7 @@ impl GovernanceCircuitBreaker {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            critical_timestamps: Vec::new(),
+            critical_timestamps: BTreeMap::new(),
             threshold: CIRCUIT_BREAKER_THRESHOLD,
             window_ms: CIRCUIT_BREAKER_WINDOW_MS,
         }
@@ -144,7 +146,7 @@ impl GovernanceCircuitBreaker {
     #[must_use]
     pub fn with_thresholds(threshold: u64, window_ms: u64) -> Self {
         Self {
-            critical_timestamps: Vec::new(),
+            critical_timestamps: BTreeMap::new(),
             threshold,
             window_ms,
         }
@@ -155,9 +157,12 @@ impl GovernanceCircuitBreaker {
     /// `critical_count` is the number of Critical-severity findings in
     /// a single scan run.
     pub fn record_critical_findings(&mut self, timestamp_ms: u64, critical_count: u64) {
-        for _ in 0..critical_count {
-            self.critical_timestamps.push(timestamp_ms);
+        if critical_count == 0 {
+            return;
         }
+
+        let count = self.critical_timestamps.entry(timestamp_ms).or_insert(0);
+        *count = (*count).saturating_add(critical_count);
     }
 
     /// Check whether the circuit breaker has tripped.
@@ -170,25 +175,23 @@ impl GovernanceCircuitBreaker {
         let count = self
             .critical_timestamps
             .iter()
-            .filter(|&&ts| ts >= window_start)
-            .count();
-        // Safe: count comes from Vec::len() which fits in usize, and u64 >= usize
-        let count_u64 = u64::try_from(count).unwrap_or(u64::MAX);
+            .filter(|(ts, _)| **ts >= window_start)
+            .fold(0u64, |total, (_, count)| total.saturating_add(*count));
 
-        if count_u64 > self.threshold {
+        if count > self.threshold {
             Err(GovernanceMonitorError::CircuitBreakerTripped {
-                critical_count: count_u64,
+                critical_count: count,
                 threshold: self.threshold,
             })
         } else {
-            Ok(count_u64)
+            Ok(count)
         }
     }
 
     /// Evict timestamps older than the window (housekeeping).
     pub fn evict_expired(&mut self, now_ms: u64) {
         let window_start = now_ms.saturating_sub(self.window_ms);
-        self.critical_timestamps.retain(|&ts| ts >= window_start);
+        self.critical_timestamps.retain(|&ts, _| ts >= window_start);
     }
 }
 
@@ -427,6 +430,62 @@ mod tests {
         // threshold check is > not >=, so exactly at threshold is OK
         let count = cb.check(2000).expect("exactly at threshold should pass");
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn circuit_breaker_records_many_findings_as_one_timestamp_bucket() {
+        let mut cb = GovernanceCircuitBreaker::with_thresholds(3, 86_400_000);
+        cb.record_critical_findings(1000, 1024);
+
+        assert_eq!(cb.critical_timestamps.len(), 1);
+        assert!(matches!(
+            cb.check(2000),
+            Err(GovernanceMonitorError::CircuitBreakerTripped {
+                critical_count: 1024,
+                threshold: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn circuit_breaker_coalesces_repeated_timestamp_counts() {
+        let mut cb = GovernanceCircuitBreaker::with_thresholds(3, 86_400_000);
+        cb.record_critical_findings(1000, 2);
+        cb.record_critical_findings(1000, 3);
+
+        assert_eq!(cb.critical_timestamps.len(), 1);
+        assert!(matches!(
+            cb.check(2000),
+            Err(GovernanceMonitorError::CircuitBreakerTripped {
+                critical_count: 5,
+                threshold: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn circuit_breaker_zero_count_does_not_create_bucket() {
+        let mut cb = GovernanceCircuitBreaker::with_thresholds(3, 86_400_000);
+        cb.record_critical_findings(1000, 0);
+
+        assert_eq!(cb.critical_timestamps.len(), 0);
+        assert!(matches!(cb.check(2000), Ok(0)));
+    }
+
+    #[test]
+    fn circuit_breaker_saturates_count_overflow_without_per_finding_allocation() {
+        let mut cb = GovernanceCircuitBreaker::with_thresholds(u64::MAX - 1, 86_400_000);
+        cb.record_critical_findings(1000, u64::MAX);
+        cb.record_critical_findings(2000, 1);
+
+        assert_eq!(cb.critical_timestamps.len(), 2);
+        assert!(matches!(
+            cb.check(3000),
+            Err(GovernanceMonitorError::CircuitBreakerTripped {
+                critical_count: u64::MAX,
+                threshold
+            }) if threshold == u64::MAX - 1
+        ));
     }
 
     #[test]
