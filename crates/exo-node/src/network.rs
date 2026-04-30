@@ -118,6 +118,7 @@ pub fn build_swarm(config: &NetworkConfig) -> anyhow::Result<Swarm<ExochainBehav
 
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(10))
+                .max_transmit_size(wire::MAX_WIRE_MESSAGE_BYTES)
                 .validation_mode(gossipsub::ValidationMode::Strict)
                 .message_id_fn(message_id_fn)
                 .build()
@@ -583,6 +584,19 @@ mod tests {
         assert!(
             !production.contains("DefaultHasher"),
             "gossipsub message IDs must not use process-seeded DefaultHasher"
+        );
+    }
+
+    #[test]
+    fn production_gossipsub_config_caps_wire_message_bytes() {
+        let source = include_str!("network.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source section exists");
+        assert!(
+            production.contains(".max_transmit_size(wire::MAX_WIRE_MESSAGE_BYTES)"),
+            "gossipsub must reject oversized wire frames before normal message handling"
         );
     }
 
