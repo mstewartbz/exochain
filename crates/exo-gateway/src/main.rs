@@ -31,9 +31,16 @@ async fn main() {
     let pool = match std::env::var("DATABASE_URL") {
         Ok(url) => {
             tracing::info!("Connecting to PostgreSQL…");
-            let pool = exo_gateway::db::init_pool(&url).await;
-            tracing::info!("Database pool ready");
-            Some(pool)
+            match exo_gateway::db::init_pool(&url).await {
+                Ok(pool) => {
+                    tracing::info!("Database pool ready");
+                    Some(pool)
+                }
+                Err(error) => {
+                    tracing::error!("Database initialization failed: {error}");
+                    std::process::exit(1);
+                }
+            }
         }
         Err(_) => {
             tracing::warn!(
