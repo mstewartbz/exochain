@@ -10,9 +10,10 @@
 //!
 //! - [`ComplianceReportMode::Full`] — includes plaintext `model_id` values.
 //!   For internal use and regulators with appropriate clearance.
-//! - [`ComplianceReportMode::Redacted`] — replaces each `model_id` with
-//!   `BLAKE3(tenant_id || model_id || redaction_salt)`. For public disclosure
-//!   or external auditors. Prevents AI model fingerprinting.
+//! - [`ComplianceReportMode::Redacted`] — replaces each `model_id` with a
+//!   domain-separated canonical CBOR hash over tenant, model, and redaction
+//!   salt. For public disclosure or external auditors. Prevents AI model
+//!   fingerprinting.
 
 use std::fmt;
 
@@ -28,6 +29,9 @@ use crate::{
 
 const COMPLIANCE_REPORT_SCHEMA_VERSION: &str = "1.0.0";
 const COMPLIANCE_REPORT_HASH_DOMAIN: &str = "exo.legal.compliance_report.v1";
+const COMPLIANCE_MODEL_REDACTION_HASH_DOMAIN: &str =
+    "exo.legal.compliance_report.model_redaction.v1";
+const COMPLIANCE_MODEL_REDACTION_HASH_SCHEMA_VERSION: u16 = 1;
 
 // ---------------------------------------------------------------------------
 // Report mode
@@ -299,18 +303,34 @@ fn redact_delegation_count(report: &AiTransparencyReport, mode: &ComplianceRepor
 
 /// Apply model_id redaction to a delegation event's model_id string.
 ///
-/// In Redacted mode: `BLAKE3(tenant_id_bytes || model_id_bytes || salt)`.
-/// In Full mode: returns the model_id unchanged.
-#[must_use]
-pub fn redact_model_id(tenant_id: &Did, model_id: &str, mode: &ComplianceReportMode) -> String {
+/// In Redacted mode, hashes a domain-separated canonical CBOR payload binding
+/// tenant ID, model ID, and salt as distinct fields. In Full mode, returns the
+/// model ID unchanged.
+///
+/// # Errors
+///
+/// Returns [`LegalError::InvalidStateTransition`] if canonical redaction hash
+/// encoding fails.
+pub fn redact_model_id(
+    tenant_id: &Did,
+    model_id: &str,
+    mode: &ComplianceReportMode,
+) -> Result<String> {
     match mode {
-        ComplianceReportMode::Full => model_id.to_owned(),
+        ComplianceReportMode::Full => Ok(model_id.to_owned()),
         ComplianceReportMode::Redacted { redaction_salt } => {
-            let mut h = blake3::Hasher::new();
-            h.update(tenant_id.as_str().as_bytes());
-            h.update(model_id.as_bytes());
-            h.update(redaction_salt);
-            hex_encode(h.finalize().as_bytes())
+            let payload = ComplianceModelRedactionHashPayload {
+                domain: COMPLIANCE_MODEL_REDACTION_HASH_DOMAIN,
+                schema_version: COMPLIANCE_MODEL_REDACTION_HASH_SCHEMA_VERSION,
+                tenant_id,
+                model_id,
+                redaction_salt,
+            };
+            hash_structured(&payload)
+                .map(|hash| hex_encode(hash.as_bytes()))
+                .map_err(|e| LegalError::InvalidStateTransition {
+                    reason: format!("model_id redaction canonical CBOR hash failed: {e}"),
+                })
         }
     }
 }
@@ -330,6 +350,15 @@ struct ComplianceReportHashPayload<'a> {
     legal_jurisdiction: &'a str,
     report_mode: &'a str,
     attestations: &'a [InvariantAttestation],
+}
+
+#[derive(Serialize)]
+struct ComplianceModelRedactionHashPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    tenant_id: &'a Did,
+    model_id: &'a str,
+    redaction_salt: &'a [u8; 32],
 }
 
 impl<'a> ComplianceReportHashPayload<'a> {
@@ -606,7 +635,8 @@ mod tests {
     #[test]
     fn redact_model_id_full_mode_passthrough() {
         let tenant = did("tenant");
-        let result = redact_model_id(&tenant, "claude-sonnet-4-6", &ComplianceReportMode::Full);
+        let result = redact_model_id(&tenant, "claude-sonnet-4-6", &ComplianceReportMode::Full)
+            .expect("model_id redaction");
         assert_eq!(result, "claude-sonnet-4-6");
     }
 
@@ -619,10 +649,29 @@ mod tests {
             &ComplianceReportMode::Redacted {
                 redaction_salt: [1u8; 32],
             },
-        );
+        )
+        .expect("model_id redaction");
         // Must be a 64-char hex string (32 bytes)
         assert_eq!(result.len(), 64);
         assert!(result.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn redact_model_id_distinguishes_tenant_model_boundaries() {
+        let salt = [9u8; 32];
+        let mode = ComplianceReportMode::Redacted {
+            redaction_salt: salt,
+        };
+
+        let tenant_a_model_b =
+            redact_model_id(&did("tenant-a"), "bmodel", &mode).expect("model_id redaction");
+        let tenant_ab_model =
+            redact_model_id(&did("tenant-ab"), "model", &mode).expect("model_id redaction");
+
+        assert_ne!(
+            tenant_a_model_b, tenant_ab_model,
+            "model redaction hash must encode tenant/model field boundaries"
+        );
     }
 
     #[test]
@@ -634,14 +683,16 @@ mod tests {
             &ComplianceReportMode::Redacted {
                 redaction_salt: [1u8; 32],
             },
-        );
+        )
+        .expect("model_id redaction");
         let r2 = redact_model_id(
             &tenant,
             "model-x",
             &ComplianceReportMode::Redacted {
                 redaction_salt: [2u8; 32],
             },
-        );
+        )
+        .expect("model_id redaction");
         assert_ne!(r1, r2);
     }
 
@@ -655,14 +706,16 @@ mod tests {
             &ComplianceReportMode::Redacted {
                 redaction_salt: salt,
             },
-        );
+        )
+        .expect("model_id redaction");
         let r2 = redact_model_id(
             &tenant,
             "model-b",
             &ComplianceReportMode::Redacted {
                 redaction_salt: salt,
             },
-        );
+        )
+        .expect("model_id redaction");
         assert_ne!(r1, r2);
     }
 }

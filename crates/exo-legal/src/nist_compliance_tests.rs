@@ -579,7 +579,8 @@ mod nist_compliance {
         assert_eq!(report.ai_delegation_revocations.len(), 1);
 
         // 5. Full mode preserves plaintext model_id.
-        let result_full = redact_model_id(&tenant, model_id, &ComplianceReportMode::Full);
+        let result_full = redact_model_id(&tenant, model_id, &ComplianceReportMode::Full)
+            .expect("model_id redaction");
         assert_eq!(result_full, model_id);
 
         // 6. Redacted mode produces a 64-char hex BLAKE3 hash.
@@ -590,7 +591,8 @@ mod nist_compliance {
             &ComplianceReportMode::Redacted {
                 redaction_salt: salt,
             },
-        );
+        )
+        .expect("model_id redaction");
         assert_eq!(redacted.len(), 64, "Redacted model_id must be 64-char hex");
         assert_ne!(redacted, model_id, "Redacted must differ from plaintext");
 
@@ -603,7 +605,8 @@ mod nist_compliance {
             &ComplianceReportMode::Redacted {
                 redaction_salt: salt,
             },
-        );
+        )
+        .expect("model_id redaction");
         assert_ne!(
             redacted, redacted2,
             "Different tenants must produce different redacted model_ids"
