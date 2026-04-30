@@ -29,6 +29,23 @@ pub enum DecisionClass {
     Constitutional,
 }
 
+impl DecisionClass {
+    /// Stable registry key for quorum, policy, and persistence lookups.
+    ///
+    /// This deliberately does not rely on `Debug` output, so refactoring
+    /// developer-facing formatting cannot silently change governance policy
+    /// resolution.
+    #[must_use]
+    pub const fn quorum_policy_key(self) -> &'static str {
+        match self {
+            Self::Routine => "Routine",
+            Self::Operational => "Operational",
+            Self::Strategic => "Strategic",
+            Self::Constitutional => "Constitutional",
+        }
+    }
+}
+
 /// Distinguishes human vs AI actors for human-gate enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActorKind {
