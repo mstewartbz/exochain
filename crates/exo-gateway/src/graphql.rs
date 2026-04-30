@@ -512,36 +512,44 @@ impl QueryRoot {
     async fn resolve_identity(&self, ctx: &Context<'_>, did: ID) -> GqlResult<GqlIdentity> {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
-        let guard = state.lock().await;
+        let registry = {
+            let guard = state.lock().await;
+            Arc::clone(&guard.registry)
+        };
         let did_str = did.to_string();
         let did_key = Did::new(&did_str)
             .map_err(|e| async_graphql::Error::new(format!("invalid DID: {e}")))?;
-        let registry = guard.registry.read().unwrap_or_else(|e| e.into_inner());
-        match registry.resolve(&did_key) {
-            Some(doc) => {
-                let active_key_count = i32::try_from(
-                    doc.verification_methods
-                        .iter()
-                        .filter(|vm| vm.active)
-                        .count(),
-                )
-                .unwrap_or(0);
-                let service_endpoint_count =
-                    i32::try_from(doc.service_endpoints.len()).unwrap_or(0);
-                Ok(GqlIdentity {
+
+        tokio::task::spawn_blocking(move || {
+            let registry = registry.read().unwrap_or_else(|e| e.into_inner());
+            match registry.resolve(&did_key) {
+                Some(doc) => {
+                    let active_key_count = i32::try_from(
+                        doc.verification_methods
+                            .iter()
+                            .filter(|vm| vm.active)
+                            .count(),
+                    )
+                    .unwrap_or(0);
+                    let service_endpoint_count =
+                        i32::try_from(doc.service_endpoints.len()).unwrap_or(0);
+                    GqlIdentity {
+                        did: did_str,
+                        registered: true,
+                        active_key_count,
+                        service_endpoint_count,
+                    }
+                }
+                None => GqlIdentity {
                     did: did_str,
-                    registered: true,
-                    active_key_count,
-                    service_endpoint_count,
-                })
+                    registered: false,
+                    active_key_count: 0,
+                    service_endpoint_count: 0,
+                },
             }
-            None => Ok(GqlIdentity {
-                did: did_str,
-                registered: false,
-                active_key_count: 0,
-                service_endpoint_count: 0,
-            }),
-        }
+        })
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("registry lookup task failed: {e}")))
     }
 
     /// Evaluate whether an actor has active consent from a subject for a given
@@ -1306,6 +1314,30 @@ mod tests {
         assert!(
             !production.contains("data_unchecked::<Arc<Mutex<AppState>>>"),
             "GraphQL resolvers must not panic if schema data is misconfigured"
+        );
+    }
+
+    #[test]
+    fn resolve_identity_moves_sync_registry_lock_off_async_worker() {
+        let production = include_str!("graphql.rs")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+        let resolver = production
+            .split("async fn resolve_identity")
+            .nth(1)
+            .expect("resolve_identity resolver")
+            .split("    /// Evaluate whether an actor has active consent")
+            .next()
+            .expect("resolve_identity resolver end");
+
+        assert!(
+            resolver.contains("tokio::task::spawn_blocking"),
+            "synchronous LocalDidRegistry lock acquisition must run off the async worker"
+        );
+        assert!(
+            !resolver.contains("guard.registry.read()"),
+            "resolve_identity must not block the async worker on std::sync::RwLock"
         );
     }
 
