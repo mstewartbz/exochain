@@ -727,28 +727,15 @@ async fn start_node(
     // restrictive permissions (owner read/write only, 0600) under the
     // node's data directory.
     let admin_token = auth::generate_admin_token();
-    let token_prefix = &admin_token[..8.min(admin_token.len())];
+    let token_prefix = admin_token.chars().take(8).collect::<String>();
     let token_path = data_dir.join("admin_token");
-    if let Err(e) = std::fs::write(&token_path, &admin_token) {
+    if let Err(e) = auth::write_admin_token_file(&token_path, admin_token.as_str()) {
         tracing::error!(
             path = %token_path.display(),
             err = %e,
             "Failed to write admin token file — aborting startup"
         );
         return Err(anyhow::anyhow!("admin token persistence failed: {e}"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&token_path)?.permissions();
-        perms.set_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(&token_path, perms) {
-            tracing::warn!(
-                path = %token_path.display(),
-                err = %e,
-                "Failed to set 0600 on admin token file — file may be world-readable"
-            );
-        }
     }
     tracing::info!(
         token_prefix = %token_prefix,
