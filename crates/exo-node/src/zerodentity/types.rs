@@ -10,7 +10,8 @@ use std::{collections::BTreeMap, fmt};
 
 pub use exo_core::types::Signature;
 use exo_core::types::{Did, Hash256, PublicKey};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError};
+use zeroize::{Zeroize, Zeroizing};
 
 // ---------------------------------------------------------------------------
 // ClaimType
@@ -258,6 +259,67 @@ pub enum OtpState {
     LockedOut,
 }
 
+/// Zeroizing wrapper for the OTP HMAC secret.
+///
+/// The secret must remain available while a challenge is pending so the server
+/// can verify the submitted OTP code. It must not be exposed through debug
+/// output or left in memory after the challenge value is dropped.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtpHmacSecret {
+    bytes: Zeroizing<[u8; 32]>,
+}
+
+impl OtpHmacSecret {
+    /// Wrap non-zero HMAC secret material and wipe the caller-owned stack copy.
+    pub(crate) fn new(mut bytes: [u8; 32]) -> Option<Self> {
+        let secret = Zeroizing::new(bytes);
+        bytes.zeroize();
+        Self::from_zeroizing(secret)
+    }
+
+    /// Wrap already-zeroizing HMAC secret material without creating another
+    /// plain byte-array copy.
+    pub(crate) fn from_zeroizing(mut bytes: Zeroizing<[u8; 32]>) -> Option<Self> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            bytes.zeroize();
+            return None;
+        }
+
+        Some(Self { bytes })
+    }
+
+    pub(crate) fn expose_secret(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for OtpHmacSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OtpHmacSecret(<redacted>)")
+    }
+}
+
+impl Serialize for OtpHmacSecret {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.expose_secret().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OtpHmacSecret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        Self::new(bytes).ok_or_else(|| {
+            D::Error::custom("OTP HMAC secret must not be all zero when deserializing challenge")
+        })
+    }
+}
+
 /// OTP challenge — state machine for one verification attempt.
 ///
 /// The 32-byte HMAC secret is stored so the server can verify the user's code
@@ -272,7 +334,7 @@ pub struct OtpChallenge {
     /// Delivery channel.
     pub channel: OtpChannel,
     /// HMAC-SHA256 secret (32 bytes). Used to verify the presented code.
-    pub hmac_secret: [u8; 32],
+    pub hmac_secret: OtpHmacSecret,
     /// When the OTP was dispatched (epoch ms).
     pub dispatched_ms: u64,
     /// TTL in ms. Email: 300_000 (5 min). SMS: 180_000 (3 min).

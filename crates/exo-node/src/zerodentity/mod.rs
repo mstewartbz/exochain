@@ -70,5 +70,5 @@ pub use store::{SharedZerodentityStore, ZerodentityStore};
 pub use types::{
     AttestationType, BehavioralSample, BehavioralSignalType, ClaimStatus, ClaimType,
     DeviceFingerprint, FingerprintSignal, IdentityClaim, IdentitySession, OtpChallenge, OtpChannel,
-    OtpState, PeerAttestation, PolarAxes, Signature, ZerodentityScore,
+    OtpHmacSecret, OtpState, PeerAttestation, PolarAxes, Signature, ZerodentityScore,
 };

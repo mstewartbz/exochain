@@ -874,7 +874,7 @@ mod tests {
                 challenge_id: "expired-otp".into(),
                 subject_did: Did::new("did:exo:otp").unwrap(),
                 channel: crate::zerodentity::types::OtpChannel::Email,
-                hmac_secret: [7u8; 32],
+                hmac_secret: crate::zerodentity::types::OtpHmacSecret::new([7u8; 32]).unwrap(),
                 dispatched_ms: now.saturating_sub(10_000),
                 ttl_ms: 1,
                 attempts: 0,
