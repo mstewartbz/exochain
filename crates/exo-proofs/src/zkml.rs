@@ -84,7 +84,7 @@ pub enum AttestationDecision {
 /// a qualified human reviewed the AI output and made an independent decision.
 ///
 /// The `signature` field is an Ed25519 signature over the canonical message:
-/// `b"zkml:attestation:" || reviewer_did_bytes || ai_recommendation_hash || final_decision_hash || decision_variant_byte`
+/// `b"zkml:attestation:" || reviewer_did_len_le_u64 || reviewer_did_bytes || ai_recommendation_hash || final_decision_hash || decision_variant_byte`
 ///
 /// Callers must verify the signature against the reviewer's `public_key` before
 /// relying on the attestation for evidentiary purposes.
@@ -118,8 +118,11 @@ impl HumanAttestation {
             AttestationDecision::Modified => 0x02,
             AttestationDecision::Rejected => 0x03,
         };
+        let reviewer_did_bytes = reviewer_did.as_bytes();
+        let reviewer_did_len = u64::try_from(reviewer_did_bytes.len()).unwrap_or(u64::MAX);
         let mut msg = b"zkml:attestation:".to_vec();
-        msg.extend_from_slice(reviewer_did.as_bytes());
+        msg.extend_from_slice(&reviewer_did_len.to_le_bytes());
+        msg.extend_from_slice(reviewer_did_bytes);
         msg.extend_from_slice(ai_recommendation_hash.as_bytes());
         msg.extend_from_slice(final_decision_hash.as_bytes());
         msg.push(decision_byte);
@@ -310,9 +313,7 @@ pub fn verify_inference(proof: &InferenceProof) -> Result<bool> {
     let expected_proof =
         compute_inference_proof(&model_hash, &proof.input_hash, &proof.output_hash);
 
-    if expected_proof != proof.proof {
-        return Ok(false);
-    }
+    let proof_ok = constant_time_hash256_eq(&expected_proof, &proof.proof);
 
     // Recompute and check the verification tag
     let expected_tag = compute_verification_tag(
@@ -322,7 +323,9 @@ pub fn verify_inference(proof: &InferenceProof) -> Result<bool> {
         &proof.proof,
     );
 
-    Ok(expected_tag == proof.verification_tag)
+    let tag_ok = constant_time_hash256_eq(&expected_tag, &proof.verification_tag);
+
+    Ok(proof_ok & tag_ok)
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +358,14 @@ fn compute_verification_tag(
     hasher.update(output_hash.as_bytes());
     hasher.update(proof.as_bytes());
     Hash256::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn constant_time_hash256_eq(left: &Hash256, right: &Hash256) -> bool {
+    let mut diff = 0u8;
+    for idx in 0..32 {
+        diff |= left.as_bytes()[idx] ^ right.as_bytes()[idx];
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +452,31 @@ mod tests {
         let mut tampered = prove_inference(&model, b"input", b"output").unwrap();
         tampered.verification_tag = Hash256::ZERO;
         assert!(!verify_inference(&tampered).unwrap());
+    }
+
+    #[test]
+    fn verify_inference_uses_constant_time_hash_comparisons() {
+        let source = include_str!("zkml.rs");
+        let Some(verify_start) = source.find("pub fn verify_inference") else {
+            panic!("verify_inference must exist");
+        };
+        let Some(internals_start) = source.find("// Internals") else {
+            panic!("internals marker must exist");
+        };
+        let verify_source = &source[verify_start..internals_start];
+
+        assert!(
+            verify_source.contains("constant_time_hash256_eq"),
+            "verify_inference must use the constant-time Hash256 comparator"
+        );
+        assert!(
+            !verify_source.contains("expected_proof != proof.proof"),
+            "proof comparison must not use variable-time PartialEq"
+        );
+        assert!(
+            !verify_source.contains("expected_tag == proof.verification_tag"),
+            "verification tag comparison must not use variable-time PartialEq"
+        );
     }
 
     #[test]
@@ -561,6 +597,74 @@ mod tests {
         assert!(
             att.verify_signature(),
             "Valid Ed25519 attestation must verify"
+        );
+    }
+
+    #[test]
+    fn human_attestation_signing_message_frames_reviewer_did() {
+        let reviewer_did = "did:exo:reviewer-alice";
+        let ai_rec = Hash256::digest(b"ai recommendation");
+        let final_dec = Hash256::digest(b"final decision");
+
+        let msg = HumanAttestation::signing_message(
+            reviewer_did,
+            &ai_rec,
+            &final_dec,
+            &AttestationDecision::Modified,
+        );
+
+        let domain = b"zkml:attestation:";
+        assert!(msg.starts_with(domain));
+        let did_len_start = domain.len();
+        let did_len_end = did_len_start + 8;
+        let did_len_bytes: [u8; 8] = match msg[did_len_start..did_len_end].try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => panic!("DID length prefix must be eight bytes"),
+        };
+        let expected_len = match u64::try_from(reviewer_did.len()) {
+            Ok(len) => len,
+            Err(_) => panic!("reviewer DID length must fit in u64"),
+        };
+        assert_eq!(u64::from_le_bytes(did_len_bytes), expected_len);
+        assert_eq!(
+            &msg[did_len_end..did_len_end + reviewer_did.len()],
+            reviewer_did.as_bytes()
+        );
+
+        let mut legacy = domain.to_vec();
+        legacy.extend_from_slice(reviewer_did.as_bytes());
+        legacy.extend_from_slice(ai_rec.as_bytes());
+        legacy.extend_from_slice(final_dec.as_bytes());
+        legacy.push(0x02);
+        assert_ne!(msg, legacy, "new attestations must not use legacy framing");
+    }
+
+    #[test]
+    fn human_attestation_rejects_legacy_unframed_signature() {
+        let (public_key, secret_key) = crypto::generate_keypair();
+        let reviewer_did = "did:exo:reviewer-alice".to_string();
+        let ai_rec = Hash256::digest(b"ai says: approve");
+        let final_dec = Hash256::digest(b"human says: reject");
+
+        let mut legacy = b"zkml:attestation:".to_vec();
+        legacy.extend_from_slice(reviewer_did.as_bytes());
+        legacy.extend_from_slice(ai_rec.as_bytes());
+        legacy.extend_from_slice(final_dec.as_bytes());
+        legacy.push(0x03);
+
+        let signature = crypto::sign(&legacy, &secret_key);
+        let att = HumanAttestation {
+            reviewer_did,
+            reviewer_public_key: public_key,
+            ai_recommendation_hash: ai_rec,
+            final_decision_hash: final_dec,
+            decision: AttestationDecision::Rejected,
+            signature,
+        };
+
+        assert!(
+            !att.verify_signature(),
+            "legacy unframed attestations must not verify"
         );
     }
 
