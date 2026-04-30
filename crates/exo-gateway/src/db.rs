@@ -17,10 +17,16 @@ pub const MAX_DB_LIST_ROWS: i64 = 1_000;
 
 #[derive(Debug, Error)]
 pub enum DbInitError {
-    #[error("failed to connect to PostgreSQL: {source}")]
-    Connect { source: sqlx::Error },
-    #[error("failed to run database migrations: {source}")]
-    Migrate { source: sqlx::migrate::MigrateError },
+    #[error("failed to connect to PostgreSQL")]
+    Connect {
+        #[source]
+        source: sqlx::Error,
+    },
+    #[error("failed to run database migrations")]
+    Migrate {
+        #[source]
+        source: sqlx::migrate::MigrateError,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,6 +1177,24 @@ mod tests {
         assert!(
             !init_pool_source.contains("#[allow(clippy::expect_used)]"),
             "init_pool must not suppress panic linting"
+        );
+    }
+
+    #[test]
+    fn db_init_error_display_redacts_driver_sources() {
+        let source = production_source();
+
+        assert!(
+            !source.contains("failed to connect to PostgreSQL: {source}"),
+            "DbInitError Display must not include driver connection details"
+        );
+        assert!(
+            !source.contains("failed to run database migrations: {source}"),
+            "DbInitError Display must not include migration driver details"
+        );
+        assert!(
+            source.contains("#[source]"),
+            "DbInitError must retain underlying sources for internal diagnostics"
         );
     }
 
