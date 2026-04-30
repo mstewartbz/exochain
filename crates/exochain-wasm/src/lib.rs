@@ -150,6 +150,22 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_messaging_bridge_does_not_export_x25519_secret_material() {
+        let source = include_str!("messaging_bindings.rs");
+        let forbidden = [
+            ["secret", "_key_hex"].concat(),
+            [".secret", ".to_hex()"].concat(),
+            [".secret", ".0"].concat(),
+        ];
+        for pattern in forbidden {
+            assert!(
+                !source.contains(&pattern),
+                "messaging WASM bindings must not export or tuple-access X25519 secret material via {pattern}"
+            );
+        }
+    }
+
+    #[test]
     fn wasm_identity_risk_bridge_requires_caller_supplied_signer_and_time() {
         let source = include_str!("identity_bindings.rs");
         assert!(

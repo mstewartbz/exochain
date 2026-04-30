@@ -13,14 +13,13 @@ struct WasmAuthorizedTrustee {
     public_key_hex: String,
 }
 
-/// Generate a new X25519 keypair for Diffie-Hellman key exchange.
-/// Returns `{ public_key_hex, secret_key_hex }`.
+/// Generate a new X25519 public key for Diffie-Hellman key exchange.
+/// Returns `{ public_key_hex }`.
 #[wasm_bindgen]
 pub fn wasm_generate_x25519_keypair() -> Result<JsValue, JsValue> {
     let kp = exo_messaging::kex::X25519KeyPair::generate();
     to_js_value(&serde_json::json!({
         "public_key_hex": kp.public.to_hex(),
-        "secret_key_hex": kp.secret.to_hex(),
     }))
 }
 
@@ -30,9 +29,8 @@ pub fn wasm_generate_x25519_keypair() -> Result<JsValue, JsValue> {
 pub fn wasm_x25519_public_from_secret(secret_hex: &str) -> Result<JsValue, JsValue> {
     let secret = exo_messaging::X25519SecretKey::from_hex(secret_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid secret key: {e}")))?;
-    let kp = exo_messaging::kex::X25519KeyPair::from_secret_bytes(secret.0);
     to_js_value(&serde_json::json!({
-        "public_key_hex": kp.public.to_hex(),
+        "public_key_hex": secret.public_key().to_hex(),
     }))
 }
 
