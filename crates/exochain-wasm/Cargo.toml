@@ -46,6 +46,7 @@ rand = { workspace = true }
 
 # Hex encoding
 hex = "0.4"
+zeroize = { workspace = true }
 
 # UUID
 uuid = { workspace = true }

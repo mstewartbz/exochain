@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
@@ -11,6 +12,21 @@ use crate::serde_bridge::*;
 struct WasmAuthorizedTrustee {
     did: String,
     public_key_hex: String,
+}
+
+fn parse_ed25519_signing_seed_hex(
+    label: &str,
+    secret_hex: &str,
+) -> Result<exo_core::SecretKey, JsValue> {
+    let secret_bytes = Zeroizing::new(
+        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?,
+    );
+    let arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!("{label} must be 32 bytes")))?;
+    let arr = Zeroizing::new(arr);
+    Ok(exo_core::SecretKey::from_bytes(*arr))
 }
 
 /// Generate a new X25519 public key for Diffie-Hellman key exchange.
@@ -76,14 +92,7 @@ pub fn wasm_encrypt_message(
     let recipient = exo_core::Did::new(recipient_did)
         .map_err(|e| JsValue::from_str(&format!("invalid recipient DID: {e}")))?;
 
-    let sk_bytes = hex::decode(sender_signing_key_hex)
-        .map_err(|e| JsValue::from_str(&format!("invalid sender key hex: {e}")))?;
-    if sk_bytes.len() != 32 {
-        return Err(JsValue::from_str("sender signing key must be 32 bytes"));
-    }
-    let mut sk_arr = [0u8; 32];
-    sk_arr.copy_from_slice(&sk_bytes);
-    let sender_sk = exo_core::SecretKey::from_bytes(sk_arr);
+    let sender_sk = parse_ed25519_signing_seed_hex("sender signing key", sender_signing_key_hex)?;
 
     let recipient_pub = exo_messaging::X25519PublicKey::from_hex(recipient_x25519_public_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid recipient X25519 key: {e}")))?;
