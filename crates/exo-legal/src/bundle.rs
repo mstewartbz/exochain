@@ -242,10 +242,11 @@ const BUNDLE_EVENT_CHAIN_DOMAIN: &str = "exo.legal.bundle.event_chain.v1";
 const BUNDLE_EVIDENCE_HASHES_DOMAIN: &str = "exo.legal.bundle.evidence_hashes.v1";
 const BUNDLE_SIGNATURE_DOMAIN: &str = "exo.legal.bundle.signature.v1";
 
-/// Safe usize → u32 conversion (saturating for safety).
-#[allow(clippy::as_conversions)]
-fn idx_u32(n: usize) -> u32 {
-    n as u32
+/// Safe usize to u32 conversion for event sequence indexes.
+fn idx_u32(n: usize) -> Result<u32> {
+    u32::try_from(n).map_err(|_| LegalError::InvalidStateTransition {
+        reason: format!("event index {n} exceeds u32 sequence range"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -307,11 +308,12 @@ pub fn assemble(input: BundleAssemblyInput) -> Result<EvidenceBundle> {
 
 fn validate_event_ordering(events: &[BundleEvent]) -> Result<()> {
     for (i, event) in events.iter().enumerate() {
-        if event.sequence != idx_u32(i) {
+        let expected_sequence = idx_u32(i)?;
+        if event.sequence != expected_sequence {
             return Err(LegalError::InvalidStateTransition {
                 reason: format!(
-                    "event at position {i} has sequence {}, expected {i}",
-                    event.sequence
+                    "event at position {i} has sequence {}, expected {expected_sequence}",
+                    event.sequence,
                 ),
             });
         }
@@ -1154,6 +1156,30 @@ mod tests {
         assert!(result.hash_valid);
         assert!(result.signatures_valid.is_empty());
         assert!(result.overall);
+    }
+
+    #[test]
+    fn idx_u32_rejects_out_of_range_indices_without_truncation() {
+        match idx_u32(0) {
+            Ok(idx) => assert_eq!(idx, 0),
+            Err(err) => panic!("zero index must convert: {err}"),
+        }
+        match idx_u32(u32::MAX as usize) {
+            Ok(idx) => assert_eq!(idx, u32::MAX),
+            Err(err) => panic!("u32::MAX index must convert: {err}"),
+        }
+
+        if usize::BITS > u32::BITS {
+            let overflowing_index = u32::MAX as usize + 1;
+            let err = match idx_u32(overflowing_index) {
+                Ok(idx) => panic!("out-of-range index must not truncate to {idx}"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string().contains("exceeds u32 sequence range"),
+                "error must explain the sequence range limit"
+            );
+        }
     }
 
     #[test]
