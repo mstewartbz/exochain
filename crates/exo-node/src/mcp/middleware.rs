@@ -1,55 +1,20 @@
 //! Constitutional enforcement middleware for MCP tool calls.
 //!
 //! Every tool invocation passes through this middleware which:
-//! 1. Builds an `McpContext` from the calling actor's identity
+//! 1. Parses caller-supplied verified constitutional context
 //! 2. Enforces all 6 MCP rules (via exo-gatekeeper)
-//! 3. Builds an `AdjudicationContext` for the CGR Kernel
+//! 3. Adjudicates the supplied `AdjudicationContext` in the CGR Kernel
 //! 4. Adjudicates the action against all 8 constitutional invariants
 //! 5. Returns Permitted/Denied/Escalated verdict
 //!
-//! # Audit status — Onyx pass 3, RED #3 (defense-in-depth notice)
+//! # Verified Context Requirement
 //!
-//! The `McpContext` and `AdjudicationContext` built below carry
-//! **hardcoded-true** constitutional booleans:
-//!
-//!   - `has_provenance: true`
-//!   - `consent_active: true`
-//!   - `output_marked_ai: true`
-//!   - `human_override_preserved: true`
-//!   - authority chain: configured MCP authority → actor
-//!   - provenance: configured MCP authority signature over the tool action
-//!
-//! These sentinels mean the middleware cannot actually fail on
-//! `ProvenancePresent`, `ConsentRequired`, or `HumanOverride` —
-//! those invariants rubber-stamp every call. The semantic checks
-//! that DO fire are the structural ones (`NoSelfGrant`,
-//! `KernelModification`, `SeparationOfPowers`) because those look
-//! at fields the caller supplies (`is_self_grant`, `modifies_kernel`,
-//! `actor_roles`).
-//!
-//! **Current blast radius: bounded by the gates on RED #2 and sibling
-//! simulation findings.** Governance MCP tools that would otherwise simulate
-//! decisions, votes, quorum, decision status, or amendments, and legal MCP
-//! tools that would otherwise simulate e-discovery, privilege, safe-harbor,
-//! or fiduciary state, refuse by default behind the
-//! `unaudited-mcp-simulation-tools` feature flag. Non-synthetic read-only
-//! tools (`exochain_list_invariants`, etc.) are the only callers the
-//! middleware currently rubber-stamps, and they can't mutate governance or
-//! legal fabric.
-//!
-//! **When RED #2 is resolved (real reactor wiring), this middleware
-//! MUST be promoted from node-level authority to live delegated authority.**
-//! A rewrite must either:
-//!   (a) accept real `McpContext` / `AdjudicationContext` from the
-//!       caller and verify the embedded signatures/provenance, or
-//!   (b) decline to adjudicate (return Err) when it cannot construct
-//!       a real context and refuse the mutating action at the handler
-//!       layer.
-//!
-//! Tracked in `Initiatives/fix-mcp-simulation-tools.md`. This
-//! module-level doc exists so the stub context is visible to anyone
-//! reading the code — DO NOT remove the audit-status section when
-//! adjusting this middleware.
+//! Tool-call params must include a top-level `constitutional_context` object.
+//! The middleware parses that object, verifies the signed authority chain and
+//! provenance through the same gatekeeper logic as `exochain_adjudicate_action`,
+//! derives MCP rule facts from the parsed context, and refuses the call when
+//! the context is absent or invalid. It does not fabricate consent, provenance,
+//! output marking, or human-override evidence.
 
 use std::sync::Arc;
 
@@ -58,13 +23,17 @@ use exo_gatekeeper::{
     invariants::InvariantSet,
     kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
     mcp::{self, McpContext, McpRule},
-    types::{
-        AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role,
-    },
+    types::{BailmentState, Permission, PermissionSet},
+};
+use serde_json::Value;
+
+use super::{
+    error::{McpError, Result},
+    protocol::AI_OUTPUT_MARKING,
+    tools::authority::parse_verified_adjudication_context,
 };
 
-use super::error::{McpError, Result};
+const CONSTITUTIONAL_CONTEXT_FIELD: &str = "constitutional_context";
 
 /// Constitutional enforcement middleware wrapping every MCP tool invocation.
 ///
@@ -78,16 +47,16 @@ pub struct ConstitutionalMiddleware {
 struct McpAuthority {
     did: Did,
     public_key: PublicKey,
-    signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+}
+
+struct VerifiedMcpInvocation {
+    mcp_context: McpContext,
+    adjudication_context: AdjudicationContext,
 }
 
 impl ConstitutionalMiddleware {
     /// Create a new middleware instance with the full constitutional kernel.
     ///
-    /// **Emits a loud warning** about the stub adjudication context.
-    /// See module-level docs under `# Audit status` for why this
-    /// middleware cannot currently detect provenance/consent/authority
-    /// violations — those invariants rubber-stamp every call.
     #[must_use]
     pub fn new() -> Self {
         tracing::warn!(
@@ -104,22 +73,20 @@ impl ConstitutionalMiddleware {
 
     /// Create middleware bound to a caller-supplied MCP authority signer.
     ///
-    /// The authority is used to sign the canonical authority/provenance payload
-    /// hashes that the gatekeeper verifies. The surrounding MCP context still
-    /// carries hardcoded consent/provenance booleans until
-    /// `fix-mcp-simulation-tools.md` is resolved.
+    /// The signer remains part of the constructor so call sites cannot
+    /// accidentally configure a public key without also holding signing
+    /// authority. Middleware enforcement verifies caller-supplied context
+    /// against the configured DID and public key; it does not sign or fabricate
+    /// context on behalf of the caller.
     #[must_use]
     pub fn with_authority(
         authority_did: Did,
         authority_public_key: PublicKey,
-        authority_signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+        _authority_signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
     ) -> Self {
         tracing::warn!(
             "mcp::ConstitutionalMiddleware initialized with configured \
-             authority signer but hardcoded MCP context booleans \
-             (has_provenance/consent_active/human_override_preserved). \
-             Mutating tools MUST remain gated separately. Tracked in \
-             Initiatives/fix-mcp-simulation-tools.md."
+             authority; tool calls must include verified constitutional_context."
         );
         let kernel = Kernel::new(b"EXOCHAIN Constitutional Trust Fabric", InvariantSet::all());
         Self {
@@ -127,93 +94,195 @@ impl ConstitutionalMiddleware {
             authority: Some(McpAuthority {
                 did: authority_did,
                 public_key: authority_public_key,
-                signer: authority_signer,
             }),
         }
     }
 
     /// Enforce all 6 MCP rules against the AI actor's context.
-    ///
-    /// Builds an `McpContext` with reasonable defaults for an AI agent
-    /// operating within the MCP protocol and verifies all rules pass.
-    pub fn enforce_mcp_rules(&self, actor_did: &Did, action: &str) -> Result<()> {
-        let ctx = McpContext {
-            actor_did: actor_did.clone(),
-            signer_type: SignerType::Ai {
-                delegation_id: Hash256::digest(b"mcp-session"),
-            },
-            bcts_scope: Some(action.to_string()),
-            capabilities: PermissionSet::new(vec![Permission::new("mcp:tool_call")]),
-            action: action.to_string(),
-            has_provenance: true,
-            forging_identity: false,
-            output_marked_ai: true,
-            consent_active: true,
-            self_escalation: false,
-        };
-
-        mcp::enforce(&McpRule::all(), &ctx).map_err(|violation| McpError::McpRuleViolation {
+    pub fn enforce_mcp_rules(&self, context: &McpContext) -> Result<()> {
+        mcp::enforce(&McpRule::all(), context).map_err(|violation| McpError::McpRuleViolation {
             rule: format!("{:?}", violation.rule),
             description: violation.description,
         })
     }
 
-    fn signed_authority_link(authority: &McpAuthority, grantee: &Did) -> AuthorityLink {
-        let permissions = PermissionSet::new(vec![Permission::new("mcp:tool_call")]);
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(authority.did.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for permission in &permissions.permissions {
-            payload.extend_from_slice(permission.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
-        let signature = (authority.signer)(message.as_bytes());
-
-        AuthorityLink {
-            grantor: authority.did.clone(),
-            grantee: grantee.clone(),
-            permissions,
-            signature: signature.to_bytes().to_vec(),
-            grantor_public_key: Some(authority.public_key.as_bytes().to_vec()),
-        }
+    fn parse_required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                McpError::ConstitutionalViolation(format!(
+                    "verified MCP invocation context missing non-empty {field}"
+                ))
+            })
     }
 
-    fn signed_provenance(authority: &McpAuthority, actor: &Did, action: &str) -> Provenance {
-        let timestamp = "2026-01-01T00:00:00Z".to_owned();
-        let action_hash = Hash256::digest(action.as_bytes()).as_bytes().to_vec();
+    fn parse_required_bool(value: &Value, field: &str) -> Result<bool> {
+        value.get(field).and_then(Value::as_bool).ok_or_else(|| {
+            McpError::ConstitutionalViolation(format!(
+                "verified MCP invocation context missing boolean {field}"
+            ))
+        })
+    }
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(actor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&action_hash);
-        payload.push(0x00);
-        payload.extend_from_slice(timestamp.as_bytes());
-        let message = Hash256::digest(&payload);
-        let signature = (authority.signer)(message.as_bytes());
-
-        Provenance {
-            actor: actor.clone(),
-            timestamp,
-            action_hash,
-            signature: signature.to_bytes().to_vec(),
-            public_key: Some(authority.public_key.as_bytes().to_vec()),
-            voice_kind: None,
-            independence: None,
-            review_order: None,
+    fn parse_capabilities(value: &Value) -> Result<PermissionSet> {
+        let capabilities = value
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                McpError::ConstitutionalViolation(
+                    "verified MCP invocation context missing capabilities array".into(),
+                )
+            })?;
+        if capabilities.is_empty() {
+            return Err(McpError::ConstitutionalViolation(
+                "verified MCP invocation context capabilities must not be empty".into(),
+            ));
         }
+        let mut permissions = Vec::new();
+        for (idx, capability) in capabilities.iter().enumerate() {
+            let raw = capability
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    McpError::ConstitutionalViolation(format!(
+                        "verified MCP invocation context capabilities[{idx}] must be non-empty string"
+                    ))
+                })?;
+            permissions.push(Permission::new(raw));
+        }
+        Ok(PermissionSet::new(permissions))
+    }
+
+    fn action_hash_matches(context: &AdjudicationContext, action: &str) -> bool {
+        let expected = Hash256::digest(action.as_bytes()).as_bytes().to_vec();
+        context
+            .provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.action_hash == expected)
+    }
+
+    fn active_consent_for_actor(context: &AdjudicationContext, actor_did: &Did) -> bool {
+        let active_bailment_matches_actor = match &context.bailment_state {
+            BailmentState::Active { bailee, .. } => bailee == actor_did,
+            BailmentState::None | BailmentState::Suspended { .. } | BailmentState::Terminated => {
+                false
+            }
+        };
+        active_bailment_matches_actor
+            && context
+                .consent_records
+                .iter()
+                .any(|record| record.granted_to == *actor_did && record.active)
+    }
+
+    fn verify_authority_binding(
+        &self,
+        actor_did: &Did,
+        context: &AdjudicationContext,
+    ) -> Result<()> {
+        let authority = self.authority.as_ref().ok_or_else(|| {
+            McpError::ConstitutionalViolation(
+                "MCP authority signer is required for verified MCP invocation context".into(),
+            )
+        })?;
+        let Some(root_link) = context.authority_chain.links.first() else {
+            return Err(McpError::ConstitutionalViolation(
+                "verified MCP invocation context authority_chain is empty".into(),
+            ));
+        };
+        if root_link.grantor != authority.did {
+            return Err(McpError::AuthenticationRequired);
+        }
+        let authority_public_key = authority.public_key.as_bytes();
+        if root_link.grantor_public_key.as_deref() != Some(authority_public_key) {
+            return Err(McpError::AuthenticationRequired);
+        }
+        let provenance = context.provenance.as_ref().ok_or_else(|| {
+            McpError::ConstitutionalViolation(
+                "verified MCP invocation context provenance is required".into(),
+            )
+        })?;
+        if provenance.actor != *actor_did {
+            return Err(McpError::AuthenticationRequired);
+        }
+        if provenance.public_key.as_deref() != Some(authority_public_key) {
+            return Err(McpError::AuthenticationRequired);
+        }
+        Ok(())
+    }
+
+    fn parse_invocation_context(
+        &self,
+        actor_did: &Did,
+        action: &str,
+        tool_call_params: &Value,
+    ) -> Result<VerifiedMcpInvocation> {
+        let context_value = tool_call_params
+            .get(CONSTITUTIONAL_CONTEXT_FIELD)
+            .ok_or_else(|| {
+                McpError::ConstitutionalViolation(
+                    "verified MCP invocation context is required".into(),
+                )
+            })?;
+        let adjudication_value = context_value.get("adjudication_context").ok_or_else(|| {
+            McpError::ConstitutionalViolation(
+                "verified MCP invocation context missing adjudication_context".into(),
+            )
+        })?;
+        let adjudication_context =
+            parse_verified_adjudication_context(adjudication_value, actor_did).map_err(|err| {
+                McpError::ConstitutionalViolation(format!(
+                    "verified MCP invocation context invalid: {err}"
+                ))
+            })?;
+        self.verify_authority_binding(actor_did, &adjudication_context)?;
+        if !Self::action_hash_matches(&adjudication_context, action) {
+            return Err(McpError::ConstitutionalViolation(
+                "verified MCP invocation context provenance action_hash does not match tool action"
+                    .into(),
+            ));
+        }
+
+        let bcts_scope = Self::parse_required_str(context_value, "bcts_scope")?.to_owned();
+        let output_marking = Self::parse_required_str(context_value, "output_marking")?;
+        let delegation_id = {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(actor_did.as_str().as_bytes());
+            payload.push(0x00);
+            payload.extend_from_slice(action.as_bytes());
+            payload.push(0x00);
+            payload.extend_from_slice(bcts_scope.as_bytes());
+            Hash256::digest(&payload)
+        };
+        let mcp_context = McpContext {
+            actor_did: actor_did.clone(),
+            signer_type: SignerType::Ai { delegation_id },
+            bcts_scope: Some(bcts_scope),
+            capabilities: Self::parse_capabilities(context_value)?,
+            action: action.to_owned(),
+            has_provenance: adjudication_context.provenance.is_some(),
+            forging_identity: Self::parse_required_bool(context_value, "forging_identity")?,
+            output_marked_ai: output_marking == AI_OUTPUT_MARKING,
+            consent_active: Self::active_consent_for_actor(&adjudication_context, actor_did),
+            self_escalation: Self::parse_required_bool(context_value, "self_escalation")?,
+        };
+
+        Ok(VerifiedMcpInvocation {
+            mcp_context,
+            adjudication_context,
+        })
     }
 
     /// Adjudicate an action against all 8 constitutional invariants.
-    ///
-    /// Builds an `ActionRequest` and `AdjudicationContext` with reasonable
-    /// defaults (single Judicial role, valid authority chain from root to
-    /// actor, active bailment, provenance present) and returns the kernel
-    /// verdict.
-    pub fn adjudicate(&self, actor_did: &Did, action: &str) -> Result<Verdict> {
+    pub fn adjudicate(
+        &self,
+        actor_did: &Did,
+        action: &str,
+        adj_context: &AdjudicationContext,
+    ) -> Result<Verdict> {
+        self.verify_authority_binding(actor_did, adj_context)?;
         let action_request = ActionRequest {
             actor: actor_did.clone(),
             action: action.to_string(),
@@ -222,42 +291,7 @@ impl ConstitutionalMiddleware {
             modifies_kernel: false,
         };
 
-        let authority = self.authority.as_ref().ok_or_else(|| {
-            McpError::ConstitutionalViolation(
-                "MCP authority signer is required for kernel adjudication".into(),
-            )
-        })?;
-        if actor_did != &authority.did {
-            return Err(McpError::AuthenticationRequired);
-        }
-
-        let adj_context = AdjudicationContext {
-            actor_roles: vec![Role {
-                name: "mcp-agent".into(),
-                branch: GovernmentBranch::Judicial,
-            }],
-            authority_chain: AuthorityChain {
-                links: vec![Self::signed_authority_link(authority, actor_did)],
-            },
-            consent_records: vec![ConsentRecord {
-                subject: authority.did.clone(),
-                granted_to: actor_did.clone(),
-                scope: "mcp:tools".into(),
-                active: true,
-            }],
-            bailment_state: BailmentState::Active {
-                bailor: authority.did.clone(),
-                bailee: actor_did.clone(),
-                scope: "mcp:tools".into(),
-            },
-            human_override_preserved: true,
-            actor_permissions: PermissionSet::new(vec![Permission::new("mcp:tool_call")]),
-            provenance: Some(Self::signed_provenance(authority, actor_did, action)),
-            quorum_evidence: None,
-            active_challenge_reason: None,
-        };
-
-        let verdict = self.kernel.adjudicate(&action_request, &adj_context);
+        let verdict = self.kernel.adjudicate(&action_request, adj_context);
 
         match &verdict {
             Verdict::Denied { violations } => {
@@ -269,14 +303,16 @@ impl ConstitutionalMiddleware {
         }
     }
 
-    /// Full constitutional enforcement: MCP rules + kernel adjudication.
-    ///
-    /// Returns `Ok(())` only if both the 6 MCP rules and the 8 kernel
-    /// invariants pass. An escalated verdict is treated as permissible
-    /// (the action proceeds but is flagged for review).
-    pub fn enforce(&self, actor_did: &Did, action: &str) -> Result<()> {
-        self.enforce_mcp_rules(actor_did, action)?;
-        self.adjudicate(actor_did, action)?;
+    /// Full constitutional enforcement for a JSON-RPC `tools/call` envelope.
+    pub fn enforce_tool_call(
+        &self,
+        actor_did: &Did,
+        action: &str,
+        tool_call_params: &Value,
+    ) -> Result<()> {
+        let invocation = self.parse_invocation_context(actor_did, action, tool_call_params)?;
+        self.enforce_mcp_rules(&invocation.mcp_context)?;
+        self.adjudicate(actor_did, action, &invocation.adjudication_context)?;
         Ok(())
     }
 }
@@ -311,25 +347,119 @@ mod tests {
         )
     }
 
+    fn signed_tool_call_params(action: &str) -> Value {
+        let actor = test_did();
+        let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x4D; 32]).unwrap();
+        let public_key = *keypair.public_key();
+        let secret_key = keypair.secret_key().clone();
+        let public_key_hex = hex::encode(public_key.as_bytes());
+        let permissions = ["mcp:tool_call"];
+
+        let mut authority_payload = Vec::new();
+        authority_payload.extend_from_slice(actor.as_str().as_bytes());
+        authority_payload.push(0x00);
+        authority_payload.extend_from_slice(actor.as_str().as_bytes());
+        authority_payload.push(0x00);
+        for permission in &permissions {
+            authority_payload.extend_from_slice(permission.as_bytes());
+            authority_payload.push(0x00);
+        }
+        let authority_message = Hash256::digest(&authority_payload);
+        let authority_signature = exo_core::crypto::sign(authority_message.as_bytes(), &secret_key);
+
+        let timestamp = exo_core::Timestamp::new(1_777_000_000_000, 7).to_string();
+        let action_hash = Hash256::digest(action.as_bytes());
+        let mut provenance_payload = Vec::new();
+        provenance_payload.extend_from_slice(actor.as_str().as_bytes());
+        provenance_payload.push(0x00);
+        provenance_payload.extend_from_slice(action_hash.as_bytes());
+        provenance_payload.push(0x00);
+        provenance_payload.extend_from_slice(timestamp.as_bytes());
+        let provenance_message = Hash256::digest(&provenance_payload);
+        let provenance_signature =
+            exo_core::crypto::sign(provenance_message.as_bytes(), &secret_key);
+
+        serde_json::json!({
+            CONSTITUTIONAL_CONTEXT_FIELD: {
+                "bcts_scope": action,
+                "capabilities": ["mcp:tool_call"],
+                "output_marking": AI_OUTPUT_MARKING,
+                "forging_identity": false,
+                "self_escalation": false,
+                "adjudication_context": {
+                    "actor_roles": [
+                        { "name": "mcp-agent", "branch": "Judicial" }
+                    ],
+                    "authority_chain": [
+                        {
+                            "grantor": actor.as_str(),
+                            "grantee": actor.as_str(),
+                            "permissions": permissions,
+                            "signature": hex::encode(authority_signature.to_bytes()),
+                            "grantor_public_key": public_key_hex,
+                        }
+                    ],
+                    "consent_records": [
+                        {
+                            "subject": actor.as_str(),
+                            "granted_to": actor.as_str(),
+                            "scope": "mcp:tools",
+                            "active": true,
+                        }
+                    ],
+                    "bailment_state": {
+                        "state": "Active",
+                        "bailor": actor.as_str(),
+                        "bailee": actor.as_str(),
+                        "scope": "mcp:tools",
+                    },
+                    "human_override_preserved": true,
+                    "actor_permissions": ["mcp:tool_call"],
+                    "provenance": {
+                        "actor": actor.as_str(),
+                        "timestamp": timestamp,
+                        "action_hash": hex::encode(action_hash.as_bytes()),
+                        "signature": hex::encode(provenance_signature.to_bytes()),
+                        "public_key": public_key_hex,
+                    }
+                }
+            }
+        })
+    }
+
     #[test]
     fn middleware_permits_valid_action() {
         let mw = signed_middleware();
         let did = test_did();
-        assert!(mw.enforce(&did, "exochain_node_status").is_ok());
+        let action = "exochain_node_status";
+        assert!(
+            mw.enforce_tool_call(&did, action, &signed_tool_call_params(action))
+                .is_ok()
+        );
     }
 
     #[test]
     fn middleware_mcp_rules_pass_valid() {
-        let mw = ConstitutionalMiddleware::new();
+        let mw = signed_middleware();
         let did = test_did();
-        assert!(mw.enforce_mcp_rules(&did, "list_invariants").is_ok());
+        let action = "list_invariants";
+        let invocation = mw
+            .parse_invocation_context(&did, action, &signed_tool_call_params(action))
+            .unwrap();
+        assert!(mw.enforce_mcp_rules(&invocation.mcp_context).is_ok());
     }
 
     #[test]
     fn middleware_adjudicate_permits_valid() {
         let mw = signed_middleware();
         let did = test_did();
-        let verdict = mw.adjudicate(&did, "exochain_node_status").unwrap();
+        let action = "exochain_node_status";
+        let invocation = mw
+            .parse_invocation_context(&did, action, &signed_tool_call_params(action))
+            .unwrap();
+        let verdict = mw
+            .adjudicate(&did, action, &invocation.adjudication_context)
+            .unwrap();
         assert!(verdict.is_permitted());
     }
 
@@ -337,7 +467,29 @@ mod tests {
     fn middleware_adjudicate_without_authority_fails_closed() {
         let mw = ConstitutionalMiddleware::new();
         let did = test_did();
-        assert!(mw.adjudicate(&did, "exochain_node_status").is_err());
+        let action = "exochain_node_status";
+        assert!(
+            mw.enforce_tool_call(&did, action, &signed_tool_call_params(action))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn middleware_refuses_without_verified_invocation_context() {
+        let mw = signed_middleware();
+        let did = test_did();
+        let action = "exochain_node_status";
+        let params_without_context = serde_json::json!({
+            "name": action,
+            "arguments": {},
+        });
+        let err = mw
+            .enforce_tool_call(&did, action, &params_without_context)
+            .expect_err("tool calls without verified MCP invocation context must fail closed");
+        assert!(
+            err.to_string().contains("verified MCP invocation context"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -362,10 +514,13 @@ mod tests {
     fn middleware_enforces_mcp_rules() {
         // The MCP rules check is exercised through the full enforce path.
         // A valid action must pass all 6 rules.
-        let mw = ConstitutionalMiddleware::new();
+        let mw = signed_middleware();
         let did = test_did();
-        // This should succeed — all MCP context defaults are compliant.
-        assert!(mw.enforce_mcp_rules(&did, "read_data").is_ok());
+        let action = "read_data";
+        assert!(
+            mw.enforce_tool_call(&did, action, &signed_tool_call_params(action))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -387,32 +542,48 @@ mod tests {
         );
     }
 
-    /// Regression guard: the module-level `# Audit status` doc must
-    /// remain in place. It's the only durable signal to future readers
-    /// that this middleware cannot detect provenance/consent/authority
-    /// violations. If someone "cleans up" the doc they must re-add it.
+    /// Regression guard: the module-level verified-context doc must remain in
+    /// place so future changes do not reintroduce fabricated context.
     #[test]
-    fn module_doc_retains_audit_status_section() {
+    fn module_doc_retains_verified_context_requirement() {
         // Read the source file at test time. Tests run from the crate
         // root, so this relative path is stable in the repo layout.
         let src = std::fs::read_to_string("src/mcp/middleware.rs")
             .expect("middleware.rs readable from crate root");
         assert!(
-            src.contains("# Audit status"),
-            "module doc must contain '# Audit status' audit notice; \
-             see RED #3 fix commit. Do not remove this section."
+            src.contains("# Verified Context Requirement"),
+            "module doc must contain the verified-context requirement"
         );
         assert!(
-            src.contains("hardcoded-true") || src.contains("hardcoded true"),
-            "audit doc must name the stub behavior explicitly"
+            src.contains(CONSTITUTIONAL_CONTEXT_FIELD),
+            "module doc must name the required tool-call context field"
         );
+    }
+
+    #[test]
+    fn production_source_does_not_fabricate_mcp_context() {
+        let src = std::fs::read_to_string("src/mcp/middleware.rs")
+            .expect("middleware.rs readable from crate root");
+        let production = src
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("middleware production section must be present");
+        for (field, value) in [
+            ("has_provenance", "true"),
+            ("output_marked_ai", "true"),
+            ("consent_active", "true"),
+            ("human_override_preserved", "true"),
+        ] {
+            let fabricated_assignment = format!("{field}: {value}");
+            assert!(
+                !production.contains(&fabricated_assignment),
+                "middleware production must not fabricate {fabricated_assignment}"
+            );
+        }
+        let fixed_timestamp = ["2026-01", "-01T00:00:00Z"].concat();
         assert!(
-            src.contains("unaudited-mcp-simulation-tools"),
-            "audit doc must link to the RED #2 feature flag"
-        );
-        assert!(
-            src.contains("fix-mcp-simulation-tools.md"),
-            "audit doc must link to the remediation initiative"
+            !production.contains(&fixed_timestamp),
+            "middleware production must not hardcode provenance timestamps"
         );
     }
 }

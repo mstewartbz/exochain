@@ -15,10 +15,17 @@ MCP rules and 8 kernel invariants on every action. Read this document first.
 ## 1. How to authenticate
 
 - The server is bound to a specific actor DID on startup (`exochain mcp --actor-did did:exo:...`).
-- You do not re-authenticate per call. Instead, every tool invocation carries:
-  - Your actor DID
-  - A cryptographic `SignerType::Ai { delegation_id }` stamp (0x02 prefix)
-  - Provenance metadata (action hash, timestamp, signature)
+- You do not re-authenticate per call. Instead, every `tools/call` params
+  object must include top-level `constitutional_context` with:
+  - `bcts_scope`, `capabilities`, `output_marking`, `forging_identity`, and
+    `self_escalation`
+  - `adjudication_context` containing actor roles, signed authority chain,
+    active consent records, active bailment state, actor permissions, human
+    override evidence, and signed provenance
+- The middleware derives its MCP facts from that verified context. Missing or
+  invalid context is refused before tool execution.
+- Every `ToolResult` returned by the server carries metadata:
+  `outputMarking: "exo-mcp-ai-generated-v1"` and `generatedBy: "exo-mcp"`.
 - The middleware rejects actions that attempt to present an AI signer as a
   human signer — the `SignerType` is part of the signed payload, not a flag.
 - Read `exochain://constitution` to see the root-of-trust text, and hash it
@@ -170,5 +177,7 @@ mod tests {
         assert!(text.contains("MCP-001"));
         assert!(text.contains("unaudited-mcp-simulation-tools"));
         assert!(text.contains("live legal/evidence store"));
+        assert!(text.contains("constitutional_context"));
+        assert!(text.contains("outputMarking"));
     }
 }
