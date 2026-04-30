@@ -12,6 +12,7 @@ use exo_core::{
     crypto::{generate_keypair, generate_pq_keypair},
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::error::IdentityError;
 
@@ -164,7 +165,7 @@ impl KeyStore {
 ///
 /// The two public keys are stored together so verifiers can construct a
 /// `Signature::Hybrid` check in one step.  Secret keys are returned only
-/// at creation/rotation time and must be zeroized by the caller when done.
+/// at creation/rotation time and zeroize automatically when dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HybridPublicKeys {
     /// Ed25519 verifying key.
@@ -175,8 +176,10 @@ pub struct HybridPublicKeys {
 
 /// A secret key bundle returned at key creation/rotation time.
 ///
-/// The caller **must** zeroize both fields after use.  Neither field is
-/// stored in `HybridKeyStore`.
+/// Neither field is stored in `HybridKeyStore`; both are zeroized when this
+/// bundle is dropped.
+#[derive(Zeroize)]
+#[zeroize(drop)]
 pub struct HybridSecretKeys {
     /// Ed25519 signing key (32-byte scalar).
     pub classical: SecretKey,
@@ -236,7 +239,7 @@ impl HybridKeyStore {
 
     /// Generate and store a fresh hybrid key pair for `did`.
     ///
-    /// Returns the secret keys; the caller is responsible for zeroizing them.
+    /// Returns the secret keys; the bundle zeroizes itself when dropped.
     pub fn create_key(&mut self, did: &Did) -> Result<HybridSecretKeys, IdentityError> {
         let (classical_pk, classical_sk) = generate_keypair();
         let (pq_pk, pq_sk) = generate_pq_keypair();
@@ -552,6 +555,29 @@ mod tests {
         assert_eq!(keys[0].status, HybridKeyStatus::Active);
         // PQ public key must be 1952 bytes (ML-DSA-65)
         assert_eq!(keys[0].public_keys.post_quantum.as_bytes().len(), 1952);
+    }
+
+    #[test]
+    fn hybrid_secret_keys_have_composite_zeroize_on_drop_guarantee() {
+        fn assert_zeroize<T: zeroize::Zeroize>() {}
+        assert_zeroize::<HybridSecretKeys>();
+
+        let source = include_str!("key_management.rs");
+        let zeroize_drop = ["#", "[zeroize(drop)]"].concat();
+        let caller_responsible = ["caller is responsible", " for zeroizing"].concat();
+        let must_zeroize = ["must be zeroized", " by the caller"].concat();
+        assert!(
+            source.contains(&zeroize_drop),
+            "HybridSecretKeys must explicitly zeroize on drop"
+        );
+        assert!(
+            !source.contains(&caller_responsible),
+            "returned hybrid secrets must not rely on caller-managed zeroization"
+        );
+        assert!(
+            !source.contains(&must_zeroize),
+            "returned hybrid secrets must not rely on caller-managed zeroization"
+        );
     }
 
     #[test]
