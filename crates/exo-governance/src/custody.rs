@@ -147,6 +147,11 @@ impl CustodyChain {
     ) -> Result<&CustodyEvent, CustodyChainError> {
         let prev_event_hash = self.events.last().map(|e| e.event_hash);
         let sequence = self.next_sequence;
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(CustodyChainError::SequenceOverflow {
+                sequence: self.next_sequence,
+            })?;
 
         // Compute event hash over canonical fields.
         let event_hash = Self::compute_event_hash(
@@ -159,7 +164,7 @@ impl CustodyChain {
         )?;
 
         let event = CustodyEvent {
-            id: format!("ce-{}-{}", self.decision_id.as_bytes()[0], sequence),
+            id: format!("ce-{}-{}", self.decision_id, sequence),
             sequence,
             record_hash,
             prev_event_hash,
@@ -171,7 +176,7 @@ impl CustodyChain {
             event_hash,
         };
 
-        self.next_sequence += 1;
+        self.next_sequence = next_sequence;
         self.events.push(event);
         // SAFETY: we just pushed, so `last()` is guaranteed `Some`.
         // Using indexing instead of `expect` for constitutional lint compliance.
@@ -336,6 +341,8 @@ fn custody_event_hash_payload(
 pub enum CustodyChainError {
     /// Sequence number gap detected.
     SequenceGap { expected: u64, actual: u64 },
+    /// Sequence counter cannot advance without wrapping.
+    SequenceOverflow { sequence: u64 },
     /// Genesis event should not have a previous event hash.
     InvalidGenesisLink,
     /// Chain link hash does not match expected previous event hash.
@@ -361,6 +368,9 @@ impl std::fmt::Display for CustodyChainError {
         match self {
             Self::SequenceGap { expected, actual } => {
                 write!(f, "Sequence gap: expected {expected}, got {actual}")
+            }
+            Self::SequenceOverflow { sequence } => {
+                write!(f, "Sequence counter overflow at {sequence}")
             }
             Self::InvalidGenesisLink => write!(f, "Genesis event should not have prev_event_hash"),
             Self::BrokenLink { sequence, .. } => {
@@ -477,6 +487,14 @@ mod tests {
         assert!(
             !production.contains("unwrap_or(Hash256::ZERO)"),
             "custody event hashing must fail closed instead of using a zero hash"
+        );
+        assert!(
+            !production.contains("next_sequence += 1"),
+            "custody sequence advancement must use checked arithmetic"
+        );
+        assert!(
+            !production.contains("decision_id.as_bytes()[0]"),
+            "custody event IDs must not use only the first byte of the decision hash"
         );
     }
 
@@ -973,6 +991,12 @@ mod tests {
         };
         assert_eq!(format!("{seq_gap}"), "Sequence gap: expected 3, got 7");
 
+        let overflow = CustodyChainError::SequenceOverflow { sequence: u64::MAX };
+        assert_eq!(
+            format!("{overflow}"),
+            "Sequence counter overflow at 18446744073709551615"
+        );
+
         let genesis = CustodyChainError::InvalidGenesisLink;
         assert_eq!(
             format!("{genesis}"),
@@ -1008,11 +1032,12 @@ mod tests {
         assert!(err.to_string().contains("sequence 2"));
     }
 
-    // Covers: CustodyEvent id uses first byte of decision_id and the sequence number.
+    // Covers: CustodyEvent id uses the full decision_id and the sequence number.
     #[test]
     fn test_event_id_format() {
         let mut bytes = [0u8; 32];
         bytes[0] = 0x2a;
+        bytes[31] = 0xff;
         let decision_id = Hash256::from_bytes(bytes);
         let mut chain = CustodyChain::new(decision_id);
         chain
@@ -1035,8 +1060,35 @@ mod tests {
                 None,
             )
             .expect("append custody event");
-        assert_eq!(chain.events[0].id, "ce-42-0");
-        assert_eq!(chain.events[1].id, "ce-42-1");
+        assert_eq!(chain.events[0].id, format!("ce-{decision_id}-0"));
+        assert_eq!(chain.events[1].id, format!("ce-{decision_id}-1"));
+    }
+
+    #[test]
+    fn test_event_id_does_not_collide_on_shared_first_hash_byte() {
+        let mut left_bytes = [0u8; 32];
+        left_bytes[0] = 0x2a;
+        left_bytes[31] = 0x01;
+        let mut right_bytes = [0u8; 32];
+        right_bytes[0] = 0x2a;
+        right_bytes[31] = 0x02;
+
+        let mut left_chain = CustodyChain::new(Hash256::from_bytes(left_bytes));
+        let mut right_chain = CustodyChain::new(Hash256::from_bytes(right_bytes));
+        for chain in [&mut left_chain, &mut right_chain] {
+            chain
+                .append(
+                    test_did("alice"),
+                    CustodyRole::Proposer,
+                    CustodyAction::Create,
+                    Hash256::digest(b"r"),
+                    test_ts(1000),
+                    None,
+                )
+                .expect("append custody event");
+        }
+
+        assert_ne!(left_chain.events[0].id, right_chain.events[0].id);
     }
 
     // Covers: next_sequence monotonically increases across appends.
@@ -1058,6 +1110,30 @@ mod tests {
         }
         assert_eq!(chain.next_sequence, 3);
         assert_eq!(chain.len(), 3);
+    }
+
+    #[test]
+    fn test_next_sequence_overflow_fails_without_mutating_chain() {
+        let mut chain = CustodyChain::new(Hash256::digest(b"decision-overflow"));
+        chain.next_sequence = u64::MAX;
+
+        let err = chain
+            .append(
+                test_did("alice"),
+                CustodyRole::Proposer,
+                CustodyAction::Create,
+                Hash256::digest(b"r"),
+                test_ts(1000),
+                None,
+            )
+            .expect_err("sequence overflow must fail closed");
+
+        assert!(matches!(
+            err,
+            CustodyChainError::SequenceOverflow { sequence: u64::MAX }
+        ));
+        assert!(chain.events.is_empty());
+        assert_eq!(chain.next_sequence, u64::MAX);
     }
 
     // Covers: events_by_actor filters and returns only matching actor's events (no false positives).
