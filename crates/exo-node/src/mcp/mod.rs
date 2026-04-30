@@ -21,27 +21,37 @@ pub mod protocol;
 pub mod resources;
 pub mod tools;
 
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    io::{Error, ErrorKind},
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_stream::stream;
 use axum::{
     Router,
     extract::{DefaultBodyLimit, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
 };
 #[allow(unused_imports)]
 pub use context::NodeContext;
-use futures::stream::Stream;
 pub use handler::{MAX_JSON_RPC_MESSAGE_BYTES, McpServer};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    sync::Semaphore,
     time::sleep,
 };
+use zeroize::Zeroizing;
+
+const EXO_MCP_SSE_TOKEN_ENV: &str = "EXO_MCP_SSE_TOKEN";
+const MAX_SSE_EVENT_CONNECTIONS: usize = 64;
 
 /// Run the MCP server on stdio (stdin/stdout).
 ///
@@ -80,7 +90,94 @@ pub async fn serve_stdio(server: McpServer) -> std::io::Result<()> {
 #[derive(Clone)]
 pub struct SseState {
     /// The MCP server shared across all HTTP handlers.
-    pub server: Arc<McpServer>,
+    server: Arc<McpServer>,
+    bearer_token: Arc<Zeroizing<String>>,
+    event_connections: Arc<Semaphore>,
+}
+
+impl SseState {
+    #[must_use]
+    pub fn new(
+        server: Arc<McpServer>,
+        bearer_token: Zeroizing<String>,
+        max_event_connections: usize,
+    ) -> Self {
+        Self {
+            server,
+            bearer_token: Arc::new(bearer_token),
+            event_connections: Arc::new(Semaphore::new(max_event_connections)),
+        }
+    }
+
+    fn authorize(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let header = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+
+        match header.and_then(|value| value.strip_prefix("Bearer ")) {
+            Some(provided)
+                if constant_time_eq(provided.as_bytes(), self.bearer_token.as_bytes()) =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(StatusCode::FORBIDDEN),
+            None => Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (left, right) in a.iter().zip(b.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+fn sse_bearer_token_from_env() -> std::io::Result<Zeroizing<String>> {
+    match std::env::var(EXO_MCP_SSE_TOKEN_ENV) {
+        Ok(token) if !token.is_empty() => Ok(Zeroizing::new(token)),
+        Ok(_) => Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("{EXO_MCP_SSE_TOKEN_ENV} must not be empty"),
+        )),
+        Err(_) => Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("{EXO_MCP_SSE_TOKEN_ENV} must be set before enabling MCP SSE"),
+        )),
+    }
+}
+
+fn parse_sse_bind_addr(bind: &str) -> std::io::Result<SocketAddr> {
+    let addr = bind
+        .parse::<SocketAddr>()
+        .or_else(|_| parse_localhost_bind_addr(bind))?;
+    if !addr.ip().is_loopback() {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "MCP SSE plaintext transport may only bind to loopback; place a TLS terminator in front of 127.0.0.1 when remote access is required",
+        ));
+    }
+    Ok(addr)
+}
+
+fn parse_localhost_bind_addr(bind: &str) -> std::io::Result<SocketAddr> {
+    let Some(port) = bind.strip_prefix("localhost:") else {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "MCP SSE bind must be a literal loopback socket address",
+        ));
+    };
+    let port = port.parse::<u16>().map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid localhost MCP SSE port: {error}"),
+        )
+    })?;
+    Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
 }
 
 /// Run the MCP server over HTTP + Server-Sent Events.
@@ -94,18 +191,18 @@ pub struct SseState {
 /// - `GET /mcp/events` — subscribe to server-sent notifications (future fan-out)
 /// - `GET /mcp/health` — health check for load balancers
 pub async fn serve_sse(server: McpServer, bind: &str) -> std::io::Result<()> {
-    let state = SseState {
-        server: Arc::new(server),
-    };
+    let bind_addr = parse_sse_bind_addr(bind)?;
+    let bearer_token = sse_bearer_token_from_env()?;
+    let state = SseState::new(Arc::new(server), bearer_token, MAX_SSE_EVENT_CONNECTIONS);
 
     eprintln!("[exochain-mcp] Constitutional MCP server ready on SSE");
     eprintln!("[exochain-mcp] Actor: {}", state.server.actor_did());
     eprintln!("[exochain-mcp] Tools: {}", state.server.tool_count());
-    eprintln!("[exochain-mcp] Listening on http://{bind}");
+    eprintln!("[exochain-mcp] Listening on loopback http://{bind_addr}");
 
     let router = build_sse_router(state);
 
-    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -124,25 +221,43 @@ async fn handle_health() -> &'static str {
     "ok"
 }
 
-async fn handle_message(State(state): State<SseState>, body: String) -> impl IntoResponse {
+async fn handle_message(
+    State(state): State<SseState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(status) = state.authorize(&headers) {
+        return status.into_response();
+    }
+
     match state.server.handle_message(&body) {
-        Some(resp) => (StatusCode::OK, resp),
-        None => (StatusCode::ACCEPTED, String::new()),
+        Some(resp) => (StatusCode::OK, resp).into_response(),
+        None => (StatusCode::ACCEPTED, String::new()).into_response(),
     }
 }
 
-async fn handle_events(
-    State(_state): State<SseState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn handle_events(State(state): State<SseState>, headers: HeaderMap) -> Response {
+    if let Err(status) = state.authorize(&headers) {
+        return status.into_response();
+    }
+
+    let permit = match state.event_connections.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+    };
+
     // Heartbeat stream — a production implementation would fan-out
     // server-initiated JSON-RPC notifications to subscribed clients.
     let s = stream! {
+        let _permit = permit;
         loop {
-            yield Ok(Event::default().event("heartbeat").data("ok"));
+            yield Ok::<Event, Infallible>(Event::default().event("heartbeat").data("ok"));
             sleep(Duration::from_secs(30)).await;
         }
     };
-    Sse::new(s).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Sse::new(s)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 #[cfg(test)]
@@ -152,20 +267,47 @@ mod sse_tests {
 
     use super::*;
 
+    const TEST_SSE_TOKEN: &str = "test-sse-token";
+
     fn test_router() -> Router {
+        test_router_with_event_limit(64)
+    }
+
+    fn test_router_with_event_limit(max_event_connections: usize) -> Router {
         let did = exo_core::Did::new("did:exo:test").expect("valid DID");
         let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x4D; 32]).unwrap();
         let public_key = *keypair.public_key();
         let secret_key = keypair.secret_key().clone();
-        let state = SseState {
-            server: Arc::new(McpServer::with_authority(
+        let state = SseState::new(
+            Arc::new(McpServer::with_authority(
                 did.clone(),
                 did,
                 public_key,
                 Arc::new(move |message: &[u8]| exo_core::crypto::sign(message, &secret_key)),
             )),
-        };
+            Zeroizing::new(TEST_SSE_TOKEN.to_owned()),
+            max_event_connections,
+        );
         build_sse_router(state)
+    }
+
+    #[test]
+    fn sse_transport_source_requires_loopback_auth_and_connection_limit() {
+        let source = include_str!("mod.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(
+            production.contains("EXO_MCP_SSE_TOKEN"),
+            "SSE transport must require a configured bearer token"
+        );
+        assert!(
+            production.contains("is_loopback"),
+            "SSE transport must reject non-loopback plaintext binds"
+        );
+        assert!(
+            production.contains("try_acquire_owned"),
+            "SSE event stream must enforce a bounded connection semaphore"
+        );
     }
 
     #[tokio::test]
@@ -185,6 +327,34 @@ mod sse_tests {
     }
 
     #[tokio::test]
+    async fn sse_message_requires_bearer_token() {
+        let router = test_router();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.0"}}}"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp/message")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sse_events_requires_bearer_token() {
+        let router = test_router();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp/events")
+            .body(Body::empty())
+            .unwrap();
+
+        let res = router.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn sse_message_initialize() {
         let router = test_router();
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.0"}}}"#;
@@ -192,6 +362,7 @@ mod sse_tests {
             .method("POST")
             .uri("/mcp/message")
             .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {TEST_SSE_TOKEN}"))
             .body(Body::from(body))
             .unwrap();
         let res = router.oneshot(req).await.unwrap();
@@ -214,6 +385,7 @@ mod sse_tests {
             .method("POST")
             .uri("/mcp/message")
             .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {TEST_SSE_TOKEN}"))
             .body(Body::from(body))
             .unwrap();
         let res = router.oneshot(req).await.unwrap();
@@ -239,10 +411,36 @@ mod sse_tests {
             .method("POST")
             .uri("/mcp/message")
             .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {TEST_SSE_TOKEN}"))
             .body(Body::from(body))
             .unwrap();
 
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn sse_events_enforces_connection_limit() {
+        let router = test_router_with_event_limit(1);
+        let first_req = Request::builder()
+            .method("GET")
+            .uri("/mcp/events")
+            .header("authorization", format!("Bearer {TEST_SSE_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let second_req = Request::builder()
+            .method("GET")
+            .uri("/mcp/events")
+            .header("authorization", format!("Bearer {TEST_SSE_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let first = router.clone().oneshot(first_req).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = router.oneshot(second_req).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        drop(first);
     }
 }
