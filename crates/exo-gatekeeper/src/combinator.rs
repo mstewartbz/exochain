@@ -3,15 +3,24 @@
 //! Provides a deterministic algebra for composing governance operations.
 //! Every reduction is pure: same input always produces same output.
 
-use std::collections::BTreeMap;
+use std::{cell::Cell, collections::BTreeMap};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::error::GatekeeperError;
 
 // ---------------------------------------------------------------------------
 // Combinator types
 // ---------------------------------------------------------------------------
+
+/// Maximum allowed nesting depth for a combinator tree.
+pub const MAX_COMBINATOR_DEPTH: usize = 128;
+
+/// Maximum children allowed in any sequence, parallel, or choice branch list.
+pub const MAX_COMBINATOR_BRANCH_WIDTH: usize = 256;
+
+/// Maximum retry budget accepted for a retry combinator.
+pub const MAX_RETRY_ATTEMPTS: u32 = 100;
 
 /// A predicate that guards combinator execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,12 +57,51 @@ pub struct TransformFn {
 }
 
 /// Policy for retrying a combinator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RetryPolicy {
     /// Maximum number of retries.
     pub max_retries: u32,
     /// Current attempt (used during reduction).
     pub current_attempt: u32,
+}
+
+impl RetryPolicy {
+    fn validate(&self) -> Result<(), GatekeeperError> {
+        if self.max_retries > MAX_RETRY_ATTEMPTS {
+            return Err(GatekeeperError::CombinatorError(format!(
+                "maximum retry budget exceeded: {} > {}",
+                self.max_retries, MAX_RETRY_ATTEMPTS
+            )));
+        }
+        if self.current_attempt > self.max_retries {
+            return Err(GatekeeperError::CombinatorError(format!(
+                "retry current_attempt {} exceeds max_retries {}",
+                self.current_attempt, self.max_retries
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct RetryPolicyProxy {
+    max_retries: u32,
+    current_attempt: u32,
+}
+
+impl<'de> Deserialize<'de> for RetryPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let proxy = RetryPolicyProxy::deserialize(deserializer)?;
+        let policy = Self {
+            max_retries: proxy.max_retries,
+            current_attempt: proxy.current_attempt,
+        };
+        policy.validate().map_err(de::Error::custom)?;
+        Ok(policy)
+    }
 }
 
 /// A checkpoint identifier for resumable combinators.
@@ -65,7 +113,7 @@ pub struct CheckpointId(pub String);
 pub struct Duration(pub u64);
 
 /// The combinator algebra terms.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Combinator {
     /// Pass-through: returns the input as output.
     Identity,
@@ -85,6 +133,126 @@ pub enum Combinator {
     Timeout(Box<Combinator>, Duration),
     /// Resumable checkpoint.
     Checkpoint(Box<Combinator>, CheckpointId),
+}
+
+thread_local! {
+    static COMBINATOR_DESERIALIZE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct CombinatorDeserializeDepthGuard;
+
+impl Drop for CombinatorDeserializeDepthGuard {
+    fn drop(&mut self) {
+        COMBINATOR_DESERIALIZE_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+fn enter_combinator_deserialize_depth<E>() -> Result<CombinatorDeserializeDepthGuard, E>
+where
+    E: de::Error,
+{
+    COMBINATOR_DESERIALIZE_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current > MAX_COMBINATOR_DEPTH {
+            return Err(de::Error::custom(format!(
+                "maximum combinator nesting depth exceeded during deserialization: {} > {}",
+                current, MAX_COMBINATOR_DEPTH
+            )));
+        }
+        depth.set(current + 1);
+        Ok(CombinatorDeserializeDepthGuard)
+    })
+}
+
+struct BoundedCombinators(Vec<Combinator>);
+
+impl<'de> Deserialize<'de> for BoundedCombinators {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(BoundedCombinatorsVisitor)
+    }
+}
+
+struct BoundedCombinatorsVisitor;
+
+impl<'de> de::Visitor<'de> for BoundedCombinatorsVisitor {
+    type Value = BoundedCombinators;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded combinator sequence")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        if seq
+            .size_hint()
+            .is_some_and(|hint| hint > MAX_COMBINATOR_BRANCH_WIDTH)
+        {
+            return Err(de::Error::custom(format!(
+                "maximum combinator branch width exceeded: more than {}",
+                MAX_COMBINATOR_BRANCH_WIDTH
+            )));
+        }
+
+        let mut combinators = Vec::new();
+        while let Some(combinator) = seq.next_element()? {
+            if combinators.len() >= MAX_COMBINATOR_BRANCH_WIDTH {
+                return Err(de::Error::custom(format!(
+                    "maximum combinator branch width exceeded: more than {}",
+                    MAX_COMBINATOR_BRANCH_WIDTH
+                )));
+            }
+            combinators.push(combinator);
+        }
+
+        Ok(BoundedCombinators(combinators))
+    }
+}
+
+#[derive(Deserialize)]
+enum CombinatorProxy {
+    Identity,
+    Sequence(BoundedCombinators),
+    Parallel(BoundedCombinators),
+    Choice(BoundedCombinators),
+    Guard(Box<Combinator>, Predicate),
+    Transform(Box<Combinator>, TransformFn),
+    Retry(Box<Combinator>, RetryPolicy),
+    Timeout(Box<Combinator>, Duration),
+    Checkpoint(Box<Combinator>, CheckpointId),
+}
+
+impl<'de> Deserialize<'de> for Combinator {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let _depth_guard = enter_combinator_deserialize_depth::<D::Error>()?;
+        let proxy = CombinatorProxy::deserialize(deserializer)?;
+        Ok(match proxy {
+            CombinatorProxy::Identity => Self::Identity,
+            CombinatorProxy::Sequence(BoundedCombinators(combinators)) => {
+                Self::Sequence(combinators)
+            }
+            CombinatorProxy::Parallel(BoundedCombinators(combinators)) => {
+                Self::Parallel(combinators)
+            }
+            CombinatorProxy::Choice(BoundedCombinators(combinators)) => Self::Choice(combinators),
+            CombinatorProxy::Guard(inner, predicate) => Self::Guard(inner, predicate),
+            CombinatorProxy::Transform(inner, transform) => Self::Transform(inner, transform),
+            CombinatorProxy::Retry(inner, policy) => Self::Retry(inner, policy),
+            CombinatorProxy::Timeout(inner, duration) => Self::Timeout(inner, duration),
+            CombinatorProxy::Checkpoint(inner, checkpoint_id) => {
+                Self::Checkpoint(inner, checkpoint_id)
+            }
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,15 +326,31 @@ pub fn reduce(
     combinator: &Combinator,
     input: &CombinatorInput,
 ) -> Result<CombinatorOutput, GatekeeperError> {
+    reduce_inner(combinator, input, 0)
+}
+
+fn reduce_inner(
+    combinator: &Combinator,
+    input: &CombinatorInput,
+    depth: usize,
+) -> Result<CombinatorOutput, GatekeeperError> {
+    if depth > MAX_COMBINATOR_DEPTH {
+        return Err(GatekeeperError::CombinatorError(format!(
+            "maximum combinator nesting depth exceeded: {} > {}",
+            depth, MAX_COMBINATOR_DEPTH
+        )));
+    }
+
     match combinator {
         Combinator::Identity => Ok(CombinatorOutput::from_input(input)),
 
         Combinator::Sequence(combinators) => {
+            enforce_branch_width("Sequence", combinators.len())?;
             let mut current_input = input.clone();
             let mut last_output = CombinatorOutput::from_input(input);
 
             for (i, c) in combinators.iter().enumerate() {
-                match reduce(c, &current_input) {
+                match reduce_inner(c, &current_input, depth + 1) {
                     Ok(output) => {
                         // Feed output as next input.
                         current_input = CombinatorInput {
@@ -186,10 +370,11 @@ pub fn reduce(
         }
 
         Combinator::Parallel(combinators) => {
+            enforce_branch_width("Parallel", combinators.len())?;
             let mut merged = CombinatorOutput::from_input(input);
 
             for (i, c) in combinators.iter().enumerate() {
-                match reduce(c, input) {
+                match reduce_inner(c, input, depth + 1) {
                     Ok(output) => {
                         merged.merge(&output);
                     }
@@ -205,8 +390,9 @@ pub fn reduce(
         }
 
         Combinator::Choice(combinators) => {
+            enforce_branch_width("Choice", combinators.len())?;
             for c in combinators {
-                match reduce(c, input) {
+                match reduce_inner(c, input, depth + 1) {
                     Ok(output) => return Ok(output),
                     Err(_) => continue,
                 }
@@ -223,19 +409,20 @@ pub fn reduce(
                     predicate.name
                 )));
             }
-            reduce(inner, input)
+            reduce_inner(inner, input, depth + 1)
         }
 
         Combinator::Transform(inner, transform) => {
-            let mut output = reduce(inner, input)?;
+            let mut output = reduce_inner(inner, input, depth + 1)?;
             output.set(transform.output_key.clone(), transform.output_value.clone());
             Ok(output)
         }
 
         Combinator::Retry(inner, policy) => {
+            policy.validate()?;
             let mut last_err = None;
             for attempt in 0..=policy.max_retries {
-                match reduce(inner, input) {
+                match reduce_inner(inner, input, depth + 1) {
                     Ok(mut output) => {
                         output.set("retry_attempts", attempt.to_string());
                         return Ok(output);
@@ -252,17 +439,27 @@ pub fn reduce(
         Combinator::Timeout(inner, duration) => {
             // In deterministic mode, we simulate timeout by simply running.
             // Real timeout enforcement is at the Holon runtime level.
-            let mut output = reduce(inner, input)?;
+            let mut output = reduce_inner(inner, input, depth + 1)?;
             output.set("timeout_budget_ms", duration.0.to_string());
             Ok(output)
         }
 
         Combinator::Checkpoint(inner, checkpoint_id) => {
-            let mut output = reduce(inner, input)?;
+            let mut output = reduce_inner(inner, input, depth + 1)?;
             output.checkpoint = Some(checkpoint_id.clone());
             Ok(output)
         }
     }
+}
+
+fn enforce_branch_width(kind: &str, len: usize) -> Result<(), GatekeeperError> {
+    if len > MAX_COMBINATOR_BRANCH_WIDTH {
+        return Err(GatekeeperError::CombinatorError(format!(
+            "maximum combinator branch width exceeded in {}: {} > {}",
+            kind, len, MAX_COMBINATOR_BRANCH_WIDTH
+        )));
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -544,6 +741,98 @@ mod tests {
             },
         );
         assert!(reduce(&retried, &input).is_err());
+    }
+
+    #[test]
+    fn retry_rejects_excessive_retry_budget_before_looping() {
+        let input = sample_input();
+        let retried = Combinator::Retry(
+            Box::new(Combinator::Guard(
+                Box::new(Combinator::Identity),
+                Predicate {
+                    name: "impossible".into(),
+                    required_key: "nonexistent".into(),
+                    expected_value: None,
+                },
+            )),
+            RetryPolicy {
+                max_retries: 101,
+                current_attempt: 0,
+            },
+        );
+
+        let err = match reduce(&retried, &input) {
+            Ok(output) => panic!("excessive retries must fail fast: {output:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("maximum retry"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reduce_rejects_excessive_combinator_depth() {
+        let input = sample_input();
+        let mut combinator = Combinator::Identity;
+        for _ in 0..129 {
+            combinator = Combinator::Timeout(Box::new(combinator), Duration(1));
+        }
+
+        let err = match reduce(&combinator, &input) {
+            Ok(output) => panic!("excessive depth must fail: {output:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("maximum combinator nesting depth"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reduce_rejects_excessive_branch_width() {
+        let input = sample_input();
+        let combinator = Combinator::Sequence(vec![Combinator::Identity; 257]);
+
+        let err = match reduce(&combinator, &input) {
+            Ok(output) => panic!("excessive branch width must fail: {output:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("maximum combinator branch width"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn combinator_deserialization_is_not_directly_derived() {
+        let source = include_str!("combinator.rs");
+        assert!(
+            !source
+                .contains("#[derive(Debug, Clone, Serialize, Deserialize)]\npub enum Combinator"),
+            "Combinator deserialization must enforce structural limits"
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_excessive_branch_width() {
+        let mut json = String::from("{\"Sequence\":[");
+        for idx in 0..257 {
+            if idx > 0 {
+                json.push(',');
+            }
+            json.push_str("\"Identity\"");
+        }
+        json.push_str("]}");
+
+        let err = match serde_json::from_str::<Combinator>(&json) {
+            Ok(combinator) => panic!("wide sequence must be rejected: {combinator:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("maximum combinator branch width"),
+            "unexpected error: {err}"
+        );
     }
 
     // --- Timeout ---
