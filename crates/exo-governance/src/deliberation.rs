@@ -446,12 +446,27 @@ mod tests {
     }
     #[test]
     fn close_approved() {
+        let key_a = keypair(1);
+        let key_b = keypair(2);
+        let mut keys = BTreeMap::new();
+        keys.insert(did("a"), *key_a.public_key());
+        keys.insert(did("b"), *key_b.public_key());
+
         let mut d = open(b"p", &[did("a"), did("b"), did("c")]);
-        cast_vote(&mut d, vote("a", Position::For)).unwrap();
-        cast_vote(&mut d, vote("b", Position::For)).unwrap();
+        let created = d.created;
+        cast_vote(
+            &mut d,
+            signed_vote("a", Position::For, Role::Contributor, &key_a, created),
+        )
+        .unwrap();
+        cast_vote(
+            &mut d,
+            signed_vote("b", Position::For, Role::Contributor, &key_b, created),
+        )
+        .unwrap();
         cast_vote(&mut d, vote("c", Position::Against)).unwrap();
         assert!(matches!(
-            close(&mut d, &policy(2)),
+            close_verified(&mut d, &policy(2), &resolver(&keys)),
             DeliberationResult::Approved {
                 votes_for: 2,
                 votes_against: 1,
@@ -461,12 +476,21 @@ mod tests {
     }
     #[test]
     fn close_rejected() {
+        let key_a = keypair(1);
+        let mut keys = BTreeMap::new();
+        keys.insert(did("a"), *key_a.public_key());
+
         let mut d = open(b"p", &[did("a"), did("b"), did("c")]);
-        cast_vote(&mut d, vote("a", Position::For)).unwrap();
+        let created = d.created;
+        cast_vote(
+            &mut d,
+            signed_vote("a", Position::For, Role::Contributor, &key_a, created),
+        )
+        .unwrap();
         cast_vote(&mut d, vote("b", Position::Against)).unwrap();
         cast_vote(&mut d, vote("c", Position::Against)).unwrap();
         assert!(matches!(
-            close(&mut d, &policy(1)),
+            close_verified(&mut d, &policy(1), &resolver(&keys)),
             DeliberationResult::Rejected { .. }
         ));
     }
@@ -481,12 +505,27 @@ mod tests {
     }
     #[test]
     fn abstentions_counted() {
+        let key_a = keypair(1);
+        let key_b = keypair(2);
+        let mut keys = BTreeMap::new();
+        keys.insert(did("a"), *key_a.public_key());
+        keys.insert(did("b"), *key_b.public_key());
+
         let mut d = open(b"p", &[did("a"), did("b"), did("c")]);
-        cast_vote(&mut d, vote("a", Position::For)).unwrap();
-        cast_vote(&mut d, vote("b", Position::For)).unwrap();
+        let created = d.created;
+        cast_vote(
+            &mut d,
+            signed_vote("a", Position::For, Role::Contributor, &key_a, created),
+        )
+        .unwrap();
+        cast_vote(
+            &mut d,
+            signed_vote("b", Position::For, Role::Contributor, &key_b, created),
+        )
+        .unwrap();
         cast_vote(&mut d, vote("c", Position::Abstain)).unwrap();
         assert!(matches!(
-            close(&mut d, &policy(2)),
+            close_verified(&mut d, &policy(2), &resolver(&keys)),
             DeliberationResult::Approved {
                 votes_for: 2,
                 votes_against: 0,
@@ -497,6 +536,10 @@ mod tests {
     #[test]
     fn close_uses_vote_role_for_required_roles() {
         let alice_key = keypair(1);
+        let alice = did("alice");
+        let mut keys = BTreeMap::new();
+        keys.insert(alice, *alice_key.public_key());
+
         let mut d = open(b"p", &[did("alice")]);
         let created = d.created;
         cast_vote(
@@ -513,7 +556,7 @@ mod tests {
         };
 
         assert!(matches!(
-            close(&mut d, &quorum_policy),
+            close_verified(&mut d, &quorum_policy, &resolver(&keys)),
             DeliberationResult::Approved {
                 votes_for: 1,
                 votes_against: 0,
@@ -548,6 +591,31 @@ mod tests {
             other => panic!("forged vote must not close deliberation: {other:?}"),
         }
     }
+
+    #[test]
+    fn close_without_resolver_fails_closed_for_unverified_quorum() {
+        let alice_key = keypair(1);
+        let mut d = open(b"p", &[did("alice")]);
+        let created = d.created;
+        let mut forged = signed_vote("alice", Position::For, Role::Steward, &alice_key, created);
+        forged.signature = test_sig();
+        cast_vote(&mut d, forged).unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match close(&mut d, &quorum_policy) {
+            DeliberationResult::NoQuorum { reason } => {
+                assert!(reason.contains("verified quorum"));
+            }
+            other => panic!("structural close must not approve without verification: {other:?}"),
+        }
+    }
+
     #[test]
     fn close_verified_accepts_distinct_valid_steward_vote() {
         let alice_key = keypair(1);
