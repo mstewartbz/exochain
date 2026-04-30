@@ -43,7 +43,7 @@ pub enum TeeEnvironment {
 // ---------------------------------------------------------------------------
 
 /// An attestation from a TEE.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeeAttestation {
     /// The platform that produced this attestation.
     pub platform: TeePlatform,
@@ -53,6 +53,17 @@ pub struct TeeAttestation {
     pub timestamp: u64,
     /// Signature over the measurement + timestamp.
     pub signature: Vec<u8>,
+}
+
+impl std::fmt::Debug for TeeAttestation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeeAttestation")
+            .field("platform", &self.platform)
+            .field("measurement_hash", &"[REDACTED]")
+            .field("timestamp", &self.timestamp)
+            .field("signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +423,18 @@ mod tests {
         assert_eq!(att.timestamp, TIMESTAMP);
         assert!(!att.signature.is_empty());
         assert_eq!(att.measurement_hash, *blake3::hash(MEASUREMENT).as_bytes());
+    }
+
+    #[test]
+    fn tee_attestation_debug_redacts_sensitive_material() {
+        let att = valid_attestation();
+        let rendered = format!("{att:?}");
+
+        assert!(rendered.contains("TeeAttestation"));
+        assert!(rendered.contains("measurement_hash: \"[REDACTED]\""));
+        assert!(rendered.contains("signature: \"[REDACTED]\""));
+        assert!(!rendered.contains(&format!("{:?}", att.measurement_hash)));
+        assert!(!rendered.contains(&format!("{:?}", att.signature)));
     }
 
     #[test]
