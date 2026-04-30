@@ -472,6 +472,75 @@ fn check_store_consistency(store: &Arc<Mutex<SqliteDagStore>>) -> SentinelStatus
     }
 }
 
+fn sentinel_task_failed_statuses(message: String) -> Vec<SentinelStatus> {
+    [
+        SentinelCheck::Liveness,
+        SentinelCheck::QuorumHealth,
+        SentinelCheck::ReceiptIntegrity,
+        SentinelCheck::StoreConsistency,
+        SentinelCheck::ScoreIntegrity,
+        SentinelCheck::OtpCleanup,
+    ]
+    .into_iter()
+    .map(|check| SentinelStatus {
+        check,
+        healthy: false,
+        message: message.clone(),
+        last_run_ms: now_ms(),
+    })
+    .collect()
+}
+
+fn collect_sentinel_statuses(
+    reactor: &SharedReactorState,
+    store: &Arc<Mutex<SqliteDagStore>>,
+    zerodentity: &SharedZerodentityStore,
+    prev_round: &mut u64,
+) -> Vec<SentinelStatus> {
+    vec![
+        check_liveness(reactor, prev_round),
+        check_quorum_health(reactor),
+        check_receipt_integrity(store),
+        check_store_consistency(store),
+        check_score_integrity(zerodentity),
+        check_otp_cleanup(zerodentity),
+    ]
+}
+
+async fn collect_sentinel_statuses_blocking(
+    reactor: SharedReactorState,
+    store: Arc<Mutex<SqliteDagStore>>,
+    zerodentity: SharedZerodentityStore,
+    prev_round: u64,
+) -> (Vec<SentinelStatus>, u64) {
+    tokio::task::spawn_blocking(move || {
+        let mut next_prev_round = prev_round;
+        let statuses =
+            collect_sentinel_statuses(&reactor, &store, &zerodentity, &mut next_prev_round);
+        (statuses, next_prev_round)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        let message = format!("Sentinel check task failed: {e}");
+        (sentinel_task_failed_statuses(message), prev_round)
+    })
+}
+
+fn replace_sentinel_state_sync(state: SharedSentinelState, statuses: Vec<SentinelStatus>) {
+    match state.lock() {
+        Ok(mut ss) => *ss = statuses,
+        Err(_) => tracing::error!("Sentinel state mutex poisoned — skipping update"),
+    }
+}
+
+async fn replace_sentinel_state(state: SharedSentinelState, statuses: Vec<SentinelStatus>) {
+    if let Err(e) =
+        tokio::task::spawn_blocking(move || replace_sentinel_state_sync(state, statuses)).await
+    {
+        tracing::error!(err = %e, "Sentinel state update task failed");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sentinel loop
 // ---------------------------------------------------------------------------
@@ -495,14 +564,14 @@ pub async fn run_sentinel_loop(
     loop {
         ticker.tick().await;
 
-        let statuses = vec![
-            check_liveness(&reactor, &mut prev_round),
-            check_quorum_health(&reactor),
-            check_receipt_integrity(&store),
-            check_store_consistency(&store),
-            check_score_integrity(&zerodentity),
-            check_otp_cleanup(&zerodentity),
-        ];
+        let (statuses, next_prev_round) = collect_sentinel_statuses_blocking(
+            Arc::clone(&reactor),
+            Arc::clone(&store),
+            Arc::clone(&zerodentity),
+            prev_round,
+        )
+        .await;
+        prev_round = next_prev_round;
 
         // Emit alerts for unhealthy sentinels.
         for status in &statuses {
@@ -530,10 +599,7 @@ pub async fn run_sentinel_loop(
         }
 
         // Update shared state.
-        match sentinel_state.lock() {
-            Ok(mut ss) => *ss = statuses,
-            Err(_) => tracing::error!("Sentinel state mutex poisoned — skipping update"),
-        }
+        replace_sentinel_state(Arc::clone(&sentinel_state), statuses).await;
     }
 }
 
@@ -541,15 +607,32 @@ pub async fn run_sentinel_loop(
 // API
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/sentinels` — current sentinel status.
-async fn handle_sentinel_status(
-    State(state): State<SharedSentinelState>,
-) -> Result<Json<Vec<SentinelStatus>>, StatusCode> {
+fn clone_sentinel_state_sync(
+    state: SharedSentinelState,
+) -> Result<Vec<SentinelStatus>, StatusCode> {
     let ss = state.lock().map_err(|_| {
         tracing::error!("Sentinel state mutex poisoned in status handler");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok(Json(ss.clone()))
+    Ok(ss.clone())
+}
+
+async fn load_sentinel_statuses(
+    state: SharedSentinelState,
+) -> Result<Vec<SentinelStatus>, StatusCode> {
+    tokio::task::spawn_blocking(move || clone_sentinel_state_sync(state))
+        .await
+        .map_err(|e| {
+            tracing::error!(err = %e, "Sentinel status load task failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+}
+
+/// `GET /api/v1/sentinels` — current sentinel status.
+async fn handle_sentinel_status(
+    State(state): State<SharedSentinelState>,
+) -> Result<Json<Vec<SentinelStatus>>, StatusCode> {
+    load_sentinel_statuses(state).await.map(Json)
 }
 
 /// Build the sentinel API router.
@@ -639,6 +722,40 @@ mod tests {
             .unwrap();
 
         assert!(!score_integrity.contains(".unwrap_or_default()"));
+    }
+
+    #[test]
+    fn sentinel_async_paths_do_not_lock_std_mutexes_directly() {
+        let source = include_str!("sentinels.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "sentinel async paths must isolate synchronous mutex/store work from Tokio workers"
+        );
+
+        let loop_body = production
+            .split("pub async fn run_sentinel_loop")
+            .nth(1)
+            .and_then(|section| section.split("// ---------------------------------------------------------------------------\n// API").next())
+            .unwrap();
+        assert!(
+            !loop_body.contains(".lock()"),
+            "sentinel loop must not directly lock std::sync::Mutex inside async context"
+        );
+
+        let handler_body = production
+            .split("async fn handle_sentinel_status")
+            .nth(1)
+            .and_then(|section| section.split("/// Build the sentinel API router.").next())
+            .unwrap();
+        assert!(
+            !handler_body.contains(".lock()"),
+            "sentinel status handler must not directly lock std::sync::Mutex inside async context"
+        );
     }
 
     #[test]
