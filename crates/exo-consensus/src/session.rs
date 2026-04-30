@@ -125,6 +125,10 @@ impl DeliberationSession {
             return Err(ConsensusError::RoundLimitExceeded);
         }
         timing.validate()?;
+        let next_round = self
+            .current_round
+            .checked_add(1)
+            .ok_or(ConsensusError::RoundLimitExceeded)?;
 
         let mut positions = BTreeMap::new();
 
@@ -192,7 +196,7 @@ impl DeliberationSession {
         round.round_hash = round.compute_hash()?;
 
         self.rounds.push(round.clone());
-        self.current_round += 1;
+        self.current_round = next_round;
 
         Ok(round)
     }
@@ -451,6 +455,24 @@ mod tests {
         // The failed call must not push a round or advance the counter.
         assert_eq!(session.rounds.len(), 1);
         assert_eq!(session.current_round, 2);
+    }
+
+    #[test]
+    fn execute_round_rejects_u32_max_round_counter_without_overflowing() {
+        let mut panel = Panel::default_panel(DecisionClass::Routine);
+        panel.max_rounds = u32::MAX;
+        let provider =
+            DeterministicResponseProvider::with_positions(routine_responses("A, B", &["a", "b"]));
+        let mut session = DeliberationSession::new("s".into(), panel, "Q?".into(), provider);
+        session.current_round = u32::MAX;
+
+        let err = session
+            .execute_round(timing(1))
+            .expect_err("u32::MAX round counter must fail closed");
+
+        assert!(matches!(err, ConsensusError::RoundLimitExceeded));
+        assert!(session.rounds.is_empty());
+        assert_eq!(session.current_round, u32::MAX);
     }
 
     // Covers lines 130-131: is_converged returns false when last round's score is below threshold.
