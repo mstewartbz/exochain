@@ -32,9 +32,9 @@ use axum::{
 };
 #[cfg(any(test, feature = "unaudited-admin-governance-shortcut"))]
 use exo_core::types::Did;
-use exo_core::types::Hash256;
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
 use exo_core::types::PublicKey;
+use exo_core::types::{Hash256, TrustReceipt};
 use serde::{Deserialize, Serialize};
 use tower::limit::ConcurrencyLimitLayer;
 
@@ -152,6 +152,121 @@ pub struct NodeStatusResponse {
     pub validators: Vec<String>,
 }
 
+struct NodeStatusSnapshot {
+    consensus_round: u64,
+    committed_height: u64,
+    validators: Vec<String>,
+    is_validator: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Blocking adapters
+// ---------------------------------------------------------------------------
+
+async fn read_node_status_snapshot(
+    reactor_state: SharedReactorState,
+) -> Result<NodeStatusSnapshot, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let s = reactor_state.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Reactor state unavailable".to_string(),
+            )
+        })?;
+        let committed_height = u64::try_from(s.consensus.committed.len()).map_err(|_| {
+            tracing::error!(
+                committed_len = s.consensus.committed.len(),
+                "Committed height cannot be represented as u64"
+            );
+            internal_error_response("Consensus status unavailable")
+        })?;
+        Ok(NodeStatusSnapshot {
+            consensus_round: s.consensus.current_round,
+            committed_height,
+            validators: s
+                .consensus
+                .config
+                .validators
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>(),
+            is_validator: s.is_validator,
+        })
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "Node status blocking task failed");
+        internal_error_response("Consensus status unavailable")
+    })?
+}
+
+#[cfg(feature = "unaudited-admin-governance-shortcut")]
+async fn read_validator_count(
+    reactor_state: SharedReactorState,
+) -> Result<usize, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let s = reactor_state.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Reactor state unavailable".to_string(),
+            )
+        })?;
+        Ok(s.consensus.config.validators.len())
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "Validator count blocking task failed");
+        internal_error_response("Consensus status unavailable")
+    })?
+}
+
+async fn load_receipt_by_hash(
+    store: Arc<Mutex<SqliteDagStore>>,
+    hash: Hash256,
+) -> Result<Option<TrustReceipt>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let st = store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Store unavailable".to_string(),
+            )
+        })?;
+        st.load_receipt(&hash).map_err(|e| {
+            tracing::error!(err = %e, "Receipt lookup failed");
+            internal_error_response("Receipt lookup failed")
+        })
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "Receipt lookup blocking task failed");
+        internal_error_response("Receipt lookup failed")
+    })?
+}
+
+async fn load_receipts_by_actor(
+    store: Arc<Mutex<SqliteDagStore>>,
+    actor: String,
+    limit: u32,
+) -> Result<Vec<TrustReceipt>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let st = store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Store unavailable".to_string(),
+            )
+        })?;
+        st.load_receipts_by_actor(&actor, limit).map_err(|e| {
+            tracing::error!(err = %e, actor = %actor, "Receipt list failed");
+            internal_error_response("Receipt list failed")
+        })
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "Receipt list blocking task failed");
+        internal_error_response("Receipt list failed")
+    })?
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
@@ -235,39 +350,14 @@ async fn handle_broadcast(
 async fn handle_status(
     State(api): State<Arc<NodeApiState>>,
 ) -> Result<Json<NodeStatusResponse>, (StatusCode, String)> {
-    let (round, height, validators, is_validator) = {
-        let s = api.reactor_state.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Reactor state unavailable".to_string(),
-            )
-        })?;
-        let committed_height = u64::try_from(s.consensus.committed.len()).map_err(|_| {
-            tracing::error!(
-                committed_len = s.consensus.committed.len(),
-                "Committed height cannot be represented as u64"
-            );
-            internal_error_response("Consensus status unavailable")
-        })?;
-        (
-            s.consensus.current_round,
-            committed_height,
-            s.consensus
-                .config
-                .validators
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>(),
-            s.is_validator,
-        )
-    };
+    let snapshot = read_node_status_snapshot(Arc::clone(&api.reactor_state)).await?;
 
     Ok(Json(NodeStatusResponse {
-        consensus_round: round,
-        committed_height: height,
-        validator_count: validators.len(),
-        is_validator,
-        validators,
+        consensus_round: snapshot.consensus_round,
+        committed_height: snapshot.committed_height,
+        validator_count: snapshot.validators.len(),
+        is_validator: snapshot.is_validator,
+        validators: snapshot.validators,
     }))
 }
 
@@ -358,15 +448,7 @@ async fn handle_validator_change(
         let change = match req.action.as_str() {
             "add" => ValidatorChange::AddValidator { did: did.clone() },
             "remove" => {
-                let validator_count = {
-                    let s = api.reactor_state.lock().map_err(|_| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Reactor state unavailable".to_string(),
-                        )
-                    })?;
-                    s.consensus.config.validators.len()
-                };
+                let validator_count = read_validator_count(Arc::clone(&api.reactor_state)).await?;
                 if validator_count <= 4 {
                     return Err((
                         StatusCode::CONFLICT,
@@ -434,18 +516,7 @@ async fn handle_receipt_by_hash(
     arr.copy_from_slice(&hash_bytes);
     let hash = Hash256::from_bytes(arr);
 
-    let receipt = {
-        let st = api.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Store unavailable".to_string(),
-            )
-        })?;
-        st.load_receipt(&hash).map_err(|e| {
-            tracing::error!(err = %e, "Receipt lookup failed");
-            internal_error_response("Receipt lookup failed")
-        })?
-    };
+    let receipt = load_receipt_by_hash(Arc::clone(&api.store), hash).await?;
 
     match receipt {
         Some(r) => Ok(Json(ReceiptResponse::from(r))),
@@ -467,18 +538,7 @@ async fn handle_receipts_list(
 
     let limit = q.limit.unwrap_or(50).min(500);
 
-    let receipts = {
-        let st = api.store.lock().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Store unavailable".to_string(),
-            )
-        })?;
-        st.load_receipts_by_actor(&actor, limit).map_err(|e| {
-            tracing::error!(err = %e, actor = %actor, "Receipt list failed");
-            internal_error_response("Receipt list failed")
-        })?
-    };
+    let receipts = load_receipts_by_actor(Arc::clone(&api.store), actor, limit).await?;
 
     Ok(Json(
         receipts.into_iter().map(ReceiptResponse::from).collect(),
@@ -697,6 +757,31 @@ mod tests {
         assert!(
             !production.contains(".committed.len() as u64"),
             "status committed height must use checked conversion, not a truncating cast"
+        );
+    }
+
+    #[test]
+    fn async_handlers_do_not_lock_std_mutexes_directly() {
+        let source = include_str!("api.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+        let handlers = production
+            .split("// ---------------------------------------------------------------------------\n// Route handlers")
+            .nth(1)
+            .expect("route handler section")
+            .split("// ---------------------------------------------------------------------------\n// Router construction")
+            .next()
+            .expect("router construction boundary");
+
+        assert!(
+            !handlers.contains(".store.lock()"),
+            "async route handlers must not block runtime workers on store std::sync::Mutex"
+        );
+        assert!(
+            !handlers.contains(".reactor_state.lock()"),
+            "async route handlers must not block runtime workers on reactor std::sync::Mutex"
         );
     }
 
