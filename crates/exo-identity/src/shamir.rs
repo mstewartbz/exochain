@@ -2,6 +2,8 @@
 //!
 //! Constant-time GF(256) field arithmetic to prevent timing side-channels.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::IdentityError;
@@ -63,11 +65,22 @@ impl ShamirConfig {
 }
 
 /// A single share produced by Shamir secret splitting, with a blake3 commitment to the original secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Share {
     pub index: u8,
     pub data: Vec<u8>,
     pub commitment: [u8; 32],
+}
+
+impl fmt::Debug for Share {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Share")
+            .field("index", &self.index)
+            .field("data", &"<redacted>")
+            .field("data_len", &self.data.len())
+            .field("commitment", &self.commitment)
+            .finish()
+    }
 }
 
 /// Split a secret into `config.shares` shares, any `config.threshold` of which can reconstruct it.
@@ -270,6 +283,30 @@ mod tests {
             let recovered = reconstruct(&subset, &config).unwrap();
             assert_eq!(recovered, secret);
         }
+    }
+
+    #[test]
+    fn share_debug_redacts_secret_share_data() {
+        let share = Share {
+            index: 1,
+            data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            commitment: [0x42; 32],
+        };
+
+        let debug = format!("{share:?}");
+
+        assert!(
+            !debug.contains("222, 173, 190, 239"),
+            "Debug output must not expose raw Shamir share data"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug output must make share data redaction explicit"
+        );
+        assert!(
+            debug.contains("data_len"),
+            "Debug output should retain non-sensitive share length context"
+        );
     }
 
     #[test]

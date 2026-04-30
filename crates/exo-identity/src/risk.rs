@@ -1,5 +1,7 @@
 //! Risk attestation for identity adjudication.
 
+use std::fmt;
+
 use exo_core::{Did, PublicKey, SecretKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +24,7 @@ pub enum RiskLevel {
 }
 
 /// A signed risk assessment binding a subject DID to a risk level with expiry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RiskAttestation {
     pub subject_did: Did,
     pub attester_did: Did,
@@ -31,6 +33,20 @@ pub struct RiskAttestation {
     pub timestamp: Timestamp,
     pub expiry: Timestamp,
     pub signature: Signature,
+}
+
+impl fmt::Debug for RiskAttestation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RiskAttestation")
+            .field("subject_did", &self.subject_did)
+            .field("attester_did", &self.attester_did)
+            .field("level", &self.level)
+            .field("evidence_hash", &"<redacted>")
+            .field("timestamp", &self.timestamp)
+            .field("expiry", &self.expiry)
+            .field("signature", &"<redacted>")
+            .finish()
+    }
 }
 
 impl From<RiskLevel> for u8 {
@@ -270,6 +286,34 @@ mod tests {
         att.level = RiskLevel::Critical;
 
         assert!(!verify_attestation(&att, &pk));
+    }
+
+    #[test]
+    fn risk_attestation_debug_redacts_evidence_hash_and_signature() {
+        let attestation = RiskAttestation {
+            subject_did: make_did("debug-subject"),
+            attester_did: make_did("debug-attester"),
+            level: RiskLevel::Medium,
+            evidence_hash: [0x42; 32],
+            timestamp: Timestamp::new(10_000, 0),
+            expiry: Timestamp::new(20_000, 0),
+            signature: Signature::from_bytes([0xAA; 64]),
+        };
+
+        let debug = format!("{attestation:?}");
+
+        assert!(
+            !debug.contains("66, 66"),
+            "Debug output must not expose raw evidence_hash bytes"
+        );
+        assert!(
+            !debug.contains("aaaaaaaa"),
+            "Debug output must not expose signature material"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug output must make redaction explicit"
+        );
     }
 
     #[test]

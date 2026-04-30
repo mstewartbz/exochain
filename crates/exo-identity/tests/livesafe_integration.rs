@@ -11,7 +11,7 @@
 use exo_core::Did;
 use exo_identity::{
     pace::{PaceConfig, PaceState, deescalate, escalate, resolve_operator},
-    shamir::{ShamirConfig, reconstruct, split},
+    shamir::{ShamirConfig, Share, reconstruct, split},
 };
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,10 @@ use exo_identity::{
 // ---------------------------------------------------------------------------
 
 fn did(label: &str) -> Did {
-    Did::new(&format!("did:exo:{label}")).expect("valid DID")
+    match Did::new(&format!("did:exo:{label}")) {
+        Ok(did) => did,
+        Err(err) => panic!("test fixture DID must be valid for label {label}: {err}"),
+    }
 }
 
 fn livesafe_pace_config() -> PaceConfig {
@@ -28,6 +31,41 @@ fn livesafe_pace_config() -> PaceConfig {
         alternates: vec![did("livesafe:alt1"), did("livesafe:alt2")],
         contingency: vec![did("livesafe:cont1")],
         emergency: vec![did("livesafe:emerg1")],
+    }
+}
+
+fn escalate_ok(state: &mut PaceState) -> PaceState {
+    match escalate(state) {
+        Ok(next_state) => next_state,
+        Err(err) => panic!("expected PACE escalation to succeed: {err}"),
+    }
+}
+
+fn deescalate_ok(state: &mut PaceState) -> PaceState {
+    match deescalate(state) {
+        Ok(next_state) => next_state,
+        Err(err) => panic!("expected PACE de-escalation to succeed: {err}"),
+    }
+}
+
+fn split_ok(secret: &[u8], config: &ShamirConfig) -> Vec<Share> {
+    match split(secret, config) {
+        Ok(shares) => shares,
+        Err(err) => panic!("expected Shamir split to succeed: {err}"),
+    }
+}
+
+fn reconstruct_ok(shares: &[Share], config: &ShamirConfig) -> Vec<u8> {
+    match reconstruct(shares, config) {
+        Ok(secret) => secret,
+        Err(err) => panic!("expected Shamir reconstruct to succeed: {err}"),
+    }
+}
+
+fn reconstruct_error(shares: &[Share], config: &ShamirConfig) -> String {
+    match reconstruct(shares, config) {
+        Ok(secret) => panic!("expected Shamir reconstruct to fail, recovered {secret:?}"),
+        Err(err) => format!("{err:?}"),
     }
 }
 
@@ -46,7 +84,10 @@ fn test_pace_config_creation() {
     assert_eq!(config.emergency.len(), 1);
 
     // Validation passes.
-    config.validate().expect("valid LiveSafe PACE config");
+    assert!(
+        config.validate().is_ok(),
+        "valid LiveSafe PACE config must pass validation"
+    );
 }
 
 #[test]
@@ -106,13 +147,13 @@ fn test_pace_state_transitions() {
 
     // Full escalation path.
     let mut s = PaceState::Normal;
-    assert_eq!(escalate(&mut s).unwrap(), PaceState::AlternateActive);
+    assert_eq!(escalate_ok(&mut s), PaceState::AlternateActive);
     assert_eq!(s, PaceState::AlternateActive);
 
-    assert_eq!(escalate(&mut s).unwrap(), PaceState::ContingencyActive);
+    assert_eq!(escalate_ok(&mut s), PaceState::ContingencyActive);
     assert_eq!(s, PaceState::ContingencyActive);
 
-    assert_eq!(escalate(&mut s).unwrap(), PaceState::EmergencyActive);
+    assert_eq!(escalate_ok(&mut s), PaceState::EmergencyActive);
     assert_eq!(s, PaceState::EmergencyActive);
 
     // Cannot escalate beyond Emergency.
@@ -122,9 +163,9 @@ fn test_pace_state_transitions() {
     );
 
     // Full de-escalation path from Emergency back to Normal.
-    assert_eq!(deescalate(&mut s).unwrap(), PaceState::ContingencyActive);
-    assert_eq!(deescalate(&mut s).unwrap(), PaceState::AlternateActive);
-    assert_eq!(deescalate(&mut s).unwrap(), PaceState::Normal);
+    assert_eq!(deescalate_ok(&mut s), PaceState::ContingencyActive);
+    assert_eq!(deescalate_ok(&mut s), PaceState::AlternateActive);
+    assert_eq!(deescalate_ok(&mut s), PaceState::Normal);
 
     // Cannot de-escalate below Normal.
     assert!(
@@ -169,21 +210,21 @@ fn test_pace_escalate_deescalate() {
     let mut state = PaceState::Normal;
 
     // Escalate to Alternate.
-    escalate(&mut state).unwrap();
+    escalate_ok(&mut state);
     assert_eq!(
         resolve_operator(&config, &state).as_str(),
         "did:exo:livesafe:alt1"
     );
 
     // Escalate further to Contingency.
-    escalate(&mut state).unwrap();
+    escalate_ok(&mut state);
     assert_eq!(
         resolve_operator(&config, &state).as_str(),
         "did:exo:livesafe:cont1"
     );
 
     // De-escalate back to Alternate.
-    deescalate(&mut state).unwrap();
+    deescalate_ok(&mut state);
     assert_eq!(state, PaceState::AlternateActive);
     assert_eq!(
         resolve_operator(&config, &state).as_str(),
@@ -191,7 +232,7 @@ fn test_pace_escalate_deescalate() {
     );
 
     // De-escalate back to Normal.
-    deescalate(&mut state).unwrap();
+    deescalate_ok(&mut state);
     assert_eq!(state, PaceState::Normal);
     assert_eq!(
         resolve_operator(&config, &state).as_str(),
@@ -212,12 +253,12 @@ fn test_shamir_split_reconstruct() {
         shares: 5,
     };
 
-    let shares = split(secret, &config).expect("split must succeed");
+    let shares = split_ok(secret, &config);
     assert_eq!(shares.len(), 5, "must produce exactly 5 shares");
 
     // Reconstruct with exactly the threshold number of shares.
     let subset: Vec<_> = shares.iter().take(3).cloned().collect();
-    let recovered = reconstruct(&subset, &config).expect("reconstruct must succeed");
+    let recovered = reconstruct_ok(&subset, &config);
     assert_eq!(recovered, secret, "recovered secret must match original");
 
     // All shares carry the same commitment.
@@ -237,13 +278,13 @@ fn test_shamir_split_reconstruct_any_threshold_subset() {
         threshold: 2,
         shares: 4,
     };
-    let shares = split(secret, &config).unwrap();
+    let shares = split_ok(secret, &config);
 
     // Any 2-of-4 combination must reconstruct correctly.
     for i in 0..4 {
         for j in (i + 1)..4 {
             let subset = vec![shares[i].clone(), shares[j].clone()];
-            let recovered = reconstruct(&subset, &config).unwrap();
+            let recovered = reconstruct_ok(&subset, &config);
             assert_eq!(recovered, secret, "combo ({i},{j}) must reconstruct");
         }
     }
@@ -260,15 +301,13 @@ fn test_shamir_insufficient_shares() {
         threshold: 3,
         shares: 5,
     };
-    let shares = split(secret, &config).unwrap();
+    let shares = split_ok(secret, &config);
 
     // Provide only 2 shares when 3 are required.
     let insufficient: Vec<_> = shares.iter().take(2).cloned().collect();
-    let err = reconstruct(&insufficient, &config)
-        .expect_err("reconstruct with fewer than threshold shares must fail");
+    let err_str = reconstruct_error(&insufficient, &config);
 
     // The error must name the required and provided counts.
-    let err_str = format!("{err:?}");
     assert!(
         err_str.contains('3') && err_str.contains('2'),
         "error must indicate need=3, got=2; got: {err_str}"
@@ -294,7 +333,7 @@ fn test_pace_operator_continuity() {
     assert_eq!(resolve_operator(&config, &state), &primary);
 
     // After escalation, operator must change.
-    escalate(&mut state).unwrap();
+    escalate_ok(&mut state);
     let alternate = resolve_operator(&config, &state).clone();
     assert_ne!(alternate, primary, "alternate must differ from primary");
     assert_eq!(alternate.as_str(), "did:exo:livesafe:alt1");
@@ -303,6 +342,6 @@ fn test_pace_operator_continuity() {
     assert_eq!(resolve_operator(&config, &state), &alternate);
 
     // After de-escalation back to Normal, primary is restored.
-    deescalate(&mut state).unwrap();
+    deescalate_ok(&mut state);
     assert_eq!(resolve_operator(&config, &state), &primary);
 }

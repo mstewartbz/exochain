@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp, hash::hash_structured};
 use serde::Serialize;
@@ -36,12 +36,36 @@ const VERIFICATION_CEREMONY_PROOF_MATERIAL_HASH_DOMAIN: &str =
 const VERIFICATION_CEREMONY_PROOF_MATERIAL_HASH_SCHEMA_VERSION: u16 = 1;
 pub const VERIFICATION_CEREMONY_EXPIRY_WINDOW_MS: u64 = 3_600_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum IdentityProof {
     Signature(Signature, PublicKey, Vec<u8>), // sig, pubkey, message
     Otp(String),
     WebAuthnAssertion(Vec<u8>),
     KycToken(String),
+}
+
+impl fmt::Debug for IdentityProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Signature(signature, public_key, message) => f
+                .debug_struct("Signature")
+                .field("signature", signature)
+                .field("public_key", public_key)
+                .field("message", &"<redacted>")
+                .field("message_len", &message.len())
+                .finish(),
+            Self::Otp(_) => f.debug_struct("Otp").field("token", &"<redacted>").finish(),
+            Self::WebAuthnAssertion(assertion) => f
+                .debug_struct("WebAuthnAssertion")
+                .field("assertion", &"<redacted>")
+                .field("assertion_len", &assertion.len())
+                .finish(),
+            Self::KycToken(_) => f
+                .debug_struct("KycToken")
+                .field("token", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +467,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ceremony.calculate_risk_score(), 3000); // 1000 + 2000
+    }
+
+    #[test]
+    fn identity_proof_debug_redacts_otp_and_kyc_secrets() {
+        let otp = IdentityProof::Otp("super-secret-otp".to_string());
+        let kyc = IdentityProof::KycToken("super-secret-kyc".to_string());
+
+        let otp_debug = format!("{otp:?}");
+        let kyc_debug = format!("{kyc:?}");
+
+        assert!(
+            !otp_debug.contains("super-secret-otp"),
+            "OTP Debug output must redact the token"
+        );
+        assert!(
+            !kyc_debug.contains("super-secret-kyc"),
+            "KYC Debug output must redact the token"
+        );
+        assert!(otp_debug.contains("<redacted>"));
+        assert!(kyc_debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn verification_ceremony_debug_uses_redacted_identity_proofs() {
+        let did = match Did::new("did:exo:redacted-proof") {
+            Ok(did) => did,
+            Err(err) => panic!("test DID must be valid: {err}"),
+        };
+        let mut ceremony =
+            VerificationCeremony::new(did, "sess-redacted".to_string(), Timestamp::new(1000, 0));
+        ceremony
+            .proofs
+            .push(IdentityProof::KycToken("ceremony-secret-kyc".to_string()));
+
+        let debug = format!("{ceremony:?}");
+
+        assert!(
+            !debug.contains("ceremony-secret-kyc"),
+            "VerificationCeremony Debug output must not leak nested proof secrets"
+        );
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
