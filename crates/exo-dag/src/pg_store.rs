@@ -84,6 +84,13 @@ impl PostgresStore {
             .collect()
     }
 
+    /// Decode tip rows returned by Postgres without assuming storage integrity.
+    fn decode_tip_hashes(rows: Vec<(Vec<u8>,)>) -> Result<Vec<Hash256>> {
+        rows.into_iter()
+            .map(|(bytes,)| Self::decode_hash256(&bytes, "tips.hash"))
+            .collect()
+    }
+
     /// Encode a `Signature` to bytes for storage.
     /// Uses serde_json for full enum fidelity (Ed25519, PostQuantum, Hybrid, Empty).
     fn encode_signature(sig: &Signature) -> Result<Vec<u8>> {
@@ -111,6 +118,34 @@ impl PostgresStore {
         })?;
 
         Ok(Timestamp::new(physical_ms, logical))
+    }
+
+    /// Encode a timestamp physical component for PostgreSQL BIGINT storage.
+    fn encode_timestamp_physical_ms(timestamp: Timestamp) -> Result<i64> {
+        Self::encode_u64_as_bigint(timestamp.physical_ms, "dag_nodes.ts_physical_ms")
+    }
+
+    /// Decode a committed height from PostgreSQL BIGINT storage.
+    fn decode_committed_height(height: i64) -> Result<u64> {
+        u64::try_from(height).map_err(|_| {
+            store_err(format!(
+                "invalid dag_committed.height: expected non-negative value, got {height}"
+            ))
+        })
+    }
+
+    /// Encode a DAG height for PostgreSQL BIGINT storage.
+    fn encode_height(height: u64, column: &str) -> Result<i64> {
+        Self::encode_u64_as_bigint(height, column)
+    }
+
+    fn encode_u64_as_bigint(value: u64, column: &str) -> Result<i64> {
+        i64::try_from(value).map_err(|_| {
+            store_err(format!(
+                "invalid {column}: value {value} exceeds PostgreSQL BIGINT maximum {}",
+                i64::MAX
+            ))
+        })
     }
 }
 
@@ -154,8 +189,9 @@ impl DagStore for PostgresStore {
     async fn put(&mut self, node: DagNode) -> Result<()> {
         let parents = Self::encode_parents(&node.parents);
         let sig_bytes = Self::encode_signature(&node.signature)?;
+        let physical_ms = Self::encode_timestamp_physical_ms(node.timestamp)?;
+        let logical = i64::from(node.timestamp.logical);
 
-        #[allow(clippy::as_conversions)]
         sqlx::query(
             "INSERT INTO dag_nodes (hash, parents, payload_hash, creator_did, ts_physical_ms, ts_logical, signature)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -165,8 +201,8 @@ impl DagStore for PostgresStore {
         .bind(&parents)
         .bind(node.payload_hash.as_bytes().as_slice())
         .bind(node.creator_did.as_str())
-        .bind(node.timestamp.physical_ms as i64)
-        .bind(node.timestamp.logical as i64)
+        .bind(physical_ms)
+        .bind(logical)
         .bind(&sig_bytes)
         .execute(&self.pool)
         .await
@@ -198,16 +234,7 @@ impl DagStore for PostgresStore {
         .await
         .map_err(store_err)?;
 
-        let tips = rows
-            .into_iter()
-            .map(|(bytes,)| {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Hash256::from_bytes(arr)
-            })
-            .collect();
-
-        Ok(tips)
+        Self::decode_tip_hashes(rows)
     }
 
     async fn committed_height(&self) -> Result<u64> {
@@ -216,8 +243,7 @@ impl DagStore for PostgresStore {
             .await
             .map_err(store_err)?;
 
-        #[allow(clippy::as_conversions)]
-        Ok(row.0 as u64)
+        Self::decode_committed_height(row.0)
     }
 
     async fn mark_committed(&mut self, hash: &Hash256, height: u64) -> Result<()> {
@@ -225,13 +251,14 @@ impl DagStore for PostgresStore {
             return Err(DagError::NodeNotFound(*hash));
         }
 
-        #[allow(clippy::as_conversions)]
+        let height = Self::encode_height(height, "dag_committed.height")?;
+
         sqlx::query(
             "INSERT INTO dag_committed (hash, height) VALUES ($1, $2)
              ON CONFLICT (hash) DO UPDATE SET height = EXCLUDED.height",
         )
         .bind(hash.as_bytes().as_slice())
-        .bind(height as i64)
+        .bind(height)
         .execute(&self.pool)
         .await
         .map_err(store_err)?;
@@ -353,6 +380,66 @@ mod tests {
 
         assert!(message.contains("ts_physical_ms"));
         assert!(message.contains("expected non-negative"));
+    }
+
+    #[test]
+    fn decode_tip_hashes_rejects_wrong_width_storage() {
+        let err = PostgresStore::decode_tip_hashes(vec![(vec![1u8; 31],)]).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("tips.hash"));
+        assert!(message.contains("expected 32 bytes, got 31"));
+    }
+
+    #[test]
+    fn decode_tip_hashes_preserves_query_order() {
+        let first = Hash256::from_bytes([1u8; 32]);
+        let second = Hash256::from_bytes([2u8; 32]);
+
+        let decoded = PostgresStore::decode_tip_hashes(vec![
+            (first.as_bytes().to_vec(),),
+            (second.as_bytes().to_vec(),),
+        ])
+        .unwrap();
+
+        assert_eq!(decoded, vec![first, second]);
+    }
+
+    #[test]
+    fn decode_committed_height_rejects_negative_storage_values() {
+        let err = PostgresStore::decode_committed_height(-1).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("dag_committed.height"));
+        assert!(message.contains("expected non-negative"));
+    }
+
+    #[test]
+    fn encode_timestamp_rejects_postgres_bigint_overflow() {
+        let err =
+            PostgresStore::encode_timestamp_physical_ms(Timestamp::new(u64::MAX, 0)).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("ts_physical_ms"));
+        assert!(message.contains("exceeds PostgreSQL BIGINT"));
+    }
+
+    #[test]
+    fn encode_height_rejects_postgres_bigint_overflow() {
+        let err = PostgresStore::encode_height(u64::MAX, "dag_committed.height").unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("dag_committed.height"));
+        assert!(message.contains("exceeds PostgreSQL BIGINT"));
+    }
+
+    #[test]
+    fn encode_height_accepts_postgres_bigint_maximum() {
+        let encoded =
+            PostgresStore::encode_height(u64::try_from(i64::MAX).unwrap(), "dag_committed.height")
+                .unwrap();
+
+        assert_eq!(encoded, i64::MAX);
     }
 
     #[tokio::test]
