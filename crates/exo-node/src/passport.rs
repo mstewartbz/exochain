@@ -35,6 +35,7 @@ use crate::{
 
 type PassportError = (StatusCode, String);
 type PassportResult<T> = Result<T, PassportError>;
+const PASSPORT_CONCURRENCY_LIMIT: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -477,14 +478,25 @@ fn build_standing_profile(
 // Router construction
 // ---------------------------------------------------------------------------
 
-/// Build the agent passport API router.
-pub fn passport_router(state: Arc<PassportApiState>) -> Router {
+fn passport_routes(state: Arc<PassportApiState>) -> Router {
     Router::new()
         .route("/api/v1/agents/:did/passport", get(handle_passport))
         .route("/api/v1/agents/:did/delegations", get(handle_delegations))
         .route("/api/v1/agents/:did/consent", get(handle_consent))
         .route("/api/v1/agents/:did/standing", get(handle_standing))
         .with_state(state)
+}
+
+/// Build the agent passport API router.
+pub fn passport_router(state: Arc<PassportApiState>, auth: crate::auth::BearerAuth) -> Router {
+    passport_routes(state)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let auth = auth.clone();
+            crate::auth::require_bearer(auth, req, next)
+        }))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            PASSPORT_CONCURRENCY_LIMIT,
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +598,53 @@ mod tests {
         })
     }
 
+    fn test_passport_auth() -> crate::auth::BearerAuth {
+        crate::auth::BearerAuth {
+            token: Arc::new(zeroize::Zeroizing::new("passport-test-token".to_string())),
+        }
+    }
+
+    fn passport_test_routes(state: Arc<PassportApiState>) -> Router {
+        passport_routes(state)
+    }
+
+    #[tokio::test]
+    async fn passport_get_requires_bearer_token() {
+        let state = test_passport_state();
+        let app = passport_router(state, test_passport_auth());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:v0/passport")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn passport_get_with_bearer_token_passes() {
+        let state = test_passport_state();
+        let app = passport_router(state, test_passport_auth());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:v0/passport")
+                    .header("authorization", "Bearer passport-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn standing_fails_closed_when_claim_read_fails() {
         let state = test_passport_state();
@@ -594,7 +653,7 @@ mod tests {
             zd.inject_read_failure(crate::zerodentity::store::ZerodentityReadFailure::Claims);
         }
 
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -615,7 +674,7 @@ mod tests {
     #[tokio::test]
     async fn passport_returns_profile_for_known_validator() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -643,7 +702,7 @@ mod tests {
     #[tokio::test]
     async fn passport_returns_unknown_for_unrecognized_did() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -667,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn passport_rejects_invalid_did_format() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -685,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn delegations_endpoint_returns_empty_for_known_did() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -707,7 +766,7 @@ mod tests {
     #[tokio::test]
     async fn consent_endpoint_returns_default_deny() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -728,7 +787,7 @@ mod tests {
     #[tokio::test]
     async fn standing_shows_active_for_validator() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -752,7 +811,7 @@ mod tests {
     #[tokio::test]
     async fn standing_shows_unknown_for_unrecognized_did() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -773,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn passport_includes_all_trust_dimensions() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -816,7 +875,7 @@ mod tests {
     #[tokio::test]
     async fn passport_returns_null_zerodentity_when_no_score() {
         let state = test_passport_state();
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -864,7 +923,7 @@ mod tests {
             zd.put_score(score);
         }
 
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
 
         let resp = app
             .oneshot(
@@ -928,7 +987,7 @@ mod tests {
             });
         }
 
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -968,7 +1027,7 @@ mod tests {
             zd.insert_claim("claim-rev", &claim).unwrap();
         }
 
-        let app = passport_router(state);
+        let app = passport_test_routes(state);
         let resp = app
             .oneshot(
                 Request::builder()
