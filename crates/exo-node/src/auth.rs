@@ -9,7 +9,11 @@
 //! layer will be upgraded to Ed25519 DID-signature authentication (as already
 //! implemented in `exo-gateway/src/auth.rs`).
 
-use std::sync::Arc;
+use std::{
+    io::{ErrorKind, Write},
+    path::Path,
+    sync::Arc,
+};
 
 use axum::{
     body::Body,
@@ -17,21 +21,69 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 /// Shared bearer token state for the auth middleware.
 #[derive(Clone)]
 pub struct BearerAuth {
     /// The expected bearer token (hex-encoded 256-bit random value).
-    pub token: Arc<String>,
+    pub token: Arc<Zeroizing<String>>,
 }
 
 /// Generate a cryptographically random admin token (hex-encoded 32 bytes).
 #[must_use]
 #[allow(clippy::expect_used)] // OS entropy failure is unrecoverable.
-pub fn generate_admin_token() -> String {
+pub fn generate_admin_token() -> Zeroizing<String> {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).expect("OS entropy source unavailable");
-    hex::encode(bytes)
+    let token = Zeroizing::new(hex::encode(bytes));
+    bytes.zeroize();
+    token
+}
+
+/// Persist an admin token with restrictive file permissions from creation.
+///
+/// The temporary file is created with `create_new`, and on Unix the `0600` mode
+/// is applied atomically during open rather than by chmod after plaintext has
+/// already hit the filesystem. The final rename preserves restart behavior by
+/// replacing any prior token file.
+pub fn write_admin_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    let tmp_path = path.with_extension("tmp");
+    match std::fs::remove_file(&tmp_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+    }
+
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 /// axum middleware: require bearer token on mutating requests.
@@ -113,7 +165,7 @@ mod tests {
 
     fn test_auth() -> BearerAuth {
         BearerAuth {
-            token: Arc::new("test-token-abc123".to_string()),
+            token: Arc::new(Zeroizing::new("test-token-abc123".to_string())),
         }
     }
 
@@ -203,6 +255,33 @@ mod tests {
     }
 
     #[test]
+    fn admin_token_writer_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_token");
+
+        std::fs::write(&path, "old-token").unwrap();
+        write_admin_token_file(&path, "new-token").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new-token");
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admin_token_writer_creates_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_token");
+
+        write_admin_token_file(&path, "secret-token").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret-token");
+    }
+
+    #[test]
     fn constant_time_eq_matches_equal() {
         assert!(constant_time_eq(b"abcdef", b"abcdef"));
         assert!(constant_time_eq(b"", b""));
@@ -224,5 +303,45 @@ mod tests {
         assert!(!constant_time_eq(b"abcdex", b"abcdef"));
         // Multiple differences
         assert!(!constant_time_eq(b"xxxxxx", b"abcdef"));
+    }
+
+    #[test]
+    fn production_source_uses_zeroizing_admin_token_storage() {
+        let source = include_str!("auth.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("Zeroizing<String>"),
+            "bearer admin token must be stored in zeroize-on-drop storage"
+        );
+        assert!(
+            !production.contains("Arc<String>"),
+            "bearer admin token must not be held in a plain Arc<String>"
+        );
+        assert!(
+            production.contains("bytes.zeroize()"),
+            "raw random token bytes must be wiped after hex encoding"
+        );
+    }
+
+    #[test]
+    fn main_persists_admin_token_through_restrictive_auth_writer() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("auth::write_admin_token_file"),
+            "startup must persist admin tokens through the restrictive auth writer"
+        );
+        assert!(
+            !production.contains("std::fs::write(&token_path, &admin_token)"),
+            "startup must not write the admin token before restrictive permissions are set"
+        );
     }
 }
