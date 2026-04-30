@@ -785,19 +785,26 @@ async fn start_node(
     // Start the Telegram adjutant if configured.
     if let Some(tg_config) = telegram::AdjutantConfig::from_env() {
         tracing::info!("Telegram adjutant configured — starting bot");
-        let adjutant = telegram::Adjutant::new(tg_config);
-        background_tasks.spawn_critical(
-            "Telegram adjutant",
-            telegram::run_adjutant(
-                adjutant,
-                alert_rx,
-                Arc::clone(&reactor_state),
-                Arc::clone(&shared_store),
-                Arc::clone(&challenge_store),
-                Arc::clone(&sentinel_state),
-                Arc::clone(&zerodentity_store),
-            ),
-        );
+        match telegram::Adjutant::new(tg_config) {
+            Ok(adjutant) => {
+                background_tasks.spawn_critical(
+                    "Telegram adjutant",
+                    telegram::run_adjutant(
+                        adjutant,
+                        alert_rx,
+                        Arc::clone(&reactor_state),
+                        Arc::clone(&shared_store),
+                        Arc::clone(&challenge_store),
+                        Arc::clone(&sentinel_state),
+                        Arc::clone(&zerodentity_store),
+                    ),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "Telegram adjutant disabled: HTTP client setup failed");
+                drop(alert_rx);
+            }
+        }
     } else {
         tracing::info!(
             "Telegram adjutant not configured — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable"

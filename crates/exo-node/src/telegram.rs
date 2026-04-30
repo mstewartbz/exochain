@@ -40,6 +40,9 @@ use crate::{
 // Telegram API types (minimal subset)
 // ---------------------------------------------------------------------------
 
+const TELEGRAM_HTTP_TIMEOUT_SECS: u64 = 30;
+const MAX_TELEGRAM_UPDATE_RESPONSE_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Serialize)]
 struct SendMessageRequest {
     chat_id: String,
@@ -64,6 +67,91 @@ struct TelegramResponse<T> {
     #[allow(dead_code)]
     ok: bool,
     result: Option<T>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TelegramUpdateParseError {
+    Oversized { len: u64, max: u64 },
+    Body(String),
+    Json(String),
+}
+
+impl std::fmt::Display for TelegramUpdateParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Oversized { len, max } => {
+                write!(f, "telegram update response too large: {len} bytes > {max}")
+            }
+            Self::Body(error) => write!(f, "telegram update response body failed: {error}"),
+            Self::Json(error) => write!(f, "telegram update response parse failed: {error}"),
+        }
+    }
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn u64_to_usize_cap(value: u64, cap: usize) -> usize {
+    match usize::try_from(value) {
+        Ok(converted) => converted.min(cap),
+        Err(_) => cap,
+    }
+}
+
+async fn read_bounded_response_body(
+    mut resp: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, TelegramUpdateParseError> {
+    let max_u64 = usize_to_u64_saturating(max);
+    if let Some(content_length) = resp.content_length() {
+        if content_length > max_u64 {
+            return Err(TelegramUpdateParseError::Oversized {
+                len: content_length,
+                max: max_u64,
+            });
+        }
+    }
+
+    let initial_capacity = resp
+        .content_length()
+        .map_or(0, |len| u64_to_usize_cap(len, max));
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|error| TelegramUpdateParseError::Body(error.to_string()))?
+    {
+        let next_len = usize_to_u64_saturating(body.len())
+            .saturating_add(usize_to_u64_saturating(chunk.len()));
+        if next_len > max_u64 {
+            return Err(TelegramUpdateParseError::Oversized {
+                len: next_len,
+                max: max_u64,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+async fn read_telegram_update_body(
+    resp: reqwest::Response,
+) -> Result<Vec<u8>, TelegramUpdateParseError> {
+    read_bounded_response_body(resp, MAX_TELEGRAM_UPDATE_RESPONSE_BYTES).await
+}
+
+fn parse_updates_response(bytes: &[u8]) -> Result<Vec<Update>, TelegramUpdateParseError> {
+    let len = usize_to_u64_saturating(bytes.len());
+    let max = usize_to_u64_saturating(MAX_TELEGRAM_UPDATE_RESPONSE_BYTES);
+    if len > max {
+        return Err(TelegramUpdateParseError::Oversized { len, max });
+    }
+
+    let parsed: TelegramResponse<Vec<Update>> = serde_json::from_slice(bytes)
+        .map_err(|error| TelegramUpdateParseError::Json(error.to_string()))?;
+    Ok(parsed.result.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,13 +240,17 @@ pub struct Adjutant {
 
 impl Adjutant {
     /// Create a new adjutant.
-    #[must_use]
-    pub fn new(config: AdjutantConfig) -> Self {
-        Self {
+    pub fn new(config: AdjutantConfig) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(TELEGRAM_HTTP_TIMEOUT_SECS))
+            .build()
+            .map_err(|error| format!("telegram HTTP client: {error}"))?;
+
+        Ok(Self {
             config,
-            client: reqwest::Client::new(),
+            client,
             last_update_id: 0,
-        }
+        })
     }
 
     /// Telegram Bot API base URL.
@@ -229,22 +321,27 @@ impl Adjutant {
             }
         };
 
-        let parsed: TelegramResponse<Vec<Update>> = match resp.json().await {
-            Ok(p) => p,
+        let bytes = match read_telegram_update_body(resp).await {
+            Ok(bytes) => bytes,
             Err(e) => {
-                tracing::debug!(err = %e, "Telegram parse failed");
+                tracing::debug!(err = %e, "Telegram update body read failed");
                 return Vec::new();
             }
         };
 
-        if let Some(updates) = parsed.result {
-            if let Some(last) = updates.last() {
-                self.last_update_id = last.update_id;
+        let updates = match parse_updates_response(bytes.as_ref()) {
+            Ok(updates) => updates,
+            Err(e) => {
+                tracing::debug!(err = %e, "Telegram update response rejected");
+                return Vec::new();
             }
-            updates
-        } else {
-            Vec::new()
+        };
+
+        if let Some(last) = updates.last() {
+            self.last_update_id = last.update_id;
         }
+
+        updates
     }
 
     /// Acknowledge a callback query (removes the "loading" indicator).
@@ -955,6 +1052,25 @@ mod tests {
         })
     }
 
+    async fn response_from_raw_http(raw: Vec<u8>) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _bytes_read = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &raw)
+                .await
+                .unwrap();
+        });
+
+        reqwest::Client::new()
+            .get(format!("http://{addr}/updates"))
+            .send()
+            .await
+            .unwrap()
+    }
+
     fn score_snapshot(
         did: &Did,
         composite: u32,
@@ -1103,6 +1219,122 @@ mod tests {
                 "Telegram callback handler must not call sync builder {builder} directly"
             );
         }
+    }
+
+    #[test]
+    fn adjutant_http_client_uses_timeout() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let new_adjutant = production
+            .split("pub fn new(config: AdjutantConfig)")
+            .nth(1)
+            .and_then(|section| section.split("/// Telegram Bot API base URL.").next())
+            .unwrap();
+
+        assert!(new_adjutant.contains("reqwest::Client::builder()"));
+        assert!(
+            new_adjutant
+                .contains(".timeout(std::time::Duration::from_secs(TELEGRAM_HTTP_TIMEOUT_SECS))")
+        );
+        assert!(!new_adjutant.contains("reqwest::Client::new()"));
+    }
+
+    #[test]
+    fn poll_updates_uses_bounded_response_body_before_deserialization() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let poll_updates = production
+            .split("pub async fn poll_updates")
+            .nth(1)
+            .and_then(|section| section.split("/// Acknowledge a callback query").next())
+            .unwrap();
+
+        assert!(!poll_updates.contains(".json().await"));
+        assert!(!poll_updates.contains(".bytes().await"));
+        assert!(poll_updates.contains("read_telegram_update_body"));
+        assert!(poll_updates.contains("parse_updates_response"));
+    }
+
+    #[tokio::test]
+    async fn read_bounded_response_body_rejects_oversized_content_length() {
+        let max = 8;
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", max + 1);
+        let resp = response_from_raw_http(raw.into_bytes()).await;
+
+        let err = read_bounded_response_body(resp, max)
+            .await
+            .expect_err("oversized content-length must fail before body read");
+
+        assert_eq!(
+            err,
+            TelegramUpdateParseError::Oversized {
+                len: 9,
+                max: usize_to_u64_saturating(max),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn read_bounded_response_body_rejects_chunked_body_after_limit() {
+        let resp = response_from_raw_http(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n12345678\r\n1\r\n9\r\n0\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+
+        let err = read_bounded_response_body(resp, 8)
+            .await
+            .expect_err("streaming body exceeding the limit must fail");
+
+        assert_eq!(err, TelegramUpdateParseError::Oversized { len: 9, max: 8 });
+    }
+
+    #[tokio::test]
+    async fn read_bounded_response_body_accepts_body_within_limit() {
+        let resp = response_from_raw_http(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+
+        let body = read_bounded_response_body(resp, 8)
+            .await
+            .expect("body within limit must pass");
+
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn parse_updates_response_rejects_oversized_body() {
+        let bytes = vec![b' '; MAX_TELEGRAM_UPDATE_RESPONSE_BYTES + 1];
+
+        let err = parse_updates_response(&bytes).expect_err("oversized response must fail");
+
+        assert_eq!(
+            err,
+            TelegramUpdateParseError::Oversized {
+                len: usize_to_u64_saturating(MAX_TELEGRAM_UPDATE_RESPONSE_BYTES + 1),
+                max: usize_to_u64_saturating(MAX_TELEGRAM_UPDATE_RESPONSE_BYTES),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_updates_response_accepts_valid_updates() {
+        let updates = parse_updates_response(
+            br#"{"ok":true,"result":[{"update_id":42,"message":{"text":"/status","chat":{"id":7}}}]}"#,
+        )
+        .expect("valid Telegram update response");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].update_id, 42);
+        assert!(updates[0].message.is_some());
     }
 
     #[test]
