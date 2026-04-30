@@ -260,7 +260,7 @@ impl BudgetLedger {
                     }
             })
             .map(|e| e.amount)
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Check enforcement for a specific scope.
@@ -695,6 +695,38 @@ mod tests {
             ledger.total_spent(&BudgetScope::Company, &BudgetMetric::BilledCents),
             300
         );
+    }
+
+    #[test]
+    fn total_spent_saturates_overflow_and_preserves_hard_stop() {
+        let mut ledger = BudgetLedger::new();
+        assert!(
+            ledger
+                .add_policy(make_policy(BudgetScope::Company, 100))
+                .is_ok()
+        );
+        assert!(
+            ledger
+                .record_cost(make_cost(OdaSlot::VentureCommander, u64::MAX))
+                .is_ok()
+        );
+        assert!(
+            ledger
+                .record_cost(make_cost(OdaSlot::GrowthEngineer1, 1))
+                .is_ok()
+        );
+
+        assert_eq!(
+            ledger.total_spent(&BudgetScope::Company, &BudgetMetric::BilledCents),
+            u64::MAX
+        );
+        assert!(matches!(
+            ledger.check_enforcement(&BudgetScope::Company),
+            BudgetVerdict::HardStop {
+                spent: u64::MAX,
+                limit: 100
+            }
+        ));
     }
 
     #[test]
