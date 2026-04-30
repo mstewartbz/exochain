@@ -17,6 +17,8 @@ use exo_dag::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const MAX_WIRE_MESSAGE_BYTES: usize = 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Wire message envelope
 // ---------------------------------------------------------------------------
@@ -204,12 +206,23 @@ pub struct StateSnapshotChunkMsg {
 pub fn encode(msg: &WireMessage) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     ciborium::into_writer(msg, &mut buf).map_err(|e| format!("CBOR encode: {e}"))?;
+    ensure_wire_message_size(buf.len())?;
     Ok(buf)
 }
 
 /// Decode a wire message from CBOR bytes.
 pub fn decode(bytes: &[u8]) -> Result<WireMessage, String> {
+    ensure_wire_message_size(bytes.len())?;
     ciborium::from_reader(bytes).map_err(|e| format!("CBOR decode: {e}"))
+}
+
+fn ensure_wire_message_size(size: usize) -> Result<(), String> {
+    if size > MAX_WIRE_MESSAGE_BYTES {
+        return Err(format!(
+            "wire message exceeds {MAX_WIRE_MESSAGE_BYTES} byte limit: {size} bytes"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -351,5 +364,35 @@ mod tests {
         let bytes1 = encode(&msg).unwrap();
         let bytes2 = encode(&msg).unwrap();
         assert_eq!(bytes1, bytes2, "CBOR encoding must be deterministic");
+    }
+
+    #[test]
+    fn decode_rejects_oversized_wire_message_before_cbor() {
+        let oversized = vec![0u8; MAX_WIRE_MESSAGE_BYTES + 1];
+
+        let err = decode(&oversized).expect_err("oversized inbound frame must fail");
+
+        assert!(err.contains(&format!(
+            "wire message exceeds {MAX_WIRE_MESSAGE_BYTES} byte limit"
+        )));
+    }
+
+    #[test]
+    fn encode_rejects_oversized_wire_message() {
+        let msg = WireMessage::GovernanceEvent(GovernanceEventMsg {
+            sender: test_did(),
+            event_type: GovernanceEventType::AuditEntry,
+            payload: vec![0xA5; MAX_WIRE_MESSAGE_BYTES + 1],
+            timestamp: Timestamp::new(1000, 1),
+            signature: Signature::from_bytes([3u8; 64]),
+        });
+
+        let result = encode(&msg);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+
+        assert!(err.contains(&format!(
+            "wire message exceeds {MAX_WIRE_MESSAGE_BYTES} byte limit"
+        )));
     }
 }
