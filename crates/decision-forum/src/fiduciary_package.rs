@@ -64,9 +64,7 @@ impl ProngDisinterestedness {
         if eligible == 0 {
             return 0;
         }
-        let numer = u64::try_from(self.disinterested_voters).unwrap_or(0);
-        let denom = u64::try_from(eligible).unwrap_or(1);
-        (numer * 10_000 / denom).min(10_000)
+        score_ratio_bps(self.disinterested_voters, eligible)
     }
 }
 
@@ -95,10 +93,18 @@ impl ProngInformedBasis {
         if self.total_voters == 0 {
             return 0;
         }
-        let numer = u64::try_from(self.voters_who_reviewed).unwrap_or(0);
-        let denom = u64::try_from(self.total_voters).unwrap_or(1);
-        (numer * 10_000 / denom).min(10_000)
+        score_ratio_bps(self.voters_who_reviewed, self.total_voters)
     }
+}
+
+fn score_ratio_bps(numerator: usize, denominator: usize) -> u64 {
+    if denominator == 0 {
+        return 0;
+    }
+    let numerator = u128::try_from(numerator).unwrap_or(u128::MAX);
+    let denominator = u128::try_from(denominator).unwrap_or(u128::MAX);
+    let bps = numerator.saturating_mul(10_000) / denominator;
+    u64::try_from(bps.min(10_000)).unwrap_or(10_000)
 }
 
 /// Evidence for BJR Prong 3: Good Faith.
@@ -554,6 +560,31 @@ mod tests {
         // All-zero inputs should produce 0 bps
         assert_eq!(p1.score_bps(), 0);
         assert_eq!(p2.score_bps(), 0);
+    }
+
+    #[test]
+    fn disinterestedness_score_handles_deserialized_extreme_counts_without_overflow() {
+        let p1 = ProngDisinterestedness {
+            total_members: 1,
+            recused_count: 0,
+            disinterested_voters: usize::MAX,
+            majority_disinterested: true,
+            disclosure_record_hashes: vec![],
+        };
+
+        assert_eq!(p1.score_bps(), 10_000);
+    }
+
+    #[test]
+    fn informed_basis_score_handles_deserialized_extreme_counts_without_overflow() {
+        let p2 = ProngInformedBasis {
+            voters_who_reviewed: usize::MAX,
+            total_voters: 1,
+            evidence_manifest_hashes: vec![],
+            materials_complete_before_vote: true,
+        };
+
+        assert_eq!(p2.score_bps(), 10_000);
     }
 
     #[test]
