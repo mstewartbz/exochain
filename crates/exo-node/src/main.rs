@@ -131,6 +131,12 @@ fn parse_seed_addrs(seed: &[String]) -> anyhow::Result<Vec<libp2p::Multiaddr>> {
     Ok(parsed)
 }
 
+fn derive_quic_port(p2p_port: u16) -> anyhow::Result<u16> {
+    p2p_port.checked_add(1).ok_or_else(|| {
+        anyhow::anyhow!("p2p port {p2p_port} cannot reserve adjacent QUIC port without overflow")
+    })
+}
+
 fn parse_public_key_hex(value: &str) -> anyhow::Result<PublicKey> {
     let bytes = hex::decode(value)?;
     if bytes.len() != 32 {
@@ -299,7 +305,7 @@ async fn start_node(
     // Start P2P networking.
     let net_config = NetworkConfig {
         tcp_port: p2p_port,
-        quic_port: p2p_port + 1,
+        quic_port: derive_quic_port(p2p_port)?,
         seed_addrs: seed_addrs.clone(),
         node_did: node_identity.did.clone(),
     };
@@ -1046,5 +1052,19 @@ mod tests {
         assert_eq!(addrs[0].to_string(), "/ip4/127.0.0.1/tcp/4001");
         assert_eq!(addrs[1].to_string(), "/ip4/192.0.2.10/tcp/4002");
         assert_eq!(addrs[2].to_string(), "/dns4/seed1.exochain.io/tcp/4003");
+    }
+
+    #[test]
+    fn derive_quic_port_uses_adjacent_port_when_available() {
+        assert_eq!(derive_quic_port(4001).unwrap(), 4002);
+    }
+
+    #[test]
+    fn derive_quic_port_rejects_overflowing_port() {
+        let err = derive_quic_port(u16::MAX).unwrap_err();
+        let text = err.to_string();
+
+        assert!(text.contains("65535"));
+        assert!(text.contains("QUIC"));
     }
 }
