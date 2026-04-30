@@ -15,6 +15,13 @@ use serde::{Deserialize, Serialize};
 /// Tenant identifier — opaque string, unique per organization.
 pub type TenantId = String;
 
+/// Financial commitment threshold at or above which human approval is required.
+///
+/// Stored in cents to preserve deterministic integer arithmetic. This keeps
+/// low-value operational spend below the human gate while preventing AI-only
+/// authorization of material financial commitments.
+pub const FINANCIAL_HUMAN_GATE_THRESHOLD_CENTS: u64 = 100_000;
+
 /// Semantic version for constitutional documents.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SemVer {
@@ -68,14 +75,20 @@ pub enum DecisionClass {
 impl DecisionClass {
     /// Returns true if this class requires a human gate (TNC-02).
     ///
-    /// Constitutional, Strategic, and Emergency decisions MUST have human
-    /// approval — AI agents alone cannot authorize these decision classes.
+    /// Constitutional, Strategic, Emergency, and material Financial decisions
+    /// MUST have human approval — AI agents alone cannot authorize these
+    /// decision classes.
     #[must_use]
     pub fn requires_human_gate(&self) -> bool {
-        matches!(
-            self,
-            DecisionClass::Constitutional | DecisionClass::Strategic | DecisionClass::Emergency
-        )
+        match self {
+            DecisionClass::Constitutional | DecisionClass::Strategic | DecisionClass::Emergency => {
+                true
+            }
+            DecisionClass::Financial { threshold_cents } => {
+                *threshold_cents >= FINANCIAL_HUMAN_GATE_THRESHOLD_CENTS
+            }
+            DecisionClass::Operational | DecisionClass::Custom(_) => false,
+        }
     }
 }
 
@@ -97,7 +110,7 @@ pub enum SignerType {
 ///
 /// Extends a bare cryptographic signature with identity and role context,
 /// enabling audit trails to distinguish human from AI attestations.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GovernanceSignature {
     /// DID of the signer.
     pub signer: Did,
@@ -109,6 +122,18 @@ pub struct GovernanceSignature {
     pub key_version: u64,
     /// Timestamp of signature.
     pub timestamp: Timestamp,
+}
+
+impl std::fmt::Debug for GovernanceSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GovernanceSignature")
+            .field("signer", &self.signer)
+            .field("signer_type", &self.signer_type)
+            .field("signature", &"[REDACTED]")
+            .field("key_version", &self.key_version)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
 }
 
 /// Actions that can be authorized via delegation.
@@ -184,6 +209,45 @@ mod tests {
             }
             .requires_human_gate()
         );
+    }
+
+    #[test]
+    fn test_financial_decision_requires_human_gate_at_threshold() {
+        assert!(
+            !DecisionClass::Financial {
+                threshold_cents: 99_999
+            }
+            .requires_human_gate()
+        );
+        assert!(
+            DecisionClass::Financial {
+                threshold_cents: 100_000
+            }
+            .requires_human_gate()
+        );
+        assert!(
+            DecisionClass::Financial {
+                threshold_cents: u64::MAX
+            }
+            .requires_human_gate()
+        );
+    }
+
+    #[test]
+    fn test_governance_signature_debug_redacts_signature_material() {
+        let signature = GovernanceSignature {
+            signer: Did::new("did:exo:secretary").expect("valid"),
+            signer_type: SignerType::Human,
+            signature: Signature::Ed25519([7_u8; 64]),
+            key_version: 3,
+            timestamp: Timestamp::new(1000, 0),
+        };
+
+        let debug = format!("{signature:?}");
+        assert!(debug.contains("GovernanceSignature"));
+        assert!(debug.contains("signature: \"[REDACTED]\""));
+        assert!(!debug.contains("Ed25519"));
+        assert!(!debug.contains("7, 7"));
     }
 
     #[test]
