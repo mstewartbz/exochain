@@ -515,6 +515,7 @@ async fn start_node(
             root_did: holon_authority_did,
             root_public_key: holon_authority_public_key,
             root_signer: holon_authority_signer,
+            provenance_timestamp_source: holons::hlc_provenance_timestamp_source(),
             topology_interval_secs: 60,
             scaling_interval_secs: 300,
             health_interval_secs: 30,
