@@ -138,7 +138,7 @@ mod tests {
     use super::*;
     use crate::{
         error::IdentityError,
-        registry::{DidRegistry, LocalDidRegistry},
+        registry::{DidRegistry, LocalDidRegistry, revocation_proof_payload},
     };
 
     fn make_did(label: &str) -> Did {
@@ -203,9 +203,10 @@ mod tests {
         let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
+        let payload = revocation_proof_payload(&did).expect("revocation payload");
         let proof = RevocationProof {
             did: did.clone(),
-            signature: sign(did.as_str().as_bytes(), &sk),
+            signature: sign(&payload, &sk),
         };
         reg.revoke(&did, &proof).unwrap();
         assert!(reg.resolve(&did).is_none());
@@ -215,9 +216,10 @@ mod tests {
     fn revoke_unknown_did_fails() {
         let (_pk, sk) = generate_keypair();
         let did = make_did("unknown");
+        let payload = revocation_proof_payload(&did).expect("revocation payload");
         let proof = RevocationProof {
             did: did.clone(),
-            signature: sign(did.as_str().as_bytes(), &sk),
+            signature: sign(&payload, &sk),
         };
 
         let mut reg = LocalDidRegistry::new();
@@ -235,9 +237,10 @@ mod tests {
         reg.register(doc).unwrap();
 
         let (_pk2, sk2) = generate_keypair();
+        let payload = revocation_proof_payload(&did).expect("revocation payload");
         let proof = RevocationProof {
             did: did.clone(),
-            signature: sign(did.as_str().as_bytes(), &sk2),
+            signature: sign(&payload, &sk2),
         };
         let err = reg.revoke(&did, &proof).unwrap_err();
         assert!(matches!(err, IdentityError::InvalidRevocationProof(_)));
@@ -285,9 +288,10 @@ mod tests {
         let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
+        let payload = revocation_proof_payload(&did).expect("revocation payload");
         let revocation = RevocationProof {
             did: did.clone(),
-            signature: sign(did.as_str().as_bytes(), &sk),
+            signature: sign(&payload, &sk),
         };
         reg.revoke(&did, &revocation).unwrap();
 

@@ -27,6 +27,9 @@ pub enum IdentityError {
     #[error("invalid revocation proof for DID: {0}")]
     InvalidRevocationProof(Did),
 
+    #[error("revocation proof payload encoding failed for DID {did}: {reason}")]
+    RevocationProofPayloadEncoding { did: Did, reason: String },
+
     #[error("public key not found on DID: {0}")]
     KeyNotFound(Did),
 
