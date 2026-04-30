@@ -38,6 +38,7 @@ use tower_http::trace::TraceLayer;
 /// dedicated streaming endpoints that override this cap with
 /// `DefaultBodyLimit::disable()` at the route level. (A-022)
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+const MAX_DID_DOCUMENT_BODY_BYTES: usize = 64 * 1024;
 
 use crate::{
     auth::{AuthenticatedActor, AuthenticationMetadata, Request as AuthRequest, authenticate},
@@ -2166,13 +2167,19 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/auth/saml/callback",
             post(handle_auth_saml_callback),
         )
-        .route("/api/v1/auth/register", post(handle_auth_register))
+        .route(
+            "/api/v1/auth/register",
+            post(handle_auth_register).layer(DefaultBodyLimit::max(MAX_DID_DOCUMENT_BODY_BYTES)),
+        )
         .route("/api/v1/auth/login", post(handle_auth_login))
         .route("/api/v1/auth/refresh", post(handle_auth_refresh))
         .route("/api/v1/auth/me", get(handle_auth_me))
         .route("/api/v1/auth/logout", post(handle_auth_logout))
         // Agents (static route before parameterised to avoid ambiguity)
-        .route("/api/v1/agents/enroll", post(handle_agents_enroll))
+        .route(
+            "/api/v1/agents/enroll",
+            post(handle_agents_enroll).layer(DefaultBodyLimit::max(MAX_DID_DOCUMENT_BODY_BYTES)),
+        )
         .route("/api/v1/agents", get(handle_agents_list))
         .route("/api/v1/agents/:did", get(handle_agent_get))
         .route(
@@ -2868,6 +2875,34 @@ mod tests {
                 "registration conflict responses must not expose registry internals"
             );
         }
+    }
+
+    #[test]
+    fn did_document_routes_have_explicit_tight_body_limits() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+        let router = source_between(source, "pub fn build_router", "fn apply_gateway_layers");
+        let compact_router: String = router.chars().filter(|ch| !ch.is_whitespace()).collect();
+
+        assert!(
+            production.contains("const MAX_DID_DOCUMENT_BODY_BYTES: usize = 64 * 1024;"),
+            "DID document JSON must have a tighter route-local body budget"
+        );
+        assert!(
+            compact_router.contains(
+                "\"/api/v1/auth/register\",post(handle_auth_register).layer(DefaultBodyLimit::max(MAX_DID_DOCUMENT_BODY_BYTES))"
+            ),
+            "auth/register must apply the DID document body budget at the route"
+        );
+        assert!(
+            compact_router.contains(
+                "\"/api/v1/agents/enroll\",post(handle_agents_enroll).layer(DefaultBodyLimit::max(MAX_DID_DOCUMENT_BODY_BYTES))"
+            ),
+            "agents/enroll must apply the DID document body budget at the route"
+        );
     }
 
     #[tokio::test]
