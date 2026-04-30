@@ -26,7 +26,7 @@ struct AuthorityLinkSigningPayload<'a> {
     scope: &'a [Permission],
     created: &'a Timestamp,
     expires: &'a Option<Timestamp>,
-    depth: usize,
+    depth: u32,
     delegatee_kind: &'a DelegateeKind,
 }
 
@@ -96,6 +96,13 @@ impl AuthorityLink {
             .iter()
             .copied()
             .collect();
+        let depth =
+            u32::try_from(self.depth).map_err(|_| AuthorityError::SigningPayloadEncoding {
+                reason: format!(
+                    "authority link depth {} exceeds u32 signing payload capacity",
+                    self.depth
+                ),
+            })?;
         let payload = AuthorityLinkSigningPayload {
             domain: AUTHORITY_LINK_SIGNING_DOMAIN,
             schema_version: AUTHORITY_LINK_SIGNING_SCHEMA_VERSION,
@@ -104,7 +111,7 @@ impl AuthorityLink {
             scope: &scope,
             created: &self.created,
             expires: &self.expires,
-            depth: self.depth,
+            depth,
             delegatee_kind: &self.delegatee_kind,
         };
         let mut buf = Vec::new();
@@ -720,6 +727,36 @@ mod tests {
 
         assert_eq!(decoded.domain, AUTHORITY_LINK_SIGNING_DOMAIN);
         assert_eq!(decoded.schema_version, 1);
+    }
+
+    #[test]
+    fn authority_link_signing_payload_does_not_serialize_usize_depth() {
+        let production = include_str!("chain.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let payload_section = production
+            .split("struct AuthorityLinkSigningPayload")
+            .nth(1)
+            .expect("authority signing payload section")
+            .split("/// Distinguishes human")
+            .next()
+            .expect("end of authority signing payload section");
+
+        assert!(
+            !payload_section.contains("depth: usize,"),
+            "signed authority payload must use a fixed-width integer depth"
+        );
+    }
+
+    #[test]
+    fn authority_link_signing_payload_rejects_non_portable_depth() {
+        let link = fake_link("root", "alice", vec![Permission::Read], usize::MAX, None);
+
+        assert!(matches!(
+            link.signing_payload(),
+            Err(AuthorityError::SigningPayloadEncoding { .. })
+        ));
     }
 
     #[test]
