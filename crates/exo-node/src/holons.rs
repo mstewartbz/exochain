@@ -36,9 +36,18 @@
 #![allow(clippy::expect_used, clippy::as_conversions, clippy::single_match)]
 #![cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use exo_core::{Hash256, PublicKey, Signature, types::Did};
+use exo_core::{
+    Hash256, PublicKey, Signature,
+    types::{Did, Timestamp},
+};
 use exo_gatekeeper::{
     combinator::{Combinator, CombinatorInput, Predicate, TransformFn},
     holon::{self, Holon, HolonState},
@@ -127,6 +136,8 @@ pub struct HolonManagerConfig {
     pub root_public_key: PublicKey,
     /// Signs canonical authority/provenance payload hashes for infrastructure Holon context.
     pub root_signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+    /// Supplies deterministic HLC metadata for each signed Holon provenance record.
+    pub provenance_timestamp_source: Arc<dyn Fn() -> Timestamp + Send + Sync>,
     /// How often to run the topology optimizer (seconds).
     pub topology_interval_secs: u64,
     /// How often to run the scaling advisor (seconds).
@@ -141,11 +152,36 @@ impl std::fmt::Debug for HolonManagerConfig {
             .field("node_did", &self.node_did)
             .field("root_did", &self.root_did)
             .field("root_public_key", &self.root_public_key)
+            .field("provenance_timestamp_source", &"<deterministic-hlc-source>")
             .field("topology_interval_secs", &self.topology_interval_secs)
             .field("scaling_interval_secs", &self.scaling_interval_secs)
             .field("health_interval_secs", &self.health_interval_secs)
             .finish_non_exhaustive()
     }
+}
+
+/// Build a deterministic monotonic timestamp source for tests and defaults.
+#[must_use]
+pub fn deterministic_provenance_timestamp_source(
+    start_physical_ms: u64,
+) -> Arc<dyn Fn() -> Timestamp + Send + Sync> {
+    let next_physical_ms = Arc::new(AtomicU64::new(start_physical_ms.max(1)));
+    Arc::new(move || {
+        let physical_ms = next_physical_ms.fetch_add(1, Ordering::Relaxed);
+        Timestamp::new(physical_ms, 0)
+    })
+}
+
+/// Build an HLC-backed provenance timestamp source for runtime Holon steps.
+#[must_use]
+pub fn hlc_provenance_timestamp_source() -> Arc<dyn Fn() -> Timestamp + Send + Sync> {
+    let clock = Arc::new(std::sync::Mutex::new(exo_core::hlc::HybridClock::new()));
+    Arc::new(move || {
+        let mut clock = clock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clock.now()
+    })
 }
 
 impl Default for HolonManagerConfig {
@@ -161,6 +197,7 @@ impl Default for HolonManagerConfig {
             root_signer: Arc::new(move |message: &[u8]| {
                 exo_core::crypto::sign(message, &root_secret_key)
             }),
+            provenance_timestamp_source: deterministic_provenance_timestamp_source(1),
             topology_interval_secs: 60,
             scaling_interval_secs: 300,
             health_interval_secs: 30,
@@ -320,8 +357,12 @@ fn signed_authority_link(holon: &Holon, config: &HolonManagerConfig) -> Authorit
     }
 }
 
-fn signed_provenance(holon: &Holon, config: &HolonManagerConfig) -> Provenance {
-    let timestamp = "2026-04-27T00:00:00Z".to_owned();
+fn signed_provenance(
+    holon: &Holon,
+    config: &HolonManagerConfig,
+    provenance_timestamp: Timestamp,
+) -> Provenance {
+    let timestamp = provenance_timestamp.to_string();
     let action_hash = Hash256::digest(format!("infrastructure-holon-step:{}", holon.id).as_bytes())
         .as_bytes()
         .to_vec();
@@ -340,11 +381,20 @@ fn signed_provenance(holon: &Holon, config: &HolonManagerConfig) -> Provenance {
     }
 }
 
+fn next_provenance_timestamp(config: &HolonManagerConfig) -> Result<Timestamp, String> {
+    let timestamp = (config.provenance_timestamp_source)();
+    if timestamp == Timestamp::ZERO {
+        return Err("Holon provenance timestamp source returned zero HLC timestamp".into());
+    }
+    Ok(timestamp)
+}
+
 pub fn build_holon_adjudication_context(
     holon: &Holon,
     config: &HolonManagerConfig,
-) -> AdjudicationContext {
-    AdjudicationContext {
+) -> Result<AdjudicationContext, String> {
+    let provenance_timestamp = next_provenance_timestamp(config)?;
+    Ok(AdjudicationContext {
         actor_roles: vec![Role {
             name: "infrastructure-agent".into(),
             branch: GovernmentBranch::Executive,
@@ -365,10 +415,10 @@ pub fn build_holon_adjudication_context(
         },
         human_override_preserved: true,
         actor_permissions: holon.capabilities.clone(),
-        provenance: Some(signed_provenance(holon, config)),
+        provenance: Some(signed_provenance(holon, config, provenance_timestamp)),
         quorum_evidence: None,
         active_challenge_reason: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +586,17 @@ pub async fn run_holon_manager(
                     .with("peer_count", peer_count.to_string())
                     .with("diversity_score_bp", diversity_score_bp.to_string());
 
-                let ctx = build_holon_adjudication_context(&topology_holon, &config);
+                let ctx = match build_holon_adjudication_context(&topology_holon, &config) {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        tracing::warn!(
+                            err = %e,
+                            holon = %topology_holon.id,
+                            "Topology Holon context construction failed"
+                        );
+                        continue;
+                    }
+                };
                 match holon::step(&mut topology_holon, &input, &kernel, &ctx) {
                     Ok(_output) => {
                         if event_tx.send(HolonEvent::TopologyAnalysis {
@@ -595,7 +655,17 @@ pub async fn run_holon_manager(
                     .with("validator_count", validator_count.to_string())
                     .with("node_count", node_count.to_string());
 
-                let ctx = build_holon_adjudication_context(&scaling_holon, &config);
+                let ctx = match build_holon_adjudication_context(&scaling_holon, &config) {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        tracing::warn!(
+                            err = %e,
+                            holon = %scaling_holon.id,
+                            "Scaling Holon context construction failed"
+                        );
+                        continue;
+                    }
+                };
                 match holon::step(&mut scaling_holon, &input, &kernel, &ctx) {
                     Ok(_output) => {
                         if event_tx.send(HolonEvent::ScalingRecommendation {
@@ -702,7 +772,17 @@ pub async fn run_holon_manager(
                     .with("consensus_round", consensus_round.to_string())
                     .with("committed_height", committed_height.to_string());
 
-                let ctx = build_holon_adjudication_context(&health_holon, &config);
+                let ctx = match build_holon_adjudication_context(&health_holon, &config) {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        tracing::warn!(
+                            err = %e,
+                            holon = %health_holon.id,
+                            "Health Holon context construction failed"
+                        );
+                        continue;
+                    }
+                };
                 match holon::step(&mut health_holon, &input, &kernel, &ctx) {
                     Ok(_output) => {
                         if event_tx.send(HolonEvent::HealthCheck {
@@ -787,6 +867,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn holon_provenance_source_does_not_hardcode_timestamp() {
+        let src = include_str!("holons.rs");
+        let forbidden_timestamp = ["2026-04-27", "T00:00:00Z"].concat();
+        assert!(
+            !src.contains(&forbidden_timestamp),
+            "Holon provenance must use caller-supplied deterministic HLC metadata, not a hardcoded timestamp"
+        );
+    }
+
+    #[test]
+    fn holon_provenance_uses_configured_hlc_timestamp_source() {
+        let mut config = test_config();
+        config.provenance_timestamp_source = Arc::new(|| Timestamp::new(42_424, 7));
+        let h = create_health_holon(&test_did());
+
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
+        let provenance = ctx.provenance.expect("provenance");
+
+        assert_eq!(provenance.timestamp, "42424:7");
+    }
+
+    #[test]
+    fn holon_provenance_rejects_zero_hlc_timestamp_source() {
+        let mut config = test_config();
+        config.provenance_timestamp_source = Arc::new(|| Timestamp::ZERO);
+        let h = create_health_holon(&test_did());
+
+        let result = build_holon_adjudication_context(&h, &config);
+
+        assert!(
+            result.is_err(),
+            "Holon context construction must fail closed on zero provenance HLC metadata"
+        );
+    }
+
     #[cfg(not(feature = "unaudited-infrastructure-holons"))]
     #[test]
     fn infrastructure_holons_disabled_without_feature_flag() {
@@ -831,7 +947,7 @@ mod tests {
         let kernel = create_infrastructure_kernel();
         let config = test_config();
         let mut h = create_topology_holon(&test_did());
-        let ctx = build_holon_adjudication_context(&h, &config);
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
         let input = CombinatorInput::new().with("peer_count", "5");
 
@@ -849,7 +965,7 @@ mod tests {
         let kernel = create_infrastructure_kernel();
         let config = test_config();
         let mut h = create_topology_holon(&test_did());
-        let ctx = build_holon_adjudication_context(&h, &config);
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
         // No peer_count in input — Guard should fail
         let input = CombinatorInput::new();
@@ -871,7 +987,7 @@ mod tests {
         let kernel = create_infrastructure_kernel();
         let config = test_config();
         let mut h = create_scaling_holon(&test_did());
-        let ctx = build_holon_adjudication_context(&h, &config);
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
         let input = CombinatorInput::new()
             .with("validator_count", "4")
@@ -887,7 +1003,7 @@ mod tests {
         let kernel = create_infrastructure_kernel();
         let config = test_config();
         let mut h = create_health_holon(&test_did());
-        let ctx = build_holon_adjudication_context(&h, &config);
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
         let input = CombinatorInput::new()
             .with("consensus_round", "10")
@@ -963,7 +1079,7 @@ mod tests {
         let h = create_health_holon(&test_did());
 
         // Build context normally.
-        let ctx = build_holon_adjudication_context(&h, &config);
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
         // Normal step works.
         let mut h2 = create_health_holon(&test_did());
@@ -978,7 +1094,7 @@ mod tests {
         let _kernel = create_infrastructure_kernel();
         let config = test_config();
         let h = create_health_holon(&test_did());
-        let ctx = build_holon_adjudication_context(&h, &config);
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
         // The adjudication context we build has modifies_kernel=false (set in step()),
         // so kernel immutability is preserved. Verify the context is well-formed.
