@@ -33,6 +33,12 @@ use serde::{Deserialize, Serialize};
 /// Thread-safe shared handle to the forge orchestration state.
 pub type SharedForgeState = Arc<Mutex<ForgeState>>;
 
+/// Maximum retained ExoForge activity entries.
+///
+/// The dashboard only renders recent activity, so retaining an unbounded log
+/// inside the node process creates avoidable memory exhaustion risk.
+const MAX_FORGE_ACTIVITY_LOG_ENTRIES: usize = 256;
+
 /// A single task in the build orchestration graph, tracking phase, status, and agent assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeTask {
@@ -265,6 +271,15 @@ fn percent_basis_points(complete: u32, total: u32) -> u32 {
         return 0;
     }
     complete.saturating_mul(10_000) / total
+}
+
+fn push_activity_log_bounded(activity_log: &mut Vec<ActivityEntry>, entry: ActivityEntry) {
+    let next_len = activity_log.len().saturating_add(1);
+    if next_len > MAX_FORGE_ACTIVITY_LOG_ENTRIES {
+        let remove_count = next_len - MAX_FORGE_ACTIVITY_LOG_ENTRIES;
+        activity_log.drain(0..remove_count).for_each(drop);
+    }
+    activity_log.push(entry);
 }
 
 #[allow(clippy::too_many_lines, unused_assignments)]
@@ -767,41 +782,265 @@ fn build_zerodentity_tasks() -> Vec<ForgeTask> {
     tasks
 }
 
+struct ForgeTaskListSnapshot {
+    spec_name: String,
+    tasks: Vec<ForgeTask>,
+    stats: ForgeStats,
+}
+
+struct ForgeDashboardSnapshot {
+    tasks_json: String,
+    stats_json: String,
+    log_json: String,
+}
+
+fn forge_lock_error(context: &'static str) -> StatusCode {
+    tracing::error!(context, "ForgeState mutex poisoned");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+fn forge_join_error(context: &'static str, error: tokio::task::JoinError) -> StatusCode {
+    tracing::error!(
+        context,
+        err = %error,
+        "ForgeState blocking adapter failed"
+    );
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+async fn read_forge_state<T, F>(
+    state: SharedForgeState,
+    context: &'static str,
+    read: F,
+) -> Result<T, StatusCode>
+where
+    T: Send + 'static,
+    F: FnOnce(&ForgeState) -> Result<T, StatusCode> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let state = state.lock().map_err(|_| forge_lock_error(context))?;
+        read(&state)
+    })
+    .await
+    .map_err(|error| forge_join_error(context, error))?
+}
+
+async fn mutate_forge_state<T, F>(
+    state: SharedForgeState,
+    context: &'static str,
+    mutate: F,
+) -> Result<T, StatusCode>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut ForgeState) -> Result<T, StatusCode> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut state = state.lock().map_err(|_| forge_lock_error(context))?;
+        mutate(&mut state)
+    })
+    .await
+    .map_err(|error| forge_join_error(context, error))?
+}
+
+async fn load_task_list_snapshot(
+    state: SharedForgeState,
+) -> Result<ForgeTaskListSnapshot, StatusCode> {
+    read_forge_state(state, "list_tasks", |state| {
+        Ok(ForgeTaskListSnapshot {
+            spec_name: state.spec_name.clone(),
+            tasks: state.tasks.clone(),
+            stats: state.stats(),
+        })
+    })
+    .await
+}
+
+async fn load_forge_stats(state: SharedForgeState) -> Result<ForgeStats, StatusCode> {
+    read_forge_state(state, "get_stats", |state| Ok(state.stats())).await
+}
+
+async fn load_activity_log(state: SharedForgeState) -> Result<Vec<ActivityEntry>, StatusCode> {
+    read_forge_state(state, "get_activity", |state| {
+        Ok(state.activity_log.clone())
+    })
+    .await
+}
+
+async fn load_dashboard_snapshot(
+    state: SharedForgeState,
+) -> Result<ForgeDashboardSnapshot, StatusCode> {
+    read_forge_state(state, "serve_dashboard", |state| {
+        Ok(ForgeDashboardSnapshot {
+            tasks_json: serialize_dashboard_json("tasks", &state.tasks)?,
+            stats_json: serialize_dashboard_json("stats", &state.stats())?,
+            log_json: serialize_dashboard_json("activity_log", &state.activity_log)?,
+        })
+    })
+    .await
+}
+
+async fn update_task_status_state(
+    state: SharedForgeState,
+    task_id: u32,
+    status: TaskStatus,
+) -> Result<(), StatusCode> {
+    mutate_forge_state(state, "update_task_status", move |state| {
+        let task_index = state
+            .tasks
+            .iter()
+            .position(|task| task.id == task_id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let timestamp = state.next_timestamp();
+        let task = &mut state.tasks[task_index];
+
+        let old_status = task.status.clone();
+        let task_title = task.title.clone();
+        task.status = status.clone();
+
+        if status == TaskStatus::InProgress && task.started_at.is_none() {
+            task.started_at = Some(timestamp);
+        }
+        if status == TaskStatus::Complete {
+            task.completed_at = Some(timestamp);
+        }
+
+        push_activity_log_bounded(
+            &mut state.activity_log,
+            ActivityEntry {
+                timestamp,
+                message: format!(
+                    "Task #{} '{}' status: {:?} -> {:?}",
+                    task_id, task_title, old_status, status
+                ),
+                task_id: Some(task_id),
+            },
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+async fn assign_agent_state(
+    state: SharedForgeState,
+    task_id: u32,
+    agent: String,
+) -> Result<(), StatusCode> {
+    mutate_forge_state(state, "assign_agent", move |state| {
+        let task_index = state
+            .tasks
+            .iter()
+            .position(|task| task.id == task_id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let timestamp = state.next_timestamp();
+        let task = &mut state.tasks[task_index];
+
+        let task_title = task.title.clone();
+        task.agent = Some(agent.clone());
+        if task.status == TaskStatus::Queued {
+            task.status = TaskStatus::Assigned;
+        }
+
+        push_activity_log_bounded(
+            &mut state.activity_log,
+            ActivityEntry {
+                timestamp,
+                message: format!("Task #{} '{}' assigned to {}", task_id, task_title, agent),
+                task_id: Some(task_id),
+            },
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+fn escalation_level_label(level: &EscalationLevel) -> &'static str {
+    match level {
+        EscalationLevel::None => "None",
+        EscalationLevel::Council => "Council",
+        EscalationLevel::AiIrb => "AI-IRB",
+        EscalationLevel::Human => "Human Operator",
+    }
+}
+
+async fn escalate_task_state(
+    state: SharedForgeState,
+    task_id: u32,
+    level: EscalationLevel,
+    reason: String,
+) -> Result<&'static str, StatusCode> {
+    mutate_forge_state(state, "escalate_task", move |state| {
+        let task_index = state
+            .tasks
+            .iter()
+            .position(|task| task.id == task_id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let timestamp = state.next_timestamp();
+        let task = &mut state.tasks[task_index];
+
+        task.escalation = level.clone();
+        task.status = TaskStatus::Escalated;
+
+        let level_str = escalation_level_label(&level);
+        push_activity_log_bounded(
+            &mut state.activity_log,
+            ActivityEntry {
+                timestamp,
+                message: format!("Task #{} ESCALATED to {} - {}", task_id, level_str, reason),
+                task_id: Some(task_id),
+            },
+        );
+
+        Ok(level_str)
+    })
+    .await
+}
+
+async fn append_log_state(
+    state: SharedForgeState,
+    message: String,
+    task_id: Option<u32>,
+) -> Result<(), StatusCode> {
+    mutate_forge_state(state, "append_log", move |state| {
+        let timestamp = state.next_timestamp();
+        push_activity_log_bounded(
+            &mut state.activity_log,
+            ActivityEntry {
+                timestamp,
+                message,
+                task_id,
+            },
+        );
+        Ok(())
+    })
+    .await
+}
+
 // ─── API Handlers ───────────────────────────────────────────────────
 
 /// `GET /api/v1/forge/tasks` — list all spec tasks with current stats.
 async fn list_tasks(
     State(state): State<SharedForgeState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in list_tasks");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let snapshot = load_task_list_snapshot(state).await?;
     Ok(Json(serde_json::json!({
-        "spec_name": s.spec_name,
-        "tasks": s.tasks,
-        "stats": s.stats(),
+        "spec_name": snapshot.spec_name,
+        "tasks": snapshot.tasks,
+        "stats": snapshot.stats,
     })))
 }
 
 /// `GET /api/v1/forge/stats` — aggregate task statistics.
 async fn get_stats(State(state): State<SharedForgeState>) -> Result<Json<ForgeStats>, StatusCode> {
-    let s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in get_stats");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Json(s.stats()))
+    Ok(Json(load_forge_stats(state).await?))
 }
 
 /// `GET /api/v1/forge/activity` — recent task activity log.
 async fn get_activity(
     State(state): State<SharedForgeState>,
 ) -> Result<Json<Vec<ActivityEntry>>, StatusCode> {
-    let s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in get_activity");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Json(s.activity_log.clone()))
+    Ok(Json(load_activity_log(state).await?))
 }
 
 /// `PUT /api/v1/forge/tasks/:id/status` — update a task's status.
@@ -810,38 +1049,7 @@ async fn update_task_status(
     Path(task_id): Path<u32>,
     Json(body): Json<StatusUpdate>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in update_task_status");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let task_index = s
-        .tasks
-        .iter()
-        .position(|t| t.id == task_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let timestamp = s.next_timestamp();
-    let task = &mut s.tasks[task_index];
-
-    let old_status = task.status.clone();
-    let task_title = task.title.clone();
-    task.status = body.status.clone();
-
-    if body.status == TaskStatus::InProgress && task.started_at.is_none() {
-        task.started_at = Some(timestamp);
-    }
-    if body.status == TaskStatus::Complete {
-        task.completed_at = Some(timestamp);
-    }
-
-    s.activity_log.push(ActivityEntry {
-        timestamp,
-        message: format!(
-            "Task #{} '{}' status: {:?} → {:?}",
-            task_id, task_title, old_status, body.status
-        ),
-        task_id: Some(task_id),
-    });
-
+    update_task_status_state(state, task_id, body.status).await?;
     Ok(Json(serde_json::json!({ "ok": true, "task_id": task_id })))
 }
 
@@ -851,35 +1059,11 @@ async fn assign_agent(
     Path(task_id): Path<u32>,
     Json(body): Json<AgentAssignment>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in assign_agent");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let task_index = s
-        .tasks
-        .iter()
-        .position(|t| t.id == task_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let timestamp = s.next_timestamp();
-    let task = &mut s.tasks[task_index];
-
-    let task_title = task.title.clone();
-    task.agent = Some(body.agent.clone());
-    if task.status == TaskStatus::Queued {
-        task.status = TaskStatus::Assigned;
-    }
-
-    s.activity_log.push(ActivityEntry {
-        timestamp,
-        message: format!(
-            "Task #{} '{}' assigned to {}",
-            task_id, task_title, body.agent
-        ),
-        task_id: Some(task_id),
-    });
+    let agent = body.agent;
+    assign_agent_state(state, task_id, agent.clone()).await?;
 
     Ok(Json(
-        serde_json::json!({ "ok": true, "task_id": task_id, "agent": body.agent }),
+        serde_json::json!({ "ok": true, "task_id": task_id, "agent": agent }),
     ))
 }
 
@@ -889,36 +1073,7 @@ async fn escalate_task(
     Path(task_id): Path<u32>,
     Json(body): Json<EscalateRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in escalate_task");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let task_index = s
-        .tasks
-        .iter()
-        .position(|t| t.id == task_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let timestamp = s.next_timestamp();
-    let task = &mut s.tasks[task_index];
-
-    task.escalation = body.level.clone();
-    task.status = TaskStatus::Escalated;
-
-    let level_str = match &body.level {
-        EscalationLevel::None => "None",
-        EscalationLevel::Council => "Council",
-        EscalationLevel::AiIrb => "AI-IRB",
-        EscalationLevel::Human => "Human Operator",
-    };
-
-    s.activity_log.push(ActivityEntry {
-        timestamp,
-        message: format!(
-            "Task #{} ESCALATED to {} — {}",
-            task_id, level_str, body.reason
-        ),
-        task_id: Some(task_id),
-    });
+    let level_str = escalate_task_state(state, task_id, body.level, body.reason).await?;
 
     Ok(Json(
         serde_json::json!({ "ok": true, "task_id": task_id, "escalation": level_str }),
@@ -930,16 +1085,7 @@ async fn append_log(
     State(state): State<SharedForgeState>,
     Json(body): Json<LogEntry>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in append_log");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let timestamp = s.next_timestamp();
-    s.activity_log.push(ActivityEntry {
-        timestamp,
-        message: body.message,
-        task_id: body.task_id,
-    });
+    append_log_state(state, body.message, body.task_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -949,14 +1095,7 @@ async fn append_log(
 async fn serve_dashboard(
     State(state): State<SharedForgeState>,
 ) -> Result<Html<String>, StatusCode> {
-    let s = state.lock().map_err(|_| {
-        tracing::error!("ForgeState mutex poisoned in serve_dashboard");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let tasks_json = serialize_dashboard_json("tasks", &s.tasks)?;
-    let stats_json = serialize_dashboard_json("stats", &s.stats())?;
-    let log_json = serialize_dashboard_json("activity_log", &s.activity_log)?;
-    drop(s);
+    let snapshot = load_dashboard_snapshot(state).await?;
 
     Ok(Html(format!(
         r##"<!DOCTYPE html>
@@ -1480,10 +1619,13 @@ setInterval(async () => {{
     setTimeout(() => {{ if (hdr) hdr.style.borderBottom = ''; }}, 2000);
   }}
 }}, 3000);
-</script>
+	</script>
 
-</body>
-</html>"##
+	</body>
+	</html>"##,
+        tasks_json = snapshot.tasks_json,
+        stats_json = snapshot.stats_json,
+        log_json = snapshot.log_json,
     )))
 }
 
@@ -1506,7 +1648,7 @@ pub fn exoforge_router(state: SharedForgeState) -> Router {
 // ─── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1632,6 +1774,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn append_log_bounds_activity_log_growth() {
+        const EXPECTED_MAX_ACTIVITY_LOG_ENTRIES: usize = 256;
+
+        let state: SharedForgeState = Arc::new(Mutex::new(test_state()));
+        let router = exoforge_router(Arc::clone(&state));
+
+        for idx in 0..300u16 {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "message": format!("entry-{idx}"),
+                "task_id": null,
+            }))
+            .unwrap();
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/forge/log")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let resp = tower::ServiceExt::oneshot(router.clone(), req)
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+        }
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.activity_log.len(), EXPECTED_MAX_ACTIVITY_LOG_ENTRIES);
+        assert_eq!(
+            state.activity_log.first().unwrap().message,
+            "entry-44",
+            "oldest entries should be evicted first, after preserving a fixed-size recent log"
+        );
+        assert_eq!(state.activity_log.last().unwrap().message, "entry-299");
+    }
+
     struct FailingSerialize;
 
     impl Serialize for FailingSerialize {
@@ -1665,5 +1843,22 @@ mod tests {
         assert!(!production.contains("unwrap_or_default()"));
         let hash_set = "Hash".to_owned() + "Set";
         assert!(!source.contains(&hash_set));
+    }
+
+    #[test]
+    fn async_handlers_do_not_lock_forge_state_directly() {
+        let source = include_str!("exoforge.rs");
+        let handlers = source
+            .split("// ─── API Handlers")
+            .nth(1)
+            .expect("API handler marker present")
+            .split("// ─── Router")
+            .next()
+            .expect("router marker present");
+
+        assert!(
+            !handlers.contains("state.lock()"),
+            "async ExoForge handlers must use blocking adapter helpers instead of directly locking std::sync::Mutex"
+        );
     }
 }
