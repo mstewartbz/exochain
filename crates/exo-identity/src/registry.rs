@@ -1,11 +1,40 @@
 use std::collections::BTreeMap;
 
 use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
+use serde::Serialize;
 
 use crate::{
     did::{DidDocument, RevocationProof},
     error::IdentityError,
 };
+
+const DID_REVOCATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.revocation.v1";
+
+#[derive(Serialize)]
+struct RevocationProofPayload<'a> {
+    domain: &'static str,
+    did: &'a Did,
+}
+
+/// Build the canonical signable payload for DID revocation proofs.
+///
+/// The explicit domain prevents raw DID-string signatures from being replayed
+/// into revocation, or revocation signatures from being replayed into another
+/// DID protocol step.
+pub(crate) fn revocation_proof_payload(did: &Did) -> Result<Vec<u8>, IdentityError> {
+    let payload = RevocationProofPayload {
+        domain: DID_REVOCATION_PROOF_DOMAIN,
+        did,
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&payload, &mut encoded).map_err(|e| {
+        IdentityError::RevocationProofPayloadEncoding {
+            did: did.clone(),
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(encoded)
+}
 
 /// A decentralized identifier registry trait.
 pub trait DidRegistry {
@@ -79,11 +108,11 @@ impl DidRegistry for LocalDidRegistry {
             .get_mut(did.as_str())
             .ok_or_else(|| IdentityError::DidNotFound(did.clone()))?;
 
-        let msg = did.as_str().as_bytes();
+        let msg = revocation_proof_payload(did)?;
         let valid = doc
             .public_keys
             .iter()
-            .any(|pk| crypto::verify(msg, &proof.signature, pk));
+            .any(|pk| crypto::verify(&msg, &proof.signature, pk));
 
         if !valid {
             return Err(IdentityError::InvalidRevocationProof(did.clone()));
@@ -182,9 +211,37 @@ mod tests {
         let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
 
+        let payload = revocation_proof_payload(&did).unwrap();
         let proof = RevocationProof {
             did: did.clone(),
+            signature: sign(&payload, &sk),
+        };
+        reg.revoke(&did, &proof).unwrap();
+
+        assert!(reg.resolve(&did).is_none());
+    }
+
+    #[test]
+    fn revoke_requires_domain_separated_payload_not_raw_did() {
+        let (pk, sk) = generate_keypair();
+        let did = make_did("domain-revoke");
+        let doc = make_doc(did.clone(), pk);
+
+        let mut reg = LocalDidRegistry::new();
+        reg.register(doc).unwrap();
+
+        let raw_proof = RevocationProof {
+            did: did.clone(),
             signature: sign(did.as_str().as_bytes(), &sk),
+        };
+        let err = reg.revoke(&did, &raw_proof).unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidRevocationProof(_)));
+        assert!(reg.resolve(&did).is_some());
+
+        let payload = revocation_proof_payload(&did).unwrap();
+        let proof = RevocationProof {
+            did: did.clone(),
+            signature: sign(&payload, &sk),
         };
         reg.revoke(&did, &proof).unwrap();
 

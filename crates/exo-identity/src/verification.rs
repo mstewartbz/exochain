@@ -465,7 +465,7 @@ mod tests {
     // Integration-style tests combining the registry and verification flow
     use crate::{
         did::DidDocument,
-        registry::{DidRegistry, LocalDidRegistry},
+        registry::{DidRegistry, LocalDidRegistry, revocation_proof_payload},
     };
 
     fn make_did(label: &str) -> Did {
@@ -545,9 +545,10 @@ mod tests {
         reg.register(doc).unwrap();
 
         // Revoke the DID
+        let payload = revocation_proof_payload(&did).unwrap();
         let proof = crate::did::RevocationProof {
             did: did.clone(),
-            signature: sign(did.as_str().as_bytes(), &sk),
+            signature: sign(&payload, &sk),
         };
         reg.revoke(&did, &proof).unwrap();
 
