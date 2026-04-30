@@ -14,6 +14,8 @@ pub enum VerificationCeremonyError {
     AlreadyFinalized,
     #[error("Invalid signature proof")]
     InvalidSignature,
+    #[error("Duplicate proof kind: {kind}")]
+    DuplicateProofKind { kind: &'static str },
     #[error("Insufficient risk score to finalize: {score}")]
     InsufficientScore { score: u32 },
     #[error("Invalid attester DID: {0}")]
@@ -32,6 +34,7 @@ const VERIFICATION_CEREMONY_EVIDENCE_SCHEMA_VERSION: u16 = 1;
 const VERIFICATION_CEREMONY_PROOF_MATERIAL_HASH_DOMAIN: &str =
     "exo.identity.verification_ceremony.proof_material.v1";
 const VERIFICATION_CEREMONY_PROOF_MATERIAL_HASH_SCHEMA_VERSION: u16 = 1;
+pub const VERIFICATION_CEREMONY_EXPIRY_WINDOW_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityProof {
@@ -120,8 +123,17 @@ impl VerificationCeremony {
         if self.finalized {
             return Err(VerificationCeremonyError::AlreadyFinalized);
         }
-        if now.physical_ms > self.initiated_at.physical_ms + 3_600_000 {
+        if ceremony_is_expired(self.initiated_at, now) {
             return Err(VerificationCeremonyError::Expired);
+        }
+
+        let proof_kind = proof.kind();
+        if self
+            .proofs
+            .iter()
+            .any(|existing| existing.kind() == proof_kind)
+        {
+            return Err(VerificationCeremonyError::DuplicateProofKind { kind: proof_kind });
         }
 
         if let IdentityProof::Signature(ref sig, ref pk, ref msg) = proof {
@@ -135,7 +147,7 @@ impl VerificationCeremony {
     }
 
     pub fn calculate_risk_score(&self) -> u32 {
-        let mut score = 0;
+        let mut score: u32 = 0;
         // BTreeMap used as required
         let mut proof_weights: BTreeMap<&str, u32> = BTreeMap::new();
         proof_weights.insert("Signature", 1000);
@@ -143,18 +155,14 @@ impl VerificationCeremony {
         proof_weights.insert("WebAuthnAssertion", 4000);
         proof_weights.insert("KycToken", 5000);
 
+        let mut seen = std::collections::BTreeSet::new();
         for proof in &self.proofs {
-            let s = match proof {
-                IdentityProof::Signature(..) => {
-                    proof_weights.get("Signature").copied().unwrap_or(0)
-                }
-                IdentityProof::Otp(_) => proof_weights.get("Otp").copied().unwrap_or(0),
-                IdentityProof::WebAuthnAssertion(_) => {
-                    proof_weights.get("WebAuthnAssertion").copied().unwrap_or(0)
-                }
-                IdentityProof::KycToken(_) => proof_weights.get("KycToken").copied().unwrap_or(0),
-            };
-            score += s;
+            let proof_kind = proof.kind();
+            if !seen.insert(proof_kind) {
+                continue;
+            }
+            let s = proof_weights.get(proof_kind).copied().unwrap_or(0);
+            score = score.saturating_add(s);
         }
         score
     }
@@ -187,7 +195,7 @@ impl VerificationCeremony {
         if self.finalized {
             return Err(VerificationCeremonyError::AlreadyFinalized);
         }
-        if now.physical_ms > self.initiated_at.physical_ms + 3_600_000 {
+        if ceremony_is_expired(self.initiated_at, now) {
             return Err(VerificationCeremonyError::Expired);
         }
 
@@ -296,6 +304,16 @@ impl VerificationCeremony {
             proofs,
         })
     }
+}
+
+fn ceremony_is_expired(initiated_at: Timestamp, now: Timestamp) -> bool {
+    let Some(expires_at) = initiated_at
+        .physical_ms
+        .checked_add(VERIFICATION_CEREMONY_EXPIRY_WINDOW_MS)
+    else {
+        return true;
+    };
+    now.physical_ms > expires_at
 }
 
 impl IdentityProof {
@@ -428,6 +446,53 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_proof_kind_does_not_inflate_risk_score() {
+        let did = Did::new("did:exo:duplicate-score").unwrap();
+        let mut ceremony =
+            VerificationCeremony::new(did, "sess-dup-score".to_string(), Timestamp::new(1000, 0));
+
+        ceremony
+            .proofs
+            .push(IdentityProof::Otp("111111".to_string()));
+        ceremony
+            .proofs
+            .push(IdentityProof::Otp("222222".to_string()));
+
+        assert_eq!(
+            ceremony.calculate_risk_score(),
+            2000,
+            "duplicate proof kinds must count once even if inserted directly"
+        );
+    }
+
+    #[test]
+    fn submit_proof_rejects_duplicate_proof_kind() {
+        let did = Did::new("did:exo:duplicate-submit").unwrap();
+        let mut ceremony =
+            VerificationCeremony::new(did, "sess-dup-submit".to_string(), Timestamp::new(1000, 0));
+
+        ceremony
+            .submit_proof(
+                IdentityProof::Otp("111111".to_string()),
+                Timestamp::new(1001, 0),
+            )
+            .unwrap();
+        let err = ceremony
+            .submit_proof(
+                IdentityProof::Otp("222222".to_string()),
+                Timestamp::new(1002, 0),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            VerificationCeremonyError::DuplicateProofKind { kind: "Otp" }
+        ));
+        assert_eq!(ceremony.proofs.len(), 1);
+        assert_eq!(ceremony.calculate_risk_score(), 2000);
+    }
+
+    #[test]
     fn test_expired_ceremony_fails() {
         let did = Did::new("did:exo:dave").unwrap();
         let mut ceremony =
@@ -440,6 +505,39 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, VerificationCeremonyError::Expired));
+    }
+
+    #[test]
+    fn ceremony_expiry_overflow_fails_closed_without_panic() {
+        let did = Did::new("did:exo:expiry-overflow").unwrap();
+        let mut ceremony = VerificationCeremony::new(
+            did.clone(),
+            "sess-expiry-overflow".to_string(),
+            Timestamp::new(u64::MAX, 0),
+        );
+
+        let submit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ceremony.submit_proof(
+                IdentityProof::Otp("123456".to_string()),
+                Timestamp::new(u64::MAX, 0),
+            )
+        }));
+        assert!(
+            matches!(submit_result, Ok(Err(VerificationCeremonyError::Expired))),
+            "expiry overflow during submit must fail closed, got {submit_result:?}"
+        );
+        assert!(ceremony.proofs.is_empty());
+
+        let (_att_pk, att_sk) = generate_keypair();
+        let attester_did = Did::new("did:exo:attester-expiry-overflow").unwrap();
+        let finalize_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ceremony.finalize(Timestamp::new(u64::MAX, 0), &attester_did, &att_sk)
+        }));
+        assert!(
+            matches!(finalize_result, Ok(Err(VerificationCeremonyError::Expired))),
+            "expiry overflow during finalize must fail closed, got {finalize_result:?}"
+        );
+        assert!(!ceremony.finalized);
     }
 
     #[test]
