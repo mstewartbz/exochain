@@ -63,7 +63,9 @@ struct Cert90211HashPayload<'a> {
     record_hash: Hash256,
     custody_chain_digest: Hash256,
     system_description: &'a str,
+    declarant_placeholder: &'a str,
     generated_at_ms: u64,
+    filing_disclaimer: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,22 +151,26 @@ pub fn generate_902_11_cert(
 
     let record_hash = evidence.hash;
     let custody_chain_digest = compute_custody_digest(evidence)?;
+    let declarant_placeholder =
+        "[DECLARANT NAME, TITLE, ORGANIZATION — COMPLETE BEFORE FILING]".to_string();
+    let filing_disclaimer = Cert902_11::FILING_DISCLAIMER;
     let cert_hash = compute_cert_hash(
         &record_hash,
         &custody_chain_digest,
         system_description,
+        &declarant_placeholder,
         generated_at_ms,
+        filing_disclaimer,
     )?;
 
     Ok(Cert902_11 {
         record_hash,
         custody_chain_digest,
         system_description: system_description.to_string(),
-        declarant_placeholder: "[DECLARANT NAME, TITLE, ORGANIZATION — COMPLETE BEFORE FILING]"
-            .to_string(),
+        declarant_placeholder,
         generated_at_ms,
         cert_hash,
-        filing_disclaimer: Cert902_11::FILING_DISCLAIMER,
+        filing_disclaimer,
     })
 }
 
@@ -182,9 +188,11 @@ pub fn verify_902_11_cert(cert: &Cert902_11) -> Result<bool> {
         &cert.record_hash,
         &cert.custody_chain_digest,
         &cert.system_description,
+        &cert.declarant_placeholder,
         cert.generated_at_ms,
+        cert.filing_disclaimer,
     )?;
-    Ok(expected == cert.cert_hash)
+    Ok(hash256_eq_constant_time(&expected, &cert.cert_hash))
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +222,9 @@ fn cert_902_11_hash_payload<'a>(
     record_hash: &Hash256,
     custody_chain_digest: &Hash256,
     system_description: &'a str,
+    declarant_placeholder: &'a str,
     generated_at_ms: u64,
+    filing_disclaimer: &'a str,
 ) -> Cert90211HashPayload<'a> {
     Cert90211HashPayload {
         domain: CERT_902_11_HASH_DOMAIN,
@@ -222,7 +232,9 @@ fn cert_902_11_hash_payload<'a>(
         record_hash: *record_hash,
         custody_chain_digest: *custody_chain_digest,
         system_description,
+        declarant_placeholder,
         generated_at_ms,
+        filing_disclaimer,
     }
 }
 
@@ -238,17 +250,31 @@ fn compute_cert_hash(
     record_hash: &Hash256,
     custody_chain_digest: &Hash256,
     system_description: &str,
+    declarant_placeholder: &str,
     generated_at_ms: u64,
+    filing_disclaimer: &str,
 ) -> Result<Hash256> {
     hash_structured(&cert_902_11_hash_payload(
         record_hash,
         custody_chain_digest,
         system_description,
+        declarant_placeholder,
         generated_at_ms,
+        filing_disclaimer,
     ))
     .map_err(|e| LegalError::CertificationHashEncodingFailed {
         reason: format!("FRE 902(11) certificate hash canonical CBOR hash failed: {e}"),
     })
+}
+
+fn hash256_eq_constant_time(left: &Hash256, right: &Hash256) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut diff = 0u8;
+    for idx in 0..32 {
+        diff |= left[idx] ^ right[idx];
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -328,14 +354,24 @@ mod tests {
     fn cert_hash_payload_is_domain_separated_cbor() {
         let ev = make_evidence();
         let custody_digest = compute_custody_digest(&ev).expect("canonical 902(11) custody digest");
-        let payload =
-            cert_902_11_hash_payload(&ev.hash, &custody_digest, SYSTEM_DESC, 1_700_000_001_000);
+        let declarant_placeholder =
+            "[DECLARANT NAME, TITLE, ORGANIZATION — COMPLETE BEFORE FILING]";
+        let payload = cert_902_11_hash_payload(
+            &ev.hash,
+            &custody_digest,
+            SYSTEM_DESC,
+            declarant_placeholder,
+            1_700_000_001_000,
+            Cert902_11::FILING_DISCLAIMER,
+        );
         assert_eq!(payload.domain, CERT_902_11_HASH_DOMAIN);
         assert_eq!(payload.schema_version, 1);
         assert_eq!(payload.record_hash, ev.hash);
         assert_eq!(payload.custody_chain_digest, custody_digest);
         assert_eq!(payload.system_description, SYSTEM_DESC);
+        assert_eq!(payload.declarant_placeholder, declarant_placeholder);
         assert_eq!(payload.generated_at_ms, 1_700_000_001_000);
+        assert_eq!(payload.filing_disclaimer, Cert902_11::FILING_DISCLAIMER);
     }
 
     #[test]
@@ -452,6 +488,55 @@ mod tests {
         assert!(
             !verify_902_11_cert(&cert).unwrap(),
             "tampered system_description must fail verification"
+        );
+    }
+
+    #[test]
+    fn cert_verification_detects_tampering_declarant_placeholder() {
+        let ev = make_evidence();
+        let mut cert = match generate_902_11_cert(&ev, SYSTEM_DESC, 1_700_000_001_000) {
+            Ok(cert) => cert,
+            Err(err) => panic!("certificate generation must succeed: {err}"),
+        };
+        cert.declarant_placeholder = "Jane Declarant, Records Custodian, Example Corp".to_string();
+        let verifies = match verify_902_11_cert(&cert) {
+            Ok(verifies) => verifies,
+            Err(err) => panic!("certificate verification must return tamper result: {err}"),
+        };
+        assert!(
+            !verifies,
+            "tampered declarant_placeholder must fail verification"
+        );
+    }
+
+    #[test]
+    fn cert_verification_detects_tampering_filing_disclaimer() {
+        let ev = make_evidence();
+        let mut cert = match generate_902_11_cert(&ev, SYSTEM_DESC, 1_700_000_001_000) {
+            Ok(cert) => cert,
+            Err(err) => panic!("certificate generation must succeed: {err}"),
+        };
+        cert.filing_disclaimer = "READY TO FILE WITHOUT REVIEW";
+        let verifies = match verify_902_11_cert(&cert) {
+            Ok(verifies) => verifies,
+            Err(err) => panic!("certificate verification must return tamper result: {err}"),
+        };
+        assert!(
+            !verifies,
+            "tampered filing_disclaimer must fail verification"
+        );
+    }
+
+    #[test]
+    fn cert_verification_uses_constant_time_hash_comparison() {
+        let production = production_source();
+        assert!(
+            production.contains("hash256_eq_constant_time"),
+            "FRE 902(11) certificate verification must compare hashes in constant time"
+        );
+        assert!(
+            !production.contains("Ok(expected == cert.cert_hash)"),
+            "FRE 902(11) certificate verification must not use direct hash equality"
         );
     }
 
