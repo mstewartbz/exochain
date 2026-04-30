@@ -41,6 +41,7 @@ mod zerodentity;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     net::IpAddr,
     sync::{Arc, Mutex},
 };
@@ -196,13 +197,68 @@ fn resolve_validator_public_keys(
 
 /// Spawn the event fan-out task that dispatches network events to both
 /// the consensus reactor and the sync engine.
+struct BackgroundTasks {
+    tasks: tokio::task::JoinSet<anyhow::Result<()>>,
+}
+
+impl BackgroundTasks {
+    fn new() -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+        }
+    }
+
+    fn spawn_critical<F>(&mut self, name: &'static str, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(async move {
+            future.await;
+            Err(anyhow::anyhow!(
+                "background task `{name}` exited unexpectedly"
+            ))
+        });
+    }
+
+    fn spawn_one_shot<F>(&mut self, _name: &'static str, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(async move {
+            future.await;
+            Ok(())
+        });
+    }
+
+    async fn next_failure(&mut self) -> anyhow::Result<()> {
+        loop {
+            match self.tasks.join_next().await {
+                Some(Ok(Ok(()))) => continue,
+                Some(Ok(Err(error))) => return Err(error),
+                Some(Err(error)) if error.is_panic() => {
+                    return Err(anyhow::anyhow!("background task panicked: {error}"));
+                }
+                Some(Err(error)) => {
+                    return Err(anyhow::anyhow!("background task failed: {error}"));
+                }
+                None => return std::future::pending().await,
+            }
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        self.tasks.shutdown().await;
+    }
+}
+
 fn spawn_event_fanout(
+    tasks: &mut BackgroundTasks,
     mut event_rx: mpsc::Receiver<NetworkEvent>,
     reactor_tx: mpsc::Sender<NetworkEvent>,
     sync_tx: mpsc::Sender<NetworkEvent>,
     metrics: metrics::SharedMetrics,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn_critical("network event fan-out", async move {
         while let Some(event) = event_rx.recv().await {
             // Log peer lifecycle events and update metrics.
             match &event {
@@ -322,9 +378,13 @@ async fn start_node(
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let (event_tx, event_rx) = mpsc::channel(256);
     let net_handle = NetworkHandle::new(cmd_tx);
+    let mut background_tasks = BackgroundTasks::new();
 
     // Spawn the P2P network event loop.
-    tokio::spawn(network::run_network_loop(swarm, cmd_rx, event_tx));
+    background_tasks.spawn_critical(
+        "P2P network loop",
+        network::run_network_loop(swarm, cmd_rx, event_tx),
+    );
     tracing::info!(p2p_port, "P2P network started");
 
     // Create shared state.
@@ -358,13 +418,16 @@ async fn start_node(
     let (reactor_tx, mut reactor_rx) = mpsc::channel::<ReactorEvent>(256);
     let (reactor_event_tx, reactor_event_rx) = mpsc::channel::<NetworkEvent>(256);
 
-    tokio::spawn(reactor::run_reactor(
-        reactor_state.clone(),
-        Arc::clone(&shared_store),
-        net_handle.clone(),
-        reactor_event_rx,
-        reactor_tx,
-    ));
+    background_tasks.spawn_critical(
+        "consensus reactor",
+        reactor::run_reactor(
+            reactor_state.clone(),
+            Arc::clone(&shared_store),
+            net_handle.clone(),
+            reactor_event_rx,
+            reactor_tx,
+        ),
+    );
 
     // Set initial metrics from configuration.
     node_metrics
@@ -413,7 +476,7 @@ async fn start_node(
             net_handle.clone(),
             mpsc::channel::<SyncEvent>(1).0,
         );
-        tokio::spawn(async move {
+        background_tasks.spawn_one_shot("initial state sync", async move {
             // Wait briefly for connections to establish.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Err(e) = sync_for_join.request_sync().await {
@@ -423,11 +486,15 @@ async fn start_node(
     }
 
     // Spawn the sync engine event loop.
-    tokio::spawn(sync::run_sync_engine(sync_engine, sync_net_event_rx));
+    background_tasks.spawn_critical(
+        "sync engine",
+        sync::run_sync_engine(sync_engine, sync_net_event_rx),
+    );
     tracing::info!("Sync engine started");
 
     // --- Event fan-out ---
     spawn_event_fanout(
+        &mut background_tasks,
         event_rx,
         reactor_event_tx,
         sync_net_event_tx,
@@ -436,7 +503,7 @@ async fn start_node(
 
     // --- Event loggers (with metrics updates) ---
     let reactor_metrics = Arc::clone(&node_metrics);
-    tokio::spawn(async move {
+    background_tasks.spawn_critical("reactor event logger", async move {
         while let Some(event) = reactor_rx.recv().await {
             match event {
                 ReactorEvent::NodeCommitted {
@@ -473,7 +540,7 @@ async fn start_node(
     });
 
     let sync_metrics = Arc::clone(&node_metrics);
-    tokio::spawn(async move {
+    background_tasks.spawn_critical("sync event logger", async move {
         while let Some(event) = sync_event_rx.recv().await {
             match event {
                 SyncEvent::Progress {
@@ -529,13 +596,16 @@ async fn start_node(
 
         let (holon_event_tx, mut holon_event_rx) = mpsc::channel::<HolonEvent>(256);
 
-        tokio::spawn(holons::run_holon_manager(
-            holon_config,
-            Arc::clone(&reactor_state),
-            Arc::clone(&shared_store),
-            net_handle.clone(),
-            holon_event_tx,
-        ));
+        background_tasks.spawn_critical(
+            "infrastructure holon manager",
+            holons::run_holon_manager(
+                holon_config,
+                Arc::clone(&reactor_state),
+                Arc::clone(&shared_store),
+                net_handle.clone(),
+                holon_event_tx,
+            ),
+        );
         tracing::warn!(
             enabled = holons::infrastructure_holons_enabled(),
             feature_flag = holons::INFRASTRUCTURE_HOLONS_FEATURE,
@@ -545,7 +615,7 @@ async fn start_node(
 
         // Holon event logger (with metrics updates).
         let holon_metrics = Arc::clone(&node_metrics);
-        tokio::spawn(async move {
+        background_tasks.spawn_critical("holon event logger", async move {
             while let Some(event) = holon_event_rx.recv().await {
                 match event {
                     HolonEvent::TopologyAnalysis {
@@ -694,28 +764,34 @@ async fn start_node(
     let (alert_tx, alert_rx) = tokio::sync::mpsc::channel::<sentinels::SentinelAlert>(64);
 
     // Spawn sentinel background loop.
-    tokio::spawn(sentinels::run_sentinel_loop(
-        Arc::clone(&reactor_state),
-        Arc::clone(&shared_store),
-        Arc::clone(&zerodentity_store),
-        Arc::clone(&sentinel_state),
-        alert_tx,
-        std::time::Duration::from_secs(30),
-    ));
+    background_tasks.spawn_critical(
+        "sentinel loop",
+        sentinels::run_sentinel_loop(
+            Arc::clone(&reactor_state),
+            Arc::clone(&shared_store),
+            Arc::clone(&zerodentity_store),
+            Arc::clone(&sentinel_state),
+            alert_tx,
+            std::time::Duration::from_secs(30),
+        ),
+    );
 
     // Start the Telegram adjutant if configured.
     if let Some(tg_config) = telegram::AdjutantConfig::from_env() {
         tracing::info!("Telegram adjutant configured — starting bot");
         let adjutant = telegram::Adjutant::new(tg_config);
-        tokio::spawn(telegram::run_adjutant(
-            adjutant,
-            alert_rx,
-            Arc::clone(&reactor_state),
-            Arc::clone(&shared_store),
-            Arc::clone(&challenge_store),
-            Arc::clone(&sentinel_state),
-            Arc::clone(&zerodentity_store),
-        ));
+        background_tasks.spawn_critical(
+            "Telegram adjutant",
+            telegram::run_adjutant(
+                adjutant,
+                alert_rx,
+                Arc::clone(&reactor_state),
+                Arc::clone(&shared_store),
+                Arc::clone(&challenge_store),
+                Arc::clone(&sentinel_state),
+                Arc::clone(&zerodentity_store),
+            ),
+        );
     } else {
         tracing::info!(
             "Telegram adjutant not configured — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable"
@@ -829,7 +905,12 @@ async fn start_node(
         %bind_address,
         "Node fully started — SIGTERM/Ctrl+C will trigger graceful shutdown"
     );
-    serve_fut.await?;
+    let run_result = tokio::select! {
+        server_result = serve_fut => server_result.map_err(anyhow::Error::from),
+        task_result = background_tasks.next_failure() => task_result,
+    };
+    background_tasks.shutdown().await;
+    run_result?;
 
     tracing::info!("HTTP server drained — signaling subsystems to stop");
     tokio::task::yield_now().await;
@@ -1066,5 +1147,49 @@ mod tests {
 
         assert!(text.contains("65535"));
         assert!(text.contains("QUIC"));
+    }
+
+    #[tokio::test]
+    async fn background_task_completion_is_ignored_until_failure() {
+        let mut tasks = BackgroundTasks::new();
+        tasks.spawn_one_shot("bounded startup task", async {});
+        tasks.spawn_critical("short critical task", async {});
+
+        let err = tasks.next_failure().await.unwrap_err();
+        assert!(err.to_string().contains("short critical task"));
+
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn background_task_panic_is_reported() {
+        let mut tasks = BackgroundTasks::new();
+        tasks.spawn_critical("panic task", async {
+            panic!("supervised panic");
+        });
+
+        let err = tasks.next_failure().await.unwrap_err();
+        assert!(err.to_string().contains("panicked"));
+
+        tasks.shutdown().await;
+    }
+
+    #[test]
+    fn startup_background_tasks_are_supervised() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(
+            production.contains("BackgroundTasks"),
+            "startup must register background tasks with a supervisor"
+        );
+        assert!(
+            production.contains("tokio::select!"),
+            "startup must race HTTP serving against supervised task failure"
+        );
+        assert!(
+            !production.contains("tokio::spawn("),
+            "startup must not discard JoinHandles from raw tokio::spawn"
+        );
     }
 }
