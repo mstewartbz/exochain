@@ -15,7 +15,7 @@ use chacha20poly1305::{
 use exo_core::SecretKey;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::IdentityError;
 
@@ -56,10 +56,10 @@ impl VaultEncryptor {
     /// fails (in practice this cannot occur for a 32-byte output).
     pub fn derive_key(secret: &SecretKey, context: &[u8]) -> Result<Self, IdentityError> {
         let hk = Hkdf::<Sha256>::new(None, secret.as_bytes());
-        let mut okm = [0u8; 32];
-        hk.expand(context, &mut okm)
+        let mut okm = Zeroizing::new([0u8; 32]);
+        hk.expand(context, &mut *okm)
             .map_err(|e| IdentityError::VaultKeyDerivationFailed(e.to_string()))?;
-        Ok(Self { key: okm })
+        Ok(Self { key: *okm })
     }
 
     /// Encrypt `plaintext` with XChaCha20-Poly1305.
@@ -302,6 +302,24 @@ mod tests {
         let enc2 = VaultEncryptor::derive_key(&sk, b"context-beta").expect("derive_key");
 
         assert_ne!(enc1.key_bytes(), enc2.key_bytes());
+    }
+
+    #[test]
+    fn derive_key_source_zeroizes_hkdf_output_buffer() {
+        let source = include_str!("vault.rs");
+        let production = match source.split("#[cfg(test)]").next() {
+            Some(production) => production,
+            None => panic!("test boundary marker must be present"),
+        };
+
+        assert!(
+            production.contains("Zeroizing::new([0u8; 32])"),
+            "derive_key must hold HKDF output in an auto-zeroizing buffer"
+        );
+        assert!(
+            !production.contains("let mut okm = [0u8; 32]"),
+            "derive_key must not leave a plain stack copy of derived key material"
+        );
     }
 
     #[test]
