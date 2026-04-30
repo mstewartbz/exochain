@@ -11,8 +11,10 @@
 //! # Hybrid verification
 //!
 //! [`verify_hybrid`] requires **both** the Ed25519 and ML-DSA-65 components
-//! to pass.  Both components are always evaluated — no short-circuit — so
-//! the timing of a rejection does not reveal which component failed.
+//! to pass.  It evaluates both top-level components before combining their
+//! results, removing a top-level short-circuit. Component-level timing remains
+//! governed by the verifier crates, so callers must not expose rejection timing
+//! as an oracle.
 //!
 //! # Security note — `verify()` and Hybrid signatures
 //!
@@ -33,7 +35,7 @@
 
 use ed25519_dalek::{Signer, Verifier};
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     error::{ExoError, Result},
@@ -235,10 +237,10 @@ pub fn generate_pq_keypair() -> (PqPublicKey, PqSecretKey) {
     // Generate entropy via rand 0.8 (rand_core 0.6) — no conflict with
     // ml-dsa's rand_core 0.10, because we fill a plain byte array and then
     // hand it to ml-dsa's seed-based constructor.
-    let mut seed_bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed_bytes);
+    let mut seed_bytes = Zeroizing::new([0u8; 32]);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut *seed_bytes);
 
-    let seed: ml_dsa::Seed = seed_bytes.into();
+    let seed: ml_dsa::Seed = (*seed_bytes).into();
     let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&seed);
     let vk = sk.verifying_key();
     let vk_encoded: EncodedVerifyingKey<MlDsa65> = vk.encode();
@@ -337,9 +339,10 @@ pub fn sign_hybrid(
 
 /// Verify a `Hybrid` signature.
 ///
-/// **Both** the Ed25519 and ML-DSA-65 components must pass.  Both are always
-/// evaluated — no short-circuit — so the timing of a `false` result does not
-/// reveal which component failed.
+/// **Both** the Ed25519 and ML-DSA-65 components must pass. Both top-level
+/// components are evaluated before results are combined, removing a top-level
+/// short-circuit. Component-level timing remains governed by the verifier crates,
+/// so callers must not expose rejection timing as an oracle.
 ///
 /// Returns `false` for any `Signature` variant other than `Hybrid`.
 #[must_use]
@@ -353,8 +356,8 @@ pub fn verify_hybrid(
         return false;
     };
 
-    // Evaluate both before combining — no short-circuit — to prevent timing
-    // leakage of which component failed.
+    // Evaluate both before combining. This removes top-level short-circuiting;
+    // component-level timing remains governed by the verifier crates.
     let classical_ok = verify_ed25519_bytes(message, classical, classical_public);
     let pq_ok = verify_pq(message, &Signature::PostQuantum(pq.clone()), pq_public);
 
@@ -564,6 +567,30 @@ mod tests {
     }
 
     #[test]
+    fn generate_pq_keypair_zeroizes_stack_seed_buffer() {
+        let source = include_str!("crypto.rs");
+        let Some(production) = source.split("#[cfg(test)]").next() else {
+            panic!("production source section exists");
+        };
+        let Some(start) = production.find("pub fn generate_pq_keypair()") else {
+            panic!("generate_pq_keypair source exists");
+        };
+        let Some(end) = production[start..].find("/// Sign `message`") else {
+            panic!("sign_pq docs follow generate_pq_keypair");
+        };
+        let generate_pq_keypair_source = &production[start..start + end];
+
+        assert!(
+            generate_pq_keypair_source.contains("Zeroizing::new([0u8; 32])"),
+            "ML-DSA seed scratch buffer must be wrapped in Zeroizing"
+        );
+        assert!(
+            !generate_pq_keypair_source.contains("let mut seed_bytes = [0u8; 32];"),
+            "plain stack seed buffer can leave ML-DSA seed bytes behind after key generation"
+        );
+    }
+
+    #[test]
     fn pq_sign_verify_roundtrip() {
         let (pk, sk) = generate_pq_keypair();
         let msg = b"hello post-quantum exochain";
@@ -679,6 +706,23 @@ mod tests {
         assert!(
             verify_hybrid(msg, &sig, &classical_pk, &pq_pk),
             "verify_hybrid should accept a valid Hybrid signature"
+        );
+    }
+
+    #[test]
+    fn hybrid_verification_docs_do_not_overstate_component_timing_privacy() {
+        let source = include_str!("crypto.rs");
+        let Some(production) = source.split("#[cfg(test)]").next() else {
+            panic!("production source section exists");
+        };
+
+        assert!(
+            !production.contains("does not reveal which component failed"),
+            "hybrid verifier docs must not promise component-level timing indistinguishability"
+        );
+        assert!(
+            production.contains("component-level timing remains governed by the verifier crates"),
+            "hybrid verifier docs must state the remaining component-level timing boundary"
         );
     }
 
