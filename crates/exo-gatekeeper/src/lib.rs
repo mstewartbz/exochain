@@ -9,6 +9,8 @@
 //! - **TEE** — Trusted Execution Environment attestation
 //! - **Governance Monitor** — T-14 defense: signed attestation, circuit breaker, human approval gate
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod combinator;
 pub mod error;
 pub mod governance_monitor;
