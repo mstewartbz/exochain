@@ -6,12 +6,13 @@
 
 #![allow(clippy::same_item_push)]
 
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 use exo_core::{
     crypto::KeyPair,
     types::{Did, PublicKey},
 };
+use zeroize::Zeroize;
 
 /// A node's persistent identity.
 pub struct NodeIdentity {
@@ -62,17 +63,22 @@ pub fn load_or_create(data_dir: &Path) -> anyhow::Result<NodeIdentity> {
 
     if key_path.exists() {
         // Reload existing identity.
-        let secret_bytes = std::fs::read(&key_path)?;
+        let mut secret_bytes = std::fs::read(&key_path)?;
         if secret_bytes.len() != 32 {
+            let actual_len = secret_bytes.len();
+            secret_bytes.zeroize();
             anyhow::bail!(
                 "Corrupt identity key at {} — expected 32 bytes, got {}",
                 key_path.display(),
-                secret_bytes.len()
+                actual_len
             );
         }
         let mut buf = [0u8; 32];
         buf.copy_from_slice(&secret_bytes);
-        let keypair = KeyPair::from_secret_bytes(buf)?;
+        secret_bytes.zeroize();
+        let keypair_result = KeyPair::from_secret_bytes(buf);
+        buf.zeroize();
+        let keypair = keypair_result?;
 
         let did_str = std::fs::read_to_string(&did_path)?;
         let did = Did::new(did_str.trim())?;
@@ -149,14 +155,33 @@ fn bs58_encode(data: &[u8]) -> String {
 
 /// Write secret key bytes with restrictive permissions.
 fn write_secret(path: &Path, data: &[u8]) -> anyhow::Result<()> {
-    std::fs::write(path, data)?;
-
-    // Set 0600 on Unix.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| {
+                anyhow::anyhow!("failed to create secret key file {}: {e}", path.display())
+            })?;
+        file.write_all(data)?;
+        file.sync_all()?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| {
+                anyhow::anyhow!("failed to create secret key file {}: {e}", path.display())
+            })?;
+        file.write_all(data)?;
+        file.sync_all()?;
     }
 
     Ok(())
@@ -214,6 +239,68 @@ mod tests {
         assert!(
             err.to_string().contains("Corrupt identity key"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn write_secret_rejects_existing_file_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("identity.key");
+        std::fs::write(&key_path, [0xA5u8; 32]).unwrap();
+
+        let err = match write_secret(&key_path, &[0x5Au8; 32]) {
+            Ok(()) => panic!("write_secret must not overwrite an existing secret path"),
+            Err(err) => err,
+        };
+        let contents = std::fs::read(&key_path).unwrap();
+
+        assert!(
+            err.to_string().contains("identity.key"),
+            "error should identify the refused secret path: {err}"
+        );
+        assert_eq!(contents, vec![0xA5u8; 32]);
+    }
+
+    #[test]
+    fn write_secret_source_creates_file_with_restrictive_mode_before_write() {
+        let source = include_str!("identity.rs");
+        let write_secret_source = source
+            .split("fn write_secret")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(
+            !write_secret_source.contains("std::fs::write(path, data)"),
+            "secret key must not be written before restrictive permissions are applied"
+        );
+        assert!(
+            write_secret_source.contains(".create_new(true)"),
+            "secret key creation must fail if an attacker races in an existing path"
+        );
+        #[cfg(unix)]
+        assert!(
+            write_secret_source.contains(".mode(0o600)"),
+            "Unix secret key file must be created with mode 0600 before bytes are written"
+        );
+    }
+
+    #[test]
+    fn load_existing_identity_source_zeroizes_secret_read_buffer() {
+        let source = include_str!("identity.rs");
+        let load_source = source
+            .split("pub fn load_or_create")
+            .nth(1)
+            .unwrap()
+            .split("/// Minimal base58 encoding")
+            .next()
+            .unwrap();
+
+        assert!(
+            load_source.contains("secret_bytes.zeroize()"),
+            "temporary Vec holding identity.key bytes must be zeroized after copying"
         );
     }
 
