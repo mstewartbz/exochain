@@ -18,6 +18,8 @@
 //! `BoardAcknowledgment` records that each non-conflicted board member received
 //! and acknowledged a specific conflict disclosure.
 
+use std::collections::BTreeSet;
+
 use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -85,6 +87,8 @@ pub enum ConflictSeverity {
 /// Acknowledgment is the proof that the board *received* the disclosure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoardAcknowledgment {
+    /// DID of the declarant whose conflict disclosure is being acknowledged.
+    pub declarant_did: Did,
     /// DID of the acknowledging board member (must not be the conflicted party).
     pub acknowledger_did: Did,
     /// The conflict declaration being acknowledged.
@@ -150,10 +154,23 @@ impl StandingConflictRegister {
     /// Number of board acknowledgments recorded for a given declarant.
     #[must_use]
     pub fn acknowledgment_count(&self, declarant: &Did) -> usize {
-        self.acknowledgments
-            .iter()
-            .filter(|a| &a.acknowledger_did != declarant)
-            .count()
+        let mut acknowledgers = BTreeSet::new();
+        for acknowledgment in &self.acknowledgments {
+            if &acknowledgment.declarant_did != declarant
+                || &acknowledgment.acknowledger_did == declarant
+            {
+                continue;
+            }
+
+            let registered_disclosure = self.entries.iter().any(|entry| {
+                &entry.declarant_did == declarant
+                    && entry.timestamp == acknowledgment.declaration_timestamp
+            });
+            if registered_disclosure {
+                acknowledgers.insert(acknowledgment.acknowledger_did.clone());
+            }
+        }
+        acknowledgers.len()
     }
 
     /// All declarations in the register.
@@ -412,6 +429,7 @@ mod tests {
         register.register(decl("financial interest", "bob"));
 
         let ack = BoardAcknowledgment {
+            declarant_did: declarant.clone(),
             acknowledger_did: did("carol"),
             declaration_timestamp: Timestamp::new(1000, 0),
             acknowledged_at: Timestamp::new(2000, 0),
@@ -428,6 +446,7 @@ mod tests {
         let mut register = StandingConflictRegister::new();
         let declarant = did("alice");
         let ack = BoardAcknowledgment {
+            declarant_did: declarant.clone(),
             acknowledger_did: declarant.clone(), // same as declarant
             declaration_timestamp: Timestamp::new(1000, 0),
             acknowledged_at: Timestamp::new(2000, 0),
@@ -437,6 +456,85 @@ mod tests {
             register.acknowledgment_count(&declarant),
             0,
             "Declarant self-acknowledgment must not count toward DGCL §144(a)(1)"
+        );
+    }
+
+    #[test]
+    fn board_acknowledgment_count_excludes_unrelated_declarants() {
+        let mut register = StandingConflictRegister::new();
+        let alice = did("alice");
+        let dave = did("dave");
+
+        register.register(ConflictDeclaration {
+            declarant_did: alice.clone(),
+            nature: "financial interest".into(),
+            related_dids: vec![did("bob")],
+            timestamp: Timestamp::new(1000, 0),
+        });
+        register.register(ConflictDeclaration {
+            declarant_did: dave.clone(),
+            nature: "personal relationship".into(),
+            related_dids: vec![did("eve")],
+            timestamp: Timestamp::new(1000, 0),
+        });
+
+        register.record_acknowledgment(BoardAcknowledgment {
+            declarant_did: dave.clone(),
+            acknowledger_did: did("carol"),
+            declaration_timestamp: Timestamp::new(1000, 0),
+            acknowledged_at: Timestamp::new(3000, 0),
+        });
+
+        assert_eq!(
+            register.acknowledgment_count(&alice),
+            0,
+            "acknowledgments for Dave's disclosure must not count for Alice"
+        );
+        assert_eq!(register.acknowledgment_count(&dave), 1);
+    }
+
+    #[test]
+    fn board_acknowledgment_count_deduplicates_acknowledgers() {
+        let mut register = StandingConflictRegister::new();
+        let alice = did("alice");
+        register.register(ConflictDeclaration {
+            declarant_did: alice.clone(),
+            nature: "financial interest".into(),
+            related_dids: vec![did("bob")],
+            timestamp: Timestamp::new(1000, 0),
+        });
+
+        for acknowledged_at in [Timestamp::new(2000, 0), Timestamp::new(2001, 0)] {
+            register.record_acknowledgment(BoardAcknowledgment {
+                declarant_did: alice.clone(),
+                acknowledger_did: did("carol"),
+                declaration_timestamp: Timestamp::new(1000, 0),
+                acknowledged_at,
+            });
+        }
+
+        assert_eq!(
+            register.acknowledgment_count(&alice),
+            1,
+            "the same board member must not inflate acknowledgment quorum"
+        );
+    }
+
+    #[test]
+    fn board_acknowledgment_count_excludes_unregistered_declarations() {
+        let mut register = StandingConflictRegister::new();
+        let alice = did("alice");
+        register.record_acknowledgment(BoardAcknowledgment {
+            declarant_did: alice.clone(),
+            acknowledger_did: did("carol"),
+            declaration_timestamp: Timestamp::new(9999, 0),
+            acknowledged_at: Timestamp::new(10_000, 0),
+        });
+
+        assert_eq!(
+            register.acknowledgment_count(&alice),
+            0,
+            "acknowledgments must not count without a registered disclosure"
         );
     }
 
