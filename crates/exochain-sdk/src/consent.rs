@@ -41,7 +41,7 @@
 //! ```
 
 use exo_core::Did;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::error::{ExoError, ExoResult};
 
@@ -192,15 +192,11 @@ impl BailmentBuilder {
         let scope = self
             .scope
             .ok_or_else(|| ExoError::Consent("scope is required".into()))?;
-        if scope.is_empty() {
-            return Err(ExoError::Consent("scope must be non-empty".into()));
-        }
         let duration_hours = self
             .duration_hours
             .ok_or_else(|| ExoError::Consent("duration_hours is required".into()))?;
-        if duration_hours == 0 {
-            return Err(ExoError::Consent("duration_hours must be > 0".into()));
-        }
+        validate_bailment_fields(&self.bailor, &self.bailee, &scope, duration_hours)
+            .map_err(ExoError::Consent)?;
 
         // Deterministic proposal ID: BLAKE3 over canonical fields, first 16 hex chars.
         let proposal_id = proposal_id_for(&self.bailor, &self.bailee, &scope, duration_hours);
@@ -242,7 +238,7 @@ impl BailmentBuilder {
 /// assert_eq!(proposal, decoded);
 /// # Ok::<(), exochain_sdk::error::ExoError>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BailmentProposal {
     /// Deterministic content-addressed identifier for this proposal.
     pub proposal_id: String,
@@ -254,6 +250,77 @@ pub struct BailmentProposal {
     pub scope: String,
     /// Duration of the bailment, in whole hours.
     pub duration_hours: u64,
+}
+
+impl<'de> Deserialize<'de> for BailmentProposal {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireBailmentProposal {
+            proposal_id: String,
+            bailor: Did,
+            bailee: Did,
+            scope: String,
+            duration_hours: u64,
+        }
+
+        let wire = WireBailmentProposal::deserialize(deserializer)?;
+        validate_bailment_proposal(
+            &wire.proposal_id,
+            &wire.bailor,
+            &wire.bailee,
+            &wire.scope,
+            wire.duration_hours,
+        )
+        .map_err(de::Error::custom)?;
+        Ok(Self {
+            proposal_id: wire.proposal_id,
+            bailor: wire.bailor,
+            bailee: wire.bailee,
+            scope: wire.scope,
+            duration_hours: wire.duration_hours,
+        })
+    }
+}
+
+fn validate_bailment_fields(
+    bailor: &Did,
+    bailee: &Did,
+    scope: &str,
+    duration_hours: u64,
+) -> Result<(), String> {
+    if scope.is_empty() {
+        return Err("scope must be non-empty".into());
+    }
+    if scope.contains('\0') {
+        return Err("scope must not contain NUL bytes".into());
+    }
+    if bailor.as_str().contains('\0') || bailee.as_str().contains('\0') {
+        return Err("DID fields must not contain NUL bytes".into());
+    }
+    if duration_hours == 0 {
+        return Err("duration_hours must be > 0".into());
+    }
+    Ok(())
+}
+
+fn validate_bailment_proposal(
+    proposal_id: &str,
+    bailor: &Did,
+    bailee: &Did,
+    scope: &str,
+    duration_hours: u64,
+) -> Result<(), String> {
+    validate_bailment_fields(bailor, bailee, scope, duration_hours)?;
+    let expected = proposal_id_for(bailor, bailee, scope, duration_hours);
+    if proposal_id != expected {
+        return Err(format!(
+            "proposal_id does not match canonical content hash: expected {expected}, got {proposal_id}"
+        ));
+    }
+    Ok(())
 }
 
 /// Compute the deterministic proposal ID.
@@ -325,6 +392,16 @@ mod tests {
     }
 
     #[test]
+    fn null_byte_scope_fails() {
+        let err = BailmentBuilder::new(did("did:exo:a"), did("did:exo:b"))
+            .scope("data\0medical")
+            .duration_hours(1)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, ExoError::Consent(_)));
+    }
+
+    #[test]
     fn missing_duration_fails() {
         let err = BailmentBuilder::new(did("did:exo:a"), did("did:exo:b"))
             .scope("data")
@@ -387,5 +464,59 @@ mod tests {
         let json = serde_json::to_string(&proposal).expect("serialize");
         let decoded: BailmentProposal = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(proposal, decoded);
+    }
+
+    #[test]
+    fn proposal_deserialization_rejects_zero_duration() {
+        let json = serde_json::json!({
+            "proposal_id": "0000000000000000",
+            "bailor": "did:exo:a",
+            "bailee": "did:exo:b",
+            "scope": "data",
+            "duration_hours": 0
+        });
+
+        let result = serde_json::from_value::<BailmentProposal>(json);
+
+        assert!(
+            result.is_err(),
+            "deserialization must enforce non-zero duration"
+        );
+    }
+
+    #[test]
+    fn proposal_deserialization_rejects_forged_proposal_id() {
+        let proposal = BailmentBuilder::new(did("did:exo:a"), did("did:exo:b"))
+            .scope("data")
+            .duration_hours(1)
+            .build()
+            .expect("valid");
+        let mut json = serde_json::to_value(&proposal).expect("serialize");
+        json["proposal_id"] = serde_json::json!("ffffffffffffffff");
+
+        let result = serde_json::from_value::<BailmentProposal>(json);
+
+        assert!(
+            result.is_err(),
+            "deserialization must recompute and verify the content-addressed ID"
+        );
+    }
+
+    #[test]
+    fn proposal_deserialization_rejects_null_byte_scope() {
+        let json = serde_json::json!({
+            "proposal_id": "0000000000000000",
+            "bailor": "did:exo:a",
+            "bailee": "did:exo:b",
+            "scope": "data\0medical",
+            "duration_hours": 1
+        });
+
+        let result = serde_json::from_value::<BailmentProposal>(json);
+
+        assert!(
+            result.is_err(),
+            "deserialization must reject NUL-delimited scope collisions"
+        );
     }
 }
