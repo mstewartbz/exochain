@@ -1,19 +1,103 @@
 //! PACE — Primary / Alternate / Contingency / Emergency operator continuity.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use exo_core::Did;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, SeqAccess, Visitor},
+};
 
 use crate::error::IdentityError;
 
+/// Maximum DIDs accepted in any non-primary PACE level.
+pub const MAX_PACE_LEVEL_DIDS: usize = 32;
+
 /// Configuration defining the operator hierarchy for PACE continuity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaceConfig {
     pub primary: Did,
+    #[serde(deserialize_with = "deserialize_pace_alternates")]
     pub alternates: Vec<Did>,
+    #[serde(deserialize_with = "deserialize_pace_contingency")]
     pub contingency: Vec<Did>,
+    #[serde(deserialize_with = "deserialize_pace_emergency")]
     pub emergency: Vec<Did>,
+}
+
+impl fmt::Debug for PaceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaceConfig")
+            .field("primary", &"<redacted>")
+            .field("alternate_count", &self.alternates.len())
+            .field("contingency_count", &self.contingency.len())
+            .field("emergency_count", &self.emergency.len())
+            .finish()
+    }
+}
+
+fn deserialize_pace_alternates<'de, D>(deserializer: D) -> Result<Vec<Did>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_did_vec(deserializer, "alternates")
+}
+
+fn deserialize_pace_contingency<'de, D>(deserializer: D) -> Result<Vec<Did>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_did_vec(deserializer, "contingency")
+}
+
+fn deserialize_pace_emergency<'de, D>(deserializer: D) -> Result<Vec<Did>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_did_vec(deserializer, "emergency")
+}
+
+fn deserialize_bounded_did_vec<'de, D>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<Vec<Did>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BoundedDidVecVisitor {
+        field: &'static str,
+    }
+
+    impl<'de> Visitor<'de> for BoundedDidVecVisitor {
+        type Value = Vec<Did>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_PACE_LEVEL_DIDS} DID values in {}",
+                self.field
+            )
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut dids = Vec::new();
+            while let Some(did) = seq.next_element::<Did>()? {
+                if dids.len() >= MAX_PACE_LEVEL_DIDS {
+                    return Err(de::Error::custom(format!(
+                        "{} must not contain more than {} DIDs",
+                        self.field, MAX_PACE_LEVEL_DIDS
+                    )));
+                }
+                dids.push(did);
+            }
+            Ok(dids)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedDidVecVisitor { field })
 }
 
 impl PaceConfig {
@@ -173,6 +257,63 @@ mod tests {
             config.validate().unwrap_err(),
             IdentityError::DuplicatePaceDid(_)
         ));
+    }
+
+    #[test]
+    fn deserialize_rejects_oversized_pace_levels() {
+        let alternates: Vec<String> = (0..=MAX_PACE_LEVEL_DIDS)
+            .map(|idx| format!("did:exo:alt-{idx}"))
+            .collect();
+        let payload = serde_json::json!({
+            "primary": "did:exo:primary",
+            "alternates": alternates,
+            "contingency": ["did:exo:contingency"],
+            "emergency": ["did:exo:emergency"]
+        });
+        let json = serde_json::to_string(&payload).expect("PACE JSON encodes");
+
+        let err = serde_json::from_str::<PaceConfig>(&json)
+            .expect_err("oversized PACE level must be rejected during deserialization");
+
+        assert!(
+            err.to_string().contains("alternates"),
+            "error should identify the oversized PACE level: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_accepts_pace_levels_at_bound() {
+        let alternates: Vec<String> = (0..MAX_PACE_LEVEL_DIDS)
+            .map(|idx| format!("did:exo:alt-{idx}"))
+            .collect();
+        let payload = serde_json::json!({
+            "primary": "did:exo:primary",
+            "alternates": alternates,
+            "contingency": ["did:exo:contingency"],
+            "emergency": ["did:exo:emergency"]
+        });
+        let json = serde_json::to_string(&payload).expect("PACE JSON encodes");
+
+        let config = serde_json::from_str::<PaceConfig>(&json)
+            .expect("PACE levels at the configured bound must deserialize");
+
+        assert_eq!(config.alternates.len(), MAX_PACE_LEVEL_DIDS);
+        config
+            .validate()
+            .expect("bounded non-duplicated PACE config validates");
+    }
+
+    #[test]
+    fn pace_config_debug_summarizes_operator_lists() {
+        let config = make_config();
+
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains("did:exo:primary"));
+        assert!(!debug.contains("did:exo:alt1"));
+        assert!(debug.contains("alternate_count"));
+        assert!(debug.contains("contingency_count"));
+        assert!(debug.contains("emergency_count"));
     }
 
     #[test]
