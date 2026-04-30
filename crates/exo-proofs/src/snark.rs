@@ -74,6 +74,7 @@ pub fn setup(circuit: &dyn Circuit) -> Result<(ProvingKey, VerifyingKey)> {
             "circuit has no constraints".to_string(),
         ));
     }
+    validate_public_input_indices(&cs).map_err(ProofError::SetupError)?;
 
     // Compute a deterministic fingerprint of the circuit structure.
     let circuit_hash =
@@ -110,6 +111,7 @@ pub fn prove(pk: &ProvingKey, circuit: &dyn Circuit, witness: &[u64]) -> Result<
     circuit
         .synthesize(&mut cs)
         .map_err(|e| ProofError::ProofGenerationFailed(e.to_string()))?;
+    validate_public_input_indices(&cs).map_err(ProofError::InvalidWitness)?;
 
     // Populate witness values
     if witness.len() != cs.num_variables() {
@@ -140,19 +142,17 @@ pub fn prove(pk: &ProvingKey, circuit: &dyn Circuit, witness: &[u64]) -> Result<
         ));
     }
 
-    // Compute proof components deterministically from the witness.
-    // In real Groth16 these would be elliptic curve pairings.
-    // a and b encode the full witness (prover knowledge).
-    let a = compute_proof_component(b"snark:a:", &circuit_hash, witness);
-    let b = compute_proof_component(b"snark:b:", &circuit_hash, witness);
+    let public_inputs = public_inputs_from_witness(&cs, witness)?;
 
-    // c is derived from (a, b, circuit_hash, public_inputs) so the verifier
-    // can recompute it without the private witness.
-    let public_inputs: Vec<u64> = cs
-        .public_input_indices
-        .iter()
-        .map(|&idx| witness[idx])
-        .collect();
+    // Compute proof components deterministically from the public statement.
+    // In real Groth16 these would be zero-knowledge elliptic curve points.
+    // This pedagogical stand-in must not commit private witness values into
+    // serialized proof bytes.
+    let a = compute_proof_component(b"snark:a:statement:", &circuit_hash, &public_inputs);
+    let b = compute_proof_component(b"snark:b:statement:", &circuit_hash, &public_inputs);
+
+    // c is derived from (a, b, circuit_hash, public_inputs) so the verifier can
+    // recompute it from the public statement.
     let c = compute_c_component(&circuit_hash, &public_inputs, &a, &b);
 
     Ok(Proof { a, b, c })
@@ -216,12 +216,47 @@ fn compute_circuit_hash(cs: &ConstraintSystem) -> Result<Hash256> {
     Ok(Hash256::from_bytes(*hasher.finalize().as_bytes()))
 }
 
-fn compute_proof_component(prefix: &[u8], circuit_hash: &Hash256, witness: &[u64]) -> [u8; 32] {
+fn validate_public_input_indices(cs: &ConstraintSystem) -> std::result::Result<(), String> {
+    if cs.public_input_indices.len() != cs.num_public_inputs {
+        return Err(format!(
+            "public input metadata mismatch: declared {} inputs but recorded {} indices",
+            cs.num_public_inputs,
+            cs.public_input_indices.len()
+        ));
+    }
+
+    for &idx in &cs.public_input_indices {
+        if idx >= cs.num_variables() {
+            return Err(format!(
+                "public input index {idx} is outside variable count {}",
+                cs.num_variables()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn public_inputs_from_witness(cs: &ConstraintSystem, witness: &[u64]) -> Result<Vec<u64>> {
+    let mut public_inputs = Vec::with_capacity(cs.public_input_indices.len());
+    for &idx in &cs.public_input_indices {
+        let Some(value) = witness.get(idx) else {
+            return Err(ProofError::InvalidWitness(format!(
+                "public input index {idx} is outside witness length {}",
+                witness.len()
+            )));
+        };
+        public_inputs.push(*value);
+    }
+    Ok(public_inputs)
+}
+
+fn compute_proof_component(prefix: &[u8], circuit_hash: &Hash256, values: &[u64]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(prefix);
     hasher.update(circuit_hash.as_bytes());
-    for &w in witness {
-        hasher.update(&w.to_le_bytes());
+    for &value in values {
+        hasher.update(&value.to_le_bytes());
     }
     *hasher.finalize().as_bytes()
 }
@@ -337,6 +372,68 @@ mod tests {
         let (pk, _) = setup(&circuit).unwrap();
         let err = prove(&pk, &circuit, &[3, 4]).unwrap_err();
         assert!(matches!(err, ProofError::InvalidWitness(_)));
+    }
+
+    #[test]
+    fn proof_components_do_not_commit_private_witness_values() {
+        #[derive(Debug)]
+        struct UnderconstrainedCircuit {
+            public: Option<u64>,
+            private: Option<u64>,
+        }
+
+        impl Circuit for UnderconstrainedCircuit {
+            fn synthesize(&self, cs: &mut ConstraintSystem) -> crate::error::Result<()> {
+                let public = allocate_public(cs, self.public);
+                let _private = allocate(cs, self.private);
+                enforce(
+                    cs,
+                    &LinearCombination::from_variable(public),
+                    &LinearCombination::constant(1),
+                    &LinearCombination::from_variable(public),
+                );
+                Ok(())
+            }
+        }
+
+        let circuit = UnderconstrainedCircuit {
+            public: Some(7),
+            private: Some(11),
+        };
+        let (pk, _) = setup(&circuit).unwrap();
+
+        let proof_a = prove(&pk, &circuit, &[7, 11]).unwrap();
+        let proof_b = prove(&pk, &circuit, &[7, 99]).unwrap();
+
+        assert_eq!(
+            proof_a, proof_b,
+            "serialized proof components must not reveal deterministic commitments to private witness values"
+        );
+    }
+
+    #[test]
+    fn setup_rejects_out_of_range_public_input_indices() {
+        #[derive(Debug)]
+        struct InvalidPublicInputCircuit;
+
+        impl Circuit for InvalidPublicInputCircuit {
+            fn synthesize(&self, cs: &mut ConstraintSystem) -> crate::error::Result<()> {
+                let value = allocate(cs, Some(1));
+                enforce(
+                    cs,
+                    &LinearCombination::from_variable(value),
+                    &LinearCombination::constant(1),
+                    &LinearCombination::from_variable(value),
+                );
+                cs.public_input_indices.push(value.index + 1);
+                cs.num_public_inputs += 1;
+                Ok(())
+            }
+        }
+
+        let err = setup(&InvalidPublicInputCircuit).unwrap_err();
+
+        assert!(matches!(err, ProofError::SetupError(_)));
     }
 
     #[test]
