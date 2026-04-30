@@ -1,5 +1,8 @@
 //! HTTP server skeleton — gateway configuration, lifecycle, and axum routing.
-use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use axum::{
     Router,
@@ -241,6 +244,73 @@ impl AppState {
             active_challenge_reason: None,
         }
     }
+}
+
+#[derive(Debug)]
+enum RegistryBlockingError {
+    Operation(String),
+    Join(String),
+}
+
+impl fmt::Display for RegistryBlockingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Operation(error) => write!(f, "registry operation failed: {error}"),
+            Self::Join(error) => write!(f, "registry blocking task failed: {error}"),
+        }
+    }
+}
+
+async fn registry_register_document(
+    registry: Arc<RwLock<LocalDidRegistry>>,
+    doc: DidDocument,
+) -> std::result::Result<(), RegistryBlockingError> {
+    tokio::task::spawn_blocking(move || {
+        let mut reg = registry.write().unwrap_or_else(|e| e.into_inner());
+        reg.register(doc)
+            .map_err(|e| RegistryBlockingError::Operation(e.to_string()))
+    })
+    .await
+    .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
+}
+
+async fn registry_resolve_document(
+    registry: Arc<RwLock<LocalDidRegistry>>,
+    did: Did,
+) -> std::result::Result<Option<DidDocument>, RegistryBlockingError> {
+    tokio::task::spawn_blocking(move || {
+        let reg = registry.read().unwrap_or_else(|e| e.into_inner());
+        Ok(reg.resolve(&did).cloned())
+    })
+    .await
+    .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
+}
+
+async fn registry_list_dids(
+    registry: Arc<RwLock<LocalDidRegistry>>,
+) -> std::result::Result<Vec<String>, RegistryBlockingError> {
+    tokio::task::spawn_blocking(move || {
+        let reg = registry.read().unwrap_or_else(|e| e.into_inner());
+        Ok(reg.list_dids().into_iter().map(|s| s.to_owned()).collect())
+    })
+    .await
+    .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
+}
+
+async fn registry_authenticate_session_login(
+    registry: Arc<RwLock<LocalDidRegistry>>,
+    did: String,
+    metadata: SessionIssueMetadata,
+    proof: SessionLoginProof,
+) -> std::result::Result<(), RegistryBlockingError> {
+    tokio::task::spawn_blocking(move || {
+        let reg = registry.read().unwrap_or_else(|e| e.into_inner());
+        authenticate_session_login(&did, &metadata, &proof, &*reg)
+            .map(|_| ())
+            .map_err(|e| RegistryBlockingError::Operation(e.to_string()))
+    })
+    .await
+    .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
 }
 
 fn decode_conflict_declaration_payload(
@@ -736,18 +806,28 @@ async fn handle_auth_register(
     Json(doc): Json<DidDocument>,
 ) -> impl IntoResponse {
     let did_str = doc.id.as_str().to_owned();
-    let mut reg = state.registry.write().unwrap_or_else(|e| e.into_inner());
-    match reg.register(doc) {
+    match registry_register_document(Arc::clone(&state.registry), doc).await {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "did": did_str, "status": "registered" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(RegistryBlockingError::Operation(e)) => {
+            tracing::warn!(error = %e, did = %did_str, "DID registration rejected");
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "DID already registered" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry registration task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -761,22 +841,37 @@ async fn handle_auth_me(State(state): State<AppState>, headers: HeaderMap) -> im
         Ok(actor) => actor,
         Err(e) => return auth_boundary_error_response(e),
     };
-    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
-    match reg.resolve(&did) {
-        Some(doc) => Json(doc.clone()).into_response(),
-        None => (
+    match registry_resolve_document(Arc::clone(&state.registry), did).await {
+        Ok(Some(doc)) => Json(doc).into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "DID not found" })),
         )
             .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
+        }
     }
 }
 
 /// GET /api/v1/agents — list all registered DID identifiers.
 async fn handle_agents_list(State(state): State<AppState>) -> impl IntoResponse {
-    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
-    let dids: Vec<String> = reg.list_dids().into_iter().map(|s| s.to_owned()).collect();
-    Json(serde_json::json!({ "agents": dids }))
+    match registry_list_dids(Arc::clone(&state.registry)).await {
+        Ok(dids) => Json(serde_json::json!({ "agents": dids })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry listing failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// GET /api/v1/agents/:did — resolve a single DID document by its identifier.
@@ -794,14 +889,21 @@ async fn handle_agent_get(
                 .into_response();
         }
     };
-    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
-    match reg.resolve(&did) {
-        Some(doc) => Json(doc.clone()).into_response(),
-        None => (
+    match registry_resolve_document(Arc::clone(&state.registry), did).await {
+        Ok(Some(doc)) => Json(doc).into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "DID not found" })),
         )
             .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -826,9 +928,8 @@ async fn handle_identity_score(
                 .into_response();
         }
     };
-    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
-    match reg.resolve(&did) {
-        None => (
+    match registry_resolve_document(Arc::clone(&state.registry), did).await {
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "did": did_str,
@@ -838,7 +939,7 @@ async fn handle_identity_score(
             })),
         )
             .into_response(),
-        Some(doc) => {
+        Ok(Some(doc)) => {
             let has_active_keys = !doc.verification_methods.is_empty();
             let score_bps: u32 = if doc.revoked || !has_active_keys {
                 5000
@@ -856,6 +957,14 @@ async fn handle_identity_score(
                 }
             }))
             .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry lookup failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
         }
     }
 }
@@ -911,9 +1020,17 @@ async fn handle_get_constitution(Path(_id): Path<String>) -> impl IntoResponse {
 /// deployment the user and agent registries would be separated; for now they share
 /// the in-memory store.
 async fn handle_users_list(State(state): State<AppState>) -> impl IntoResponse {
-    let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
-    let dids: Vec<String> = reg.list_dids().into_iter().map(|s| s.to_owned()).collect();
-    Json(serde_json::json!({ "users": dids }))
+    match registry_list_dids(Arc::clone(&state.registry)).await {
+        Ok(dids) => Json(serde_json::json!({ "users": dids })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry listing failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// GET /api/v1/decisions/:id — retrieve a specific decision record.
@@ -1025,18 +1142,28 @@ async fn handle_agents_enroll(
     Json(doc): Json<DidDocument>,
 ) -> impl IntoResponse {
     let did_str = doc.id.as_str().to_owned();
-    let mut reg = state.registry.write().unwrap_or_else(|e| e.into_inner());
-    match reg.register(doc) {
+    match registry_register_document(Arc::clone(&state.registry), doc).await {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "did": did_str, "status": "enrolled" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(RegistryBlockingError::Operation(e)) => {
+            tracing::warn!(error = %e, did = %did_str, "agent enrollment rejected");
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "DID already enrolled" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry enrollment task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1104,15 +1231,30 @@ async fn handle_auth_login(
         Ok(proof) => proof,
         Err(e) => return metadata_error_response(e),
     };
+    match registry_authenticate_session_login(
+        Arc::clone(&state.registry),
+        did_str.clone(),
+        metadata,
+        proof,
+    )
+    .await
     {
-        let reg = state.registry.read().unwrap_or_else(|e| e.into_inner());
-        if let Err(e) = authenticate_session_login(&did_str, &metadata, &proof, &*reg) {
+        Ok(()) => {}
+        Err(RegistryBlockingError::Operation(e)) => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({
                     "error": "authentication failed",
-                    "message": e.to_string()
+                    "message": e
                 })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "DID registry authentication task failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "DID registry unavailable" })),
             )
                 .into_response();
         }
@@ -2689,6 +2831,43 @@ mod tests {
             !handler.contains("x-actor-did"),
             "auth/me must not trust spoofable x-actor-did headers"
         );
+    }
+
+    #[test]
+    fn async_registry_handlers_do_not_block_workers_or_leak_register_errors() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        for needle in [
+            "state.registry.read().unwrap_or_else",
+            "state.registry.write().unwrap_or_else",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "async handlers must not acquire std::sync::RwLock on Tokio workers: {needle}"
+            );
+        }
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "std registry access must run on the blocking pool when used by async handlers"
+        );
+
+        for (start, end) in [
+            ("async fn handle_auth_register", "/// GET /api/v1/auth/me"),
+            (
+                "async fn handle_agents_enroll",
+                "// ---------------------------------------------------------------------------\n// Session auth handlers",
+            ),
+        ] {
+            let handler = source_between(source, start, end);
+            assert!(
+                !handler.contains("e.to_string()"),
+                "registration conflict responses must not expose registry internals"
+            );
+        }
     }
 
     #[tokio::test]
