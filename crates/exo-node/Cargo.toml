@@ -106,22 +106,18 @@ ignored = ["ed25519-dalek", "exo-consent", "exo-governance", "exo-identity", "ze
 default = []
 
 # GAP (Onyx pass 3, RED #1): the HTTP endpoint
-# `POST /api/v1/governance/validators` currently mutates the validator
-# set unilaterally on presentation of the node's admin bearer token —
-# no BFT proposal, no quorum, no signature chain, no recorded
-# governance event. A single holder of the admin bearer token is
-# therefore a constitutional dictator over validator membership.
+# `POST /api/v1/governance/validators` used to mutate the validator set
+# unilaterally on presentation of the node's admin bearer token. That
+# direct mutation path has been removed: even when this feature is enabled,
+# the endpoint validates the request and submits a canonical
+# `ValidatorSetChange` DAG proposal for consensus instead of editing
+# reactor state or persistence directly.
 #
-# The real fix is to replace this endpoint with a proper submit-proposal
-# → quorum-vote → commit flow wired through exo-governance + the DAG.
-# That is a governance-surface rewrite, not a tactical patch. Until
-# that work lands, we REFUSE the shortcut by default and gate the
-# legacy behavior behind this explicit, loud feature flag so no operator
-# trips over it accidentally.
-#
-# Do NOT enable this in production. Enabling it means: "I accept that a
-# single bearer-token holder controls validator set mutation, without
-# quorum or on-chain record."
+# The endpoint remains default-off because full validator-set lifecycle
+# governance still requires an approved quorum-vote/commit application path.
+# Do NOT enable this in production unless the surrounding operator workflow
+# explicitly accepts that this HTTP route is proposal-only, not a complete
+# governance lifecycle.
 unaudited-admin-governance-shortcut = []
 
 # GAP (Onyx pass 3, RED #2 and follow-on trust-surface scans): several

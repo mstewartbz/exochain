@@ -15,8 +15,8 @@
     // can't see the other branch, so the explicit `return` is
     // load-bearing for the feature-on build.
     clippy::needless_return,
-    // `ValidatorChangeRequest` fields + `save_validator_set` are
-    // only used inside #[cfg(feature = "unaudited-admin-governance-shortcut")].
+    // `ValidatorChangeRequest` fields are only used inside
+    // #[cfg(feature = "unaudited-admin-governance-shortcut")].
     // Keeping dead_code on in default build would force us to duplicate
     // the struct definition per feature which is worse than this allow.
     dead_code
@@ -315,7 +315,7 @@ async fn handle_validator_change(
         let did = Did::new(&req.did)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
 
-        let add_public_key = if req.action == "add" {
+        if req.action == "add" {
             let public_key_hex = req.public_key_hex.as_deref().ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
@@ -335,14 +335,29 @@ async fn handle_validator_change(
                     format!("public_key_hex derives {derived_did}, not {did}"),
                 ));
             }
-            Some(public_key)
-        } else {
-            None
-        };
+        }
 
         let change = match req.action.as_str() {
-            "add" => ValidatorChange::AddValidator { did },
-            "remove" => ValidatorChange::RemoveValidator { did },
+            "add" => ValidatorChange::AddValidator { did: did.clone() },
+            "remove" => {
+                let validator_count = {
+                    let s = api.reactor_state.lock().map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Reactor state unavailable".to_string(),
+                        )
+                    })?;
+                    s.consensus.config.validators.len()
+                };
+                if validator_count <= 4 {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "Cannot propose validator removal: minimum 4 required for BFT safety (3f+1)"
+                            .into(),
+                    ));
+                }
+                ValidatorChange::RemoveValidator { did: did.clone() }
+            }
             other => {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -351,91 +366,31 @@ async fn handle_validator_change(
             }
         };
 
-        // Apply the validator change.
-        let (new_count, quorum) = {
-            let mut s = api.reactor_state.lock().map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Reactor state unavailable".to_string(),
-                )
-            })?;
-            match &change {
-                ValidatorChange::AddValidator { did } => {
-                    s.consensus.config.validators.insert(did.clone());
-                    if let Some(public_key) = add_public_key {
-                        s.validator_public_keys.insert(did.clone(), public_key);
-                    }
-                }
-                ValidatorChange::RemoveValidator { did } => {
-                    if s.consensus.config.validators.len() <= 4 {
-                        return Err((
-                            StatusCode::CONFLICT,
-                            "Cannot remove validator: minimum 4 required for BFT safety (3f+1)"
-                                .into(),
-                        ));
-                    }
-                    s.consensus.config.validators.remove(did);
-                    s.validator_public_keys.remove(did);
-                }
-            }
+        let mut payload = Vec::new();
+        ciborium::into_writer(&change, &mut payload).map_err(|e| {
+            tracing::error!(err = %e, "Validator change proposal CBOR encoding failed");
             (
-                s.consensus.config.validators.len(),
-                s.consensus.config.quorum_size(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Validator change proposal encoding failed".to_string(),
             )
-        };
+        })?;
 
-        // Persist the updated validator set.
-        {
-            let s = api.reactor_state.lock().map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Reactor state unavailable".to_string(),
-                )
-            })?;
-            let mut st = api.store.lock().map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Store unavailable".to_string(),
-                )
-            })?;
-            if let Err(e) = st.save_validator_set(&s.consensus.config.validators) {
-                tracing::warn!(err = %e, "Failed to persist validator set");
-            }
-        }
-
-        // Broadcast the change to the network.
-        let payload = {
-            let mut buf = Vec::new();
-            ciborium::into_writer(&change, &mut buf).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("CBOR encode: {e}"),
-                )
-            })?;
-            buf
-        };
-
-        let broadcast_ok = match reactor::broadcast_governance_event(
-            &api.reactor_state,
-            &api.net_handle,
-            GovernanceEventType::ValidatorSetChange,
-            payload,
-        )
-        .await
-        {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(err = %e, "Validator change applied locally but broadcast failed — peers will sync on next round");
-                false
-            }
-        };
+        let node =
+            reactor::submit_proposal(&api.reactor_state, &api.store, &api.net_handle, &payload)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(err = %e, "Validator change proposal submission failed");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Validator change proposal submission failed".to_string(),
+                    )
+                })?;
 
         Ok(Json(serde_json::json!({
-            "validator_count": new_count,
-            "quorum_size": quorum,
+            "proposal_status": "submitted",
+            "node_hash": hex::encode(node.hash.0),
             "action": req.action,
             "did": req.did,
-            "broadcast": broadcast_ok,
         })))
     } // end cfg(feature = "unaudited-admin-governance-shortcut") block
 }
@@ -586,7 +541,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
 
-        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(32);
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(async move { while cmd_rx.recv().await.is_some() {} });
         let net_handle = NetworkHandle::new(cmd_tx);
 
         Arc::new(NodeApiState {
@@ -673,8 +629,12 @@ mod tests {
 
     #[cfg(feature = "unaudited-admin-governance-shortcut")]
     #[tokio::test]
-    async fn validator_add_increases_count() {
+    async fn validator_add_submits_proposal_without_mutating_validator_set() {
         let state = test_api_state();
+        let validators_before = {
+            let s = state.reactor_state.lock().unwrap();
+            s.consensus.config.validators.clone()
+        };
         let app = governance_router(Arc::clone(&state));
         let keypair = KeyPair::from_secret_bytes([50u8; 32]).unwrap();
         let did = crate::identity::did_from_public_key(keypair.public_key()).unwrap();
@@ -700,7 +660,23 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(result["validator_count"], 5);
+        assert_eq!(result["proposal_status"], "submitted");
+        assert_eq!(result["action"], "add");
+        assert_eq!(result["did"], did.to_string());
+        assert_eq!(
+            result["node_hash"].as_str().map(str::len),
+            Some(64),
+            "validator change proposal must return a 32-byte DAG hash"
+        );
+
+        let validators_after = {
+            let s = state.reactor_state.lock().unwrap();
+            s.consensus.config.validators.clone()
+        };
+        assert_eq!(
+            validators_before, validators_after,
+            "validator-change endpoint must not directly mutate validator set"
+        );
     }
 
     #[cfg(feature = "unaudited-admin-governance-shortcut")]
@@ -731,7 +707,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-admin-governance-shortcut")]
     #[tokio::test]
-    async fn validator_remove_above_minimum_succeeds() {
+    async fn validator_remove_above_minimum_submits_proposal_without_mutating_validator_set() {
         let state = test_api_state();
 
         // First add validators to reach 5+
@@ -742,8 +718,12 @@ mod tests {
                 .validators
                 .insert(Did::new("did:exo:v4").unwrap());
         }
+        let validators_before = {
+            let s = state.reactor_state.lock().unwrap();
+            s.consensus.config.validators.clone()
+        };
 
-        let app = governance_router(state);
+        let app = governance_router(Arc::clone(&state));
 
         let body = serde_json::json!({
             "action": "remove",
@@ -765,7 +745,23 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(result["validator_count"], 4);
+        assert_eq!(result["proposal_status"], "submitted");
+        assert_eq!(result["action"], "remove");
+        assert_eq!(result["did"], "did:exo:v4");
+        assert_eq!(
+            result["node_hash"].as_str().map(str::len),
+            Some(64),
+            "validator change proposal must return a 32-byte DAG hash"
+        );
+
+        let validators_after = {
+            let s = state.reactor_state.lock().unwrap();
+            s.consensus.config.validators.clone()
+        };
+        assert_eq!(
+            validators_before, validators_after,
+            "validator-change endpoint must not directly mutate validator set"
+        );
     }
 
     // -----------------------------------------------------------------------
