@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use exo_core::types::Did;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::{
     challenges::SharedChallengeStore,
@@ -209,25 +210,36 @@ fn is_callback_authorized(expected_chat_id: Option<i64>, cb: &CallbackQuery) -> 
 // ---------------------------------------------------------------------------
 
 /// Configuration for the Telegram adjutant.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AdjutantConfig {
-    pub bot_token: String,
+    bot_token: Zeroizing<String>,
     pub chat_id: String,
 }
 
+impl std::fmt::Debug for AdjutantConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdjutantConfig")
+            .field("bot_token", &"<redacted>")
+            .field("chat_id", &self.chat_id)
+            .finish()
+    }
+}
+
 impl AdjutantConfig {
+    fn from_parts(bot_token: Zeroizing<String>, chat_id: String) -> Option<Self> {
+        if bot_token.is_empty() || chat_id.is_empty() {
+            return None;
+        }
+
+        Some(Self { bot_token, chat_id })
+    }
+
     /// Load from environment variables.  Returns `None` if not configured.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let token = std::env::var("TELEGRAM_BOT_TOKEN").ok()?;
+        let token = Zeroizing::new(std::env::var("TELEGRAM_BOT_TOKEN").ok()?);
         let chat_id = std::env::var("TELEGRAM_CHAT_ID").ok()?;
-        if token.is_empty() || chat_id.is_empty() {
-            return None;
-        }
-        Some(Self {
-            bot_token: token,
-            chat_id,
-        })
+        Self::from_parts(token, chat_id)
     }
 }
 
@@ -254,11 +266,12 @@ impl Adjutant {
     }
 
     /// Telegram Bot API base URL.
-    fn api_url(&self, method: &str) -> String {
-        format!(
+    fn api_url(&self, method: &str) -> Zeroizing<String> {
+        Zeroizing::new(format!(
             "https://api.telegram.org/bot{}/{}",
-            self.config.bot_token, method
-        )
+            self.config.bot_token.as_str(),
+            method
+        ))
     }
 
     /// Send a text message with optional inline keyboard.
@@ -288,8 +301,9 @@ impl Adjutant {
             reply_markup,
         };
 
+        let url = self.api_url("sendMessage");
         self.client
-            .post(self.api_url("sendMessage"))
+            .post(url.as_str())
             .json(&body)
             .send()
             .await
@@ -307,13 +321,14 @@ impl Adjutant {
 
     /// Poll for new updates (long-poll, 10s timeout).
     pub async fn poll_updates(&mut self) -> Vec<Update> {
-        let url = format!(
+        let base_url = self.api_url("getUpdates");
+        let url = Zeroizing::new(format!(
             "{}?offset={}&timeout=10",
-            self.api_url("getUpdates"),
+            base_url.as_str(),
             self.last_update_id + 1
-        );
+        ));
 
-        let resp = match self.client.get(url).send().await {
+        let resp = match self.client.get(url.as_str()).send().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(err = %e, "Telegram poll failed");
@@ -346,9 +361,10 @@ impl Adjutant {
 
     /// Acknowledge a callback query (removes the "loading" indicator).
     pub async fn answer_callback(&self, callback_id: &str) {
+        let url = self.api_url("answerCallbackQuery");
         let _ = self
             .client
-            .post(self.api_url("answerCallbackQuery"))
+            .post(url.as_str())
             .json(&serde_json::json!({ "callback_query_id": callback_id }))
             .send()
             .await;
@@ -1219,6 +1235,75 @@ mod tests {
                 "Telegram callback handler must not call sync builder {builder} directly"
             );
         }
+    }
+
+    #[test]
+    fn adjutant_config_source_uses_zeroizing_token_storage() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let config_source = production
+            .split("pub struct AdjutantConfig")
+            .nth(1)
+            .and_then(|section| section.split("impl AdjutantConfig").next())
+            .unwrap();
+
+        assert!(production.contains("use zeroize::Zeroizing;"));
+        assert!(config_source.contains("bot_token: Zeroizing<String>"));
+        assert!(!config_source.contains("bot_token: String"));
+    }
+
+    #[test]
+    fn adjutant_config_debug_redacts_bot_token() {
+        let config = AdjutantConfig::from_parts(
+            zeroize::Zeroizing::new("123456:secret-token-value".to_string()),
+            "42".to_string(),
+        )
+        .expect("valid config");
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("AdjutantConfig"));
+        assert!(debug.contains("bot_token"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("chat_id"));
+        assert!(!debug.contains("123456"));
+        assert!(!debug.contains("secret-token-value"));
+    }
+
+    #[test]
+    fn adjutant_config_from_parts_rejects_empty_secret_or_chat() {
+        assert!(
+            AdjutantConfig::from_parts(zeroize::Zeroizing::new(String::new()), "42".to_string())
+                .is_none()
+        );
+        assert!(
+            AdjutantConfig::from_parts(
+                zeroize::Zeroizing::new("123456:secret-token-value".to_string()),
+                String::new(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_api_url_source_uses_zeroizing_temporary_url() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let api_url_source = production
+            .split("fn api_url(&self, method: &str)")
+            .nth(1)
+            .and_then(|section| section.split("/// Send a text message").next())
+            .unwrap();
+
+        assert!(api_url_source.contains("-> Zeroizing<String>"));
+        assert!(api_url_source.contains("Zeroizing::new(format!("));
+        assert!(api_url_source.contains("self.config.bot_token.as_str()"));
     }
 
     #[test]
