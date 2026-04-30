@@ -4,14 +4,20 @@
 //! and verify a message: the ephemeral public key, ciphertext, sender DID,
 //! recipient DID, content type, and Ed25519 signature.
 
+use std::fmt;
+
 use exo_core::{Did, Hash256, Signature, Timestamp};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, SeqAccess, Visitor},
+};
 
 use crate::error::MessagingError;
 
 /// Domain tag for encrypted-envelope signatures.
 pub const ENVELOPE_SIGNING_DOMAIN: &str = "exo.messaging.envelope.v1";
 const ENVELOPE_SIGNING_SCHEMA_VERSION: u16 = 1;
+pub const MAX_ENVELOPE_CIPHERTEXT_LEN: usize = 16 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct EnvelopeSigningPayload<'a> {
@@ -69,7 +75,7 @@ impl From<ContentType> for u8 {
 /// The ciphertext is produced by X25519 ECDH + HKDF + XChaCha20-Poly1305.
 /// Format: `[24-byte nonce][ciphertext][16-byte Poly1305 tag]`
 /// (same layout as `VaultEncryptor` in `exo-identity`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EncryptedEnvelope {
     /// Unique message ID.
     pub id: String,
@@ -80,6 +86,7 @@ pub struct EncryptedEnvelope {
     /// Ephemeral X25519 public key used for this message's ECDH.
     pub ephemeral_public_key: [u8; 32],
     /// Encrypted payload: `[nonce][ciphertext][tag]`.
+    #[serde(deserialize_with = "deserialize_bounded_ciphertext")]
     pub ciphertext: Vec<u8>,
     /// Content type classification.
     pub content_type: ContentType,
@@ -93,6 +100,91 @@ pub struct EncryptedEnvelope {
     pub release_delay_hours: u32,
     /// Creation timestamp (hybrid logical clock).
     pub created: Timestamp,
+}
+
+impl fmt::Debug for EncryptedEnvelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptedEnvelope")
+            .field("id", &self.id)
+            .field("sender_did", &self.sender_did)
+            .field("recipient_did", &self.recipient_did)
+            .field("ephemeral_public_key", &"<redacted>")
+            .field("ciphertext_len", &self.ciphertext.len())
+            .field("content_type", &self.content_type)
+            .field("release_on_death", &self.release_on_death)
+            .field("release_delay_hours", &self.release_delay_hours)
+            .field("created", &self.created)
+            .finish()
+    }
+}
+
+fn deserialize_bounded_ciphertext<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BoundedCiphertextVisitor;
+
+    impl<'de> Visitor<'de> for BoundedCiphertextVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "ciphertext no longer than {MAX_ENVELOPE_CIPHERTEXT_LEN} bytes"
+            )
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            validate_ciphertext_len(value.len()).map_err(E::custom)?;
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            validate_ciphertext_len(value.len()).map_err(E::custom)?;
+            Ok(value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if let Some(size_hint) = seq.size_hint() {
+                validate_ciphertext_len(size_hint).map_err(de::Error::custom)?;
+            }
+
+            let capacity = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(MAX_ENVELOPE_CIPHERTEXT_LEN);
+            let mut ciphertext = Vec::with_capacity(capacity);
+            while let Some(byte) = seq.next_element::<u8>()? {
+                if ciphertext.len() == MAX_ENVELOPE_CIPHERTEXT_LEN {
+                    return Err(de::Error::custom(format!(
+                        "ciphertext length exceeds {MAX_ENVELOPE_CIPHERTEXT_LEN} bytes"
+                    )));
+                }
+                ciphertext.push(byte);
+            }
+            Ok(ciphertext)
+        }
+    }
+
+    deserializer.deserialize_byte_buf(BoundedCiphertextVisitor)
+}
+
+fn validate_ciphertext_len(len: usize) -> Result<(), String> {
+    if len > MAX_ENVELOPE_CIPHERTEXT_LEN {
+        return Err(format!(
+            "ciphertext length {len} exceeds {MAX_ENVELOPE_CIPHERTEXT_LEN} bytes"
+        ));
+    }
+    Ok(())
 }
 
 impl EncryptedEnvelope {
@@ -201,5 +293,35 @@ mod tests {
         assert_eq!(decoded.release_on_death, envelope.release_on_death);
         assert_eq!(decoded.release_delay_hours, envelope.release_delay_hours);
         assert_eq!(decoded.created, envelope.created);
+    }
+
+    #[test]
+    fn encrypted_envelope_debug_redacts_ciphertext_and_signature() {
+        let envelope = sample_envelope();
+
+        let debug = format!("{envelope:?}");
+
+        assert!(debug.contains("EncryptedEnvelope"));
+        assert!(debug.contains("ciphertext_len"));
+        assert!(!debug.contains("ciphertext: [1, 1, 2, 3, 5, 8]"));
+        assert!(!debug.contains("signature:"));
+        assert!(!debug.contains("plaintext_hash:"));
+    }
+
+    #[test]
+    fn encrypted_envelope_deserialization_rejects_oversized_ciphertext() {
+        let mut envelope = sample_envelope();
+        envelope.ciphertext = vec![0xab; 16 * 1024 * 1024 + 1];
+        let mut encoded = Vec::new();
+        if let Err(error) = ciborium::into_writer(&envelope, &mut encoded) {
+            panic!("encode oversized envelope failed: {error}");
+        }
+
+        let decoded: Result<EncryptedEnvelope, _> = ciborium::from_reader(&encoded[..]);
+
+        assert!(
+            decoded.is_err(),
+            "oversized ciphertext must be rejected during envelope deserialization"
+        );
     }
 }

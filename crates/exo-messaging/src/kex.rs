@@ -5,6 +5,7 @@
 //! symmetric key suitable for XChaCha20-Poly1305.
 
 use hkdf::Hkdf;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -14,12 +15,17 @@ use crate::error::MessagingError;
 const X25519_HKDF_SALT_DOMAIN: &[u8] = b"exo.messaging.x25519.hkdf.salt.v1";
 
 /// An X25519 public key (32 bytes).
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct X25519PublicKey(pub [u8; 32]);
+#[derive(Clone, PartialEq, Eq)]
+pub struct X25519PublicKey([u8; 32]);
 
 impl X25519PublicKey {
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, MessagingError> {
+        validate_x25519_public_key(&bytes)?;
+        Ok(Self(bytes))
+    }
+
+    fn from_trusted_bytes(bytes: [u8; 32]) -> Self {
+        debug_assert!(validate_x25519_public_key(&bytes).is_ok());
         Self(bytes)
     }
 
@@ -40,13 +46,32 @@ impl X25519PublicKey {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
-        Ok(Self(arr))
+        Self::from_bytes(arr)
     }
 
     /// Encode as hex string.
     #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+}
+
+impl Serialize for X25519PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for X25519PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        Self::from_bytes(bytes).map_err(de::Error::custom)
     }
 }
 
@@ -89,7 +114,7 @@ impl X25519SecretKey {
     pub fn public_key(&self) -> X25519PublicKey {
         let secret = StaticSecret::from(self.0);
         let public = PublicKey::from(&secret);
-        X25519PublicKey(public.to_bytes())
+        X25519PublicKey::from_trusted_bytes(public.to_bytes())
     }
 
     fn static_secret(&self) -> StaticSecret {
@@ -119,7 +144,7 @@ impl X25519KeyPair {
         let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public = PublicKey::from(&secret);
         Self {
-            public: X25519PublicKey(public.to_bytes()),
+            public: X25519PublicKey::from_trusted_bytes(public.to_bytes()),
             secret: X25519SecretKey(secret.to_bytes()),
         }
     }
@@ -130,7 +155,7 @@ impl X25519KeyPair {
         let secret = StaticSecret::from(bytes);
         let public = PublicKey::from(&secret);
         Self {
-            public: X25519PublicKey(public.to_bytes()),
+            public: X25519PublicKey::from_trusted_bytes(public.to_bytes()),
             secret: X25519SecretKey(secret.to_bytes()),
         }
     }
@@ -146,9 +171,14 @@ pub fn derive_shared_key(
     context: &[u8],
 ) -> Result<[u8; 32], MessagingError> {
     let secret = our_secret.static_secret();
-    let public = PublicKey::from(their_public.0);
+    let public = PublicKey::from(*their_public.as_bytes());
     let shared_secret = secret.diffie_hellman(&public);
-    let our_public = X25519PublicKey(PublicKey::from(&secret).to_bytes());
+    if shared_secret.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(MessagingError::KeyExchangeFailed(
+            "invalid X25519 public key: low-order shared secret".to_owned(),
+        ));
+    }
+    let our_public = X25519PublicKey::from_trusted_bytes(PublicKey::from(&secret).to_bytes());
     let salt = hkdf_salt(&our_public, their_public);
 
     // HKDF-SHA256: extract from shared secret with a deterministic transcript
@@ -174,6 +204,25 @@ fn hkdf_salt(our_public: &X25519PublicKey, their_public: &X25519PublicKey) -> [u
     hasher.finalize().into()
 }
 
+fn validate_x25519_public_key(bytes: &[u8; 32]) -> Result<(), MessagingError> {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err(MessagingError::KeyExchangeFailed(
+            "invalid X25519 public key: all-zero value".to_owned(),
+        ));
+    }
+
+    let validation_secret = StaticSecret::from([0x5a; 32]);
+    let validation_public = PublicKey::from(*bytes);
+    let validation_shared = validation_secret.diffie_hellman(&validation_public);
+    if validation_shared.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(MessagingError::KeyExchangeFailed(
+            "invalid X25519 public key: low-order point".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Generate an ephemeral X25519 keypair for one-time use in message encryption.
 ///
 /// This uses `EphemeralSecret` which is consumed after a single DH operation,
@@ -195,7 +244,11 @@ mod tests {
     #[test]
     fn keypair_generation() {
         let kp = X25519KeyPair::generate();
-        assert_ne!(kp.public.0, [0u8; 32], "public key should not be all zeros");
+        assert_ne!(
+            *kp.public.as_bytes(),
+            [0u8; 32],
+            "public key should not be all zeros"
+        );
     }
 
     #[test]
@@ -231,7 +284,11 @@ mod tests {
             secret,
         };
 
-        assert_eq!(kp1.public.0, kp2.public.0, "same secret → same public");
+        assert_eq!(
+            kp1.public.as_bytes(),
+            kp2.public.as_bytes(),
+            "same secret → same public"
+        );
     }
 
     #[test]
@@ -240,6 +297,40 @@ mod tests {
         let hex = kp.public.to_hex();
         let recovered = X25519PublicKey::from_hex(&hex).expect("from_hex");
         assert_eq!(kp.public, recovered);
+    }
+
+    #[test]
+    fn x25519_public_key_rejects_all_zero_hex() {
+        let zero_hex = "00".repeat(32);
+
+        let result = X25519PublicKey::from_hex(&zero_hex);
+
+        assert!(
+            matches!(result, Err(MessagingError::KeyExchangeFailed(reason)) if reason.contains("invalid X25519 public key")),
+            "all-zero X25519 public keys must be rejected"
+        );
+    }
+
+    #[test]
+    fn x25519_public_key_deserialization_rejects_all_zero_bytes() {
+        let zero_bytes = format!("[{}]", vec!["0"; 32].join(","));
+
+        let result: Result<X25519PublicKey, _> = serde_json::from_str(&zero_bytes);
+
+        assert!(
+            result.is_err(),
+            "serde deserialization must validate X25519 public keys"
+        );
+    }
+
+    #[test]
+    fn x25519_public_key_source_does_not_expose_inner_bytes() {
+        let source = include_str!("kex.rs");
+
+        assert!(
+            !source.contains(&["pub struct X25519PublicKey", "(pub"].concat()),
+            "X25519 public key bytes must not be exposed through a public tuple field"
+        );
     }
 
     #[test]

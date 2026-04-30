@@ -39,7 +39,7 @@ pub fn unlock(
     }
 
     // 2. ECDH: derive shared symmetric key from ephemeral public + our secret
-    let ephemeral_pub = X25519PublicKey::from_bytes(envelope.ephemeral_public_key);
+    let ephemeral_pub = X25519PublicKey::from_bytes(envelope.ephemeral_public_key)?;
     let shared_key =
         kex::derive_shared_key(recipient_x25519_secret, &ephemeral_pub, MESSAGE_KEX_CONTEXT)?;
 
