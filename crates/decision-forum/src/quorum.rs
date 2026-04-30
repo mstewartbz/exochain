@@ -100,6 +100,7 @@ pub fn check_quorum(
     let req = registry
         .requirement_for(decision.class)
         .ok_or(ForumError::QuorumPolicyMissing)?;
+    validate_requirement(req)?;
 
     let total_votes = decision.votes.len();
     let approve_count = decision
@@ -163,7 +164,20 @@ pub fn verify_quorum_precondition(
     let req = registry
         .requirement_for(class)
         .ok_or(ForumError::QuorumPolicyMissing)?;
+    validate_requirement(req)?;
     Ok(eligible_voters >= req.min_votes && eligible_human_voters >= req.min_human_votes)
+}
+
+fn validate_requirement(req: &QuorumRequirement) -> Result<()> {
+    if !(1..=100).contains(&req.min_approve_pct) {
+        return Err(ForumError::QuorumPolicyInvalid {
+            reason: format!(
+                "min_approve_pct must be in 1..=100; got {}",
+                req.min_approve_pct
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -344,6 +358,53 @@ mod tests {
             !verify_quorum_precondition(&reg, DecisionClass::Constitutional, 7, 4).expect("ok"),
             "constitutional class requires five eligible human voters"
         );
+    }
+
+    fn registry_with_routine_requirement(requirement: QuorumRequirement) -> QuorumRegistry {
+        let mut policies = DeterministicMap::new();
+        policies.insert(
+            DecisionClass::Routine.quorum_policy_key().to_owned(),
+            requirement,
+        );
+        QuorumRegistry { policies }
+    }
+
+    #[test]
+    fn check_quorum_rejects_invalid_approval_thresholds() {
+        for threshold in [0, 101] {
+            let mut clock = test_clock();
+            let reg = registry_with_routine_requirement(QuorumRequirement {
+                min_votes: 1,
+                min_approve_pct: threshold,
+                min_human_votes: 0,
+            });
+            let mut decision =
+                make_decision("invalid threshold", DecisionClass::Routine, &mut clock);
+            decision
+                .add_vote(human_approve_vote("alice", &mut clock))
+                .expect("vote accepted");
+
+            let err = check_quorum(&reg, &decision).expect_err("invalid threshold must fail");
+            assert!(matches!(
+                err,
+                ForumError::QuorumPolicyInvalid { reason }
+                    if reason.contains("min_approve_pct")
+                        && reason.contains(&threshold.to_string())
+            ));
+        }
+    }
+
+    #[test]
+    fn precondition_rejects_invalid_approval_threshold() {
+        let reg = registry_with_routine_requirement(QuorumRequirement {
+            min_votes: 1,
+            min_approve_pct: 101,
+            min_human_votes: 0,
+        });
+
+        let err = verify_quorum_precondition(&reg, DecisionClass::Routine, 1, 0)
+            .expect_err("invalid threshold must fail before vote initiation");
+        assert!(matches!(err, ForumError::QuorumPolicyInvalid { .. }));
     }
 
     #[test]

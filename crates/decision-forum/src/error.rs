@@ -38,6 +38,9 @@ pub enum ForumError {
     #[error("quorum policy missing for decision class")]
     QuorumPolicyMissing,
 
+    #[error("quorum policy invalid: {reason}")]
+    QuorumPolicyInvalid { reason: String },
+
     // -- Decision errors ---------------------------------------------------
     #[error("decision not found: {0}")]
     DecisionNotFound(String),
@@ -139,6 +142,9 @@ mod tests {
                 actual: 1,
             },
             ForumError::QuorumPolicyMissing,
+            ForumError::QuorumPolicyInvalid {
+                reason: "min_approve_pct must be 1..=100".into(),
+            },
             ForumError::DecisionNotFound("abc".into()),
             ForumError::EnactmentFailed {
                 reason: "rejected".into(),
