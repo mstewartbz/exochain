@@ -313,11 +313,23 @@ pub async fn vote_handler(
                 .into_response();
         }
     };
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": format!("failed to start vote transaction: {e}")}),
+                ),
+            )
+                .into_response();
+        }
+    };
 
     // Load and deserialize DecisionObject from DB.
-    let row = sqlx::query("SELECT tenant_id, payload FROM decisions WHERE id_hash = $1")
+    let row = sqlx::query("SELECT tenant_id, payload FROM decisions WHERE id_hash = $1 FOR UPDATE")
         .bind(&body.decision_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *tx)
         .await;
     let (tenant_id, payload_val): (String, Value) = match row {
         Ok(Some(r)) => {
@@ -471,12 +483,19 @@ pub async fn vote_handler(
     if let Err(e) = sqlx::query("UPDATE decisions SET payload = $1 WHERE id_hash = $2")
         .bind(&updated_payload)
         .bind(&body.decision_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("failed to persist vote: {e}")})),
+        )
+            .into_response();
+    }
+    if let Err(e) = tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to commit vote transaction: {e}")})),
         )
             .into_response();
     }
@@ -841,6 +860,51 @@ mod tests {
         assert!(
             production.contains("check_and_block(&voter_did, &conflicts)"),
             "vote handler must use the enforcing conflict gate, not advisory-only recusal checks"
+        );
+    }
+
+    #[test]
+    fn vote_handler_updates_decision_under_row_lock_transaction() {
+        let source = include_str!("handlers.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+        let vote_handler = production
+            .split("pub async fn vote_handler")
+            .nth(1)
+            .expect("vote handler source present")
+            .split("// ── Health handler")
+            .next()
+            .expect("vote handler source end");
+
+        assert!(
+            vote_handler.contains("let mut tx = match db.begin().await"),
+            "vote handler must update decisions inside a database transaction"
+        );
+        assert!(
+            vote_handler.contains("FOR UPDATE"),
+            "vote handler must lock the decision row before deserializing and mutating it"
+        );
+        assert!(
+            vote_handler.contains(".fetch_optional(&mut *tx)"),
+            "decision row read must happen through the transaction"
+        );
+        assert!(
+            vote_handler.contains(".execute(&mut *tx)"),
+            "decision update must happen through the transaction"
+        );
+        assert!(
+            vote_handler.contains("tx.commit().await"),
+            "vote handler must commit the transaction only after the update succeeds"
+        );
+        assert!(
+            !vote_handler.contains(".fetch_optional(db)"),
+            "vote handler must not read the mutable decision outside the transaction"
+        );
+        assert!(
+            !vote_handler.contains(".execute(db)"),
+            "vote handler must not update the mutable decision outside the transaction"
         );
     }
 
