@@ -288,6 +288,9 @@ fn fmt_bp(bp: u32) -> String {
     format!("{}.{:02}", bp / 100, bp % 100)
 }
 
+type TelegramKeyboard = Vec<Vec<(&'static str, &'static str)>>;
+type TelegramMessage = (String, TelegramKeyboard);
+
 /// Build the `/0dentity <did>` response.
 ///
 /// Shows the 8-axis polar table, composite, symmetry and claim count.
@@ -617,6 +620,55 @@ pub fn build_challenges_message(
     (text, keyboard)
 }
 
+fn telegram_message_builder_failed(
+    label: &'static str,
+    error: tokio::task::JoinError,
+) -> TelegramMessage {
+    tracing::error!(%label, err = %error, "Telegram message builder task failed");
+    (
+        "\u{274c} Telegram message builder temporarily unavailable".to_string(),
+        vec![],
+    )
+}
+
+async fn status_message_blocking(
+    reactor: SharedReactorState,
+    store: Arc<Mutex<SqliteDagStore>>,
+) -> TelegramMessage {
+    tokio::task::spawn_blocking(move || build_status_message(&reactor, &store))
+        .await
+        .unwrap_or_else(|e| telegram_message_builder_failed("status", e))
+}
+
+async fn sentinels_message_blocking(state: SharedSentinelState) -> TelegramMessage {
+    tokio::task::spawn_blocking(move || build_sentinels_message(&state))
+        .await
+        .unwrap_or_else(|e| telegram_message_builder_failed("sentinels", e))
+}
+
+async fn challenges_message_blocking(challenge_store: SharedChallengeStore) -> TelegramMessage {
+    tokio::task::spawn_blocking(move || build_challenges_message(&challenge_store))
+        .await
+        .unwrap_or_else(|e| telegram_message_builder_failed("challenges", e))
+}
+
+async fn zerodentity_score_message_blocking(
+    zerodentity: SharedZerodentityStore,
+    did_str: String,
+) -> TelegramMessage {
+    tokio::task::spawn_blocking(move || build_zerodentity_score_message(&zerodentity, &did_str))
+        .await
+        .unwrap_or_else(|e| telegram_message_builder_failed("0dentity-score", e))
+}
+
+async fn zerodentity_alerts_message_blocking(
+    zerodentity: SharedZerodentityStore,
+) -> TelegramMessage {
+    tokio::task::spawn_blocking(move || build_zerodentity_alerts_message(&zerodentity))
+        .await
+        .unwrap_or_else(|e| telegram_message_builder_failed("0dentity-alerts", e))
+}
+
 // ---------------------------------------------------------------------------
 // Main adjutant loop
 // ---------------------------------------------------------------------------
@@ -745,15 +797,15 @@ async fn handle_command(
     let cmd = parts.next().unwrap_or("");
     match cmd {
         "/status" | "/start" => {
-            let (msg, kb) = build_status_message(reactor, store);
+            let (msg, kb) = status_message_blocking(Arc::clone(reactor), Arc::clone(store)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "/sentinels" => {
-            let (msg, kb) = build_sentinels_message(sentinel_state);
+            let (msg, kb) = sentinels_message_blocking(Arc::clone(sentinel_state)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "/challenges" => {
-            let (msg, kb) = build_challenges_message(challenge_store);
+            let (msg, kb) = challenges_message_blocking(Arc::clone(challenge_store)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "/0dentity" => {
@@ -766,12 +818,16 @@ async fn handle_command(
                     )
                     .await;
             } else {
-                let (msg, kb) = build_zerodentity_score_message(zerodentity, did_str);
+                let (msg, kb) = zerodentity_score_message_blocking(
+                    Arc::clone(zerodentity),
+                    did_str.to_string(),
+                )
+                .await;
                 adjutant.send_or_log(&msg, Some(kb)).await;
             }
         }
         "/0dentity-alerts" => {
-            let (msg, kb) = build_zerodentity_alerts_message(zerodentity);
+            let (msg, kb) = zerodentity_alerts_message_blocking(Arc::clone(zerodentity)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "/help" => {
@@ -802,25 +858,26 @@ async fn handle_callback(
     zerodentity: &SharedZerodentityStore,
 ) {
     if let Some(did_str) = data.strip_prefix("0d_score:") {
-        let (msg, kb) = build_zerodentity_score_message(zerodentity, did_str);
+        let (msg, kb) =
+            zerodentity_score_message_blocking(Arc::clone(zerodentity), did_str.to_string()).await;
         let _ = adjutant.send_message(&msg, Some(kb)).await;
         return;
     }
     match data {
         "cmd:status" => {
-            let (msg, kb) = build_status_message(reactor, store);
+            let (msg, kb) = status_message_blocking(Arc::clone(reactor), Arc::clone(store)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "cmd:sentinels" => {
-            let (msg, kb) = build_sentinels_message(sentinel_state);
+            let (msg, kb) = sentinels_message_blocking(Arc::clone(sentinel_state)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "cmd:challenges" => {
-            let (msg, kb) = build_challenges_message(challenge_store);
+            let (msg, kb) = challenges_message_blocking(Arc::clone(challenge_store)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "0d_alerts" => {
-            let (msg, kb) = build_zerodentity_alerts_message(zerodentity);
+            let (msg, kb) = zerodentity_alerts_message_blocking(Arc::clone(zerodentity)).await;
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "sentinel:ack" => {
@@ -890,6 +947,51 @@ mod tests {
             .unwrap();
 
         assert!(!alerts.contains(".unwrap_or_default()"));
+    }
+
+    #[test]
+    fn telegram_async_dispatch_uses_blocking_message_builders() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        assert!(
+            production.contains("tokio::task::spawn_blocking"),
+            "Telegram async dispatch must isolate synchronous store reads from Tokio workers"
+        );
+
+        let sync_builders = [
+            "build_status_message(",
+            "build_sentinels_message(",
+            "build_challenges_message(",
+            "build_zerodentity_score_message(",
+            "build_zerodentity_alerts_message(",
+        ];
+        let command_handler = production
+            .split("async fn handle_command")
+            .nth(1)
+            .and_then(|section| section.split("async fn handle_callback").next())
+            .unwrap();
+        for builder in sync_builders {
+            assert!(
+                !command_handler.contains(builder),
+                "Telegram command handler must not call sync builder {builder} directly"
+            );
+        }
+
+        let callback_handler = production
+            .split("async fn handle_callback")
+            .nth(1)
+            .and_then(|section| section.split("// ---------------------------------------------------------------------------\n// Tests").next())
+            .unwrap();
+        for builder in sync_builders {
+            assert!(
+                !callback_handler.contains(builder),
+                "Telegram callback handler must not call sync builder {builder} directly"
+            );
+        }
     }
 
     #[test]
