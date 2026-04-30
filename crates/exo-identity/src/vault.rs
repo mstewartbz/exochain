@@ -4,7 +4,8 @@
 //! (AEAD), where the associated data is typically DID bytes so that ciphertext
 //! is cryptographically bound to a specific identity.
 //!
-//! Key derivation uses HKDF-SHA256 from an Ed25519 secret key.
+//! Key derivation uses HKDF-SHA256 from an Ed25519 secret key with a
+//! protocol-domain salt.
 //!
 //! Ciphertext format: `[24-byte nonce][encrypted payload][16-byte Poly1305 tag]`
 
@@ -27,6 +28,9 @@ const TAG_SIZE: usize = 16;
 
 /// Minimum ciphertext length: nonce + tag (payload can be empty).
 const MIN_CIPHERTEXT_LEN: usize = NONCE_SIZE + TAG_SIZE;
+
+/// HKDF extraction salt for identity vault keys.
+const VAULT_HKDF_SALT_DOMAIN: &[u8] = b"exo.identity.vault.hkdf.salt.v1";
 
 /// AEAD vault encryptor using XChaCha20-Poly1305.
 ///
@@ -55,7 +59,7 @@ impl VaultEncryptor {
     /// Returns `IdentityError::VaultKeyDerivationFailed` if HKDF expand
     /// fails (in practice this cannot occur for a 32-byte output).
     pub fn derive_key(secret: &SecretKey, context: &[u8]) -> Result<Self, IdentityError> {
-        let hk = Hkdf::<Sha256>::new(None, secret.as_bytes());
+        let hk = Hkdf::<Sha256>::new(Some(VAULT_HKDF_SALT_DOMAIN), secret.as_bytes());
         let mut okm = Zeroizing::new([0u8; 32]);
         hk.expand(context, &mut *okm)
             .map_err(|e| IdentityError::VaultKeyDerivationFailed(e.to_string()))?;
@@ -302,6 +306,40 @@ mod tests {
         let enc2 = VaultEncryptor::derive_key(&sk, b"context-beta").expect("derive_key");
 
         assert_ne!(enc1.key_bytes(), enc2.key_bytes());
+    }
+
+    #[test]
+    fn derive_key_uses_protocol_bound_hkdf_salt() {
+        let (_, sk) = generate_keypair();
+        let context = b"vault-test-context";
+        let enc = VaultEncryptor::derive_key(&sk, context).expect("derive_key");
+
+        let unsalted_hkdf = Hkdf::<Sha256>::new(None, sk.as_bytes());
+        let mut unsalted = [0u8; 32];
+        unsalted_hkdf
+            .expand(context, &mut unsalted)
+            .expect("unsalted HKDF expansion");
+
+        assert_ne!(
+            enc.key_bytes(),
+            &unsalted,
+            "vault key derivation must not match HKDF extraction with an absent salt"
+        );
+
+        let source = include_str!("vault.rs");
+        let production = match source.split("#[cfg(test)]").next() {
+            Some(production) => production,
+            None => panic!("test boundary marker must be present"),
+        };
+
+        assert!(
+            production.contains("VAULT_HKDF_SALT_DOMAIN"),
+            "derive_key must use an explicit protocol-domain HKDF salt"
+        );
+        assert!(
+            !production.contains("Hkdf::<Sha256>::new(None"),
+            "derive_key must not use HKDF extraction with an absent salt"
+        );
     }
 
     #[test]
