@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ApiError, Result};
 
 const P2P_MESSAGE_SIGNING_DOMAIN: &str = "exo.p2p.message.v1";
+const MAX_DIVERSE_SELECTION_PEERS: usize = 4_096;
 
 /// Unique identifier for a peer in the P2P mesh, wrapping a DID.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -290,7 +291,10 @@ pub fn select_diverse_peers(
     policy: &AsnPolicy,
     max_peers: usize,
 ) -> Vec<PeerMetadata> {
-    if candidates.is_empty() || max_peers == 0 {
+    let selection_limit = max_peers
+        .min(candidates.len())
+        .min(MAX_DIVERSE_SELECTION_PEERS);
+    if candidates.is_empty() || selection_limit == 0 {
         return Vec::new();
     }
 
@@ -300,16 +304,16 @@ pub fn select_diverse_peers(
         by_asn.entry(effective_asn(c)).or_default().push(c);
     }
 
-    let mut selected: Vec<PeerMetadata> = Vec::with_capacity(max_peers);
+    let mut selected: Vec<PeerMetadata> = Vec::with_capacity(selection_limit);
     let mut round = 0usize;
 
     loop {
-        if selected.len() >= max_peers {
+        if selected.len() >= selection_limit {
             break;
         }
         let mut added_this_round = false;
         for bucket in by_asn.values() {
-            if selected.len() >= max_peers {
+            if selected.len() >= selection_limit {
                 break;
             }
             if round >= policy.max_peers_per_asn {
@@ -667,6 +671,33 @@ mod tests {
         for &c in counts.values() {
             assert_eq!(c, 2);
         }
+    }
+
+    #[test]
+    fn select_diverse_peers_clamps_untrusted_max_peers_before_allocating() {
+        const EXPECTED_SELECTION_LIMIT: usize = 4_096;
+        let candidates: Vec<PeerMetadata> = (0..(EXPECTED_SELECTION_LIMIT + 1))
+            .map(|i| {
+                peer_meta(
+                    &format!("peer-{i}"),
+                    Some(u32::try_from(i + 1).unwrap()),
+                    1000,
+                )
+            })
+            .collect();
+        let policy = AsnPolicy {
+            max_peers_per_asn: 1,
+            ..AsnPolicy::default()
+        };
+
+        let selected = select_diverse_peers(&candidates, &policy, usize::MAX);
+
+        assert_eq!(selected.len(), EXPECTED_SELECTION_LIMIT);
+        assert_eq!(selected.first().unwrap().info.id, candidates[0].info.id);
+        assert_eq!(
+            selected.last().unwrap().info.id,
+            candidates[EXPECTED_SELECTION_LIMIT - 1].info.id
+        );
     }
 
     // 5. Stale peers identified correctly
