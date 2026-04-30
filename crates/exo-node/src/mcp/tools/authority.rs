@@ -29,6 +29,8 @@ use crate::mcp::{
 
 /// Constitution bytes used to initialise the CGR Kernel for adjudication.
 const CONSTITUTION: &[u8] = b"We the people of the EXOCHAIN constitutional trust fabric...";
+const MAX_AUTHORITY_CHAIN_LINKS: usize = 5;
+const MAX_PERMISSION_SET_ENTRIES: usize = 64;
 
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 fn authority_tool_refused(tool_name: &str) -> ToolResult {
@@ -98,6 +100,11 @@ fn parse_permission_set(value: &Value, field: &str) -> Result<PermissionSet, Str
         .get(field)
         .and_then(Value::as_array)
         .ok_or_else(|| format!("missing required parameter: {field} (must be an array)"))?;
+    if arr.len() > MAX_PERMISSION_SET_ENTRIES {
+        return Err(format!(
+            "{field} may contain at most {MAX_PERMISSION_SET_ENTRIES} permission names"
+        ));
+    }
     let mut permissions = Vec::new();
     for (idx, permission) in arr.iter().enumerate() {
         let raw = permission
@@ -120,6 +127,11 @@ fn parse_authority_chain(value: &Value) -> Result<AuthorityChain, Vec<String>> {
     };
     if arr.is_empty() {
         return Err(vec!["authority chain is empty".to_owned()]);
+    }
+    if arr.len() > MAX_AUTHORITY_CHAIN_LINKS {
+        return Err(vec![format!(
+            "authority chain may contain at most {MAX_AUTHORITY_CHAIN_LINKS} signed links"
+        )]);
     }
 
     let mut issues = Vec::new();
@@ -353,6 +365,7 @@ pub fn delegate_authority_definition() -> ToolDefinition {
                 },
                 "permissions": {
                     "type": "array",
+                    "maxItems": MAX_PERMISSION_SET_ENTRIES,
                     "items": { "type": "string" },
                     "description": "List of permission names to delegate."
                 }
@@ -469,6 +482,7 @@ pub fn verify_authority_chain_definition() -> ToolDefinition {
             "properties": {
                 "chain": {
                     "type": "array",
+                    "maxItems": MAX_AUTHORITY_CHAIN_LINKS,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -476,6 +490,7 @@ pub fn verify_authority_chain_definition() -> ToolDefinition {
                             "grantee": { "type": "string" },
                             "permissions": {
                                 "type": "array",
+                                "maxItems": MAX_PERMISSION_SET_ENTRIES,
                                 "items": { "type": "string" }
                             },
                             "signature": {
@@ -505,15 +520,12 @@ pub fn verify_authority_chain_definition() -> ToolDefinition {
 /// Execute the `exochain_verify_authority_chain` tool.
 #[must_use]
 pub fn execute_verify_authority_chain(params: &Value, _context: &NodeContext) -> ToolResult {
-    let chain_val = match params.get("chain").and_then(Value::as_array) {
-        Some(arr) => arr,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: chain (must be an array)"})
-                    .to_string(),
-            );
-        }
+    let Some(chain_value @ Value::Array(chain_val)) = params.get("chain") else {
+        return ToolResult::error(
+            json!({"error": "missing required parameter: chain (must be an array)"}).to_string(),
+        );
     };
+    let depth = chain_val.len();
     let terminal_str = match params.get("terminal_actor").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -534,7 +546,7 @@ pub fn execute_verify_authority_chain(params: &Value, _context: &NodeContext) ->
     };
 
     let mut issues = Vec::new();
-    let authority_chain = match parse_authority_chain(&Value::Array(chain_val.clone())) {
+    let authority_chain = match parse_authority_chain(chain_value) {
         Ok(chain) => chain,
         Err(parse_issues) => {
             issues.extend(parse_issues);
@@ -545,7 +557,6 @@ pub fn execute_verify_authority_chain(params: &Value, _context: &NodeContext) ->
         issues.extend(validate_authority_chain(&authority_chain, &terminal));
     }
     let valid = issues.is_empty();
-    let depth = chain_val.len();
 
     let response = json!({
         "valid": valid,
@@ -579,6 +590,7 @@ pub fn check_permission_definition() -> ToolDefinition {
                 },
                 "chain": {
                     "type": "array",
+                    "maxItems": MAX_AUTHORITY_CHAIN_LINKS,
                     "description": "Signed authority chain to verify before checking permission."
                 }
             },
@@ -699,6 +711,7 @@ pub fn adjudicate_action_definition() -> ToolDefinition {
                 },
                 "required_permissions": {
                     "type": "array",
+                    "maxItems": MAX_PERMISSION_SET_ENTRIES,
                     "items": { "type": "string" },
                     "description": "Permissions required by this action."
                 },
@@ -1116,6 +1129,62 @@ mod tests {
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
         assert_eq!(v["valid"], false);
         assert_eq!(v["depth"], 0);
+    }
+
+    #[test]
+    fn parse_authority_chain_rejects_excessive_link_count() {
+        let chain = Value::Array((0..=MAX_AUTHORITY_CHAIN_LINKS).map(|_| json!({})).collect());
+
+        let issues = parse_authority_chain(&chain).expect_err("oversized chain must fail");
+
+        assert_eq!(
+            issues,
+            vec![format!(
+                "authority chain may contain at most {MAX_AUTHORITY_CHAIN_LINKS} signed links"
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_permission_set_rejects_excessive_permission_count() {
+        let permissions: Vec<Value> = (0..=MAX_PERMISSION_SET_ENTRIES)
+            .map(|idx| Value::String(format!("permission:{idx}")))
+            .collect();
+        let value = json!({ "permissions": permissions });
+
+        let err = parse_permission_set(&value, "permissions")
+            .expect_err("oversized permission set must fail");
+
+        assert_eq!(
+            err,
+            format!(
+                "permissions may contain at most {MAX_PERMISSION_SET_ENTRIES} permission names"
+            )
+        );
+    }
+
+    #[test]
+    fn execute_verify_authority_chain_reports_excessive_link_count() {
+        let chain: Vec<Value> = (0..=MAX_AUTHORITY_CHAIN_LINKS).map(|_| json!({})).collect();
+
+        let result = execute_verify_authority_chain(
+            &json!({
+                "chain": chain,
+                "terminal_actor": "did:exo:alice",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
+        assert_eq!(v["valid"], false);
+        assert_eq!(v["depth"], MAX_AUTHORITY_CHAIN_LINKS + 1);
+        let issues = v["issues"].as_array().expect("issues");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].as_str().expect("issue text"),
+            format!("authority chain may contain at most {MAX_AUTHORITY_CHAIN_LINKS} signed links")
+        );
     }
 
     // -- check_permission --------------------------------------------------
