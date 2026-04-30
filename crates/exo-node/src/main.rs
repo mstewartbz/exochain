@@ -733,13 +733,41 @@ async fn start_node(
     });
     let governance_router = api::governance_router(api_state);
 
+    // Generate admin token for privileged API authentication.
+    //
+    // Security note: we do NOT log the full token — a log aggregator
+    // that captures node stdout would otherwise end up with a copy of
+    // the governance-write credential. Instead we log a short prefix
+    // for identification and write the full token to a file with
+    // restrictive permissions (owner read/write only, 0600) under the
+    // node's data directory.
+    let admin_token = auth::generate_admin_token();
+    let token_prefix = admin_token.chars().take(8).collect::<String>();
+    let token_path = data_dir.join("admin_token");
+    if let Err(e) = auth::write_admin_token_file(&token_path, admin_token.as_str()) {
+        tracing::error!(
+            path = %token_path.display(),
+            err = %e,
+            "Failed to write admin token file — aborting startup"
+        );
+        return Err(anyhow::anyhow!("admin token persistence failed: {e}"));
+    }
+    tracing::info!(
+        token_prefix = %token_prefix,
+        token_path = %token_path.display(),
+        "Admin bearer token generated — full token written to file, required for privileged endpoints"
+    );
+    let bearer_auth = auth::BearerAuth {
+        token: Arc::new(admin_token),
+    };
+
     // Build the agent passport API router.
     let passport_state = Arc::new(passport::PassportApiState {
         reactor_state: Arc::clone(&reactor_state),
         store: Arc::clone(&shared_store),
         zerodentity_store: Arc::clone(&zerodentity_store),
     });
-    let passport_router = passport::passport_router(passport_state);
+    let passport_router = passport::passport_router(passport_state, bearer_auth.clone());
 
     // Build the dashboard router (serves GET /).
     let dashboard_router = dashboard::dashboard_router();
@@ -812,34 +840,6 @@ async fn start_node(
         // Drop the alert receiver so sentinels don't block.
         drop(alert_rx);
     }
-
-    // Generate admin token for write-endpoint authentication.
-    //
-    // Security note: we do NOT log the full token — a log aggregator
-    // that captures node stdout would otherwise end up with a copy of
-    // the governance-write credential. Instead we log a short prefix
-    // for identification and write the full token to a file with
-    // restrictive permissions (owner read/write only, 0600) under the
-    // node's data directory.
-    let admin_token = auth::generate_admin_token();
-    let token_prefix = admin_token.chars().take(8).collect::<String>();
-    let token_path = data_dir.join("admin_token");
-    if let Err(e) = auth::write_admin_token_file(&token_path, admin_token.as_str()) {
-        tracing::error!(
-            path = %token_path.display(),
-            err = %e,
-            "Failed to write admin token file — aborting startup"
-        );
-        return Err(anyhow::anyhow!("admin token persistence failed: {e}"));
-    }
-    tracing::info!(
-        token_prefix = %token_prefix,
-        token_path = %token_path.display(),
-        "Admin bearer token generated — full token written to file, required for POST endpoints"
-    );
-    let bearer_auth = auth::BearerAuth {
-        token: Arc::new(admin_token),
-    };
 
     // Build 0dentity routers.
     let zd_onboarding_state =
@@ -1174,6 +1174,34 @@ mod tests {
         assert!(
             !production.contains(".len() as u64"),
             "startup metrics must use checked length conversions"
+        );
+    }
+
+    #[test]
+    fn passport_router_is_strictly_authenticated_and_rate_limited() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let passport_source = include_str!("passport.rs");
+        let passport_production = passport_source.split("#[cfg(test)]").next().unwrap();
+        let passport_section = production
+            .split("// Build the agent passport API router.")
+            .nth(1)
+            .and_then(|section| section.split("// Build the dashboard router").next())
+            .unwrap();
+
+        assert!(passport_section.contains("passport::passport_router("));
+        assert!(
+            passport_section.contains("bearer_auth.clone()"),
+            "passport router must receive bearer auth directly, not only the global write guard"
+        );
+        assert!(
+            passport_production.contains("ConcurrencyLimitLayer"),
+            "passport router must have a router-local request limiter"
+        );
+        assert!(passport_production.contains("auth::require_bearer("));
+        assert!(
+            !passport_section.contains("require_bearer_on_writes"),
+            "passport GET endpoints must not rely on write-only auth"
         );
     }
 

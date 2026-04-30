@@ -17,7 +17,7 @@ use std::{
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -86,6 +86,34 @@ pub fn write_admin_token_file(path: &Path, token: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn verify_bearer_header(headers: &HeaderMap, auth: &BearerAuth) -> Result<(), StatusCode> {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match header {
+        Some(value) if value.starts_with("Bearer ") => {
+            let provided = &value["Bearer ".len()..];
+            if constant_time_eq(provided.as_bytes(), auth.token.as_bytes()) {
+                Ok(())
+            } else {
+                Err(StatusCode::FORBIDDEN)
+            }
+        }
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+/// axum middleware: require bearer token on every request.
+pub async fn require_bearer(
+    auth: BearerAuth,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    verify_bearer_header(request.headers(), &auth)?;
+    Ok(next.run(request).await)
+}
+
 /// axum middleware: require bearer token on mutating requests.
 ///
 /// `GET` and `HEAD` requests pass through without authentication.
@@ -102,23 +130,8 @@ pub async fn require_bearer_on_writes(
         return Ok(next.run(request).await);
     }
 
-    // Extract the Authorization header.
-    let header = request
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    match header {
-        Some(value) if value.starts_with("Bearer ") => {
-            let provided = &value["Bearer ".len()..];
-            if constant_time_eq(provided.as_bytes(), auth.token.as_bytes()) {
-                Ok(next.run(request).await)
-            } else {
-                Err(StatusCode::FORBIDDEN)
-            }
-        }
-        _ => Err(StatusCode::UNAUTHORIZED),
-    }
+    verify_bearer_header(request.headers(), &auth)?;
+    Ok(next.run(request).await)
 }
 
 /// Constant-time byte-slice equality.
@@ -178,6 +191,49 @@ mod tests {
                 let a = auth.clone();
                 require_bearer_on_writes(a, req, next)
             }))
+    }
+
+    fn strict_test_app() -> Router {
+        let auth = test_auth();
+        Router::new()
+            .route("/read", get(|| async { "ok" }))
+            .layer(middleware::from_fn(move |req, next| {
+                let a = auth.clone();
+                require_bearer(a, req, next)
+            }))
+    }
+
+    #[tokio::test]
+    async fn strict_get_without_token_rejected() {
+        let app = strict_test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/read")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn strict_get_with_correct_token_passes() {
+        let app = strict_test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/read")
+                    .header("authorization", "Bearer test-token-abc123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
