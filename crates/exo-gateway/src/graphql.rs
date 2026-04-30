@@ -288,16 +288,19 @@ impl AppState {
         self.next_timestamp().to_string()
     }
 
-    fn append_audit(&mut self, decision_id: &str, event_type: &str, actor: &str) {
+    fn append_audit(&mut self, decision_id: &str, event_type: &str, actor: &str) -> GqlResult<()> {
         if !self.decisions.contains_key(decision_id) {
-            return;
+            return Ok(());
         }
 
         let seq = self.next_audit_seq;
-        self.next_audit_seq += 1;
+        let next_seq = seq
+            .checked_add(1)
+            .ok_or_else(|| async_graphql::Error::new("audit sequence exhausted"))?;
         let ts = self.now_str();
 
         if let Some(rec) = self.decisions.get_mut(decision_id) {
+            self.next_audit_seq = next_seq;
             let prev_hash = rec
                 .audit_trail
                 .last()
@@ -314,6 +317,7 @@ impl AppState {
                 receipt_hash,
             });
         }
+        Ok(())
     }
 
     fn compute_decision_hash(d: &GqlDecision) -> String {
@@ -339,6 +343,10 @@ fn guard_graphql_execution() -> GqlResult<()> {
     {
         Ok(())
     }
+}
+
+fn app_state_from_context<'ctx>(ctx: &'ctx Context<'_>) -> GqlResult<&'ctx Arc<Mutex<AppState>>> {
+    ctx.data::<Arc<Mutex<AppState>>>()
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +376,7 @@ impl QueryRoot {
     /// Fetch a single decision by ID.
     async fn decision(&self, ctx: &Context<'_>, id: ID) -> GqlResult<Option<GqlDecision>> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         Ok(guard.decisions.get(id.as_str()).map(|r| r.decision.clone()))
     }
@@ -383,7 +391,7 @@ impl QueryRoot {
         offset: Option<i32>,
     ) -> GqlResult<Vec<GqlDecision>> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         let offset = usize::try_from(offset.unwrap_or(0).max(0)).unwrap_or(0);
         let limit = usize::try_from(limit.unwrap_or(50).clamp(1, 200)).unwrap_or(50);
@@ -406,7 +414,7 @@ impl QueryRoot {
         actor_did: String,
     ) -> GqlResult<GqlAuthorityChain> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         let chain_length = i32::try_from(
             guard
@@ -431,7 +439,7 @@ impl QueryRoot {
         #[graphql(default)] version: Option<String>,
     ) -> GqlResult<GqlConstitution> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         let _ = version; // version pinning reserved for DB layer
         if guard.constitution.tenant_id == tenant_id.as_str() {
@@ -452,7 +460,7 @@ impl QueryRoot {
         actor_did: String,
     ) -> GqlResult<Vec<GqlDelegation>> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         let results = guard
             .delegations
@@ -470,7 +478,7 @@ impl QueryRoot {
         decision_id: ID,
     ) -> GqlResult<Vec<GqlAuditEntry>> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         Ok(guard
             .decisions
@@ -503,7 +511,7 @@ impl QueryRoot {
     /// Wired end-to-end to `exo-identity::LocalDidRegistry` (APE-35 acceptance criterion).
     async fn resolve_identity(&self, ctx: &Context<'_>, did: ID) -> GqlResult<GqlIdentity> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         let did_str = did.to_string();
         let did_key = Did::new(&did_str)
@@ -551,7 +559,7 @@ impl QueryRoot {
         action_type: String,
     ) -> GqlResult<GqlConsentResult> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
         let subject_str = subject.to_string();
         let actor_str = actor.to_string();
@@ -625,7 +633,7 @@ impl MutationRoot {
         input: CreateDecisionInput,
     ) -> GqlResult<GqlDecision> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id = Uuid::new_v4().to_string();
         let body_hash = Hash256::digest(input.body.as_bytes()).to_string();
@@ -656,7 +664,7 @@ impl MutationRoot {
                 audit_trail: Vec::new(),
             },
         );
-        guard.append_audit(&id, "DecisionCreated", "system");
+        guard.append_audit(&id, "DecisionCreated", "system")?;
         Ok(decision)
     }
 
@@ -669,7 +677,7 @@ impl MutationRoot {
         reason: Option<String>,
     ) -> GqlResult<GqlDecision> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = id.to_string();
         let decision = {
@@ -682,7 +690,7 @@ impl MutationRoot {
             rec.decision.clone()
         };
         let actor = reason.as_deref().unwrap_or("system");
-        guard.append_audit(&id_str, &format!("StatusAdvanced:{new_status}"), actor);
+        guard.append_audit(&id_str, &format!("StatusAdvanced:{new_status}"), actor)?;
         if guard
             .event_tx
             .send(GovEvent::DecisionUpdated(decision.clone()))
@@ -708,7 +716,7 @@ impl MutationRoot {
                 "invalid choice '{choice}'; must be one of APPROVE, REJECT, ABSTAIN"
             )));
         }
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
         let duplicate_vote = guard
@@ -740,7 +748,7 @@ impl MutationRoot {
                 "decision {id_str} not found"
             )));
         };
-        guard.append_audit(&id_str, "VoteCast", &voter);
+        guard.append_audit(&id_str, "VoteCast", &voter)?;
         if guard
             .event_tx
             .send(GovEvent::DecisionUpdated(decision))
@@ -761,7 +769,7 @@ impl MutationRoot {
         if input.expires_in_hours <= 0 {
             return Err(async_graphql::Error::new("expires_in_hours must be > 0"));
         }
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id = Uuid::new_v4().to_string();
         let now = guard.next_timestamp();
@@ -785,7 +793,7 @@ impl MutationRoot {
     /// Revoke an existing delegation by ID.
     async fn revoke_delegation(&self, ctx: &Context<'_>, id: ID) -> GqlResult<GqlDelegation> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = id.to_string();
         let delegation = guard
@@ -804,7 +812,7 @@ impl MutationRoot {
         grounds: String,
     ) -> GqlResult<GqlChallenge> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
         let (challenge, decision) = {
@@ -826,7 +834,7 @@ impl MutationRoot {
             &id_str,
             &format!("ChallengeRaised:{grounds}"),
             "did:exo:caller",
-        );
+        )?;
         if guard
             .event_tx
             .send(GovEvent::DecisionUpdated(decision))
@@ -848,7 +856,7 @@ impl MutationRoot {
         justification: String,
     ) -> GqlResult<GqlEmergencyAction> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
         // Verify decision exists before creating emergency action.
@@ -879,7 +887,7 @@ impl MutationRoot {
             &id_str,
             &format!("EmergencyAction:{justification}"),
             "did:exo:caller",
-        );
+        )?;
         if guard
             .event_tx
             .send(GovEvent::EmergencyActionCreated(action.clone()))
@@ -899,7 +907,7 @@ impl MutationRoot {
         nature: String,
     ) -> GqlResult<GqlConflictDisclosure> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
         // Conflict records are append-only — no update path exists.
@@ -913,7 +921,7 @@ impl MutationRoot {
             &id_str,
             &format!("ConflictDisclosed:{nature}"),
             "did:exo:caller",
-        );
+        )?;
         Ok(disclosure)
     }
 
@@ -929,7 +937,7 @@ impl MutationRoot {
         amendment: String,
     ) -> GqlResult<GqlConstitution> {
         guard_graphql_execution()?;
-        let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>();
+        let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let new_hash =
             Hash256::digest(format!("{}:{}", guard.constitution.hash, amendment).as_bytes())
@@ -979,16 +987,21 @@ impl SubscriptionRoot {
 
         #[cfg(feature = "unaudited-gateway-graphql-api")]
         {
-            let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>().clone();
+            let state = app_state_from_context(ctx).cloned();
             let id_str = decision_id.to_string();
-            let mut rx = state.lock().await.event_tx.subscribe();
             stream! {
-                loop {
-                    match rx.recv().await {
-                        Ok(GovEvent::DecisionUpdated(d)) if d.id.to_string() == id_str => yield Ok(d),
-                        Ok(_) => {}
-                        Err(_) => break,
+                match state {
+                    Ok(state) => {
+                        let mut rx = state.lock().await.event_tx.subscribe();
+                        loop {
+                            match rx.recv().await {
+                                Ok(GovEvent::DecisionUpdated(d)) if d.id.to_string() == id_str => yield Ok(d),
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
                     }
+                    Err(error) => yield Err(error),
                 }
             }
         }
@@ -1011,18 +1024,23 @@ impl SubscriptionRoot {
 
         #[cfg(feature = "unaudited-gateway-graphql-api")]
         {
-            let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>().clone();
+            let state = app_state_from_context(ctx).cloned();
             let did = actor_did;
-            let mut rx = state.lock().await.event_tx.subscribe();
             stream! {
-                loop {
-                    match rx.recv().await {
-                        Ok(GovEvent::DelegationExpiring(d)) if d.delegatee == did || d.delegator == did => {
-                            yield Ok(d)
+                match state {
+                    Ok(state) => {
+                        let mut rx = state.lock().await.event_tx.subscribe();
+                        loop {
+                            match rx.recv().await {
+                                Ok(GovEvent::DelegationExpiring(d)) if d.delegatee == did || d.delegator == did => {
+                                    yield Ok(d)
+                                }
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
                         }
-                        Ok(_) => {}
-                        Err(_) => break,
                     }
+                    Err(error) => yield Err(error),
                 }
             }
         }
@@ -1045,16 +1063,21 @@ impl SubscriptionRoot {
 
         #[cfg(feature = "unaudited-gateway-graphql-api")]
         {
-            let state = ctx.data_unchecked::<Arc<Mutex<AppState>>>().clone();
+            let state = app_state_from_context(ctx).cloned();
             let tid = tenant_id.to_string();
-            let mut rx = state.lock().await.event_tx.subscribe();
             stream! {
-                loop {
-                    match rx.recv().await {
-                        Ok(GovEvent::EmergencyActionCreated(a)) if a.tenant_id == tid => yield Ok(a),
-                        Ok(_) => {}
-                        Err(_) => break,
+                match state {
+                    Ok(state) => {
+                        let mut rx = state.lock().await.event_tx.subscribe();
+                        loop {
+                            match rx.recv().await {
+                                Ok(GovEvent::EmergencyActionCreated(a)) if a.tenant_id == tid => yield Ok(a),
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
                     }
+                    Err(error) => yield Err(error),
                 }
             }
         }
@@ -1262,6 +1285,72 @@ mod tests {
             subscription_section.matches("    async fn ").count(),
             subscription_section.matches("yield Err(error);").count(),
             "every GraphQL subscription resolver must yield the default-off refusal error"
+        );
+    }
+
+    #[test]
+    fn graphql_resolvers_use_checked_context_data_lookup() {
+        let production = include_str!("graphql.rs")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("fn app_state_from_context"),
+            "GraphQL state lookup must be centralized"
+        );
+        assert!(
+            production.contains("ctx.data::<Arc<Mutex<AppState>>>()"),
+            "GraphQL state lookup must return an error on missing AppState"
+        );
+        assert!(
+            !production.contains("data_unchecked::<Arc<Mutex<AppState>>>"),
+            "GraphQL resolvers must not panic if schema data is misconfigured"
+        );
+    }
+
+    #[test]
+    fn append_audit_rejects_sequence_overflow_without_wrapping() {
+        let mut state = AppState::new();
+        let decision_id = "decision-overflow".to_owned();
+        state.decisions.insert(
+            decision_id.clone(),
+            DecisionRecord {
+                decision: GqlDecision {
+                    id: ID::from(decision_id.clone()),
+                    tenant_id: "tenant".to_owned(),
+                    status: "CREATED".to_owned(),
+                    title: "Overflow".to_owned(),
+                    decision_class: "Routine".to_owned(),
+                    author: "did:exo:author".to_owned(),
+                    created_at: "1:0".to_owned(),
+                    votes: Vec::new(),
+                    challenges: Vec::new(),
+                    content_hash: Hash256::digest(b"overflow").to_string(),
+                },
+                audit_trail: Vec::new(),
+            },
+        );
+        state.next_audit_seq = i32::MAX;
+
+        let append_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.append_audit(&decision_id, "OverflowAttempt", "did:exo:actor")
+        }));
+
+        let err = append_result
+            .expect("overflowing audit sequence must be rejected without panic")
+            .expect_err("overflowing audit sequence must return an error");
+
+        assert!(err.message.contains("audit sequence exhausted"));
+        assert_eq!(state.next_audit_seq, i32::MAX);
+        assert!(
+            state
+                .decisions
+                .get(&decision_id)
+                .expect("decision")
+                .audit_trail
+                .is_empty(),
+            "overflowing audit append must not write a wrapped sequence entry"
         );
     }
 
