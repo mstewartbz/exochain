@@ -2240,14 +2240,23 @@ fn apply_gateway_layers(router: Router, concurrency_limit: usize) -> Router {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(err = %e, "Failed to install Ctrl+C shutdown handler");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let sigterm = async {
-        let mut stream = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .unwrap_or_else(|_| panic!("failed to install SIGTERM handler"));
-        stream.recv().await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to install SIGTERM shutdown handler");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -2363,6 +2372,25 @@ mod tests {
         assert!(!production.contains(&timestamp_now));
         assert!(!production.contains(&system_time_now));
         assert!(!production.contains(&instant_now));
+    }
+
+    #[test]
+    fn shutdown_signal_setup_failures_are_not_silent_or_panicking() {
+        let source = include_str!("server.rs");
+        let shutdown_signal = source_between(
+            source,
+            "async fn shutdown_signal",
+            "// ---------------------------------------------------------------------------\n// Async server entry point",
+        );
+
+        assert!(
+            !shutdown_signal.contains("let _ = tokio::signal::ctrl_c().await"),
+            "Ctrl+C listener errors must be observed"
+        );
+        assert!(
+            !shutdown_signal.contains("panic!(\"failed to install SIGTERM handler\")"),
+            "SIGTERM listener setup errors must not panic the gateway"
+        );
     }
 
     #[tokio::test]
