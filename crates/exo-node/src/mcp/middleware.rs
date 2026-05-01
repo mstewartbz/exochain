@@ -101,7 +101,7 @@ impl ConstitutionalMiddleware {
     /// Enforce all 6 MCP rules against the AI actor's context.
     pub fn enforce_mcp_rules(&self, context: &McpContext) -> Result<()> {
         mcp::enforce(&McpRule::all(), context).map_err(|violation| McpError::McpRuleViolation {
-            rule: format!("{:?}", violation.rule),
+            rule: violation.rule.id().to_owned(),
             description: violation.description,
         })
     }
@@ -584,6 +584,14 @@ mod tests {
         assert!(
             !production.contains(&fixed_timestamp),
             "middleware production must not hardcode provenance timestamps"
+        );
+        assert!(
+            !production.contains("format!(\"{:?}\", violation.rule)"),
+            "MCP middleware errors must use stable rule IDs instead of Rust Debug output"
+        );
+        assert!(
+            production.contains("violation.rule.id()"),
+            "MCP middleware errors must expose explicit stable MCP rule identifiers"
         );
     }
 }

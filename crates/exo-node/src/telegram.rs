@@ -65,9 +65,9 @@ struct InlineKeyboardButton {
 
 #[derive(Debug, Deserialize)]
 struct TelegramResponse<T> {
-    #[allow(dead_code)]
     ok: bool,
     result: Option<T>,
+    description: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -75,6 +75,8 @@ enum TelegramUpdateParseError {
     Oversized { len: u64, max: u64 },
     Body(String),
     Json(String),
+    ApiRejected { description: String },
+    MissingResult,
 }
 
 impl std::fmt::Display for TelegramUpdateParseError {
@@ -85,6 +87,10 @@ impl std::fmt::Display for TelegramUpdateParseError {
             }
             Self::Body(error) => write!(f, "telegram update response body failed: {error}"),
             Self::Json(error) => write!(f, "telegram update response parse failed: {error}"),
+            Self::ApiRejected { description } => {
+                write!(f, "telegram API rejected update polling: {description}")
+            }
+            Self::MissingResult => write!(f, "telegram update response missing result field"),
         }
     }
 }
@@ -158,7 +164,15 @@ fn parse_updates_response(bytes: &[u8]) -> Result<Vec<Update>, TelegramUpdatePar
 
     let parsed: TelegramResponse<Vec<Update>> = serde_json::from_slice(bytes)
         .map_err(|error| TelegramUpdateParseError::Json(error.to_string()))?;
-    Ok(parsed.result.unwrap_or_default())
+    if !parsed.ok {
+        return Err(TelegramUpdateParseError::ApiRejected {
+            description: parsed
+                .description
+                .unwrap_or_else(|| "ok=false without description".into()),
+        });
+    }
+
+    parsed.result.ok_or(TelegramUpdateParseError::MissingResult)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1544,6 +1558,25 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].update_id, 42);
         assert!(updates[0].message.is_some());
+    }
+
+    #[test]
+    fn parse_updates_response_rejects_missing_result() {
+        let err =
+            parse_updates_response(br#"{"ok":true}"#).expect_err("missing result must fail closed");
+
+        assert!(matches!(err, TelegramUpdateParseError::MissingResult));
+    }
+
+    #[test]
+    fn parse_updates_response_rejects_api_failure() {
+        let err = parse_updates_response(br#"{"ok":false,"description":"Unauthorized"}"#)
+            .expect_err("Telegram API failure must fail closed");
+
+        assert!(matches!(
+            err,
+            TelegramUpdateParseError::ApiRejected { description } if description == "Unauthorized"
+        ));
     }
 
     #[test]

@@ -31,14 +31,23 @@ pub struct BearerAuth {
 }
 
 /// Generate a cryptographically random admin token (hex-encoded 32 bytes).
-#[must_use]
-#[allow(clippy::expect_used)] // OS entropy failure is unrecoverable.
-pub fn generate_admin_token() -> Zeroizing<String> {
+///
+/// # Errors
+///
+/// Returns the OS entropy error if secure random bytes cannot be obtained.
+pub fn generate_admin_token() -> Result<Zeroizing<String>, getrandom::Error> {
+    generate_admin_token_with_entropy(|bytes| getrandom::getrandom(bytes))
+}
+
+fn generate_admin_token_with_entropy<E, F>(fill_entropy: F) -> Result<Zeroizing<String>, E>
+where
+    F: FnOnce(&mut [u8; 32]) -> Result<(), E>,
+{
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).expect("OS entropy source unavailable");
+    fill_entropy(&mut bytes)?;
     let token = Zeroizing::new(hex::encode(bytes));
     bytes.zeroize();
-    token
+    Ok(token)
 }
 
 /// Persist an admin token with restrictive file permissions from creation.
@@ -304,10 +313,18 @@ mod tests {
 
     #[tokio::test]
     async fn token_generation_is_unique() {
-        let t1 = generate_admin_token();
-        let t2 = generate_admin_token();
+        let t1 = generate_admin_token().expect("admin token generation");
+        let t2 = generate_admin_token().expect("admin token generation");
         assert_ne!(t1, t2);
         assert_eq!(t1.len(), 64); // 32 bytes hex-encoded
+    }
+
+    #[test]
+    fn token_generation_propagates_entropy_failure_without_panic() {
+        let err = generate_admin_token_with_entropy(|_| Err("entropy unavailable"))
+            .expect_err("entropy failure must propagate");
+
+        assert_eq!(err, "entropy unavailable");
     }
 
     #[test]
@@ -380,6 +397,16 @@ mod tests {
         assert!(
             production.contains("bytes.zeroize()"),
             "raw random token bytes must be wiped after hex encoding"
+        );
+        assert!(
+            !production.contains("expect(\"OS entropy source unavailable\")"),
+            "admin token generation must propagate entropy failures instead of panicking"
+        );
+        assert!(
+            production.contains(
+                "pub fn generate_admin_token() -> Result<Zeroizing<String>, getrandom::Error>"
+            ),
+            "admin token generation must return a typed entropy error"
         );
     }
 

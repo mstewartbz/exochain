@@ -191,19 +191,34 @@ impl ApiKeyRegistry {
     ///
     /// Returns `(plaintext_key_hex, record)`.  The plaintext key is shown **once**
     /// at creation and never stored — only its BLAKE3 hash is persisted.
-    /// # Panics
     ///
-    /// Panics if the OS entropy source is unavailable (unrecoverable).
-    #[allow(clippy::expect_used)] // OS entropy failure is unrecoverable.
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Internal` if the OS entropy source fails.
     pub fn register(
         &mut self,
         did: Did,
         label: String,
         metadata: ApiKeyMetadata,
-    ) -> (Zeroizing<String>, ApiKeyRecord) {
-        // Generate 32 random bytes via getrandom.
+    ) -> Result<(Zeroizing<String>, ApiKeyRecord)> {
+        self.register_with_entropy(did, label, metadata, |key_bytes| {
+            getrandom::getrandom(key_bytes)
+                .map_err(|error| GatewayError::Internal(format!("API key entropy failed: {error}")))
+        })
+    }
+
+    fn register_with_entropy<F>(
+        &mut self,
+        did: Did,
+        label: String,
+        metadata: ApiKeyMetadata,
+        fill_entropy: F,
+    ) -> Result<(Zeroizing<String>, ApiKeyRecord)>
+    where
+        F: FnOnce(&mut [u8; 32]) -> Result<()>,
+    {
         let mut key_bytes = Zeroizing::new([0u8; 32]);
-        getrandom::getrandom(&mut *key_bytes).expect("OS entropy source unavailable");
+        fill_entropy(&mut key_bytes)?;
 
         let plaintext_hex = Zeroizing::new(hex::encode(&key_bytes[..]));
         let key_hash = Hash256::digest(&key_bytes[..]);
@@ -218,7 +233,7 @@ impl ApiKeyRegistry {
         };
 
         self.keys.insert(key_hash, record.clone());
-        (plaintext_hex, record)
+        Ok((plaintext_hex, record))
     }
 
     /// Resolve a plaintext API key (hex-encoded) to its record.
@@ -715,7 +730,9 @@ mod tests {
         let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
-        let (plaintext, _record) = api_reg.register(did, "test key".into(), api_key_metadata());
+        let (plaintext, _record) = api_reg
+            .register(did, "test key".into(), api_key_metadata())
+            .expect("api key registration");
 
         let cred = Credential::ApiKey(plaintext);
         let actor = resolve_credential(&cred, &did_reg, &api_reg, auth_metadata()).unwrap();
@@ -748,7 +765,9 @@ mod tests {
         let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
-        let (plaintext, record) = api_reg.register(did, "test key".into(), api_key_metadata());
+        let (plaintext, record) = api_reg
+            .register(did, "test key".into(), api_key_metadata())
+            .expect("api key registration");
         api_reg.revoke(&record.key_hash);
 
         let cred = Credential::ApiKey(plaintext);
@@ -762,7 +781,9 @@ mod tests {
         let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
-        let (plaintext, record) = api_reg.register(did, "test key".into(), api_key_metadata());
+        let (plaintext, record) = api_reg
+            .register(did, "test key".into(), api_key_metadata())
+            .expect("api key registration");
 
         // Manually set expiration to the past.
         let key_hash = record.key_hash;
@@ -789,8 +810,9 @@ mod tests {
         let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:bob").unwrap();
-        let (plaintext, _record) =
-            api_reg.register(did, "bearer session".into(), api_key_metadata());
+        let (plaintext, _record) = api_reg
+            .register(did, "bearer session".into(), api_key_metadata())
+            .expect("api key registration");
 
         let cred = Credential::BearerToken(plaintext);
         let actor = resolve_credential(&cred, &did_reg, &api_reg, auth_metadata()).unwrap();
@@ -801,7 +823,9 @@ mod tests {
     fn api_key_registry_register() {
         let mut reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:carol").unwrap();
-        let (plaintext, record) = reg.register(did.clone(), "my key".into(), api_key_metadata());
+        let (plaintext, record) = reg
+            .register(did.clone(), "my key".into(), api_key_metadata())
+            .expect("api key registration");
 
         // Plaintext is 64 hex chars (32 bytes).
         assert_eq!(plaintext.len(), 64);
@@ -821,7 +845,9 @@ mod tests {
     fn api_key_registry_revoke() {
         let mut reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:carol").unwrap();
-        let (_plaintext, record) = reg.register(did, "my key".into(), api_key_metadata());
+        let (_plaintext, record) = reg
+            .register(did, "my key".into(), api_key_metadata())
+            .expect("api key registration");
 
         assert!(reg.revoke(&record.key_hash));
         assert!(reg.keys.get(&record.key_hash).unwrap().revoked);
@@ -836,9 +862,12 @@ mod tests {
         let alice = Did::new("did:exo:alice").unwrap();
         let bob = Did::new("did:exo:bob").unwrap();
 
-        reg.register(alice.clone(), "alice-1".into(), api_key_metadata());
-        reg.register(alice.clone(), "alice-2".into(), api_key_metadata());
-        reg.register(bob.clone(), "bob-1".into(), api_key_metadata());
+        reg.register(alice.clone(), "alice-1".into(), api_key_metadata())
+            .expect("api key registration");
+        reg.register(alice.clone(), "alice-2".into(), api_key_metadata())
+            .expect("api key registration");
+        reg.register(bob.clone(), "bob-1".into(), api_key_metadata())
+            .expect("api key registration");
 
         let alice_keys = reg.keys_for_did(&alice);
         assert_eq!(alice_keys.len(), 2);
@@ -853,7 +882,9 @@ mod tests {
     fn api_key_plaintext_shown_once() {
         let mut reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
-        let (plaintext, record) = reg.register(did, "test".into(), api_key_metadata());
+        let (plaintext, record) = reg
+            .register(did, "test".into(), api_key_metadata())
+            .expect("api key registration");
 
         // The plaintext key, when hashed with BLAKE3, must equal the stored key_hash.
         let key_bytes = hex::decode(plaintext.as_str()).unwrap();
@@ -875,12 +906,31 @@ mod tests {
     }
 
     #[test]
+    fn api_key_registry_register_propagates_entropy_failure_without_mutation() {
+        let mut reg = ApiKeyRegistry::new();
+        let did = Did::new("did:exo:alice").unwrap();
+        let err = reg
+            .register_with_entropy(did.clone(), "test key".into(), api_key_metadata(), |_| {
+                Err(GatewayError::Internal("entropy unavailable".into()))
+            })
+            .expect_err("entropy failure must propagate");
+
+        assert!(matches!(err, GatewayError::Internal(reason) if reason.contains("entropy")));
+        assert!(
+            reg.keys_for_did(&did).is_empty(),
+            "failed key generation must not insert a partial API key record"
+        );
+    }
+
+    #[test]
     fn resolve_credential_uses_supplied_authentication_metadata() {
         let did_reg = LocalDidRegistry::new();
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
         let key_metadata = ApiKeyMetadata::new(Timestamp::new(1_000, 0)).unwrap();
-        let (plaintext, record) = api_reg.register(did, "test key".into(), key_metadata);
+        let (plaintext, record) = api_reg
+            .register(did, "test key".into(), key_metadata)
+            .expect("api key registration");
 
         assert_eq!(record.created_at, Timestamp::new(1_000, 0));
 
@@ -916,8 +966,20 @@ mod tests {
         assert!(production.contains("use zeroize::Zeroizing;"));
         assert!(production.contains("ApiKey(Zeroizing<String>)"));
         assert!(production.contains("BearerToken(Zeroizing<String>)"));
-        assert!(production.contains(") -> (Zeroizing<String>, ApiKeyRecord)"));
+        assert!(production.contains(") -> Result<(Zeroizing<String>, ApiKeyRecord)>"));
         assert!(production.contains("let mut key_bytes = Zeroizing::new([0u8; 32]);"));
         assert!(production.contains("let key_bytes = Zeroizing::new(hex::decode(api_key).ok()?);"));
+    }
+
+    #[test]
+    fn api_key_registry_register_does_not_panic_on_entropy_failure() {
+        let source = include_str!("auth.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(!production.contains("expect(\"OS entropy source unavailable\")"));
+        assert!(production.contains(") -> Result<(Zeroizing<String>, ApiKeyRecord)>"));
     }
 }

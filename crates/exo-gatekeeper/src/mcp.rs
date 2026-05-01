@@ -42,6 +42,18 @@ impl McpRule {
     }
 
     #[must_use]
+    pub fn id(&self) -> &'static str {
+        match self {
+            McpRule::Mcp001BctsScope => "mcp-001-bcts-scope",
+            McpRule::Mcp002NoSelfEscalation => "mcp-002-no-self-escalation",
+            McpRule::Mcp003ProvenanceRequired => "mcp-003-provenance-required",
+            McpRule::Mcp004NoIdentityForge => "mcp-004-no-identity-forge",
+            McpRule::Mcp005Distinguishable => "mcp-005-distinguishable",
+            McpRule::Mcp006ConsentBoundaries => "mcp-006-consent-boundaries",
+        }
+    }
+
+    #[must_use]
     pub fn description(&self) -> &'static str {
         match self {
             McpRule::Mcp001BctsScope => "AI must operate within BCTS scope",
@@ -378,6 +390,17 @@ mod tests {
     fn descriptions_non_empty() {
         for r in McpRule::all() {
             assert!(!r.description().is_empty());
+        }
+    }
+    #[test]
+    fn rule_ids_are_stable_and_non_debug() {
+        assert_eq!(McpRule::Mcp001BctsScope.id(), "mcp-001-bcts-scope");
+        for r in McpRule::all() {
+            assert!(r.id().starts_with("mcp-00"));
+            assert!(
+                !r.id().contains("Mcp"),
+                "stable MCP rule IDs must not mirror Rust Debug variant names"
+            );
         }
     }
 

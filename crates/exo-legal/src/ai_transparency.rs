@@ -583,7 +583,7 @@ fn aggregate_mcp_outcomes(
         .iter()
         .filter(|r| r.timestamp >= period_start && r.timestamp <= period_end)
     {
-        let rule_key = format!("{:?}", record.rule);
+        let rule_key = record.rule.id().to_owned();
         let entry = counts.entry(rule_key).or_insert((0, 0, 0));
         match record.outcome {
             McpEnforcementOutcome::Allowed => entry.0 = entry.0.saturating_add(1),
@@ -959,6 +959,14 @@ mod tests {
             !aggregate.contains("+= 1"),
             "MCP outcome counters must not use direct += arithmetic"
         );
+        assert!(
+            !aggregate.contains("format!(\"{:?}\", record.rule)"),
+            "MCP outcome report keys must use stable rule IDs instead of Rust Debug output"
+        );
+        assert!(
+            aggregate.contains("record.rule.id()"),
+            "MCP outcome aggregation must bind reports to explicit stable rule identifiers"
+        );
     }
 
     #[test]
@@ -1150,15 +1158,15 @@ mod tests {
         let mcp001 = report
             .mcp_rule_outcomes
             .iter()
-            .find(|o| o.rule.contains("Mcp001"))
-            .expect("Mcp001 must appear");
+            .find(|o| o.rule == "mcp-001-bcts-scope")
+            .expect("mcp-001-bcts-scope must appear");
         assert_eq!(mcp001.allowed, 1);
         assert_eq!(mcp001.blocked, 0);
         let mcp002 = report
             .mcp_rule_outcomes
             .iter()
-            .find(|o| o.rule.contains("Mcp002"))
-            .expect("Mcp002 must appear");
+            .find(|o| o.rule == "mcp-002-no-self-escalation")
+            .expect("mcp-002-no-self-escalation must appear");
         assert_eq!(mcp002.blocked, 1);
     }
 

@@ -745,7 +745,10 @@ async fn start_node(
     // for identification and write the full token to a file with
     // restrictive permissions (owner read/write only, 0600) under the
     // node's data directory.
-    let admin_token = auth::generate_admin_token();
+    let admin_token = auth::generate_admin_token().map_err(|e| {
+        tracing::error!(err = %e, "Failed to generate admin token — aborting startup");
+        anyhow::anyhow!("admin token entropy failed: {e}")
+    })?;
     let token_prefix = admin_token.chars().take(8).collect::<String>();
     let token_path = data_dir.join("admin_token");
     if let Err(e) = auth::write_admin_token_file(&token_path, admin_token.as_str()) {

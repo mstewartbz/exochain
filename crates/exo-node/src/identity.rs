@@ -154,7 +154,7 @@ fn bs58_encode(data: &[u8]) -> String {
     }
 
     encoded.reverse();
-    String::from_utf8(encoded).unwrap_or_default()
+    encoded.into_iter().map(char::from).collect()
 }
 
 /// Write secret key bytes with restrictive permissions.
@@ -334,6 +334,10 @@ mod tests {
         assert!(
             !encode_source.contains("remainder as usize"),
             "base58 alphabet index conversion must be checked rather than truncated"
+        );
+        assert!(
+            !encode_source.contains("String::from_utf8(encoded).unwrap_or_default()"),
+            "base58 encoding must not silently collapse encoding defects to an empty string"
         );
     }
 

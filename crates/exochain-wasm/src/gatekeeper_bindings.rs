@@ -127,7 +127,7 @@ pub fn wasm_mcp_rules() -> Result<JsValue, JsValue> {
         .iter()
         .map(|r| {
             serde_json::json!({
-                "rule": format!("{r:?}"),
+                "rule": r.id(),
                 "description": r.description(),
             })
         })
@@ -359,5 +359,17 @@ mod tests {
             result.is_ok(),
             "WasmInvariantRequest must deserialize from valid JSON"
         );
+    }
+
+    #[test]
+    fn wasm_mcp_rules_use_stable_ids_not_debug_variants() {
+        let source = include_str!("gatekeeper_bindings.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production section");
+
+        assert!(!production.contains("format!(\"{r:?}\")"));
+        assert!(production.contains("\"rule\": r.id()"));
     }
 }
