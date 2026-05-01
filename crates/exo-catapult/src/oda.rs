@@ -116,6 +116,25 @@ impl OdaSlot {
         }
     }
 
+    /// Stable lowercase label for identifiers, APIs, and error messages.
+    #[must_use]
+    pub const fn slug(&self) -> &'static str {
+        match self {
+            Self::VentureCommander => "venturecommander",
+            Self::OperationsDeputy => "operationsdeputy",
+            Self::ProcessArchitect => "processarchitect",
+            Self::DeepResearcher => "deepresearcher",
+            Self::GrowthEngineer1 => "growthengineer1",
+            Self::GrowthEngineer2 => "growthengineer2",
+            Self::Communications1 => "communications1",
+            Self::Communications2 => "communications2",
+            Self::HrPeopleOps1 => "hrpeopleops1",
+            Self::HrPeopleOps2 => "hrpeopleops2",
+            Self::PlatformEngineer1 => "platformengineer1",
+            Self::PlatformEngineer2 => "platformengineer2",
+        }
+    }
+
     /// Authority depth in the ODA hierarchy (0 = highest authority).
     #[must_use]
     pub const fn authority_depth(&self) -> u32 {
@@ -133,6 +152,12 @@ impl OdaSlot {
             | Self::PlatformEngineer1
             | Self::PlatformEngineer2 => 3,
         }
+    }
+}
+
+impl std::fmt::Display for OdaSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.slug())
     }
 }
 
@@ -179,6 +204,13 @@ mod tests {
         for slot in &OdaSlot::ALL {
             assert!(!slot.display_name().is_empty());
         }
+    }
+
+    #[test]
+    fn stable_slot_slugs() {
+        assert_eq!(OdaSlot::VentureCommander.slug(), "venturecommander");
+        assert_eq!(OdaSlot::HrPeopleOps1.slug(), "hrpeopleops1");
+        assert_eq!(OdaSlot::PlatformEngineer2.to_string(), "platformengineer2");
     }
 
     #[test]

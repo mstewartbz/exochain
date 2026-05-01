@@ -86,8 +86,7 @@ pub fn classify_decision(slot: &OdaSlot) -> DecisionClass {
 #[must_use]
 pub fn commandbase_profile_name(newco_id: &Uuid, slot: &OdaSlot) -> String {
     let short_id = uuid_short_id(newco_id);
-    let slot_name = format!("{slot:?}").to_ascii_lowercase();
-    format!("catapult-{short_id}-{slot_name}")
+    format!("catapult-{short_id}-{}", slot.slug())
 }
 
 fn uuid_short_id(id: &Uuid) -> String {
@@ -244,6 +243,10 @@ mod tests {
         assert!(
             !production.contains("to_string()[..8]"),
             "CommandBase profile short IDs must not byte-slice UUID strings"
+        );
+        assert!(
+            !production.contains("format!(\"{slot:?}\")"),
+            "CommandBase profile names must use explicit slot labels"
         );
     }
 

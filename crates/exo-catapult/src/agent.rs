@@ -216,8 +216,10 @@ impl AgentRoster {
             if *slot != agent.slot {
                 return Err(CatapultError::InvalidAgent {
                     reason: format!(
-                        "agent {} stored under slot {slot:?} but declares slot {:?}",
-                        agent.did, agent.slot
+                        "agent {} stored under slot {} but declares slot {}",
+                        agent.did,
+                        slot.slug(),
+                        agent.slot.slug()
                     ),
                 });
             }
@@ -230,8 +232,7 @@ impl AgentRoster {
     ///
     /// Format: `did:exo:catapult:<newco_id>:<slot_name>`
     pub fn generate_did(newco_id: &Uuid, slot: &OdaSlot) -> exo_core::Result<Did> {
-        let slot_name = format!("{slot:?}").to_ascii_lowercase();
-        Did::new(&format!("did:exo:catapult:{newco_id}:{slot_name}"))
+        Did::new(&format!("did:exo:catapult:{newco_id}:{}", slot.slug()))
     }
 }
 
@@ -343,7 +344,11 @@ mod tests {
         let agent = make_agent(OdaSlot::DeepResearcher, "dr1");
         roster.agents.insert(OdaSlot::HrPeopleOps1, agent);
 
-        assert!(roster.validate().is_err());
+        let err = roster.validate().unwrap_err().to_string();
+        assert!(err.contains("hrpeopleops1"));
+        assert!(err.contains("deepresearcher"));
+        assert!(!err.contains("HrPeopleOps1"));
+        assert!(!err.contains("DeepResearcher"));
     }
 
     #[test]
@@ -450,8 +455,27 @@ mod tests {
     fn generate_did_format() {
         let id = Uuid::nil();
         let did = AgentRoster::generate_did(&id, &OdaSlot::VentureCommander).unwrap();
-        assert!(did.as_str().starts_with("did:exo:catapult:"));
-        assert!(did.as_str().contains("venturecommander"));
+        assert_eq!(
+            did.as_str(),
+            "did:exo:catapult:00000000-0000-0000-0000-000000000000:venturecommander"
+        );
+    }
+
+    #[test]
+    fn agent_slot_boundary_labels_do_not_depend_on_debug_formatting() {
+        let source = include_str!("agent.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("format!(\"{slot:?}\")"),
+            "agent DID generation must use explicit slot labels"
+        );
+        assert!(
+            !production.contains("{slot:?}"),
+            "agent validation errors must use explicit slot labels"
+        );
     }
 
     #[test]

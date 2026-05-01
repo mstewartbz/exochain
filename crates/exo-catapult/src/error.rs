@@ -22,9 +22,9 @@ pub enum CatapultError {
         needed: usize,
         have: usize,
     },
-    #[error("agent slot already filled: {0:?}")]
+    #[error("agent slot already filled: {0}")]
     SlotAlreadyFilled(OdaSlot),
-    #[error("agent slot empty: {0:?}")]
+    #[error("agent slot empty: {0}")]
     SlotEmpty(OdaSlot),
     #[error("budget exceeded: spent={spent_cents} limit={limit_cents}")]
     BudgetExceeded { spent_cents: u64, limit_cents: u64 },
