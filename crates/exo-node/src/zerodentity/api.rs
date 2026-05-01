@@ -215,10 +215,13 @@ fn json_error(
 }
 
 fn store_error(error: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
-    json_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("Store error: {error}"),
-    )
+    tracing::error!(err = %error, "0dentity API store operation failed");
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, "Store operation failed")
+}
+
+fn store_operation_failed(operation: &'static str) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::error!(operation, "0dentity API store operation failed");
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, "Store operation failed")
 }
 
 async fn with_store_blocking<T, F>(state: ApiState, operation: F) -> ApiResult<T>
@@ -230,7 +233,7 @@ where
         let mut store = state
             .store
             .lock()
-            .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "lock poisoned"))?;
+            .map_err(|_| store_operation_failed("lock_poisoned"))?;
         operation(&mut store)
     })
     .await
@@ -287,12 +290,7 @@ async fn verify_signed_write_blocking(
     with_store_blocking(state, move |store| {
         let session = store
             .get_session(&token)
-            .map_err(|e| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Store error: {e}"),
-                )
-            })?
+            .map_err(store_error)?
             .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
         if session.subject_did.as_str() != expected_did.as_str() {
@@ -324,12 +322,9 @@ async fn verify_signed_write_blocking(
             ));
         }
 
-        let nonce_is_new = store.consume_session_nonce(&token, nonce).map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Store error: {e}"),
-            )
-        })?;
+        let nonce_is_new = store
+            .consume_session_nonce(&token, nonce)
+            .map_err(store_error)?;
         if !nonce_is_new {
             return Err(json_error(
                 StatusCode::CONFLICT,
@@ -798,12 +793,7 @@ pub async fn create_peer_attestation(
         })?;
         let dag_node_hash = store
             .next_claim_dag_node_hash(target_claim_hash, Timestamp::new(created_ms, 0))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                )
-            })?;
+            .map_err(store_error)?;
 
         let attestation = create_attestation(CreateAttestationInput {
             attester_did: &attester_did,
@@ -821,14 +811,13 @@ pub async fn create_peer_attestation(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?;
-        let target_claim = build_target_claim(&attestation, dag_node_hash, created_ms).map_err(
-            |e| {
+        let target_claim =
+            build_target_claim(&attestation, dag_node_hash, created_ms).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": e.to_string()})),
                 )
-            },
-        )?;
+            })?;
         let claim_id = target_claim_id(&attestation).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -837,24 +826,13 @@ pub async fn create_peer_attestation(
         })?;
         let evidence = store
             .save_claim_with_evidence(&claim_id, &target_claim)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                )
-            })?;
-        store.insert_attestation(&attestation).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Store error: {e}")})),
-            )
-        })?;
-        let receipt_hash = evidence.receipt_hash.ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Store error: verified attestation claim did not emit a trust receipt"})),
-            )
-        })?;
+            .map_err(store_error)?;
+        store
+            .insert_attestation(&attestation)
+            .map_err(store_error)?;
+        let receipt_hash = evidence
+            .receipt_hash
+            .ok_or_else(|| store_operation_failed("create_peer_attestation_missing_receipt"))?;
         let receipt_hash = hex::encode(receipt_hash.as_bytes());
 
         Ok(AttestResponse {
@@ -931,12 +909,7 @@ pub async fn delete_identity(
     let erasure_evidence = with_store_blocking(state, move |store| {
         store
             .erase_did_with_evidence(&did, Timestamp::new(erased_ms, 0))
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Erasure failed: {e}")})),
-                )
-            })
+            .map_err(store_error)
     })
     .await?;
 
@@ -988,7 +961,7 @@ mod tests {
     use super::*;
     use crate::zerodentity::{
         attestation::attestation_signing_payload,
-        store::ZerodentityStore,
+        store::{ZerodentityReadFailure, ZerodentityStore},
         types::{ClaimStatus, ClaimType, IdentityClaim, IdentitySession},
     };
 
@@ -1004,6 +977,33 @@ mod tests {
         ApiState {
             store: Arc::new(Mutex::new(test_store())),
         }
+    }
+
+    #[tokio::test]
+    async fn get_score_redacts_store_read_errors() {
+        let mut store = test_store();
+        store.inject_read_failure(ZerodentityReadFailure::Claims);
+        let app = zerodentity_api_router(ApiState {
+            store: Arc::new(Mutex::new(store)),
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did:exo:redaction/score")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body_text = std::str::from_utf8(&body).unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["error"], "Store operation failed");
+        assert!(!body_text.contains("Store error"));
+        assert!(!body_text.contains("injected 0dentity"));
     }
 
     #[test]
