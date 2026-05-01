@@ -11,11 +11,11 @@
 //! - Distinct-DID / distinct-signal-type counts use `BTreeSet`, not `HashSet`.
 //! - Input slices must be sorted by `created_ms` ascending before calling
 //!   `compute()`.  The caller is responsible for this invariant.
-// The scoring engine performs extensive integer arithmetic with safe `as`
-// casts between bounded integer types. External basis-point inputs are clamped,
-// collection sizes use checked saturating conversions, and aggregate sums use
-// widened accumulators before arithmetic.
-#![allow(clippy::as_conversions, clippy::manual_range_contains)]
+// The scoring engine performs extensive integer arithmetic with checked or
+// widening conversions. External basis-point inputs are clamped, collection
+// sizes use checked saturating conversions, and aggregate sums use widened
+// accumulators before arithmetic.
+#![allow(clippy::manual_range_contains)]
 
 use std::collections::BTreeSet;
 
@@ -49,7 +49,7 @@ fn average_basis_points(values: impl Iterator<Item = u32>) -> Option<u32> {
     }
 
     sum.checked_div(count)
-        .map(|average| average.min(u64::from(MAX_BASIS_POINTS)) as u32)
+        .map(|average| u64_to_u32_saturating(average.min(u64::from(MAX_BASIS_POINTS))))
 }
 
 fn average_axis_values(axes: &[u32; 8]) -> u32 {
@@ -57,7 +57,7 @@ fn average_axis_values(axes: &[u32; 8]) -> u32 {
         .iter()
         .copied()
         .fold(0_u64, |acc, axis| acc.saturating_add(u64::from(axis)));
-    (sum / 8).min(u64::from(u32::MAX)) as u32
+    u64_to_u32_saturating(sum / 8)
 }
 
 fn average_basis_point_axes(axes: &[u32; 8]) -> u32 {
@@ -74,8 +74,9 @@ fn int_ln_milli(x: u64) -> u64 {
         return 0;
     }
     const LN2_MILLI: u64 = 693; // ln(2) × 1000
-    let k = (63 - x.leading_zeros()) as u64; // floor(log2(x))
-    let power = 1u64 << (k as u32);
+    let k_u32 = 63_u32.saturating_sub(x.leading_zeros()); // floor(log2(x))
+    let k = u64::from(k_u32);
+    let power = 1u64 << k_u32;
     // Encode fractional part f = x/2^k − 1 as f_num ∈ [0, 1024).
     let f_num = (x.saturating_sub(power) << 10) / power;
     // ln(1 + f) ≈ f − f²/2  (second-order Taylor)
@@ -113,6 +114,10 @@ fn u64_to_u32_saturating(value: u64) -> u32 {
 
 fn u128_to_u32_saturating(value: u128) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn u128_to_u64_saturating(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn capped_count_contribution(count: usize, per_item: u32, cap: u32) -> u32 {
@@ -513,9 +518,9 @@ pub(crate) fn compute_symmetry(axes: &[u32; 8]) -> u32 {
             diff * diff
         })
         .sum();
-    let variance = (variance_sum / 8).min(u128::from(u64::MAX)) as u64;
-    let std_dev = isqrt(variance) as u32;
-    let cv_bp = (std_dev as u64 * 10_000 / mean as u64) as u32;
+    let variance = u128_to_u64_saturating(variance_sum / 8);
+    let std_dev = u64_to_u32_saturating(isqrt(variance));
+    let cv_bp = u64_to_u32_saturating(u64::from(std_dev).saturating_mul(10_000) / u64::from(mean));
     10_000u32.saturating_sub(cv_bp)
 }
 
@@ -643,6 +648,14 @@ mod tests {
         assert!(
             !production.contains("clippy::expect_used"),
             "scoring production source must not suppress expect safety lint"
+        );
+        assert!(
+            !production.contains("clippy::as_conversions"),
+            "scoring production source must not suppress integer conversion lints"
+        );
+        assert!(
+            !production.contains(" as u"),
+            "scoring production source must use checked or widening conversions, not numeric as casts"
         );
         assert!(
             !production.contains(".count() as u32"),
