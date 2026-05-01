@@ -379,17 +379,17 @@ impl SqliteDagStore {
     /// directly.
     #[allow(dead_code)]
     pub fn save_validator_set(&mut self, validators: &BTreeSet<Did>) -> DagResult<()> {
-        self.conn
-            .execute("DELETE FROM validators", [])
+        let tx = self.conn.transaction().map_err(store_err)?;
+        tx.execute("DELETE FROM validators", [])
             .map_err(store_err)?;
         for did in validators {
-            self.conn
-                .execute(
-                    "INSERT INTO validators (did) VALUES (?1)",
-                    params![did.to_string()],
-                )
-                .map_err(store_err)?;
+            tx.execute(
+                "INSERT INTO validators (did) VALUES (?1)",
+                params![did.to_string()],
+            )
+            .map_err(store_err)?;
         }
+        tx.commit().map_err(store_err)?;
         Ok(())
     }
 
@@ -1126,6 +1126,40 @@ mod tests {
         store.save_validator_set(&smaller).unwrap();
         let loaded2 = store.load_validator_set().unwrap();
         assert_eq!(loaded2.len(), 1);
+    }
+
+    #[test]
+    fn save_validator_set_preserves_existing_set_if_replacement_insert_fails() {
+        let mut store = temp_store();
+        let mut original = BTreeSet::new();
+        original.insert(Did::new("did:exo:v0").unwrap());
+        original.insert(Did::new("did:exo:v1").unwrap());
+        store.save_validator_set(&original).unwrap();
+
+        store
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_validator_insert
+                 BEFORE INSERT ON validators
+                 WHEN NEW.did = 'did:exo:blocked'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected validator insert failure');
+                 END;",
+            )
+            .unwrap();
+
+        let mut replacement = BTreeSet::new();
+        replacement.insert(Did::new("did:exo:blocked").unwrap());
+        replacement.insert(Did::new("did:exo:z").unwrap());
+
+        let err = store.save_validator_set(&replacement).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("injected validator insert failure")
+        );
+        let loaded = store.load_validator_set().unwrap();
+        assert_eq!(loaded, original);
     }
 
     #[test]
