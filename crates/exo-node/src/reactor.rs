@@ -78,6 +78,25 @@ where
     .map_err(|e| format!("Store blocking task failed in {context}: {e}"))?
 }
 
+async fn with_reactor_state_blocking<T, F>(
+    shared: SharedReactorState,
+    context: &'static str,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut ReactorState) -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut guard = shared
+            .lock()
+            .map_err(|_| format!("Reactor state mutex poisoned in {context}"))?;
+        operation(&mut guard)
+    })
+    .await
+    .map_err(|e| format!("Reactor state blocking task failed in {context}: {e}"))?
+}
+
 async fn stored_node_timestamp_for_receipt(
     store: &Arc<Mutex<SqliteDagStore>>,
     hash: &Hash256,
@@ -105,21 +124,25 @@ async fn commit_receipt_from_certificate(
 ) -> Result<TrustReceipt, String> {
     let timestamp = stored_node_timestamp_for_receipt(store, &cert.node_hash).await?;
     let authority_hash = commit_receipt_authority_hash(cert)?;
-    let s = state
-        .lock()
-        .map_err(|_| "Reactor state mutex poisoned while building commit receipt".to_string())?;
-
-    TrustReceipt::new(
-        s.node_did.clone(),
-        authority_hash,
-        None,
-        "dag.commit".to_string(),
-        cert.node_hash,
-        ReceiptOutcome::Executed,
-        timestamp,
-        &*s.sign_fn,
+    let node_hash = cert.node_hash;
+    with_reactor_state_blocking(
+        Arc::clone(state),
+        "commit_receipt_from_certificate",
+        move |s| {
+            TrustReceipt::new(
+                s.node_did.clone(),
+                authority_hash,
+                None,
+                "dag.commit".to_string(),
+                node_hash,
+                ReceiptOutcome::Executed,
+                timestamp,
+                &*s.sign_fn,
+            )
+            .map_err(|e| format!("build commit trust receipt: {e}"))
+        },
     )
-    .map_err(|e| format!("build commit trust receipt: {e}"))
+    .await
 }
 
 fn sign_proposal(
@@ -390,16 +413,18 @@ pub async fn run_reactor(
     mut net_events: mpsc::Receiver<crate::network::NetworkEvent>,
     reactor_tx: mpsc::Sender<ReactorEvent>,
 ) {
-    let round_timeout = {
-        let s = match state.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                tracing::error!("Reactor state mutex poisoned — cannot start reactor");
+    let round_timeout =
+        match with_reactor_state_blocking(Arc::clone(&state), "reactor_start_config", |s| {
+            Ok(Duration::from_millis(s.consensus.config.round_timeout_ms))
+        })
+        .await
+        {
+            Ok(round_timeout) => round_timeout,
+            Err(e) => {
+                tracing::error!(err = %e, "Cannot start reactor");
                 return;
             }
         };
-        Duration::from_millis(s.consensus.config.round_timeout_ms)
-    };
 
     let mut round_timer = tokio::time::interval(round_timeout);
     // Don't try to catch up on missed ticks.
@@ -425,13 +450,21 @@ pub async fn run_reactor(
 
             // Round timeout — advance to next round
             _ = round_timer.tick() => {
-                let round = {
-                    let Ok(mut s) = state.lock() else {
-                        tracing::error!("Reactor state mutex poisoned in round tick");
-                        continue;
-                    };
+                let round = match with_reactor_state_blocking(
+                    Arc::clone(&state),
+                    "reactor_round_tick",
+                    |s| {
                     s.consensus.advance_round();
-                    s.consensus.current_round
+                        Ok(s.consensus.current_round)
+                    },
+                )
+                .await
+                {
+                    Ok(round) => round,
+                    Err(e) => {
+                        tracing::error!(err = %e, "Failed to advance reactor round");
+                        continue;
+                    }
                 };
 
                 // Persist the new round number.
@@ -635,19 +668,19 @@ async fn handle_proposal(
     msg: ConsensusProposalMsg,
 ) {
     // Validate the proposal before any processing.
+    let proposal_for_validation = msg.clone();
+    if let Err(reason) =
+        with_reactor_state_blocking(Arc::clone(state), "handle_proposal_validate", move |s| {
+            validate_proposal(
+                &proposal_for_validation,
+                &s.consensus.config.validators,
+                &s.validator_public_keys,
+            )
+        })
+        .await
     {
-        let Ok(s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_proposal (validate)");
-            return;
-        };
-        if let Err(reason) = validate_proposal(
-            &msg,
-            &s.consensus.config.validators,
-            &s.validator_public_keys,
-        ) {
-            tracing::warn!(err = %reason, "Rejected invalid proposal from network");
-            return;
-        }
+        tracing::warn!(err = %reason, "Rejected invalid proposal from network");
+        return;
     }
 
     if let Err(e) = with_store_blocking(Arc::clone(store), "handle_proposal_put", {
@@ -664,59 +697,58 @@ async fn handle_proposal(
         return;
     }
 
-    // All synchronous work in a block so MutexGuard is dropped before any .await.
-    let vote_msg_opt = {
-        let Ok(mut s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_proposal (process)");
-            return;
-        };
-
-        // Register the proposal in consensus state after cryptographic verification.
-        let resolver = s.validator_public_keys.clone();
-        if let Err(e) = consensus::propose_verified(
-            &mut s.consensus,
-            &msg.node,
-            &msg.proposal.proposer,
-            &msg.signature,
-            &resolver,
-        ) {
-            tracing::warn!(err = %e, proposer = %msg.proposal.proposer, "Invalid proposal");
-            return;
-        }
-
-        tracing::info!(
-            round = msg.proposal.round,
-            proposer = %msg.proposal.proposer,
-            node = %msg.node.hash,
-            "Received proposal"
-        );
-
-        // If we are a validator, vote for the proposal.
-        if s.is_validator {
-            let vote = match signed_vote(
-                s.node_did.clone(),
-                s.consensus.current_round,
-                msg.node.hash,
-                &*s.sign_fn,
-            ) {
-                Ok(vote) => vote,
-                Err(e) => {
-                    tracing::warn!(err = %e, "Failed to sign own consensus vote");
-                    return;
-                }
-            };
-
+    let proposal_for_process = msg.clone();
+    let vote_msg_opt =
+        match with_reactor_state_blocking(Arc::clone(state), "handle_proposal_process", move |s| {
+            // Register the proposal in consensus state after cryptographic verification.
             let resolver = s.validator_public_keys.clone();
-            if let Err(e) = consensus::vote_verified(&mut s.consensus, vote.clone(), &resolver) {
-                tracing::warn!(err = %e, "Failed to cast own vote");
-                return;
+            if let Err(e) = consensus::propose_verified(
+                &mut s.consensus,
+                &proposal_for_process.node,
+                &proposal_for_process.proposal.proposer,
+                &proposal_for_process.signature,
+                &resolver,
+            ) {
+                return Err(format!(
+                    "invalid proposal from {}: {e}",
+                    proposal_for_process.proposal.proposer
+                ));
             }
 
-            Some(WireMessage::ConsensusVote(ConsensusVoteMsg { vote }))
-        } else {
-            None
-        }
-    }; // MutexGuard dropped here
+            tracing::info!(
+                round = proposal_for_process.proposal.round,
+                proposer = %proposal_for_process.proposal.proposer,
+                node = %proposal_for_process.node.hash,
+                "Received proposal"
+            );
+
+            // If we are a validator, vote for the proposal.
+            if s.is_validator {
+                let vote = signed_vote(
+                    s.node_did.clone(),
+                    s.consensus.current_round,
+                    proposal_for_process.node.hash,
+                    &*s.sign_fn,
+                )
+                .map_err(|e| format!("sign own consensus vote: {e}"))?;
+
+                let resolver = s.validator_public_keys.clone();
+                consensus::vote_verified(&mut s.consensus, vote.clone(), &resolver)
+                    .map_err(|e| format!("cast own vote: {e}"))?;
+
+                Ok(Some(WireMessage::ConsensusVote(ConsensusVoteMsg { vote })))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        {
+            Ok(vote_msg_opt) => vote_msg_opt,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to process proposal");
+                return;
+            }
+        };
 
     // Async network operations happen outside the lock.
     if let Some(vote_msg) = vote_msg_opt {
@@ -738,44 +770,45 @@ async fn handle_vote(
     msg: ConsensusVoteMsg,
 ) {
     // Validate the vote before processing.
+    let vote_for_validation = msg.clone();
+    if let Err(reason) =
+        with_reactor_state_blocking(Arc::clone(state), "handle_vote_validate", move |s| {
+            validate_vote(
+                &vote_for_validation,
+                &s.consensus.config.validators,
+                &s.validator_public_keys,
+            )
+        })
+        .await
     {
-        let Ok(s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_vote (validate)");
-            return;
-        };
-        if let Err(reason) = validate_vote(
-            &msg,
-            &s.consensus.config.validators,
-            &s.validator_public_keys,
-        ) {
-            tracing::warn!(err = %reason, "Rejected invalid vote from network");
-            return;
-        }
+        tracing::warn!(err = %reason, "Rejected invalid vote from network");
+        return;
     }
 
-    {
-        let Ok(mut s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_vote (process)");
-            return;
-        };
+    let vote_for_process = msg.vote.clone();
+    if let Err(e) =
+        with_reactor_state_blocking(Arc::clone(state), "handle_vote_process", move |s| {
+            let resolver = s.validator_public_keys.clone();
+            consensus::vote_verified(&mut s.consensus, vote_for_process.clone(), &resolver)
+                .map_err(|e| {
+                    format!(
+                        "vote from {} in round {} rejected: {e}",
+                        vote_for_process.voter, vote_for_process.round
+                    )
+                })?;
 
-        let resolver = s.validator_public_keys.clone();
-        if let Err(e) = consensus::vote_verified(&mut s.consensus, msg.vote.clone(), &resolver) {
             tracing::debug!(
-                err = %e,
-                voter = %msg.vote.voter,
-                round = msg.vote.round,
-                "Vote rejected"
+                voter = %vote_for_process.voter,
+                round = vote_for_process.round,
+                node = %vote_for_process.node_hash,
+                "Received vote"
             );
-            return;
-        }
-
-        tracing::debug!(
-            voter = %msg.vote.voter,
-            round = msg.vote.round,
-            node = %msg.vote.node_hash,
-            "Received vote"
-        );
+            Ok(())
+        })
+        .await
+    {
+        tracing::debug!(err = %e, "Vote rejected");
+        return;
     }
 
     // Persist the vote.
@@ -804,45 +837,52 @@ async fn handle_commit(
     msg: ConsensusCommitMsg,
 ) {
     // Validate the commit certificate before processing.
+    let commit_for_validation = msg.clone();
+    if let Err(reason) =
+        with_reactor_state_blocking(Arc::clone(state), "handle_commit_validate", move |s| {
+            validate_commit(
+                &commit_for_validation,
+                &s.consensus.config.validators,
+                &s.validator_public_keys,
+            )
+        })
+        .await
     {
-        let Ok(s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_commit (validate)");
-            return;
-        };
-        if let Err(reason) = validate_commit(
-            &msg,
-            &s.consensus.config.validators,
-            &s.validator_public_keys,
-        ) {
-            tracing::warn!(err = %reason, "Rejected invalid commit certificate from network");
-            return;
-        }
+        tracing::warn!(err = %reason, "Rejected invalid commit certificate from network");
+        return;
     }
 
-    let (cert, commit_info) = {
-        let Ok(mut s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in handle_commit (process)");
-            return;
+    let cert_for_process = msg.certificate;
+    let commit_result =
+        match with_reactor_state_blocking(Arc::clone(state), "handle_commit_process", move |s| {
+            let cert = cert_for_process;
+
+            // Skip if already finalized.
+            if consensus::is_finalized(&s.consensus, &cert.node_hash) {
+                return Ok(None);
+            }
+
+            // Apply the commit certificate after verifying every certificate vote.
+            let round = cert.round;
+            let hash = cert.node_hash;
+            let resolver = s.validator_public_keys.clone();
+            consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver)
+                .map_err(|e| format!("invalid commit certificate: {e}"))?;
+
+            let height = s.consensus.committed.len() as u64;
+            Ok(Some((cert, (hash, height, round))))
+        })
+        .await
+        {
+            Ok(commit_info) => commit_info,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to process commit certificate");
+                return;
+            }
         };
-        let cert = msg.certificate;
-
-        // Skip if already finalized.
-        if consensus::is_finalized(&s.consensus, &cert.node_hash) {
-            return;
-        }
-
-        // Apply the commit certificate after verifying every certificate vote.
-        let round = cert.round;
-        let hash = cert.node_hash;
-        let resolver = s.validator_public_keys.clone();
-        if let Err(e) = consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver) {
-            tracing::warn!(err = %e, "Invalid commit certificate");
-            return;
-        }
-
-        let height = s.consensus.committed.len() as u64;
-        (cert, (hash, height, round))
-    }; // MutexGuard dropped here
+    let Some((cert, commit_info)) = commit_result else {
+        return;
+    };
 
     let (hash, height, round) = commit_info;
 
@@ -907,41 +947,44 @@ async fn check_and_commit(
     reactor_tx: &mpsc::Sender<ReactorEvent>,
     node_hash: &Hash256,
 ) {
-    let cert = {
-        let Ok(s) = state.lock() else {
-            tracing::error!("Reactor state mutex poisoned in check_and_commit");
-            return;
+    let node_hash_for_check = *node_hash;
+    let cert =
+        match with_reactor_state_blocking(Arc::clone(state), "check_and_commit_check", move |s| {
+            Ok(consensus::check_commit(&s.consensus, &node_hash_for_check))
+        })
+        .await
+        {
+            Ok(cert) => cert,
+            Err(e) => {
+                tracing::error!(err = %e, "Failed to check commit quorum");
+                return;
+            }
         };
-        consensus::check_commit(&s.consensus, node_hash)
-    };
 
     if let Some(cert) = cert {
         let round = cert.round;
         let hash = cert.node_hash;
 
-        // Commit locally.
-        {
-            let Ok(mut s) = state.lock() else {
-                tracing::error!("Reactor state mutex poisoned in check_and_commit (commit)");
-                return;
-            };
-            if !consensus::is_finalized(&s.consensus, &hash) {
-                let resolver = s.validator_public_keys.clone();
-                if let Err(e) =
-                    consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver)
-                {
-                    tracing::warn!(err = %e, "Failed to verify local commit certificate");
-                    return;
+        let cert_for_commit = cert.clone();
+        let height = match with_reactor_state_blocking(
+            Arc::clone(state),
+            "check_and_commit_commit",
+            move |s| {
+                if !consensus::is_finalized(&s.consensus, &hash) {
+                    let resolver = s.validator_public_keys.clone();
+                    consensus::commit_verified(&mut s.consensus, cert_for_commit, &resolver)
+                        .map_err(|e| format!("verify local commit certificate: {e}"))?;
                 }
-            }
-        }
-
-        let height = {
-            let Ok(s) = state.lock() else {
-                tracing::error!("Reactor state mutex poisoned in check_and_commit (height)");
+                Ok(s.consensus.committed.len() as u64)
+            },
+        )
+        .await
+        {
+            Ok(height) => height,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to apply local commit certificate");
                 return;
-            };
-            s.consensus.committed.len() as u64
+            }
         };
 
         // Persist to store.
@@ -1018,15 +1061,14 @@ pub async fn submit_proposal(
     net_handle: &NetworkHandle,
     payload: &[u8],
 ) -> anyhow::Result<DagNode> {
-    {
-        let s = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in submit_proposal"))?;
-
+    with_reactor_state_blocking(Arc::clone(state), "submit_proposal_validate", |s| {
         if !s.is_validator {
-            anyhow::bail!("This node is not a validator — cannot propose");
+            return Err("This node is not a validator — cannot propose".to_string());
         }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Get current tips as parents.
     let tips = with_store_blocking(Arc::clone(store), "submit_proposal_tips", |store| {
@@ -1040,10 +1082,8 @@ pub async fn submit_proposal(
         tips
     };
 
-    let node = {
-        let mut s = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in submit_proposal"))?;
+    let payload_for_node = payload.to_vec();
+    let node = with_reactor_state_blocking(Arc::clone(state), "submit_proposal_append", move |s| {
         // Destructure to avoid borrow conflicts: `append` needs &mut dag
         // and &mut clock simultaneously, which can't be done through `s`.
         let ReactorState {
@@ -1055,9 +1095,18 @@ pub async fn submit_proposal(
         } = *s;
 
         // Create the DAG node.
-        append(dag, &parents, payload, node_did, &**sign_fn, clock)
-            .map_err(|e| anyhow::anyhow!("append: {e}"))?
-    };
+        append(
+            dag,
+            &parents,
+            &payload_for_node,
+            node_did,
+            &**sign_fn,
+            clock,
+        )
+        .map_err(|e| format!("append: {e}"))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Store it locally.
     with_store_blocking(Arc::clone(store), "submit_proposal_put", {
@@ -1067,41 +1116,47 @@ pub async fn submit_proposal(
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let (proposal, signature) = {
-        let mut s = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in submit_proposal"))?;
-        if !s.is_validator {
-            anyhow::bail!("This node is not a validator — cannot propose");
-        }
-        // Create and sign the proposal over the canonical consensus payload.
-        let proposer_did = s.node_did.clone();
-        let proposal_to_sign = Proposal {
-            proposer: proposer_did.clone(),
-            round: s.consensus.current_round,
-            node_hash: node.hash,
-        };
-        let sig = sign_proposal(&proposal_to_sign, &*s.sign_fn)
-            .map_err(|e| anyhow::anyhow!("proposal signature: {e}"))?;
-        let resolver = s.validator_public_keys.clone();
-        let proposal =
-            consensus::propose_verified(&mut s.consensus, &node, &proposer_did, &sig, &resolver)
-                .map_err(|e| anyhow::anyhow!("propose: {e}"))?;
+    let node_for_proposal = node.clone();
+    let (proposal, signature) =
+        with_reactor_state_blocking(Arc::clone(state), "submit_proposal_consensus", move |s| {
+            if !s.is_validator {
+                return Err("This node is not a validator — cannot propose".to_string());
+            }
+            // Create and sign the proposal over the canonical consensus payload.
+            let proposer_did = s.node_did.clone();
+            let proposal_to_sign = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node_for_proposal.hash,
+            };
+            let sig = sign_proposal(&proposal_to_sign, &*s.sign_fn)
+                .map_err(|e| format!("proposal signature: {e}"))?;
+            let resolver = s.validator_public_keys.clone();
+            let proposal = consensus::propose_verified(
+                &mut s.consensus,
+                &node_for_proposal,
+                &proposer_did,
+                &sig,
+                &resolver,
+            )
+            .map_err(|e| format!("propose: {e}"))?;
 
-        // Vote for our own proposal.
-        let vote = signed_vote(
-            s.node_did.clone(),
-            s.consensus.current_round,
-            node.hash,
-            &*s.sign_fn,
-        )
-        .map_err(|e| anyhow::anyhow!("self-vote signature: {e}"))?;
-        let resolver = s.validator_public_keys.clone();
-        consensus::vote_verified(&mut s.consensus, vote, &resolver)
-            .map_err(|e| anyhow::anyhow!("self-vote: {e}"))?;
+            // Vote for our own proposal.
+            let vote = signed_vote(
+                s.node_did.clone(),
+                s.consensus.current_round,
+                node_for_proposal.hash,
+                &*s.sign_fn,
+            )
+            .map_err(|e| format!("self-vote signature: {e}"))?;
+            let resolver = s.validator_public_keys.clone();
+            consensus::vote_verified(&mut s.consensus, vote, &resolver)
+                .map_err(|e| format!("self-vote: {e}"))?;
 
-        (proposal, sig)
-    };
+            Ok((proposal, sig))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Broadcast the proposal.
     let proposal_msg = WireMessage::ConsensusProposal(ConsensusProposalMsg {
@@ -1127,13 +1182,14 @@ pub async fn broadcast_governance_event(
     event_type: GovernanceEventType,
     payload: Vec<u8>,
 ) -> anyhow::Result<()> {
-    let (sender, timestamp, signature) = {
-        let s = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Reactor state mutex poisoned in broadcast_governance"))?;
-        let sig = (s.sign_fn)(&payload);
-        (s.node_did.clone(), Timestamp::ZERO, sig)
-    };
+    let payload_for_signature = payload.clone();
+    let (sender, timestamp, signature) =
+        with_reactor_state_blocking(Arc::clone(state), "broadcast_governance", move |s| {
+            let sig = (s.sign_fn)(&payload_for_signature);
+            Ok((s.node_did.clone(), Timestamp::ZERO, sig))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let msg = WireMessage::GovernanceEvent(GovernanceEventMsg {
         sender,
@@ -1282,6 +1338,31 @@ mod tests {
             assert!(
                 !production.contains(forbidden),
                 "async reactor path still directly locks the store: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn reactor_async_state_access_uses_spawn_blocking() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("async fn with_reactor_state_blocking"),
+            "async reactor state access must be isolated from Tokio workers"
+        );
+        for forbidden in [
+            "state.lock()",
+            "state\n        .lock()",
+            "state\n            .lock()",
+            "state\n                .lock()",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "async reactor path still directly locks reactor state: {forbidden}"
             );
         }
     }
