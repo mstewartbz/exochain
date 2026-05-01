@@ -4,6 +4,39 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+fn triage_level_label(level: &exo_escalation::triage::TriageLevel) -> &'static str {
+    match level {
+        exo_escalation::triage::TriageLevel::Automatic => "Automatic",
+        exo_escalation::triage::TriageLevel::Supervised => "Supervised",
+        exo_escalation::triage::TriageLevel::ManualRequired => "ManualRequired",
+        exo_escalation::triage::TriageLevel::EmergencyHuman => "EmergencyHuman",
+    }
+}
+
+fn triage_action_label(action: &exo_escalation::triage::TriageAction) -> &'static str {
+    match action {
+        exo_escalation::triage::TriageAction::Log => "Log",
+        exo_escalation::triage::TriageAction::Alert => "Alert",
+        exo_escalation::triage::TriageAction::Quarantine => "Quarantine",
+        exo_escalation::triage::TriageAction::Suspend => "Suspend",
+        exo_escalation::triage::TriageAction::Escalate => "Escalate",
+        exo_escalation::triage::TriageAction::Shutdown => "Shutdown",
+    }
+}
+
+fn completeness_details(result: &exo_escalation::completeness::CompletenessResult) -> String {
+    match result {
+        exo_escalation::completeness::CompletenessResult::Complete => "Complete".to_owned(),
+        exo_escalation::completeness::CompletenessResult::Incomplete { missing } => {
+            if missing.is_empty() {
+                "Incomplete".to_owned()
+            } else {
+                format!("Incomplete: {}", missing.join("; "))
+            }
+        }
+    }
+}
+
 /// Evaluate detection signals and produce threat assessment
 #[wasm_bindgen]
 pub fn wasm_evaluate_signals(signals_json: &str) -> Result<JsValue, JsValue> {
@@ -54,7 +87,7 @@ pub fn wasm_check_completeness(case_json: &str) -> Result<JsValue, JsValue> {
     let result = exo_escalation::completeness::check_completeness(&case);
     to_js_value(&serde_json::json!({
         "complete": matches!(result, exo_escalation::completeness::CompletenessResult::Complete),
-        "details": format!("{result:?}"),
+        "details": completeness_details(&result),
     }))
 }
 
@@ -73,8 +106,8 @@ pub fn wasm_triage(assessment_json: &str) -> Result<JsValue, JsValue> {
         .map(|p| p.name.as_str())
         .unwrap_or("");
     to_js_value(&serde_json::json!({
-        "level": format!("{:?}", decision.level),
-        "actions": decision.actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+        "level": triage_level_label(&decision.level),
+        "actions": decision.actions.iter().map(triage_action_label).collect::<Vec<_>>(),
         "timeout_ms": decision.timeout.physical_ms,
         "escalation_path": path,
     }))
@@ -115,5 +148,60 @@ pub fn wasm_validate_kanban_column(column_json: &str) -> Result<JsValue, JsValue
         Err(_) => {
             to_js_value(&serde_json::json!({"valid": false, "error": "invalid kanban column"}))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn triage_export_uses_stable_labels_not_debug_variants() {
+        let source = include_str!("escalation_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("format!(\"{:?}\", decision.level)"),
+            "WASM triage level must not depend on Rust Debug output"
+        );
+        assert!(
+            !production.contains("format!(\"{a:?}\")"),
+            "WASM triage actions must not depend on Rust Debug output"
+        );
+        assert!(
+            !production.contains("format!(\"{result:?}\")"),
+            "WASM completeness details must not depend on Rust Debug output"
+        );
+    }
+
+    #[test]
+    fn triage_labels_preserve_public_contract() {
+        assert_eq!(
+            super::triage_level_label(&exo_escalation::triage::TriageLevel::EmergencyHuman),
+            "EmergencyHuman"
+        );
+        assert_eq!(
+            super::triage_action_label(&exo_escalation::triage::TriageAction::Quarantine),
+            "Quarantine"
+        );
+    }
+
+    #[test]
+    fn completeness_details_preserve_stable_status_text() {
+        assert_eq!(
+            super::completeness_details(
+                &exo_escalation::completeness::CompletenessResult::Complete
+            ),
+            "Complete"
+        );
+        assert_eq!(
+            super::completeness_details(
+                &exo_escalation::completeness::CompletenessResult::Incomplete {
+                    missing: vec!["missing stage: intake".to_owned()]
+                }
+            ),
+            "Incomplete: missing stage: intake"
+        );
     }
 }

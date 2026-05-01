@@ -39,6 +39,15 @@ use uuid::Uuid;
 const MAX_CHALLENGE_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHALLENGE_API_CONCURRENT_REQUESTS: usize = 64;
 
+fn contest_status_label(status: &challenge::ContestStatus) -> &'static str {
+    match status {
+        challenge::ContestStatus::PauseEligible => "PauseEligible",
+        challenge::ContestStatus::UnderReview => "UnderReview",
+        challenge::ContestStatus::Resolved => "Resolved",
+        challenge::ContestStatus::Dismissed => "Dismissed",
+    }
+}
+
 /// In-memory challenge store.
 ///
 /// Challenges are stored in memory and backed by the append-only audit log
@@ -134,7 +143,7 @@ impl From<&ContestHold> for ChallengeResponse {
             id: hold.id.to_string(),
             action_id: hex::encode(hold.action_id),
             ground: hold.ground.to_string(),
-            status: format!("{:?}", hold.status),
+            status: contest_status_label(&hold.status).to_owned(),
             admitted_at_ms: hold.admitted_at.physical_ms,
             admitted_by: hold.admitted_by.to_string(),
             evidence_hash: hex::encode(hold.evidence_hash),
@@ -682,5 +691,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn challenge_response_uses_stable_status_labels() {
+        let source = include_str!("challenges.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("format!(\"{:?}\", hold.status)"),
+            "challenge API status output must not depend on Rust Debug output"
+        );
     }
 }

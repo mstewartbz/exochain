@@ -819,7 +819,7 @@ pub fn execute_adjudicate_action(params: &Value, _context: &NodeContext) -> Tool
                 .iter()
                 .map(|v| {
                     json!({
-                        "invariant": format!("{:?}", v.invariant),
+                        "invariant": v.invariant.id(),
                         "description": v.description,
                     })
                 })
@@ -1313,7 +1313,14 @@ mod tests {
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verdict"], "Denied");
-        assert!(!v["violations"].as_array().expect("violations").is_empty());
+        let violations = v["violations"].as_array().expect("violations");
+        assert!(!violations.is_empty());
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation["invariant"] == "no-self-grant"),
+            "denied self-grant verdict must expose a stable invariant ID"
+        );
     }
 
     #[test]
@@ -1364,5 +1371,26 @@ mod tests {
         assert!(!adjudicate_body.contains("signature: vec![1, 2, 3]"));
         assert!(!adjudicate_body.contains("grantor_public_key: None"));
         assert!(adjudicate_body.contains("parse_verified_adjudication_context"));
+    }
+
+    #[test]
+    fn adjudication_response_uses_stable_invariant_ids() {
+        let source = include_str!("authority.rs");
+        let adjudicate_body = source
+            .split("pub fn execute_adjudicate_action")
+            .nth(1)
+            .expect("adjudication function present")
+            .split("// ===========================================================================")
+            .next()
+            .expect("tests separator present");
+
+        assert!(
+            !adjudicate_body.contains("format!(\"{:?}\", v.invariant)"),
+            "MCP adjudication output must not depend on Rust Debug invariant names"
+        );
+        assert!(
+            adjudicate_body.contains("v.invariant.id()"),
+            "MCP adjudication output must expose explicit stable invariant identifiers"
+        );
     }
 }

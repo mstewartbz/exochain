@@ -47,6 +47,15 @@ fn parse_timestamp(
     })
 }
 
+fn heartbeat_alert_severity_label(
+    severity: exo_catapult::heartbeat::AlertSeverity,
+) -> &'static str {
+    match severity {
+        exo_catapult::heartbeat::AlertSeverity::Warning => "Warning",
+        exo_catapult::heartbeat::AlertSeverity::Critical => "Critical",
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct WasmNewcoInstantiationInput {
     name: String,
@@ -298,7 +307,7 @@ pub fn wasm_check_heartbeat_health(monitor_json: &str, now_ms: u64) -> Result<Js
             "agent_did": a.agent_did.to_string(),
             "last_seen_ms": a.last_seen.physical_ms,
             "elapsed_ms": a.elapsed_ms,
-            "severity": format!("{:?}", a.severity),
+            "severity": heartbeat_alert_severity_label(a.severity),
         })).collect::<Vec<_>>(),
         "agent_count": monitor.agent_count(),
     }))
@@ -459,5 +468,31 @@ mod tests {
                 "Catapult WASM exports must not fabricate placeholder metadata: {pattern}"
             );
         }
+    }
+
+    #[test]
+    fn heartbeat_health_export_uses_stable_severity_labels() {
+        let source = include_str!("catapult_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("format!(\"{:?}\", a.severity)"),
+            "WASM heartbeat alert severity must not depend on Rust Debug output"
+        );
+    }
+
+    #[test]
+    fn heartbeat_severity_labels_preserve_public_contract() {
+        assert_eq!(
+            super::heartbeat_alert_severity_label(exo_catapult::heartbeat::AlertSeverity::Warning),
+            "Warning"
+        );
+        assert_eq!(
+            super::heartbeat_alert_severity_label(exo_catapult::heartbeat::AlertSeverity::Critical),
+            "Critical"
+        );
     }
 }

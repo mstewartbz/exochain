@@ -36,6 +36,22 @@ pub enum ConstitutionalInvariant {
     ProvenanceVerifiable,
 }
 
+impl ConstitutionalInvariant {
+    #[must_use]
+    pub fn id(&self) -> &'static str {
+        match self {
+            ConstitutionalInvariant::SeparationOfPowers => "separation-of-powers",
+            ConstitutionalInvariant::ConsentRequired => "consent-required",
+            ConstitutionalInvariant::NoSelfGrant => "no-self-grant",
+            ConstitutionalInvariant::HumanOverride => "human-override",
+            ConstitutionalInvariant::KernelImmutability => "kernel-immutability",
+            ConstitutionalInvariant::AuthorityChainValid => "authority-chain-valid",
+            ConstitutionalInvariant::QuorumLegitimate => "quorum-legitimate",
+            ConstitutionalInvariant::ProvenanceVerifiable => "provenance-verifiable",
+        }
+    }
+}
+
 /// Complete set of invariants to enforce.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvariantSet {
@@ -898,6 +914,34 @@ mod tests {
     #[test]
     fn invariant_set_all_count() {
         assert_eq!(InvariantSet::all().invariants.len(), 8);
+    }
+
+    #[test]
+    fn invariant_ids_are_stable_and_non_debug() {
+        let ids: Vec<&str> = InvariantSet::all()
+            .invariants
+            .iter()
+            .map(ConstitutionalInvariant::id)
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec![
+                "separation-of-powers",
+                "consent-required",
+                "no-self-grant",
+                "human-override",
+                "kernel-immutability",
+                "authority-chain-valid",
+                "quorum-legitimate",
+                "provenance-verifiable",
+            ]
+        );
+        assert!(
+            ids.iter()
+                .all(|id| !id.contains("Of") && !id.contains("Required")),
+            "stable invariant IDs must not mirror Rust Debug variant names"
+        );
     }
 
     #[test]
