@@ -247,14 +247,12 @@ impl DagStore for PostgresStore {
     }
 
     async fn mark_committed(&mut self, hash: &Hash256, height: u64) -> Result<()> {
-        if !self.contains(hash).await? {
-            return Err(DagError::NodeNotFound(*hash));
-        }
-
         let height = Self::encode_height(height, "dag_committed.height")?;
 
-        sqlx::query(
-            "INSERT INTO dag_committed (hash, height) VALUES ($1, $2)
+        let result = sqlx::query(
+            "INSERT INTO dag_committed (hash, height)
+             SELECT $1, $2
+             WHERE EXISTS (SELECT 1 FROM dag_nodes WHERE hash = $1)
              ON CONFLICT (hash) DO UPDATE SET height = EXCLUDED.height",
         )
         .bind(hash.as_bytes().as_slice())
@@ -262,6 +260,10 @@ impl DagStore for PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(store_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DagError::NodeNotFound(*hash));
+        }
 
         Ok(())
     }
@@ -440,6 +442,34 @@ mod tests {
                 .unwrap();
 
         assert_eq!(encoded, i64::MAX);
+    }
+
+    #[test]
+    fn mark_committed_uses_atomic_insert_without_preflight_contains() {
+        let source = include_str!("pg_store.rs");
+        let method = source
+            .split("async fn mark_committed")
+            .nth(1)
+            .expect("mark_committed method must exist");
+        let method = method
+            .split("\n    }\n}")
+            .next()
+            .expect("mark_committed method body must be delimited by impl end");
+
+        assert!(
+            !method.contains("self.contains(hash).await"),
+            "Postgres mark_committed must not perform a separate contains preflight before INSERT"
+        );
+        assert!(
+            method.contains("INSERT INTO dag_committed")
+                && method.contains("SELECT $1, $2")
+                && method.contains("WHERE EXISTS"),
+            "Postgres mark_committed must insert only when the referenced DAG node exists"
+        );
+        assert!(
+            method.contains("rows_affected"),
+            "Postgres mark_committed must map an unmatched atomic INSERT to NodeNotFound"
+        );
     }
 
     #[tokio::test]
