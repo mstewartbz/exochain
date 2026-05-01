@@ -46,7 +46,13 @@ impl DeterministicDagClock {
 
     /// Tick the clock, returning a new monotonically increasing timestamp.
     pub fn tick(&mut self) -> Timestamp {
-        self.latest = Timestamp::new(self.latest.physical_ms, self.latest.logical + 1);
+        self.latest = match self.latest.logical.checked_add(1) {
+            Some(logical) => Timestamp::new(self.latest.physical_ms, logical),
+            None => match self.latest.physical_ms.checked_add(1) {
+                Some(physical_ms) => Timestamp::new(physical_ms, 0),
+                None => Timestamp::new(u64::MAX, u32::MAX),
+            },
+        };
         self.latest
     }
 
@@ -684,6 +690,15 @@ mod tests {
         let t3 = clock.tick();
         assert!(t1 < t2);
         assert!(t2 < t3);
+    }
+
+    #[test]
+    fn deterministic_dag_clock_carries_when_logical_counter_saturates() {
+        let previous = Timestamp::new(42, u32::MAX);
+        let mut clock = DeterministicDagClock { latest: previous };
+        let next = clock.tick();
+        assert!(previous < next);
+        assert_eq!(next, Timestamp::new(43, 0));
     }
 
     #[test]
