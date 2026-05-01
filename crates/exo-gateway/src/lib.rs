@@ -1,4 +1,7 @@
 //! EXOCHAIN constitutional trust fabric — HTTP gateway server with default-deny pattern.
+
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod auth;
 pub mod db;
 pub mod error;

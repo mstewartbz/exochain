@@ -8,6 +8,8 @@
 //! - Shamir secret split + reconstruct (success and failure paths)
 //! - Operator continuity through state transitions
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use exo_core::Did;
 use exo_identity::{
     pace::{PaceConfig, PaceState, deescalate, escalate, resolve_operator},

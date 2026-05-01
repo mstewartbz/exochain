@@ -7,6 +7,8 @@
 //! Satisfies: GOV-005 (authority chain), TNC-03 (audit continuity),
 //! LEG-001 (business records), EXOCHAIN-REM-004 (coverage ≥ 90%)
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use exo_core::{
     bcts::{BailmentTransaction, BctsState, Transaction},
     crypto::{

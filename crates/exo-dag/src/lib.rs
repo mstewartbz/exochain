@@ -9,6 +9,8 @@
 //! - Merkle Mountain Range for append-only accumulation (`mmr`)
 //! - Storage abstraction (`store`)
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod append;
 pub mod checkpoint;
 pub mod consensus;

@@ -10,6 +10,8 @@
 //!
 //! All other EXOCHAIN crates depend on `exo-core`.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod bcts;
 pub mod crypto;
 pub mod error;

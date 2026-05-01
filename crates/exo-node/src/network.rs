@@ -1,4 +1,4 @@
-//! P2P networking layer — libp2p swarm with gossipsub, Kademlia, mDNS, and identify.
+//! P2P networking layer — libp2p swarm with gossipsub, Kademlia, and identify.
 //!
 //! This module bridges the existing `exo-api::p2p` abstractions (PeerRegistry,
 //! ASN diversity, rate limiting) with a real libp2p transport layer.
@@ -13,11 +13,22 @@ use exo_core::{
     types::{Did, Hash256, Timestamp},
 };
 use futures::StreamExt;
-use libp2p::{
-    Multiaddr, PeerId, Swarm, SwarmBuilder, gossipsub, identify, kad, mdns, noise, ping,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux,
+use libp2p_core::{
+    Multiaddr, Transport,
+    muxing::StreamMuxerBox,
+    transport::{Boxed, timeout::TransportTimeout},
+    upgrade,
 };
+use libp2p_gossipsub as gossipsub;
+use libp2p_identify as identify;
+use libp2p_identity::{Keypair, PeerId};
+use libp2p_kad as kad;
+use libp2p_noise as noise;
+use libp2p_ping as ping;
+use libp2p_quic as quic;
+use libp2p_swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p_tcp as tcp;
+use libp2p_yamux as yamux;
 use tokio::sync::mpsc;
 
 use crate::wire::{self, WireMessage, topics};
@@ -38,13 +49,12 @@ struct GossipsubMessageIdPayload<'a> {
 
 /// Composed libp2p behaviour for exochain nodes.
 #[derive(NetworkBehaviour)]
+#[behaviour(prelude = "libp2p_swarm::derive_prelude")]
 pub struct ExochainBehaviour {
     /// Pub/sub for consensus and governance broadcasts.
     pub gossipsub: gossipsub::Behaviour,
     /// Distributed hash table for peer discovery.
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
-    /// Local network discovery.
-    pub mdns: mdns::tokio::Behaviour,
     /// Protocol metadata exchange.
     pub identify: identify::Behaviour,
     /// Keepalive pings.
@@ -98,77 +108,82 @@ pub struct NetworkConfig {
 
 /// Build the libp2p swarm with all behaviours composed.
 pub fn build_swarm() -> anyhow::Result<Swarm<ExochainBehaviour>> {
-    let swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )?
-        .with_quic()
-        .with_behaviour(|keypair| {
-            // Gossipsub configuration
-            let message_id_fn = canonical_gossipsub_message_id;
-
-            let gossipsub_config = gossipsub::ConfigBuilder::default()
-                .heartbeat_interval(Duration::from_secs(10))
-                .max_transmit_size(wire::MAX_WIRE_MESSAGE_BYTES)
-                .validation_mode(gossipsub::ValidationMode::Strict)
-                .message_id_fn(message_id_fn)
-                .build()
-                .map_err(|e| std::io::Error::other(format!("gossipsub config: {e}")))?;
-
-            let mut gossipsub_behaviour = gossipsub::Behaviour::new(
-                gossipsub::MessageAuthenticity::Signed(keypair.clone()),
-                gossipsub_config,
-            )
-            .map_err(|e| std::io::Error::other(format!("gossipsub: {e}")))?;
-
-            // Subscribe to exochain topics
-            let consensus_topic = gossipsub::IdentTopic::new(topics::CONSENSUS);
-            let governance_topic = gossipsub::IdentTopic::new(topics::GOVERNANCE);
-            let peers_topic = gossipsub::IdentTopic::new(topics::PEER_EXCHANGE);
-
-            gossipsub_behaviour
-                .subscribe(&consensus_topic)
-                .map_err(|e| std::io::Error::other(format!("subscribe consensus: {e}")))?;
-            gossipsub_behaviour
-                .subscribe(&governance_topic)
-                .map_err(|e| std::io::Error::other(format!("subscribe governance: {e}")))?;
-            gossipsub_behaviour
-                .subscribe(&peers_topic)
-                .map_err(|e| std::io::Error::other(format!("subscribe peers: {e}")))?;
-
-            // Kademlia DHT for peer discovery
-            let peer_id = keypair.public().to_peer_id();
-            let kademlia = kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
-
-            // mDNS for local network discovery
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
-                .map_err(|e| std::io::Error::other(format!("mdns: {e}")))?;
-
-            // Identify protocol for exchanging metadata without broadcasting node DID material.
-            let identify = identify::Behaviour::new(
-                identify::Config::new("/exochain/1.0.0".into(), keypair.public())
-                    .with_agent_version(IDENTIFY_AGENT_VERSION.into())
-                    .with_push_listen_addr_updates(true),
-            );
-
-            // Ping for keepalive
-            let ping = ping::Behaviour::default();
-
-            Ok(ExochainBehaviour {
-                gossipsub: gossipsub_behaviour,
-                kademlia,
-                mdns,
-                identify,
-                ping,
-            })
-        })?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
-        .build();
+    let keypair = Keypair::generate_ed25519();
+    let peer_id = keypair.public().to_peer_id();
+    let transport = build_transport(&keypair)?;
+    let behaviour = build_behaviour(&keypair, peer_id)?;
+    let swarm_config = libp2p_swarm::Config::with_tokio_executor()
+        .with_idle_connection_timeout(Duration::from_secs(120));
+    let swarm = Swarm::new(
+        TransportTimeout::new(transport, Duration::from_secs(10)).boxed(),
+        behaviour,
+        peer_id,
+        swarm_config,
+    );
 
     Ok(swarm)
+}
+
+fn build_transport(keypair: &Keypair) -> anyhow::Result<Boxed<(PeerId, StreamMuxerBox)>> {
+    let tcp_transport = tcp::tokio::Transport::new(tcp::Config::default())
+        .upgrade(upgrade::Version::V1Lazy)
+        .authenticate(noise::Config::new(keypair)?)
+        .multiplex(yamux::Config::default())
+        .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)));
+
+    let quic_transport = quic::tokio::Transport::new(quic::Config::new(keypair))
+        .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)));
+
+    Ok(tcp_transport
+        .or_transport(quic_transport)
+        .map(|transport, _| transport.into_inner())
+        .boxed())
+}
+
+fn build_behaviour(keypair: &Keypair, peer_id: PeerId) -> anyhow::Result<ExochainBehaviour> {
+    let message_id_fn = canonical_gossipsub_message_id;
+    let gossipsub_config = gossipsub::ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(10))
+        .max_transmit_size(wire::MAX_WIRE_MESSAGE_BYTES)
+        .validation_mode(gossipsub::ValidationMode::Strict)
+        .message_id_fn(message_id_fn)
+        .build()
+        .map_err(|e| std::io::Error::other(format!("gossipsub config: {e}")))?;
+
+    let mut gossipsub_behaviour = gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+        gossipsub_config,
+    )
+    .map_err(|e| std::io::Error::other(format!("gossipsub: {e}")))?;
+
+    let consensus_topic = gossipsub::IdentTopic::new(topics::CONSENSUS);
+    let governance_topic = gossipsub::IdentTopic::new(topics::GOVERNANCE);
+    let peers_topic = gossipsub::IdentTopic::new(topics::PEER_EXCHANGE);
+
+    gossipsub_behaviour
+        .subscribe(&consensus_topic)
+        .map_err(|e| std::io::Error::other(format!("subscribe consensus: {e}")))?;
+    gossipsub_behaviour
+        .subscribe(&governance_topic)
+        .map_err(|e| std::io::Error::other(format!("subscribe governance: {e}")))?;
+    gossipsub_behaviour
+        .subscribe(&peers_topic)
+        .map_err(|e| std::io::Error::other(format!("subscribe peers: {e}")))?;
+
+    let kademlia = kad::Behaviour::new(peer_id, kad::store::MemoryStore::new(peer_id));
+    let identify = identify::Behaviour::new(
+        identify::Config::new("/exochain/1.0.0".into(), keypair.public())
+            .with_agent_version(IDENTIFY_AGENT_VERSION.into())
+            .with_push_listen_addr_updates(true),
+    );
+    let ping = ping::Behaviour::default();
+
+    Ok(ExochainBehaviour {
+        gossipsub: gossipsub_behaviour,
+        kademlia,
+        identify,
+        ping,
+    })
 }
 
 fn canonical_gossipsub_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
@@ -238,7 +253,7 @@ pub fn dial_seeds(
 ///
 /// This task:
 /// 1. Processes libp2p swarm events (connections, messages, discovery)
-/// 2. Bridges mDNS discoveries to gossipsub
+/// 2. Bridges identified peer addresses to Kademlia
 /// 3. Forwards received gossipsub messages as `NetworkEvent`s
 /// 4. Handles `NetworkCommand`s from the application layer
 pub async fn run_network_loop(
@@ -343,36 +358,6 @@ pub async fn run_network_loop(
                         gossipsub::Event::Subscribed { peer_id, topic }
                     )) => {
                         tracing::debug!(%peer_id, %topic, "Peer subscribed to topic");
-                    }
-
-                    // -- mDNS events —- bridge discovered peers to gossipsub
-                    SwarmEvent::Behaviour(ExochainBehaviourEvent::Mdns(
-                        mdns::Event::Discovered(peers)
-                    )) => {
-                        for (peer_id, addr) in peers {
-                            tracing::info!(%peer_id, %addr, "mDNS discovered peer");
-                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                            register_peer(&mut peer_registry, &peer_id);
-                            if event_tx
-                                .send(NetworkEvent::PeerDiscovered { peer_id })
-                                .await
-                                .is_err()
-                            {
-                                tracing::warn!(
-                                    "Network event receiver dropped (mDNS PeerDiscovered)"
-                                );
-                            }
-                        }
-                    }
-
-                    SwarmEvent::Behaviour(ExochainBehaviourEvent::Mdns(
-                        mdns::Event::Expired(peers)
-                    )) => {
-                        for (peer_id, _addr) in peers {
-                            tracing::debug!(%peer_id, "mDNS peer expired");
-                            swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                        }
                     }
 
                     // -- Identify events --
@@ -688,7 +673,7 @@ mod tests {
         tokio::spawn(run_network_loop(swarm, cmd_rx, event_tx));
 
         // Query peer count before listening so concurrent network tests cannot
-        // connect through loopback/mDNS and make this assertion nondeterministic.
+        // connect through loopback and make this assertion nondeterministic.
         let count = handle.peer_count().await.unwrap();
         assert_eq!(count, 0);
     }
@@ -756,42 +741,5 @@ mod tests {
         // Verify peer count
         let count = handle1.peer_count().await.unwrap();
         assert_eq!(count, 1, "Should have exactly 1 peer");
-    }
-
-    /// mDNS discovery test — may fail in environments where multicast UDP
-    /// is not available on loopback. Run manually with:
-    /// `cargo test -p exo-node -- --ignored two_nodes_discover_via_mdns`
-    #[tokio::test]
-    #[ignore]
-    async fn two_nodes_discover_via_mdns() {
-        let mut swarm1 = build_swarm().unwrap();
-        let mut swarm2 = build_swarm().unwrap();
-
-        swarm1
-            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-            .unwrap();
-        swarm2
-            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-            .unwrap();
-
-        let (_cmd_tx1, cmd_rx1) = mpsc::channel(32);
-        let (event_tx1, mut event_rx1) = mpsc::channel(32);
-        let (_cmd_tx2, cmd_rx2) = mpsc::channel(32);
-        let (event_tx2, _event_rx2) = mpsc::channel(32);
-
-        tokio::spawn(run_network_loop(swarm1, cmd_rx1, event_tx1));
-        tokio::spawn(run_network_loop(swarm2, cmd_rx2, event_tx2));
-
-        let discovered = tokio::time::timeout(Duration::from_secs(15), async {
-            while let Some(event) = event_rx1.recv().await {
-                if matches!(event, NetworkEvent::PeerDiscovered { .. }) {
-                    return true;
-                }
-            }
-            false
-        })
-        .await;
-
-        assert!(discovered.unwrap_or(false), "mDNS discovery should work");
     }
 }

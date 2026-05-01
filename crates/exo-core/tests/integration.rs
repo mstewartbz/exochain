@@ -3,6 +3,8 @@
 //! These tests exercise cross-module interactions that unit tests in
 //! individual modules don't cover.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use exo_core::{
     bcts::{BailmentTransaction, BctsState, Transaction},
     crypto::KeyPair,

@@ -1164,13 +1164,16 @@ mod tests {
             Ok(idx) => assert_eq!(idx, 0),
             Err(err) => panic!("zero index must convert: {err}"),
         }
-        match idx_u32(u32::MAX as usize) {
+        let max_u32_index = usize::try_from(u32::MAX).expect("usize represents u32::MAX");
+        match idx_u32(max_u32_index) {
             Ok(idx) => assert_eq!(idx, u32::MAX),
             Err(err) => panic!("u32::MAX index must convert: {err}"),
         }
 
         if usize::BITS > u32::BITS {
-            let overflowing_index = u32::MAX as usize + 1;
+            let overflowing_index = max_u32_index
+                .checked_add(1)
+                .expect("usize represents u32::MAX + 1 when wider than u32");
             let err = match idx_u32(overflowing_index) {
                 Ok(idx) => panic!("out-of-range index must not truncate to {idx}"),
                 Err(err) => err,

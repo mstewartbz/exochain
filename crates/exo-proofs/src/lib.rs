@@ -36,6 +36,8 @@
 //! Without the feature, every call returns `Err(UnauditedImplementation)`.
 //! This is intentional.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod circuit;
 pub mod error;
 pub mod snark;

@@ -143,6 +143,7 @@
 //! public key before constructing the identity.
 
 #![deny(missing_docs)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 /// Fabric protocol version this SDK speaks (A-066).
 ///

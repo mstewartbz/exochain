@@ -8,6 +8,8 @@
 //! - **Open & verify** (`open`) — Recipient-side: decrypt + verify signature
 //! - **Death triggers** (`death_trigger`) — Afterlife message release state machine
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod compose;
 pub mod death_trigger;
 pub mod envelope;

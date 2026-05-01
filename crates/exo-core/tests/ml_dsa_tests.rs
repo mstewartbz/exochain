@@ -10,6 +10,8 @@
 //! - FIPS 204 KAT anchor: verifies the ml-dsa crate produces the expected
 //!   output for a known seed, confirming correct wiring to the spec.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use exo_core::{
     PqSecretKey, SecretKey, Signature,
     crypto::{

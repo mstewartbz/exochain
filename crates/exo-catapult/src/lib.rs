@@ -17,6 +17,8 @@
 //! - Integer cents for budget, basis points for thresholds.
 //! - HLC timestamps for all temporal ordering.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod agent;
 pub mod budget;
 pub mod error;

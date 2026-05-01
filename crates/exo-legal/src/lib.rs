@@ -2,6 +2,8 @@
 //! eDiscovery, privilege assertions, fiduciary duty tracking, records
 //! management, and conflict-of-interest disclosure.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod ai_transparency;
 pub mod bundle;
 pub mod cert_902_11;

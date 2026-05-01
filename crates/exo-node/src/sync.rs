@@ -729,7 +729,8 @@ mod tests {
             .unwrap();
             let hash = node.hash;
             store.put_sync(node).unwrap();
-            store.mark_committed_sync(&hash, (i + 1) as u64).unwrap();
+            let committed_height = u64::try_from(i + 1).expect("test height fits in u64");
+            store.mark_committed_sync(&hash, committed_height).unwrap();
             hashes.push(hash);
             parents = vec![hash];
         }

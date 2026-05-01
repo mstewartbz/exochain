@@ -4,6 +4,8 @@
 //! Covers 14 crates: core, identity, consent, authority, gatekeeper, governance,
 //! escalation, legal, dag, proofs, api, tenant, decision-forum, and messaging.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod authority_bindings;
 pub mod catapult_bindings;
 pub mod consent_bindings;

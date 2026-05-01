@@ -9,6 +9,7 @@
 //! no-op so that the native CI pipeline is not broken.
 
 #![cfg(target_arch = "wasm32")]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;

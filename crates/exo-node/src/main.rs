@@ -15,6 +15,10 @@
 //! ```
 
 #![allow(clippy::type_complexity)]
+#![cfg_attr(
+    test,
+    allow(clippy::expect_used, clippy::single_match, clippy::unwrap_used)
+)]
 
 mod api;
 mod auth;
@@ -51,6 +55,7 @@ use cli::{Cli, Command};
 use exo_core::types::{Did, PublicKey};
 #[cfg(feature = "unaudited-infrastructure-holons")]
 use holons::{HolonEvent, HolonManagerConfig};
+use libp2p_core::Multiaddr;
 use network::{NetworkConfig, NetworkEvent, NetworkHandle};
 use reactor::{ReactorConfig, ReactorEvent};
 use sync::{SyncConfig, SyncEngine, SyncEvent};
@@ -94,7 +99,7 @@ fn parse_validator_set(
     }
 }
 
-fn parse_seed_addrs(seed: &[String]) -> anyhow::Result<Vec<libp2p::Multiaddr>> {
+fn parse_seed_addrs(seed: &[String]) -> anyhow::Result<Vec<Multiaddr>> {
     if seed.is_empty() {
         anyhow::bail!("at least one seed address is required for join");
     }
@@ -102,7 +107,7 @@ fn parse_seed_addrs(seed: &[String]) -> anyhow::Result<Vec<libp2p::Multiaddr>> {
     let mut parsed = Vec::with_capacity(seed.len());
     for raw in seed {
         if raw.starts_with('/') {
-            let addr = raw.parse::<libp2p::Multiaddr>().map_err(|e| {
+            let addr = raw.parse::<Multiaddr>().map_err(|e| {
                 anyhow::anyhow!("invalid seed address '{raw}': malformed multiaddr: {e}")
             })?;
             parsed.push(addr);
@@ -123,7 +128,7 @@ fn parse_seed_addrs(seed: &[String]) -> anyhow::Result<Vec<libp2p::Multiaddr>> {
             Ok(IpAddr::V6(_)) => format!("/ip6/{host}/tcp/{port_number}"),
             Err(_) => format!("/dns4/{host}/tcp/{port_number}"),
         };
-        let addr = multiaddr.parse::<libp2p::Multiaddr>().map_err(|e| {
+        let addr = multiaddr.parse::<Multiaddr>().map_err(|e| {
             anyhow::anyhow!("invalid seed address '{raw}': could not build multiaddr: {e}")
         })?;
         parsed.push(addr);
@@ -318,7 +323,7 @@ async fn start_node(
     validator: bool,
     validators: &Option<Vec<String>>,
     validator_public_key_entries: &Option<Vec<String>>,
-    seed_addrs: Vec<libp2p::Multiaddr>,
+    seed_addrs: Vec<Multiaddr>,
     is_join: bool,
 ) -> anyhow::Result<()> {
     // Bootstrap node identity.

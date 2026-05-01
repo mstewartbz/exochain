@@ -5,6 +5,8 @@
 //! challenge mechanisms, deliberation processes, conflict detection,
 //! hash-chained audit trails, typed custody chains, and shared governance types.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod audit;
 pub mod challenge;
 pub mod clearance;

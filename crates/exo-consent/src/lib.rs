@@ -3,6 +3,8 @@
 //! Bailment-conditioned consent fabric. No action without consent.
 //! Default posture: DENY.
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod bailment;
 pub mod contract;
 pub mod error;

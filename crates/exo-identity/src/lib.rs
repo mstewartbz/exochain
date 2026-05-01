@@ -9,6 +9,8 @@
 //! - **PACE operator continuity** (`pace`) — Primary/Alternate/Contingency/Emergency escalation
 //! - **Key management** (`key_management`) — Key lifecycle tracking: create, rotate, revoke
 
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+
 pub mod did;
 pub mod did_verification;
 pub mod error;
