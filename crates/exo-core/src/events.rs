@@ -4,7 +4,7 @@
 //! be verified independently.  Events carry a CBOR-encoded payload and are
 //! attributed to a DID via an Ed25519 signature.
 
-use std::io::Write;
+use std::{fmt, io::Write};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +53,7 @@ pub enum EventType {
 // ---------------------------------------------------------------------------
 
 /// A signed, timestamped event in the EXOCHAIN system.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     /// Unique identifier for this event.
     pub id: CorrelationId,
@@ -67,6 +67,20 @@ pub struct Event {
     pub source_did: Did,
     /// Ed25519 signature over the canonical event content.
     pub signature: Signature,
+}
+
+impl fmt::Debug for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Event")
+            .field("id", &self.id)
+            .field("timestamp", &self.timestamp)
+            .field("event_type", &self.event_type)
+            .field("payload_len", &self.payload.len())
+            .field("source_did", &self.source_did)
+            .field("signature_algorithm", &self.signature.algorithm())
+            .field("signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Event {
@@ -608,7 +622,14 @@ mod tests {
         let kp = KeyPair::generate();
         let event = make_event(&kp);
         let dbg = format!("{event:?}");
+        let raw_payload_debug = format!("{:?}", event.payload);
+        let raw_signature_debug = format!("{:?}", event.signature);
+
         assert!(dbg.contains("Event"));
+        assert!(dbg.contains("payload_len"));
+        assert!(!dbg.contains(&raw_payload_debug));
+        assert!(!dbg.contains(&raw_signature_debug));
+        assert!(!dbg.contains("signature: Signature"));
     }
 
     // -----------------------------------------------------------------------
