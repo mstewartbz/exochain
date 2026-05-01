@@ -179,6 +179,14 @@ impl AppState {
             .ok_or_else(|| GatewayError::Internal("database unavailable".into()))
     }
 
+    /// Return the number of registered DIDs without blocking a Tokio worker
+    /// on the synchronous registry lock.
+    pub async fn registry_len(&self) -> Result<usize> {
+        registry_len(Arc::clone(&self.registry))
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))
+    }
+
     /// Load conflict declarations for an actor from the DB-backed standing
     /// conflict register.
     pub async fn load_conflict_declarations(
@@ -293,6 +301,17 @@ async fn registry_list_dids(
     tokio::task::spawn_blocking(move || {
         let reg = registry.read().unwrap_or_else(|e| e.into_inner());
         Ok(reg.list_dids().into_iter().map(|s| s.to_owned()).collect())
+    })
+    .await
+    .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
+}
+
+async fn registry_len(
+    registry: Arc<RwLock<LocalDidRegistry>>,
+) -> std::result::Result<usize, RegistryBlockingError> {
+    tokio::task::spawn_blocking(move || {
+        let reg = registry.read().unwrap_or_else(|e| e.into_inner());
+        Ok(reg.len())
     })
     .await
     .map_err(|e| RegistryBlockingError::Join(e.to_string()))?

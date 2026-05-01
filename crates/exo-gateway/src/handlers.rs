@@ -447,11 +447,17 @@ pub async fn vote_handler(
     // voter DIDs, so its cardinality is both the total and human-eligible
     // count supplied to the decision-forum precondition.
     let registry = QuorumRegistry::with_defaults();
-    let eligible_voters = state
-        .registry
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .len();
+    let eligible_voters = match state.registry_len().await {
+        Ok(len) => len,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to count eligible voters");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "registry unavailable"})),
+            )
+                .into_response();
+        }
+    };
     let eligible_human_voters = eligible_voters;
     match verify_quorum_precondition(
         &registry,
@@ -729,6 +735,27 @@ mod tests {
             assert!(
                 !production.contains(pattern),
                 "HTTP response bodies must not expose raw internal error details: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn vote_handler_does_not_lock_registry_on_async_worker() {
+        let source = include_str!("handlers.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+
+        for needle in [
+            "state.registry.read()",
+            "state.registry.write()",
+            ".registry\n        .read()",
+            ".registry\n        .write()",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "async vote handler must not acquire std::sync::RwLock on a Tokio worker: {needle}"
             );
         }
     }
