@@ -594,6 +594,50 @@ async fn execute_governance_action(
 // Holon manager — runs all infrastructure Holons as a background task
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HolonScalingSnapshot {
+    validator_count: usize,
+    is_validator: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HolonHealthSnapshot {
+    consensus_round: u64,
+    committed_height: u64,
+}
+
+async fn read_holon_scaling_snapshot(
+    reactor_state: SharedReactorState,
+) -> Result<HolonScalingSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = reactor_state
+            .lock()
+            .map_err(|_| "Reactor state mutex poisoned in scaling holon".to_owned())?;
+        Ok(HolonScalingSnapshot {
+            validator_count: state.consensus.config.validators.len(),
+            is_validator: state.is_validator,
+        })
+    })
+    .await
+    .map_err(|error| format!("Scaling Holon reactor snapshot task failed: {error}"))?
+}
+
+async fn read_holon_health_snapshot(
+    reactor_state: SharedReactorState,
+) -> Result<HolonHealthSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = reactor_state
+            .lock()
+            .map_err(|_| "Reactor state mutex poisoned in health holon".to_owned())?;
+        Ok(HolonHealthSnapshot {
+            consensus_round: state.consensus.current_round,
+            committed_height: usize_to_u64_saturating(state.consensus.committed.len()),
+        })
+    })
+    .await
+    .map_err(|error| format!("Health Holon reactor snapshot task failed: {error}"))?
+}
+
 /// Run the infrastructure Holon manager.
 ///
 /// Periodically executes each Holon under kernel adjudication and emits
@@ -689,13 +733,15 @@ pub async fn run_holon_manager(
                     continue;
                 }
 
-                let validator_count = match reactor_state.lock() {
-                    Ok(s) => s.consensus.config.validators.len(),
-                    Err(_) => {
-                        tracing::error!("Reactor state mutex poisoned in scaling holon");
-                        continue;
-                    }
-                };
+                let scaling_snapshot =
+                    match read_holon_scaling_snapshot(Arc::clone(&reactor_state)).await {
+                        Ok(snapshot) => snapshot,
+                        Err(e) => {
+                            tracing::error!(err = %e, "Scaling Holon reactor snapshot failed");
+                            continue;
+                        }
+                    };
+                let validator_count = scaling_snapshot.validator_count;
                 // Estimate node count from peer count + 1 (self).
                 let node_count = net_handle.peer_count().await.unwrap_or(0) + 1;
 
@@ -729,47 +775,41 @@ pub async fn run_holon_manager(
                         // Auto-action: if validator count is critical (< 3) and
                         // we're a validator, attempt to propose validator promotion
                         // for an eligible peer via a governance action.
-                        if validator_count < 3 && node_count > validator_count {
-                            let is_validator = match reactor_state.lock() {
-                                Ok(s) => s.is_validator,
-                                Err(_) => {
-                                    tracing::error!("Reactor state mutex poisoned in scaling auto-action");
-                                    continue;
-                                }
-                            };
-                            if is_validator {
-                                // Build a candidate DID — in production, this would
-                                // query PeerRegistry for an eligible non-validator.
-                                let candidate = Did::new(&format!(
-                                    "did:exo:auto-promoted-{node_count}"
-                                ))
-                                .unwrap_or_else(|_| static_did("did:exo:candidate"));
+                        if validator_count < 3
+                            && node_count > validator_count
+                            && scaling_snapshot.is_validator
+                        {
+                            // Build a candidate DID — in production, this would
+                            // query PeerRegistry for an eligible non-validator.
+                            let candidate = Did::new(&format!(
+                                "did:exo:auto-promoted-{node_count}"
+                            ))
+                            .unwrap_or_else(|_| static_did("did:exo:candidate"));
 
-                                let change = ValidatorChange::AddValidator {
-                                    did: candidate.clone(),
-                                };
-                                let mut buf = Vec::new();
-                                if ciborium::into_writer(&change, &mut buf).is_ok() {
-                                    if let Err(e) = execute_governance_action(
-                                        &reactor_state,
-                                        &shared_store,
-                                        &net_handle,
-                                        GovernanceEventType::ValidatorSetChange,
-                                        &buf,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            err = %e,
-                                            candidate = %candidate,
-                                            "Scaling Holon: auto-promotion failed"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            candidate = %candidate,
-                                            "Scaling Holon: auto-promoted candidate"
-                                        );
-                                    }
+                            let change = ValidatorChange::AddValidator {
+                                did: candidate.clone(),
+                            };
+                            let mut buf = Vec::new();
+                            if ciborium::into_writer(&change, &mut buf).is_ok() {
+                                if let Err(e) = execute_governance_action(
+                                    &reactor_state,
+                                    &shared_store,
+                                    &net_handle,
+                                    GovernanceEventType::ValidatorSetChange,
+                                    &buf,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        err = %e,
+                                        candidate = %candidate,
+                                        "Scaling Holon: auto-promotion failed"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        candidate = %candidate,
+                                        "Scaling Holon: auto-promoted candidate"
+                                    );
                                 }
                             }
                         }
@@ -806,16 +846,16 @@ pub async fn run_holon_manager(
                     continue;
                 }
 
-                let (consensus_round, committed_height) = match reactor_state.lock() {
-                    Ok(s) => (
-                        s.consensus.current_round,
-                        usize_to_u64_saturating(s.consensus.committed.len()),
-                    ),
-                    Err(_) => {
-                        tracing::error!("Reactor state mutex poisoned in health holon");
-                        continue;
-                    }
-                };
+                let health_snapshot =
+                    match read_holon_health_snapshot(Arc::clone(&reactor_state)).await {
+                        Ok(snapshot) => snapshot,
+                        Err(e) => {
+                            tracing::error!(err = %e, "Health Holon reactor snapshot failed");
+                            continue;
+                        }
+                    };
+                let consensus_round = health_snapshot.consensus_round;
+                let committed_height = health_snapshot.committed_height;
 
                 let status = analyze_health(consensus_round, committed_height);
 
@@ -947,6 +987,23 @@ mod tests {
                 "production Holon source must not suppress {lint}"
             );
         }
+    }
+
+    #[test]
+    fn holon_manager_async_path_does_not_lock_reactor_state_directly() {
+        let source = include_str!("holons.rs");
+        let manager_source = source
+            .split("pub async fn run_holon_manager")
+            .nth(1)
+            .expect("Holon manager source must be present")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("Holon manager source ends before tests");
+
+        assert!(
+            !manager_source.contains("reactor_state.lock()"),
+            "Holon async manager must isolate reactor std::sync::Mutex access from Tokio workers"
+        );
     }
 
     #[test]
