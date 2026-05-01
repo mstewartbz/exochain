@@ -10,7 +10,10 @@ use std::{collections::BTreeMap, fmt};
 
 pub use exo_core::types::Signature;
 use exo_core::types::{Did, Hash256, PublicKey};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError,
+    ser::Error as SerdeSerError,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 // ---------------------------------------------------------------------------
@@ -304,7 +307,8 @@ impl Serialize for OtpHmacSecret {
     where
         S: Serializer,
     {
-        self.expose_secret().serialize(serializer)
+        let _ = serializer;
+        Err(S::Error::custom("OTP HMAC secret must not be serialized"))
     }
 }
 
@@ -473,7 +477,7 @@ pub struct PeerAttestation {
 /// Created after successful OTP verification; carries the session token and
 /// the public key used to verify subsequent requests.
 /// Spec §8.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentitySession {
     /// Opaque session token issued after verified onboarding bootstrap.
     pub session_token: String,
@@ -487,6 +491,19 @@ pub struct IdentitySession {
     pub last_active_ms: u64,
     /// Whether the session has been revoked.
     pub revoked: bool,
+}
+
+impl fmt::Debug for IdentitySession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IdentitySession")
+            .field("session_token", &"<redacted>")
+            .field("subject_did", &self.subject_did)
+            .field("public_key", &self.public_key)
+            .field("created_ms", &self.created_ms)
+            .field("last_active_ms", &self.last_active_ms)
+            .field("revoked", &self.revoked)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +678,8 @@ impl std::str::FromStr for OtpState {
 mod tests {
     use std::str::FromStr;
 
+    use crate::zerodentity::OTP_MAX_ATTEMPTS;
+
     use super::*;
 
     // ---- AttestationType ----
@@ -730,6 +749,45 @@ mod tests {
             assert_eq!(t.to_string(), s);
         }
         assert!(OtpState::from_str("X").is_err());
+    }
+
+    #[test]
+    fn otp_challenge_serialization_fails_closed_before_secret_exposure() {
+        let challenge = OtpChallenge {
+            challenge_id: "challenge-secret-serialization".into(),
+            subject_did: Did::new("did:exo:otp-subject").unwrap(),
+            channel: OtpChannel::Email,
+            hmac_secret: OtpHmacSecret::new([9u8; 32]).unwrap(),
+            dispatched_ms: 1_000,
+            ttl_ms: OtpChannel::Email.ttl_ms(),
+            attempts: 0,
+            max_attempts: OTP_MAX_ATTEMPTS,
+            state: OtpState::Pending,
+        };
+
+        let error = serde_json::to_string(&challenge)
+            .expect_err("OTP challenge serialization must fail before exposing HMAC secret bytes");
+        assert!(error.to_string().contains("OTP HMAC secret"));
+    }
+
+    #[test]
+    fn identity_session_debug_redacts_session_token() {
+        let session = IdentitySession {
+            session_token: "session-token-must-not-appear".into(),
+            subject_did: Did::new("did:exo:session-subject").unwrap(),
+            public_key: vec![1, 2, 3],
+            created_ms: 1_000,
+            last_active_ms: 2_000,
+            revoked: false,
+        };
+
+        let debug = format!("{session:?}");
+        assert!(debug.contains("session_token"));
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains("session-token-must-not-appear"),
+            "IdentitySession Debug output must not expose bearer session tokens: {debug}"
+        );
     }
 
     // ---- FingerprintSignal Display ----
