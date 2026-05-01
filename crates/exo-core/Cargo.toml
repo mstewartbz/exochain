@@ -26,11 +26,13 @@ ml-dsa = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+getrandom = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 serde_json = { workspace = true }
 
 [package.metadata.cargo-machete]
-# Pre-existing deps used via re-exports for downstream crates.
-ignored = ["chrono", "indexmap"]
+# Pre-existing deps used via re-exports for downstream crates, plus wasm-only
+# feature activation for transitive RNG consumers.
+ignored = ["chrono", "getrandom", "indexmap"]

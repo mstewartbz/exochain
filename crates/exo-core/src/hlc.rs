@@ -162,10 +162,11 @@ fn system_time_millis() -> u64 {
 /// WASM wall-clock: route through js_sys::Date::now().
 #[cfg(target_arch = "wasm32")]
 fn system_time_millis() -> u64 {
-    #[allow(clippy::as_conversions)] // js_sys::Date::now() returns f64; safe truncation to u64
-    {
-        js_sys::Date::now() as u64
+    let millis = js_sys::Date::now();
+    if !millis.is_finite() || millis.is_sign_negative() {
+        return 0;
     }
+    millis.to_string().parse::<u64>().unwrap_or(0)
 }
 
 // ===========================================================================
@@ -384,5 +385,26 @@ mod tests {
     fn system_time_millis_returns_nonzero() {
         let ms = system_time_millis();
         assert!(ms > 0);
+    }
+
+    #[test]
+    fn wasm_clock_source_uses_checked_date_now_conversion() {
+        let source = include_str!("hlc.rs");
+        let wasm_clock_source = source
+            .split("/// WASM wall-clock: route through js_sys::Date::now().")
+            .nth(1)
+            .expect("WASM clock source exists")
+            .split("// ===========================================================================")
+            .next()
+            .expect("WASM clock source ends before tests");
+
+        assert!(
+            !wasm_clock_source.contains("clippy::as_conversions"),
+            "WASM HLC clock conversion must not suppress checked conversion lints"
+        );
+        assert!(
+            !wasm_clock_source.contains("Date::now() as u64"),
+            "WASM HLC clock conversion must not use lossy float-to-integer casts"
+        );
     }
 }
