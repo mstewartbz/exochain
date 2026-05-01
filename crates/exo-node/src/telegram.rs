@@ -256,6 +256,10 @@ pub struct Adjutant {
     last_update_id: i64,
 }
 
+fn next_update_offset(last_update_id: i64) -> Option<i64> {
+    last_update_id.checked_add(1)
+}
+
 impl Adjutant {
     /// Create a new adjutant.
     pub fn new(config: AdjutantConfig) -> Result<Self, String> {
@@ -328,10 +332,17 @@ impl Adjutant {
     /// Poll for new updates (long-poll, 10s timeout).
     pub async fn poll_updates(&mut self) -> Vec<Update> {
         let base_url = self.api_url("getUpdates");
+        let Some(offset) = next_update_offset(self.last_update_id) else {
+            tracing::warn!(
+                last_update_id = self.last_update_id,
+                "Telegram update offset cannot advance without overflow"
+            );
+            return Vec::new();
+        };
         let url = Zeroizing::new(format!(
             "{}?offset={}&timeout=10",
             base_url.as_str(),
-            self.last_update_id + 1
+            offset
         ));
 
         let resp = match self.client.get(url.as_str()).send().await {
@@ -1451,6 +1462,12 @@ mod tests {
         assert!(!poll_updates.contains(".bytes().await"));
         assert!(poll_updates.contains("read_telegram_update_body"));
         assert!(poll_updates.contains("parse_updates_response"));
+    }
+
+    #[test]
+    fn next_update_offset_rejects_i64_max_without_wrapping() {
+        assert_eq!(next_update_offset(41), Some(42));
+        assert_eq!(next_update_offset(i64::MAX), None);
     }
 
     #[tokio::test]
