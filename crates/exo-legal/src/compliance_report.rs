@@ -186,6 +186,7 @@ fn build_attestation(
     mode: &ComplianceReportMode,
 ) -> InvariantAttestation {
     let entry = mapping.entry_for(invariant);
+    let invariant_id = invariant.id();
     let (label, functions, subcategories, reg_refs) = match &entry {
         Some(e) => (
             e.exochain_label.clone(),
@@ -193,13 +194,13 @@ fn build_attestation(
             e.nist_subcategories.clone(),
             e.regulatory_refs.clone(),
         ),
-        None => (format!("{invariant:?}"), vec![], vec![], vec![]),
+        None => (invariant_id.to_owned(), vec![], vec![], vec![]),
     };
 
     let (status, evidence_summary) = derive_status_and_evidence(invariant, report, mode);
 
     InvariantAttestation {
-        invariant: format!("{invariant:?}"),
+        invariant: invariant_id.to_owned(),
         exochain_label: label,
         nist_functions: functions,
         nist_subcategories: subcategories,
@@ -284,8 +285,9 @@ fn derive_status_and_evidence(
         | ConstitutionalInvariant::QuorumLegitimate => (
             AttestationStatus::Compliant,
             format!(
-                "{invariant:?} enforced synchronously by InvariantEngine::enforce_all(). \
-                 No violations recorded this period."
+                "{} enforced synchronously by InvariantEngine::enforce_all(). \
+                 No violations recorded this period.",
+                invariant.id()
             ),
         ),
     }
@@ -467,6 +469,32 @@ mod tests {
     }
 
     #[test]
+    fn build_report_uses_stable_invariant_ids_not_debug_labels() {
+        let tenant = did("tenant");
+        let tr = empty_report(&tenant);
+        let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000)).expect("ok");
+
+        let expected_ids: Vec<&str> = InvariantSet::all()
+            .invariants
+            .iter()
+            .map(ConstitutionalInvariant::id)
+            .collect();
+        let actual_ids: Vec<&str> = report
+            .attestations
+            .iter()
+            .map(|attestation| attestation.invariant.as_str())
+            .collect();
+
+        assert_eq!(actual_ids, expected_ids);
+        assert!(report.attestations.iter().all(|attestation| {
+            attestation
+                .invariant
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch == '-')
+        }));
+    }
+
+    #[test]
     fn build_report_redacted_mode_label() {
         let tenant = did("tenant");
         let tr = empty_report(&tenant);
@@ -515,7 +543,7 @@ mod tests {
         let provenance = report
             .attestations
             .iter()
-            .find(|a| a.invariant == "ProvenanceVerifiable")
+            .find(|a| a.invariant == ConstitutionalInvariant::ProvenanceVerifiable.id())
             .expect("ProvenanceVerifiable must appear in attestations");
 
         assert_eq!(provenance.status, AttestationStatus::Compliant);
@@ -583,7 +611,7 @@ mod tests {
         let tr = empty_report(&tenant);
         let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000)).expect("ok");
         for att in &report.attestations {
-            if att.invariant == "ProvenanceVerifiable" {
+            if att.invariant == ConstitutionalInvariant::ProvenanceVerifiable.id() {
                 assert_eq!(att.status, AttestationStatus::NotApplicable);
             } else {
                 assert_eq!(
@@ -605,7 +633,7 @@ mod tests {
         let provenance = report
             .attestations
             .iter()
-            .find(|a| a.invariant == "ProvenanceVerifiable")
+            .find(|a| a.invariant == ConstitutionalInvariant::ProvenanceVerifiable.id())
             .expect("ProvenanceVerifiable must appear in attestations");
         assert_ne!(
             provenance.status,
@@ -622,7 +650,7 @@ mod tests {
         let authority = report
             .attestations
             .iter()
-            .find(|a| a.invariant == "AuthorityChainValid")
+            .find(|a| a.invariant == ConstitutionalInvariant::AuthorityChainValid.id())
             .expect("AuthorityChainValid must appear in attestations");
         assert!(
             !authority

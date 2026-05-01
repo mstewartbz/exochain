@@ -332,7 +332,7 @@ impl DelegationRegistry {
         let link = self
             .links
             .remove(link_id)
-            .ok_or_else(|| AuthorityError::NotFound(format!("{link_id:?}")))?;
+            .ok_or_else(|| AuthorityError::NotFound(link_id.to_string()))?;
 
         if let Some(ids) = self.by_delegator.get_mut(link.delegator_did.as_str()) {
             ids.retain(|id| id != link_id);
@@ -367,7 +367,7 @@ impl DelegationRegistry {
             .links
             .get(link_id)
             .cloned()
-            .ok_or_else(|| AuthorityError::NotFound(format!("{link_id:?}")))?;
+            .ok_or_else(|| AuthorityError::NotFound(link_id.to_string()))?;
 
         let revocation =
             AuthorityRevocation::for_link(link, revoker, revoked_at, revoker_public_key, sign_fn)?;
@@ -935,6 +935,55 @@ mod tests {
             reg.revoke_delegation(&fake),
             Err(AuthorityError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn missing_revocation_reports_stable_hash_label() {
+        let mut reg = DelegationRegistry::new();
+        let fake = Hash256::digest(b"missing-revocation");
+
+        let result = reg.revoke_delegation(&fake);
+
+        match result {
+            Err(AuthorityError::NotFound(id)) => {
+                assert_eq!(id, fake.to_string());
+                assert!(
+                    !id.contains("Hash256("),
+                    "missing-link labels must not depend on Debug output"
+                );
+            }
+            other => panic!("expected NotFound with stable hash label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_signed_revocation_reports_stable_hash_label() {
+        let mut reg = DelegationRegistry::new();
+        let fake = Hash256::digest(b"missing-signed-revocation");
+        let alice = did("alice");
+        let alice_key = KeyPair::generate();
+        let alice_public_key = public_key(&alice_key);
+
+        let result = reg.revoke_delegation_signed(
+            DelegationRevocationGrant {
+                link_id: &fake,
+                revoker: &alice,
+                revoked_at: &ts(6_000),
+                revoker_public_key: &alice_public_key,
+            },
+            |payload| alice_key.sign(payload),
+        );
+
+        match result {
+            Err(AuthorityError::NotFound(id)) => {
+                assert_eq!(id, fake.to_string());
+                assert!(
+                    !id.contains("Hash256("),
+                    "missing signed-revocation labels must not depend on Debug output"
+                );
+            }
+            other => panic!("expected NotFound with stable hash label, got {other:?}"),
+        }
     }
 
     #[test]

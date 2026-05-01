@@ -17,9 +17,22 @@ pub enum KanbanColumn {
     Archived,
 }
 
+impl KanbanColumn {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backlog => "Backlog",
+            Self::InProgress => "InProgress",
+            Self::Review => "Review",
+            Self::Resolved => "Resolved",
+            Self::Archived => "Archived",
+        }
+    }
+}
+
 impl std::fmt::Display for KanbanColumn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        f.write_str(self.as_str())
     }
 }
 
@@ -169,5 +182,20 @@ mod tests {
     fn column_display() {
         assert_eq!(KanbanColumn::Backlog.to_string(), "Backlog");
         assert_eq!(KanbanColumn::Archived.to_string(), "Archived");
+    }
+
+    #[test]
+    fn column_display_does_not_depend_on_debug_output() {
+        let production = include_str!("kanban.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("{self:?}"),
+            "production Display labels must be explicit, not derived from Debug"
+        );
+        assert_eq!(KanbanColumn::InProgress.to_string(), "InProgress");
+        assert_eq!(KanbanColumn::Resolved.to_string(), "Resolved");
     }
 }

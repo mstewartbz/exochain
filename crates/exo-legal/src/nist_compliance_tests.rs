@@ -452,7 +452,7 @@ mod nist_compliance {
         let pv_att = cr1
             .attestations
             .iter()
-            .find(|a| a.invariant == "ProvenanceVerifiable")
+            .find(|a| a.invariant == ConstitutionalInvariant::ProvenanceVerifiable.id())
             .expect("ProvenanceVerifiable must appear in attestations");
         assert_eq!(pv_att.status, AttestationStatus::Compliant);
     }
@@ -624,7 +624,7 @@ mod nist_compliance {
         let acv = cr
             .attestations
             .iter()
-            .find(|a| a.invariant == "AuthorityChainValid")
+            .find(|a| a.invariant == ConstitutionalInvariant::AuthorityChainValid.id())
             .expect("AuthorityChainValid must appear in attestations");
         assert_eq!(acv.status, AttestationStatus::Compliant);
         assert_eq!(cr.report_mode, "Redacted");
