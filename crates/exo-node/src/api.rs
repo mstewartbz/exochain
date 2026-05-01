@@ -6,8 +6,6 @@
 //! alongside the existing REST / GraphQL endpoints.
 
 #![allow(
-    clippy::expect_used,
-    clippy::as_conversions,
     clippy::needless_borrows_for_generic_args,
     // `needless_return` fires inside #[cfg(not(feature = "..."))]
     // refusal blocks where the function body continues in the
@@ -758,6 +756,22 @@ mod tests {
             !production.contains(".committed.len() as u64"),
             "status committed height must use checked conversion, not a truncating cast"
         );
+    }
+
+    #[test]
+    fn production_api_source_does_not_suppress_security_relevant_clippy_lints() {
+        let source = include_str!("api.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+
+        for lint in ["clippy::expect_used", "clippy::as_conversions"] {
+            assert!(
+                !production.contains(lint),
+                "production API source must not suppress {lint}"
+            );
+        }
     }
 
     #[test]
