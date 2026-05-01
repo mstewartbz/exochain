@@ -3,8 +3,6 @@
 //! Every failure mode in the system has a dedicated variant ensuring
 //! exhaustive error handling at compile time.
 
-use core::fmt;
-
 use thiserror::Error;
 
 /// Unified error type for all `exo-core` operations.
@@ -84,18 +82,30 @@ impl ExoError {
     }
 }
 
-impl<T: fmt::Debug> From<ciborium::ser::Error<T>> for ExoError {
+impl<T> From<ciborium::ser::Error<T>> for ExoError {
     fn from(e: ciborium::ser::Error<T>) -> Self {
+        let reason = match e {
+            ciborium::ser::Error::Io(_) => "CBOR serialization I/O error",
+            ciborium::ser::Error::Value(_) => "CBOR serialization value error",
+        };
         ExoError::SerializationError {
-            reason: format!("{e:?}"),
+            reason: reason.into(),
         }
     }
 }
 
-impl<T: fmt::Debug> From<ciborium::de::Error<T>> for ExoError {
+impl<T> From<ciborium::de::Error<T>> for ExoError {
     fn from(e: ciborium::de::Error<T>) -> Self {
+        let reason = match e {
+            ciborium::de::Error::Io(_) => "CBOR deserialization I/O error",
+            ciborium::de::Error::Syntax(_) => "CBOR deserialization syntax error",
+            ciborium::de::Error::Semantic(_, _) => "CBOR deserialization semantic error",
+            ciborium::de::Error::RecursionLimitExceeded => {
+                "CBOR deserialization recursion limit exceeded"
+            }
+        };
         ExoError::SerializationError {
-            reason: format!("{e:?}"),
+            reason: reason.into(),
         }
     }
 }
@@ -236,6 +246,30 @@ mod tests {
         assert_eq!(e1, e2);
         let dbg = format!("{e1:?}");
         assert!(dbg.contains("InvalidMerkleProof"));
+    }
+
+    #[test]
+    fn cbor_error_conversion_redacts_underlying_debug_details() {
+        struct LeakyIoError;
+
+        impl core::fmt::Debug for LeakyIoError {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("tenant-secret-token")
+            }
+        }
+
+        let serialized: ExoError = ciborium::ser::Error::Io(LeakyIoError).into();
+        let deserialized: ExoError = ciborium::de::Error::Io(LeakyIoError).into();
+
+        for error in [serialized, deserialized] {
+            let ExoError::SerializationError { reason } = error else {
+                panic!("expected serialization error");
+            };
+            assert!(
+                !reason.contains("tenant-secret-token"),
+                "underlying debug details must not be exposed in public error text: {reason}"
+            );
+        }
     }
 
     #[test]
