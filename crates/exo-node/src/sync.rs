@@ -17,8 +17,6 @@
 //! `DagSyncResponse`) and operates over the gossipsub + direct messaging
 //! layer.
 
-#![allow(clippy::as_conversions, clippy::manual_clamp, clippy::single_match)]
-
 use std::sync::{Arc, Mutex};
 
 use exo_core::types::Did;
@@ -34,6 +32,13 @@ use crate::{
 };
 
 const MAX_SNAPSHOT_CHUNK_SIZE: u32 = 500;
+
+fn static_did(value: &'static str) -> Did {
+    match Did::new(value) {
+        Ok(did) => did,
+        Err(error) => unreachable!("hardcoded sync DID {value} must be valid: {error}"),
+    }
+}
 
 fn normalized_snapshot_chunk_size(chunk_size: u32) -> u32 {
     chunk_size.clamp(1, MAX_SNAPSHOT_CHUNK_SIZE)
@@ -70,10 +75,9 @@ pub struct SyncConfig {
 }
 
 impl Default for SyncConfig {
-    #[allow(clippy::expect_used)] // Hardcoded constant — always valid.
     fn default() -> Self {
         Self {
-            node_did: Did::new("did:exo:default").expect("hardcoded DID is valid"),
+            node_did: static_did("did:exo:default"),
             chunk_size: 100,
             max_sync_nodes: 200,
         }
@@ -639,6 +643,26 @@ mod tests {
             !production.contains("self.store.lock()"),
             "async sync-engine paths must not directly block on the store mutex"
         );
+    }
+
+    #[test]
+    fn production_sync_source_does_not_suppress_security_relevant_clippy_lints() {
+        let source = include_str!("sync.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        for lint in [
+            "clippy::as_conversions",
+            "clippy::single_match",
+            "clippy::expect_used",
+        ] {
+            assert!(
+                !production.contains(lint),
+                "production sync source must not suppress {lint}"
+            );
+        }
     }
 
     #[test]
