@@ -29,6 +29,8 @@ use crate::server::AppState;
 // ── Violation 3 fix: CBOR canonical hashing ──────────────────────────────
 
 const MAX_CANONICAL_CBOR_HASH_BYTES: usize = 64 * 1024;
+const VOTE_SIGNATURE_HASH_DOMAIN: &str = "exo.gateway.vote_signature_hash.v1";
+const VOTE_SIGNATURE_HASH_SCHEMA_VERSION: u16 = 1;
 
 struct CanonicalHashWriter {
     hasher: blake3::Hasher,
@@ -87,6 +89,40 @@ fn canonical_cbor_hash(payload: &impl Serialize) -> Result<blake3::Hash, String>
 
 fn canonical_hash(payload: &Value) -> Result<blake3::Hash, String> {
     canonical_cbor_hash(payload)
+}
+
+#[derive(Serialize)]
+struct VoteSignatureHashInput<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    voter_did: &'a Did,
+    decision_id: &'a str,
+    choice: &'static str,
+}
+
+fn vote_choice_label(choice: VoteChoice) -> &'static str {
+    match choice {
+        VoteChoice::Approve => "Approve",
+        VoteChoice::Reject => "Reject",
+        VoteChoice::Abstain => "Abstain",
+    }
+}
+
+fn vote_signature_hash(
+    voter_did: &Did,
+    decision_id: &str,
+    choice: VoteChoice,
+) -> Result<Hash256, String> {
+    let payload = VoteSignatureHashInput {
+        domain: VOTE_SIGNATURE_HASH_DOMAIN,
+        schema_version: VOTE_SIGNATURE_HASH_SCHEMA_VERSION,
+        voter_did,
+        decision_id,
+        choice: vote_choice_label(choice),
+    };
+    Ok(Hash256::from_bytes(
+        *canonical_cbor_hash(&payload)?.as_bytes(),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,8 +530,17 @@ pub async fn vote_handler(
                 .into_response();
         }
     };
-    let sig_input = format!("{}:{}:{:?}", body.voter_did, body.decision_id, body.choice);
-    let signature_hash = Hash256::digest(sig_input.as_bytes());
+    let signature_hash = match vote_signature_hash(&voter_did, &body.decision_id, body.choice) {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to hash vote signature payload");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "vote signature hash failed"})),
+            )
+                .into_response();
+        }
+    };
     let vote = Vote {
         voter_did: voter_did.clone(),
         choice: body.choice,
@@ -709,6 +754,26 @@ mod tests {
         assert!(
             err.contains("canonical CBOR payload exceeds"),
             "error should identify the canonical CBOR hash budget: {err}"
+        );
+    }
+
+    #[test]
+    fn vote_signature_hash_is_domain_separated_cbor() {
+        let voter = Did::new("did:exo:alice").expect("valid DID");
+
+        let first = vote_signature_hash(&voter, "decision-1", VoteChoice::Approve)
+            .expect("vote signature hash");
+        let second = vote_signature_hash(&voter, "decision-1", VoteChoice::Approve)
+            .expect("vote signature hash");
+        let changed_choice = vote_signature_hash(&voter, "decision-1", VoteChoice::Reject)
+            .expect("vote signature hash");
+        let legacy_debug_concat = Hash256::digest(b"did:exo:alice:decision-1:Approve");
+
+        assert_eq!(first, second);
+        assert_ne!(first, changed_choice);
+        assert_ne!(
+            first, legacy_debug_concat,
+            "vote signature_hash must not match the legacy raw concat/Debug preimage"
         );
     }
 
@@ -1034,6 +1099,31 @@ mod tests {
         assert!(
             !vote_handler.contains(".execute(db)"),
             "vote handler must not update the mutable decision outside the transaction"
+        );
+    }
+
+    #[test]
+    fn vote_signature_hash_source_uses_canonical_cbor_not_debug_concat() {
+        let source = include_str!("handlers.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+        let vote_handler = production
+            .split("pub async fn vote_handler")
+            .nth(1)
+            .expect("vote handler source present")
+            .split("// ── Health handler")
+            .next()
+            .expect("vote handler source end");
+
+        assert!(
+            vote_handler.contains("vote_signature_hash("),
+            "vote handler must route signature_hash construction through canonical helper"
+        );
+        assert!(
+            !vote_handler.contains("format!(\"{}:{}:{:?}\""),
+            "vote signature_hash must not use raw concat or Debug formatting"
         );
     }
 
