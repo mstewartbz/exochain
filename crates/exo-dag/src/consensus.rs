@@ -53,7 +53,7 @@ impl ConsensusConfig {
         if n == 0 {
             return 0;
         }
-        (2 * n / 3) + 1
+        n - ((n - 1) / 3)
     }
 }
 
@@ -633,6 +633,19 @@ mod tests {
         let c0 = ConsensusConfig::new(BTreeSet::new(), 1000);
         assert_eq!(c0.quorum_size(), 0);
         assert_eq!(c0.fault_tolerance, 0);
+    }
+
+    #[test]
+    fn quorum_size_implementation_avoids_overflowing_multiplication() {
+        let source = include_str!("consensus.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("2 * n"),
+            "quorum_size must not compute 2 * n before division"
+        );
     }
 
     #[test]
