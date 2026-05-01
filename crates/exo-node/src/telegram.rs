@@ -93,6 +93,12 @@ fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn checked_committed_height(committed_len: usize) -> Result<u64, String> {
+    u64::try_from(committed_len).map_err(|_| {
+        format!("committed height {committed_len} exceeds maximum representable u64 height")
+    })
+}
+
 fn u64_to_usize_cap(value: u64, cap: usize) -> usize {
     match usize::try_from(value) {
         Ok(converted) => converted.min(cap),
@@ -426,7 +432,6 @@ type TelegramMessage = (String, TelegramKeyboard);
 ///
 /// Shows the 8-axis polar table, composite, symmetry and claim count.
 /// Spec §10.5.
-#[allow(clippy::expect_used, clippy::as_conversions)]
 pub fn build_zerodentity_score_message(
     zerodentity: &SharedZerodentityStore,
     did_str: &str,
@@ -521,7 +526,6 @@ const MAX_ZERODENTITY_ALERT_SCAN_DIDS: usize = 1_000;
 /// - OTP lockout in the last 24 h
 ///
 /// Spec §10.5.
-#[allow(clippy::as_conversions)]
 pub fn build_zerodentity_alerts_message(
     zerodentity: &SharedZerodentityStore,
 ) -> (String, Vec<Vec<(&'static str, &'static str)>>) {
@@ -656,18 +660,26 @@ pub fn build_zerodentity_alerts_message(
 }
 
 /// Build the /status response.
-#[allow(clippy::as_conversions)]
 pub fn build_status_message(
     reactor: &SharedReactorState,
     store: &Arc<Mutex<SqliteDagStore>>,
 ) -> (String, Vec<Vec<(&'static str, &'static str)>>) {
     let (round, height, validator_count, is_validator) = match reactor.lock() {
-        Ok(s) => (
-            s.consensus.current_round,
-            s.consensus.committed.len() as u64,
-            s.consensus.config.validators.len(),
-            s.is_validator,
-        ),
+        Ok(s) => match checked_committed_height(s.consensus.committed.len()) {
+            Ok(height) => (
+                s.consensus.current_round,
+                height,
+                s.consensus.config.validators.len(),
+                s.is_validator,
+            ),
+            Err(e) => {
+                let error_html = escape_telegram_html(&e);
+                return (
+                    format!("\u{274c} Reactor height unavailable: {error_html}"),
+                    vec![],
+                );
+            }
+        },
         Err(_) => {
             return (
                 "\u{274c} Reactor state temporarily unavailable".to_string(),
@@ -1258,6 +1270,33 @@ mod tests {
         assert!(text.contains("1000 alert(s) found."));
         assert!(!text.contains("did:exo:alert1000"));
         assert!(!keyboard.is_empty());
+    }
+
+    #[test]
+    fn telegram_production_uses_checked_committed_height_conversion() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let status_builder = production
+            .split("pub fn build_status_message")
+            .nth(1)
+            .and_then(|section| section.split("/// Build the /sentinels response.").next())
+            .unwrap();
+
+        assert!(
+            !production.contains("clippy::as_conversions"),
+            "Telegram production code must not suppress checked conversion linting"
+        );
+        assert!(
+            !status_builder.contains("committed.len() as u64"),
+            "Telegram status height must use a checked conversion from committed length"
+        );
+        assert!(
+            status_builder.contains("checked_committed_height"),
+            "Telegram status height must route conversion through the checked helper"
+        );
     }
 
     #[test]
