@@ -226,33 +226,29 @@ impl GoalTree {
     /// Returns 10000 if there are no goals (vacuously aligned).
     #[must_use]
     pub fn alignment_score(&self) -> u32 {
-        let active_goals: Vec<&Goal> = self
+        let mut active_goals = 0u64;
+        let mut completed = 0u64;
+        for goal in self
             .goals
             .values()
-            .filter(|g| g.status != GoalStatus::Cancelled)
-            .collect();
+            .filter(|goal| goal.status != GoalStatus::Cancelled)
+        {
+            active_goals = active_goals.saturating_add(1);
+            if goal.status == GoalStatus::Completed {
+                completed = completed.saturating_add(1);
+            }
+        }
 
-        if active_goals.is_empty() {
+        if active_goals == 0 {
             return 10_000;
         }
 
-        let completed = active_goals
-            .iter()
-            .filter(|g| g.status == GoalStatus::Completed)
-            .count();
-
-        // Integer division: (completed * 10000) / total
-        #[allow(clippy::as_conversions)]
-        let score = (completed as u64)
+        let score = completed
             .saturating_mul(10_000)
-            .checked_div(active_goals.len() as u64)
-            .unwrap_or(0);
-
-        // Safe: score is at most 10_000 which fits in u32
-        #[allow(clippy::as_conversions)]
-        {
-            score as u32
-        }
+            .checked_div(active_goals)
+            .unwrap_or(0)
+            .min(10_000_u64);
+        u32::try_from(score).unwrap_or(10_000)
     }
 
     /// Total number of goals.
@@ -568,6 +564,21 @@ mod tests {
             .unwrap();
         // Only one non-cancelled goal, and it's completed
         assert_eq!(tree.alignment_score(), 10_000);
+    }
+
+    #[test]
+    fn alignment_score_source_uses_checked_integer_conversions() {
+        let source = include_str!("goal.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(
+            !production.contains("clippy::as_conversions"),
+            "goal alignment scoring must not suppress checked conversion lints"
+        );
+        assert!(
+            !production.contains(" as u"),
+            "goal alignment scoring must use checked or widening conversions, not numeric as casts"
+        );
     }
 
     #[test]
