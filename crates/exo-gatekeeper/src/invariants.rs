@@ -170,6 +170,53 @@ fn check_invariant(
     }
 }
 
+fn government_branch_label(branch: GovernmentBranch) -> &'static str {
+    match branch {
+        GovernmentBranch::Legislative => "legislative",
+        GovernmentBranch::Executive => "executive",
+        GovernmentBranch::Judicial => "judicial",
+    }
+}
+
+fn role_evidence_label(roles: &[Role]) -> String {
+    roles
+        .iter()
+        .map(|role| format!("{}@{}", role.name, government_branch_label(role.branch)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn branch_evidence_label(branches: &std::collections::BTreeSet<GovernmentBranch>) -> String {
+    branches
+        .iter()
+        .map(|branch| government_branch_label(*branch))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn bailment_state_evidence(state: &BailmentState) -> Vec<String> {
+    match state {
+        BailmentState::None => vec!["bailment_state: none".into()],
+        BailmentState::Active {
+            bailor,
+            bailee,
+            scope,
+        } => vec![
+            "bailment_state: active".into(),
+            format!("bailor: {bailor}"),
+            format!("bailee: {bailee}"),
+            format!("scope: {scope}"),
+        ],
+        BailmentState::Suspended { reason } => {
+            vec![
+                "bailment_state: suspended".into(),
+                format!("reason: {reason}"),
+            ]
+        }
+        BailmentState::Terminated => vec!["bailment_state: terminated".into()],
+    }
+}
+
 fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
     let mut branches = std::collections::BTreeSet::new();
     for role in &ctx.actor_roles {
@@ -184,7 +231,7 @@ fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantVio
             description: "Actor holds roles in all three branches of government".into(),
             evidence: vec![
                 format!("actor: {}", ctx.actor),
-                format!("roles: {:?}", ctx.actor_roles),
+                format!("roles: {}", role_evidence_label(&ctx.actor_roles)),
             ],
         });
     }
@@ -194,7 +241,7 @@ fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantVio
             description: "Actor holds roles in multiple branches of government".into(),
             evidence: vec![
                 format!("actor: {}", ctx.actor),
-                format!("branches: {:?}", branches),
+                format!("branches: {}", branch_evidence_label(&branches)),
             ],
         });
     }
@@ -206,7 +253,7 @@ fn check_consent_required(ctx: &InvariantContext) -> Result<(), InvariantViolati
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::ConsentRequired,
             description: "No active bailment for this action".into(),
-            evidence: vec![format!("bailment_state: {:?}", ctx.bailment_state)],
+            evidence: bailment_state_evidence(&ctx.bailment_state),
         });
     }
     let has_active = ctx
@@ -478,6 +525,14 @@ mod tests {
         Did::new(s).expect("valid DID")
     }
 
+    fn production_source() -> &'static str {
+        let source = include_str!("invariants.rs");
+        let end = source
+            .find("// ===========================================================================")
+            .expect("tests section marker must exist");
+        &source[..end]
+    }
+
     fn passing_context() -> InvariantContext {
         let actor = did("did:exo:actor1");
         let (authority_link, _) = signed_link("did:exo:root", actor.as_str());
@@ -538,6 +593,40 @@ mod tests {
     }
 
     #[test]
+    fn separation_evidence_uses_stable_role_labels() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::SeparationOfPowers,
+        ]));
+        let mut ctx = passing_context();
+        ctx.actor_roles = vec![
+            Role {
+                name: "senator".into(),
+                branch: GovernmentBranch::Legislative,
+            },
+            Role {
+                name: "judge".into(),
+                branch: GovernmentBranch::Judicial,
+            },
+        ];
+
+        let err = enforce_all(&engine, &ctx).expect_err("multi-branch role must fail");
+        assert_eq!(
+            err[0].evidence,
+            vec![
+                "actor: did:exo:actor1".to_string(),
+                "branches: legislative,judicial".to_string(),
+            ]
+        );
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .all(|entry| !entry.contains("Role {") && !entry.contains("Legislative")),
+            "public evidence must not expose Rust Debug labels"
+        );
+    }
+
+    #[test]
     fn separation_fails_all_three() {
         let engine = InvariantEngine::new(InvariantSet::with(vec![
             ConstitutionalInvariant::SeparationOfPowers,
@@ -577,6 +666,33 @@ mod tests {
         ctx.bailment_state = BailmentState::None;
         let err = enforce_all(&engine, &ctx).unwrap_err();
         assert_eq!(err[0].invariant, ConstitutionalInvariant::ConsentRequired);
+    }
+
+    #[test]
+    fn consent_evidence_uses_stable_bailment_state_labels() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Suspended {
+            reason: "audit hold".into(),
+        };
+
+        let err = enforce_all(&engine, &ctx).expect_err("suspended bailment must fail");
+        assert_eq!(
+            err[0].evidence,
+            vec![
+                "bailment_state: suspended".to_string(),
+                "reason: audit hold".to_string(),
+            ]
+        );
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .all(|entry| !entry.contains("Suspended {")),
+            "public evidence must not expose Rust Debug labels"
+        );
     }
 
     #[test]
@@ -942,6 +1058,21 @@ mod tests {
                 .all(|id| !id.contains("Of") && !id.contains("Required")),
             "stable invariant IDs must not mirror Rust Debug variant names"
         );
+    }
+
+    #[test]
+    fn invariant_production_source_has_no_debug_evidence_formatting() {
+        let production = production_source();
+        for forbidden in [
+            "format!(\"roles: {:?}\"",
+            "format!(\"branches: {:?}\"",
+            "format!(\"bailment_state: {:?}\"",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "invariant evidence must use stable labels, not Debug formatting: {forbidden}"
+            );
+        }
     }
 
     #[test]
