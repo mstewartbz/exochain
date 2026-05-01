@@ -160,6 +160,18 @@ impl OtpChallenge {
         Ok((challenge, code_str))
     }
 
+    fn expires_at_ms(&self) -> u64 {
+        self.dispatched_ms.saturating_add(self.ttl_ms)
+    }
+
+    fn locked_until_ms(&self) -> u64 {
+        self.expires_at_ms().saturating_add(OTP_LOCKOUT_MS)
+    }
+
+    fn resend_available_at_ms(&self) -> u64 {
+        self.dispatched_ms.saturating_add(OTP_RESEND_COOLDOWN_MS)
+    }
+
     /// Verify a user-provided code.
     ///
     /// Mutates `attempts` and `state` in-place. Callers must persist the
@@ -174,7 +186,7 @@ impl OtpChallenge {
             OtpState::Verified => return OtpResult::AlreadyVerified,
             OtpState::LockedOut => {
                 // Compute when lock expires
-                let locked_until = self.dispatched_ms + self.ttl_ms + OTP_LOCKOUT_MS;
+                let locked_until = self.locked_until_ms();
                 return OtpResult::Locked {
                     locked_until_ms: locked_until,
                 };
@@ -184,14 +196,14 @@ impl OtpChallenge {
         }
 
         // Check TTL
-        if now_ms >= self.dispatched_ms + self.ttl_ms {
+        if now_ms >= self.expires_at_ms() {
             self.state = OtpState::Expired;
             return OtpResult::Expired;
         }
 
         // Check lockout
         if self.is_locked(now_ms) {
-            let locked_until = self.dispatched_ms + self.ttl_ms + OTP_LOCKOUT_MS;
+            let locked_until = self.locked_until_ms();
             return OtpResult::Locked {
                 locked_until_ms: locked_until,
             };
@@ -214,7 +226,7 @@ impl OtpChallenge {
             OtpResult::Success
         } else if self.attempts >= self.max_attempts {
             self.state = OtpState::LockedOut;
-            let locked_until = self.dispatched_ms + self.ttl_ms + OTP_LOCKOUT_MS;
+            let locked_until = self.locked_until_ms();
             OtpResult::Locked {
                 locked_until_ms: locked_until,
             }
@@ -230,7 +242,7 @@ impl OtpChallenge {
     pub fn is_locked(&self, now_ms: u64) -> bool {
         if self.state == OtpState::LockedOut {
             // Lockout persists until TTL + lockout window after dispatch
-            let locked_until = self.dispatched_ms + self.ttl_ms + OTP_LOCKOUT_MS;
+            let locked_until = self.locked_until_ms();
             return now_ms < locked_until;
         }
         false
@@ -239,7 +251,7 @@ impl OtpChallenge {
     /// Whether the challenge can be re-dispatched (resend cooldown has elapsed).
     #[must_use]
     pub fn can_resend(&self, now_ms: u64) -> bool {
-        self.state == OtpState::Pending && now_ms >= self.dispatched_ms + OTP_RESEND_COOLDOWN_MS
+        self.state == OtpState::Pending && now_ms >= self.resend_available_at_ms()
     }
 }
 
@@ -507,6 +519,50 @@ mod tests {
         let (challenge, _) =
             OtpChallenge::new(&did, OtpChannel::Email, 0, &mut rng).expect("new ok");
         assert!(!challenge.is_locked(1_000));
+    }
+
+    #[test]
+    fn verify_locked_out_saturates_deadline_when_timestamp_overflows() {
+        let did = test_did();
+        let (mut ch, _) =
+            OtpChallenge::from_secret(&did, OtpChannel::Email, 1, [9u8; 32]).expect("new ok");
+        ch.dispatched_ms = u64::MAX - 10;
+        ch.ttl_ms = 20;
+        ch.state = OtpState::LockedOut;
+
+        let result = ch.verify("000000", u64::MAX - 1);
+
+        assert_eq!(
+            result,
+            OtpResult::Locked {
+                locked_until_ms: u64::MAX
+            }
+        );
+    }
+
+    #[test]
+    fn verify_expiry_saturates_deadline_when_timestamp_overflows() {
+        let did = test_did();
+        let (mut ch, _) =
+            OtpChallenge::from_secret(&did, OtpChannel::Email, 1, [10u8; 32]).expect("new ok");
+        ch.dispatched_ms = u64::MAX - 5;
+        ch.ttl_ms = 10;
+
+        let result = ch.verify("000000", u64::MAX);
+
+        assert_eq!(result, OtpResult::Expired);
+        assert_eq!(ch.state, OtpState::Expired);
+    }
+
+    #[test]
+    fn can_resend_saturates_cooldown_when_timestamp_overflows() {
+        let did = test_did();
+        let (mut ch, _) =
+            OtpChallenge::from_secret(&did, OtpChannel::Email, 1, [11u8; 32]).expect("new ok");
+        ch.dispatched_ms = u64::MAX - 1;
+
+        assert!(!ch.can_resend(u64::MAX - 1));
+        assert!(ch.can_resend(u64::MAX));
     }
 
     // ---- can_resend ----
