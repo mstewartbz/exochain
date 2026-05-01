@@ -3,11 +3,7 @@
 //! This module bridges the existing `exo-api::p2p` abstractions (PeerRegistry,
 //! ASN diversity, rate limiting) with a real libp2p transport layer.
 
-#![allow(
-    clippy::expect_used,
-    clippy::large_enum_variant,
-    clippy::collapsible_match
-)]
+#![allow(clippy::large_enum_variant, clippy::collapsible_match)]
 
 use std::time::Duration;
 
@@ -298,7 +294,17 @@ pub async fn run_network_loop(
                             ..
                         }
                     )) => {
-                        let exo_peer = libp2p_peer_to_exo(&propagation_source);
+                        let exo_peer = match libp2p_peer_to_exo(&propagation_source) {
+                            Ok(exo_peer) => exo_peer,
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer = %propagation_source,
+                                    err = %e,
+                                    "Failed to derive exochain peer ID; dropping message"
+                                );
+                                continue;
+                            }
+                        };
 
                         // Rate limiting using existing exo-api RateLimiter
                         if rate_limiter.check_and_increment(&exo_peer).is_err() {
@@ -449,22 +455,39 @@ pub async fn run_network_loop(
 // ---------------------------------------------------------------------------
 
 /// Convert a libp2p PeerId to an exochain PeerId (DID-based).
-fn libp2p_peer_to_exo(peer_id: &PeerId) -> ExoPeerId {
+fn libp2p_peer_to_exo(peer_id: &PeerId) -> Result<ExoPeerId, String> {
     let did_str = format!("did:exo:peer-{}", peer_id);
-    ExoPeerId(Did::new(&did_str).unwrap_or_else(|_| {
-        // Fallback: use the hash of the peer ID
-        let hash = blake3::hash(peer_id.to_bytes().as_slice());
-        Did::new(&format!(
-            "did:exo:peer-{}",
-            hex::encode(&hash.as_bytes()[..16])
-        ))
-        .expect("fallback DID must be valid")
-    }))
+    match Did::new(&did_str) {
+        Ok(did) => Ok(ExoPeerId(did)),
+        Err(primary_error) => {
+            // Fallback: use the hash of the peer ID.
+            let hash = blake3::hash(peer_id.to_bytes().as_slice());
+            let fallback_did = format!("did:exo:peer-{}", hex::encode(&hash.as_bytes()[..16]));
+            Did::new(&fallback_did)
+                .map(ExoPeerId)
+                .map_err(|fallback_error| {
+                    format!(
+                        "primary peer DID rejected ({primary_error}); fallback peer DID \
+                     {fallback_did} rejected ({fallback_error})"
+                    )
+                })
+        }
+    }
 }
 
 /// Register a libp2p peer in the exochain PeerRegistry.
 fn register_peer(registry: &mut PeerRegistry, peer_id: &PeerId) {
-    let exo_peer = libp2p_peer_to_exo(peer_id);
+    let exo_peer = match libp2p_peer_to_exo(peer_id) {
+        Ok(exo_peer) => exo_peer,
+        Err(e) => {
+            tracing::warn!(
+                peer = %peer_id,
+                err = %e,
+                "Failed to derive exochain peer ID; skipping peer registry update"
+            );
+            return;
+        }
+    };
     if registry.get(&exo_peer).is_none() {
         registry.register(PeerInfo {
             id: exo_peer,
@@ -531,15 +554,15 @@ impl NetworkHandle {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn libp2p_peer_to_exo_deterministic() {
         let peer_id = PeerId::random();
-        let exo1 = libp2p_peer_to_exo(&peer_id);
-        let exo2 = libp2p_peer_to_exo(&peer_id);
+        let exo1 = libp2p_peer_to_exo(&peer_id).unwrap();
+        let exo2 = libp2p_peer_to_exo(&peer_id).unwrap();
         assert_eq!(exo1, exo2);
     }
 
@@ -597,6 +620,24 @@ mod tests {
         assert!(
             production.contains(".max_transmit_size(wire::MAX_WIRE_MESSAGE_BYTES)"),
             "gossipsub must reject oversized wire frames before normal message handling"
+        );
+    }
+
+    #[test]
+    fn production_network_code_does_not_suppress_expect_lint() {
+        let source = include_str!("network.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source section exists");
+
+        assert!(
+            !production.contains("clippy::expect_used"),
+            "expect_used must not be allowed across network-facing production code"
+        );
+        assert!(
+            !production.contains(".expect("),
+            "network-facing production code must not rely on panic-prone expect calls"
         );
     }
 
