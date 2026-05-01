@@ -22,18 +22,22 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     routing::{get, post},
 };
 use exo_core::types::Timestamp;
 use exo_escalation::challenge::{self, ContestHold, SignedChallengeAdmission};
 use serde::{Deserialize, Serialize};
+use tower::limit::ConcurrencyLimitLayer;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+const MAX_CHALLENGE_API_BODY_BYTES: usize = 64 * 1024;
+const MAX_CHALLENGE_API_CONCURRENT_REQUESTS: usize = 64;
 
 /// In-memory challenge store.
 ///
@@ -293,6 +297,10 @@ pub fn challenge_router(store: SharedChallengeStore) -> Router {
         .route("/api/v1/challenges/:id/resolve", post(handle_resolve))
         .route("/api/v1/challenges/:id/dismiss", post(handle_dismiss))
         .with_state(store)
+        .layer(DefaultBodyLimit::max(MAX_CHALLENGE_API_BODY_BYTES))
+        .layer(ConcurrencyLimitLayer::new(
+            MAX_CHALLENGE_API_CONCURRENT_REQUESTS,
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +368,32 @@ mod tests {
         assert!(
             !handlers.contains(".lock()"),
             "challenge async handlers must not lock std::sync::Mutex values directly"
+        );
+    }
+
+    #[test]
+    fn challenge_router_applies_local_admission_layers() {
+        let source = include_str!("challenges.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let router = production
+            .split("pub fn challenge_router")
+            .nth(1)
+            .unwrap()
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        assert!(
+            router.contains("DefaultBodyLimit::max(MAX_CHALLENGE_API_BODY_BYTES)"),
+            "challenge routes must bound JSON request bodies locally instead of relying on outer gateway composition"
+        );
+        assert!(
+            router.contains("ConcurrencyLimitLayer::new(")
+                && router.contains("MAX_CHALLENGE_API_CONCURRENT_REQUESTS"),
+            "challenge routes must apply a local concurrency limit before admitting signed disputes"
         );
     }
 
@@ -573,6 +607,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn file_challenge_rejects_oversized_body_locally() {
+        let store = test_store();
+        let app = challenge_router(store);
+        let body = format!(
+            "{{\"oversized\":\"{}\"}}",
+            "a".repeat(MAX_CHALLENGE_API_BODY_BYTES + 1)
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/challenges")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
