@@ -39,6 +39,9 @@ pub enum DagError {
     #[error("invalid round: expected {expected}, got {got}")]
     InvalidRound { expected: u64, got: u64 },
 
+    #[error("consensus round overflow: cannot advance beyond round {current_round}")]
+    RoundOverflow { current_round: u64 },
+
     #[error("insufficient quorum in round {round}: required {required}, got {actual}")]
     InsufficientQuorum {
         required: usize,

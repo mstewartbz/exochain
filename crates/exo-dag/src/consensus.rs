@@ -232,8 +232,14 @@ impl ConsensusState {
     }
 
     /// Advance to the next round.
-    pub fn advance_round(&mut self) {
-        self.current_round += 1;
+    pub fn advance_round(&mut self) -> Result<()> {
+        self.current_round = self
+            .current_round
+            .checked_add(1)
+            .ok_or(DagError::RoundOverflow {
+                current_round: self.current_round,
+            })?;
+        Ok(())
     }
 }
 
@@ -782,11 +788,29 @@ mod tests {
         let mut state = ConsensusState::new(config);
         assert_eq!(state.current_round, 0);
 
-        state.advance_round();
+        state.advance_round().expect("round advances");
         assert_eq!(state.current_round, 1);
 
-        state.advance_round();
+        state.advance_round().expect("round advances");
         assert_eq!(state.current_round, 2);
+    }
+
+    #[test]
+    fn advance_round_rejects_u64_max_without_wrapping() {
+        let validators = make_validators(4);
+        let config = ConsensusConfig::new(validators, 1000);
+        let mut state = ConsensusState::new(config);
+        state.current_round = u64::MAX;
+
+        let err = state.advance_round().unwrap_err();
+
+        assert!(matches!(
+            err,
+            DagError::RoundOverflow {
+                current_round: u64::MAX
+            }
+        ));
+        assert_eq!(state.current_round, u64::MAX);
     }
 
     #[test]
@@ -798,7 +822,7 @@ mod tests {
 
         let v: Vec<Did> = validators.iter().cloned().collect();
 
-        state.advance_round();
+        state.advance_round().expect("round advances");
         let _proposal = propose(&mut state, &node, &v[0]).unwrap();
 
         let vt = make_vote(&v[0], 1, &node.hash);
@@ -971,7 +995,7 @@ mod tests {
         assert!(check_commit(&state, &node_x.hash).is_none());
 
         // Advance to round 1
-        state.advance_round();
+        state.advance_round().expect("round advances");
 
         // Round 1: quorum on a new proposal
         propose(&mut state, &node_r1, &v[0]).unwrap();
@@ -1160,7 +1184,7 @@ mod tests {
         let mut vs = BTreeSet::new();
         vs.insert(a.clone());
         let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
-        state.advance_round(); // now at round 1
+        state.advance_round().expect("round advances"); // now at round 1
         let (n, _, _) = make_node("x");
         // Signed for round 0 but state is at round 1.
         let v = signed_vote(&a, 0, n.hash, &sk_a);
@@ -1696,7 +1720,7 @@ mod tests {
         let mut vs = BTreeSet::new();
         vs.insert(a.clone());
         let mut state = ConsensusState::new(ConsensusConfig::new(vs, 1000));
-        state.advance_round();
+        state.advance_round().expect("round advances");
         let (n, _, _) = make_node("x");
         let cert = CommitCertificate {
             node_hash: n.hash,

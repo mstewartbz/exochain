@@ -346,7 +346,7 @@ fn bench_consensus_rounds(c: &mut Criterion) {
                         if let Some(cert) = check_commit(&state, &node.hash) {
                             commit_verified(&mut state, cert, &resolver).expect("commit");
                         }
-                        state.advance_round();
+                        state.advance_round().expect("round advances");
                     }
                     black_box(state.committed.len())
                 });
