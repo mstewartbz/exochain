@@ -15,6 +15,17 @@ pub enum StorageTier {
     Archive,
 }
 
+impl StorageTier {
+    fn as_str(self) -> &'static str {
+        match self {
+            StorageTier::Hot => "hot",
+            StorageTier::Warm => "warm",
+            StorageTier::Cold => "cold",
+            StorageTier::Archive => "archive",
+        }
+    }
+}
+
 /// A storage record associating an item with its current tier.
 #[derive(Debug, Clone)]
 pub struct StorageRecord {
@@ -77,13 +88,13 @@ impl StorageManager {
                 })?;
         if record.tier != from {
             return Err(TenantError::MigrationError {
-                reason: format!("expected {from:?}, found {:?}", record.tier),
+                reason: format!("expected {}, found {}", from.as_str(), record.tier.as_str()),
             });
         }
         // Can only move to colder or same tier (Hot -> Warm -> Cold -> Archive)
         if to < from {
             return Err(TenantError::MigrationError {
-                reason: format!("cannot promote from {from:?} to {to:?}"),
+                reason: format!("cannot promote from {} to {}", from.as_str(), to.as_str()),
             });
         }
         record.tier = to;
@@ -131,6 +142,14 @@ impl StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn production_source() -> &'static str {
+        let source = include_str!("cold_storage.rs");
+        let end = source
+            .find("#[cfg(test)]")
+            .expect("test module marker exists");
+        &source[..end]
+    }
 
     fn uuid(byte: u8) -> Uuid {
         Uuid::from_bytes([byte; 16])
@@ -216,6 +235,45 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn migration_errors_use_stable_tier_labels() {
+        let mut m = StorageManager::new();
+        let tenant_id = uuid(1);
+        let id = uuid(10);
+        m.register(tenant_id, id, StorageTier::Warm).unwrap();
+
+        let wrong_current = m
+            .migrate(&tenant_id, &id, StorageTier::Hot, StorageTier::Cold)
+            .expect_err("wrong current tier must fail");
+        assert_eq!(
+            wrong_current.to_string(),
+            "migration error: expected hot, found warm"
+        );
+
+        let promotion = m
+            .migrate(&tenant_id, &id, StorageTier::Warm, StorageTier::Hot)
+            .expect_err("promotion must fail");
+        assert_eq!(
+            promotion.to_string(),
+            "migration error: cannot promote from warm to hot"
+        );
+    }
+
+    #[test]
+    fn migration_errors_do_not_depend_on_debug_formatting() {
+        let production = production_source();
+        for forbidden in [
+            "format!(\"expected {from:?}, found {:?}\"",
+            "format!(\"cannot promote from {from:?} to {to:?}\"",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "storage tier migration errors must use explicit stable labels: {forbidden}"
+            );
+        }
+    }
+
     #[test]
     fn not_found() {
         let mut m = StorageManager::new();

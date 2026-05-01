@@ -15,6 +15,16 @@ pub enum TenantStatus {
     Archived,
 }
 
+impl TenantStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TenantStatus::Active => "active",
+            TenantStatus::Suspended => "suspended",
+            TenantStatus::Archived => "archived",
+        }
+    }
+}
+
 /// Resource limits and quota configuration for a tenant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantConfig {
@@ -136,7 +146,7 @@ impl TenantRegistry {
             | (TenantStatus::Suspended, TenantStatus::Archived) => {}
             _ => {
                 return Err(TenantError::InvalidStateTransition {
-                    reason: format!("{:?} -> {status:?}", t.status),
+                    reason: format!("{} -> {}", t.status.as_str(), status.as_str()),
                 });
             }
         }
@@ -171,6 +181,14 @@ impl TenantRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn production_source() -> &'static str {
+        let source = include_str!("tenant.rs");
+        let end = source
+            .find("#[cfg(test)]")
+            .expect("test module marker exists");
+        &source[..end]
+    }
 
     fn uuid(byte: u8) -> Uuid {
         Uuid::from_bytes([byte; 16])
@@ -290,6 +308,33 @@ mod tests {
         r.update_status(&id, TenantStatus::Archived).unwrap();
         assert!(r.update_status(&id, TenantStatus::Active).is_err());
     }
+
+    #[test]
+    fn invalid_transition_uses_stable_status_labels() {
+        let mut r = TenantRegistry::new();
+        let id = r
+            .create(registration(uuid(1), "t", ts(1_700_000_000_000)))
+            .unwrap();
+        r.update_status(&id, TenantStatus::Archived).unwrap();
+
+        let err = r
+            .update_status(&id, TenantStatus::Active)
+            .expect_err("archived tenant cannot reactivate");
+        assert_eq!(
+            err.to_string(),
+            "invalid state transition: archived -> active"
+        );
+    }
+
+    #[test]
+    fn tenant_status_errors_do_not_depend_on_debug_formatting() {
+        let production = production_source();
+        assert!(
+            !production.contains("format!(\"{:?} -> {status:?}\""),
+            "tenant status transition errors must use explicit stable labels"
+        );
+    }
+
     #[test]
     fn update_not_found() {
         let mut r = TenantRegistry::new();
