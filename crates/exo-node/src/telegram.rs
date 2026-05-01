@@ -393,12 +393,15 @@ impl Adjutant {
     /// Acknowledge a callback query (removes the "loading" indicator).
     pub async fn answer_callback(&self, callback_id: &str) {
         let url = self.api_url("answerCallbackQuery");
-        let _ = self
+        if let Err(e) = self
             .client
             .post(url.as_str())
             .json(&serde_json::json!({ "callback_query_id": callback_id }))
             .send()
-            .await;
+            .await
+        {
+            tracing::debug!(err = %e, "Telegram callback acknowledgement failed");
+        }
     }
 
     /// Send a sentinel alert with action buttons.
@@ -908,8 +911,8 @@ pub async fn run_adjutant(
     zerodentity: SharedZerodentityStore,
 ) {
     // Announce startup.
-    let _ = adjutant
-        .send_message(
+    adjutant
+        .send_or_log(
             "\u{1f916} <b>EXOCHAIN Adjutant Online</b>\n\nType /status for node overview.",
             Some(vec![vec![
                 ("\u{1f4ca} Status", "cmd:status"),
@@ -1029,8 +1032,8 @@ async fn handle_command(
         "/0dentity" => {
             let did_str = parts.next().unwrap_or("");
             if did_str.is_empty() {
-                let _ = adjutant
-                    .send_message(
+                adjutant
+                    .send_or_log(
                         "Usage: /0dentity &lt;did&gt;\nExample: /0dentity did:exo:alice",
                         None,
                     )
@@ -1049,8 +1052,8 @@ async fn handle_command(
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "/help" => {
-            let _ = adjutant
-                .send_message(
+            adjutant
+                .send_or_log(
                     "\u{1f4d6} <b>Commands</b>\n\
                      /status — Node overview\n\
                      /sentinels — Health checks\n\
@@ -1078,7 +1081,7 @@ async fn handle_callback(
     if let Some(did_str) = data.strip_prefix("0d_score:") {
         let (msg, kb) =
             zerodentity_score_message_blocking(Arc::clone(zerodentity), did_str.to_string()).await;
-        let _ = adjutant.send_message(&msg, Some(kb)).await;
+        adjutant.send_or_log(&msg, Some(kb)).await;
         return;
     }
     match data {
@@ -1099,8 +1102,8 @@ async fn handle_callback(
             adjutant.send_or_log(&msg, Some(kb)).await;
         }
         "sentinel:ack" => {
-            let _ = adjutant
-                .send_message("\u{2705} Alert acknowledged.", None)
+            adjutant
+                .send_or_log("\u{2705} Alert acknowledged.", None)
                 .await;
         }
         _ => {
@@ -1231,6 +1234,27 @@ mod tests {
             .unwrap();
 
         assert!(!alerts.contains(".unwrap_or_default()"));
+    }
+
+    #[test]
+    fn telegram_delivery_paths_do_not_silently_discard_send_failures() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+
+        for forbidden in [
+            "let _ = adjutant\n        .send_message(",
+            "let _ = adjutant\n                    .send_message(",
+            "let _ = adjutant.send_message(",
+            "let _ = self\n            .client\n            .post(url.as_str())",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "Telegram delivery failures must be observed or logged: {forbidden}"
+            );
+        }
     }
 
     #[test]
