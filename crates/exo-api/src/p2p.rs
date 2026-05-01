@@ -14,6 +14,19 @@ const MAX_DIVERSE_SELECTION_PEERS: usize = 4_096;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PeerId(pub Did);
 
+impl PeerId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Metadata describing a known peer (addresses, key hash, reputation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -94,14 +107,14 @@ impl RateLimiter {
     pub fn check_and_increment(&mut self, peer: &PeerId) -> Result<()> {
         if !self.counts.contains_key(peer) && self.counts.len() >= Self::MAX_TRACKED_PEERS {
             return Err(ApiError::RateLimited {
-                peer_id: format!("{:?}", peer),
+                peer_id: peer.to_string(),
             });
         }
 
         let c = self.counts.entry(peer.clone()).or_insert(0);
         if *c >= Self::MAX_PER_WINDOW {
             return Err(ApiError::RateLimited {
-                peer_id: format!("{:?}", peer),
+                peer_id: peer.to_string(),
             });
         }
         *c += 1;
@@ -117,7 +130,7 @@ impl RateLimiter {
 pub fn send(registry: &PeerRegistry, msg: &Message) -> Result<()> {
     if let Some(ref to) = msg.to {
         if !registry.peers.contains_key(to) {
-            return Err(ApiError::PeerNotFound(format!("{to:?}")));
+            return Err(ApiError::PeerNotFound(to.to_string()));
         }
     }
     Ok(())
@@ -466,7 +479,11 @@ mod tests {
     #[test]
     fn send_unknown_peer() {
         let r = PeerRegistry::new();
-        assert!(send(&r, &msg("a", Some("b"))).is_err());
+        let err = send(&r, &msg("a", Some("b"))).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::PeerNotFound(peer_id) if peer_id == "did:exo:b"
+        ));
     }
     #[test]
     fn send_broadcast() {
@@ -581,7 +598,11 @@ mod tests {
         for _ in 0..100 {
             rl.check_and_increment(&pid("a")).unwrap();
         }
-        assert!(rl.check_and_increment(&pid("a")).is_err());
+        let err = rl.check_and_increment(&pid("a")).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::RateLimited { peer_id } if peer_id == "did:exo:a"
+        ));
     }
     #[test]
     fn rate_limiter_reset() {
@@ -600,13 +621,33 @@ mod tests {
         }
 
         assert_eq!(rl.counts.len(), RateLimiter::MAX_TRACKED_PEERS);
-        assert!(rl.check_and_increment(&pid("overflow-peer")).is_err());
+        let err = rl.check_and_increment(&pid("overflow-peer")).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::RateLimited { peer_id } if peer_id == "did:exo:overflow-peer"
+        ));
         assert_eq!(
             rl.counts.len(),
             RateLimiter::MAX_TRACKED_PEERS,
             "refused peers must not grow the limiter state"
         );
         assert!(rl.check_and_increment(&pid("peer-0")).is_ok());
+    }
+    #[test]
+    fn p2p_error_peer_labels_do_not_depend_on_debug_formatting() {
+        let source = include_str!("p2p.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("format!(\"{:?}\", peer)"),
+            "P2P rate-limit errors must use stable peer labels"
+        );
+        assert!(
+            !production.contains("format!(\"{to:?}\")"),
+            "P2P peer lookup errors must use stable peer labels"
+        );
     }
     #[test]
     fn peer_id_ord() {
