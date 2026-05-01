@@ -4,8 +4,6 @@
 //! This implementation mirrors `MemoryStore` from `exo-dag` but uses durable
 //! storage so state survives restarts.
 
-#![allow(clippy::as_conversions)]
-
 use std::{collections::BTreeSet, path::Path};
 
 use exo_core::types::{Did, Hash256, Signature};
@@ -26,12 +24,8 @@ fn sqlite_u64_to_i64(value: u64, field: &str) -> DagResult<i64> {
         .map_err(|_| store_err(format!("{field} value {value} exceeds SQLite INTEGER max")))
 }
 
-#[allow(clippy::as_conversions)]
 fn sqlite_i64_to_u64(value: i64, field: &str) -> DagResult<u64> {
-    if value < 0 {
-        return Err(store_err(format!("{field} value {value} is negative")));
-    }
-    Ok(value as u64)
+    u64::try_from(value).map_err(|_| store_err(format!("{field} value {value} is negative")))
 }
 
 fn decode_hash_bytes(bytes: &[u8], field: &str) -> DagResult<Hash256> {
@@ -245,7 +239,6 @@ impl SqliteDagStore {
 
     /// Save the current consensus round number.
     pub fn save_consensus_round(&mut self, round: u64) -> DagResult<()> {
-        #[allow(clippy::as_conversions)]
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO consensus_meta (key, value) VALUES ('round', ?1)",
@@ -723,6 +716,24 @@ mod tests {
     fn temp_store() -> SqliteDagStore {
         let dir = tempfile::tempdir().unwrap();
         SqliteDagStore::open(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn production_store_source_does_not_suppress_or_use_truncating_sqlite_integer_casts() {
+        let source = include_str!("store.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("clippy::as_conversions"),
+            "production store source must not suppress integer conversion lints"
+        );
+        assert!(
+            !production.contains("value as u64"),
+            "SQLite INTEGER conversion must use checked conversion, not an as cast"
+        );
     }
 
     #[test]
