@@ -37,10 +37,10 @@ struct EnvelopeSigningPayload<'a> {
 
 /// The type of content in the encrypted message.
 ///
-/// `#[repr(u8)]` with explicit discriminants so the wire-format byte
-/// value is stable and independent of declaration order. See
-/// `impl From<ContentType> for u8` below — that's the canonical
-/// widening the envelope serializer uses.
+/// `#[repr(u8)]` with explicit discriminants so the wire-format byte value is
+/// stable and independent of declaration order. The `From<ContentType> for u8`
+/// implementation below repeats those discriminants explicitly so the wire
+/// mapping stays obvious without relying on a numeric cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ContentType {
@@ -60,12 +60,13 @@ pub enum ContentType {
 
 impl From<ContentType> for u8 {
     fn from(ct: ContentType) -> Self {
-        // `ContentType` is `#[repr(u8)]` with explicit discriminants,
-        // so this is a well-defined no-op widening — the only place
-        // we use `as` and it's canonical for the repr.
-        #[allow(clippy::as_conversions)]
-        {
-            ct as u8
+        match ct {
+            ContentType::Text => 0,
+            ContentType::Password => 1,
+            ContentType::Secret => 2,
+            ContentType::AfterlifeMessage => 3,
+            ContentType::Template => 4,
+            ContentType::Attachment => 5,
         }
     }
 }
@@ -238,6 +239,35 @@ mod tests {
             let recovered: ContentType = serde_json::from_str(&json).unwrap();
             assert_eq!(ct, recovered);
         }
+    }
+
+    #[test]
+    fn content_type_wire_conversion_uses_explicit_mapping() {
+        assert_eq!(u8::from(ContentType::Text), 0);
+        assert_eq!(u8::from(ContentType::Password), 1);
+        assert_eq!(u8::from(ContentType::Secret), 2);
+        assert_eq!(u8::from(ContentType::AfterlifeMessage), 3);
+        assert_eq!(u8::from(ContentType::Template), 4);
+        assert_eq!(u8::from(ContentType::Attachment), 5);
+
+        let source = include_str!("envelope.rs");
+        let conversion_source = source
+            .split("fn from(ct: ContentType) -> Self")
+            .nth(1)
+            .expect("content type conversion exists")
+            .split("/// An encrypted message envelope")
+            .next()
+            .expect("content type conversion ends before envelope struct");
+        let forbidden_cast = ["ct", " as ", "u8"].concat();
+
+        assert!(
+            !conversion_source.contains("clippy::as_conversions"),
+            "content type wire conversion must not suppress checked conversion lints"
+        );
+        assert!(
+            !conversion_source.contains(&forbidden_cast),
+            "content type wire conversion must not rely on an unchecked numeric cast"
+        );
     }
 
     #[derive(Debug, Deserialize)]
