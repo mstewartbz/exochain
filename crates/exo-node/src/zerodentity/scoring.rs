@@ -12,8 +12,9 @@
 //! - Input slices must be sorted by `created_ms` ascending before calling
 //!   `compute()`.  The caller is responsible for this invariant.
 // The scoring engine performs extensive integer arithmetic with safe `as`
-// casts between bounded integer types. External basis-point inputs are clamped
-// before arithmetic, and aggregate sums use widened accumulators.
+// casts between bounded integer types. External basis-point inputs are clamped,
+// collection sizes use checked saturating conversions, and aggregate sums use
+// widened accumulators before arithmetic.
 #![allow(
     clippy::as_conversions,
     clippy::unwrap_used,
@@ -103,6 +104,41 @@ fn isqrt(n: u64) -> u64 {
     x
 }
 
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn u64_to_u32_saturating(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn u128_to_u32_saturating(value: u128) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn capped_count_contribution(count: usize, per_item: u32, cap: u32) -> u32 {
+    let contribution = usize_to_u64_saturating(count)
+        .saturating_mul(u64::from(per_item))
+        .min(u64::from(cap));
+    u64_to_u32_saturating(contribution)
+}
+
+fn ratio_basis_points(numerator: usize, denominator: usize) -> Option<u32> {
+    let denominator = usize_to_u64_saturating(denominator);
+    if denominator == 0 {
+        return None;
+    }
+
+    let numerator = usize_to_u64_saturating(numerator).min(denominator);
+    let ratio = u128::from(numerator).saturating_mul(u128::from(MAX_BASIS_POINTS))
+        / u128::from(denominator);
+    Some(u128_to_u32_saturating(ratio).min(MAX_BASIS_POINTS))
+}
+
 // ---------------------------------------------------------------------------
 // ZerodentityScore::compute
 // ---------------------------------------------------------------------------
@@ -149,7 +185,7 @@ impl ZerodentityScore {
         let claim_count = claims
             .iter()
             .filter(|c| c.status == ClaimStatus::Verified)
-            .count() as u32;
+            .count();
 
         ZerodentityScore {
             subject_did: subject_did.clone(),
@@ -157,7 +193,7 @@ impl ZerodentityScore {
             composite,
             computed_ms: now_ms,
             dag_state_hash,
-            claim_count,
+            claim_count: usize_to_u32_saturating(claim_count),
             symmetry,
         }
     }
@@ -194,8 +230,8 @@ fn score_communication(claims: &[IdentityClaim]) -> u32 {
             matches!(c.claim_type, ClaimType::ProfessionalCredential { .. })
                 && c.status == ClaimStatus::Verified
         })
-        .count() as u32;
-    score += (extra * 400).min(1300);
+        .count();
+    score += capped_count_contribution(extra, 400, 1300);
 
     score.min(10_000)
 }
@@ -228,8 +264,8 @@ fn score_credential_depth(claims: &[IdentityClaim]) -> u32 {
             matches!(c.claim_type, ClaimType::ProfessionalCredential { .. })
                 && c.status == ClaimStatus::Verified
         })
-        .count() as u32;
-    score += (pro_count * 1000).min(3000);
+        .count();
+    score += capped_count_contribution(pro_count, 1000, 3000);
 
     score.min(10_000)
 }
@@ -245,7 +281,7 @@ fn score_device_trust(fingerprints: &[DeviceFingerprint]) -> u32 {
     let latest = &fingerprints[fingerprints.len() - 1];
 
     // Signal coverage: max 15 signal types → up to 2500 bp contribution.
-    let signal_count = (latest.signal_hashes.len() as u32).min(15);
+    let signal_count = usize_to_u32_saturating(latest.signal_hashes.len()).min(15);
     let coverage_bp = signal_count * 10_000 / 15;
     score += coverage_bp / 4; // coverage_bp * 25 / 100
 
@@ -282,7 +318,7 @@ fn score_behavioral(samples: &[BehavioralSample]) -> u32 {
     // Diversity of signal types (BTreeSet for deterministic ordering).
     let signal_types: BTreeSet<&BehavioralSignalType> =
         samples.iter().map(|s| &s.signal_type).collect();
-    score += ((signal_types.len() as u32) * 600).min(1800);
+    score += capped_count_contribution(signal_types.len(), 600, 1800);
 
     // Baseline similarity.
     if let Some(avg_bp) = average_basis_points(
@@ -296,8 +332,8 @@ fn score_behavioral(samples: &[BehavioralSample]) -> u32 {
     }
 
     // Sample volume: ln(count) * 500 bp, capped at 1600.
-    let count = samples.len() as u64;
-    let ln_contrib = (int_ln_milli(count) * 500 / 1000) as u32;
+    let count = usize_to_u64_saturating(samples.len());
+    let ln_contrib = u64_to_u32_saturating(int_ln_milli(count).saturating_mul(500) / 1000);
     score += ln_contrib.min(1600);
 
     score.min(10_000)
@@ -317,7 +353,7 @@ fn score_network_reputation(claims: &[IdentityClaim]) -> u32 {
             _ => None,
         })
         .collect();
-    score += ((attesters.len() as u32) * 500).min(4000);
+    score += capped_count_contribution(attesters.len(), 500, 4000);
 
     // Delegation grants.
     let delegations = claims
@@ -326,8 +362,8 @@ fn score_network_reputation(claims: &[IdentityClaim]) -> u32 {
             matches!(c.claim_type, ClaimType::DelegationGrant { .. })
                 && c.status == ClaimStatus::Verified
         })
-        .count() as u32;
-    score += (delegations * 800).min(2400);
+        .count();
+    score += capped_count_contribution(delegations, 800, 2400);
 
     // Sybil challenge resolutions.
     let resolved = claims
@@ -336,8 +372,8 @@ fn score_network_reputation(claims: &[IdentityClaim]) -> u32 {
             matches!(c.claim_type, ClaimType::SybilChallengeResolution { .. })
                 && c.status == ClaimStatus::Verified
         })
-        .count() as u32;
-    score += (resolved * 1200).min(3600);
+        .count();
+    score += capped_count_contribution(resolved, 1200, 3600);
 
     score.min(10_000)
 }
@@ -354,7 +390,7 @@ fn score_temporal_stability(claims: &[IdentityClaim], now_ms: u64) -> u32 {
     let oldest_ms = claims.iter().map(|c| c.created_ms).min().unwrap_or(now_ms);
     let age_days = now_ms.saturating_sub(oldest_ms) / 86_400_000;
     if age_days > 0 {
-        let contrib = (int_ln_milli(age_days) * 800 / 1000) as u32;
+        let contrib = u64_to_u32_saturating(int_ln_milli(age_days).saturating_mul(800) / 1000);
         score += contrib.min(3500);
     }
 
@@ -364,15 +400,12 @@ fn score_temporal_stability(claims: &[IdentityClaim], now_ms: u64) -> u32 {
         .iter()
         .filter(|c| c.status == ClaimStatus::Verified)
         .collect();
-    let total_verified = verified.len() as u32;
+    let total_verified = verified.len();
     let fresh = verified
         .iter()
         .filter(|c| c.expires_ms.is_none_or(|exp| exp > now_ms))
-        .count() as u32;
-    if let Some(freshness_bp) = fresh
-        .checked_mul(10_000)
-        .and_then(|n| n.checked_div(total_verified))
-    {
+        .count();
+    if let Some(freshness_bp) = ratio_basis_points(fresh, total_verified) {
         score += freshness_bp * 30 / 100;
     }
 
@@ -380,15 +413,15 @@ fn score_temporal_stability(claims: &[IdentityClaim], now_ms: u64) -> u32 {
     let renewals = claims
         .iter()
         .filter(|c| c.verified_ms.is_some_and(|v| v != c.created_ms))
-        .count() as u32;
-    score += (renewals * 500).min(2000);
+        .count();
+    score += capped_count_contribution(renewals, 500, 2000);
 
     // Session continuity claims.
     let sessions = claims
         .iter()
         .filter(|c| c.claim_type == ClaimType::SessionContinuity)
-        .count() as u32;
-    score += (sessions * 200).min(1500);
+        .count();
+    score += capped_count_contribution(sessions, 200, 1500);
 
     score.min(10_000)
 }
@@ -409,8 +442,8 @@ fn score_cryptographic_strength(claims: &[IdentityClaim]) -> u32 {
     let rotations = claims
         .iter()
         .filter(|c| matches!(c.claim_type, ClaimType::KeyRotation { .. }))
-        .count() as u32;
-    score += (rotations * 800).min(2400);
+        .count();
+    score += capped_count_contribution(rotations, 800, 2400);
 
     if claims
         .iter()
@@ -439,26 +472,26 @@ fn score_constitutional_standing(claims: &[IdentityClaim]) -> u32 {
     let votes = claims
         .iter()
         .filter(|c| matches!(c.claim_type, ClaimType::GovernanceVote { .. }))
-        .count() as u32;
-    score += (votes * 400).min(2000);
+        .count();
+    score += capped_count_contribution(votes, 400, 2000);
 
     let proposals = claims
         .iter()
         .filter(|c| matches!(c.claim_type, ClaimType::ProposalAuthored { .. }))
-        .count() as u32;
-    score += (proposals * 700).min(2100);
+        .count();
+    score += capped_count_contribution(proposals, 700, 2100);
 
     let validator = claims
         .iter()
         .filter(|c| matches!(c.claim_type, ClaimType::ValidatorService { .. }))
-        .count() as u32;
-    score += (validator * 500).min(2500);
+        .count();
+    score += capped_count_contribution(validator, 500, 2500);
 
     let resolutions = claims
         .iter()
         .filter(|c| matches!(c.claim_type, ClaimType::SybilChallengeResolution { .. }))
-        .count() as u32;
-    score += (resolutions * 800).min(2400);
+        .count();
+    score += capped_count_contribution(resolutions, 800, 2400);
 
     score.min(10_000)
 }
@@ -598,6 +631,53 @@ mod tests {
         assert_eq!(isqrt(2), 1);
         assert_eq!(isqrt(8), 2);
         assert_eq!(isqrt(15), 3);
+    }
+
+    #[test]
+    fn scoring_source_avoids_truncating_collection_count_casts() {
+        let source = include_str!("scoring.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            !production.contains(".count() as u32"),
+            "scoring must not truncate iterator counts into u32"
+        );
+        assert!(
+            !production.contains(".len() as u32"),
+            "scoring must not truncate collection lengths into u32"
+        );
+        assert!(
+            !production.contains(".len() as u64"),
+            "scoring must not truncate collection lengths into u64"
+        );
+    }
+
+    #[test]
+    fn saturating_count_conversions_clamp_instead_of_truncating() {
+        assert_eq!(usize_to_u32_saturating(42), 42);
+        assert_eq!(u64_to_u32_saturating(42), 42);
+        assert_eq!(u64_to_u32_saturating(u64::from(u32::MAX) + 1), u32::MAX);
+
+        if let Ok(too_large_for_u32) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(usize_to_u32_saturating(too_large_for_u32), u32::MAX);
+        }
+    }
+
+    #[test]
+    fn capped_count_contribution_uses_wide_saturating_math() {
+        assert_eq!(capped_count_contribution(2, 400, 1300), 800);
+        assert_eq!(capped_count_contribution(4, 400, 1300), 1300);
+        assert_eq!(capped_count_contribution(usize::MAX, 1000, 3000), 3000);
+    }
+
+    #[test]
+    fn ratio_basis_points_handles_extreme_counts() {
+        assert_eq!(ratio_basis_points(0, usize::MAX), Some(0));
+        assert_eq!(ratio_basis_points(usize::MAX, usize::MAX), Some(10_000));
+        assert_eq!(ratio_basis_points(1, 0), None);
     }
 
     // ---- axis functions ----
