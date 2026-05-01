@@ -33,7 +33,6 @@
 //! 3. **Health Monitor** — tracks consensus round times, peer latency,
 //!    DAG growth rate, and alerts on anomalies.
 
-#![allow(clippy::expect_used, clippy::as_conversions, clippy::single_match)]
 #![cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
 
 use std::{
@@ -184,15 +183,60 @@ pub fn hlc_provenance_timestamp_source() -> Arc<dyn Fn() -> Timestamp + Send + S
     })
 }
 
+fn static_did(value: &'static str) -> Did {
+    match Did::new(value) {
+        Ok(did) => did,
+        Err(error) => unreachable!("hardcoded DID {value} must be valid: {error}"),
+    }
+}
+
+fn did_with_static_fallback(candidate: String, fallback: &'static str) -> Did {
+    match Did::new(&candidate) {
+        Ok(did) => did,
+        Err(error) => {
+            tracing::warn!(
+                candidate,
+                fallback,
+                err = %error,
+                "Generated Holon DID was invalid; using static fallback"
+            );
+            static_did(fallback)
+        }
+    }
+}
+
+fn default_holon_keypair() -> exo_core::crypto::KeyPair {
+    match exo_core::crypto::KeyPair::from_secret_bytes([0x48; 32]) {
+        Ok(keypair) => keypair,
+        Err(error) => {
+            unreachable!("hardcoded infrastructure Holon key seed must be valid: {error}")
+        }
+    }
+}
+
+fn ratio_basis_points(numerator: usize, denominator: usize) -> u32 {
+    if denominator == 0 {
+        return 0;
+    }
+
+    let numerator = u128::try_from(numerator).unwrap_or(u128::MAX);
+    let denominator = u128::try_from(denominator).unwrap_or(u128::MAX);
+    let ratio = numerator.saturating_mul(10_000) / denominator;
+    u32::try_from(ratio).unwrap_or(u32::MAX)
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 impl Default for HolonManagerConfig {
     fn default() -> Self {
-        let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x48; 32])
-            .expect("default infrastructure Holon key seed");
+        let keypair = default_holon_keypair();
         let root_public_key = *keypair.public_key();
         let root_secret_key = keypair.secret_key().clone();
         Self {
-            node_did: Did::new("did:exo:node-default").expect("default DID"),
-            root_did: Did::new("did:exo:root").expect("root DID"),
+            node_did: static_did("did:exo:node-default"),
+            root_did: static_did("did:exo:root"),
             root_public_key,
             root_signer: Arc::new(move |message: &[u8]| {
                 exo_core::crypto::sign(message, &root_secret_key)
@@ -213,8 +257,10 @@ impl Default for HolonManagerConfig {
 ///
 /// Program: Guard(peer_count ≥ 1) → Transform(compute diversity) → Checkpoint
 pub fn create_topology_holon(node_did: &Did) -> Holon {
-    let holon_did = Did::new(&format!("did:exo:archon-topology-{node_did}"))
-        .unwrap_or_else(|_| Did::new("did:exo:archon-topology").expect("fallback DID"));
+    let holon_did = did_with_static_fallback(
+        format!("did:exo:archon-topology-{node_did}"),
+        "did:exo:archon-topology",
+    );
 
     holon::spawn(
         holon_did,
@@ -249,8 +295,10 @@ pub fn create_topology_holon(node_did: &Did) -> Holon {
 ///
 /// Program: Guard(validator_count exists) → Transform(scaling recommendation)
 pub fn create_scaling_holon(node_did: &Did) -> Holon {
-    let holon_did = Did::new(&format!("did:exo:archon-scaling-{node_did}"))
-        .unwrap_or_else(|_| Did::new("did:exo:archon-scaling").expect("fallback DID"));
+    let holon_did = did_with_static_fallback(
+        format!("did:exo:archon-scaling-{node_did}"),
+        "did:exo:archon-scaling",
+    );
 
     holon::spawn(
         holon_did,
@@ -285,8 +333,10 @@ pub fn create_scaling_holon(node_did: &Did) -> Holon {
 ///
 /// Program: Transform(health status) — always runs.
 pub fn create_health_holon(node_did: &Did) -> Holon {
-    let holon_did = Did::new(&format!("did:exo:archon-health-{node_did}"))
-        .unwrap_or_else(|_| Did::new("did:exo:archon-health").expect("fallback DID"));
+    let holon_did = did_with_static_fallback(
+        format!("did:exo:archon-health-{node_did}"),
+        "did:exo:archon-health",
+    );
 
     holon::spawn(
         holon_did,
@@ -468,7 +518,7 @@ fn analyze_scaling(validator_count: usize, node_count: usize) -> String {
         return "No nodes in network.".into();
     }
 
-    let ratio_bp = ((validator_count as u128) * 10_000 / (node_count as u128)) as u32;
+    let ratio_bp = ratio_basis_points(validator_count, node_count);
     let ratio_percent = ratio_bp / 100;
 
     if validator_count < 3 {
@@ -693,9 +743,7 @@ pub async fn run_holon_manager(
                                 let candidate = Did::new(&format!(
                                     "did:exo:auto-promoted-{node_count}"
                                 ))
-                                .unwrap_or_else(|_| {
-                                    Did::new("did:exo:candidate").expect("fallback DID")
-                                });
+                                .unwrap_or_else(|_| static_did("did:exo:candidate"));
 
                                 let change = ValidatorChange::AddValidator {
                                     did: candidate.clone(),
@@ -759,7 +807,10 @@ pub async fn run_holon_manager(
                 }
 
                 let (consensus_round, committed_height) = match reactor_state.lock() {
-                    Ok(s) => (s.consensus.current_round, s.consensus.committed.len() as u64),
+                    Ok(s) => (
+                        s.consensus.current_round,
+                        usize_to_u64_saturating(s.consensus.committed.len()),
+                    ),
                     Err(_) => {
                         tracing::error!("Reactor state mutex poisoned in health holon");
                         continue;
@@ -875,6 +926,27 @@ mod tests {
             !src.contains(&forbidden_timestamp),
             "Holon provenance must use caller-supplied deterministic HLC metadata, not a hardcoded timestamp"
         );
+    }
+
+    #[test]
+    fn production_holon_source_does_not_suppress_security_relevant_clippy_lints() {
+        let source = include_str!("holons.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+
+        for lint in [
+            "clippy::expect_used",
+            "clippy::unwrap_used",
+            "clippy::as_conversions",
+            "clippy::single_match",
+        ] {
+            assert!(
+                !production.contains(lint),
+                "production Holon source must not suppress {lint}"
+            );
+        }
     }
 
     #[test]

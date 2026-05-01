@@ -15,12 +15,7 @@
 // casts between bounded integer types. External basis-point inputs are clamped,
 // collection sizes use checked saturating conversions, and aggregate sums use
 // widened accumulators before arithmetic.
-#![allow(
-    clippy::as_conversions,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::manual_range_contains
-)]
+#![allow(clippy::as_conversions, clippy::manual_range_contains)]
 
 use std::collections::BTreeSet;
 
@@ -641,6 +636,14 @@ mod tests {
             .next()
             .unwrap_or(source);
 
+        assert!(
+            !production.contains("clippy::unwrap_used"),
+            "scoring production source must not suppress unwrap safety lint"
+        );
+        assert!(
+            !production.contains("clippy::expect_used"),
+            "scoring production source must not suppress expect safety lint"
+        );
         assert!(
             !production.contains(".count() as u32"),
             "scoring must not truncate iterator counts into u32"
