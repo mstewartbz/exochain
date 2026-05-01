@@ -452,10 +452,26 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
   function renderLog() {
     const el = document.getElementById('activity-log');
-    el.innerHTML = activityLog.map(function(e) {
-      return '<div class="log-entry"><span class="log-time">' + e.time +
-        '</span><span class="log-msg ' + e.cls + '">' + e.msg + '</span></div>';
-    }).join('');
+    const entries = activityLog.map(function(e) {
+      const row = document.createElement('div');
+      row.className = 'log-entry';
+
+      const time = document.createElement('span');
+      time.className = 'log-time';
+      time.textContent = String(e.time || '');
+      row.appendChild(time);
+
+      const msg = document.createElement('span');
+      msg.className = 'log-msg';
+      if (e.cls === 'advance' || e.cls === 'commit' || e.cls === 'warn') {
+        msg.classList.add(e.cls);
+      }
+      msg.textContent = String(e.msg || '');
+      row.appendChild(msg);
+
+      return row;
+    });
+    el.replaceChildren(...entries);
   }
 
   function flashDot() {
@@ -686,6 +702,14 @@ mod tests {
         assert!(
             !DASHBOARD_HTML.contains("vList.innerHTML = gov.validators.map"),
             "validator DID data must not be interpolated into innerHTML"
+        );
+    }
+
+    #[test]
+    fn dashboard_activity_log_does_not_render_dynamic_html() {
+        assert!(
+            !DASHBOARD_HTML.contains("innerHTML"),
+            "dashboard must not render dynamic status, version, error, or DID data through innerHTML"
         );
     }
 }
