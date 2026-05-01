@@ -279,7 +279,7 @@ mod tests {
         hasher.update(dec_id.as_bytes());
         hasher.update(&ts.physical_ms.to_le_bytes());
         hasher.update(&u64::from(ts.logical).to_le_bytes());
-        hasher.update(format!("{:?}", BctsState::Submitted).as_bytes());
+        hasher.update(BctsState::Submitted.as_str().as_bytes());
         let legacy = Hash256::from_bytes(*hasher.finalize().as_bytes());
         assert_ne!(receipt.receipt_hash, legacy);
     }
@@ -313,6 +313,7 @@ mod tests {
             .expect("production section");
         assert!(!production.contains("blake3::Hasher"));
         assert!(!production.contains("hasher.update"));
+        assert!(!production.contains("format!(\"{:?}\""));
         assert!(!production.contains("format!(\"{stage:?}\""));
     }
 

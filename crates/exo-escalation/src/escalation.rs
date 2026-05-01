@@ -15,6 +15,18 @@ pub enum EscalationPath {
     Constitutional,
 }
 
+impl EscalationPath {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::SybilAdjudication => "SybilAdjudication",
+            Self::Emergency => "Emergency",
+            Self::Constitutional => "Constitutional",
+        }
+    }
+}
+
 /// Stages of the Sybil adjudication path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SybilStage {
@@ -25,6 +37,21 @@ pub enum SybilStage {
     ClearanceDowngrade,
     Reinstatement,
     AuditLog,
+}
+
+impl SybilStage {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Detection => "Detection",
+            Self::Triage => "Triage",
+            Self::Quarantine => "Quarantine",
+            Self::EvidentaryReview => "EvidentaryReview",
+            Self::ClearanceDowngrade => "ClearanceDowngrade",
+            Self::Reinstatement => "Reinstatement",
+            Self::AuditLog => "AuditLog",
+        }
+    }
 }
 
 /// Lifecycle status of an escalation case.
@@ -132,8 +159,8 @@ pub fn advance_sybil_stage(
 ) -> Result<(), EscalationError> {
     if case.path != EscalationPath::SybilAdjudication {
         return Err(EscalationError::InvalidStateTransition {
-            from: format!("{:?}", case.path),
-            to: format!("{stage:?}"),
+            from: case.path.as_str().to_owned(),
+            to: stage.as_str().to_owned(),
         });
     }
     case.stages_completed.push(stage.to_string());
@@ -159,7 +186,7 @@ pub fn reinstate(
 ) -> Result<(), EscalationError> {
     if case.path != EscalationPath::SybilAdjudication {
         return Err(EscalationError::InvalidStateTransition {
-            from: format!("{:?}", case.path),
+            from: case.path.as_str().to_owned(),
             to: "Reinstatement".into(),
         });
     }
@@ -174,7 +201,7 @@ pub fn reinstate(
 
 impl std::fmt::Display for SybilStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        f.write_str(self.as_str())
     }
 }
 
@@ -428,5 +455,35 @@ mod tests {
     fn sybil_stage_display() {
         assert_eq!(SybilStage::Detection.to_string(), "Detection");
         assert_eq!(SybilStage::AuditLog.to_string(), "AuditLog");
+    }
+
+    #[test]
+    fn escalation_labels_do_not_depend_on_debug_formatting() {
+        assert_eq!(
+            EscalationPath::SybilAdjudication.as_str(),
+            "SybilAdjudication"
+        );
+        assert_eq!(
+            SybilStage::ClearanceDowngrade.as_str(),
+            "ClearanceDowngrade"
+        );
+
+        let source = include_str!("escalation.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("format!(\"{:?}\", case.path)"),
+            "escalation path errors must use explicit stable labels"
+        );
+        assert!(
+            !production.contains("format!(\"{stage:?}\")"),
+            "Sybil stage errors must use explicit stable labels"
+        );
+        assert!(
+            !production.contains("write!(f, \"{self:?}\")"),
+            "Sybil stage Display must use explicit stable labels"
+        );
     }
 }

@@ -27,11 +27,34 @@ pub enum ChallengeStatus {
     Withdrawn,
 }
 
+impl ChallengeStatus {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Filed => "Filed",
+            Self::UnderReview => "UnderReview",
+            Self::Sustained => "Sustained",
+            Self::Overruled => "Overruled",
+            Self::Withdrawn => "Withdrawn",
+        }
+    }
+}
+
 /// Adjudication outcome for a challenge: sustain or overrule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChallengeVerdict {
     Sustain,
     Overrule,
+}
+
+impl ChallengeVerdict {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sustain => "Sustain",
+            Self::Overrule => "Overrule",
+        }
+    }
 }
 
 /// Maximum inline evidence bytes accepted for a filed challenge.
@@ -134,8 +157,8 @@ pub fn adjudicate(
             Ok(())
         }
         _ => Err(GovernanceError::InvalidTransition {
-            from: format!("{:?}", challenge.status),
-            to: format!("{verdict:?}"),
+            from: challenge.status.as_str().to_owned(),
+            to: verdict.as_str().to_owned(),
         }),
     }
 }
@@ -148,7 +171,7 @@ pub fn withdraw(challenge: &mut Challenge) -> Result<(), GovernanceError> {
             Ok(())
         }
         _ => Err(GovernanceError::InvalidTransition {
-            from: format!("{:?}", challenge.status),
+            from: challenge.status.as_str().to_owned(),
             to: "Withdrawn".to_string(),
         }),
     }
@@ -194,6 +217,22 @@ mod tests {
         assert!(
             !source.contains(&forbidden_timestamp),
             "governance challenges and pause orders must not read wall-clock time internally"
+        );
+    }
+
+    #[test]
+    fn challenge_transition_labels_do_not_depend_on_debug_formatting() {
+        assert_eq!(ChallengeStatus::UnderReview.as_str(), "UnderReview");
+        assert_eq!(ChallengeVerdict::Overrule.as_str(), "Overrule");
+
+        let source = challenge_constructor_source();
+        assert!(
+            !source.contains("format!(\"{:?}\", challenge.status)"),
+            "governance challenge transition errors must use stable status labels"
+        );
+        assert!(
+            !source.contains("format!(\"{verdict:?}\")"),
+            "governance challenge transition errors must use stable verdict labels"
         );
     }
 

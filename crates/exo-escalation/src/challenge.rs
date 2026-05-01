@@ -68,6 +68,24 @@ pub enum ContestStatus {
     Dismissed,
 }
 
+impl ContestStatus {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::PauseEligible => "PauseEligible",
+            Self::UnderReview => "UnderReview",
+            Self::Resolved => "Resolved",
+            Self::Dismissed => "Dismissed",
+        }
+    }
+}
+
+impl std::fmt::Display for ContestStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Challenge admission provenance
 // ---------------------------------------------------------------------------
@@ -286,7 +304,7 @@ pub fn admit_challenge(signed: SignedChallengeAdmission) -> Result<ContestHold, 
 pub fn begin_review(hold: &mut ContestHold, at: Timestamp) -> Result<(), EscalationError> {
     if hold.status != ContestStatus::PauseEligible {
         return Err(EscalationError::InvalidStateTransition {
-            from: format!("{:?}", hold.status),
+            from: hold.status.as_str().to_owned(),
             to: "UnderReview".into(),
         });
     }
@@ -309,7 +327,7 @@ pub fn resolve_hold(
             Ok(())
         }
         _ => Err(EscalationError::InvalidStateTransition {
-            from: format!("{:?}", hold.status),
+            from: hold.status.as_str().to_owned(),
             to: "Resolved".into(),
         }),
     }
@@ -329,7 +347,7 @@ pub fn dismiss_hold(
             Ok(())
         }
         _ => Err(EscalationError::InvalidStateTransition {
-            from: format!("{:?}", hold.status),
+            from: hold.status.as_str().to_owned(),
             to: "Dismissed".into(),
         }),
     }
@@ -656,6 +674,22 @@ mod tests {
         assert_eq!(
             SybilChallengeGround::SyntheticHumanMisrepresentation.to_string(),
             "SyntheticHumanMisrepresentation"
+        );
+    }
+
+    #[test]
+    fn contest_status_labels_do_not_depend_on_debug_formatting() {
+        assert_eq!(ContestStatus::PauseEligible.as_str(), "PauseEligible");
+        assert_eq!(ContestStatus::Dismissed.to_string(), "Dismissed");
+
+        let source = include_str!("challenge.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("format!(\"{:?}\", hold.status)"),
+            "contest status errors must use explicit stable labels"
         );
     }
 }

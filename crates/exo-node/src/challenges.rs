@@ -40,12 +40,7 @@ const MAX_CHALLENGE_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHALLENGE_API_CONCURRENT_REQUESTS: usize = 64;
 
 fn contest_status_label(status: &challenge::ContestStatus) -> &'static str {
-    match status {
-        challenge::ContestStatus::PauseEligible => "PauseEligible",
-        challenge::ContestStatus::UnderReview => "UnderReview",
-        challenge::ContestStatus::Resolved => "Resolved",
-        challenge::ContestStatus::Dismissed => "Dismissed",
-    }
+    status.as_str()
 }
 
 /// In-memory challenge store.

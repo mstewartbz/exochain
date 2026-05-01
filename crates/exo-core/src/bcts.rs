@@ -38,6 +38,27 @@ pub enum BctsState {
 }
 
 impl BctsState {
+    /// Stable label for persistence, API, and receipt text.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "Draft",
+            Self::Submitted => "Submitted",
+            Self::IdentityResolved => "IdentityResolved",
+            Self::ConsentValidated => "ConsentValidated",
+            Self::Deliberated => "Deliberated",
+            Self::Verified => "Verified",
+            Self::Governed => "Governed",
+            Self::Approved => "Approved",
+            Self::Executed => "Executed",
+            Self::Recorded => "Recorded",
+            Self::Closed => "Closed",
+            Self::Denied => "Denied",
+            Self::Escalated => "Escalated",
+            Self::Remediated => "Remediated",
+        }
+    }
+
     /// Return the set of states that are valid successors of `self`.
     #[must_use]
     pub fn valid_transitions(self) -> &'static [BctsState] {
@@ -69,7 +90,7 @@ impl BctsState {
 
 impl core::fmt::Display for BctsState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}")
+        f.write_str(self.as_str())
     }
 }
 
@@ -699,5 +720,21 @@ mod tests {
             tx.transition(s, &actor, &mut clock).expect("ok");
         }
         tx.verify_receipt_chain().expect("chain valid");
+    }
+
+    #[test]
+    fn bcts_state_labels_do_not_depend_on_debug_formatting() {
+        assert_eq!(BctsState::Submitted.as_str(), "Submitted");
+        assert_eq!(BctsState::Submitted.to_string(), "Submitted");
+
+        let source = include_str!("bcts.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("write!(f, \"{self:?}\")"),
+            "BCTS display output must use explicit stable labels"
+        );
     }
 }

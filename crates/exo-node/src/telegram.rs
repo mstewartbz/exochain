@@ -823,7 +823,7 @@ pub fn build_challenges_message(
             let id = h.id.to_string();
             let id_short = escape_telegram_html(&id[..8]);
             let ground = escape_telegram_html(&h.ground.to_string());
-            let status = escape_telegram_html(&format!("{:?}", h.status));
+            let status = escape_telegram_html(h.status.as_str());
             text.push_str(&format!(
                 "\u{2022} <code>{id_short}</code>\n  Ground: {ground}\n  Status: {status}\n\n",
             ));
@@ -1694,6 +1694,23 @@ mod tests {
         let (text, _) = build_challenges_message(&store);
         assert!(text.contains("QuorumContamination"));
         assert!(text.contains("PauseEligible"));
+    }
+
+    #[test]
+    fn challenges_message_uses_stable_status_labels() {
+        let source = include_str!("telegram.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("format!(\"{:?}\", h.status)"),
+            "Telegram challenge status output must use explicit stable labels"
+        );
+        assert!(
+            production.contains("h.status.as_str()"),
+            "Telegram challenge status output must use ContestStatus labels"
+        );
     }
 
     // ==== GAP-015 chat_id auth tests ==================================

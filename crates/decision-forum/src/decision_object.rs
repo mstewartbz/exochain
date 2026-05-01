@@ -178,8 +178,8 @@ impl DecisionObject {
         }
         if !self.state.can_transition_to(to) {
             return Err(ForumError::InvalidTransition {
-                from: format!("{:?}", self.state),
-                to: format!("{to:?}"),
+                from: self.state.to_string(),
+                to: to.to_string(),
             });
         }
         self.validate_transition_timestamp(timestamp)?;
@@ -521,6 +521,23 @@ mod tests {
                 attached_at: clock.now(),
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_transition_errors_use_stable_bcts_labels() {
+        let source = include_str!("decision_object.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("format!(\"{:?}\", self.state)"),
+            "decision transition errors must not depend on BCTS Debug labels"
+        );
+        assert!(
+            !production.contains("format!(\"{to:?}\")"),
+            "decision transition errors must not depend on BCTS Debug labels"
         );
     }
 
