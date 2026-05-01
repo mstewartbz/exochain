@@ -256,4 +256,47 @@ mod source_guard_tests {
             "messaging WASM encryption must use a zeroizing Ed25519 signing-seed parser"
         );
     }
+
+    #[test]
+    fn wasm_gatekeeper_boundary_redacts_internal_errors_and_state() {
+        let source = include_str!("gatekeeper_bindings.rs");
+        assert!(
+            source.contains("gatekeeper_boundary_error"),
+            "gatekeeper WASM bindings must centralize sanitized boundary errors"
+        );
+        assert!(
+            source.contains("holon_state_label"),
+            "gatekeeper WASM bindings must expose explicit lifecycle labels"
+        );
+
+        let forbidden = [
+            "format!(\"Reduction error: {e}\")",
+            "format!(\"Step error: {e}\")",
+            "format!(\"{:?}\", holon.state)",
+        ];
+
+        for pattern in forbidden {
+            assert!(
+                !source.contains(pattern),
+                "gatekeeper WASM boundary must not expose internal debug/error details via {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_escalation_kanban_validator_uses_bounded_json_bridge() {
+        let source = include_str!("escalation_bindings.rs");
+        assert!(
+            source.contains("from_json_str(column_json)"),
+            "Kanban column validation must use the bounded JSON bridge"
+        );
+        assert!(
+            !source.contains("serde_json::from_str(column_json)"),
+            "Kanban column validation must not bypass the bounded JSON bridge"
+        );
+        assert!(
+            !source.contains("\"error\": e.to_string()"),
+            "Kanban column validation must not return raw serde errors to WASM callers"
+        );
+    }
 }

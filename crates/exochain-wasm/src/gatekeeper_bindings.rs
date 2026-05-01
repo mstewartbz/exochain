@@ -33,13 +33,26 @@ fn default_true() -> bool {
     true
 }
 
+fn gatekeeper_boundary_error(operation: &'static str) -> JsValue {
+    JsValue::from_str(operation)
+}
+
+fn holon_state_label(state: exo_gatekeeper::holon::HolonState) -> &'static str {
+    match state {
+        exo_gatekeeper::holon::HolonState::Idle => "idle",
+        exo_gatekeeper::holon::HolonState::Executing => "executing",
+        exo_gatekeeper::holon::HolonState::Suspended => "suspended",
+        exo_gatekeeper::holon::HolonState::Terminated => "terminated",
+    }
+}
+
 /// Reduce a combinator expression with the given input
 #[wasm_bindgen]
 pub fn wasm_reduce_combinator(combinator_json: &str, input_json: &str) -> Result<JsValue, JsValue> {
     let combinator: exo_gatekeeper::Combinator = from_json_str(combinator_json)?;
     let input: exo_gatekeeper::CombinatorInput = from_json_str(input_json)?;
     let output = exo_gatekeeper::combinator::reduce(&combinator, &input)
-        .map_err(|e| JsValue::from_str(&format!("Reduction error: {e}")))?;
+        .map_err(|_| gatekeeper_boundary_error("combinator reduction failed"))?;
     to_js_value(&output)
 }
 
@@ -92,7 +105,7 @@ pub fn wasm_spawn_holon(did: &str, program_json: &str) -> Result<JsValue, JsValu
     // Holon doesn't derive Serialize, return summary
     to_js_value(&serde_json::json!({
         "id": holon.id.as_str(),
-        "state": format!("{:?}", holon.state),
+        "state": holon_state_label(holon.state),
     }))
 }
 
@@ -102,7 +115,7 @@ pub fn wasm_step_combinator(combinator_json: &str, input_json: &str) -> Result<J
     let combinator: exo_gatekeeper::Combinator = from_json_str(combinator_json)?;
     let input: exo_gatekeeper::CombinatorInput = from_json_str(input_json)?;
     let output = exo_gatekeeper::combinator::reduce(&combinator, &input)
-        .map_err(|e| JsValue::from_str(&format!("Step error: {e}")))?;
+        .map_err(|_| gatekeeper_boundary_error("combinator step failed"))?;
     to_js_value(&output)
 }
 

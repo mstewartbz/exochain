@@ -109,9 +109,11 @@ pub fn wasm_cases_by_priority(cases_json: &str) -> Result<JsValue, JsValue> {
 /// otherwise `{valid: false, error: "..."}`.
 #[wasm_bindgen]
 pub fn wasm_validate_kanban_column(column_json: &str) -> Result<JsValue, JsValue> {
-    let result: Result<exo_escalation::kanban::KanbanColumn, _> = serde_json::from_str(column_json);
+    let result: Result<exo_escalation::kanban::KanbanColumn, _> = from_json_str(column_json);
     match result {
-        Ok(col) => to_js_value(&serde_json::json!({"valid": true, "column": format!("{col:?}")})),
-        Err(e) => to_js_value(&serde_json::json!({"valid": false, "error": e.to_string()})),
+        Ok(col) => to_js_value(&serde_json::json!({"valid": true, "column": col.to_string()})),
+        Err(_) => {
+            to_js_value(&serde_json::json!({"valid": false, "error": "invalid kanban column"}))
+        }
     }
 }
