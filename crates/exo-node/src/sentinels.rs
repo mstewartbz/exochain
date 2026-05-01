@@ -243,7 +243,6 @@ fn check_receipt_integrity(store: &Arc<Mutex<SqliteDagStore>>) -> SentinelStatus
 /// verify they match the stored values within a 10 bp tolerance.
 ///
 /// Spec §10.4.
-#[allow(clippy::as_conversions)]
 fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus {
     let zstore = match zerodentity.lock() {
         Ok(s) => s,
@@ -382,7 +381,6 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
 /// Check for expired OTP challenges still in `Pending` state and clean them up.
 ///
 /// Spec §10.4 — ensures no stale challenges linger in memory.
-#[allow(clippy::as_conversions)]
 fn check_otp_cleanup(zerodentity: &SharedZerodentityStore) -> SentinelStatus {
     let mut zstore = match zerodentity.lock() {
         Ok(s) => s,
@@ -429,7 +427,6 @@ fn check_otp_cleanup(zerodentity: &SharedZerodentityStore) -> SentinelStatus {
 }
 
 /// Check store consistency — committed height vs certificate count.
-#[allow(clippy::as_conversions)]
 fn check_store_consistency(store: &Arc<Mutex<SqliteDagStore>>) -> SentinelStatus {
     let st = match store.lock() {
         Ok(s) => s,
@@ -1016,6 +1013,20 @@ mod tests {
         assert!(
             !check_store_consistency_section.contains("certs.len() as u64"),
             "certificate count comparison must use checked conversion, not a truncating cast"
+        );
+    }
+
+    #[test]
+    fn production_sentinel_source_does_not_suppress_integer_conversion_lints() {
+        let source = include_str!("sentinels.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            !production.contains("clippy::as_conversions"),
+            "production sentinel source must not suppress integer conversion lints"
         );
     }
 
