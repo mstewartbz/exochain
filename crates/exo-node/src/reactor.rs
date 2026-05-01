@@ -18,7 +18,7 @@
 //! against that resolver. Local proposal and self-vote signatures are produced
 //! over the canonical CBOR payloads defined by `exo-dag::consensus`.
 
-#![allow(clippy::as_conversions, clippy::type_complexity, clippy::single_match)]
+#![allow(clippy::type_complexity, clippy::single_match)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -57,6 +57,12 @@ fn commit_receipt_authority_hash(cert: &CommitCertificate) -> Result<Hash256, St
         certificate: cert,
     })
     .map_err(|e| format!("commit certificate authority hash: {e}"))
+}
+
+fn checked_committed_height(committed_len: usize) -> Result<u64, String> {
+    u64::try_from(committed_len).map_err(|_| {
+        format!("committed height {committed_len} exceeds maximum representable u64 height")
+    })
 }
 
 async fn with_store_blocking<T, F>(
@@ -869,7 +875,7 @@ async fn handle_commit(
             consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver)
                 .map_err(|e| format!("invalid commit certificate: {e}"))?;
 
-            let height = s.consensus.committed.len() as u64;
+            let height = checked_committed_height(s.consensus.committed.len())?;
             Ok(Some((cert, (hash, height, round))))
         })
         .await
@@ -975,7 +981,7 @@ async fn check_and_commit(
                     consensus::commit_verified(&mut s.consensus, cert_for_commit, &resolver)
                         .map_err(|e| format!("verify local commit certificate: {e}"))?;
                 }
-                Ok(s.consensus.committed.len() as u64)
+                checked_committed_height(s.consensus.committed.len())
             },
         )
         .await
@@ -1365,6 +1371,28 @@ mod tests {
                 "async reactor path still directly locks reactor state: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn reactor_production_uses_checked_committed_height_conversion() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            !production.contains("clippy::as_conversions"),
+            "reactor production code must not suppress checked conversion linting"
+        );
+        assert!(
+            !production.contains("committed.len() as u64"),
+            "reactor commit height must use a checked conversion from committed length"
+        );
+        assert!(
+            production.contains("checked_committed_height"),
+            "reactor commit paths must route height conversion through the checked helper"
+        );
     }
 
     #[test]
