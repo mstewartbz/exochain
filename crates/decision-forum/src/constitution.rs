@@ -274,10 +274,33 @@ pub fn amend_verified<R: PublicKeyResolver>(
     }
     let message = amendment_signature_message(corpus, &amendment)?;
     ensure_verified_quorum(&message, signatures, quorum, eligible_signers, resolver)?;
-    corpus.articles.push(amendment);
-    corpus.version = corpus.version.next();
-    corpus.hash = compute_corpus_hash(&corpus.articles)?;
-    corpus.amendment_count += 1;
+
+    let next_version = Version(corpus.version.value().checked_add(1).ok_or_else(|| {
+        ForumError::AmendmentFailed {
+            reason: format!(
+                "constitution version overflow: cannot advance beyond {}",
+                corpus.version.value()
+            ),
+        }
+    })?);
+    let next_amendment_count =
+        corpus
+            .amendment_count
+            .checked_add(1)
+            .ok_or_else(|| ForumError::AmendmentFailed {
+                reason: format!(
+                    "amendment count overflow: cannot advance beyond {}",
+                    corpus.amendment_count
+                ),
+            })?;
+    let mut next_articles = corpus.articles.clone();
+    next_articles.push(amendment);
+    let next_hash = compute_corpus_hash(&next_articles)?;
+
+    corpus.articles = next_articles;
+    corpus.version = next_version;
+    corpus.hash = next_hash;
+    corpus.amendment_count = next_amendment_count;
     Ok(())
 }
 
@@ -905,6 +928,102 @@ mod tests {
 
         assert_eq!(c.amendment_count, 1);
         assert_ne!(c.hash, old_hash);
+    }
+
+    #[test]
+    fn amend_verified_rejects_amendment_count_overflow_without_mutation() {
+        let alice = did("alice");
+        let alice_key = keypair(1);
+        let keys = public_key_map(&[(alice.clone(), &alice_key)]);
+        let resolver = |d: &Did| keys.get(d).copied();
+        let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
+            .expect("valid corpus");
+        let q = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 100,
+        };
+        let ratify_sig = sign_ratification(&c, &alice_key);
+        ratify_verified(
+            &mut c,
+            &[(alice.clone(), ratify_sig)],
+            &q,
+            Timestamp::ZERO,
+            &eligible(std::slice::from_ref(&alice)),
+            &resolver,
+        )
+        .expect("ratified");
+        c.amendment_count = u32::MAX;
+        let before = c.clone();
+        let amendment = article("a2", DocumentTier::Bylaws);
+        let amendment_sig = sign_amendment(&c, &amendment, &alice_key);
+
+        let err = amend_verified(
+            &mut c,
+            amendment,
+            &[(alice.clone(), amendment_sig)],
+            &q,
+            &eligible(&[alice]),
+            &resolver,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ForumError::AmendmentFailed { reason }
+                if reason.contains("amendment count overflow")
+        ));
+        assert_eq!(c.version, before.version);
+        assert_eq!(c.hash, before.hash);
+        assert_eq!(c.articles.len(), before.articles.len());
+        assert_eq!(c.amendment_count, before.amendment_count);
+    }
+
+    #[test]
+    fn amend_verified_rejects_version_overflow_without_mutation() {
+        let alice = did("alice");
+        let alice_key = keypair(1);
+        let keys = public_key_map(&[(alice.clone(), &alice_key)]);
+        let resolver = |d: &Did| keys.get(d).copied();
+        let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
+            .expect("valid corpus");
+        let q = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 100,
+        };
+        let ratify_sig = sign_ratification(&c, &alice_key);
+        ratify_verified(
+            &mut c,
+            &[(alice.clone(), ratify_sig)],
+            &q,
+            Timestamp::ZERO,
+            &eligible(std::slice::from_ref(&alice)),
+            &resolver,
+        )
+        .expect("ratified");
+        c.version = Version(u64::MAX);
+        let before = c.clone();
+        let amendment = article("a2", DocumentTier::Bylaws);
+        let amendment_sig = sign_amendment(&c, &amendment, &alice_key);
+
+        let err = amend_verified(
+            &mut c,
+            amendment,
+            &[(alice.clone(), amendment_sig)],
+            &q,
+            &eligible(&[alice]),
+            &resolver,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ForumError::AmendmentFailed { reason }
+                if reason.contains("constitution version overflow")
+        ));
+        assert_eq!(c.version, before.version);
+        assert_eq!(c.hash, before.hash);
+        assert_eq!(c.articles.len(), before.articles.len());
+        assert_eq!(c.amendment_count, before.amendment_count);
     }
 
     #[test]
