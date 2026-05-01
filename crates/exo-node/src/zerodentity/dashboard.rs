@@ -538,6 +538,43 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
   }
 
+  function appendText(parent, tagName, className, value) {
+    const el = document.createElement(tagName);
+    if (className) el.className = className;
+    el.textContent = String(value ?? '');
+    parent.appendChild(el);
+    return el;
+  }
+
+  function appendTextCell(row, value, className = '') {
+    return appendText(row, 'td', className, value);
+  }
+
+  function replaceWithEmpty(container, message) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = message;
+    container.replaceChildren(empty);
+  }
+
+  function renderHeaderScore(value) {
+    const header = document.getElementById('headerScore');
+    const suffix = document.createElement('span');
+    suffix.textContent = ' / 100';
+    header.replaceChildren(document.createTextNode(String(value ?? '—')), suffix);
+  }
+
+  function clampPercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.min(Math.max(numeric, 0), 100);
+  }
+
+  function fixedOrDash(value, digits) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric.toFixed(digits) : '—';
+  }
+
   async function fetchScore() {
     const res = await fetch(`/api/v1/0dentity/${encodeURIComponent(DID)}/score`);
     if (res.status === 404) return null;
@@ -560,40 +597,47 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
   function renderScore(score) {
     if (!score) {
-      document.getElementById('headerScore').innerHTML = '—<span> / 100</span>';
+      renderHeaderScore('—');
       document.getElementById('compositeValue').textContent = '—';
       document.getElementById('symmetryValue').textContent = '—';
-      document.getElementById('axisList').innerHTML = '<div class="empty">No score available yet.</div>';
+      replaceWithEmpty(document.getElementById('axisList'), 'No score available yet.');
       animateTo(Array(8).fill(0));
       return;
     }
 
-    const composite = score.composite != null ? score.composite.toFixed(1) : '—';
-    document.getElementById('headerScore').innerHTML = `${composite}<span> / 100</span>`;
+    const composite = score.composite != null ? fixedOrDash(score.composite, 1) : '—';
+    renderHeaderScore(composite);
     document.getElementById('compositeValue').textContent = composite;
     document.getElementById('symmetryValue').textContent =
-      score.symmetry != null ? score.symmetry.toFixed(3) : '—';
+      score.symmetry != null ? fixedOrDash(score.symmetry, 3) : '—';
 
     const axes = score.axes || {};
-    const values = POLAR_AXIS_ORDER.map(k => axes[k] ?? 0);
+    const values = POLAR_AXIS_ORDER.map(k => clampPercent(axes[k] ?? 0));
     animateTo(values);
 
     const listEl = document.getElementById('axisList');
-    listEl.innerHTML = AXIS_LABELS.map(([key, label]) => {
-      const val = axes[key] ?? 0;
-      const pct = Math.min(Math.max(val, 0), 100);
-      return `
-        <div class="axis-row">
-          <div class="axis-name">${label}</div>
-          <div class="axis-bar-wrap">
-            <div class="axis-bar" style="width:${pct}%"></div>
-          </div>
-          <div class="axis-value">${pct.toFixed(0)}</div>
-        </div>`;
-    }).join('');
+    const axisRows = AXIS_LABELS.map(([key, label]) => {
+      const pct = clampPercent(axes[key] ?? 0);
+      const row = document.createElement('div');
+      row.className = 'axis-row';
+
+      appendText(row, 'div', 'axis-name', label);
+      const barWrap = document.createElement('div');
+      barWrap.className = 'axis-bar-wrap';
+      const bar = document.createElement('div');
+      bar.className = 'axis-bar';
+      bar.style.width = `${pct}%`;
+      barWrap.appendChild(bar);
+      row.appendChild(barWrap);
+      appendText(row, 'div', 'axis-value', pct.toFixed(0));
+      return row;
+    });
+    listEl.replaceChildren(...axisRows);
 
     const ts = score.computed_ms ? new Date(score.computed_ms).toLocaleTimeString() : '—';
-    document.getElementById('lastUpdated').innerHTML = `<span>${ts}</span>`;
+    const tsSpan = document.createElement('span');
+    tsSpan.textContent = ts;
+    document.getElementById('lastUpdated').replaceChildren(tsSpan);
   }
 
   function claimStatusClass(status) {
@@ -602,8 +646,9 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
   }
 
   function shortHash(hex) {
-    if (!hex || hex.length < 12) return hex || '—';
-    return `${hex.slice(0, 6)}…${hex.slice(-4)}`;
+    const value = String(hex || '');
+    if (value.length < 12) return value || '—';
+    return `${value.slice(0, 6)}…${value.slice(-4)}`;
   }
 
   function relativeTime(ms) {
@@ -619,48 +664,57 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     const claims = (data && data.claims) ? data.claims : [];
     const wrap = document.getElementById('claimsWrap');
     if (claims.length === 0) {
-      wrap.innerHTML = '<div class="empty">No claims found.</div>';
+      replaceWithEmpty(wrap, 'No claims found.');
       return;
     }
-    wrap.innerHTML = `
-      <table class="claims-table">
-        <thead>
-          <tr>
-            <th>Type</th>
-            <th>Hash</th>
-            <th>Status</th>
-            <th>Verified</th>
-            <th>Expires</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${claims.map(c => `
-            <tr>
-              <td>${c.claim_type || '—'}</td>
-              <td class="hash-cell">${shortHash(c.claim_hash)}</td>
-              <td><span class="status-badge ${claimStatusClass(c.status)}">${c.status || '—'}</span></td>
-              <td>${relativeTime(c.verified_ms)}</td>
-              <td>${c.expires_ms ? relativeTime(c.expires_ms) : 'Never'}</td>
-            </tr>`).join('')}
-        </tbody>
-      </table>`;
+
+    const table = document.createElement('table');
+    table.className = 'claims-table';
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    ['Type', 'Hash', 'Status', 'Verified', 'Expires'].forEach(label => {
+      appendText(headerRow, 'th', '', label);
+    });
+    thead.appendChild(headerRow);
+
+    const tbody = document.createElement('tbody');
+    claims.forEach(c => {
+      const row = document.createElement('tr');
+      appendTextCell(row, c.claim_type || '—');
+      appendTextCell(row, shortHash(c.claim_hash), 'hash-cell');
+
+      const statusCell = document.createElement('td');
+      const status = String(c.status || '—');
+      appendText(statusCell, 'span', `status-badge ${claimStatusClass(status)}`, status);
+      row.appendChild(statusCell);
+
+      appendTextCell(row, relativeTime(c.verified_ms));
+      appendTextCell(row, c.expires_ms ? relativeTime(c.expires_ms) : 'Never');
+      tbody.appendChild(row);
+    });
+
+    table.append(thead, tbody);
+    wrap.replaceChildren(table);
   }
 
   function renderHistory(data) {
     const snapshots = (data && data.snapshots) ? data.snapshots : [];
     const listEl = document.getElementById('historyList');
     if (snapshots.length === 0) {
-      listEl.innerHTML = '<div class="empty">No score history yet.</div>';
+      replaceWithEmpty(listEl, 'No score history yet.');
       return;
     }
     // Show most-recent first
     const sorted = [...snapshots].sort((a, b) => (b.computed_ms || 0) - (a.computed_ms || 0));
-    listEl.innerHTML = sorted.map(s => `
-      <div class="history-item">
-        <div class="history-ts">${s.computed_ms ? new Date(s.computed_ms).toLocaleString() : '—'}</div>
-        <div class="history-score">${s.composite != null ? s.composite.toFixed(1) : '—'}</div>
-        <div class="history-claims">${s.claim_count != null ? `${s.claim_count} claims` : ''}</div>
-      </div>`).join('');
+    const rows = sorted.map(s => {
+      const row = document.createElement('div');
+      row.className = 'history-item';
+      appendText(row, 'div', 'history-ts', s.computed_ms ? new Date(s.computed_ms).toLocaleString() : '—');
+      appendText(row, 'div', 'history-score', s.composite != null ? fixedOrDash(s.composite, 1) : '—');
+      appendText(row, 'div', 'history-claims', s.claim_count != null ? `${s.claim_count} claims` : '');
+      return row;
+    });
+    listEl.replaceChildren(...rows);
   }
 
   async function fetchFingerprints() {
@@ -675,28 +729,37 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     const fps = (data && data.fingerprints) ? data.fingerprints : [];
     const listEl = document.getElementById('fpList');
     if (fps.length === 0) {
-      listEl.innerHTML = '<div class="empty">No fingerprint sessions recorded yet.</div>';
+      replaceWithEmpty(listEl, 'No fingerprint sessions recorded yet.');
       return;
     }
     // Sort most recent first
     const sorted = [...fps].sort((a, b) => (b.captured_ms || 0) - (a.captured_ms || 0));
-    listEl.innerHTML = sorted.map(fp => {
-      const score = fp.consistency_score != null ? fp.consistency_score : null;
-      const pct = score != null ? Math.min(Math.max(score / 100, 0), 100) : 0;
+    const rows = sorted.map(fp => {
+      const score = fp.consistency_score != null ? Number(fp.consistency_score) : null;
+      const pct = score != null && Number.isFinite(score) ? clampPercent(score / 100) : 0;
       const barClass = pct >= 70 ? 'fp-bar-high' : pct >= 40 ? 'fp-bar-med' : 'fp-bar-low';
       const scoreText = score != null ? (score / 100).toFixed(0) + '%' : 'N/A';
-      const hash = fp.composite_hash || '—';
+      const hash = String(fp.composite_hash || '—');
       const shortH = hash.length > 10 ? hash.slice(0, 6) + '…' + hash.slice(-4) : hash;
       const signals = fp.signal_count != null ? fp.signal_count + ' sig' : '';
       const time = fp.captured_ms ? relativeTime(fp.captured_ms) : '—';
-      return `<div class="fp-item">
-        <div class="fp-hash">${shortH}</div>
-        <div class="fp-bar-wrap"><div class="fp-bar ${barClass}" style="width:${pct}%"></div></div>
-        <div class="fp-value">${scoreText}</div>
-        <div class="fp-signals">${signals}</div>
-        <div class="fp-time">${time}</div>
-      </div>`;
-    }).join('');
+
+      const row = document.createElement('div');
+      row.className = 'fp-item';
+      appendText(row, 'div', 'fp-hash', shortH);
+      const barWrap = document.createElement('div');
+      barWrap.className = 'fp-bar-wrap';
+      const bar = document.createElement('div');
+      bar.className = `fp-bar ${barClass}`;
+      bar.style.width = `${pct}%`;
+      barWrap.appendChild(bar);
+      row.appendChild(barWrap);
+      appendText(row, 'div', 'fp-value', scoreText);
+      appendText(row, 'div', 'fp-signals', signals);
+      appendText(row, 'div', 'fp-time', time);
+      return row;
+    });
+    listEl.replaceChildren(...rows);
   }
 
   async function poll() {
@@ -804,6 +867,30 @@ mod tests {
             html.contains(r#"\u003c/script\u003e\u003cscript\u003ealert(1)\u003c/script\u003e"#),
             "JavaScript DID string must escape script-breaking angle brackets"
         );
+    }
+
+    #[test]
+    fn dashboard_api_fields_are_not_interpolated_into_inner_html() {
+        assert!(
+            DASHBOARD_HTML.contains("textContent"),
+            "dashboard must render API-provided text through textContent"
+        );
+
+        for forbidden in [
+            "document.getElementById('headerScore').innerHTML",
+            "document.getElementById('lastUpdated').innerHTML",
+            "listEl.innerHTML = AXIS_LABELS.map",
+            "wrap.innerHTML = `",
+            "listEl.innerHTML = sorted.map",
+            "${c.claim_type",
+            "${shortHash(c.claim_hash)",
+            "${c.status",
+        ] {
+            assert!(
+                !DASHBOARD_HTML.contains(forbidden),
+                "dashboard must not interpolate untrusted API fields into innerHTML: {forbidden}"
+            );
+        }
     }
 
     #[test]
