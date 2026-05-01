@@ -92,13 +92,18 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
     let n: usize = config.shares.into();
 
     let mut shares: Vec<Share> = (1..=n)
-        .map(|i| Share {
-            #[allow(clippy::as_conversions)]
-            index: i as u8,
-            data: Vec::with_capacity(secret.len()),
-            commitment,
+        .map(|i| {
+            let index = u8::try_from(i).map_err(|_| IdentityError::InvalidShamirConfig {
+                threshold: config.threshold,
+                shares: config.shares,
+            })?;
+            Ok(Share {
+                index,
+                data: Vec::with_capacity(secret.len()),
+                commitment,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, IdentityError>>()?;
 
     let mut rng = rand::rngs::OsRng;
 
@@ -595,6 +600,28 @@ mod tests {
         assert!(
             source.contains(&required_rng),
             "Shamir coefficients must be generated with the operating-system CSPRNG"
+        );
+    }
+
+    #[test]
+    fn split_uses_checked_share_index_conversion() {
+        let source = include_str!("shamir.rs");
+        let split_source = source
+            .split("pub fn split(")
+            .nth(1)
+            .expect("split source exists")
+            .split("fn validate_shares")
+            .next()
+            .expect("split source ends before share validation");
+        let forbidden_cast = ["i", " as ", "u8"].concat();
+
+        assert!(
+            !split_source.contains("clippy::as_conversions"),
+            "Shamir share index conversion must not suppress checked conversion lints"
+        );
+        assert!(
+            !split_source.contains(&forbidden_cast),
+            "Shamir share index conversion must not use an unchecked narrowing cast"
         );
     }
 
