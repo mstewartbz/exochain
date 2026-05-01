@@ -221,7 +221,7 @@ impl OtpChallenge {
 
         self.attempts += 1;
 
-        if code == expected {
+        if constant_time_eq(code.as_bytes(), expected.as_bytes()) {
             self.state = OtpState::Verified;
             OtpResult::Success
         } else if self.attempts >= self.max_attempts {
@@ -273,6 +273,19 @@ fn derive_code(secret: &[u8; 32], subject_did: &str, dispatched_ms: u64) -> Resu
     // Take first 4 bytes as big-endian u32
     let n = u32::from_be_bytes([result[0], result[1], result[2], result[3]]);
     Ok(n % 1_000_000)
+}
+
+#[inline]
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
+        diff |= left_byte ^ right_byte;
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +419,31 @@ mod tests {
         assert!(
             !types_source.contains("pub hmac_secret: [u8; 32]"),
             "OtpChallenge must not expose the HMAC secret as a plain byte array"
+        );
+    }
+
+    #[test]
+    fn otp_verify_source_uses_constant_time_code_comparison() {
+        let otp_source = include_str!("otp.rs");
+        let production = otp_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let verify_source = production
+            .split("pub fn verify")
+            .nth(1)
+            .expect("verify source exists")
+            .split("/// Returns `true` if the challenge is currently in lockout.")
+            .next()
+            .expect("verify source ends before is_locked");
+
+        assert!(
+            !verify_source.contains("code == expected"),
+            "OTP verification must not compare secret codes with short-circuiting string equality"
+        );
+        assert!(
+            production.contains("constant_time_eq"),
+            "OTP verification must use a constant-time equality helper"
         );
     }
 
