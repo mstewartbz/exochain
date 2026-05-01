@@ -468,17 +468,26 @@ fn check_store_consistency(store: &Arc<Mutex<SqliteDagStore>>) -> SentinelStatus
         }
     };
 
-    let healthy = certs.len() as u64 <= height || height == 0;
+    let cert_count = match u64::try_from(certs.len()) {
+        Ok(count) => count,
+        Err(_) => {
+            return SentinelStatus {
+                check: SentinelCheck::StoreConsistency,
+                healthy: false,
+                message: format!(
+                    "Store certificate count {} exceeds u64 comparison range",
+                    certs.len()
+                ),
+                last_run_ms: now_ms(),
+            };
+        }
+    };
+
+    let healthy = cert_count <= height || height == 0;
     let message = if healthy {
-        format!(
-            "Store consistent — height {height}, {} certificates",
-            certs.len()
-        )
+        format!("Store consistent — height {height}, {cert_count} certificates")
     } else {
-        format!(
-            "Store inconsistency — height {height} but {} certificates",
-            certs.len()
-        )
+        format!("Store inconsistency — height {height} but {cert_count} certificates")
     };
 
     SentinelStatus {
@@ -993,6 +1002,21 @@ mod tests {
         let store = test_store();
         let status = check_store_consistency(&store);
         assert!(status.healthy);
+    }
+
+    #[test]
+    fn store_consistency_does_not_use_truncating_certificate_count_cast() {
+        let source = include_str!("sentinels.rs");
+        let check_store_consistency_section = source
+            .split("fn check_store_consistency")
+            .nth(1)
+            .and_then(|section| section.split("fn collect_sentinel_statuses").next())
+            .unwrap();
+
+        assert!(
+            !check_store_consistency_section.contains("certs.len() as u64"),
+            "certificate count comparison must use checked conversion, not a truncating cast"
+        );
     }
 
     #[test]
