@@ -28,8 +28,32 @@ pub fn is_minority_report(
         .filter(|claim| position_claims.contains(claim))
         .count();
 
-    let overlap_bps = (u64::try_from(present).unwrap_or(0) * 10000)
-        / u64::try_from(consensus_claims.len()).unwrap_or(1);
+    let overlap_bps = overlap_bps_from_counts(present, consensus_claims.len());
 
     overlap_bps < threshold_bps
+}
+
+fn overlap_bps_from_counts(present: usize, total: usize) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+
+    let numerator = u128::try_from(present)
+        .unwrap_or(u128::MAX)
+        .saturating_mul(10_000);
+    let denominator = u128::try_from(total).unwrap_or(u128::MAX);
+    let bps = numerator / denominator;
+    u64::try_from(bps.min(10_000)).unwrap_or(10_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlap_bps_from_counts_handles_pathological_lengths_without_overflow() {
+        assert_eq!(overlap_bps_from_counts(2, 4), 5_000);
+        assert_eq!(overlap_bps_from_counts(usize::MAX, usize::MAX), 10_000);
+        assert_eq!(overlap_bps_from_counts(usize::MAX, 1), 10_000);
+    }
 }
