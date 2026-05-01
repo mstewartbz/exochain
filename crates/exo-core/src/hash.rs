@@ -132,7 +132,17 @@ pub fn verify_merkle_proof(
         idx /= 2;
     }
 
-    current == *root
+    hash256_eq_constant_time(&current, root)
+}
+
+/// Compare two `Hash256` values without data-dependent early exit.
+#[must_use]
+pub fn hash256_eq_constant_time(left: &Hash256, right: &Hash256) -> bool {
+    let mut diff = 0u8;
+    for (left_byte, right_byte) in left.as_bytes().iter().zip(right.as_bytes().iter()) {
+        diff |= left_byte ^ right_byte;
+    }
+    diff == 0
 }
 
 /// Hash two nodes together: `H(left || right)`.
@@ -341,6 +351,46 @@ mod tests {
         let proof = merkle_proof(&leaves, 0).expect("ok");
         let wrong_root = Hash256::digest(b"wrong root");
         assert!(!verify_merkle_proof(&wrong_root, &leaves[0], &proof, 0));
+    }
+
+    #[test]
+    fn verify_merkle_proof_uses_constant_time_root_comparison() {
+        let source = include_str!("hash.rs");
+        let Some(after_verify_fn) = source.split("pub fn verify_merkle_proof").nth(1) else {
+            panic!("verify_merkle_proof source exists");
+        };
+        let Some(verify_body) = after_verify_fn.split("/// Hash two nodes together").next() else {
+            panic!("hash_pair marker follows verify_merkle_proof");
+        };
+
+        assert!(
+            verify_body.contains("hash256_eq_constant_time(&current, root)"),
+            "verify_merkle_proof must compare the reconstructed root in constant time"
+        );
+        assert!(
+            !verify_body.contains("current == *root"),
+            "verify_merkle_proof must not use direct Hash256 equality for the root check"
+        );
+    }
+
+    #[test]
+    fn hash256_eq_constant_time_matches_hash_equality() {
+        let first = Hash256::digest(b"same");
+        let same = Hash256::digest(b"same");
+        let different_first_byte = Hash256::from_bytes({
+            let mut bytes = *first.as_bytes();
+            bytes[0] ^= 0x80;
+            bytes
+        });
+        let different_last_byte = Hash256::from_bytes({
+            let mut bytes = *first.as_bytes();
+            bytes[31] ^= 0x01;
+            bytes
+        });
+
+        assert!(hash256_eq_constant_time(&first, &same));
+        assert!(!hash256_eq_constant_time(&first, &different_first_byte));
+        assert!(!hash256_eq_constant_time(&first, &different_last_byte));
     }
 
     #[test]
