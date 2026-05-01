@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use crate::wire::{self, WireMessage, topics};
 
 const GOSSIPSUB_MESSAGE_ID_DOMAIN: &str = "exo.node.gossipsub.message-id.v1";
+const IDENTIFY_AGENT_VERSION: &str = "exochain/1.0";
 
 #[derive(serde::Serialize)]
 struct GossipsubMessageIdPayload<'a> {
@@ -93,13 +94,10 @@ pub struct NetworkConfig {
     pub quic_port: u16,
     /// Seed node multiaddrs to dial on startup.
     pub seed_addrs: Vec<Multiaddr>,
-    /// This node's DID (for protocol identification).
-    pub node_did: Did,
 }
 
 /// Build the libp2p swarm with all behaviours composed.
-pub fn build_swarm(config: &NetworkConfig) -> anyhow::Result<Swarm<ExochainBehaviour>> {
-    let node_did_for_identify = config.node_did.to_string();
+pub fn build_swarm() -> anyhow::Result<Swarm<ExochainBehaviour>> {
     let swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(
@@ -149,11 +147,10 @@ pub fn build_swarm(config: &NetworkConfig) -> anyhow::Result<Swarm<ExochainBehav
             let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
                 .map_err(|e| std::io::Error::other(format!("mdns: {e}")))?;
 
-            // Identify protocol for exchanging metadata.
-            // Include the node DID in the agent version for diagnostics.
+            // Identify protocol for exchanging metadata without broadcasting node DID material.
             let identify = identify::Behaviour::new(
                 identify::Config::new("/exochain/1.0.0".into(), keypair.public())
-                    .with_agent_version(format!("exochain/1.0 {node_did_for_identify}"))
+                    .with_agent_version(IDENTIFY_AGENT_VERSION.into())
                     .with_push_listen_addr_updates(true),
             );
 
@@ -587,13 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_swarm_succeeds() {
-        let config = NetworkConfig {
-            tcp_port: 0,
-            quic_port: 0,
-            seed_addrs: vec![],
-            node_did: Did::new("did:exo:test").unwrap(),
-        };
-        let swarm = build_swarm(&config);
+        let swarm = build_swarm();
         assert!(swarm.is_ok());
     }
 
@@ -642,6 +633,24 @@ mod tests {
     }
 
     #[test]
+    fn identify_agent_version_does_not_broadcast_node_did() {
+        let source = include_str!("network.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source section exists");
+
+        assert!(
+            !production.contains("node_did_for_identify"),
+            "libp2p identify metadata must not include the node DID"
+        );
+        assert!(
+            !production.contains("with_agent_version(format!"),
+            "libp2p identify agent version must be static, not DID-derived"
+        );
+    }
+
+    #[test]
     fn gossipsub_message_ids_are_canonical_and_domain_separated() {
         let id_a = canonical_gossipsub_message_id_for_parts("exo/consensus", b"payload")
             .expect("canonical message id");
@@ -668,13 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_handle_peer_count() {
-        let config = NetworkConfig {
-            tcp_port: 0,
-            quic_port: 0,
-            seed_addrs: vec![],
-            node_did: Did::new("did:exo:test").unwrap(),
-        };
-        let swarm = build_swarm(&config).unwrap();
+        let swarm = build_swarm().unwrap();
 
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (event_tx, _event_rx) = mpsc::channel(32);
@@ -692,22 +695,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_nodes_connect_via_dial() {
-        // Build two swarms
-        let config1 = NetworkConfig {
-            tcp_port: 0,
-            quic_port: 0,
-            seed_addrs: vec![],
-            node_did: Did::new("did:exo:node1").unwrap(),
-        };
-        let config2 = NetworkConfig {
-            tcp_port: 0,
-            quic_port: 0,
-            seed_addrs: vec![],
-            node_did: Did::new("did:exo:node2").unwrap(),
-        };
-
-        let mut swarm1 = build_swarm(&config1).unwrap();
-        let mut swarm2 = build_swarm(&config2).unwrap();
+        let mut swarm1 = build_swarm().unwrap();
+        let mut swarm2 = build_swarm().unwrap();
 
         // Listen on random TCP ports on loopback
         swarm1
@@ -775,21 +764,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn two_nodes_discover_via_mdns() {
-        let config1 = NetworkConfig {
-            tcp_port: 0,
-            quic_port: 0,
-            seed_addrs: vec![],
-            node_did: Did::new("did:exo:mdns1").unwrap(),
-        };
-        let config2 = NetworkConfig {
-            tcp_port: 0,
-            quic_port: 0,
-            seed_addrs: vec![],
-            node_did: Did::new("did:exo:mdns2").unwrap(),
-        };
-
-        let mut swarm1 = build_swarm(&config1).unwrap();
-        let mut swarm2 = build_swarm(&config2).unwrap();
+        let mut swarm1 = build_swarm().unwrap();
+        let mut swarm2 = build_swarm().unwrap();
 
         swarm1
             .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())

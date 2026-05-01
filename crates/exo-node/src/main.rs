@@ -367,10 +367,9 @@ async fn start_node(
         tcp_port: p2p_port,
         quic_port: derive_quic_port(p2p_port)?,
         seed_addrs: seed_addrs.clone(),
-        node_did: node_identity.did.clone(),
     };
 
-    let mut swarm = network::build_swarm(&net_config)?;
+    let mut swarm = network::build_swarm()?;
     network::start_listening(&mut swarm, &net_config)?;
 
     // Dial seed nodes if joining.
