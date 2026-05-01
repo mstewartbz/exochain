@@ -66,6 +66,19 @@ pub enum SafeHarborStatus {
     Failed { reason: String },
 }
 
+impl SafeHarborStatus {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SafeHarborStatus::PendingDisclosure => "PendingDisclosure",
+            SafeHarborStatus::DisclosureMade => "DisclosureMade",
+            SafeHarborStatus::VotingInProgress => "VotingInProgress",
+            SafeHarborStatus::Verified => "Verified",
+            SafeHarborStatus::Failed { .. } => "Failed",
+        }
+    }
+}
+
 /// A disclosure record documenting the material interest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Disclosure {
@@ -155,7 +168,7 @@ pub fn complete_disclosure(
 ) -> Result<()> {
     if txn.status != SafeHarborStatus::PendingDisclosure {
         return Err(LegalError::InvalidStateTransition {
-            reason: format!("expected PendingDisclosure, got {:?}", txn.status),
+            reason: format!("expected PendingDisclosure, got {}", txn.status.as_str()),
         });
     }
     txn.disclosure = Some(Disclosure {
@@ -183,7 +196,10 @@ pub fn record_disinterested_vote(
         SafeHarborStatus::DisclosureMade | SafeHarborStatus::VotingInProgress => {}
         other => {
             return Err(LegalError::InvalidStateTransition {
-                reason: format!("expected DisclosureMade or VotingInProgress, got {other:?}"),
+                reason: format!(
+                    "expected DisclosureMade or VotingInProgress, got {}",
+                    other.as_str()
+                ),
             });
         }
     }
@@ -449,10 +465,11 @@ mod tests {
     fn vote_before_disclosure_fails() {
         let mut txn = create_txn(SafeHarborPath::BoardApproval);
         let err = record_disinterested_vote(&mut txn, &did("bob"), true, ts(3000));
-        assert!(matches!(
-            err,
-            Err(LegalError::InvalidStateTransition { .. })
-        ));
+        let err = err.expect_err("vote before disclosure must fail");
+        assert_eq!(
+            err.to_string(),
+            "invalid state transition: expected DisclosureMade or VotingInProgress, got PendingDisclosure"
+        );
     }
 
     #[test]
@@ -461,10 +478,11 @@ mod tests {
         complete_disclosure(&mut txn, &did("alice"), "interest", ts(2000)).unwrap();
         // Second disclosure should fail
         let err = complete_disclosure(&mut txn, &did("alice"), "more", ts(2001));
-        assert!(matches!(
-            err,
-            Err(LegalError::InvalidStateTransition { .. })
-        ));
+        let err = err.expect_err("second disclosure must fail");
+        assert_eq!(
+            err.to_string(),
+            "invalid state transition: expected PendingDisclosure, got DisclosureMade"
+        );
     }
 
     #[test]
@@ -501,6 +519,23 @@ mod tests {
             let json = serde_json::to_string(s).unwrap();
             let s2: SafeHarborStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(&s2, s);
+        }
+    }
+
+    #[test]
+    fn state_transition_errors_do_not_depend_on_debug_formatting() {
+        let source = include_str!("dgcl144.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        for forbidden in [
+            "expected PendingDisclosure, got {:?}",
+            "expected DisclosureMade or VotingInProgress, got {other:?}",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "DGCL safe-harbor state errors must use stable labels: {forbidden}"
+            );
         }
     }
 

@@ -92,6 +92,21 @@ impl DecisionClass {
     }
 }
 
+impl std::fmt::Display for DecisionClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecisionClass::Operational => f.write_str("Operational"),
+            DecisionClass::Strategic => f.write_str("Strategic"),
+            DecisionClass::Constitutional => f.write_str("Constitutional"),
+            DecisionClass::Financial { threshold_cents } => {
+                write!(f, "Financial(threshold_cents={threshold_cents})")
+            }
+            DecisionClass::Emergency => f.write_str("Emergency"),
+            DecisionClass::Custom(name) => write!(f, "Custom({name})"),
+        }
+    }
+}
+
 /// Signer type — cryptographically distinguishes human vs AI signatures (TNC-02).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SignerType {
@@ -149,6 +164,23 @@ pub enum AuthorizedAction {
     AmendConstitution,
     DiscloseConflict,
     Custom(String),
+}
+
+impl std::fmt::Display for AuthorizedAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthorizedAction::CreateDecision => f.write_str("CreateDecision"),
+            AuthorizedAction::AdvanceDecision => f.write_str("AdvanceDecision"),
+            AuthorizedAction::CastVote => f.write_str("CastVote"),
+            AuthorizedAction::GrantDelegation => f.write_str("GrantDelegation"),
+            AuthorizedAction::RevokeDelegation => f.write_str("RevokeDelegation"),
+            AuthorizedAction::RaiseChallenge => f.write_str("RaiseChallenge"),
+            AuthorizedAction::TakeEmergencyAction => f.write_str("TakeEmergencyAction"),
+            AuthorizedAction::AmendConstitution => f.write_str("AmendConstitution"),
+            AuthorizedAction::DiscloseConflict => f.write_str("DiscloseConflict"),
+            AuthorizedAction::Custom(name) => write!(f, "Custom({name})"),
+        }
+    }
 }
 
 /// Reference to evidence attached to a decision (LEG-004, LEG-006).
@@ -269,6 +301,27 @@ mod tests {
     fn test_authorized_action_equality() {
         assert_eq!(AuthorizedAction::CastVote, AuthorizedAction::CastVote);
         assert_ne!(AuthorizedAction::CastVote, AuthorizedAction::CreateDecision);
+    }
+
+    #[test]
+    fn stable_display_labels_for_class_and_action() {
+        assert_eq!(DecisionClass::Strategic.to_string(), "Strategic");
+        assert_eq!(
+            DecisionClass::Financial {
+                threshold_cents: 100_000
+            }
+            .to_string(),
+            "Financial(threshold_cents=100000)"
+        );
+        assert_eq!(
+            DecisionClass::Custom("tenant-local".to_string()).to_string(),
+            "Custom(tenant-local)"
+        );
+        assert_eq!(AuthorizedAction::CastVote.to_string(), "CastVote");
+        assert_eq!(
+            AuthorizedAction::Custom("tenant-action".to_string()).to_string(),
+            "Custom(tenant-action)"
+        );
     }
 
     #[test]

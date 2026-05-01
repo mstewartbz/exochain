@@ -305,8 +305,7 @@ impl Constitution {
                             "Human gate satisfied".to_string()
                         } else {
                             format!(
-                                "Human gate required for {:?} decisions but no human signer present",
-                                class
+                                "Human gate required for {class} decisions but no human signer present"
                             )
                         },
                     )
@@ -325,10 +324,10 @@ impl Constitution {
                         if met {
                             format!("Quorum of {} met", minimum)
                         } else {
-                            format!(
-                                "Minimum quorum of {} required, got {:?}",
-                                minimum, quorum_size
-                            )
+                            let actual = quorum_size
+                                .map(|size| size.to_string())
+                                .unwrap_or_else(|| "none".to_string());
+                            format!("Minimum quorum of {} required, got {actual}", minimum)
                         },
                     )
                 } else {
@@ -824,8 +823,7 @@ mod tests {
             .find(|r| r.constraint_id == "C-002")
             .expect("C-002 present");
         assert!(!r.satisfied);
-        assert!(r.message.contains("Minimum quorum of 3 required"));
-        assert!(r.message.contains("None"));
+        assert_eq!(r.message, "Minimum quorum of 3 required, got none");
     }
 
     // RequireMinQuorum non-matching decision class: Not applicable branch
@@ -1089,6 +1087,23 @@ mod tests {
         assert!(!r.satisfied);
         assert_eq!(r.message, "Delegation depth 9 exceeds maximum 5");
         assert_eq!(r.failure_action, Some(FailureAction::Block));
+    }
+
+    #[test]
+    fn constraint_messages_do_not_depend_on_debug_formatting() {
+        let source = include_str!("constitution.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        for forbidden in [
+            "Human gate required for {:?} decisions",
+            "Minimum quorum of {} required, got {:?}",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "constitutional constraint messages must use stable labels: {forbidden}"
+            );
+        }
     }
 
     // check_blocking_constraints: Warn-level violation should NOT error out

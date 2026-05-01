@@ -17,6 +17,20 @@ pub enum ChallengeGround {
     ConsentViolation,
 }
 
+impl ChallengeGround {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            ChallengeGround::AuthorityChainInvalid => "AuthorityChainInvalid",
+            ChallengeGround::QuorumViolation => "QuorumViolation",
+            ChallengeGround::UndisclosedConflict => "UndisclosedConflict",
+            ChallengeGround::ProceduralError => "ProceduralError",
+            ChallengeGround::SybilAllegation => "SybilAllegation",
+            ChallengeGround::ConsentViolation => "ConsentViolation",
+        }
+    }
+}
+
 /// Lifecycle state of a governance challenge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChallengeStatus {
@@ -138,7 +152,7 @@ pub fn pause_action(
     Ok(PauseOrder {
         challenge_id: challenge.id,
         target_action_id: challenge.target_action_id,
-        reason: format!("challenged on ground: {:?}", challenge.ground),
+        reason: format!("challenged on ground: {}", challenge.ground.as_str()),
         issued,
     })
 }
@@ -224,6 +238,7 @@ mod tests {
     fn challenge_transition_labels_do_not_depend_on_debug_formatting() {
         assert_eq!(ChallengeStatus::UnderReview.as_str(), "UnderReview");
         assert_eq!(ChallengeVerdict::Overrule.as_str(), "Overrule");
+        assert_eq!(ChallengeGround::QuorumViolation.as_str(), "QuorumViolation");
 
         let source = challenge_constructor_source();
         assert!(
@@ -233,6 +248,10 @@ mod tests {
         assert!(
             !source.contains("format!(\"{verdict:?}\")"),
             "governance challenge transition errors must use stable verdict labels"
+        );
+        assert!(
+            !source.contains("challenged on ground: {:?}"),
+            "pause-order reasons must use stable challenge-ground labels"
         );
     }
 
@@ -277,7 +296,7 @@ mod tests {
         let o = pause_action(&c, issued).expect("deterministic pause order");
         assert_eq!(o.challenge_id, c.id);
         assert_eq!(o.issued, issued);
-        assert!(o.reason.contains("SybilAllegation"));
+        assert_eq!(o.reason, "challenged on ground: SybilAllegation");
     }
     #[test]
     fn file_rejects_nil_id() {

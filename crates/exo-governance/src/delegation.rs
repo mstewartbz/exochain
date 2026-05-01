@@ -236,7 +236,7 @@ impl Delegation {
         if !self.scope.covers(action, class) {
             return Err(GovernanceError::AuthorityChainBroken {
                 reason: format!(
-                    "Delegation {:?} does not cover action {:?} on class {:?}",
+                    "Delegation {} does not cover action {} on class {}",
                     self.id, action, class
                 ),
             });
@@ -924,5 +924,17 @@ mod tests {
             .validate_sub_delegation(&sub_scope, 5_000, &public_key(&signer))
             .unwrap_err();
         assert!(matches!(err, GovernanceError::SubDelegationNotPermitted(_)));
+    }
+
+    #[test]
+    fn delegation_authorization_errors_do_not_depend_on_debug_formatting() {
+        let source = include_str!("delegation.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !source.contains("Delegation {:?} does not cover action {:?} on class {:?}"),
+            "delegation authorization errors must use explicit stable labels"
+        );
     }
 }

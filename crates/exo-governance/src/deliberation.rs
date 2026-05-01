@@ -45,6 +45,17 @@ pub enum DeliberationStatus {
     Cancelled,
 }
 
+impl DeliberationStatus {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            DeliberationStatus::Open => "Open",
+            DeliberationStatus::Closed => "Closed",
+            DeliberationStatus::Cancelled => "Cancelled",
+        }
+    }
+}
+
 /// A structured governance deliberation over a hashed proposal with tracked votes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deliberation {
@@ -131,7 +142,7 @@ fn not_open_result(delib: &Deliberation) -> Option<DeliberationResult> {
         None
     } else {
         Some(DeliberationResult::NoQuorum {
-            reason: format!("deliberation not open: {:?}", delib.status),
+            reason: format!("deliberation not open: {}", delib.status.as_str()),
         })
     }
 }
@@ -338,6 +349,18 @@ mod tests {
             signature: approval.signature,
             independence_attestation: Some(attestation),
         }
+    }
+
+    #[test]
+    fn deliberation_status_messages_do_not_depend_on_debug_formatting() {
+        let source = include_str!("deliberation.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !source.contains("deliberation not open: {:?}"),
+            "deliberation status messages must use stable labels"
+        );
     }
 
     fn policy(min: usize) -> QuorumPolicy {

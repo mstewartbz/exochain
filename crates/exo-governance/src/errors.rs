@@ -9,29 +9,29 @@ use crate::types::{DecisionClass, SemVer};
 #[derive(Error, Debug)]
 pub enum GovernanceError {
     // --- Decision lifecycle errors ---
-    #[error("Invalid state transition: {from:?} -> {to:?}")]
+    #[error("Invalid state transition: {from} -> {to}")]
     InvalidTransition { from: String, to: String },
 
-    #[error("Decision {0:?} is immutable (terminal status reached) — TNC-08")]
+    #[error("Decision {0} is immutable (terminal status reached) — TNC-08")]
     DecisionImmutable(Hash256),
 
-    #[error("Decision {0:?} not found")]
+    #[error("Decision {0} not found")]
     DecisionNotFound(Hash256),
 
     // --- Authority chain errors ---
     #[error("Authority chain verification failed: {reason}")]
     AuthorityChainBroken { reason: String },
 
-    #[error("Delegation {0:?} has expired — TNC-05")]
+    #[error("Delegation {0} has expired — TNC-05")]
     DelegationExpired(Hash256),
 
-    #[error("Delegation {0:?} has been revoked")]
+    #[error("Delegation {0} has been revoked")]
     DelegationRevoked(Hash256),
 
-    #[error("Delegation {0:?} not found")]
+    #[error("Delegation {0} not found")]
     DelegationNotFound(Hash256),
 
-    #[error("Sub-delegation not permitted by parent delegation {0:?}")]
+    #[error("Sub-delegation not permitted by parent delegation {0}")]
     SubDelegationNotPermitted(Hash256),
 
     #[error("Authority chain exceeds maximum depth of {0} levels")]
@@ -39,7 +39,7 @@ pub enum GovernanceError {
 
     // --- Human gate errors (TNC-02) ---
     #[error(
-        "Human gate required for {class:?} decisions but signer {signer} is an AI agent — TNC-02"
+        "Human gate required for {class} decisions but signer {signer} is an AI agent — TNC-02"
     )]
     HumanGateViolation { class: DecisionClass, signer: Did },
 
@@ -71,10 +71,10 @@ pub enum GovernanceError {
     ConflictDisclosureRequired(Did),
 
     // --- Challenge errors ---
-    #[error("Challenge {0:?} not found")]
+    #[error("Challenge {0} not found")]
     ChallengeNotFound(Hash256),
 
-    #[error("Decision {0:?} is already contested")]
+    #[error("Decision {0} is already contested")]
     AlreadyContested(Hash256),
 
     // --- Emergency errors (TNC-10) ---
@@ -86,7 +86,7 @@ pub enum GovernanceError {
 
     // --- Audit errors (TNC-03) ---
     #[error(
-        "Audit chain integrity violation at sequence {sequence}: expected {expected:?}, got {actual:?} — TNC-03"
+        "Audit chain integrity violation at sequence {sequence}: expected {expected}, got {actual} — TNC-03"
     )]
     AuditChainBroken {
         sequence: u64,
@@ -116,4 +116,45 @@ pub enum GovernanceError {
     // --- Deterministic metadata errors ---
     #[error("Invalid governance metadata for {field}: {reason}")]
     InvalidGovernanceMetadata { field: String, reason: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_transition_display_does_not_debug_quote_labels() {
+        let err = GovernanceError::InvalidTransition {
+            from: "Filed".to_string(),
+            to: "Withdrawn".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid state transition: Filed -> Withdrawn"
+        );
+    }
+
+    #[test]
+    fn governance_error_display_does_not_depend_on_debug_formatting() {
+        let source = include_str!("errors.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        for forbidden in [
+            "{from:?}",
+            "{to:?}",
+            "Decision {0:?}",
+            "Delegation {0:?}",
+            "parent delegation {0:?}",
+            "{class:?}",
+            "Challenge {0:?}",
+            "{expected:?}",
+            "{actual:?}",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "governance errors must use explicit stable Display labels: {forbidden}"
+            );
+        }
+    }
 }

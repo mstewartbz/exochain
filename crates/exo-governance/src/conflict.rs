@@ -31,7 +31,7 @@ use thiserror::Error;
 /// Errors returned by conflict-of-interest enforcement checks.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConflictError {
-    #[error("recusal required: actor {actor} has {severity:?} conflict — vote blocked")]
+    #[error("recusal required: actor {actor} has {severity} conflict — vote blocked")]
     RecusalRequired {
         actor: String,
         severity: ConflictSeverity,
@@ -74,6 +74,16 @@ pub enum ConflictSeverity {
     Advisory,
     Material,
     Disqualifying,
+}
+
+impl std::fmt::Display for ConflictSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConflictSeverity::Advisory => f.write_str("Advisory"),
+            ConflictSeverity::Material => f.write_str("Material"),
+            ConflictSeverity::Disqualifying => f.write_str("Disqualifying"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -607,5 +617,17 @@ mod tests {
     #[test]
     fn quorum_adjustment_no_recusals_unchanged() {
         assert_eq!(adjusted_quorum_denominator(7, 0), 7);
+    }
+
+    #[test]
+    fn conflict_errors_do_not_depend_on_debug_formatting() {
+        let source = include_str!("conflict.rs")
+            .split("// ---------------------------------------------------------------------------\n// Core types")
+            .next()
+            .expect("error section");
+        assert!(
+            !source.contains("{severity:?}"),
+            "conflict errors must use explicit stable severity labels"
+        );
     }
 }

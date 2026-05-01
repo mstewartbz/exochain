@@ -23,6 +23,19 @@ pub enum Role {
     Observer,
 }
 
+impl Role {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Role::Steward => "Steward",
+            Role::Governor => "Governor",
+            Role::Reviewer => "Reviewer",
+            Role::Contributor => "Contributor",
+            Role::Observer => "Observer",
+        }
+    }
+}
+
 /// A signed declaration of independence — no common control, no coordination,
 /// identity verified through independent channels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,7 +247,7 @@ pub fn compute_quorum(approvals: &[Approval], policy: &QuorumPolicy) -> QuorumRe
     for required_role in &policy.required_roles {
         if !approvals.iter().any(|a| &a.role == required_role) {
             return QuorumResult::NotMet {
-                reason: format!("missing required role: {required_role:?}"),
+                reason: format!("missing required role: {}", required_role.as_str()),
             };
         }
     }
@@ -289,8 +302,9 @@ pub fn compute_quorum_with_challenges(
     }) {
         return QuorumResult::Contested {
             challenge: format!(
-                "unresolved independence challenge {} on ground {:?}",
-                blocking.id, blocking.ground
+                "unresolved independence challenge {} on ground {}",
+                blocking.id,
+                blocking.ground.as_str()
             ),
         };
     }
@@ -379,7 +393,7 @@ pub fn compute_quorum_verified<R: PublicKeyResolver>(
     for required_role in &policy.required_roles {
         if !verified_approvals.iter().any(|a| &a.role == required_role) {
             return QuorumResult::NotMet {
-                reason: format!("missing required role: {required_role:?}"),
+                reason: format!("missing required role: {}", required_role.as_str()),
             };
         }
     }
@@ -429,8 +443,9 @@ pub fn compute_quorum_with_challenges_verified<R: PublicKeyResolver>(
     }) {
         return QuorumResult::Contested {
             challenge: format!(
-                "unresolved independence challenge {} on ground {:?}",
-                blocking.id, blocking.ground
+                "unresolved independence challenge {} on ground {}",
+                blocking.id,
+                blocking.ground.as_str()
             ),
         };
     }
@@ -1296,6 +1311,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn quorum_reasons_do_not_depend_on_debug_formatting() {
+        let source = include_str!("quorum.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        for forbidden in ["missing required role: {required_role:?}", "on ground {:?}"] {
+            assert!(
+                !source.contains(forbidden),
+                "quorum reasons must use explicit stable labels: {forbidden}"
+            );
+        }
+    }
+
     // Covers compute_quorum_verified's `missing required role` NotMet branch.
     #[test]
     fn compute_quorum_verified_missing_required_role_branch() {
@@ -1348,8 +1377,7 @@ mod tests {
         ];
         match compute_quorum_verified(&approvals, &policy, &resolver) {
             QuorumResult::NotMet { reason } => {
-                assert!(reason.contains("missing required role"));
-                assert!(reason.contains("Governor"));
+                assert_eq!(reason, "missing required role: Governor");
             }
             other => panic!("expected NotMet, got {other:?}"),
         }

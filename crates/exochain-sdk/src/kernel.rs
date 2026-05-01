@@ -514,7 +514,7 @@ impl ConstitutionalKernel {
             Verdict::Denied { violations } => KernelVerdict::Denied {
                 violations: violations
                     .into_iter()
-                    .map(|v| format!("{:?}: {}", v.invariant, v.description))
+                    .map(|v| format!("{}: {}", v.invariant.id(), v.description))
                     .collect(),
             },
             Verdict::Escalated { reason } => KernelVerdict::Escalated { reason },
@@ -606,6 +606,17 @@ mod tests {
         let actor = did("did:exo:self-granter");
         let verdict = k.adjudicate_self_grant(&actor, "escalate-self");
         assert!(verdict.is_denied(), "expected Denied, got {verdict:?}");
+        match verdict {
+            KernelVerdict::Denied { violations } => {
+                assert!(
+                    violations
+                        .iter()
+                        .any(|violation| violation.starts_with("no-self-grant: ")),
+                    "violations must use stable invariant IDs: {violations:?}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
     }
 
     #[test]
@@ -622,6 +633,18 @@ mod tests {
         let actor = did("did:exo:unauth");
         let verdict = k.adjudicate_without_bailment(&actor, "read-data");
         assert!(verdict.is_denied(), "expected Denied, got {verdict:?}");
+    }
+
+    #[test]
+    fn sdk_violation_labels_do_not_depend_on_debug_formatting() {
+        let source = include_str!("kernel.rs")
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production section");
+        assert!(
+            !source.contains("format!(\"{:?}: {}\", v.invariant, v.description)"),
+            "SDK violation labels must use stable invariant IDs"
+        );
     }
 
     #[test]
