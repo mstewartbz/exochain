@@ -51,8 +51,9 @@ pub fn enforce_human_gate(policy: &HumanGatePolicy, decision: &DecisionObject) -
         if !has_human_vote && !decision.votes.is_empty() {
             return Err(ForumError::AiCeilingExceeded {
                 reason: format!(
-                    "{:?} exceeds AI ceiling {:?}",
-                    decision.class, policy.ai_ceiling
+                    "{} exceeds AI ceiling {}",
+                    decision.class.quorum_policy_key(),
+                    policy.ai_ceiling.quorum_policy_key()
                 ),
             });
         }
@@ -149,10 +150,26 @@ mod tests {
         let mut d = make_decision(DecisionClass::Strategic, &mut clock);
         d.add_vote(ai_vote(&mut clock)).expect("ok");
         let err = enforce_human_gate(&policy, &d).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "AI delegation ceiling exceeded: Strategic exceeds AI ceiling Operational"
+        );
         assert!(matches!(
             err,
             ForumError::HumanGateRequired | ForumError::AiCeilingExceeded { .. }
         ));
+    }
+
+    #[test]
+    fn human_gate_errors_do_not_depend_on_debug_formatting() {
+        let production = include_str!("human_gate.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("{:?} exceeds AI ceiling {:?}"),
+            "human-gate ceiling errors must use explicit stable class labels"
+        );
     }
 
     #[test]

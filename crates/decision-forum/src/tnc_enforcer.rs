@@ -154,13 +154,16 @@ pub fn enforce_tnc_09(ctx: &TncContext<'_>) -> Result<()> {
                     tnc_id: 9,
                     reason: if ctx.ai_ceilings_externally_verified {
                         format!(
-                            "AI agent '{}' vote on {:?} exceeds delegation-registry ceiling {:?}",
-                            delegation_id, ctx.decision.class, ceiling_class
+                            "AI agent '{}' vote on {} exceeds delegation-registry ceiling {}",
+                            delegation_id,
+                            ctx.decision.class.quorum_policy_key(),
+                            ceiling_class.quorum_policy_key()
                         )
                     } else {
                         format!(
-                            "AI agent '{}' ceiling unverified — restricted to Routine, got {:?}",
-                            delegation_id, ctx.decision.class,
+                            "AI agent '{}' ceiling unverified — restricted to Routine, got {}",
+                            delegation_id,
+                            ctx.decision.class.quorum_policy_key(),
                         )
                     },
                 });
@@ -467,7 +470,10 @@ mod tests {
             matches!(err, ForumError::TncViolation { tnc_id: 9, .. }),
             "expected TNC-09, got {err:?}"
         );
-        assert!(err.to_string().contains("unverified"));
+        assert_eq!(
+            err.to_string(),
+            "TNC violation: TNC-09: AI agent 'del-001' ceiling unverified — restricted to Routine, got Operational"
+        );
     }
 
     #[test]
@@ -555,5 +561,22 @@ mod tests {
         assert!(matches!(err, ForumError::TncViolation { tnc_id: 9, .. }));
         // Error mentions the registry ceiling
         assert!(err.to_string().contains("Operational"));
+    }
+
+    #[test]
+    fn tnc_09_errors_do_not_depend_on_debug_formatting() {
+        let production = include_str!("tnc_enforcer.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        for forbidden in [
+            "vote on {:?} exceeds delegation-registry ceiling {:?}",
+            "restricted to Routine, got {:?}",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "AI ceiling errors must use explicit stable class labels: {forbidden}"
+            );
+        }
     }
 }

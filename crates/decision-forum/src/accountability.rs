@@ -28,6 +28,17 @@ pub enum AccountabilityStatus {
     Reversed,
 }
 
+impl AccountabilityStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            AccountabilityStatus::Proposed => "Proposed",
+            AccountabilityStatus::DueProcess => "DueProcess",
+            AccountabilityStatus::Enacted => "Enacted",
+            AccountabilityStatus::Reversed => "Reversed",
+        }
+    }
+}
+
 /// An accountability action against an actor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountabilityAction {
@@ -94,7 +105,7 @@ pub fn propose(input: AccountabilityInput) -> Result<AccountabilityAction> {
 pub fn begin_due_process(action: &mut AccountabilityAction) -> Result<()> {
     if action.status != AccountabilityStatus::Proposed {
         return Err(ForumError::AccountabilityFailed {
-            reason: format!("cannot begin due process from {:?}", action.status),
+            reason: format!("cannot begin due process from {}", action.status.as_str()),
         });
     }
     action.status = AccountabilityStatus::DueProcess;
@@ -111,7 +122,7 @@ pub fn enact(
         AccountabilityStatus::Proposed | AccountabilityStatus::DueProcess => {}
         _ => {
             return Err(ForumError::AccountabilityFailed {
-                reason: format!("cannot enact from {:?}", action.status),
+                reason: format!("cannot enact from {}", action.status.as_str()),
             });
         }
     }
@@ -206,6 +217,14 @@ mod tests {
 
     fn make_action(action_type: AccountabilityActionType) -> AccountabilityAction {
         propose(action_input(Uuid::from_u128(21), action_type)).expect("valid action")
+    }
+
+    fn production_source() -> &'static str {
+        let source = include_str!("accountability.rs");
+        let end = source
+            .find("#[cfg(test)]")
+            .expect("test module marker exists");
+        &source[..end]
     }
 
     #[test]
@@ -310,5 +329,50 @@ mod tests {
         let mut a = make_action(AccountabilityActionType::Censure);
         begin_due_process(&mut a).expect("ok");
         assert!(begin_due_process(&mut a).is_err());
+    }
+
+    #[test]
+    fn status_transition_errors_use_stable_labels() {
+        let mut action = make_action(AccountabilityActionType::Censure);
+        begin_due_process(&mut action).expect("ok");
+
+        let due_process_err = begin_due_process(&mut action).expect_err("already under review");
+        assert_eq!(
+            due_process_err.to_string(),
+            "accountability action failed: cannot begin due process from DueProcess"
+        );
+
+        let mut reversed = make_action(AccountabilityActionType::Censure);
+        enact(
+            &mut reversed,
+            Uuid::from_u128(99),
+            Timestamp::new(ts().physical_ms + 100, 0),
+        )
+        .expect("enact");
+        reverse(&mut reversed).expect("reverse");
+        let enact_err = enact(
+            &mut reversed,
+            Uuid::from_u128(100),
+            Timestamp::new(ts().physical_ms + 200, 0),
+        )
+        .expect_err("reversed actions cannot be enacted");
+        assert_eq!(
+            enact_err.to_string(),
+            "accountability action failed: cannot enact from Reversed"
+        );
+    }
+
+    #[test]
+    fn accountability_errors_do_not_depend_on_debug_formatting() {
+        let production = production_source();
+        for forbidden in [
+            "format!(\"cannot begin due process from {:?}\"",
+            "format!(\"cannot enact from {:?}\"",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "accountability lifecycle errors must use explicit stable labels: {forbidden}"
+            );
+        }
     }
 }

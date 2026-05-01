@@ -207,7 +207,7 @@ impl DecisionObject {
         if timestamp <= floor {
             return Err(ForumError::InvalidProvenance {
                 reason: format!(
-                    "transition timestamp {:?} must be greater than prior timestamp {:?}",
+                    "transition timestamp {} must be greater than prior timestamp {}",
                     timestamp, floor
                 ),
             });
@@ -414,6 +414,10 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(regressive, ForumError::InvalidProvenance { .. }));
+        assert_eq!(
+            regressive.to_string(),
+            "invalid provenance metadata: transition timestamp 10000:0 must be greater than prior timestamp 10001:0"
+        );
 
         d.transition_at(
             BctsState::IdentityResolved,
@@ -538,6 +542,11 @@ mod tests {
         assert!(
             !production.contains("format!(\"{to:?}\")"),
             "decision transition errors must not depend on BCTS Debug labels"
+        );
+        assert!(
+            !production
+                .contains("transition timestamp {:?} must be greater than prior timestamp {:?}"),
+            "decision timestamp errors must use Timestamp Display labels"
         );
     }
 

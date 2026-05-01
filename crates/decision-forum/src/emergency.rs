@@ -20,12 +20,34 @@ pub enum EmergencyActionType {
     RoleEscalation,
 }
 
+impl EmergencyActionType {
+    fn as_str(self) -> &'static str {
+        match self {
+            EmergencyActionType::SystemHalt => "SystemHalt",
+            EmergencyActionType::AccessRevocation => "AccessRevocation",
+            EmergencyActionType::DataFreeze => "DataFreeze",
+            EmergencyActionType::EmergencyPatch => "EmergencyPatch",
+            EmergencyActionType::RoleEscalation => "RoleEscalation",
+        }
+    }
+}
+
 /// Status of an emergency action's ratification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RatificationStatus {
     Required,
     Ratified,
     Expired,
+}
+
+impl RatificationStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            RatificationStatus::Required => "Required",
+            RatificationStatus::Ratified => "Ratified",
+            RatificationStatus::Expired => "Expired",
+        }
+    }
 }
 
 /// An emergency action record.
@@ -106,7 +128,7 @@ pub fn create_emergency_action(
     }
     if !policy.allowed_actions.contains(&input.action_type) {
         return Err(ForumError::EmergencyInvalid {
-            reason: format!("{:?} not in allowed actions", input.action_type),
+            reason: format!("{} not in allowed actions", input.action_type.as_str()),
         });
     }
     if input.monetary_cap_cents > policy.max_monetary_cap_cents {
@@ -180,7 +202,10 @@ pub fn ratify_emergency(
 ) -> Result<()> {
     if action.ratification_status != RatificationStatus::Required {
         return Err(ForumError::EmergencyInvalid {
-            reason: format!("cannot ratify from status {:?}", action.ratification_status),
+            reason: format!(
+                "cannot ratify from status {}",
+                action.ratification_status.as_str()
+            ),
         });
     }
     if timestamp > action.ratification_deadline {
@@ -273,6 +298,14 @@ mod tests {
     fn make_action(action_type: EmergencyActionType) -> EmergencyAction {
         create_emergency_action(emergency_input(Uuid::from_u128(31), action_type), &policy())
             .expect("valid emergency")
+    }
+
+    fn production_source() -> &'static str {
+        let source = include_str!("emergency.rs");
+        let end = source
+            .find("#[cfg(test)]")
+            .expect("test module marker exists");
+        &source[..end]
     }
 
     #[test]
@@ -489,5 +522,54 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn emergency_errors_use_stable_labels() {
+        let p = EmergencyPolicy {
+            allowed_actions: vec![EmergencyActionType::SystemHalt],
+            ..policy()
+        };
+        let disallowed = create_emergency_action(
+            emergency_input(Uuid::from_u128(70), EmergencyActionType::RoleEscalation),
+            &p,
+        )
+        .expect_err("role escalation is not allowed by policy");
+        assert_eq!(
+            disallowed.to_string(),
+            "emergency action invalid: RoleEscalation not in allowed actions"
+        );
+
+        let mut action = make_action(EmergencyActionType::SystemHalt);
+        ratify_emergency(
+            &mut action,
+            Uuid::from_u128(71),
+            Timestamp::new(ts().physical_ms + 100, 0),
+        )
+        .expect("ratify");
+        let ratify_err = ratify_emergency(
+            &mut action,
+            Uuid::from_u128(72),
+            Timestamp::new(ts().physical_ms + 200, 0),
+        )
+        .expect_err("ratified action cannot be ratified again");
+        assert_eq!(
+            ratify_err.to_string(),
+            "emergency action invalid: cannot ratify from status Ratified"
+        );
+    }
+
+    #[test]
+    fn emergency_errors_do_not_depend_on_debug_formatting() {
+        let production = production_source();
+        for forbidden in [
+            "format!(\"{:?} not in allowed actions\"",
+            "format!(\"cannot ratify from status {:?}\"",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "emergency errors must use explicit stable labels: {forbidden}"
+            );
+        }
     }
 }

@@ -81,7 +81,10 @@ pub fn adjudicate(
             Ok(())
         }
         _ => Err(ForumError::ChallengeError {
-            reason: format!("cannot adjudicate from status {:?}", challenge.status),
+            reason: format!(
+                "cannot adjudicate from status {}",
+                challenge.status.as_str()
+            ),
         }),
     }
 }
@@ -105,7 +108,7 @@ pub fn withdraw(challenge: &mut ChallengeObject) -> Result<()> {
             Ok(())
         }
         _ => Err(ForumError::ChallengeError {
-            reason: format!("cannot withdraw from {:?}", challenge.status),
+            reason: format!("cannot withdraw from {}", challenge.status.as_str()),
         }),
     }
 }
@@ -199,6 +202,14 @@ mod tests {
             ..challenge_input(Uuid::from_u128(8))
         })
         .expect("valid challenge")
+    }
+
+    fn production_source() -> &'static str {
+        let source = include_str!("contestation.rs");
+        let end = source
+            .find("#[cfg(test)]")
+            .expect("test module marker exists");
+        &source[..end]
     }
 
     #[test]
@@ -315,5 +326,53 @@ mod tests {
         assert_eq!(c.status, ChallengeStatus::UnderReview);
         // Can't begin review again
         assert!(begin_review(&mut c).is_err());
+    }
+
+    #[test]
+    fn terminal_challenge_errors_use_stable_status_labels() {
+        let mut adjudicated = make_challenge(ChallengeGround::QuorumViolation);
+        adjudicate(
+            &mut adjudicated,
+            ChallengeVerdict::Overrule,
+            Timestamp::new(2000, 0),
+        )
+        .expect("overrule");
+        let adjudicate_err = adjudicate(
+            &mut adjudicated,
+            ChallengeVerdict::Sustain,
+            Timestamp::new(3000, 0),
+        )
+        .expect_err("terminal challenge cannot be adjudicated again");
+        assert_eq!(
+            adjudicate_err.to_string(),
+            "challenge error: cannot adjudicate from status Overruled"
+        );
+
+        let mut sustained = make_challenge(ChallengeGround::QuorumViolation);
+        adjudicate(
+            &mut sustained,
+            ChallengeVerdict::Sustain,
+            Timestamp::new(2000, 0),
+        )
+        .expect("sustain");
+        let withdraw_err = withdraw(&mut sustained).expect_err("sustained cannot withdraw");
+        assert_eq!(
+            withdraw_err.to_string(),
+            "challenge error: cannot withdraw from Sustained"
+        );
+    }
+
+    #[test]
+    fn contestation_errors_do_not_depend_on_debug_formatting() {
+        let production = production_source();
+        for forbidden in [
+            "format!(\"cannot adjudicate from status {:?}\"",
+            "format!(\"cannot withdraw from {:?}\"",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "challenge lifecycle errors must use explicit stable labels: {forbidden}"
+            );
+        }
     }
 }

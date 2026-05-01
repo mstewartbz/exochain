@@ -34,6 +34,18 @@ pub enum DocumentTier {
     Policies = 4,
 }
 
+impl DocumentTier {
+    fn as_str(self) -> &'static str {
+        match self {
+            DocumentTier::Articles => "Articles",
+            DocumentTier::Bylaws => "Bylaws",
+            DocumentTier::Resolutions => "Resolutions",
+            DocumentTier::Charters => "Charters",
+            DocumentTier::Policies => "Policies",
+        }
+    }
+}
+
 /// Status of a constitutional article.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArticleStatus {
@@ -340,8 +352,9 @@ pub fn dry_run_amendment(corpus: &ConstitutionCorpus, proposed: &Article) -> Res
         // Same tier, same ID => direct conflict
         if existing.id == proposed.id {
             conflicts.push(format!(
-                "Article '{}' already exists at tier {:?}",
-                existing.id, existing.tier
+                "Article '{}' already exists at tier {}",
+                existing.id,
+                existing.tier.as_str()
             ));
         }
     }
@@ -681,6 +694,17 @@ mod tests {
             .expect("valid corpus");
         let conflicts = dry_run_amendment(&c, &article("a1", DocumentTier::Articles)).expect("ok");
         assert_eq!(conflicts.len(), 1);
+    }
+
+    #[test]
+    fn dry_run_conflicts_use_stable_tier_labels() {
+        let c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
+            .expect("valid corpus");
+        let conflicts = dry_run_amendment(&c, &article("a1", DocumentTier::Articles)).expect("ok");
+        assert_eq!(
+            conflicts,
+            vec!["Article 'a1' already exists at tier Articles"]
+        );
     }
 
     #[test]
@@ -1034,6 +1058,10 @@ mod tests {
             .expect("production section");
         assert!(!production.contains("blake3::Hasher"));
         assert!(!production.contains("hasher.update"));
+        assert!(
+            !production.contains("already exists at tier {:?}"),
+            "constitution conflict labels must not depend on DocumentTier Debug output"
+        );
     }
 
     #[test]
