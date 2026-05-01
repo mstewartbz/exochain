@@ -17,6 +17,7 @@ use crate::mcp::{
 };
 
 const MCP_CGR_PROOF_INITIATIVE: &str = "Initiatives/fix-mcp-cgr-proof-verification-stub.md";
+const MAX_MERKLE_PROOF_LEAVES: usize = 1024;
 
 fn tool_error(message: impl Into<String>) -> ToolResult {
     let message = message.into();
@@ -497,6 +498,7 @@ pub fn generate_merkle_proof_definition() -> ToolDefinition {
                 "leaves": {
                     "type": "array",
                     "items": { "type": "string" },
+                    "maxItems": MAX_MERKLE_PROOF_LEAVES,
                     "description": "Array of 64-character hex-encoded Hash256 event hashes."
                 },
                 "target_index": {
@@ -541,6 +543,17 @@ pub fn execute_generate_merkle_proof(params: &Value, _context: &NodeContext) -> 
 
     if leaves_val.is_empty() {
         return ToolResult::error(json!({"error": "leaves array must not be empty"}).to_string());
+    }
+
+    if leaves_val.len() > MAX_MERKLE_PROOF_LEAVES {
+        return ToolResult::error(
+            json!({
+                "error": format!(
+                    "leaves may contain at most {MAX_MERKLE_PROOF_LEAVES} hashes"
+                )
+            })
+            .to_string(),
+        );
     }
 
     if target_index >= leaves_val.len() {
@@ -931,6 +944,16 @@ mod tests {
     }
 
     #[test]
+    fn generate_merkle_proof_definition_bounds_leaves() {
+        let def = generate_merkle_proof_definition();
+
+        assert_eq!(
+            def.input_schema["properties"]["leaves"]["maxItems"],
+            MAX_MERKLE_PROOF_LEAVES
+        );
+    }
+
+    #[test]
     fn execute_generate_merkle_proof_success() {
         let leaves = [
             Hash256::digest(b"event-0").to_string(),
@@ -1022,6 +1045,30 @@ mod tests {
         assert!(
             result.content[0].text().contains("Hash256::ZERO"),
             "zero leaf hashes are placeholders and must be refused"
+        );
+    }
+
+    #[test]
+    fn execute_generate_merkle_proof_rejects_excessive_leaf_count() {
+        let leaves: Vec<Value> = (0..=MAX_MERKLE_PROOF_LEAVES)
+            .map(|idx| {
+                Value::String(Hash256::digest(format!("event-{idx}").as_bytes()).to_string())
+            })
+            .collect();
+        let result = execute_generate_merkle_proof(
+            &json!({
+                "leaves": leaves,
+                "target_index": 0,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        assert!(
+            result.content[0].text().contains(&format!(
+                "leaves may contain at most {MAX_MERKLE_PROOF_LEAVES} hashes"
+            )),
+            "oversized leaf arrays must be rejected before proof construction"
         );
     }
 
