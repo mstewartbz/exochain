@@ -37,6 +37,13 @@ type PassportError = (StatusCode, String);
 type PassportResult<T> = Result<T, PassportError>;
 const PASSPORT_CONCURRENCY_LIMIT: usize = 32;
 
+fn parse_passport_did(did: &str) -> PassportResult<exo_core::types::Did> {
+    exo_core::types::Did::new(did).map_err(|error| {
+        tracing::warn!(%error, "invalid passport DID path parameter");
+        (StatusCode::BAD_REQUEST, "Invalid DID".to_string())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -251,8 +258,7 @@ async fn handle_passport(
     State(state): State<Arc<PassportApiState>>,
     Path(did): Path<String>,
 ) -> Result<Json<AgentPassport>, (StatusCode, String)> {
-    let did_obj = exo_core::types::Did::new(&did)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
+    let did_obj = parse_passport_did(&did)?;
     let did_for_reactor = did.clone();
     let did_obj_for_reactor = did_obj.clone();
     let (known, is_validator) = with_reactor_state_blocking(state.clone(), move |s| {
@@ -313,8 +319,7 @@ async fn handle_delegations(
     Path(did): Path<String>,
 ) -> Result<Json<DelegationListResponse>, (StatusCode, String)> {
     // Validate DID format.
-    let _did_obj = exo_core::types::Did::new(&did)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
+    let _did_obj = parse_passport_did(&did)?;
 
     let _ = &state; // used for future delegation registry queries
 
@@ -331,8 +336,7 @@ async fn handle_consent(
     State(state): State<Arc<PassportApiState>>,
     Path(did): Path<String>,
 ) -> Result<Json<ConsentListResponse>, (StatusCode, String)> {
-    let _did_obj = exo_core::types::Did::new(&did)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
+    let _did_obj = parse_passport_did(&did)?;
 
     let _ = &state;
 
@@ -349,8 +353,7 @@ async fn handle_standing(
     State(state): State<Arc<PassportApiState>>,
     Path(did): Path<String>,
 ) -> Result<Json<StandingResponse>, (StatusCode, String)> {
-    let did_obj = exo_core::types::Did::new(&did)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
+    let did_obj = parse_passport_did(&did)?;
 
     let did_for_reactor = did.clone();
     let did_obj_for_reactor = did_obj.clone();
@@ -724,21 +727,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn passport_rejects_invalid_did_format() {
+    async fn passport_invalid_did_errors_are_redacted() {
         let state = test_passport_state();
         let app = passport_test_routes(state);
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/agents/not-a-did/passport")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        for route in [
+            "/api/v1/agents/not-a-did/passport",
+            "/api/v1/agents/not-a-did/delegations",
+            "/api/v1/agents/not-a-did/consent",
+            "/api/v1/agents/not-a-did/standing",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
 
-        assert_eq!(resp.status(), 400);
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(body, "Invalid DID");
+        }
     }
 
     #[tokio::test]
