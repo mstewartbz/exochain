@@ -105,6 +105,8 @@ pub type SharedSentinelState = Arc<Mutex<Vec<SentinelStatus>>>;
 pub type AlertSender = mpsc::Sender<SentinelAlert>;
 pub type AlertReceiver = mpsc::Receiver<SentinelAlert>;
 
+type PreviousRound = Option<u64>;
+
 pub(crate) fn now_ms() -> u64 {
     static SENTINEL_CLOCK: OnceLock<Mutex<HybridClock>> = OnceLock::new();
     let clock = SENTINEL_CLOCK.get_or_init(|| Mutex::new(HybridClock::new()));
@@ -122,7 +124,7 @@ pub(crate) fn now_ms() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Check consensus liveness — round should be advancing.
-fn check_liveness(reactor: &SharedReactorState, prev_round: &mut u64) -> SentinelStatus {
+fn check_liveness(reactor: &SharedReactorState, prev_round: &mut PreviousRound) -> SentinelStatus {
     let current_round = match reactor.lock() {
         Ok(s) => s.consensus.current_round,
         Err(_) => {
@@ -136,13 +138,28 @@ fn check_liveness(reactor: &SharedReactorState, prev_round: &mut u64) -> Sentine
         }
     };
 
-    let healthy = current_round >= *prev_round;
-    let message = if healthy {
-        format!("Consensus round {current_round} — advancing normally")
-    } else {
-        format!("Consensus round {current_round} < previous {prev_round} — possible regression")
+    let previous_round = *prev_round;
+    let (healthy, message) = match previous_round {
+        None => (
+            true,
+            format!("Consensus round {current_round} — baseline recorded"),
+        ),
+        Some(previous) if current_round > previous => (
+            true,
+            format!("Consensus round {previous} -> {current_round} — advancing normally"),
+        ),
+        Some(previous) if current_round == previous => (
+            false,
+            format!("Consensus round {current_round} == previous {previous} — stalled"),
+        ),
+        Some(previous) => (
+            false,
+            format!("Consensus round {current_round} < previous {previous} — possible regression"),
+        ),
     };
-    *prev_round = current_round;
+    if healthy {
+        *prev_round = Some(current_round);
+    }
 
     SentinelStatus {
         check: SentinelCheck::Liveness,
@@ -495,7 +512,7 @@ fn collect_sentinel_statuses(
     reactor: &SharedReactorState,
     store: &Arc<Mutex<SqliteDagStore>>,
     zerodentity: &SharedZerodentityStore,
-    prev_round: &mut u64,
+    prev_round: &mut PreviousRound,
 ) -> Vec<SentinelStatus> {
     vec![
         check_liveness(reactor, prev_round),
@@ -511,8 +528,8 @@ async fn collect_sentinel_statuses_blocking(
     reactor: SharedReactorState,
     store: Arc<Mutex<SqliteDagStore>>,
     zerodentity: SharedZerodentityStore,
-    prev_round: u64,
-) -> (Vec<SentinelStatus>, u64) {
+    prev_round: PreviousRound,
+) -> (Vec<SentinelStatus>, PreviousRound) {
     tokio::task::spawn_blocking(move || {
         let mut next_prev_round = prev_round;
         let statuses =
@@ -559,7 +576,7 @@ pub async fn run_sentinel_loop(
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut prev_round = 0u64;
+    let mut prev_round = None;
 
     loop {
         ticker.tick().await;
@@ -903,10 +920,47 @@ mod tests {
     #[test]
     fn liveness_check_healthy() {
         let reactor = test_reactor();
-        let mut prev = 0;
+        let mut prev = None;
         let status = check_liveness(&reactor, &mut prev);
         assert!(status.healthy);
         assert_eq!(status.check, SentinelCheck::Liveness);
+        assert_eq!(prev, Some(0));
+    }
+
+    #[test]
+    fn liveness_check_detects_stalled_round_after_baseline() {
+        let reactor = test_reactor();
+        let mut prev = None;
+
+        let baseline = check_liveness(&reactor, &mut prev);
+        assert!(baseline.healthy);
+
+        let stalled = check_liveness(&reactor, &mut prev);
+
+        assert!(!stalled.healthy);
+        assert_eq!(stalled.check, SentinelCheck::Liveness);
+        assert!(
+            stalled.message.contains("stalled"),
+            "stalled liveness message should explain equal rounds: {}",
+            stalled.message
+        );
+        assert_eq!(prev, Some(0));
+    }
+
+    #[test]
+    fn liveness_check_accepts_strictly_advanced_round() {
+        let reactor = test_reactor();
+        let mut prev = None;
+
+        let baseline = check_liveness(&reactor, &mut prev);
+        assert!(baseline.healthy);
+        reactor.lock().unwrap().consensus.current_round = 1;
+
+        let advanced = check_liveness(&reactor, &mut prev);
+
+        assert!(advanced.healthy);
+        assert_eq!(advanced.check, SentinelCheck::Liveness);
+        assert_eq!(prev, Some(1));
     }
 
     #[test]
