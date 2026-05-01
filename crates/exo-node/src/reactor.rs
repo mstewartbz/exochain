@@ -328,7 +328,14 @@ pub fn create_reactor_state(
         if let Ok(round) = st.load_consensus_round() {
             if round > 0 {
                 while consensus_state.current_round < round {
-                    consensus_state.advance_round();
+                    if let Err(err) = consensus_state.advance_round() {
+                        tracing::error!(
+                            err = %err,
+                            target_round = round,
+                            "Failed to restore consensus round"
+                        );
+                        break;
+                    }
                 }
                 tracing::info!(round, "Restored consensus round from store");
             }
@@ -460,7 +467,7 @@ pub async fn run_reactor(
                     Arc::clone(&state),
                     "reactor_round_tick",
                     |s| {
-                    s.consensus.advance_round();
+                        s.consensus.advance_round().map_err(|err| err.to_string())?;
                         Ok(s.consensus.current_round)
                     },
                 )
@@ -1416,7 +1423,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             assert_eq!(s.consensus.current_round, 0);
-            s.consensus.advance_round();
+            s.consensus.advance_round().expect("round advances");
             assert_eq!(s.consensus.current_round, 1);
         }
     }
@@ -1594,7 +1601,7 @@ mod tests {
         assert_eq!(consensus_state.committed.len(), 1);
 
         // Advance round and do another
-        consensus_state.advance_round();
+        consensus_state.advance_round().expect("round advances");
         let node2 = append(
             &mut dag,
             &[node.hash],
