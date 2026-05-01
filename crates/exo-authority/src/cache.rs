@@ -65,6 +65,11 @@ impl ChainCache {
 
     /// Insert a chain into the cache.
     pub fn insert(&mut self, from: &Did, to: &Did, chain: AuthorityChain, now: &Timestamp) {
+        if self.max_entries == 0 {
+            self.entries.clear();
+            return;
+        }
+
         // Evict if at capacity
         while self.entries.len() >= self.max_entries {
             self.evict_oldest();
@@ -283,5 +288,20 @@ mod tests {
         cache.insert(&did("e"), &did("f"), make_chain("e", "f"), &ts(4000));
         assert!(cache.get(&did("a"), &did("b"), &ts(5000)).is_some());
         assert!(cache.get(&did("c"), &did("d"), &ts(5000)).is_none());
+    }
+
+    #[test]
+    fn zero_capacity_insert_returns_without_caching() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cache = ChainCache::with_capacity(0);
+            cache.insert(&did("a"), &did("b"), make_chain("a", "b"), &ts(1000));
+            tx.send(cache.len()).unwrap();
+        });
+
+        let len = rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect("zero-capacity insert must return instead of looping forever");
+        assert_eq!(len, 0);
     }
 }
