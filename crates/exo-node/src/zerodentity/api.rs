@@ -554,7 +554,6 @@ pub async fn get_score(
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/0dentity/:did/claims` — list identity claims for a subject.
-#[allow(clippy::as_conversions)]
 pub async fn list_claims(
     State(state): State<ApiState>,
     Path(did_str): Path<String>,
@@ -1755,6 +1754,10 @@ mod tests {
         assert!(
             !list_claims_section.contains("as usize"),
             "claims pagination must use checked conversion, never truncating casts"
+        );
+        assert!(
+            !list_claims_section.contains("clippy::as_conversions"),
+            "claims pagination must not suppress checked conversion lints"
         );
     }
 
