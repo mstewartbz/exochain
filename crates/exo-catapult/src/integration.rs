@@ -85,9 +85,13 @@ pub fn classify_decision(slot: &OdaSlot) -> DecisionClass {
 /// Format: `catapult-<newco_short_id>-<slot_name>`
 #[must_use]
 pub fn commandbase_profile_name(newco_id: &Uuid, slot: &OdaSlot) -> String {
-    let short_id = &newco_id.to_string()[..8];
+    let short_id = uuid_short_id(newco_id);
     let slot_name = format!("{slot:?}").to_ascii_lowercase();
     format!("catapult-{short_id}-{slot_name}")
+}
+
+fn uuid_short_id(id: &Uuid) -> String {
+    id.to_string().chars().take(8).collect()
 }
 
 /// Summary of a newco's operational health.
@@ -228,7 +232,19 @@ mod tests {
         let id = Uuid::nil();
         let name = commandbase_profile_name(&id, &OdaSlot::VentureCommander);
         assert!(name.starts_with("catapult-"));
+        assert!(name.starts_with("catapult-00000000-"));
         assert!(name.contains("venturecommander"));
+    }
+
+    #[test]
+    fn commandbase_profile_short_id_avoids_byte_slicing() {
+        let source = include_str!("integration.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        assert!(
+            !production.contains("to_string()[..8]"),
+            "CommandBase profile short IDs must not byte-slice UUID strings"
+        );
     }
 
     #[test]
