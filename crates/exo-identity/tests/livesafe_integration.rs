@@ -183,19 +183,27 @@ fn test_pace_resolve_operator() {
     let config = livesafe_pace_config();
 
     assert_eq!(
-        resolve_operator(&config, &PaceState::Normal).as_str(),
+        resolve_operator(&config, &PaceState::Normal)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:primary"
     );
     assert_eq!(
-        resolve_operator(&config, &PaceState::AlternateActive).as_str(),
+        resolve_operator(&config, &PaceState::AlternateActive)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:alt1"
     );
     assert_eq!(
-        resolve_operator(&config, &PaceState::ContingencyActive).as_str(),
+        resolve_operator(&config, &PaceState::ContingencyActive)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:cont1"
     );
     assert_eq!(
-        resolve_operator(&config, &PaceState::EmergencyActive).as_str(),
+        resolve_operator(&config, &PaceState::EmergencyActive)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:emerg1"
     );
 }
@@ -212,14 +220,18 @@ fn test_pace_escalate_deescalate() {
     // Escalate to Alternate.
     escalate_ok(&mut state);
     assert_eq!(
-        resolve_operator(&config, &state).as_str(),
+        resolve_operator(&config, &state)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:alt1"
     );
 
     // Escalate further to Contingency.
     escalate_ok(&mut state);
     assert_eq!(
-        resolve_operator(&config, &state).as_str(),
+        resolve_operator(&config, &state)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:cont1"
     );
 
@@ -227,7 +239,9 @@ fn test_pace_escalate_deescalate() {
     deescalate_ok(&mut state);
     assert_eq!(state, PaceState::AlternateActive);
     assert_eq!(
-        resolve_operator(&config, &state).as_str(),
+        resolve_operator(&config, &state)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:alt1"
     );
 
@@ -235,7 +249,9 @@ fn test_pace_escalate_deescalate() {
     deescalate_ok(&mut state);
     assert_eq!(state, PaceState::Normal);
     assert_eq!(
-        resolve_operator(&config, &state).as_str(),
+        resolve_operator(&config, &state)
+            .expect("valid PACE config")
+            .as_str(),
         "did:exo:livesafe:primary"
     );
 }
@@ -325,23 +341,39 @@ fn test_pace_operator_continuity() {
     let config = livesafe_pace_config();
     let mut state = PaceState::Normal;
 
-    let primary = resolve_operator(&config, &state).clone();
+    let primary = resolve_operator(&config, &state)
+        .expect("valid PACE config")
+        .clone();
     assert_eq!(primary.as_str(), "did:exo:livesafe:primary");
 
     // Repeated resolution at same state must be stable.
-    assert_eq!(resolve_operator(&config, &state), &primary);
-    assert_eq!(resolve_operator(&config, &state), &primary);
+    assert_eq!(
+        resolve_operator(&config, &state).expect("valid PACE config"),
+        &primary
+    );
+    assert_eq!(
+        resolve_operator(&config, &state).expect("valid PACE config"),
+        &primary
+    );
 
     // After escalation, operator must change.
     escalate_ok(&mut state);
-    let alternate = resolve_operator(&config, &state).clone();
+    let alternate = resolve_operator(&config, &state)
+        .expect("valid PACE config")
+        .clone();
     assert_ne!(alternate, primary, "alternate must differ from primary");
     assert_eq!(alternate.as_str(), "did:exo:livesafe:alt1");
 
     // Operator at this new level is stable.
-    assert_eq!(resolve_operator(&config, &state), &alternate);
+    assert_eq!(
+        resolve_operator(&config, &state).expect("valid PACE config"),
+        &alternate
+    );
 
     // After de-escalation back to Normal, primary is restored.
     deescalate_ok(&mut state);
-    assert_eq!(resolve_operator(&config, &state), &primary);
+    assert_eq!(
+        resolve_operator(&config, &state).expect("valid PACE config"),
+        &primary
+    );
 }

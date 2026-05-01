@@ -145,13 +145,23 @@ pub enum PaceState {
 }
 
 /// Resolve the currently active operator DID for the given PACE state.
-#[must_use]
-pub fn resolve_operator<'a>(config: &'a PaceConfig, state: &PaceState) -> &'a Did {
+pub fn resolve_operator<'a>(
+    config: &'a PaceConfig,
+    state: &PaceState,
+) -> Result<&'a Did, IdentityError> {
     match state {
-        PaceState::Normal => &config.primary,
-        PaceState::AlternateActive => &config.alternates[0],
-        PaceState::ContingencyActive => &config.contingency[0],
-        PaceState::EmergencyActive => &config.emergency[0],
+        PaceState::Normal => Ok(&config.primary),
+        PaceState::AlternateActive => config
+            .alternates
+            .first()
+            .ok_or_else(|| IdentityError::InvalidPaceConfig("alternates must not be empty".into())),
+        PaceState::ContingencyActive => config.contingency.first().ok_or_else(|| {
+            IdentityError::InvalidPaceConfig("contingency must not be empty".into())
+        }),
+        PaceState::EmergencyActive => config
+            .emergency
+            .first()
+            .ok_or_else(|| IdentityError::InvalidPaceConfig("emergency must not be empty".into())),
     }
 }
 
@@ -320,7 +330,7 @@ mod tests {
     fn resolve_operator_normal() {
         let config = make_config();
         assert_eq!(
-            resolve_operator(&config, &PaceState::Normal),
+            resolve_operator(&config, &PaceState::Normal).expect("valid PACE config"),
             &config.primary
         );
     }
@@ -329,7 +339,7 @@ mod tests {
     fn resolve_operator_alternate() {
         let config = make_config();
         assert_eq!(
-            resolve_operator(&config, &PaceState::AlternateActive),
+            resolve_operator(&config, &PaceState::AlternateActive).expect("valid PACE config"),
             &config.alternates[0]
         );
     }
@@ -338,7 +348,7 @@ mod tests {
     fn resolve_operator_contingency() {
         let config = make_config();
         assert_eq!(
-            resolve_operator(&config, &PaceState::ContingencyActive),
+            resolve_operator(&config, &PaceState::ContingencyActive).expect("valid PACE config"),
             &config.contingency[0]
         );
     }
@@ -347,9 +357,27 @@ mod tests {
     fn resolve_operator_emergency() {
         let config = make_config();
         assert_eq!(
-            resolve_operator(&config, &PaceState::EmergencyActive),
+            resolve_operator(&config, &PaceState::EmergencyActive).expect("valid PACE config"),
             &config.emergency[0]
         );
+    }
+
+    #[test]
+    fn resolve_operator_rejects_empty_pace_level_without_panicking() {
+        let mut config = make_config();
+        config.alternates.clear();
+
+        let result =
+            std::panic::catch_unwind(|| resolve_operator(&config, &PaceState::AlternateActive));
+
+        assert!(
+            result.is_ok(),
+            "operator resolution must return a typed error for invalid PACE configs instead of panicking"
+        );
+        assert!(matches!(
+            result.expect("operator resolution must not panic"),
+            Err(IdentityError::InvalidPaceConfig(reason)) if reason.contains("alternates")
+        ));
     }
 
     #[test]
@@ -397,14 +425,31 @@ mod tests {
         let mut state = PaceState::Normal;
 
         assert_eq!(
-            resolve_operator(&config, &state).as_str(),
+            resolve_operator(&config, &state)
+                .expect("valid PACE config")
+                .as_str(),
             "did:exo:primary"
         );
         escalate(&mut state).unwrap();
-        assert_eq!(resolve_operator(&config, &state).as_str(), "did:exo:alt1");
+        assert_eq!(
+            resolve_operator(&config, &state)
+                .expect("valid PACE config")
+                .as_str(),
+            "did:exo:alt1"
+        );
         escalate(&mut state).unwrap();
-        assert_eq!(resolve_operator(&config, &state).as_str(), "did:exo:cont1");
+        assert_eq!(
+            resolve_operator(&config, &state)
+                .expect("valid PACE config")
+                .as_str(),
+            "did:exo:cont1"
+        );
         escalate(&mut state).unwrap();
-        assert_eq!(resolve_operator(&config, &state).as_str(), "did:exo:emerg1");
+        assert_eq!(
+            resolve_operator(&config, &state)
+                .expect("valid PACE config")
+                .as_str(),
+            "did:exo:emerg1"
+        );
     }
 }

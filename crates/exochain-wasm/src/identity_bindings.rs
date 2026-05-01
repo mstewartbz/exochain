@@ -86,7 +86,8 @@ pub fn wasm_shamir_reconstruct(
 pub fn wasm_pace_resolve(config_json: &str, state_json: &str) -> Result<JsValue, JsValue> {
     let config: exo_identity::pace::PaceConfig = from_json_str(config_json)?;
     let state: exo_identity::pace::PaceState = from_json_str(state_json)?;
-    let operator = exo_identity::pace::resolve_operator(&config, &state);
+    let operator = exo_identity::pace::resolve_operator(&config, &state)
+        .map_err(|e| JsValue::from_str(&format!("PACE resolve error: {e}")))?;
     to_js_value(&serde_json::json!({
         "operator": operator.as_str(),
         "state": state,
