@@ -59,6 +59,18 @@ fn next_snapshot_from_height(to_height: u64) -> Option<u64> {
     to_height.checked_add(1)
 }
 
+fn snapshot_node_height(from_height: u64, index: usize) -> anyhow::Result<u64> {
+    let offset = u64::try_from(index)
+        .map_err(|_| anyhow::anyhow!("snapshot node index does not fit in u64"))?;
+    let height = from_height.checked_add(offset).ok_or_else(|| {
+        anyhow::anyhow!("snapshot node height overflow: from_height {from_height} + index {index}")
+    })?;
+    i64::try_from(height).map_err(|_| {
+        anyhow::anyhow!("snapshot node height {height} exceeds SQLite INTEGER maximum")
+    })?;
+    Ok(height)
+}
+
 // ---------------------------------------------------------------------------
 // Sync configuration
 // ---------------------------------------------------------------------------
@@ -348,7 +360,13 @@ impl SyncEngine {
             Arc::clone(&self.store),
             "handle_snapshot_chunk",
             move |store| {
+                let mut nodes_with_heights = Vec::with_capacity(nodes.len());
                 for (i, node) in nodes.into_iter().enumerate() {
+                    let height = snapshot_node_height(from_height, i)?;
+                    nodes_with_heights.push((node, height));
+                }
+
+                for (node, height) in nodes_with_heights {
                     let hash = node.hash;
 
                     if let Err(e) = store.put_sync(node) {
@@ -356,7 +374,6 @@ impl SyncEngine {
                         continue;
                     }
 
-                    let height = from_height.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
                     if let Err(e) = store.mark_committed_sync(&hash, height) {
                         tracing::warn!(err = %e, %hash, height, "Failed to mark committed");
                     }
@@ -905,6 +922,83 @@ mod tests {
             .iter()
             .any(|e| matches!(e, SyncEvent::Complete { .. }));
         assert!(complete, "Should emit SyncEvent::Complete");
+    }
+
+    #[tokio::test]
+    async fn snapshot_chunk_with_overflowing_node_height_is_rejected_without_partial_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteDagStore::open(dir.path()).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel(256);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut engine = SyncEngine::new(
+            SyncConfig {
+                node_did: test_did(),
+                chunk_size: 100,
+                max_sync_nodes: 200,
+            },
+            Arc::clone(&store),
+            net_handle,
+            event_tx,
+        );
+
+        let sign_fn = make_sign_fn();
+        let did = test_did();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+
+        let node1 = append(&mut dag, &[], b"overflow-1", &did, &*sign_fn, &mut clock).unwrap();
+        let node2 = append(
+            &mut dag,
+            &[node1.hash],
+            b"overflow-2",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        let node3 = append(
+            &mut dag,
+            &[node2.hash],
+            b"overflow-3",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+
+        engine.syncing = true;
+        let chunk = StateSnapshotChunkMsg {
+            sender: Did::new("did:exo:sender").unwrap(),
+            from_height: u64::MAX - 1,
+            nodes: vec![node1.clone(), node2.clone(), node3.clone()],
+            to_height: u64::MAX,
+            has_more: false,
+        };
+
+        engine.handle_snapshot_chunk(chunk).await;
+
+        let st = store.lock().unwrap();
+        assert!(
+            !st.contains_sync(&node1.hash).unwrap(),
+            "overflowing snapshot chunks must be rejected before writing node 1"
+        );
+        assert!(
+            !st.contains_sync(&node2.hash).unwrap(),
+            "overflowing snapshot chunks must be rejected before writing node 2"
+        );
+        assert!(
+            !st.contains_sync(&node3.hash).unwrap(),
+            "overflowing snapshot chunks must be rejected before writing node 3"
+        );
+        assert_eq!(st.committed_height_value().unwrap(), 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "rejected chunks must not emit progress or completion events"
+        );
     }
 
     #[tokio::test]
