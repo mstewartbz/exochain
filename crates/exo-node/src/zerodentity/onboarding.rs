@@ -201,6 +201,15 @@ fn json_error(
     (status, Json(serde_json::json!({ "error": error.into() })))
 }
 
+fn store_error_response(operation: &'static str, error: impl std::fmt::Display) -> OnboardingError {
+    tracing::error!(
+        operation,
+        err = %error,
+        "0dentity onboarding store operation failed"
+    );
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, "Store operation failed")
+}
+
 async fn now_ms_blocking(state: OnboardingState) -> OnboardingResult<u64> {
     tokio::task::spawn_blocking(move || state.now_ms())
         .await
@@ -463,12 +472,7 @@ pub async fn submit_claim(
         with_store_blocking(state.clone(), move |store| {
             if store
                 .get_claims(&subject_did_for_store)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })?
+                .map_err(|e| store_error_response("submit_claim_get_claims", e))?
                 .iter()
                 .any(|(existing_id, _)| existing_id == &claim_id_for_store)
             {
@@ -479,12 +483,7 @@ pub async fn submit_claim(
             }
             store
                 .insert_claim(&claim_id_for_store, &claim_for_store)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })
+                .map_err(|e| store_error_response("submit_claim_insert_claim", e))
         })
         .await?;
     }
@@ -506,12 +505,9 @@ pub async fn submit_claim(
         let cid = challenge.challenge_id.clone();
         {
             with_store_blocking(state.clone(), move |store| {
-                store.insert_otp_challenge(&challenge).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })
+                store
+                    .insert_otp_challenge(&challenge)
+                    .map_err(|e| store_error_response("submit_claim_insert_otp_challenge", e))
             })
             .await?;
         }
@@ -541,12 +537,7 @@ pub async fn verify_otp(
     let response = with_store_blocking(state.clone(), move |store| {
         let mut challenge = store
             .get_otp_challenge(&req.challenge_id)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                )
-            })?
+            .map_err(|e| store_error_response("verify_otp_get_challenge", e))?
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
@@ -575,18 +566,12 @@ pub async fn verify_otp(
                     last_active_ms: now,
                     revoked: false,
                 };
-                store.update_otp_challenge(&challenge).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })?;
-                store.insert_session(&session).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })?;
+                store
+                    .update_otp_challenge(&challenge)
+                    .map_err(|e| store_error_response("verify_otp_update_success", e))?;
+                store
+                    .insert_session(&session)
+                    .map_err(|e| store_error_response("verify_otp_insert_session", e))?;
                 Ok(VerifyOtpResponse {
                     verified: true,
                     session_token: Some(session_token),
@@ -599,12 +584,9 @@ pub async fn verify_otp(
                 "Challenge has already been verified",
             )),
             OtpResult::WrongCode { attempts_remaining } => {
-                store.update_otp_challenge(&challenge).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })?;
+                store
+                    .update_otp_challenge(&challenge)
+                    .map_err(|e| store_error_response("verify_otp_update_wrong_code", e))?;
                 Ok(VerifyOtpResponse {
                     verified: false,
                     session_token: None,
@@ -613,21 +595,15 @@ pub async fn verify_otp(
                 })
             }
             OtpResult::Expired => {
-                store.update_otp_challenge(&challenge).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })?;
+                store
+                    .update_otp_challenge(&challenge)
+                    .map_err(|e| store_error_response("verify_otp_update_expired", e))?;
                 Err(json_error(StatusCode::GONE, "Challenge has expired"))
             }
             OtpResult::Locked { .. } => {
-                store.update_otp_challenge(&challenge).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                    )
-                })?;
+                store
+                    .update_otp_challenge(&challenge)
+                    .map_err(|e| store_error_response("verify_otp_update_locked", e))?;
                 Err(json_error(
                     StatusCode::TOO_MANY_REQUESTS,
                     "Too many failed attempts — locked",
@@ -653,12 +629,7 @@ pub async fn resend_otp(
     let response = with_store_blocking(state, move |store| {
         let mut challenge = store
             .get_otp_challenge(&req.challenge_id)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("Store error: {e}")})),
-                )
-            })?
+            .map_err(|e| store_error_response("resend_otp_get_challenge", e))?
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
@@ -690,18 +661,12 @@ pub async fn resend_otp(
         let ttl = new_challenge.ttl_ms;
         let new_id = new_challenge.challenge_id.clone();
         challenge.state = OtpState::Expired;
-        store.update_otp_challenge(&challenge).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Store error: {e}")})),
-            )
-        })?;
-        store.insert_otp_challenge(&new_challenge).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Store error: {e}")})),
-            )
-        })?;
+        store
+            .update_otp_challenge(&challenge)
+            .map_err(|e| store_error_response("resend_otp_expire_original", e))?;
+        store
+            .insert_otp_challenge(&new_challenge)
+            .map_err(|e| store_error_response("resend_otp_insert_replacement", e))?;
 
         Ok(ResendOtpResponse {
             challenge_id: new_id,
@@ -857,6 +822,28 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_store_errors_are_redacted_in_http_responses() {
+        let source = include_str!("onboarding.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("fn store_error_response"),
+            "onboarding store failures must use a central redaction helper"
+        );
+        assert!(
+            !production.contains("Store error: {e}"),
+            "internal store error details must not be reflected to HTTP clients"
+        );
+        assert!(
+            !production.contains("format!(\"Store error"),
+            "store error formatting must not be embedded in HTTP responses"
+        );
+    }
+
+    #[test]
     fn resend_otp_does_not_generate_runtime_rng_or_global_clock() {
         let source = include_str!("onboarding.rs");
         let resend = source
@@ -919,8 +906,8 @@ mod tests {
             "OTP challenge persistence failures must not be swallowed"
         );
         assert!(
-            submit_claim.contains("insert_otp_challenge(&challenge).map_err"),
-            "OTP challenge persistence failures must be returned as closed errors"
+            submit_claim.contains("store_error_response(\"submit_claim_insert_otp_challenge\""),
+            "OTP challenge persistence failures must be returned as redacted closed errors"
         );
     }
 
