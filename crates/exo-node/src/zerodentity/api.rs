@@ -76,6 +76,19 @@ pub struct ScoreQuery {
 pub struct HistoryQuery {
     pub from_ms: Option<u64>,
     pub to_ms: Option<u64>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+const DEFAULT_PAGE_LIMIT: u64 = 50;
+const MAX_PAGE_LIMIT: u64 = 100;
+
+#[derive(Debug, Clone, Copy)]
+struct PageBounds {
+    limit: usize,
+    offset: usize,
+    limit_u64: u64,
+    offset_u64: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +150,9 @@ pub struct HistorySnapshot {
 #[derive(Debug, Serialize)]
 pub struct HistoryResponse {
     pub snapshots: Vec<HistorySnapshot>,
+    pub total: usize,
+    pub limit: u64,
+    pub offset: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +353,28 @@ fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+fn parse_page_bounds(limit: Option<u64>, offset: Option<u64>) -> ApiResult<PageBounds> {
+    let limit_u64 = limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+    if limit_u64 == 0 || limit_u64 > MAX_PAGE_LIMIT {
+        return Err(bad_request(&format!(
+            "limit must be between 1 and {MAX_PAGE_LIMIT}"
+        )));
+    }
+
+    let offset_u64 = offset.unwrap_or(0);
+    let limit = usize::try_from(limit_u64)
+        .map_err(|_| bad_request("limit exceeds this platform's addressable range"))?;
+    let offset = usize::try_from(offset_u64)
+        .map_err(|_| bad_request("offset exceeds this platform's addressable range"))?;
+
+    Ok(PageBounds {
+        limit,
+        offset,
+        limit_u64,
+        offset_u64,
+    })
+}
+
 fn parse_hex_exact<const N: usize>(
     field: &str,
     value: &str,
@@ -409,6 +447,27 @@ fn axes_from_score(s: &ZerodentityScore) -> AxesResponse {
         cryptographic_strength: s.axes.cryptographic_strength,
         constitutional_standing: s.axes.constitutional_standing,
     }
+}
+
+fn claim_matches_filters(claim: &IdentityClaim, params: &ClaimsQuery) -> bool {
+    if let Some(ref status) = params.status {
+        if claim.status.to_string().to_lowercase() != status.to_lowercase() {
+            return false;
+        }
+    }
+
+    if let Some(ref claim_type) = params.claim_type {
+        if !claim
+            .claim_type
+            .to_string()
+            .to_lowercase()
+            .contains(&claim_type.to_lowercase())
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn score_as_of_ms(
@@ -503,6 +562,7 @@ pub async fn list_claims(
     headers: HeaderMap,
 ) -> Result<Json<ClaimsResponse>, (StatusCode, Json<serde_json::Value>)> {
     let did = parse_did(&did_str)?;
+    let page_bounds = parse_page_bounds(params.limit, params.offset)?;
 
     // Auth: session token required for claim listing
     let token = extract_session_token(&headers).ok_or_else(|| {
@@ -532,52 +592,32 @@ pub async fn list_claims(
 
         let all_claims = store.get_claims(&did).map_err(store_error)?;
 
-        // Filter by status
-        let filtered: Vec<(String, IdentityClaim)> = all_claims
+        let mut total = 0usize;
+        let mut page = Vec::new();
+        for (claim_id, claim) in all_claims
             .into_iter()
-            .filter(|(_, c)| {
-                if let Some(ref s) = params.status {
-                    return c.status.to_string().to_lowercase() == s.to_lowercase();
-                }
-                true
-            })
-            .filter(|(_, c)| {
-                if let Some(ref t) = params.claim_type {
-                    return c
-                        .claim_type
-                        .to_string()
-                        .to_lowercase()
-                        .contains(&t.to_lowercase());
-                }
-                true
-            })
-            .collect();
-
-        let total = filtered.len();
-        let offset = params.offset.unwrap_or(0) as usize;
-        let limit = params.limit.unwrap_or(50) as usize;
-
-        let page: Vec<ClaimItem> = filtered
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(cid, c)| ClaimItem {
-                claim_id: cid,
-                claim_type: c.claim_type.to_string(),
-                claim_hash: hex::encode(c.claim_hash.as_bytes()),
-                status: c.status.to_string(),
-                created_ms: c.created_ms,
-                verified_ms: c.verified_ms,
-                expires_ms: c.expires_ms,
-                dag_node_hash: hex::encode(c.dag_node_hash.as_bytes()),
-            })
-            .collect();
+            .filter(|(_, claim)| claim_matches_filters(claim, &params))
+        {
+            if total >= page_bounds.offset && page.len() < page_bounds.limit {
+                page.push(ClaimItem {
+                    claim_id,
+                    claim_type: claim.claim_type.to_string(),
+                    claim_hash: hex::encode(claim.claim_hash.as_bytes()),
+                    status: claim.status.to_string(),
+                    created_ms: claim.created_ms,
+                    verified_ms: claim.verified_ms,
+                    expires_ms: claim.expires_ms,
+                    dag_node_hash: hex::encode(claim.dag_node_hash.as_bytes()),
+                });
+            }
+            total = total.saturating_add(1);
+        }
 
         Ok(ClaimsResponse {
             claims: page,
             total,
-            limit: params.limit.unwrap_or(50),
-            offset: params.offset.unwrap_or(0),
+            limit: page_bounds.limit_u64,
+            offset: page_bounds.offset_u64,
         })
     })
     .await?;
@@ -596,14 +636,18 @@ pub async fn score_history(
     Query(params): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, Json<serde_json::Value>)> {
     let did = parse_did(&did_str)?;
+    let page_bounds = parse_page_bounds(params.limit, params.offset)?;
 
     let response = with_store_blocking(state, move |store| {
         let snapshots = store
             .get_score_history(&did, params.from_ms, params.to_ms)
             .map_err(store_error)?;
 
+        let total = snapshots.len();
         let items: Vec<HistorySnapshot> = snapshots
             .iter()
+            .skip(page_bounds.offset)
+            .take(page_bounds.limit)
             .map(|s| HistorySnapshot {
                 computed_ms: s.computed_ms,
                 composite: s.composite,
@@ -612,7 +656,12 @@ pub async fn score_history(
             })
             .collect();
 
-        Ok(HistoryResponse { snapshots: items })
+        Ok(HistoryResponse {
+            snapshots: items,
+            total,
+            limit: page_bounds.limit_u64,
+            offset: page_bounds.offset_u64,
+        })
     })
     .await?;
 
@@ -1114,6 +1163,57 @@ mod tests {
         }
     }
 
+    fn make_state_with_session_and_claims(
+        token: &str,
+        did_str: &str,
+        claim_count: usize,
+    ) -> ApiState {
+        let mut store = test_store();
+        let did = Did::new(did_str).unwrap();
+        let session = IdentitySession {
+            session_token: token.to_owned(),
+            subject_did: did.clone(),
+            public_key: vec![],
+            created_ms: 0,
+            last_active_ms: 0,
+            revoked: false,
+        };
+        store.insert_session(&session).unwrap();
+
+        for index in 0..claim_count {
+            let claim = IdentityClaim {
+                claim_hash: Hash256::digest(format!("email-claim-{index}").as_bytes()),
+                subject_did: did.clone(),
+                claim_type: ClaimType::Email,
+                status: ClaimStatus::Verified,
+                created_ms: 1000 + u64::try_from(index).unwrap(),
+                verified_ms: Some(2000 + u64::try_from(index).unwrap()),
+                expires_ms: None,
+                signature: Signature::Empty,
+                dag_node_hash: Hash256::digest(format!("dag-node-{index}").as_bytes()),
+            };
+            store
+                .insert_claim(&format!("claim-{index:03}"), &claim)
+                .unwrap();
+        }
+
+        ApiState {
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
+
+    fn make_state_with_score_history(did_str: &str, timestamps: &[u64]) -> ApiState {
+        let mut store = test_store();
+        let did = Did::new(did_str).unwrap();
+        for timestamp in timestamps {
+            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], *timestamp));
+        }
+
+        ApiState {
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
+
     fn make_state_with_signed_session_and_claim(
         token: &str,
         did_str: &str,
@@ -1399,6 +1499,52 @@ mod tests {
         assert_eq!(result["snapshots"].as_array().unwrap().len(), 0);
     }
 
+    #[tokio::test]
+    async fn score_history_applies_bounded_pagination() {
+        let state = make_state_with_score_history("did:exo:history", &[1000, 2000, 3000, 4000]);
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Ahistory/score/history?offset=1&limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let snapshots = result["snapshots"].as_array().unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0]["computed_ms"], 2000);
+        assert_eq!(snapshots[1]["computed_ms"], 3000);
+        assert_eq!(result["total"], 4);
+        assert_eq!(result["limit"], 2);
+        assert_eq!(result["offset"], 1);
+    }
+
+    #[tokio::test]
+    async fn score_history_rejects_limit_above_maximum() {
+        let state = make_state_with_score_history("did:exo:history", &[1000]);
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Ahistory/score/history?limit=101")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(result["error"].as_str().unwrap().contains("limit"));
+    }
+
     // --- create_peer_attestation ---
 
     #[tokio::test]
@@ -1574,6 +1720,42 @@ mod tests {
         // 1 claim total, offset=1 → empty page
         assert_eq!(result["claims"].as_array().unwrap().len(), 0);
         assert_eq!(result["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn list_claims_rejects_limit_above_maximum() {
+        let state = make_state_with_session_and_claims("tok-alice", "did:exo:alice", 2);
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice/claims?limit=101")
+                    .header("authorization", "Bearer tok-alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(result["error"].as_str().unwrap().contains("limit"));
+    }
+
+    #[test]
+    fn list_claims_pagination_avoids_lossy_usize_casts() {
+        let source = include_str!("api.rs");
+        let list_claims_section = source
+            .split("// GET /api/v1/0dentity/:did/claims\n// ---------------------------------------------------------------------------")
+            .nth(1)
+            .and_then(|section| section.split("// ---------------------------------------------------------------------------").next())
+            .unwrap();
+
+        assert!(
+            !list_claims_section.contains("as usize"),
+            "claims pagination must use checked conversion, never truncating casts"
+        );
     }
 
     // --- delete_identity (§11.4) ---
