@@ -88,8 +88,17 @@ pub fn write_admin_token_file(path: &Path, token: &str) -> std::io::Result<()> {
     }
 
     if let Err(error) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(error);
+        return match std::fs::remove_file(&tmp_path) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) if cleanup_error.kind() == ErrorKind::NotFound => Err(error),
+            Err(cleanup_error) => Err(std::io::Error::new(
+                cleanup_error.kind(),
+                format!(
+                    "failed to remove temporary admin token file {} after rename failure: {cleanup_error}; rename failure: {error}",
+                    tmp_path.display()
+                ),
+            )),
+        };
     }
 
     Ok(())
@@ -407,6 +416,10 @@ mod tests {
                 "pub fn generate_admin_token() -> Result<Zeroizing<String>, getrandom::Error>"
             ),
             "admin token generation must return a typed entropy error"
+        );
+        assert!(
+            !production.contains("let _ = std::fs::remove_file(&tmp_path)"),
+            "temporary admin token cleanup failures must propagate"
         );
     }
 
