@@ -11,6 +11,51 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
+const MAX_IDENTITY_EVIDENCE_TYPES: usize = 32;
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+const SIMULATED_DID_HASH_PREFIX_CHARS: usize = 16;
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn hash_prefix_chars(hash: &Hash256, chars: usize) -> String {
+    hash.to_string().chars().take(chars).collect()
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn parse_evidence_types(params: &Value) -> Result<Vec<String>, ToolResult> {
+    let Some(value) = params.get("evidence_types") else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = value.as_array() else {
+        return Err(ToolResult::error(
+            json!({"error": "evidence_types must be an array of strings"}).to_string(),
+        ));
+    };
+    if values.len() > MAX_IDENTITY_EVIDENCE_TYPES {
+        return Err(ToolResult::error(
+            json!({
+                "error": format!(
+                    "evidence_types length {} exceeds maximum {}",
+                    values.len(),
+                    MAX_IDENTITY_EVIDENCE_TYPES
+                )
+            })
+            .to_string(),
+        ));
+    }
+
+    let mut evidence_types = Vec::with_capacity(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        let Some(evidence_type) = value.as_str() else {
+            return Err(ToolResult::error(
+                json!({"error": format!("evidence_types[{idx}] must be a string")}).to_string(),
+            ));
+        };
+        evidence_types.push(evidence_type.to_owned());
+    }
+    Ok(evidence_types)
+}
+
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 fn identity_tool_refused(tool_name: &str, reason: &str) -> ToolResult {
     ToolResult::error(
@@ -76,7 +121,7 @@ pub fn execute_create_identity(params: &Value, _context: &NodeContext) -> ToolRe
 
         // Build a DID from the hash of the public key.
         let pk_hash = Hash256::digest(public_key.as_bytes());
-        let did_id = &pk_hash.to_string()[..16];
+        let did_id = hash_prefix_chars(&pk_hash, SIMULATED_DID_HASH_PREFIX_CHARS);
         let did_string = format!("did:exo:{did_id}");
 
         let method_id = format!("{did_string}#key-1");
@@ -178,6 +223,7 @@ pub fn assess_risk_definition() -> ToolDefinition {
                 "evidence_types": {
                     "type": "array",
                     "items": { "type": "string" },
+                    "maxItems": MAX_IDENTITY_EVIDENCE_TYPES,
                     "description": "Types of evidence to factor into the assessment (e.g. [\"kyc\", \"biometric\", \"social\"])."
                 }
             },
@@ -214,26 +260,20 @@ pub fn execute_assess_risk(params: &Value, _context: &NodeContext) -> ToolResult
         };
 
         if Did::new(did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {did_str}")}).to_string(),
-            );
+            return ToolResult::error(json!({"error": "invalid DID format"}).to_string());
         }
 
-        let evidence_types: Vec<String> = params
-            .get("evidence_types")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let evidence_types = match parse_evidence_types(params) {
+            Ok(evidence_types) => evidence_types,
+            Err(error) => return error,
+        };
 
         // Compute a risk score based on evidence: each evidence type reduces risk
         // by 150 basis points from a baseline of 750 (high-ish).
         let baseline: i64 = 750;
-        let reduction = i64::try_from(evidence_types.len()).unwrap_or(0) * 150;
+        let reduction = evidence_types
+            .iter()
+            .fold(0_i64, |total, _| total.saturating_add(150));
         let risk_score = baseline.saturating_sub(reduction).max(0);
 
         let risk_level = match risk_score {
@@ -429,9 +469,7 @@ pub fn execute_get_passport(params: &Value, _context: &NodeContext) -> ToolResul
         };
 
         if Did::new(did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {did_str}")}).to_string(),
-            );
+            return ToolResult::error(json!({"error": "invalid DID format"}).to_string());
         }
 
         let response = json!({
@@ -514,6 +552,20 @@ mod tests {
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
         assert_eq!(v["label"], "default");
+    }
+
+    #[test]
+    fn identity_simulation_did_prefix_avoids_hash_string_byte_slicing() {
+        let source = include_str!("identity.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production source");
+
+        assert!(
+            !production.contains("to_string()[..16]"),
+            "Hash256 display output must not be byte-sliced for simulated DID prefixes"
+        );
     }
 
     // -- resolve_identity --------------------------------------------------
@@ -602,6 +654,58 @@ mod tests {
         assert_eq!(v["factors"].as_array().expect("factors").len(), 3);
     }
 
+    #[test]
+    fn identity_simulation_evidence_types_are_bounded_before_collection() {
+        let source = include_str!("identity.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production source");
+
+        assert!(
+            production.contains("MAX_IDENTITY_EVIDENCE_TYPES"),
+            "MCP identity simulation risk evidence arrays must have an explicit bound"
+        );
+        assert!(
+            production.contains("parse_evidence_types"),
+            "MCP identity simulation risk evidence parsing must use a bounded parser"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_assess_risk_rejects_excessive_evidence_types() {
+        let evidence_types: Vec<Value> = (0..=MAX_IDENTITY_EVIDENCE_TYPES)
+            .map(|idx| Value::String(format!("evidence-{idx}")))
+            .collect();
+
+        let result = execute_assess_risk(
+            &json!({"did": "did:exo:target", "evidence_types": evidence_types}),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        assert!(
+            result.content[0].text().contains("evidence_types"),
+            "oversized evidence refusal should name the offending field"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_assess_risk_rejects_non_string_evidence_type() {
+        let result = execute_assess_risk(
+            &json!({"did": "did:exo:target", "evidence_types": ["kyc", 7]}),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        assert!(
+            result.content[0].text().contains("evidence_types[1]"),
+            "typed parse failure should identify the offending array index"
+        );
+    }
+
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
     fn execute_assess_risk_refuses_by_default() {
@@ -618,6 +722,33 @@ mod tests {
     fn execute_assess_risk_invalid_did() {
         let result = execute_assess_risk(&json!({"did": "bad"}), &NodeContext::empty());
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn identity_simulation_invalid_did_errors_do_not_reflect_input() {
+        let source = include_str!("identity.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production source");
+
+        assert!(
+            !production.contains("invalid DID format: {did_str}"),
+            "MCP identity simulation errors must not reflect caller-controlled DIDs"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_assess_risk_invalid_did_error_omits_input() {
+        let did = "bad<script>";
+        let result = execute_assess_risk(&json!({"did": did}), &NodeContext::empty());
+
+        assert!(result.is_error);
+        assert!(
+            !result.content[0].text().contains(did),
+            "invalid DID error must not echo attacker-controlled input"
+        );
     }
 
     // -- verify_signature --------------------------------------------------
