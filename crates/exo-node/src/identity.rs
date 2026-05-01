@@ -135,12 +135,16 @@ fn bs58_encode(data: &[u8]) -> String {
             let digit = value / 58;
             remainder = value % 58;
             if !next.is_empty() || digit > 0 {
-                #[allow(clippy::as_conversions)]
-                next.push(digit as u8);
+                let Ok(digit_byte) = u8::try_from(digit) else {
+                    return String::new();
+                };
+                next.push(digit_byte);
             }
         }
-        #[allow(clippy::as_conversions)]
-        encoded.push(ALPHABET[remainder as usize]);
+        let Ok(alphabet_index) = usize::try_from(remainder) else {
+            return String::new();
+        };
+        encoded.push(ALPHABET[alphabet_index]);
         num = next;
     }
 
@@ -301,6 +305,35 @@ mod tests {
         assert!(
             load_source.contains("secret_bytes.zeroize()"),
             "temporary Vec holding identity.key bytes must be zeroized after copying"
+        );
+    }
+
+    #[test]
+    fn bs58_encode_source_uses_checked_integer_conversions() {
+        let source = include_str!("identity.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let encode_source = production
+            .split("fn bs58_encode")
+            .nth(1)
+            .expect("base58 encoder source exists")
+            .split("/// Write secret key bytes with restrictive permissions.")
+            .next()
+            .expect("base58 encoder source ends before write_secret");
+
+        assert!(
+            !encode_source.contains("clippy::as_conversions"),
+            "node identity base58 encoding must not suppress checked conversion lints"
+        );
+        assert!(
+            !encode_source.contains("digit as u8"),
+            "base58 digit conversion must be checked rather than truncated"
+        );
+        assert!(
+            !encode_source.contains("remainder as usize"),
+            "base58 alphabet index conversion must be checked rather than truncated"
         );
     }
 
