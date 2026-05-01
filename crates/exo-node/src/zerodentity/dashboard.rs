@@ -6,17 +6,21 @@
 //!
 //! Spec reference: §8 (Dashboard).
 
-use axum::{Router, extract::Path, response::Html, routing::get};
+use axum::{Router, extract::Path, http::StatusCode, response::Html, routing::get};
 
 /// Route: `GET /0dentity/dashboard/:did`
-pub async fn zerodentity_dashboard(Path(did): Path<String>) -> Html<String> {
-    let html_did = escape_html_text(&did);
-    let js_did = escape_js_string_literal(&did);
-    Html(
+pub async fn zerodentity_dashboard(
+    Path(did): Path<String>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let did = exo_core::Did::new(&did)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
+    let html_did = escape_html_text(did.as_str());
+    let js_did = escape_js_string_literal(did.as_str());
+    Ok(Html(
         DASHBOARD_HTML
             .replace("{DID_HTML}", &html_did)
             .replace("{DID_JS}", &js_did),
-    )
+    ))
 }
 
 fn escape_html_text(value: &str) -> String {
@@ -797,18 +801,28 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
 #[cfg(test)]
 mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
     use super::*;
 
     #[tokio::test]
     async fn test_dashboard_contains_svg() {
-        let response = zerodentity_dashboard(Path("did:exo:test123".to_string())).await;
+        let response = zerodentity_dashboard(Path("did:exo:test123".to_string()))
+            .await
+            .expect("valid DID");
         let html = response.0;
         assert!(html.contains("<svg"), "dashboard must contain <svg element");
     }
 
     #[tokio::test]
     async fn test_dashboard_contains_set_interval() {
-        let response = zerodentity_dashboard(Path("did:exo:test123".to_string())).await;
+        let response = zerodentity_dashboard(Path("did:exo:test123".to_string()))
+            .await
+            .expect("valid DID");
         let html = response.0;
         assert!(
             html.contains("setInterval"),
@@ -818,7 +832,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_dashboard_contains_css_variables() {
-        let response = zerodentity_dashboard(Path("did:exo:test123".to_string())).await;
+        let response = zerodentity_dashboard(Path("did:exo:test123".to_string()))
+            .await
+            .expect("valid DID");
         let html = response.0;
         assert!(
             html.contains("--primary"),
@@ -833,7 +849,9 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_substitutes_did() {
         let did = "did:exo:abc123test456";
-        let response = zerodentity_dashboard(Path(did.to_string())).await;
+        let response = zerodentity_dashboard(Path(did.to_string()))
+            .await
+            .expect("valid DID");
         let html = response.0;
         assert!(
             html.contains(did),
@@ -846,27 +864,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dashboard_escapes_did_in_html_and_script_contexts() {
+    async fn test_dashboard_validates_did_before_html_and_script_rendering() {
         let did = "</script><script>alert(1)</script>";
+        let err = zerodentity_dashboard(Path(did.to_string()))
+            .await
+            .expect_err("invalid DID must be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_embeds_valid_did_in_html_and_script_contexts() {
+        let did = "did:exo:abc123-test:valid";
         let response = zerodentity_dashboard(Path(did.to_string())).await;
+        let response = response.expect("valid DID");
         let html = response.0;
 
         assert!(
-            !html.contains(did),
-            "dashboard must not contain raw DID markup"
+            html.contains(did),
+            "dashboard must include the validated DID in text contexts"
         );
         assert!(
             !html.contains("</script><script>"),
-            "DID must not be able to break out of the inline script"
+            "validated DID must not be able to break out of the inline script"
         );
-        assert!(
-            html.contains("&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
-            "HTML DID contexts must be entity-escaped"
-        );
-        assert!(
-            html.contains(r#"\u003c/script\u003e\u003cscript\u003ealert(1)\u003c/script\u003e"#),
-            "JavaScript DID string must escape script-breaking angle brackets"
-        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_rejects_invalid_path_did_before_rendering() {
+        let app = zerodentity_dashboard_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/0dentity/dashboard/%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -900,7 +938,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_dashboard_contains_growth_actions() {
-        let response = zerodentity_dashboard(Path("did:exo:test123".to_string())).await;
+        let response = zerodentity_dashboard(Path("did:exo:test123".to_string()))
+            .await
+            .expect("valid DID");
         let html = response.0;
         assert!(
             html.contains("Grow Your Score"),
@@ -926,7 +966,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_dashboard_contains_fingerprint_panel() {
-        let response = zerodentity_dashboard(Path("did:exo:test123".to_string())).await;
+        let response = zerodentity_dashboard(Path("did:exo:test123".to_string()))
+            .await
+            .expect("valid DID");
         let html = response.0;
         assert!(
             html.contains("Fingerprint Consistency"),

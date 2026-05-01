@@ -32,6 +32,7 @@ EXO_TS_ROOT="${EXO_TS_ROOT:-$(cd "$EXOCHAIN_ROOT/../../exo" 2>/dev/null && pwd |
 VECTORS_DIR="$SCRIPT_DIR/vectors"
 RESULTS_DIR="$SCRIPT_DIR/results"
 VERBOSE=false
+DETERMINISM_STATUS="Not run"
 
 # Colors
 RED='\033[0;31m'
@@ -98,6 +99,42 @@ log_verbose() {
     if $VERBOSE; then
         echo -e "       $1"
     fi
+}
+
+normalize_rust_test_results() {
+    local input_file="$1"
+    local output_file="$2"
+
+    sed -E 's/finished in [0-9]+(\.[0-9]+)?s/finished in <elapsed>/g' \
+        "$input_file" > "$output_file"
+}
+
+capture_rust_test_summary() {
+    local output_file="$1"
+    local raw_file
+    local summary_file
+    raw_file="$(mktemp "$RESULTS_DIR/determinism_raw.XXXXXX")"
+    summary_file="$(mktemp "$RESULTS_DIR/determinism_summary.XXXXXX")"
+
+    set +e
+    cargo test --workspace -- --quiet > "$raw_file" 2>&1
+    local cargo_status=$?
+    grep -E '^test result:' "$raw_file" > "$summary_file"
+    local grep_status=$?
+    set -e
+
+    if [ "$cargo_status" -ne 0 ]; then
+        cp "$raw_file" "${output_file}.full"
+    fi
+
+    if [ "$grep_status" -ne 0 ]; then
+        : > "$summary_file"
+    fi
+
+    normalize_rust_test_results "$summary_file" "$output_file"
+    rm -f "$raw_file" "$summary_file"
+
+    return "$cargo_status"
 }
 
 # ---------------------------------------------------------------------------
@@ -441,13 +478,24 @@ compare_results() {
     local run1="$RESULTS_DIR/determinism_run1.txt"
     local run2="$RESULTS_DIR/determinism_run2.txt"
 
-    cargo test --workspace -- --quiet 2>&1 | grep -E '^test result:' > "$run1" || true
-    cargo test --workspace -- --quiet 2>&1 | grep -E '^test result:' > "$run2" || true
+    if ! capture_rust_test_summary "$run1"; then
+        DETERMINISM_STATUS="Failed (first Rust determinism test run failed)"
+        log_fail "$DETERMINISM_STATUS"
+        return 1
+    fi
+
+    if ! capture_rust_test_summary "$run2"; then
+        DETERMINISM_STATUS="Failed (second Rust determinism test run failed)"
+        log_fail "$DETERMINISM_STATUS"
+        return 1
+    fi
 
     if diff -q "$run1" "$run2" > /dev/null 2>&1; then
+        DETERMINISM_STATUS="Verified (two identical normalized Rust test summaries)"
         log_pass "Determinism verified: two identical Rust test runs"
     else
-        log_fail "DETERMINISM VIOLATION: test runs produced different results"
+        DETERMINISM_STATUS="Failed (normalized Rust test summaries differ)"
+        log_fail "DETERMINISM VIOLATION: normalized test runs produced different results"
         if $VERBOSE; then
             diff "$run1" "$run2" || true
         fi
@@ -485,7 +533,7 @@ REPORT_EOF
     fi
 
     cat >> "$report_file" <<REPORT_EOF
-Determinism: Verified (two identical Rust test runs)
+Determinism: $DETERMINISM_STATUS
 
 Constitutional invariants enforced:
   - No floating-point arithmetic (clippy float_arithmetic = deny)
@@ -530,4 +578,6 @@ main() {
     exit $exit_code
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

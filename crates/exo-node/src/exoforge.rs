@@ -126,14 +126,20 @@ fn serialize_dashboard_json<T: Serialize>(
     field: &'static str,
     value: &T,
 ) -> Result<String, StatusCode> {
-    serde_json::to_string(value).map_err(|error| {
+    let json = serde_json::to_string(value).map_err(|error| {
         tracing::error!(
             field,
             err = %error,
             "failed to serialize ExoForge dashboard state"
         );
         StatusCode::INTERNAL_SERVER_ERROR
-    })
+    })?;
+    Ok(json
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029"))
 }
 
 // ─── Request / Response bodies ──────────────────────────────────────
@@ -1506,6 +1512,22 @@ const statusIcons = {{
   Review: '\uD83D\uDD0D', Complete: '\u2705', Blocked: '\uD83D\uDEAB', Escalated: '\u26A0\uFE0F'
 }};
 
+function clearChildren(el) {{
+  while (el.firstChild) {{
+    el.removeChild(el.firstChild);
+  }}
+}}
+
+function appendTextElement(parent, tagName, className, value) {{
+  const el = document.createElement(tagName);
+  if (className) {{
+    el.className = className;
+  }}
+  el.textContent = String(value ?? '');
+  parent.appendChild(el);
+  return el;
+}}
+
 function renderStats() {{
   const row = document.getElementById('stats-row');
   const items = [
@@ -1518,12 +1540,15 @@ function renderStats() {{
     ['blocked', stats.blocked, '--red'],
     ['escalated', stats.escalated, '--orange'],
   ];
-  row.innerHTML = items.map(([label, value, color]) =>
-    `<div class="stat-card">
-      <div class="stat-value" style="color:var(${{color}})">${{value}}</div>
-      <div class="stat-label">${{label}}</div>
-    </div>`
-  ).join('');
+  clearChildren(row);
+  items.forEach(([label, value, color]) => {{
+    const card = document.createElement('div');
+    card.className = 'stat-card';
+    const valueEl = appendTextElement(card, 'div', 'stat-value', value);
+    valueEl.style.color = 'var(' + color + ')';
+    appendTextElement(card, 'div', 'stat-label', label);
+    row.appendChild(card);
+  }});
 
   const progressPct = stats.percent_complete_basis_points / 100;
   document.getElementById('progress-pct').textContent =
@@ -1541,52 +1566,92 @@ function renderPhases() {{
     phases[t.phase].tasks.push(t);
   }});
 
-  col.innerHTML = Object.entries(phases).map(([phaseNum, phase]) => {{
+  clearChildren(col);
+  Object.entries(phases).forEach(([phaseNum, phase]) => {{
     const done = phase.tasks.filter(t => t.status === 'Complete').length;
     const total = phase.tasks.length;
     const pct = total > 0 ? (done / total * 100).toFixed(0) : 0;
-    const allDone = done === total;
 
-    return `<div class="phase ${{allDone ? '' : ''}}">
-      <div class="phase-header" onclick="this.parentElement.classList.toggle('collapsed')">
-        <div class="phase-title">
-          <span class="chevron">\u25BC</span>
-          Phase ${{phaseNum}}: ${{phase.name}}
-        </div>
-        <div class="phase-progress">
-          <span>${{done}}/${{total}}</span>
-          <div class="phase-bar"><div class="phase-bar-fill" style="width:${{pct}}%"></div></div>
-          <span>${{pct}}%</span>
-        </div>
-      </div>
-      <div class="phase-tasks">
-        ${{phase.tasks.map(t => `
-          <div class="task" data-task-id="${{t.id}}">
-            <div class="task-id">#${{t.id}}</div>
-            <div class="task-info">
-              <div class="task-title">${{t.title}}</div>
-              <div class="task-desc">${{t.description}}</div>
-            </div>
-            <div class="task-agent">${{t.agent || '\u2014'}}</div>
-            <span class="status status-${{t.status}}">${{statusIcons[t.status] || ''}} ${{t.status}}</span>
-            <div class="task-section">${{t.spec_section}}</div>
-          </div>
-        `).join('')}}
-      </div>
-    </div>`;
-  }}).join('');
+    const phaseEl = document.createElement('div');
+    phaseEl.className = 'phase';
+
+    const header = document.createElement('div');
+    header.className = 'phase-header';
+    header.addEventListener('click', () => {{
+      phaseEl.classList.toggle('collapsed');
+    }});
+
+    const title = document.createElement('div');
+    title.className = 'phase-title';
+    appendTextElement(title, 'span', 'chevron', '\u25BC');
+    title.appendChild(document.createTextNode(' Phase ' + phaseNum + ': ' + String(phase.name ?? '')));
+
+    const progress = document.createElement('div');
+    progress.className = 'phase-progress';
+    appendTextElement(progress, 'span', '', done + '/' + total);
+    const bar = document.createElement('div');
+    bar.className = 'phase-bar';
+    const fill = document.createElement('div');
+    fill.className = 'phase-bar-fill';
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+    progress.appendChild(bar);
+    appendTextElement(progress, 'span', '', pct + '%');
+
+    header.appendChild(title);
+    header.appendChild(progress);
+    phaseEl.appendChild(header);
+
+    const taskList = document.createElement('div');
+    taskList.className = 'phase-tasks';
+    phase.tasks.forEach(t => {{
+      const taskEl = document.createElement('div');
+      taskEl.className = 'task';
+      taskEl.dataset.taskId = String(t.id ?? '');
+
+      appendTextElement(taskEl, 'div', 'task-id', '#' + String(t.id ?? ''));
+      const info = document.createElement('div');
+      info.className = 'task-info';
+      appendTextElement(info, 'div', 'task-title', t.title);
+      appendTextElement(info, 'div', 'task-desc', t.description);
+      taskEl.appendChild(info);
+      appendTextElement(taskEl, 'div', 'task-agent', t.agent || '\u2014');
+
+      const status = appendTextElement(
+        taskEl,
+        'span',
+        'status status-' + String(t.status ?? ''),
+        (statusIcons[t.status] || '') + ' ' + String(t.status ?? '')
+      );
+      status.setAttribute('aria-label', 'status');
+      appendTextElement(taskEl, 'div', 'task-section', t.spec_section);
+      taskList.appendChild(taskEl);
+    }});
+
+    phaseEl.appendChild(taskList);
+    col.appendChild(phaseEl);
+  }});
 }}
 
 function renderLog() {{
   const container = document.getElementById('log-entries');
   // Show newest first
   const entries = [...activityLog].reverse();
-  container.innerHTML = entries.map(e => {{
-    const d = new Date(e.timestamp.physical_ms);
+  clearChildren(container);
+  entries.forEach(e => {{
+    const timestampMs = e.timestamp && e.timestamp.physical_ms ? e.timestamp.physical_ms : 0;
+    const d = new Date(timestampMs);
     const time = d.toLocaleTimeString('en-US', {{ hour12: false }});
-    const taskRef = e.task_id ? `<span class="log-task-ref">#${{e.task_id}}</span> ` : '';
-    return `<div class="log-entry"><span class="log-time">${{time}}</span>${{taskRef}}${{e.message}}</div>`;
-  }}).join('');
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    appendTextElement(entry, 'span', 'log-time', time);
+    if (e.task_id) {{
+      const taskRef = appendTextElement(entry, 'span', 'log-task-ref', '#' + String(e.task_id));
+      taskRef.appendChild(document.createTextNode(' '));
+    }}
+    entry.appendChild(document.createTextNode(String(e.message ?? '')));
+    container.appendChild(entry);
+  }});
 }}
 
 function render() {{
@@ -1827,6 +1892,51 @@ mod tests {
     fn dashboard_json_serialization_fails_closed() {
         let result = serialize_dashboard_json("tasks", &FailingSerialize);
         assert_eq!(result, Err(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn dashboard_json_serialization_is_safe_for_inline_script_context() {
+        let payload = serde_json::json!({
+            "message": "</script><script>alert(1)</script>",
+            "agent": "alice & bob",
+        });
+
+        let json = serialize_dashboard_json("activity_log", &payload).unwrap();
+
+        assert!(
+            !json.contains("</script>"),
+            "inline dashboard JSON must not contain a script-closing sequence"
+        );
+        assert!(json.contains("\\u003c/script\\u003e"));
+        assert!(json.contains("\\u0026"));
+    }
+
+    #[test]
+    fn dashboard_renderers_do_not_inject_dynamic_data_through_inner_html() {
+        let source = include_str!("exoforge.rs");
+        let dashboard = source
+            .split("// ─── Dashboard HTML")
+            .nth(1)
+            .expect("dashboard HTML marker present")
+            .split("// ─── Tests")
+            .next()
+            .expect("tests marker present");
+
+        for forbidden in [
+            "row.innerHTML =",
+            "col.innerHTML =",
+            "container.innerHTML =",
+            "${{t.title}}",
+            "${{t.description}}",
+            "${{t.agent",
+            "${{t.spec_section}}",
+            "${{e.message}}",
+        ] {
+            assert!(
+                !dashboard.contains(forbidden),
+                "ExoForge dashboard must render dynamic task/log fields with textContent, found {forbidden}"
+            );
+        }
     }
 
     #[test]

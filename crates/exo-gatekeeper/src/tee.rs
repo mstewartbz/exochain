@@ -167,6 +167,15 @@ pub fn generate_attestation(
 }
 
 /// Deterministic signature used only for simulated TEE test fixtures.
+fn tee_platform_tag(platform: &TeePlatform) -> &'static [u8] {
+    match platform {
+        TeePlatform::Sgx => b"tee.platform.sgx.v1",
+        TeePlatform::Sev => b"tee.platform.sev.v1",
+        TeePlatform::TrustZone => b"tee.platform.trustzone.v1",
+        TeePlatform::Simulated => b"tee.platform.simulated.v1",
+    }
+}
+
 fn synthetic_attestation_signature(
     platform: &TeePlatform,
     measurement_hash: &[u8; 32],
@@ -175,7 +184,7 @@ fn synthetic_attestation_signature(
     let mut sig_input = Vec::new();
     sig_input.extend_from_slice(measurement_hash);
     sig_input.extend_from_slice(&timestamp.to_le_bytes());
-    sig_input.extend_from_slice(format!("{:?}", platform).as_bytes());
+    sig_input.extend_from_slice(tee_platform_tag(platform));
     blake3::hash(&sig_input).as_bytes().to_vec()
 }
 
@@ -832,5 +841,19 @@ mod tests {
     fn testing_constructor_includes_simulated() {
         let policy = TeePolicy::testing();
         assert!(policy.accepted_platforms.contains(&TeePlatform::Simulated));
+    }
+
+    #[test]
+    fn synthetic_attestation_signature_uses_stable_platform_tags() {
+        let source = include_str!("tee.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            !production.contains("format!(\"{:?}\", platform)"),
+            "synthetic attestation fixture signatures must not depend on Rust Debug output"
+        );
     }
 }

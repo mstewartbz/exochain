@@ -290,7 +290,9 @@ impl AppState {
 
     fn append_audit(&mut self, decision_id: &str, event_type: &str, actor: &str) -> GqlResult<()> {
         if !self.decisions.contains_key(decision_id) {
-            return Ok(());
+            return Err(async_graphql::Error::new(format!(
+                "decision {decision_id} not found"
+            )));
         }
 
         let seq = self.next_audit_seq;
@@ -445,11 +447,10 @@ impl QueryRoot {
         if guard.constitution.tenant_id == tenant_id.as_str() {
             Ok(guard.constitution.clone())
         } else {
-            Ok(GqlConstitution {
-                tenant_id: tenant_id.to_string(),
-                version: "1.0.0".into(),
-                hash: Hash256::digest(tenant_id.as_str().as_bytes()).to_string(),
-            })
+            Err(async_graphql::Error::new(format!(
+                "constitution for tenant {} not found",
+                tenant_id.as_str()
+            )))
         }
     }
 
@@ -480,11 +481,11 @@ impl QueryRoot {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
-        Ok(guard
-            .decisions
-            .get(decision_id.as_str())
-            .map(|r| r.audit_trail.clone())
-            .unwrap_or_default())
+        let decision_id = decision_id.to_string();
+        let record = guard.decisions.get(&decision_id).ok_or_else(|| {
+            async_graphql::Error::new(format!("decision {decision_id} not found"))
+        })?;
+        Ok(record.audit_trail.clone())
     }
 
     /// Verify a cryptographic proof by ID.
@@ -873,6 +874,13 @@ impl MutationRoot {
                 "decision {id_str} not found"
             )));
         }
+        let tenant_id = guard
+            .decisions
+            .get(&id_str)
+            .ok_or_else(|| async_graphql::Error::new(format!("decision {id_str} not found")))?
+            .decision
+            .tenant_id
+            .clone();
         let action_id = Uuid::new_v4().to_string();
         let now = guard.next_timestamp();
         // Ratification deadline: 24 hours from now.
@@ -882,11 +890,7 @@ impl MutationRoot {
             decision_id: id_str.clone(),
             ratification_deadline: Timestamp::new(deadline_ms, 0).to_string(),
             justification: justification.clone(),
-            tenant_id: guard
-                .decisions
-                .get(&id_str)
-                .map(|r| r.decision.tenant_id.clone())
-                .unwrap_or_default(),
+            tenant_id,
         };
         guard
             .emergency_actions
@@ -1610,6 +1614,54 @@ mod tests {
 
     #[cfg(feature = "unaudited-gateway-graphql-api")]
     #[tokio::test]
+    async fn query_audit_trail_unknown_decision_errors() {
+        let schema = build_test_schema();
+
+        let trail = schema
+            .execute(r#"{ auditTrail(decisionId: "missing-decision") { sequence eventType } }"#)
+            .await;
+
+        assert!(
+            !trail.errors.is_empty(),
+            "unknown decision audit trail must fail closed instead of returning an empty trail"
+        );
+        assert!(
+            trail.errors[0].message.contains("missing-decision"),
+            "error must name the missing decision, got {:?}",
+            trail.errors
+        );
+    }
+
+    #[cfg(feature = "unaudited-gateway-graphql-api")]
+    #[tokio::test]
+    async fn mutation_disclose_conflict_unknown_decision_errors() {
+        let schema = build_test_schema();
+
+        let disclosure = schema
+            .execute(
+                r#"mutation {
+                    discloseConflict(
+                        decisionId: "missing-decision",
+                        description: "outside interest",
+                        nature: "financial"
+                    ) { discloser nature }
+                }"#,
+            )
+            .await;
+
+        assert!(
+            !disclosure.errors.is_empty(),
+            "conflict disclosure must not succeed without an existing decision"
+        );
+        assert!(
+            disclosure.errors[0].message.contains("missing-decision"),
+            "error must name the missing decision, got {:?}",
+            disclosure.errors
+        );
+    }
+
+    #[cfg(feature = "unaudited-gateway-graphql-api")]
+    #[tokio::test]
     async fn mutation_raise_challenge_sets_contested() {
         let schema = build_test_schema();
         let create = schema
@@ -1677,6 +1729,26 @@ mod tests {
         let data = res.data.into_json().expect("data");
         assert_eq!(data["constitution"]["tenantId"], "default");
         assert_eq!(data["constitution"]["version"], "1.0.0");
+    }
+
+    #[cfg(feature = "unaudited-gateway-graphql-api")]
+    #[tokio::test]
+    async fn query_constitution_unknown_tenant_errors() {
+        let schema = build_test_schema();
+
+        let res = schema
+            .execute(r#"{ constitution(tenantId: "unknown") { tenantId version hash } }"#)
+            .await;
+
+        assert!(
+            !res.errors.is_empty(),
+            "unknown tenant constitution query must fail closed instead of synthesizing a corpus"
+        );
+        assert!(
+            res.errors[0].message.contains("unknown"),
+            "error must name the missing tenant, got {:?}",
+            res.errors
+        );
     }
 
     #[cfg(feature = "unaudited-gateway-graphql-api")]
