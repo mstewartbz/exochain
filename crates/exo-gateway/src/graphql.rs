@@ -453,6 +453,16 @@ fn app_state_from_context<'ctx>(ctx: &'ctx Context<'_>) -> GqlResult<&'ctx Arc<M
     ctx.data::<Arc<Mutex<AppState>>>()
 }
 
+fn graphql_nonnegative_i32_to_usize(value: i32, field: &'static str) -> GqlResult<usize> {
+    usize::try_from(value)
+        .map_err(|_| async_graphql::Error::new(format!("{field} cannot be represented as usize")))
+}
+
+fn graphql_count_to_i32(count: usize, field: &'static str) -> GqlResult<i32> {
+    i32::try_from(count)
+        .map_err(|_| async_graphql::Error::new(format!("{field} exceeds GraphQL i32 range")))
+}
+
 // ---------------------------------------------------------------------------
 // Schema type alias
 // ---------------------------------------------------------------------------
@@ -497,8 +507,10 @@ impl QueryRoot {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
-        let offset = usize::try_from(offset.unwrap_or(0).max(0)).unwrap_or(0);
-        let limit = usize::try_from(limit.unwrap_or(50).clamp(1, 200)).unwrap_or(50);
+        let offset =
+            graphql_nonnegative_i32_to_usize(offset.unwrap_or(0).max(0), "decisions.offset")?;
+        let limit =
+            graphql_nonnegative_i32_to_usize(limit.unwrap_or(50).clamp(1, 200), "decisions.limit")?;
         let results: Vec<GqlDecision> = guard
             .decisions
             .values()
@@ -520,14 +532,14 @@ impl QueryRoot {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
         let guard = state.lock().await;
-        let chain_length = i32::try_from(
+        let chain_length = graphql_count_to_i32(
             guard
                 .delegations
                 .values()
                 .filter(|d| d.delegatee == actor_did && d.active)
                 .count(),
-        )
-        .unwrap_or(0);
+            "authority_chain.chain_length",
+        )?;
         Ok(GqlAuthorityChain {
             actor_did,
             chain_length,
@@ -623,36 +635,38 @@ impl QueryRoot {
         let did_key = Did::new(&did_str)
             .map_err(|e| async_graphql::Error::new(format!("invalid DID: {e}")))?;
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> GqlResult<GqlIdentity> {
             let registry = registry.read().unwrap_or_else(|e| e.into_inner());
             match registry.resolve(&did_key) {
                 Some(doc) => {
-                    let active_key_count = i32::try_from(
+                    let active_key_count = graphql_count_to_i32(
                         doc.verification_methods
                             .iter()
                             .filter(|vm| vm.active)
                             .count(),
-                    )
-                    .unwrap_or(0);
-                    let service_endpoint_count =
-                        i32::try_from(doc.service_endpoints.len()).unwrap_or(0);
-                    GqlIdentity {
+                        "resolve_identity.active_key_count",
+                    )?;
+                    let service_endpoint_count = graphql_count_to_i32(
+                        doc.service_endpoints.len(),
+                        "resolve_identity.service_endpoint_count",
+                    )?;
+                    Ok(GqlIdentity {
                         did: did_str,
                         registered: true,
                         active_key_count,
                         service_endpoint_count,
-                    }
+                    })
                 }
-                None => GqlIdentity {
+                None => Ok(GqlIdentity {
                     did: did_str,
                     registered: false,
                     active_key_count: 0,
                     service_endpoint_count: 0,
-                },
+                }),
             }
         })
         .await
-        .map_err(|e| async_graphql::Error::new(format!("registry lookup task failed: {e}")))
+        .map_err(|e| async_graphql::Error::new(format!("registry lookup task failed: {e}")))?
     }
 
     /// Evaluate whether an actor has active consent from a subject for a given
@@ -1492,6 +1506,26 @@ mod tests {
             production.contains("hash_structured"),
             "GraphQL hashes must use canonical structured hashing"
         );
+    }
+
+    #[test]
+    fn graphql_integer_conversions_do_not_silently_default_on_overflow() {
+        let production = include_str!("graphql.rs")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+        let lines: Vec<&str> = production.lines().collect();
+
+        for (idx, line) in lines.iter().enumerate() {
+            if line.contains("::try_from(") {
+                let end = (idx + 6).min(lines.len());
+                let conversion_window = lines[idx..end].join("\n");
+                assert!(
+                    !conversion_window.contains(".unwrap_or("),
+                    "GraphQL integer conversions must return typed errors instead of defaulting on overflow:\n{conversion_window}"
+                );
+            }
+        }
     }
 
     #[test]
