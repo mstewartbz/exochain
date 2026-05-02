@@ -458,12 +458,10 @@ impl ZerodentityStore {
     ///
     /// Convenience method for callers that only need the claims themselves
     /// (e.g., sentinels and scoring).
-    #[must_use]
     #[allow(dead_code)]
-    pub fn get_claims_slice(&self, did: &Did) -> Vec<IdentityClaim> {
+    pub fn get_claims_slice(&self, did: &Did) -> anyhow::Result<Vec<IdentityClaim>> {
         self.get_claims(did)
             .map(|entries| entries.into_iter().map(|(_, c)| c).collect())
-            .unwrap_or_default()
     }
 
     // -----------------------------------------------------------------------
@@ -927,6 +925,43 @@ mod tests {
         assert!(store.get_score(&did("did:exo:a")).is_none());
         assert_eq!(store.get_claims(&did("did:exo:a")).unwrap(), vec![]);
         assert_eq!(store.sample_scored_dids(5), vec![]);
+    }
+
+    #[test]
+    fn production_claim_slice_reads_do_not_squash_store_errors() {
+        let source = include_str!("store.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+        let claim_slice = production
+            .split("pub fn get_claims_slice")
+            .nth(1)
+            .expect("get_claims_slice definition")
+            .split("pub fn get_fingerprints")
+            .next()
+            .expect("get_claims_slice body");
+
+        assert!(
+            claim_slice.contains("anyhow::Result<Vec<IdentityClaim>>"),
+            "claim slice reads must expose the underlying store read error"
+        );
+        assert!(
+            !claim_slice.contains(".unwrap_or_default()"),
+            "claim slice reads must not convert store read failures into empty claim sets"
+        );
+    }
+
+    #[test]
+    fn get_claims_slice_propagates_claim_read_failures() {
+        let mut store = ZerodentityStore::new();
+        store.inject_read_failure(ZerodentityReadFailure::Claims);
+
+        let err = store
+            .get_claims_slice(&did("did:exo:claims-slice-failure"))
+            .expect_err("claim slice reads must fail closed on store read errors");
+
+        assert!(err.to_string().contains("claims read failure"));
     }
 
     #[test]

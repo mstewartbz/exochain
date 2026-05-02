@@ -628,7 +628,7 @@ mod tests {
             .unwrap();
 
         let tuples = store.get_claims(&did).unwrap();
-        let slice = store.get_claims_slice(&did);
+        let slice = store.get_claims_slice(&did).unwrap();
         assert_eq!(tuples.len(), slice.len());
         for ((_, c_t), c_s) in tuples.iter().zip(slice.iter()) {
             assert_eq!(c_t.claim_type, c_s.claim_type);
@@ -2511,7 +2511,7 @@ mod tests {
         // ── 8. Store a score snapshot and check history ───────────────────
         {
             let mut s = store.lock().unwrap();
-            let claims = s.get_claims_slice(&did);
+            let claims = s.get_claims_slice(&did).unwrap();
             let score = ZerodentityScore::compute(&did, &claims, &[], &[], dispatched_ms + 2);
             s.put_score(score);
         }
