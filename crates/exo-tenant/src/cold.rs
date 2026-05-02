@@ -120,7 +120,7 @@ impl ColdStorage {
         self.for_tenant(tenant_id)
             .iter()
             .map(|reference| reference.size_bytes)
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 
     fn validate_reference(reference: &ColdStorageRef) -> Result<()> {
@@ -218,6 +218,38 @@ mod tests {
 
         assert_eq!(cold.for_tenant(tenant).len(), 1);
         assert_eq!(cold.archived_size(tenant), 1024 * 1024);
+    }
+
+    #[test]
+    fn archived_size_saturates_instead_of_wrapping_on_large_refs() {
+        let mut cold = ColdStorage::new();
+        let tenant = uuid(1);
+
+        cold.record_archival(ColdStorageRef {
+            tenant_id: tenant,
+            object_key: "events/huge-a.cbor".into(),
+            tier: StorageTier::DeepArchive,
+            size_bytes: u64::MAX,
+            archived_at: ts(1_700_000_000_000),
+            content_hash: Hash256::digest(b"events/huge-a.cbor"),
+        })
+        .unwrap();
+
+        cold.record_archival(ColdStorageRef {
+            tenant_id: tenant,
+            object_key: "events/huge-b.cbor".into(),
+            tier: StorageTier::DeepArchive,
+            size_bytes: 1,
+            archived_at: ts(1_700_000_000_001),
+            content_hash: Hash256::digest(b"events/huge-b.cbor"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            cold.archived_size(tenant),
+            u64::MAX,
+            "archived size must not panic or wrap to a smaller value"
+        );
     }
 
     #[test]
