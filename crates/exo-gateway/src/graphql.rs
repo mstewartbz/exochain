@@ -37,17 +37,17 @@ use exo_consent::policy::{
     ActionRequest as ConsentActionRequest, ConsentDecision, ConsentPolicy, ConsentRequirement,
     PolicyEngine,
 };
-use exo_core::{Did, Hash256, Timestamp, hlc::HybridClock};
+use exo_core::{Did, Hash256, Timestamp, hash::hash_structured, hlc::HybridClock};
 use exo_identity::registry::{DidRegistry, LocalDidRegistry};
+use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // GraphQL output types
 // ---------------------------------------------------------------------------
 
 /// A single vote cast on a decision.
-#[derive(Debug, Clone, SimpleObject)]
+#[derive(Debug, Clone, Serialize, SimpleObject)]
 pub struct GqlVote {
     pub voter: String,
     pub choice: String,
@@ -56,7 +56,7 @@ pub struct GqlVote {
 }
 
 /// A challenge raised against a decision.
-#[derive(Debug, Clone, SimpleObject)]
+#[derive(Debug, Clone, Serialize, SimpleObject)]
 pub struct GqlChallenge {
     pub id: ID,
     pub grounds: String,
@@ -214,6 +214,89 @@ struct DecisionRecord {
     audit_trail: Vec<GqlAuditEntry>,
 }
 
+#[derive(Serialize)]
+struct GraphqlAuditReceiptPayload<'a> {
+    domain: &'static str,
+    decision_id: &'a str,
+    previous_receipt_hash: &'a str,
+    event_type: &'a str,
+    actor: &'a str,
+    sequence: i32,
+    timestamp: &'a str,
+}
+
+#[derive(Serialize)]
+struct GraphqlDecisionHashPayload<'a> {
+    domain: &'static str,
+    decision_id: &'a str,
+    tenant_id: &'a str,
+    status: &'a str,
+    title: &'a str,
+    decision_class: &'a str,
+    author: &'a str,
+    created_at: &'a str,
+    votes: &'a [GqlVote],
+    challenges: &'a [GqlChallenge],
+}
+
+#[derive(Serialize)]
+struct GraphqlDecisionIdPayload<'a> {
+    domain: &'static str,
+    tenant_id: &'a str,
+    title: &'a str,
+    body: &'a str,
+    decision_class: &'a str,
+    created_at: &'a Timestamp,
+}
+
+#[derive(Serialize)]
+struct GraphqlContentHashPayload<'a> {
+    domain: &'static str,
+    body: &'a str,
+}
+
+#[derive(Serialize)]
+struct GraphqlDelegationIdPayload<'a> {
+    domain: &'static str,
+    delegator: &'a str,
+    delegatee: &'a str,
+    scope: &'a str,
+    created_at: &'a Timestamp,
+    expires_in_hours: i32,
+}
+
+#[derive(Serialize)]
+struct GraphqlChallengeIdPayload<'a> {
+    domain: &'static str,
+    decision_id: &'a str,
+    grounds: &'a str,
+    created_at: &'a Timestamp,
+}
+
+#[derive(Serialize)]
+struct GraphqlEmergencyActionIdPayload<'a> {
+    domain: &'static str,
+    decision_id: &'a str,
+    tenant_id: &'a str,
+    justification: &'a str,
+    created_at: &'a Timestamp,
+}
+
+#[derive(Serialize)]
+struct GraphqlConstitutionHashPayload<'a> {
+    domain: &'static str,
+    previous_hash: &'a str,
+    tenant_id: &'a str,
+    previous_version: &'a str,
+    amendment: &'a str,
+}
+
+fn graphql_hash_hex<T: Serialize>(payload: &T) -> GqlResult<String> {
+    hash_structured(payload)
+        .map(|hash| hash.to_string())
+        .map_err(|e| async_graphql::Error::new(format!("GraphQL canonical hash failed: {e}")))
+}
+
 /// Shared application state.  Replace in-memory `BTreeMap`s with a sqlx
 /// `PgPool` when `GatewayConfig::database_pool_url` is set.
 pub struct AppState {
@@ -308,9 +391,15 @@ impl AppState {
                 .last()
                 .map(|e| e.receipt_hash.clone())
                 .unwrap_or_else(|| Hash256::ZERO.to_string());
-            let receipt_hash =
-                Hash256::digest(format!("{prev_hash}|{event_type}|{actor}|{seq}").as_bytes())
-                    .to_string();
+            let receipt_hash = graphql_hash_hex(&GraphqlAuditReceiptPayload {
+                domain: "exo.gateway.graphql.audit_receipt.v1",
+                decision_id,
+                previous_receipt_hash: &prev_hash,
+                event_type,
+                actor,
+                sequence: seq,
+                timestamp: &ts,
+            })?;
             rec.audit_trail.push(GqlAuditEntry {
                 sequence: seq,
                 event_type: event_type.into(),
@@ -322,9 +411,20 @@ impl AppState {
         Ok(())
     }
 
-    fn compute_decision_hash(d: &GqlDecision) -> String {
-        Hash256::digest(format!("{}|{}|{}", d.id.as_str(), d.status, d.votes.len()).as_bytes())
-            .to_string()
+    fn compute_decision_hash(d: &GqlDecision) -> GqlResult<String> {
+        let id = d.id.to_string();
+        graphql_hash_hex(&GraphqlDecisionHashPayload {
+            domain: "exo.gateway.graphql.decision_state.v1",
+            decision_id: &id,
+            tenant_id: &d.tenant_id,
+            status: &d.status,
+            title: &d.title,
+            decision_class: &d.decision_class,
+            author: &d.author,
+            created_at: &d.created_at,
+            votes: &d.votes,
+            challenges: &d.challenges,
+        })
     }
 }
 
@@ -644,9 +744,20 @@ impl MutationRoot {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
-        let id = Uuid::new_v4().to_string();
-        let body_hash = Hash256::digest(input.body.as_bytes()).to_string();
-        let created_at = guard.now_str();
+        let created = guard.next_timestamp();
+        let created_at = created.to_string();
+        let id = graphql_hash_hex(&GraphqlDecisionIdPayload {
+            domain: "exo.gateway.graphql.decision_id.v1",
+            tenant_id: &input.tenant_id,
+            title: &input.title,
+            body: &input.body,
+            decision_class: &input.decision_class,
+            created_at: &created,
+        })?;
+        let body_hash = graphql_hash_hex(&GraphqlContentHashPayload {
+            domain: "exo.gateway.graphql.decision_body.v1",
+            body: &input.body,
+        })?;
         let decision = GqlDecision {
             id: ID::from(id.clone()),
             tenant_id: input.tenant_id,
@@ -695,7 +806,7 @@ impl MutationRoot {
                 .get_mut(&id_str)
                 .ok_or_else(|| async_graphql::Error::new(format!("decision {id_str} not found")))?;
             rec.decision.status = new_status.clone();
-            rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision);
+            rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision)?;
             rec.decision.clone()
         };
         let actor = reason.as_deref().unwrap_or("system");
@@ -750,7 +861,7 @@ impl MutationRoot {
         };
         let decision = if let Some(rec) = guard.decisions.get_mut(&id_str) {
             rec.decision.votes.push(vote.clone());
-            rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision);
+            rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision)?;
             rec.decision.clone()
         } else {
             return Err(async_graphql::Error::new(format!(
@@ -780,13 +891,24 @@ impl MutationRoot {
         }
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
-        let id = Uuid::new_v4().to_string();
         let now = guard.next_timestamp();
-        let expires_ms = now.physical_ms.saturating_add(
-            u64::try_from(input.expires_in_hours)
-                .unwrap_or(0)
-                .saturating_mul(3_600_000),
-        );
+        let id = graphql_hash_hex(&GraphqlDelegationIdPayload {
+            domain: "exo.gateway.graphql.delegation_id.v1",
+            delegator: "did:exo:caller",
+            delegatee: &input.delegatee_did,
+            scope: &input.scope,
+            created_at: &now,
+            expires_in_hours: input.expires_in_hours,
+        })?;
+        let expires_hours = u64::try_from(input.expires_in_hours)
+            .map_err(|_| async_graphql::Error::new("expires_in_hours must fit u64"))?;
+        let expires_delta = expires_hours
+            .checked_mul(3_600_000)
+            .ok_or_else(|| async_graphql::Error::new("expires_in_hours overflows milliseconds"))?;
+        let expires_ms = now
+            .physical_ms
+            .checked_add(expires_delta)
+            .ok_or_else(|| async_graphql::Error::new("delegation expiration overflows u64"))?;
         let delegation = GqlDelegation {
             id: ID::from(id.clone()),
             delegator: "did:exo:caller".into(),
@@ -824,19 +946,26 @@ impl MutationRoot {
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
+        let challenge_created = guard.next_timestamp();
+        let challenge_id = graphql_hash_hex(&GraphqlChallengeIdPayload {
+            domain: "exo.gateway.graphql.challenge_id.v1",
+            decision_id: &id_str,
+            grounds: &grounds,
+            created_at: &challenge_created,
+        })?;
         let (challenge, decision) = {
             let rec = guard
                 .decisions
                 .get_mut(&id_str)
                 .ok_or_else(|| async_graphql::Error::new(format!("decision {id_str} not found")))?;
             let challenge = GqlChallenge {
-                id: ID::from(Uuid::new_v4().to_string()),
+                id: ID::from(challenge_id),
                 grounds: grounds.clone(),
                 status: "OPEN".into(),
             };
             rec.decision.challenges.push(challenge.clone());
             rec.decision.status = "CONTESTED".into();
-            rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision);
+            rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision)?;
             (challenge, rec.decision.clone())
         };
         guard.append_audit(
@@ -881,10 +1010,19 @@ impl MutationRoot {
             .decision
             .tenant_id
             .clone();
-        let action_id = Uuid::new_v4().to_string();
         let now = guard.next_timestamp();
+        let action_id = graphql_hash_hex(&GraphqlEmergencyActionIdPayload {
+            domain: "exo.gateway.graphql.emergency_action_id.v1",
+            decision_id: &id_str,
+            tenant_id: &tenant_id,
+            justification: &justification,
+            created_at: &now,
+        })?;
         // Ratification deadline: 24 hours from now.
-        let deadline_ms = now.physical_ms.saturating_add(86_400_000);
+        let deadline_ms = now
+            .physical_ms
+            .checked_add(86_400_000)
+            .ok_or_else(|| async_graphql::Error::new("emergency deadline overflows u64"))?;
         let action = GqlEmergencyAction {
             id: ID::from(action_id.clone()),
             decision_id: id_str.clone(),
@@ -951,9 +1089,13 @@ impl MutationRoot {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
-        let new_hash =
-            Hash256::digest(format!("{}:{}", guard.constitution.hash, amendment).as_bytes())
-                .to_string();
+        let new_hash = graphql_hash_hex(&GraphqlConstitutionHashPayload {
+            domain: "exo.gateway.graphql.constitution_amendment_hash.v1",
+            previous_hash: &guard.constitution.hash,
+            tenant_id: tenant_id.as_str(),
+            previous_version: &guard.constitution.version,
+            amendment: &amendment,
+        })?;
         guard.constitution = GqlConstitution {
             tenant_id: tenant_id.to_string(),
             version: bump_version(&guard.constitution.version),
@@ -1318,6 +1460,29 @@ mod tests {
         assert!(
             !production.contains("data_unchecked::<Arc<Mutex<AppState>>>"),
             "GraphQL resolvers must not panic if schema data is misconfigured"
+        );
+    }
+
+    #[test]
+    fn graphql_feature_on_resolvers_use_deterministic_ids_and_structured_hashes() {
+        let production = include_str!("graphql.rs")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+
+        for forbidden in [
+            "Uuid::new_v4",
+            "Hash256::digest(format!",
+            "receipt_hash =\n                Hash256::digest",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "GraphQL feature-on resolver code must not use nondeterministic IDs or raw string-concat hashes via {forbidden}"
+            );
+        }
+        assert!(
+            production.contains("hash_structured"),
+            "GraphQL hashes must use canonical structured hashing"
         );
     }
 
