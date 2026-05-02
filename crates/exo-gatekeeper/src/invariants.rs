@@ -415,17 +415,28 @@ fn check_quorum_legitimate(ctx: &InvariantContext) -> Result<(), InvariantViolat
     match &ctx.quorum_evidence {
         None => Ok(()),
         Some(evidence) => {
+            let duplicate_voters = evidence.duplicate_voters();
+            if !duplicate_voters.is_empty() {
+                let duplicate_voters = duplicate_voters
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(InvariantViolation {
+                    invariant: ConstitutionalInvariant::QuorumLegitimate,
+                    description: "Quorum evidence contains duplicate voter entries".into(),
+                    evidence: vec![
+                        format!("threshold: {}", evidence.threshold),
+                        format!("duplicate_voters: {duplicate_voters}"),
+                    ],
+                });
+            }
+
             // CR-001 §8.3: synthetic voices SHALL never be counted as distinct
             // humans. Use is_met_authentic() which excludes Synthetic-voiced
             // votes from the approval count.
             if !evidence.is_met_authentic() {
-                let authentic_approvals = evidence
-                    .votes
-                    .iter()
-                    .filter(|v| {
-                        v.approved && !v.provenance.as_ref().is_some_and(|p| p.is_synthetic())
-                    })
-                    .count();
+                let authentic_approvals = evidence.distinct_authentic_approved_voter_count();
                 let synthetic_excluded = evidence.synthetic_vote_count();
                 Err(InvariantViolation {
                     invariant: ConstitutionalInvariant::QuorumLegitimate,
@@ -1154,6 +1165,37 @@ mod tests {
             ],
         });
         assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn quorum_legitimate_rejects_duplicate_voter_evidence() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human)),
+                make_vote("did:exo:h1", true, 2, Some(VoiceKind::Human)),
+                make_vote("did:exo:h2", true, 3, Some(VoiceKind::Human)),
+            ],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0].description.contains("duplicate voter"),
+            "duplicate voter evidence must be rejected explicitly"
+        );
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|entry| entry.contains("did:exo:h1")),
+            "violation evidence must identify the duplicated voter"
+        );
     }
 
     #[test]

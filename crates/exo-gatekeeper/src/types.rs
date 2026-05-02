@@ -2,6 +2,8 @@
 //!
 //! Types specific to the judicial branch that are not part of exo-core.
 
+use std::collections::BTreeSet;
+
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
 
@@ -151,23 +153,20 @@ impl QuorumEvidence {
     /// Returns `true` if the raw approval count (all votes, regardless of
     /// provenance) meets the threshold. Used for legacy/simple quorum checks.
     pub fn is_met(&self) -> bool {
-        let approvals =
-            u32::try_from(self.votes.iter().filter(|v| v.approved).count()).unwrap_or(u32::MAX);
-        approvals >= self.threshold
+        let Some(threshold) = usize::try_from(self.threshold).ok() else {
+            return false;
+        };
+        self.distinct_approved_voter_count() >= threshold
     }
 
     /// Returns `true` if the threshold is met counting only non-synthetic
     /// approved votes. A vote with `provenance.voice_kind = Synthetic` is
     /// excluded from the human count per CR-001 §8.3.
     pub fn is_met_authentic(&self) -> bool {
-        let authentic = u32::try_from(
-            self.votes
-                .iter()
-                .filter(|v| v.approved && !v.provenance.as_ref().is_some_and(|p| p.is_synthetic()))
-                .count(),
-        )
-        .unwrap_or(u32::MAX);
-        authentic >= self.threshold
+        let Some(threshold) = usize::try_from(self.threshold).ok() else {
+            return false;
+        };
+        self.distinct_authentic_approved_voter_count() >= threshold
     }
 
     /// Count of votes where provenance explicitly marks the voter as synthetic.
@@ -176,6 +175,43 @@ impl QuorumEvidence {
             .iter()
             .filter(|v| v.provenance.as_ref().is_some_and(|p| p.is_synthetic()))
             .count()
+    }
+
+    /// Voter DIDs that appear more than once in the evidence.
+    #[must_use]
+    pub fn duplicate_voters(&self) -> BTreeSet<Did> {
+        let mut seen = BTreeSet::new();
+        let mut duplicates = BTreeSet::new();
+        for vote in &self.votes {
+            if !seen.insert(vote.voter.clone()) {
+                duplicates.insert(vote.voter.clone());
+            }
+        }
+        duplicates
+    }
+
+    /// Count distinct approved voter DIDs, regardless of provenance.
+    #[must_use]
+    pub fn distinct_approved_voter_count(&self) -> usize {
+        self.votes
+            .iter()
+            .filter(|vote| vote.approved)
+            .map(|vote| vote.voter.clone())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// Count distinct approved voter DIDs that are not synthetic.
+    #[must_use]
+    pub fn distinct_authentic_approved_voter_count(&self) -> usize {
+        self.votes
+            .iter()
+            .filter(|vote| {
+                vote.approved && !vote.provenance.as_ref().is_some_and(|p| p.is_synthetic())
+            })
+            .map(|vote| vote.voter.clone())
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 }
 
@@ -434,6 +470,31 @@ mod tests {
         assert!(!ev.is_met());
     }
 
+    #[test]
+    fn quorum_evidence_counts_distinct_voters_only() {
+        let ev = QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                    provenance: None,
+                },
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![2],
+                    provenance: None,
+                },
+            ],
+        };
+        assert!(
+            !ev.is_met(),
+            "duplicate voter DIDs must not inflate raw quorum evidence"
+        );
+    }
+
     // ── CR-001 §8.3: authentic quorum counting ───────────────────────────────
 
     #[test]
@@ -466,6 +527,21 @@ mod tests {
         };
         assert!(ev.is_met_authentic());
         assert_eq!(ev.synthetic_vote_count(), 0);
+    }
+
+    #[test]
+    fn quorum_is_met_authentic_counts_distinct_humans_only() {
+        let ev = QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human)),
+                make_vote("did:exo:h1", true, 2, Some(VoiceKind::Human)),
+            ],
+        };
+        assert!(
+            !ev.is_met_authentic(),
+            "duplicate human voter DIDs must not inflate authentic quorum evidence"
+        );
     }
 
     #[test]
