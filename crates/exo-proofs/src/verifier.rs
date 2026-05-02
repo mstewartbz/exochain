@@ -154,7 +154,7 @@ mod tests {
             Circuit, ConstraintSystem, LinearCombination, allocate, allocate_public, enforce,
         },
         snark,
-        stark::StarkConfig,
+        stark::{StarkConfig, StarkConstraint},
         zkml::{self, ModelCommitment},
     };
 
@@ -247,14 +247,19 @@ mod tests {
             num_queries: 2,
             ..StarkConfig::default_config()
         };
-        let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
-        let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
+        let trace: Vec<Vec<u64>> = vec![vec![1], vec![1], vec![1]];
+        let constraints = vec![StarkConstraint {
+            name: "constant".to_string(),
+            column_indices: vec![0],
+            coefficients: vec![(1, config.field_size - 1)],
+        }];
+        let proof = crate::stark::prove_stark(&trace, &constraints, &config).unwrap();
 
         let bundle = StarkBundle { proof };
         let proof_bytes = serde_json::to_vec(&bundle).unwrap();
         let public_inputs_bytes = cbor_bytes(&StarkPublicInputs {
-            inputs: vec![1u64, 2u64],
-            constraints: Vec::new(),
+            inputs: vec![1u64],
+            constraints,
         });
 
         let err = verify_any(ProofType::Stark, &proof_bytes, &public_inputs_bytes).unwrap_err();
@@ -297,14 +302,19 @@ mod tests {
             num_queries: 2,
             ..StarkConfig::default_config()
         };
-        let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
-        let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
+        let trace: Vec<Vec<u64>> = vec![vec![1], vec![1], vec![1]];
+        let constraints = vec![StarkConstraint {
+            name: "constant".to_string(),
+            column_indices: vec![0],
+            coefficients: vec![(1, config.field_size - 1)],
+        }];
+        let proof = crate::stark::prove_stark(&trace, &constraints, &config).unwrap();
 
         let bundle = StarkBundle { proof };
         let proof_bytes = cbor_bytes(&bundle);
         let public_inputs_bytes = cbor_bytes(&StarkPublicInputs {
-            inputs: vec![1u64, 2u64],
-            constraints: Vec::new(),
+            inputs: vec![1u64],
+            constraints,
         });
 
         let result = verify_any(ProofType::Stark, &proof_bytes, &public_inputs_bytes).unwrap();
@@ -389,13 +399,18 @@ mod tests {
             num_queries: 1,
             ..StarkConfig::default_config()
         };
-        let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4]];
-        let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
+        let trace: Vec<Vec<u64>> = vec![vec![1], vec![1]];
+        let constraints = vec![StarkConstraint {
+            name: "constant".to_string(),
+            column_indices: vec![0],
+            coefficients: vec![(1, config.field_size - 1)],
+        }];
+        let proof = crate::stark::prove_stark(&trace, &constraints, &config).unwrap();
         let bundle = StarkBundle { proof };
         let proof_bytes = cbor_bytes(&bundle);
         // Legacy bare public-input arrays are rejected because STARK
         // verification now requires caller-supplied public constraints.
-        let legacy_json_inputs = serde_json::to_vec(&vec![1u64, 2u64]).unwrap();
+        let legacy_json_inputs = serde_json::to_vec(&vec![1u64]).unwrap();
         let err = verify_any(ProofType::Stark, &proof_bytes, &legacy_json_inputs).unwrap_err();
         assert!(matches!(err, ProofError::DeserializationError(_)));
     }

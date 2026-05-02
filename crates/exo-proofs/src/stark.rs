@@ -151,6 +151,11 @@ pub fn prove_stark(
             "trace must have at least 2 rows".to_string(),
         ));
     }
+    if constraints.is_empty() {
+        return Err(ProofError::ProofGenerationFailed(
+            "STARK proof requires at least one constraint".to_string(),
+        ));
+    }
 
     let num_cols = trace[0].len();
     for row in trace {
@@ -254,7 +259,11 @@ pub fn verify_stark_with_constraints(
     constraints: &[StarkConstraint],
 ) -> Result<bool> {
     crate::guard_unaudited("stark::verify_stark")?;
-    if proof.trace_length < 2 || proof.constraints != constraints {
+    if proof.trace_length < 2
+        || constraints.is_empty()
+        || proof.constraints.is_empty()
+        || proof.constraints != constraints
+    {
         return Ok(false);
     }
 
@@ -704,7 +713,8 @@ mod tests {
     #[test]
     fn single_row_trace_rejected() {
         let config = StarkConfig::default_config();
-        let err = prove_stark(&[vec![1, 2]], &[], &config).unwrap_err();
+        let constraints = vec![equality_constraint()];
+        let err = prove_stark(&[vec![1, 2]], &constraints, &config).unwrap_err();
         assert!(matches!(err, ProofError::ProofGenerationFailed(_)));
     }
 
@@ -712,7 +722,8 @@ mod tests {
     fn inconsistent_columns_rejected() {
         let config = StarkConfig::default_config();
         let trace = vec![vec![1, 2], vec![3]];
-        let err = prove_stark(&trace, &[], &config).unwrap_err();
+        let constraints = vec![equality_constraint()];
+        let err = prove_stark(&trace, &constraints, &config).unwrap_err();
         assert!(matches!(err, ProofError::ProofGenerationFailed(_)));
     }
 
@@ -924,15 +935,64 @@ mod tests {
     }
 
     #[test]
-    fn no_constraints_trace() {
+    fn prove_stark_rejects_empty_constraints() {
+        let config = StarkConfig {
+            num_queries: 2,
+            ..StarkConfig::default_config()
+        };
+        let trace = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
+
+        let err = prove_stark(&trace, &[], &config).unwrap_err();
+
+        assert!(
+            err.to_string().contains("at least one constraint"),
+            "empty STARK constraints must fail closed: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_manually_constructed_empty_constraint_proof() {
         let config = StarkConfig {
             num_queries: 2,
             ..StarkConfig::default_config()
         };
         let trace = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
         let constraints = Vec::new();
-        let proof = prove_stark(&trace, &constraints, &config).unwrap();
-        assert!(verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
+        let trace_leaves = trace_leaf_hashes(&trace);
+        let trace_commitment = commit_trace_from_leaves(&trace_leaves);
+        let constraint_commitment =
+            commit_constraints(&trace, &constraints, config.field_size).unwrap();
+        let query_indices = derive_queries(
+            &trace_commitment,
+            &constraint_commitment,
+            config.num_queries,
+            trace.len() - 1,
+        )
+        .unwrap();
+        let fri_proof = build_fri_proof(
+            &trace,
+            &query_indices,
+            &config,
+            &trace_commitment,
+            &constraint_commitment,
+        );
+        let public_input_authentication_path = merkle_proof(&trace_leaves, 0).unwrap();
+        let trace_query_proofs =
+            build_trace_query_proofs(&trace, &trace_leaves, &query_indices).unwrap();
+        let proof = StarkProof {
+            trace_commitment,
+            constraint_commitment,
+            query_indices,
+            fri_proof,
+            config,
+            trace_length: trace.len(),
+            public_input_hash: hash_row(&trace[0]),
+            constraints: constraints.clone(),
+            public_input_authentication_path,
+            trace_query_proofs,
+        };
+
+        assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
     }
 
     #[test]
@@ -946,7 +1006,8 @@ mod tests {
     fn fri_proof_structure() {
         let config = StarkConfig::default_config();
         let trace = make_fibonacci_trace(16, config.field_size);
-        let proof = prove_stark(&trace, &[], &config).unwrap();
+        let constraints = vec![fib_constraint()];
+        let proof = prove_stark(&trace, &constraints, &config).unwrap();
 
         assert_eq!(
             proof.fri_proof.layer_commitments.len(),
