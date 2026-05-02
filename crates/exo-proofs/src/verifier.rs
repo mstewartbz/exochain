@@ -243,7 +243,10 @@ mod tests {
 
     #[test]
     fn verify_any_rejects_json_stark_bundle() {
-        let config = StarkConfig::default_config();
+        let config = StarkConfig {
+            num_queries: 2,
+            ..StarkConfig::default_config()
+        };
         let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
         let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
 
@@ -290,7 +293,10 @@ mod tests {
 
     #[test]
     fn verify_any_stark() {
-        let config = StarkConfig::default_config();
+        let config = StarkConfig {
+            num_queries: 2,
+            ..StarkConfig::default_config()
+        };
         let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
         let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
 
@@ -379,7 +385,10 @@ mod tests {
 
     #[test]
     fn verify_any_stark_bad_public_inputs_bytes() {
-        let config = StarkConfig::default_config();
+        let config = StarkConfig {
+            num_queries: 1,
+            ..StarkConfig::default_config()
+        };
         let trace: Vec<Vec<u64>> = vec![vec![1, 2], vec![3, 4]];
         let proof = crate::stark::prove_stark(&trace, &[], &config).unwrap();
         let bundle = StarkBundle { proof };

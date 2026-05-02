@@ -480,13 +480,17 @@ fn derive_queries(
     num_queries: usize,
     trace_len: usize,
 ) -> Result<Vec<usize>> {
-    if trace_len == 0 {
+    if num_queries == 0 {
         return Ok(Vec::new());
+    }
+    if num_queries > trace_len {
+        return Err(ProofError::ProofGenerationFailed(format!(
+            "query budget {num_queries} exceeds available transition rows {trace_len}"
+        )));
     }
     let trace_len_u64 = u64::try_from(trace_len).map_err(|_| {
         ProofError::ProofGenerationFailed(format!("trace length {trace_len} overflows u64"))
     })?;
-    let require_unique = num_queries <= trace_len;
     let mut seen = BTreeSet::new();
     let mut indices = Vec::with_capacity(num_queries);
 
@@ -512,7 +516,7 @@ fn derive_queries(
                 ProofError::ProofGenerationFailed(format!("query index {idx_u64} overflows usize"))
             })?;
 
-            if !require_unique || seen.insert(idx) {
+            if seen.insert(idx) {
                 indices.push(idx);
                 break;
             }
@@ -758,7 +762,7 @@ mod tests {
     #[test]
     fn proof_deterministic() {
         let config = StarkConfig::default_config();
-        let trace = make_fibonacci_trace(8, config.field_size);
+        let trace = make_fibonacci_trace(16, config.field_size);
         let constraints = vec![fib_constraint()];
 
         let p1 = prove_stark(&trace, &constraints, &config).unwrap();
@@ -769,10 +773,10 @@ mod tests {
     #[test]
     fn different_traces_different_proofs() {
         let config = StarkConfig::default_config();
-        let t1 = make_fibonacci_trace(8, config.field_size);
+        let t1 = make_fibonacci_trace(16, config.field_size);
         let t2 = {
             let mut t = vec![vec![1, 1]];
-            for i in 1..8 {
+            for i in 1..16 {
                 let prev = &t[i - 1];
                 let next_val = (prev[0] + prev[1]) % config.field_size;
                 t.push(vec![prev[1], next_val]);
@@ -789,7 +793,7 @@ mod tests {
     #[test]
     fn verify_rejects_wrong_public_inputs() {
         let config = StarkConfig::default_config();
-        let trace = make_fibonacci_trace(8, config.field_size);
+        let trace = make_fibonacci_trace(16, config.field_size);
         let constraints = vec![fib_constraint()];
 
         let proof = prove_stark(&trace, &constraints, &config).unwrap();
@@ -800,7 +804,7 @@ mod tests {
     #[test]
     fn verify_rejects_public_inputs_not_bound_to_trace_commitment() {
         let config = StarkConfig::default_config();
-        let trace = make_fibonacci_trace(8, config.field_size);
+        let trace = make_fibonacci_trace(16, config.field_size);
         let constraints = vec![fib_constraint()];
 
         let mut proof = prove_stark(&trace, &constraints, &config).unwrap();
@@ -815,7 +819,7 @@ mod tests {
     #[test]
     fn verify_rejects_tampered_query_values() {
         let config = StarkConfig::default_config();
-        let trace = make_fibonacci_trace(8, config.field_size);
+        let trace = make_fibonacci_trace(16, config.field_size);
         let constraints = vec![fib_constraint()];
 
         let mut proof = prove_stark(&trace, &constraints, &config).unwrap();
@@ -826,7 +830,10 @@ mod tests {
 
     #[test]
     fn verify_with_constraints_rejects_authenticated_trace_that_violates_constraints() {
-        let config = StarkConfig::default_config();
+        let config = StarkConfig {
+            num_queries: 5,
+            ..StarkConfig::default_config()
+        };
         let constraints = vec![equality_constraint()];
         let trace = vec![vec![0], vec![1], vec![2], vec![3], vec![4], vec![5]];
         let trace_leaves = trace_leaf_hashes(&trace);
@@ -878,9 +885,37 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_tampered_proof() {
+    fn derive_queries_rejects_query_budget_exceeding_transition_domain() {
+        let trace_commitment = Hash256::from_bytes([1u8; 32]);
+        let constraint_commitment = Hash256::from_bytes([2u8; 32]);
+        let err = derive_queries(&trace_commitment, &constraint_commitment, 8, 7).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("exceeds available transition rows"),
+            "query derivation must not silently reuse duplicate indices: {err}"
+        );
+    }
+
+    #[test]
+    fn prove_rejects_query_budget_exceeding_transition_domain() {
         let config = StarkConfig::default_config();
         let trace = make_fibonacci_trace(8, config.field_size);
+        let constraints = vec![fib_constraint()];
+
+        let err = prove_stark(&trace, &constraints, &config).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("exceeds available transition rows"),
+            "proof generation must fail closed instead of proving duplicate query indices: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_proof() {
+        let config = StarkConfig::default_config();
+        let trace = make_fibonacci_trace(16, config.field_size);
         let constraints = vec![fib_constraint()];
 
         let mut proof = prove_stark(&trace, &constraints, &config).unwrap();
@@ -890,7 +925,10 @@ mod tests {
 
     #[test]
     fn no_constraints_trace() {
-        let config = StarkConfig::default_config();
+        let config = StarkConfig {
+            num_queries: 2,
+            ..StarkConfig::default_config()
+        };
         let trace = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
         let constraints = Vec::new();
         let proof = prove_stark(&trace, &constraints, &config).unwrap();
@@ -907,7 +945,7 @@ mod tests {
     #[test]
     fn fri_proof_structure() {
         let config = StarkConfig::default_config();
-        let trace = make_fibonacci_trace(8, config.field_size);
+        let trace = make_fibonacci_trace(16, config.field_size);
         let proof = prove_stark(&trace, &[], &config).unwrap();
 
         assert_eq!(
