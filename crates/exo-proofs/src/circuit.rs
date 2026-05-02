@@ -75,6 +75,12 @@ impl LinearCombination {
         }
         sum
     }
+
+    fn references_only_allocated_variables(&self, variable_count: usize) -> bool {
+        self.terms
+            .iter()
+            .all(|&(_, idx)| idx == usize::MAX || idx < variable_count)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -132,12 +138,21 @@ impl ConstraintSystem {
 
     /// Check if all constraints are satisfied by the current variable assignments.
     pub fn is_satisfied(&self) -> bool {
-        let vals: Vec<u64> = self
-            .variables
-            .iter()
-            .map(|v| v.value.unwrap_or(0))
-            .collect();
+        let mut vals = Vec::with_capacity(self.variables.len());
+        for variable in &self.variables {
+            let Some(value) = variable.value else {
+                return false;
+            };
+            vals.push(value);
+        }
+
         for c in &self.constraints {
+            if !c.a_terms.references_only_allocated_variables(vals.len())
+                || !c.b_terms.references_only_allocated_variables(vals.len())
+                || !c.c_terms.references_only_allocated_variables(vals.len())
+            {
+                return false;
+            }
             let a = c.a_terms.evaluate(&vals);
             let b = c.b_terms.evaluate(&vals);
             let c_val = c.c_terms.evaluate(&vals);
@@ -409,6 +424,44 @@ mod tests {
 
         assert_eq!(cs.num_constraints(), 2);
         assert!(cs.is_satisfied());
+    }
+
+    #[test]
+    fn constraint_system_with_missing_witness_is_not_satisfied() {
+        let mut cs = ConstraintSystem::new();
+        let x = allocate(&mut cs, None);
+
+        enforce(
+            &mut cs,
+            &LinearCombination::from_variable(x),
+            &LinearCombination::constant(1),
+            &LinearCombination::constant(0),
+        );
+
+        assert!(
+            !cs.is_satisfied(),
+            "missing witness variables must not be substituted with zero"
+        );
+    }
+
+    #[test]
+    fn constraint_system_with_unallocated_variable_reference_is_not_satisfied() {
+        let mut cs = ConstraintSystem::new();
+        let x = allocate(&mut cs, Some(0));
+        let mut unallocated = LinearCombination::zero();
+        unallocated.add_term(1, x.index + 1);
+
+        enforce(
+            &mut cs,
+            &unallocated,
+            &LinearCombination::constant(1),
+            &LinearCombination::constant(0),
+        );
+
+        assert!(
+            !cs.is_satisfied(),
+            "constraints must not satisfy by treating unallocated variables as zero"
+        );
     }
 
     #[test]
