@@ -10,6 +10,8 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
+const MAX_SAFE_HARBOR_INTERESTED_PARTIES: usize = 1_000;
+
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 const MCP_LEGAL_SIMULATION_INITIATIVE: &str = "Initiatives/fix-mcp-legal-simulation-tools.md";
 
@@ -296,6 +298,7 @@ pub fn initiate_safe_harbor_definition() -> ToolDefinition {
                 "interested_parties": {
                     "type": "array",
                     "items": { "type": "string" },
+                    "maxItems": MAX_SAFE_HARBOR_INTERESTED_PARTIES,
                     "description": "Array of DID strings for the interested parties."
                 },
                 "process_id": {
@@ -353,6 +356,16 @@ pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> T
             );
             }
         };
+        if interested_parties.len() > MAX_SAFE_HARBOR_INTERESTED_PARTIES {
+            return ToolResult::error(
+                json!({
+                    "error": format!(
+                        "interested_parties may contain at most {MAX_SAFE_HARBOR_INTERESTED_PARTIES} DIDs"
+                    )
+                })
+                .to_string(),
+            );
+        }
         let process_id = match required_nonempty_str(params, "process_id") {
             Ok(value) => value,
             Err(result) => return result,
@@ -370,7 +383,7 @@ pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> T
         }
 
         // Validate each interested party DID.
-        let mut party_dids: Vec<String> = Vec::new();
+        let mut party_dids: Vec<String> = Vec::with_capacity(interested_parties.len());
         for (i, party) in interested_parties.iter().enumerate() {
             match party.as_str() {
                 Some(s) => {
@@ -391,16 +404,14 @@ pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> T
             }
         }
 
-        let disclosure_requirements: Vec<Value> = party_dids
-            .iter()
-            .map(|did| {
-                json!({
+        let mut disclosure_requirements: Vec<Value> = Vec::with_capacity(party_dids.len());
+        for did in &party_dids {
+            disclosure_requirements.push(json!({
                     "party_did": did,
                     "disclosure_status": "pending",
                     "requires": ["material_interest", "relationship_disclosure"],
-                })
-            })
-            .collect();
+            }));
+        }
 
         let response = json!({
             "process_id": process_id,
@@ -773,6 +784,30 @@ mod tests {
         });
         let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
         assert!(result.is_error);
+    }
+
+    #[test]
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    fn execute_initiate_safe_harbor_rejects_excessive_interested_parties() {
+        let interested_parties: Vec<Value> = (0..=MAX_SAFE_HARBOR_INTERESTED_PARTIES)
+            .map(|i| Value::String(format!("did:exo:party-{i}")))
+            .collect();
+        let params = json!({
+            "initiator_did": "did:exo:alice",
+            "transaction_description": "test",
+            "interested_parties": interested_parties,
+            "process_id": "safe-harbor-oversized",
+            "initiated_at_ms": 1700000000023_u64,
+        });
+
+        let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
+
+        assert!(result.is_error);
+        assert!(
+            result.content[0]
+                .text()
+                .contains("interested_parties may contain at most")
+        );
     }
 
     #[test]
