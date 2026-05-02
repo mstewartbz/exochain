@@ -8,6 +8,8 @@
 use exo_core::{Did, Hash256, Signature};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{DagError, Result};
+
 /// A checkpoint payload aggregating finality proof components.
 ///
 /// Validators collectively attest to a finalized DAG state by signing
@@ -76,20 +78,29 @@ pub const CHECKPOINT_DOMAIN_SEP: &[u8] = b"EXOCHAIN-CHECKPOINT-v1";
 /// `[domain_sep | event_root | state_root | height_le | finalized_events_le | frontier_len_le | frontier...]`
 ///
 /// Validators sign this preimage to attest to the checkpoint.
-#[must_use]
-pub fn checkpoint_signing_preimage(cp: &CheckpointPayload) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns [`DagError::Serialization`] if a checkpoint field cannot be
+/// represented exactly in the canonical signing frame.
+pub fn checkpoint_signing_preimage(cp: &CheckpointPayload) -> Result<Vec<u8>> {
     let mut preimage = Vec::new();
     preimage.extend_from_slice(CHECKPOINT_DOMAIN_SEP);
     preimage.extend_from_slice(cp.event_root.as_bytes());
     preimage.extend_from_slice(cp.state_root.as_bytes());
     preimage.extend_from_slice(&cp.height.to_le_bytes());
     preimage.extend_from_slice(&cp.finalized_events.to_le_bytes());
-    let frontier_len = u64::try_from(cp.frontier.len()).unwrap_or(u64::MAX);
+    let frontier_len = u64::try_from(cp.frontier.len()).map_err(|_| {
+        DagError::Serialization(format!(
+            "checkpoint frontier length {} cannot be represented in canonical signing frame",
+            cp.frontier.len()
+        ))
+    })?;
     preimage.extend_from_slice(&frontier_len.to_le_bytes());
     for frontier_hash in &cp.frontier {
         preimage.extend_from_slice(frontier_hash.as_bytes());
     }
-    preimage
+    Ok(preimage)
 }
 
 // ===========================================================================
@@ -127,21 +138,25 @@ mod proptests {
             )
     }
 
+    fn preimage(cp: &CheckpointPayload) -> Vec<u8> {
+        checkpoint_signing_preimage(cp).expect("test checkpoint preimage must encode")
+    }
+
     proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(100))]
 
         /// The preimage function must be pure: same input → same bytes.
         #[test]
         fn preimage_is_deterministic(cp in arb_checkpoint()) {
-            let p1 = checkpoint_signing_preimage(&cp);
-            let p2 = checkpoint_signing_preimage(&cp);
+            let p1 = preimage(&cp);
+            let p2 = preimage(&cp);
             prop_assert_eq!(p1, p2);
         }
 
         /// Domain separation tag must always lead the preimage.
         #[test]
         fn preimage_starts_with_domain_sep(cp in arb_checkpoint()) {
-            let preimage = checkpoint_signing_preimage(&cp);
+            let preimage = preimage(&cp);
             prop_assert!(preimage.starts_with(CHECKPOINT_DOMAIN_SEP));
         }
 
@@ -155,7 +170,7 @@ mod proptests {
                 + 8   // finalized_events (le64)
                 + 8   // frontier length (le64)
                 + 32 * cp.frontier.len();
-            let preimage = checkpoint_signing_preimage(&cp);
+            let preimage = preimage(&cp);
             prop_assert_eq!(preimage.len(), expected);
         }
 
@@ -166,9 +181,9 @@ mod proptests {
             alt_height in any::<u64>(),
         ) {
             prop_assume!(cp.height != alt_height);
-            let p1 = checkpoint_signing_preimage(&cp);
+            let p1 = preimage(&cp);
             cp.height = alt_height;
-            let p2 = checkpoint_signing_preimage(&cp);
+            let p2 = preimage(&cp);
             prop_assert_ne!(p1, p2);
         }
 
@@ -179,9 +194,9 @@ mod proptests {
             alt_root in arb_hash256(),
         ) {
             prop_assume!(cp.event_root != alt_root);
-            let p1 = checkpoint_signing_preimage(&cp);
+            let p1 = preimage(&cp);
             cp.event_root = alt_root;
-            let p2 = checkpoint_signing_preimage(&cp);
+            let p2 = preimage(&cp);
             prop_assert_ne!(p1, p2);
         }
 
@@ -192,9 +207,9 @@ mod proptests {
             alt_root in arb_hash256(),
         ) {
             prop_assume!(cp.state_root != alt_root);
-            let p1 = checkpoint_signing_preimage(&cp);
+            let p1 = preimage(&cp);
             cp.state_root = alt_root;
-            let p2 = checkpoint_signing_preimage(&cp);
+            let p2 = preimage(&cp);
             prop_assert_ne!(p1, p2);
         }
 
@@ -205,9 +220,9 @@ mod proptests {
             alt_count in any::<u64>(),
         ) {
             prop_assume!(cp.finalized_events != alt_count);
-            let p1 = checkpoint_signing_preimage(&cp);
+            let p1 = preimage(&cp);
             cp.finalized_events = alt_count;
-            let p2 = checkpoint_signing_preimage(&cp);
+            let p2 = preimage(&cp);
             prop_assert_ne!(p1, p2);
         }
     }
@@ -222,6 +237,10 @@ mod tests {
         Did::new("did:exo:validator1").expect("valid")
     }
 
+    fn preimage(cp: &CheckpointPayload) -> Vec<u8> {
+        checkpoint_signing_preimage(cp).expect("test checkpoint preimage must encode")
+    }
+
     #[test]
     fn preimage_deterministic() {
         let cp = CheckpointPayload {
@@ -233,8 +252,8 @@ mod tests {
             validator_sigs: vec![],
         };
 
-        let p1 = checkpoint_signing_preimage(&cp);
-        let p2 = checkpoint_signing_preimage(&cp);
+        let p1 = preimage(&cp);
+        let p2 = preimage(&cp);
         assert_eq!(p1, p2, "preimage must be deterministic");
     }
 
@@ -249,7 +268,7 @@ mod tests {
             validator_sigs: vec![],
         };
 
-        let preimage = checkpoint_signing_preimage(&cp);
+        let preimage = preimage(&cp);
         assert!(preimage.starts_with(CHECKPOINT_DOMAIN_SEP));
     }
 
@@ -274,8 +293,8 @@ mod tests {
         };
 
         assert_ne!(
-            checkpoint_signing_preimage(&cp_with),
-            checkpoint_signing_preimage(&cp_without),
+            preimage(&cp_with),
+            preimage(&cp_without),
             "frontier must affect preimage"
         );
     }
@@ -293,12 +312,29 @@ mod tests {
             validator_sigs: vec![],
         };
 
-        let preimage = checkpoint_signing_preimage(&cp);
+        let preimage = preimage(&cp);
         let offset = CHECKPOINT_DOMAIN_SEP.len() + 32 + 32 + 8 + 8;
 
         assert_eq!(&preimage[offset..offset + 8], &2u64.to_le_bytes());
         assert_eq!(&preimage[offset + 8..offset + 40], tip1.as_bytes());
         assert_eq!(&preimage[offset + 40..offset + 72], tip2.as_bytes());
+    }
+
+    #[test]
+    fn checkpoint_preimage_does_not_saturate_frontier_length() {
+        let production = include_str!("checkpoint.rs");
+        let preimage_section = production
+            .split("pub fn checkpoint_signing_preimage")
+            .nth(1)
+            .expect("checkpoint_signing_preimage function must exist")
+            .split("// ===========================================================================")
+            .next()
+            .expect("test separator must follow checkpoint_signing_preimage");
+
+        assert!(
+            !preimage_section.contains("unwrap_or(u64::MAX)"),
+            "checkpoint signing preimage must fail closed instead of saturating frontier length"
+        );
     }
 
     #[test]
