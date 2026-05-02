@@ -48,10 +48,12 @@ use exo_core::{
     types::{Did, Timestamp},
 };
 use exo_gatekeeper::{
+    authority_link_signature_message,
     combinator::{Combinator, CombinatorInput, Predicate, TransformFn},
     holon::{self, Holon, HolonState},
     invariants::InvariantSet,
     kernel::{AdjudicationContext, Kernel},
+    provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
         PermissionSet, Provenance, Role,
@@ -371,64 +373,48 @@ pub fn create_infrastructure_kernel() -> Kernel {
 /// Infrastructure Holons operate under the Executive branch with
 /// read-only + recommend permissions. They cannot self-grant or
 /// modify the kernel.
-fn authority_link_message(grantor: &Did, grantee: &Did, permissions: &PermissionSet) -> Hash256 {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(grantor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(grantee.as_str().as_bytes());
-    payload.push(0x00);
-    for permission in &permissions.permissions {
-        payload.extend_from_slice(permission.0.as_bytes());
-        payload.push(0x00);
-    }
-    Hash256::digest(&payload)
-}
-
-fn provenance_message(actor: &Did, action_hash: &[u8], timestamp: &str) -> Hash256 {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(actor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(action_hash);
-    payload.push(0x00);
-    payload.extend_from_slice(timestamp.as_bytes());
-    Hash256::digest(&payload)
-}
-
-fn signed_authority_link(holon: &Holon, config: &HolonManagerConfig) -> AuthorityLink {
-    let message = authority_link_message(&config.root_did, &holon.id, &holon.capabilities);
-    let signature = (config.root_signer)(message.as_bytes());
-
-    AuthorityLink {
+fn signed_authority_link(
+    holon: &Holon,
+    config: &HolonManagerConfig,
+) -> Result<AuthorityLink, String> {
+    let mut link = AuthorityLink {
         grantor: config.root_did.clone(),
         grantee: holon.id.clone(),
         permissions: holon.capabilities.clone(),
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         grantor_public_key: Some(config.root_public_key.as_bytes().to_vec()),
-    }
+    };
+    let message = authority_link_signature_message(&link)
+        .map_err(|err| format!("failed to encode authority-link signature payload: {err}"))?;
+    let signature = (config.root_signer)(message.as_bytes());
+    link.signature = signature.to_bytes().to_vec();
+    Ok(link)
 }
 
 fn signed_provenance(
     holon: &Holon,
     config: &HolonManagerConfig,
     provenance_timestamp: Timestamp,
-) -> Provenance {
+) -> Result<Provenance, String> {
     let timestamp = provenance_timestamp.to_string();
     let action_hash = Hash256::digest(format!("infrastructure-holon-step:{}", holon.id).as_bytes())
         .as_bytes()
         .to_vec();
-    let message = provenance_message(&holon.id, &action_hash, &timestamp);
-    let signature = (config.root_signer)(message.as_bytes());
-
-    Provenance {
+    let mut provenance = Provenance {
         actor: holon.id.clone(),
         timestamp,
         action_hash,
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         public_key: Some(config.root_public_key.as_bytes().to_vec()),
         voice_kind: None,
         independence: None,
         review_order: None,
-    }
+    };
+    let message = provenance_signature_message(&provenance)
+        .map_err(|err| format!("failed to encode provenance signature payload: {err}"))?;
+    let signature = (config.root_signer)(message.as_bytes());
+    provenance.signature = signature.to_bytes().to_vec();
+    Ok(provenance)
 }
 
 fn next_provenance_timestamp(config: &HolonManagerConfig) -> Result<Timestamp, String> {
@@ -450,7 +436,7 @@ pub fn build_holon_adjudication_context(
             branch: GovernmentBranch::Executive,
         }],
         authority_chain: AuthorityChain {
-            links: vec![signed_authority_link(holon, config)],
+            links: vec![signed_authority_link(holon, config)?],
         },
         consent_records: vec![ConsentRecord {
             subject: config.root_did.clone(),
@@ -465,7 +451,7 @@ pub fn build_holon_adjudication_context(
         },
         human_override_preserved: true,
         actor_permissions: holon.capabilities.clone(),
-        provenance: Some(signed_provenance(holon, config, provenance_timestamp)),
+        provenance: Some(signed_provenance(holon, config, provenance_timestamp)?),
         quorum_evidence: None,
         active_challenge_reason: None,
     })

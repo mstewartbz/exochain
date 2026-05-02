@@ -10,11 +10,12 @@ mod nist_compliance {
         AuthorityChain as ReportAuthorityChain, AuthorityLink as ReportAuthorityLink,
         AuthorityRevocation, DelegateeKind, Permission as ReportPermission,
     };
-    use exo_core::{Did, Hash256, Signature, Timestamp, crypto::KeyPair};
+    use exo_core::{Did, Signature, Timestamp, crypto::KeyPair};
     use exo_gatekeeper::{
-        InvariantEngine, McpRule,
+        InvariantEngine, McpRule, authority_link_signature_message,
         invariants::{ConstitutionalInvariant, InvariantContext, enforce_all},
         mcp_audit::{McpAuditLog, McpEnforcementOutcome, append, create_record, verify_chain},
+        provenance_signature_message,
         types::{
             AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch,
             Permission, PermissionSet, Provenance, Role,
@@ -173,26 +174,17 @@ mod nist_compliance {
     fn signed_authority_link(grantor: &Did, grantee: &Did) -> AuthorityLink {
         let (public_key, secret_key) = exo_core::crypto::generate_keypair();
         let permissions = PermissionSet::new(vec![Permission::new("read")]);
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(grantor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for permission in &permissions.permissions {
-            payload.extend_from_slice(permission.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
-        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
-
-        AuthorityLink {
+        let mut link = AuthorityLink {
             grantor: grantor.clone(),
             grantee: grantee.clone(),
             permissions,
-            signature: signature.to_bytes().to_vec(),
+            signature: Vec::new(),
             grantor_public_key: Some(public_key.as_bytes().to_vec()),
-        }
+        };
+        let message = authority_link_signature_message(&link).expect("canonical link payload");
+        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
+        link.signature = signature.to_bytes().to_vec();
+        link
     }
 
     fn signed_provenance(actor: &Did) -> Provenance {
@@ -200,25 +192,21 @@ mod nist_compliance {
         let timestamp = "2026-03-20T00:00:00Z".to_owned();
         let action_hash = vec![1, 2, 3];
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(actor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&action_hash);
-        payload.push(0x00);
-        payload.extend_from_slice(timestamp.as_bytes());
-        let message = Hash256::digest(&payload);
-        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
-
-        Provenance {
+        let mut provenance = Provenance {
             actor: actor.clone(),
             timestamp,
             action_hash,
-            signature: signature.to_bytes().to_vec(),
+            signature: Vec::new(),
             public_key: Some(public_key.as_bytes().to_vec()),
             voice_kind: None,
             independence: None,
             review_order: None,
-        }
+        };
+        let message =
+            provenance_signature_message(&provenance).expect("canonical provenance payload");
+        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
+        provenance.signature = signature.to_bytes().to_vec();
+        provenance
     }
 
     /// Build a passing InvariantContext matching the pattern in invariants.rs tests.

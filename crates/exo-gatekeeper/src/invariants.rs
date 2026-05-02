@@ -3,12 +3,12 @@
 //! Every action in the constitutional fabric must satisfy a set of invariants.
 //! Failed invariants produce detailed violation reports with evidence.
 
-use exo_core::{Did, Hash256};
+use exo_core::{Did, Hash256, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AuthorityChain, BailmentState, ConsentRecord, GovernmentBranch, PermissionSet, Provenance,
-    QuorumEvidence, Role,
+    AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, PermissionSet,
+    Provenance, QuorumEvidence, Role,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,6 +112,28 @@ pub struct InvariantViolation {
     pub invariant: ConstitutionalInvariant,
     pub description: String,
     pub evidence: Vec<String>,
+}
+
+const AUTHORITY_LINK_SIGNATURE_DOMAIN: &str = "exo.gatekeeper.authority-link-signature";
+const PROVENANCE_SIGNATURE_DOMAIN: &str = "exo.gatekeeper.provenance-signature";
+const SIGNATURE_PAYLOAD_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Serialize)]
+struct AuthorityLinkSignaturePayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    grantor: &'a Did,
+    grantee: &'a Did,
+    permissions: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ProvenanceSignaturePayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    actor: &'a Did,
+    action_hash: &'a [u8],
+    timestamp: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -345,9 +367,8 @@ fn check_authority_chain_valid(ctx: &InvariantContext) -> Result<(), InvariantVi
     }
 
     // TNC-01: Cryptographic signature verification.
-    // Every link must carry the grantor public key and verify the Ed25519 signature over the
-    // canonical payload: Hash256(grantor_bytes || 0x00 || grantee_bytes || 0x00 ||
-    // permission_bytes).
+    // Every link must carry the grantor public key and verify the Ed25519
+    // signature over the domain-separated canonical CBOR payload.
     for (idx, link) in links.iter().enumerate() {
         let pk_bytes = link
             .grantor_public_key
@@ -381,17 +402,15 @@ fn check_authority_chain_valid(ctx: &InvariantContext) -> Result<(), InvariantVi
                     evidence: vec![format!("sig_len: {}", link.signature.len())],
                 })?;
 
-        // Compute canonical payload.
-        let mut payload = Vec::new();
-        payload.extend_from_slice(link.grantor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(link.grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for perm in &link.permissions.permissions {
-            payload.extend_from_slice(perm.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
+        let message = authority_link_signature_message(link).map_err(|err| InvariantViolation {
+            invariant: ConstitutionalInvariant::AuthorityChainValid,
+            description: format!("link[{idx}] canonical signature payload could not be encoded"),
+            evidence: vec![
+                format!("grantor: {}", link.grantor),
+                format!("grantee: {}", link.grantee),
+                format!("error: {err}"),
+            ],
+        })?;
 
         let pubkey = exo_core::PublicKey::from_bytes(pk_arr);
         let sig = exo_core::Signature::from_bytes(sig_arr);
@@ -497,14 +516,11 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
                             .into(),
                         evidence: vec![format!("sig_len: {}", prov.signature.len())],
                     })?;
-            // Canonical payload: actor || 0x00 || action_hash || 0x00 || timestamp
-            let mut payload = Vec::new();
-            payload.extend_from_slice(prov.actor.as_str().as_bytes());
-            payload.push(0x00);
-            payload.extend_from_slice(&prov.action_hash);
-            payload.push(0x00);
-            payload.extend_from_slice(prov.timestamp.as_bytes());
-            let message = Hash256::digest(&payload);
+            let message = provenance_signature_message(prov).map_err(|err| InvariantViolation {
+                invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                description: "Provenance canonical signature payload could not be encoded".into(),
+                evidence: vec![format!("actor: {}", prov.actor), format!("error: {err}")],
+            })?;
             let pubkey = exo_core::PublicKey::from_bytes(pk_arr);
             let sig = exo_core::Signature::from_bytes(sig_arr);
             if !exo_core::crypto::verify(message.as_bytes(), &sig, &pubkey) {
@@ -517,6 +533,43 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
             Ok(())
         }
     }
+}
+
+/// Compute the canonical Ed25519 message for an authority-chain link.
+///
+/// The message is the hash of a domain-separated CBOR payload. Signers and
+/// verifiers must both use this helper so signatures cannot be replayed across
+/// other gatekeeper payload types or legacy delimiter-framed encodings.
+pub fn authority_link_signature_message(link: &AuthorityLink) -> exo_core::Result<Hash256> {
+    let mut permissions = link
+        .permissions
+        .permissions
+        .iter()
+        .map(|permission| permission.0.as_str())
+        .collect::<Vec<_>>();
+    permissions.sort_unstable();
+
+    hash_structured(&AuthorityLinkSignaturePayload {
+        domain: AUTHORITY_LINK_SIGNATURE_DOMAIN,
+        schema_version: SIGNATURE_PAYLOAD_SCHEMA_VERSION,
+        grantor: &link.grantor,
+        grantee: &link.grantee,
+        permissions,
+    })
+}
+
+/// Compute the canonical Ed25519 message for action provenance.
+///
+/// The message is the hash of a domain-separated CBOR payload that binds the
+/// provenance actor, action hash, and timestamp.
+pub fn provenance_signature_message(prov: &Provenance) -> exo_core::Result<Hash256> {
+    hash_structured(&ProvenanceSignaturePayload {
+        domain: PROVENANCE_SIGNATURE_DOMAIN,
+        schema_version: SIGNATURE_PAYLOAD_SCHEMA_VERSION,
+        actor: &prov.actor,
+        action_hash: &prov.action_hash,
+        timestamp: &prov.timestamp,
+    })
 }
 
 // ===========================================================================
@@ -1244,6 +1297,20 @@ mod tests {
 
     // ── CR-001 §8.3: Ed25519 provenance verification (WO-003 / GAP-02) ──────
 
+    #[test]
+    fn invariant_signature_payloads_do_not_use_raw_delimited_hashing() {
+        let source = production_source();
+
+        assert!(
+            !source.contains("payload.push(0x00)"),
+            "signature payloads must use structured canonical CBOR, not ad hoc null separators"
+        );
+        assert!(
+            !source.contains("Hash256::digest(&payload)"),
+            "signature payloads must be hashed through hash_structured"
+        );
+    }
+
     fn signed_provenance(
         actor_str: &str,
     ) -> (Provenance, exo_core::PublicKey, exo_core::SecretKey) {
@@ -1251,24 +1318,19 @@ mod tests {
         let actor = did(actor_str);
         let action_hash = vec![0xde, 0xad, 0xbe, 0xef];
         let timestamp = "2026-01-01T00:00:00Z".to_string();
-        let mut payload = Vec::new();
-        payload.extend_from_slice(actor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&action_hash);
-        payload.push(0x00);
-        payload.extend_from_slice(timestamp.as_bytes());
-        let message = Hash256::digest(&payload);
-        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
-        let prov = Provenance {
+        let mut prov = Provenance {
             actor,
             timestamp,
             action_hash,
-            signature: sig.to_bytes().to_vec(),
+            signature: Vec::new(),
             public_key: Some(pk.as_bytes().to_vec()),
             voice_kind: Some(VoiceKind::Human),
             independence: Some(IndependenceClaim::Independent),
             review_order: Some(ReviewOrder::FirstOrder),
         };
+        let message = provenance_signature_message(&prov).expect("canonical provenance payload");
+        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+        prov.signature = sig.to_bytes().to_vec();
         (prov, pk, sk)
     }
 
@@ -1351,6 +1413,40 @@ mod tests {
         assert!(err[0].description.contains("not 64 bytes"));
     }
 
+    #[test]
+    fn provenance_rejects_legacy_delimited_signature_payload() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (pk, sk) = exo_core::crypto::generate_keypair();
+        let actor = ctx.actor.clone();
+        let action_hash = vec![0xde, 0xad, 0xbe, 0xef];
+        let timestamp = "2026-01-01T00:00:00Z".to_string();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(actor.as_str().as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(&action_hash);
+        payload.push(0x00);
+        payload.extend_from_slice(timestamp.as_bytes());
+        let message = Hash256::digest(&payload);
+        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+
+        ctx.provenance = Some(Provenance {
+            actor,
+            timestamp,
+            action_hash,
+            signature: sig.to_bytes().to_vec(),
+            public_key: Some(pk.as_bytes().to_vec()),
+            voice_kind: Some(VoiceKind::Human),
+            independence: Some(IndependenceClaim::Independent),
+            review_order: Some(ReviewOrder::FirstOrder),
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("cryptographically invalid"));
+    }
+
     // ── TNC-01: Ed25519 signature verification ───────────────────────────
 
     /// Build a properly signed AuthorityLink for the given grantor→grantee.
@@ -1359,27 +1455,17 @@ mod tests {
         let grantor = did(grantor_str);
         let grantee = did(grantee_str);
         let perms = PermissionSet::new(vec![Permission::new("read")]);
-
-        // Canonical payload matches invariant engine computation.
-        let mut payload = Vec::new();
-        payload.extend_from_slice(grantor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for p in &perms.permissions {
-            payload.extend_from_slice(p.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
-        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
-
-        let link = AuthorityLink {
+        let mut link = AuthorityLink {
             grantor,
             grantee,
             permissions: perms,
-            signature: sig.to_bytes().to_vec(),
+            signature: Vec::new(),
             grantor_public_key: Some(pk.as_bytes().to_vec()),
         };
+        let message = authority_link_signature_message(&link).expect("canonical link payload");
+        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+
+        link.signature = sig.to_bytes().to_vec();
         (link, pk)
     }
 
@@ -1472,6 +1558,42 @@ mod tests {
 
         let err = enforce_all(&engine, &ctx).unwrap_err();
         assert!(err[0].description.contains("grantor_public_key"));
+    }
+
+    #[test]
+    fn authority_chain_rejects_legacy_delimited_signature_payload() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
+        let mut ctx = passing_context();
+        let (pk, sk) = exo_core::crypto::generate_keypair();
+        let grantor = did("did:exo:root");
+        let grantee = ctx.actor.clone();
+        let permissions = PermissionSet::new(vec![Permission::new("read")]);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(grantor.as_str().as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(grantee.as_str().as_bytes());
+        payload.push(0x00);
+        for permission in &permissions.permissions {
+            payload.extend_from_slice(permission.0.as_bytes());
+            payload.push(0x00);
+        }
+        let message = Hash256::digest(&payload);
+        let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+
+        ctx.authority_chain = AuthorityChain {
+            links: vec![AuthorityLink {
+                grantor,
+                grantee,
+                permissions,
+                signature: sig.to_bytes().to_vec(),
+                grantor_public_key: Some(pk.as_bytes().to_vec()),
+            }],
+        };
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("cryptographically invalid"));
     }
 
     #[test]

@@ -37,8 +37,10 @@ use exo_core::{
     types::{Did, Hash256},
 };
 use exo_gatekeeper::{
+    authority_link_signature_message,
     invariants::InvariantSet,
     kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
+    provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink as GkAuthorityLink, BailmentState, ConsentRecord,
         GovernmentBranch, Permission, PermissionSet, Provenance, QuorumEvidence, QuorumVote, Role,
@@ -67,25 +69,17 @@ fn signed_authority_link(grantee: &Did) -> GkAuthorityLink {
     let grantor = did("did:exo:governance-root");
     let permissions = PermissionSet::new(vec![Permission::new("enact:decision")]);
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(grantor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(grantee.as_str().as_bytes());
-    payload.push(0x00);
-    for permission in &permissions.permissions {
-        payload.extend_from_slice(permission.0.as_bytes());
-        payload.push(0x00);
-    }
-    let message = Hash256::digest(&payload);
-    let signature = exo_core::crypto::sign(message.as_bytes(), &sk);
-
-    GkAuthorityLink {
+    let mut link = GkAuthorityLink {
         grantor,
         grantee: grantee.clone(),
         permissions,
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         grantor_public_key: Some(pk.as_bytes().to_vec()),
-    }
+    };
+    let message = authority_link_signature_message(&link).expect("canonical link payload");
+    let signature = exo_core::crypto::sign(message.as_bytes(), &sk);
+    link.signature = signature.to_bytes().to_vec();
+    link
 }
 
 fn signed_provenance(actor: &Did) -> Provenance {
@@ -93,25 +87,20 @@ fn signed_provenance(actor: &Did) -> Provenance {
     let timestamp = "2026-03-30T00:00:00Z".to_owned();
     let action_hash = vec![0x01, 0x02, 0x03];
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(actor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(&action_hash);
-    payload.push(0x00);
-    payload.extend_from_slice(timestamp.as_bytes());
-    let message = Hash256::digest(&payload);
-    let signature = exo_core::crypto::sign(message.as_bytes(), &sk);
-
-    Provenance {
+    let mut provenance = Provenance {
         actor: actor.clone(),
         timestamp,
         action_hash,
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         public_key: Some(pk.as_bytes().to_vec()),
         voice_kind: None,
         independence: None,
         review_order: None,
-    }
+    };
+    let message = provenance_signature_message(&provenance).expect("canonical provenance payload");
+    let signature = exo_core::crypto::sign(message.as_bytes(), &sk);
+    provenance.signature = signature.to_bytes().to_vec();
+    provenance
 }
 
 fn test_kernel() -> Kernel {

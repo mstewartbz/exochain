@@ -165,7 +165,10 @@ mod tests {
     }
 
     fn minimal_passing_context() -> InvariantContext {
-        use exo_gatekeeper::types::{AuthorityLink, Provenance};
+        use exo_gatekeeper::{
+            authority_link_signature_message, provenance_signature_message,
+            types::{AuthorityLink, Provenance},
+        };
 
         // Generate a real Ed25519 keypair and sign the canonical authority-link
         // payload so the invariant engine performs full cryptographic verification
@@ -175,52 +178,41 @@ mod tests {
         let grantee = actor();
         let permissions = PermissionSet::default();
 
-        // Canonical payload: grantor || 0x00 || grantee || 0x00 || perm* || 0x00
-        let mut payload = Vec::new();
-        payload.extend_from_slice(grantor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for perm in &permissions.permissions {
-            payload.extend_from_slice(perm.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = exo_core::Hash256::digest(&payload);
+        let mut authority_link = AuthorityLink {
+            grantor,
+            grantee,
+            permissions,
+            signature: Vec::new(),
+            grantor_public_key: Some(pk.as_bytes().to_vec()),
+        };
+        let message =
+            authority_link_signature_message(&authority_link).expect("canonical link payload");
         let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+        authority_link.signature = sig.to_bytes().to_vec();
 
         let authority_chain = AuthorityChain {
-            links: vec![AuthorityLink {
-                grantor,
-                grantee,
-                permissions,
-                signature: sig.to_bytes(),
-                grantor_public_key: Some(pk.as_bytes().to_vec()),
-            }],
+            links: vec![authority_link],
         };
 
         let (provenance_pk, provenance_sk) = exo_core::crypto::generate_keypair();
         let provenance_actor = actor();
         let provenance_timestamp = "2026-03-20T00:00:00Z".to_string();
         let provenance_action_hash = vec![1u8; 32];
-        let mut provenance_payload = Vec::new();
-        provenance_payload.extend_from_slice(provenance_actor.as_str().as_bytes());
-        provenance_payload.push(0x00);
-        provenance_payload.extend_from_slice(&provenance_action_hash);
-        provenance_payload.push(0x00);
-        provenance_payload.extend_from_slice(provenance_timestamp.as_bytes());
-        let provenance_message = exo_core::Hash256::digest(&provenance_payload);
-        let provenance_sig = exo_core::crypto::sign(provenance_message.as_bytes(), &provenance_sk);
-
-        let provenance = Some(Provenance {
+        let mut provenance = Provenance {
             actor: provenance_actor,
             timestamp: provenance_timestamp,
             action_hash: provenance_action_hash,
-            signature: provenance_sig.to_bytes().to_vec(),
+            signature: Vec::new(),
             public_key: Some(provenance_pk.as_bytes().to_vec()),
             voice_kind: None,
             independence: None,
             review_order: None,
-        });
+        };
+        let provenance_message =
+            provenance_signature_message(&provenance).expect("canonical provenance payload");
+        let provenance_sig = exo_core::crypto::sign(provenance_message.as_bytes(), &provenance_sk);
+        provenance.signature = provenance_sig.to_bytes().to_vec();
+        let provenance = Some(provenance);
 
         InvariantContext {
             actor: actor(),

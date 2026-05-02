@@ -4056,6 +4056,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use exo_gatekeeper::{
+        authority_link_signature_message,
         invariants::ConstitutionalInvariant,
         types::{
             AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Role,
@@ -4086,25 +4087,17 @@ mod tests {
         let (public_key, secret_key) = generate_keypair();
         let permissions = PermissionSet::new(vec![Permission::new("vote")]);
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(grantor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for permission in &permissions.permissions {
-            payload.extend_from_slice(permission.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
-        let signature = sign(message.as_bytes(), &secret_key);
-
-        AuthorityLink {
+        let mut link = AuthorityLink {
             grantor: grantor.clone(),
             grantee: grantee.clone(),
             permissions,
-            signature: signature.to_bytes().to_vec(),
+            signature: Vec::new(),
             grantor_public_key: Some(public_key.as_bytes().to_vec()),
-        }
+        };
+        let message = authority_link_signature_message(&link).expect("canonical link payload");
+        let signature = sign(message.as_bytes(), &secret_key);
+        link.signature = signature.to_bytes().to_vec();
+        link
     }
 
     fn valid_db_context(actor: &Did) -> AdjudicationContext {

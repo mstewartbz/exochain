@@ -354,30 +354,41 @@ mod tests {
         let secret_key = keypair.secret_key().clone();
         let public_key_hex = hex::encode(public_key.as_bytes());
         let permissions = ["mcp:tool_call"];
-
-        let mut authority_payload = Vec::new();
-        authority_payload.extend_from_slice(actor.as_str().as_bytes());
-        authority_payload.push(0x00);
-        authority_payload.extend_from_slice(actor.as_str().as_bytes());
-        authority_payload.push(0x00);
-        for permission in &permissions {
-            authority_payload.extend_from_slice(permission.as_bytes());
-            authority_payload.push(0x00);
-        }
-        let authority_message = Hash256::digest(&authority_payload);
+        let permission_set = exo_gatekeeper::types::PermissionSet::new(
+            permissions
+                .iter()
+                .map(|permission| exo_gatekeeper::types::Permission::new(*permission))
+                .collect(),
+        );
+        let mut authority_link = exo_gatekeeper::types::AuthorityLink {
+            grantor: actor.clone(),
+            grantee: actor.clone(),
+            permissions: permission_set,
+            signature: Vec::new(),
+            grantor_public_key: Some(public_key.as_bytes().to_vec()),
+        };
+        let authority_message = exo_gatekeeper::authority_link_signature_message(&authority_link)
+            .expect("canonical link payload");
         let authority_signature = exo_core::crypto::sign(authority_message.as_bytes(), &secret_key);
+        authority_link.signature = authority_signature.to_bytes().to_vec();
 
         let timestamp = exo_core::Timestamp::new(1_777_000_000_000, 7).to_string();
         let action_hash = Hash256::digest(action.as_bytes());
-        let mut provenance_payload = Vec::new();
-        provenance_payload.extend_from_slice(actor.as_str().as_bytes());
-        provenance_payload.push(0x00);
-        provenance_payload.extend_from_slice(action_hash.as_bytes());
-        provenance_payload.push(0x00);
-        provenance_payload.extend_from_slice(timestamp.as_bytes());
-        let provenance_message = Hash256::digest(&provenance_payload);
+        let mut provenance = exo_gatekeeper::types::Provenance {
+            actor: actor.clone(),
+            timestamp: timestamp.clone(),
+            action_hash: action_hash.as_bytes().to_vec(),
+            signature: Vec::new(),
+            public_key: Some(public_key.as_bytes().to_vec()),
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        };
+        let provenance_message = exo_gatekeeper::provenance_signature_message(&provenance)
+            .expect("canonical provenance payload");
         let provenance_signature =
             exo_core::crypto::sign(provenance_message.as_bytes(), &secret_key);
+        provenance.signature = provenance_signature.to_bytes().to_vec();
 
         serde_json::json!({
             CONSTITUTIONAL_CONTEXT_FIELD: {
@@ -392,12 +403,12 @@ mod tests {
                     ],
                     "authority_chain": [
                         {
-                            "grantor": actor.as_str(),
-                            "grantee": actor.as_str(),
-                            "permissions": permissions,
-                            "signature": hex::encode(authority_signature.to_bytes()),
-                            "grantor_public_key": public_key_hex,
-                        }
+                        "grantor": actor.as_str(),
+                        "grantee": actor.as_str(),
+                        "permissions": permissions,
+                        "signature": hex::encode(authority_link.signature),
+                        "grantor_public_key": public_key_hex,
+                    }
                     ],
                     "consent_records": [
                         {
@@ -416,12 +427,12 @@ mod tests {
                     "human_override_preserved": true,
                     "actor_permissions": ["mcp:tool_call"],
                     "provenance": {
-                        "actor": actor.as_str(),
-                        "timestamp": timestamp,
-                        "action_hash": hex::encode(action_hash.as_bytes()),
-                        "signature": hex::encode(provenance_signature.to_bytes()),
-                        "public_key": public_key_hex,
-                    }
+                    "actor": actor.as_str(),
+                    "timestamp": timestamp,
+                    "action_hash": hex::encode(action_hash.as_bytes()),
+                    "signature": hex::encode(provenance.signature),
+                    "public_key": public_key_hex,
+                }
                 }
             }
         })

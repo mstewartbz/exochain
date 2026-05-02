@@ -30,7 +30,10 @@ pub use governance_monitor::{
     GovernanceMonitorError,
 };
 pub use holon::{Holon, HolonState};
-pub use invariants::{ConstitutionalInvariant, InvariantEngine, InvariantSet};
+pub use invariants::{
+    ConstitutionalInvariant, InvariantEngine, InvariantSet, authority_link_signature_message,
+    provenance_signature_message,
+};
 pub use kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict};
 pub use mcp::{McpContext, McpRule, McpViolation};
 pub use mcp_audit::{McpAuditLog, McpAuditRecord, McpEnforcementOutcome};

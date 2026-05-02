@@ -10,7 +10,7 @@
 //! - Reinstatement refuses zero-hash clearance evidence
 //! - `check_completeness` returns `Complete` after all seven stages
 
-use exo_core::{Did, Hash256, Timestamp};
+use exo_core::{Did, Timestamp};
 use exo_escalation::{
     challenge::{
         ChallengeAdmission, ContestStatus, SignedChallengeAdmission, SybilChallengeGround,
@@ -24,9 +24,10 @@ use exo_escalation::{
     triage::{TriageLevel, triage},
 };
 use exo_gatekeeper::{
-    Kernel, Verdict,
+    Kernel, Verdict, authority_link_signature_message,
     invariants::InvariantSet,
     kernel::{ActionRequest, AdjudicationContext},
+    provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
         PermissionSet, Provenance, Role,
@@ -96,25 +97,17 @@ fn signed_authority_link(grantee: &Did) -> AuthorityLink {
     let grantor = did("did:exo:root");
     let permissions = PermissionSet::new(vec![Permission::new("read")]);
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(grantor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(grantee.as_str().as_bytes());
-    payload.push(0x00);
-    for permission in &permissions.permissions {
-        payload.extend_from_slice(permission.0.as_bytes());
-        payload.push(0x00);
-    }
-    let message = Hash256::digest(&payload);
-    let signature = exo_core::crypto::sign(message.as_bytes(), keypair.secret_key());
-
-    AuthorityLink {
+    let mut link = AuthorityLink {
         grantor,
         grantee: grantee.clone(),
         permissions,
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         grantor_public_key: Some(keypair.public_key().as_bytes().to_vec()),
-    }
+    };
+    let message = authority_link_signature_message(&link).expect("canonical link payload");
+    let signature = exo_core::crypto::sign(message.as_bytes(), keypair.secret_key());
+    link.signature = signature.to_bytes().to_vec();
+    link
 }
 
 fn signed_provenance(actor: &Did) -> Provenance {
@@ -122,25 +115,20 @@ fn signed_provenance(actor: &Did) -> Provenance {
     let timestamp = "2026-03-30T00:00:00Z".to_owned();
     let action_hash = vec![0xAA, 0xBB, 0xCC];
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(actor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(&action_hash);
-    payload.push(0x00);
-    payload.extend_from_slice(timestamp.as_bytes());
-    let message = Hash256::digest(&payload);
-    let signature = exo_core::crypto::sign(message.as_bytes(), keypair.secret_key());
-
-    Provenance {
+    let mut provenance = Provenance {
         actor: actor.clone(),
         timestamp,
         action_hash,
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         public_key: Some(keypair.public_key().as_bytes().to_vec()),
         voice_kind: None,
         independence: None,
         review_order: None,
-    }
+    };
+    let message = provenance_signature_message(&provenance).expect("canonical provenance payload");
+    let signature = exo_core::crypto::sign(message.as_bytes(), keypair.secret_key());
+    provenance.signature = signature.to_bytes().to_vec();
+    provenance
 }
 
 /// Build a fully valid `AdjudicationContext`.  Pass `Some(reason)` to inject

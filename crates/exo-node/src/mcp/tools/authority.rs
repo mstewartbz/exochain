@@ -10,6 +10,8 @@
 use exo_core::Hash256;
 #[cfg_attr(not(feature = "unaudited-mcp-simulation-tools"), allow(unused_imports))]
 use exo_core::{Did, hash::hash_structured};
+#[cfg(test)]
+use exo_gatekeeper::{authority_link_signature_message, provenance_signature_message};
 use exo_gatekeeper::{
     invariants::{
         ConstitutionalInvariant, InvariantContext, InvariantEngine, InvariantSet, enforce_all,
@@ -930,23 +932,22 @@ mod tests {
                 .map(|permission| Permission::new(*permission))
                 .collect(),
         );
-        let mut payload = Vec::new();
-        payload.extend_from_slice(grantor.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_bytes());
-        payload.push(0x00);
-        for permission in &permission_set.permissions {
-            payload.extend_from_slice(permission.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
+        let mut link = AuthorityLink {
+            grantor: Did::new(grantor).expect("valid grantor DID"),
+            grantee: Did::new(grantee).expect("valid grantee DID"),
+            permissions: permission_set,
+            signature: Vec::new(),
+            grantor_public_key: Some(public_key.as_bytes().to_vec()),
+        };
+        let message = authority_link_signature_message(&link).expect("canonical link payload");
         let signature = crypto::sign(message.as_bytes(), &secret_key);
+        link.signature = signature.to_bytes().to_vec();
         (
             json!({
                 "grantor": grantor,
                 "grantee": grantee,
                 "permissions": permissions,
-                "signature": hex::encode(signature.to_bytes()),
+                "signature": hex::encode(link.signature),
                 "grantor_public_key": hex::encode(public_key.as_bytes()),
             }),
             public_key,
@@ -957,19 +958,25 @@ mod tests {
         let (public_key, secret_key) = crypto::generate_keypair();
         let action_hash = Hash256::digest(action.as_bytes());
         let timestamp = "2026-04-26T23:50:00Z";
-        let mut payload = Vec::new();
-        payload.extend_from_slice(actor.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(action_hash.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(timestamp.as_bytes());
-        let message = Hash256::digest(&payload);
+        let mut provenance = Provenance {
+            actor: Did::new(actor).expect("valid provenance actor DID"),
+            timestamp: timestamp.to_string(),
+            action_hash: action_hash.as_bytes().to_vec(),
+            signature: Vec::new(),
+            public_key: Some(public_key.as_bytes().to_vec()),
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        };
+        let message =
+            provenance_signature_message(&provenance).expect("canonical provenance payload");
         let signature = crypto::sign(message.as_bytes(), &secret_key);
+        provenance.signature = signature.to_bytes().to_vec();
         json!({
             "actor": actor,
             "timestamp": timestamp,
             "action_hash": hex::encode(action_hash.as_bytes()),
-            "signature": hex::encode(signature.to_bytes()),
+            "signature": hex::encode(provenance.signature),
             "public_key": hex::encode(public_key.as_bytes()),
         })
     }

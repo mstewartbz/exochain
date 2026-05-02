@@ -41,6 +41,7 @@ use std::sync::Arc;
 use exo_core::{Did, Hash256, PublicKey, Signature};
 use exo_gatekeeper::{
     ActionRequest, AdjudicationContext, InvariantSet, Kernel, Verdict,
+    authority_link_signature_message, provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
         PermissionSet, Provenance, Role,
@@ -399,51 +400,42 @@ impl ConstitutionalKernel {
         authority: &KernelAuthority,
         grantee: &Did,
         permissions: &PermissionSet,
-    ) -> AuthorityLink {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(authority.did.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for permission in &permissions.permissions {
-            payload.extend_from_slice(permission.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
-        let signature = (authority.signer)(message.as_bytes());
-
-        AuthorityLink {
+    ) -> exo_core::Result<AuthorityLink> {
+        let mut link = AuthorityLink {
             grantor: authority.did.clone(),
             grantee: grantee.clone(),
             permissions: permissions.clone(),
-            signature: signature.to_bytes().to_vec(),
+            signature: Vec::new(),
             grantor_public_key: Some(authority.public_key.as_bytes().to_vec()),
-        }
+        };
+        let message = authority_link_signature_message(&link)?;
+        let signature = (authority.signer)(message.as_bytes());
+        link.signature = signature.to_bytes().to_vec();
+        Ok(link)
     }
 
-    fn signed_provenance(authority: &KernelAuthority, actor: &Did, action: &str) -> Provenance {
+    fn signed_provenance(
+        authority: &KernelAuthority,
+        actor: &Did,
+        action: &str,
+    ) -> exo_core::Result<Provenance> {
         let timestamp = "sdk".to_owned();
         let action_hash = Hash256::digest(action.as_bytes()).as_bytes().to_vec();
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(actor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&action_hash);
-        payload.push(0x00);
-        payload.extend_from_slice(timestamp.as_bytes());
-        let message = Hash256::digest(&payload);
-        let signature = (authority.signer)(message.as_bytes());
-
-        Provenance {
+        let mut provenance = Provenance {
             actor: actor.clone(),
             timestamp,
             action_hash,
-            signature: signature.to_bytes().to_vec(),
+            signature: Vec::new(),
             public_key: Some(authority.public_key.as_bytes().to_vec()),
             voice_kind: None,
             independence: None,
             review_order: None,
-        }
+        };
+        let message = provenance_signature_message(&provenance)?;
+        let signature = (authority.signer)(message.as_bytes());
+        provenance.signature = signature.to_bytes().to_vec();
+        Ok(provenance)
     }
 
     fn adjudicate_internal(
@@ -492,19 +484,40 @@ impl ConstitutionalKernel {
             (BailmentState::None, Vec::new())
         };
 
+        let authority_link = match Self::signed_authority_link(authority, actor, &permissions) {
+            Ok(link) => link,
+            Err(err) => {
+                return KernelVerdict::Denied {
+                    violations: vec![format!(
+                        "AuthorityChainValid: canonical authority signature payload failed: {err}"
+                    )],
+                };
+            }
+        };
+        let provenance = match Self::signed_provenance(authority, actor, action) {
+            Ok(provenance) => provenance,
+            Err(err) => {
+                return KernelVerdict::Denied {
+                    violations: vec![format!(
+                        "ProvenanceVerifiable: canonical provenance signature payload failed: {err}"
+                    )],
+                };
+            }
+        };
+
         let context = AdjudicationContext {
             actor_roles: vec![Role {
                 name: "sdk-default".into(),
                 branch: GovernmentBranch::Judicial,
             }],
             authority_chain: AuthorityChain {
-                links: vec![Self::signed_authority_link(authority, actor, &permissions)],
+                links: vec![authority_link],
             },
             consent_records,
             bailment_state,
             human_override_preserved,
             actor_permissions: permissions,
-            provenance: Some(Self::signed_provenance(authority, actor, action)),
+            provenance: Some(provenance),
             quorum_evidence: None,
             active_challenge_reason: None,
         };

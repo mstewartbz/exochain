@@ -20,9 +20,9 @@
 
 use std::sync::{Arc, RwLock};
 
-use exo_core::{Did, Hash256};
+use exo_core::Did;
 use exo_gatekeeper::{
-    ActionRequest, AdjudicationContext, Kernel,
+    ActionRequest, AdjudicationContext, Kernel, authority_link_signature_message,
     invariants::{ConstitutionalInvariant, InvariantSet},
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
@@ -76,25 +76,17 @@ fn signed_authority_link(grantor: &Did, grantee: &Did) -> AuthorityLink {
     let (public_key, secret_key) = exo_core::crypto::generate_keypair();
     let permissions = PermissionSet::new(vec![Permission::new("vote")]);
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(grantor.as_str().as_bytes());
-    payload.push(0x00);
-    payload.extend_from_slice(grantee.as_str().as_bytes());
-    payload.push(0x00);
-    for permission in &permissions.permissions {
-        payload.extend_from_slice(permission.0.as_bytes());
-        payload.push(0x00);
-    }
-    let message = Hash256::digest(&payload);
-    let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
-
-    AuthorityLink {
+    let mut link = AuthorityLink {
         grantor: grantor.clone(),
         grantee: grantee.clone(),
         permissions,
-        signature: signature.to_bytes().to_vec(),
+        signature: Vec::new(),
         grantor_public_key: Some(public_key.as_bytes().to_vec()),
-    }
+    };
+    let message = authority_link_signature_message(&link).expect("canonical link payload");
+    let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
+    link.signature = signature.to_bytes().to_vec();
+    link
 }
 
 /// Construct a fully-valid `AdjudicationContext` that mirrors what
@@ -322,9 +314,9 @@ fn cross_branch_roles_denies() {
 mod db_roundtrip {
     use std::sync::{Arc, RwLock};
 
-    use exo_core::{Did, Hash256};
+    use exo_core::Did;
     use exo_gatekeeper::{
-        ActionRequest, Kernel,
+        ActionRequest, Kernel, authority_link_signature_message,
         invariants::{ConstitutionalInvariant, InvariantSet},
         types::{AuthorityChain, AuthorityLink, Permission, PermissionSet},
     };
@@ -365,25 +357,17 @@ mod db_roundtrip {
         let (public_key, secret_key) = exo_core::crypto::generate_keypair();
         let permissions = PermissionSet::new(vec![Permission::new("vote")]);
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(grantor.as_str().as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(grantee.as_str().as_bytes());
-        payload.push(0x00);
-        for permission in &permissions.permissions {
-            payload.extend_from_slice(permission.0.as_bytes());
-            payload.push(0x00);
-        }
-        let message = Hash256::digest(&payload);
-        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
-
-        AuthorityLink {
+        let mut link = AuthorityLink {
             grantor: grantor.clone(),
             grantee: grantee.clone(),
             permissions,
-            signature: signature.to_bytes().to_vec(),
+            signature: Vec::new(),
             grantor_public_key: Some(public_key.as_bytes().to_vec()),
-        }
+        };
+        let message = authority_link_signature_message(&link).expect("canonical link payload");
+        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
+        link.signature = signature.to_bytes().to_vec();
+        link
     }
 
     /// Connect to the real Postgres instance and run migrations.
