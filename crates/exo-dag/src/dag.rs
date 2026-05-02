@@ -45,23 +45,55 @@ impl DeterministicDagClock {
     }
 
     /// Tick the clock, returning a new monotonically increasing timestamp.
-    pub fn tick(&mut self) -> Timestamp {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DagError::ClockOverflow`] when both the physical and logical
+    /// components are already exhausted.
+    pub fn try_tick(&mut self) -> Result<Timestamp> {
         self.latest = match self.latest.logical.checked_add(1) {
             Some(logical) => Timestamp::new(self.latest.physical_ms, logical),
             None => match self.latest.physical_ms.checked_add(1) {
                 Some(physical_ms) => Timestamp::new(physical_ms, 0),
-                None => Timestamp::new(u64::MAX, u32::MAX),
+                None => {
+                    return Err(DagError::ClockOverflow {
+                        physical_ms: self.latest.physical_ms,
+                        logical: self.latest.logical,
+                    });
+                }
             },
         };
-        self.latest
+        Ok(self.latest)
+    }
+
+    /// Tick the clock, returning the latest timestamp if the clock is exhausted.
+    ///
+    /// Runtime append paths use [`Self::try_tick`] so exhausted clocks fail
+    /// closed. This convenience method is retained for deterministic tests and
+    /// constructors that do not return `Result`.
+    pub fn tick(&mut self) -> Timestamp {
+        match self.try_tick() {
+            Ok(timestamp) => timestamp,
+            Err(_) => self.latest,
+        }
     }
 
     /// Advance the clock to at least the given time, then tick.
-    pub fn advance(&mut self, millis: u64) -> Timestamp {
+    pub fn try_advance(&mut self, millis: u64) -> Result<Timestamp> {
         if millis > self.latest.physical_ms {
             self.latest = Timestamp::new(millis, 0);
         }
-        self.tick()
+        self.try_tick()
+    }
+
+    /// Advance the clock to at least the given time, then tick.
+    ///
+    /// Returns the latest timestamp unchanged if the clock is exhausted.
+    pub fn advance(&mut self, millis: u64) -> Timestamp {
+        match self.try_advance(millis) {
+            Ok(timestamp) => timestamp,
+            Err(_) => self.latest,
+        }
     }
 }
 
@@ -186,7 +218,7 @@ pub fn append(
     sorted_parents.dedup();
 
     let payload_hash = Hash256::digest(payload);
-    let timestamp = clock.tick();
+    let timestamp = clock.try_tick()?;
     let hash = compute_node_hash(&sorted_parents, &payload_hash, creator, &timestamp)?;
 
     // Check for duplicate
@@ -699,6 +731,28 @@ mod tests {
         let next = clock.tick();
         assert!(previous < next);
         assert_eq!(next, Timestamp::new(43, 0));
+    }
+
+    #[test]
+    fn append_rejects_exhausted_dag_clock_without_reusing_timestamp() {
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock {
+            latest: Timestamp::new(u64::MAX, u32::MAX),
+        };
+        let creator = test_did("did:exo:alice");
+        let sign_fn = make_sign_fn();
+
+        let err = append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock)
+            .expect_err("exhausted DAG clock must fail closed");
+
+        assert!(matches!(
+            err,
+            DagError::ClockOverflow {
+                physical_ms: u64::MAX,
+                logical: u32::MAX
+            }
+        ));
+        assert!(dag.is_empty());
     }
 
     #[test]

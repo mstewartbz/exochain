@@ -42,6 +42,9 @@ pub enum DagError {
     #[error("consensus round overflow: cannot advance beyond round {current_round}")]
     RoundOverflow { current_round: u64 },
 
+    #[error("DAG clock overflow: cannot advance beyond timestamp {physical_ms}:{logical}")]
+    ClockOverflow { physical_ms: u64, logical: u32 },
+
     #[error("insufficient quorum in round {round}: required {required}, got {actual}")]
     InsufficientQuorum {
         required: usize,
