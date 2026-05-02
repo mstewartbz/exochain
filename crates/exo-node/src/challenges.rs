@@ -26,7 +26,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use exo_core::types::Timestamp;
+use exo_core::{Did, PublicKey, Signature, crypto, types::Timestamp};
 use exo_escalation::challenge::{self, ContestHold, SignedChallengeAdmission};
 use serde::{Deserialize, Serialize};
 use tower::limit::ConcurrencyLimitLayer;
@@ -38,6 +38,11 @@ use uuid::Uuid;
 
 const MAX_CHALLENGE_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHALLENGE_API_CONCURRENT_REQUESTS: usize = 64;
+const CHALLENGE_TRANSITION_DOMAIN: &str = "exo.node.challenge.transition.v1";
+const CHALLENGE_TRANSITION_SCHEMA_VERSION: u16 = 1;
+const CHALLENGE_TRANSITION_REVIEW: &str = "review";
+const CHALLENGE_TRANSITION_RESOLVE: &str = "resolve";
+const CHALLENGE_TRANSITION_DISMISS: &str = "dismiss";
 
 fn contest_status_label(status: &challenge::ContestStatus) -> &'static str {
     status.as_str()
@@ -153,6 +158,8 @@ impl From<&ContestHold> for ChallengeResponse {
 #[derive(Debug, Deserialize)]
 pub struct ReviewChallengeRequest {
     pub at: Timestamp,
+    #[serde(flatten)]
+    pub authorization: ChallengeTransitionAuthorization,
 }
 
 /// Request body for resolving a challenge.
@@ -160,6 +167,8 @@ pub struct ReviewChallengeRequest {
 pub struct ResolveChallengeRequest {
     pub at: Timestamp,
     pub outcome: String,
+    #[serde(flatten)]
+    pub authorization: ChallengeTransitionAuthorization,
 }
 
 /// Request body for dismissing a challenge.
@@ -167,6 +176,126 @@ pub struct ResolveChallengeRequest {
 pub struct DismissChallengeRequest {
     pub at: Timestamp,
     pub reason: String,
+    #[serde(flatten)]
+    pub authorization: ChallengeTransitionAuthorization,
+}
+
+/// Signed authority fields required for challenge state transitions.
+#[derive(Debug, Default, Deserialize)]
+pub struct ChallengeTransitionAuthorization {
+    #[serde(default)]
+    pub actor_did: Option<Did>,
+    #[serde(default)]
+    pub public_key: Option<PublicKey>,
+    #[serde(default)]
+    pub signature: Option<Signature>,
+}
+
+#[derive(Serialize)]
+struct ChallengeTransitionSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    hold_id: &'a Uuid,
+    action_id: &'a [u8; 32],
+    current_status: &'a str,
+    transition: &'static str,
+    actor_did: &'a Did,
+    at: &'a Timestamp,
+    detail: &'a str,
+    authority_chain_hash: &'a [u8; 32],
+}
+
+fn challenge_transition_signing_payload(
+    hold: &ContestHold,
+    transition: &'static str,
+    actor_did: &Did,
+    at: &Timestamp,
+    detail: &str,
+) -> ChallengeResult<Vec<u8>> {
+    let payload = ChallengeTransitionSigningPayload {
+        domain: CHALLENGE_TRANSITION_DOMAIN,
+        schema_version: CHALLENGE_TRANSITION_SCHEMA_VERSION,
+        hold_id: &hold.id,
+        action_id: &hold.action_id,
+        current_status: hold.status.as_str(),
+        transition,
+        actor_did,
+        at,
+        detail,
+        authority_chain_hash: &hold.authority_chain_hash,
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&payload, &mut encoded).map_err(|e| {
+        tracing::error!(
+            err = %e,
+            transition,
+            hold_id = %hold.id,
+            "challenge transition signing payload encoding failed"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "challenge transition authorization unavailable".to_owned(),
+        )
+    })?;
+    Ok(encoded)
+}
+
+fn verify_transition_authorization(
+    hold: &ContestHold,
+    transition: &'static str,
+    at: &Timestamp,
+    detail: &str,
+    authorization: &ChallengeTransitionAuthorization,
+) -> ChallengeResult<()> {
+    if *at == Timestamp::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "challenge transition timestamp must be caller-supplied and non-zero".to_owned(),
+        ));
+    }
+
+    let actor_did = authorization.actor_did.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "challenge transition requires signed authorization".to_owned(),
+        )
+    })?;
+    let public_key = authorization.public_key.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "challenge transition requires signed authorization".to_owned(),
+        )
+    })?;
+    let signature = authorization.signature.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "challenge transition requires signed authorization".to_owned(),
+        )
+    })?;
+
+    if actor_did != &hold.admitted_by || public_key != &hold.admitter_public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "challenge transition signer is not authorized for this hold".to_owned(),
+        ));
+    }
+
+    if signature.is_empty() || signature.ed25519_component_is_zero() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "challenge transition signature is invalid".to_owned(),
+        ));
+    }
+
+    let payload = challenge_transition_signing_payload(hold, transition, actor_did, at, detail)?;
+    if !crypto::verify(&payload, signature, public_key) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "challenge transition signature is invalid".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -230,12 +359,20 @@ async fn handle_begin_review(
 ) -> Result<Json<ChallengeResponse>, (StatusCode, String)> {
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
+    let ReviewChallengeRequest { at, authorization } = req;
 
     let challenge = with_challenge_store_blocking(store, move |st| {
         let hold = st
             .get_mut(&id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
-        challenge::begin_review(hold, req.at).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+        verify_transition_authorization(
+            hold,
+            CHALLENGE_TRANSITION_REVIEW,
+            &at,
+            "",
+            &authorization,
+        )?;
+        challenge::begin_review(hold, at).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
         Ok(ChallengeResponse::from(&*hold))
     })
     .await?;
@@ -251,12 +388,24 @@ async fn handle_resolve(
 ) -> Result<Json<ChallengeResponse>, (StatusCode, String)> {
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
+    let ResolveChallengeRequest {
+        at,
+        outcome,
+        authorization,
+    } = req;
 
     let challenge = with_challenge_store_blocking(store, move |st| {
         let hold = st
             .get_mut(&id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
-        challenge::resolve_hold(hold, req.at, &req.outcome)
+        verify_transition_authorization(
+            hold,
+            CHALLENGE_TRANSITION_RESOLVE,
+            &at,
+            &outcome,
+            &authorization,
+        )?;
+        challenge::resolve_hold(hold, at, &outcome)
             .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
         Ok(ChallengeResponse::from(&*hold))
     })
@@ -273,12 +422,24 @@ async fn handle_dismiss(
 ) -> Result<Json<ChallengeResponse>, (StatusCode, String)> {
     let id = Uuid::parse_str(&id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid UUID: {e}")))?;
+    let DismissChallengeRequest {
+        at,
+        reason,
+        authorization,
+    } = req;
 
     let challenge = with_challenge_store_blocking(store, move |st| {
         let hold = st
             .get_mut(&id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, "challenge not found".into()))?;
-        challenge::dismiss_hold(hold, req.at, &req.reason)
+        verify_transition_authorization(
+            hold,
+            CHALLENGE_TRANSITION_DISMISS,
+            &at,
+            &reason,
+            &authorization,
+        )?;
+        challenge::dismiss_hold(hold, at, &reason)
             .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
         Ok(ChallengeResponse::from(&*hold))
     })
@@ -424,6 +585,28 @@ mod tests {
         .unwrap()
     }
 
+    fn signed_transition_body(
+        mut body: serde_json::Value,
+        hold: &ContestHold,
+        transition: &'static str,
+        at: Timestamp,
+        detail: &str,
+    ) -> serde_json::Value {
+        let keypair = keypair(7);
+        let actor = did("did:exo:reviewer");
+        let payload =
+            challenge_transition_signing_payload(hold, transition, &actor, &at, detail).unwrap();
+        let signature = exo_core::crypto::sign(&payload, keypair.secret_key());
+        let fields = body.as_object_mut().unwrap();
+        fields.insert("actor_did".into(), serde_json::to_value(actor).unwrap());
+        fields.insert(
+            "public_key".into(),
+            serde_json::to_value(*keypair.public_key()).unwrap(),
+        );
+        fields.insert("signature".into(), serde_json::to_value(signature).unwrap());
+        body
+    }
+
     #[tokio::test]
     async fn list_empty() {
         let store = test_store();
@@ -513,7 +696,18 @@ mod tests {
 
         // Begin review.
         let app = challenge_router(Arc::clone(&store));
-        let review_body = serde_json::json!({ "at": ts(1100) });
+        let review_at = ts(1100);
+        let review_hold = {
+            let st = store.lock().unwrap();
+            st.get(&hold_id).unwrap().clone()
+        };
+        let review_body = signed_transition_body(
+            serde_json::json!({ "at": review_at }),
+            &review_hold,
+            CHALLENGE_TRANSITION_REVIEW,
+            review_at,
+            "",
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -532,7 +726,19 @@ mod tests {
 
         // Resolve.
         let app2 = challenge_router(Arc::clone(&store));
-        let resolve_body = serde_json::json!({ "at": ts(1200), "outcome": "challenge sustained" });
+        let resolve_at = ts(1200);
+        let outcome = "challenge sustained";
+        let resolve_hold = {
+            let st = store.lock().unwrap();
+            st.get(&hold_id).unwrap().clone()
+        };
+        let resolve_body = signed_transition_body(
+            serde_json::json!({ "at": resolve_at, "outcome": outcome }),
+            &resolve_hold,
+            CHALLENGE_TRANSITION_RESOLVE,
+            resolve_at,
+            outcome,
+        );
         let resp2 = app2
             .oneshot(
                 Request::builder()
@@ -568,7 +774,19 @@ mod tests {
         }
 
         let app = challenge_router(Arc::clone(&store));
-        let body = serde_json::json!({ "at": ts(600), "reason": "insufficient evidence" });
+        let dismiss_at = ts(600);
+        let reason = "insufficient evidence";
+        let dismiss_hold = {
+            let st = store.lock().unwrap();
+            st.get(&hold_id).unwrap().clone()
+        };
+        let body = signed_transition_body(
+            serde_json::json!({ "at": dismiss_at, "reason": reason }),
+            &dismiss_hold,
+            CHALLENGE_TRANSITION_DISMISS,
+            dismiss_at,
+            reason,
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -584,6 +802,44 @@ mod tests {
         let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let result: ChallengeResponse = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(result.status, "Dismissed");
+    }
+
+    #[tokio::test]
+    async fn unsigned_transition_request_is_rejected_without_mutating_hold() {
+        let store = test_store();
+        let hold = challenge::admit_challenge(signed_challenge(
+            9,
+            action_id(9),
+            SybilChallengeGround::ConcealedCommonControl,
+            ts(500),
+        ))
+        .unwrap();
+        let hold_id = hold.id;
+        {
+            let mut st = store.lock().unwrap();
+            st.insert(hold);
+        }
+
+        let app = challenge_router(Arc::clone(&store));
+        let body = serde_json::json!({ "at": ts(600) });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&format!("/api/v1/challenges/{hold_id}/review"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let stored_status = {
+            let st = store.lock().unwrap();
+            st.get(&hold_id).unwrap().status.clone()
+        };
+        assert_eq!(stored_status, challenge::ContestStatus::PauseEligible);
     }
 
     #[tokio::test]
@@ -672,8 +928,20 @@ mod tests {
             st.insert(hold);
         }
 
-        let app = challenge_router(store);
-        let body = serde_json::json!({ "at": ts(300), "outcome": "again" });
+        let app = challenge_router(Arc::clone(&store));
+        let resolve_at = ts(300);
+        let outcome = "again";
+        let resolved_hold = {
+            let st = store.lock().unwrap();
+            st.get(&hold_id).unwrap().clone()
+        };
+        let body = signed_transition_body(
+            serde_json::json!({ "at": resolve_at, "outcome": outcome }),
+            &resolved_hold,
+            CHALLENGE_TRANSITION_RESOLVE,
+            resolve_at,
+            outcome,
+        );
         let resp = app
             .oneshot(
                 Request::builder()
