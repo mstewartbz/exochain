@@ -265,7 +265,9 @@ pub struct ReportParams<'a> {
 ///
 /// # Errors
 ///
-/// - [`LegalError::InvalidStateTransition`] if the MCP audit chain is broken.
+/// - [`LegalError::InvalidStateTransition`] if the MCP audit chain is broken,
+///   the report action count cannot be represented, or the audit head hash
+///   cannot be computed.
 pub fn generate_report(params: ReportParams<'_>) -> Result<AiTransparencyReport> {
     let ReportParams {
         tenant_id,
@@ -290,7 +292,9 @@ pub fn generate_report(params: ReportParams<'_>) -> Result<AiTransparencyReport>
             .filter(|r| r.timestamp >= period_start && r.timestamp <= period_end)
             .count(),
     )
-    .unwrap_or(u64::MAX);
+    .map_err(|_| LegalError::InvalidStateTransition {
+        reason: "AI agent action count cannot be represented in transparency report".into(),
+    })?;
 
     // Aggregate MCP rule outcomes.
     let mcp_rule_outcomes = aggregate_mcp_outcomes(mcp_log, period_start, period_end);
@@ -869,6 +873,27 @@ mod tests {
         assert!(
             result.is_err(),
             "transparency reports must not aggregate over a broken MCP audit chain"
+        );
+    }
+
+    #[test]
+    fn generate_report_action_count_does_not_use_u64_max_sentinel() {
+        let source = include_str!("ai_transparency.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .expect("tests section marker present");
+        let generate_report = production
+            .split("pub fn generate_report")
+            .nth(1)
+            .expect("generate_report definition present")
+            .split("// Aggregate MCP rule outcomes.")
+            .next()
+            .expect("generate_report action count section boundary present");
+
+        assert!(
+            !generate_report.contains("unwrap_or(u64::MAX)"),
+            "AI transparency action counts must fail closed instead of emitting a u64::MAX sentinel"
         );
     }
 
