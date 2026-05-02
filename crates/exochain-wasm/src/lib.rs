@@ -288,6 +288,35 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_decision_forum_vec_inputs_use_explicit_count_bounds() {
+        let source = include_str!("decision_forum_bindings.rs");
+
+        for required in [
+            "MAX_WASM_FORUM_EMERGENCY_ACTIONS",
+            "MAX_WASM_FORUM_CHALLENGES",
+            "MAX_WASM_FORUM_SIGNATURES",
+            "MAX_WASM_FORUM_PUBLIC_KEYS",
+        ] {
+            assert!(
+                source.contains(required),
+                "decision forum WASM boundary must define and use {required}"
+            );
+        }
+
+        for forbidden in [
+            "let actions: Vec<decision_forum::emergency::EmergencyAction> = from_json_str(actions_json)?;",
+            "from_json_str(challenges_json)?;",
+            "let sig_pairs: Vec<(String, String)> = from_json_str(signatures_json)?;",
+            "let key_pairs: Vec<(String, String)> = from_json_str(public_keys_json)?;",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "decision forum WASM boundary must not deserialize untrusted arrays without a count bound: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn wasm_messaging_bridge_requires_caller_supplied_envelope_metadata() {
         let source = include_str!("messaging_bindings.rs");
         assert!(

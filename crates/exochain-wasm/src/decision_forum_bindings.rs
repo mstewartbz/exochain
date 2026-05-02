@@ -5,6 +5,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+const MAX_WASM_FORUM_EMERGENCY_ACTIONS: usize = 4_096;
+const MAX_WASM_FORUM_CHALLENGES: usize = 4_096;
+const MAX_WASM_FORUM_SIGNATURES: usize = 1_024;
+const MAX_WASM_FORUM_PUBLIC_KEYS: usize = 1_024;
+
 /// Create a new DecisionObject with full BCTS lifecycle
 #[wasm_bindgen]
 pub fn wasm_create_decision(
@@ -650,7 +655,11 @@ pub fn wasm_needs_governance_review(
     actions_json: &str,
     policy_json: &str,
 ) -> Result<bool, JsValue> {
-    let actions: Vec<decision_forum::emergency::EmergencyAction> = from_json_str(actions_json)?;
+    let actions: Vec<decision_forum::emergency::EmergencyAction> = from_json_bounded_vec(
+        actions_json,
+        "forum emergency actions",
+        MAX_WASM_FORUM_EMERGENCY_ACTIONS,
+    )?;
     let policy: decision_forum::emergency::EmergencyPolicy = from_json_str(policy_json)?;
     Ok(decision_forum::emergency::needs_governance_review(
         &actions, &policy,
@@ -682,8 +691,11 @@ pub fn wasm_withdraw_challenge(challenge_json: &str) -> Result<JsValue, JsValue>
 /// Return true if the given decision is currently contested (has an active challenge).
 #[wasm_bindgen]
 pub fn wasm_is_contested(challenges_json: &str, decision_id: &str) -> Result<bool, JsValue> {
-    let challenges: Vec<decision_forum::contestation::ChallengeObject> =
-        from_json_str(challenges_json)?;
+    let challenges: Vec<decision_forum::contestation::ChallengeObject> = from_json_bounded_vec(
+        challenges_json,
+        "forum challenges",
+        MAX_WASM_FORUM_CHALLENGES,
+    )?;
     let id: uuid::Uuid = decision_id
         .parse()
         .map_err(|e| JsValue::from_str(&format!("UUID error: {e}")))?;
@@ -769,7 +781,11 @@ fn parse_hash(value: &str, label: &str) -> Result<exo_core::Hash256, JsValue> {
 fn parse_signature_pairs(
     signatures_json: &str,
 ) -> Result<Vec<(exo_core::Did, exo_core::Signature)>, JsValue> {
-    let sig_pairs: Vec<(String, String)> = from_json_str(signatures_json)?;
+    let sig_pairs: Vec<(String, String)> = from_json_bounded_vec(
+        signatures_json,
+        "forum signatures",
+        MAX_WASM_FORUM_SIGNATURES,
+    )?;
     let mut sigs = Vec::new();
     for (did_str, sig_hex) in &sig_pairs {
         let did = exo_core::Did::new(did_str)
@@ -787,7 +803,11 @@ fn parse_signature_pairs(
 fn parse_public_key_pairs(
     public_keys_json: &str,
 ) -> Result<std::collections::BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
-    let key_pairs: Vec<(String, String)> = from_json_str(public_keys_json)?;
+    let key_pairs: Vec<(String, String)> = from_json_bounded_vec(
+        public_keys_json,
+        "forum public keys",
+        MAX_WASM_FORUM_PUBLIC_KEYS,
+    )?;
     let mut public_keys = std::collections::BTreeMap::new();
     for (did_str, public_key_hex) in &key_pairs {
         let did = exo_core::Did::new(did_str)
