@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct RiskAssessmentMetadata {
     validity_ms: u64,
     attester_secret_hex: String,

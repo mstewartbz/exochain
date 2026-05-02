@@ -241,6 +241,28 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_identity_secret_metadata_has_no_debug_surface() {
+        let source = include_str!("identity_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+        let metadata_def = production
+            .split("struct RiskAssessmentMetadata")
+            .next()
+            .expect("risk metadata definition must exist");
+
+        assert!(
+            production.contains("attester_secret_hex"),
+            "risk assessment metadata must keep the caller-supplied attester secret explicit"
+        );
+        assert!(
+            !metadata_def.contains("Debug"),
+            "secret-bearing risk metadata must not derive or expose Debug"
+        );
+    }
+
+    #[test]
     fn wasm_core_event_bridge_requires_caller_supplied_metadata() {
         let source = include_str!("core_bindings.rs");
         assert!(
