@@ -133,6 +133,16 @@ pub fn enact(
         }
     }
 
+    validate_uuid(decision_id, "accountability decision id")?;
+    if timestamp < action.proposed_at {
+        return Err(ForumError::InvalidProvenance {
+            reason: format!(
+                "accountability enactment timestamp {} must not precede proposal timestamp {}",
+                timestamp, action.proposed_at
+            ),
+        });
+    }
+
     // Suspension must be enacted within 60 seconds.
     if action.action_type == AccountabilityActionType::Suspension {
         let elapsed_ms = timestamp
@@ -299,6 +309,35 @@ mod tests {
         enact(&mut a, Uuid::new_v4(), enact_ts).expect("ok");
         assert_eq!(a.status, AccountabilityStatus::Enacted);
         assert!(a.enacted_at.is_some());
+    }
+
+    #[test]
+    fn enact_rejects_nil_decision_id() {
+        let mut a = make_action(AccountabilityActionType::Censure);
+
+        let err = enact(&mut a, Uuid::nil(), Timestamp::new(ts().physical_ms + 1, 0)).unwrap_err();
+
+        assert!(matches!(err, ForumError::InvalidProvenance { .. }));
+        assert!(err.to_string().contains("decision id"));
+        assert_eq!(a.status, AccountabilityStatus::Proposed);
+        assert!(a.enacted_at.is_none());
+    }
+
+    #[test]
+    fn enact_rejects_timestamp_before_proposal() {
+        let mut a = make_action(AccountabilityActionType::Suspension);
+
+        let err = enact(
+            &mut a,
+            Uuid::from_u128(77),
+            Timestamp::new(ts().physical_ms - 1, 0),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ForumError::InvalidProvenance { .. }));
+        assert!(err.to_string().contains("must not precede proposal"));
+        assert_eq!(a.status, AccountabilityStatus::Proposed);
+        assert!(a.enacted_at.is_none());
     }
 
     #[test]
