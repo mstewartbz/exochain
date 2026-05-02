@@ -160,6 +160,104 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_non_governance_vec_inputs_use_explicit_count_bounds() {
+        let required = [
+            (
+                "authority_bindings.rs",
+                include_str!("authority_bindings.rs"),
+                "MAX_WASM_AUTHORITY_LINKS",
+            ),
+            (
+                "authority_bindings.rs",
+                include_str!("authority_bindings.rs"),
+                "MAX_WASM_AUTHORITY_KEYS",
+            ),
+            (
+                "identity_bindings.rs",
+                include_str!("identity_bindings.rs"),
+                "MAX_WASM_SHAMIR_SHARES",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "MAX_WASM_DETECTION_SIGNALS",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "MAX_WASM_FEEDBACK_ENTRIES",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "MAX_WASM_ESCALATION_CASES",
+            ),
+            (
+                "messaging_bindings.rs",
+                include_str!("messaging_bindings.rs"),
+                "MAX_WASM_AUTHORIZED_TRUSTEES",
+            ),
+        ];
+
+        for (path, source, required_name) in required {
+            assert!(
+                source.contains(required_name),
+                "{path} must define and use {required_name}"
+            );
+        }
+
+        let forbidden = [
+            (
+                "authority_bindings.rs",
+                include_str!("authority_bindings.rs"),
+                "let links: Vec<exo_authority::AuthorityLink> = from_json_str(links_json)?;",
+            ),
+            (
+                "authority_bindings.rs",
+                include_str!("authority_bindings.rs"),
+                "let key_pairs: Vec<(String, String)> = from_json_str(keys_json)?;",
+            ),
+            (
+                "identity_bindings.rs",
+                include_str!("identity_bindings.rs"),
+                "let shares: Vec<exo_identity::shamir::Share> = from_json_str(shares_json)?;",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "let signals: Vec<exo_escalation::detector::DetectionSignal> = from_json_str(signals_json)?;",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "from_json_str(entries_json)?;",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "let feedbacks: Vec<exo_escalation::feedback::FeedbackEntry> = from_json_str(feedbacks_json)?;",
+            ),
+            (
+                "escalation_bindings.rs",
+                include_str!("escalation_bindings.rs"),
+                "let mut cases: Vec<exo_escalation::escalation::EscalationCase> = from_json_str(cases_json)?;",
+            ),
+            (
+                "messaging_bindings.rs",
+                include_str!("messaging_bindings.rs"),
+                "let trustees: Vec<WasmAuthorizedTrustee> = from_json_str(authorized_trustees_json)?;",
+            ),
+        ];
+
+        for (path, source, forbidden_pattern) in forbidden {
+            assert!(
+                !source.contains(forbidden_pattern),
+                "{path} must not deserialize untrusted JSON arrays without explicit count bounds: {forbidden_pattern}"
+            );
+        }
+    }
+
+    #[test]
     fn wasm_messaging_bridge_requires_caller_supplied_envelope_metadata() {
         let source = include_str!("messaging_bindings.rs");
         assert!(

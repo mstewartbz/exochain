@@ -6,10 +6,14 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+const MAX_WASM_AUTHORITY_LINKS: usize = 1_024;
+const MAX_WASM_AUTHORITY_KEYS: usize = 1_024;
+
 /// Build and validate an authority chain from delegation links
 #[wasm_bindgen]
 pub fn wasm_build_authority_chain(links_json: &str) -> Result<JsValue, JsValue> {
-    let links: Vec<exo_authority::AuthorityLink> = from_json_str(links_json)?;
+    let links: Vec<exo_authority::AuthorityLink> =
+        from_json_bounded_vec(links_json, "authority links", MAX_WASM_AUTHORITY_LINKS)?;
     let chain = exo_authority::chain::build_chain(&links)
         .map_err(|e| JsValue::from_str(&format!("Chain error: {e}")))?;
     to_js_value(&chain)
@@ -21,7 +25,13 @@ pub fn wasm_build_authority_chain_with_depth(
     links_json: &str,
     max_depth: usize,
 ) -> Result<JsValue, JsValue> {
-    let links: Vec<exo_authority::AuthorityLink> = from_json_str(links_json)?;
+    if max_depth > MAX_WASM_AUTHORITY_LINKS {
+        return Err(JsValue::from_str(
+            "authority chain depth exceeds maximum authority link count",
+        ));
+    }
+    let links: Vec<exo_authority::AuthorityLink> =
+        from_json_bounded_vec(links_json, "authority links", MAX_WASM_AUTHORITY_LINKS)?;
     let chain = exo_authority::chain::build_chain_with_depth(&links, max_depth)
         .map_err(|e| JsValue::from_str(&format!("Chain error: {e}")))?;
     to_js_value(&chain)
@@ -52,7 +62,8 @@ pub fn wasm_verify_authority_chain(
 ) -> Result<JsValue, JsValue> {
     let chain: exo_authority::AuthorityChain = from_json_str(chain_json)?;
     let now = exo_core::types::Timestamp::new(now_ms, 0);
-    let key_pairs: Vec<(String, String)> = from_json_str(keys_json)?;
+    let key_pairs: Vec<(String, String)> =
+        from_json_bounded_vec(keys_json, "authority public keys", MAX_WASM_AUTHORITY_KEYS)?;
 
     // Build deterministic lookup table from the caller-supplied key list.
     let mut lookup: BTreeMap<exo_core::Did, exo_core::PublicKey> = BTreeMap::new();

@@ -4,6 +4,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+const MAX_WASM_DETECTION_SIGNALS: usize = 1_024;
+const MAX_WASM_FEEDBACK_ENTRIES: usize = 4_096;
+const MAX_WASM_ESCALATION_CASES: usize = 1_024;
+
 fn triage_level_label(level: &exo_escalation::triage::TriageLevel) -> &'static str {
     match level {
         exo_escalation::triage::TriageLevel::Automatic => "Automatic",
@@ -40,7 +44,11 @@ fn completeness_details(result: &exo_escalation::completeness::CompletenessResul
 /// Evaluate detection signals and produce threat assessment
 #[wasm_bindgen]
 pub fn wasm_evaluate_signals(signals_json: &str) -> Result<JsValue, JsValue> {
-    let signals: Vec<exo_escalation::detector::DetectionSignal> = from_json_str(signals_json)?;
+    let signals: Vec<exo_escalation::detector::DetectionSignal> = from_json_bounded_vec(
+        signals_json,
+        "detection signals",
+        MAX_WASM_DETECTION_SIGNALS,
+    )?;
     let assessment = exo_escalation::detector::evaluate_signals(&signals);
     to_js_value(&assessment)
 }
@@ -61,7 +69,7 @@ pub fn wasm_escalate(input_json: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_record_feedback(entries_json: &str, entry_json: &str) -> Result<JsValue, JsValue> {
     let existing_entries: Vec<exo_escalation::feedback::FeedbackEntry> =
-        from_json_str(entries_json)?;
+        from_json_bounded_vec(entries_json, "feedback entries", MAX_WASM_FEEDBACK_ENTRIES)?;
     let entry: exo_escalation::feedback::FeedbackEntry = from_json_str(entry_json)?;
     let mut log = exo_escalation::feedback::FeedbackLog::default();
     for e in existing_entries {
@@ -75,7 +83,11 @@ pub fn wasm_record_feedback(entries_json: &str, entry_json: &str) -> Result<JsVa
 /// Apply learnings from feedback to generate policy recommendations
 #[wasm_bindgen]
 pub fn wasm_apply_learnings(feedbacks_json: &str) -> Result<JsValue, JsValue> {
-    let feedbacks: Vec<exo_escalation::feedback::FeedbackEntry> = from_json_str(feedbacks_json)?;
+    let feedbacks: Vec<exo_escalation::feedback::FeedbackEntry> = from_json_bounded_vec(
+        feedbacks_json,
+        "feedback entries",
+        MAX_WASM_FEEDBACK_ENTRIES,
+    )?;
     let recommendations = exo_escalation::feedback::apply_learnings(&feedbacks);
     to_js_value(&recommendations)
 }
@@ -122,7 +134,8 @@ pub fn wasm_triage(assessment_json: &str) -> Result<JsValue, JsValue> {
 pub fn wasm_cases_by_priority(cases_json: &str) -> Result<JsValue, JsValue> {
     use exo_escalation::escalation::CasePriority;
 
-    let mut cases: Vec<exo_escalation::escalation::EscalationCase> = from_json_str(cases_json)?;
+    let mut cases: Vec<exo_escalation::escalation::EscalationCase> =
+        from_json_bounded_vec(cases_json, "escalation cases", MAX_WASM_ESCALATION_CASES)?;
     // Sort descending so highest priority comes first.
     cases.sort_by(|a, b| {
         let ord = |p: &CasePriority| match p {

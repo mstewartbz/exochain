@@ -22,6 +22,21 @@ pub fn from_json_str<T: DeserializeOwned>(json: &str) -> Result<T, JsValue> {
     serde_json::from_str(json).map_err(|_| bridge_error("JSON parse error"))
 }
 
+pub fn from_json_bounded_vec<T: DeserializeOwned>(
+    json: &str,
+    label: &str,
+    max_items: usize,
+) -> Result<Vec<T>, JsValue> {
+    let values: Vec<T> = from_json_str(json)?;
+    if values.len() > max_items {
+        return Err(bridge_error(&format!(
+            "{label} contains {} items, maximum is {max_items}",
+            values.len()
+        )));
+    }
+    Ok(values)
+}
+
 pub fn to_js_value<T: Serialize>(val: &T) -> Result<JsValue, JsValue> {
     // Go through JSON string → js_sys::JSON::parse to get plain JS objects (not Maps)
     let json = serde_json::to_string(val).map_err(|_| bridge_error("Serialization error"))?;
@@ -93,6 +108,22 @@ mod tests {
         let oversized = format!("[{}0]", "0,".repeat(600_000));
         let result: Result<Vec<u8>, _> = super::from_json_str(&oversized);
         assert!(result.is_err(), "oversized JSON must be rejected");
+    }
+
+    #[test]
+    fn from_json_bounded_vec_accepts_limit_and_rejects_excess_items() {
+        let at_limit = serde_json::to_string(&vec!["item"; 4]).expect("serialize");
+        let accepted: Vec<String> =
+            super::from_json_bounded_vec(&at_limit, "test items", 4).expect("at limit");
+        assert_eq!(accepted.len(), 4);
+
+        let over_limit = serde_json::to_string(&vec!["item"; 5]).expect("serialize");
+        let rejected: Result<Vec<String>, _> =
+            super::from_json_bounded_vec(&over_limit, "test items", 4);
+        assert!(
+            rejected.is_err(),
+            "one item over the limit must fail closed"
+        );
     }
 
     #[test]

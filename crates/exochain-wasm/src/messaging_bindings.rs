@@ -7,6 +7,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+const MAX_WASM_AUTHORIZED_TRUSTEES: usize = 1_024;
+
 #[derive(Deserialize)]
 struct WasmAuthorizedTrustee {
     did: String,
@@ -249,7 +251,11 @@ fn parse_ed25519_signature_hex(label: &str, value: &str) -> Result<exo_core::Sig
 fn parse_authorized_trustees_json(
     authorized_trustees_json: &str,
 ) -> Result<BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
-    let trustees: Vec<WasmAuthorizedTrustee> = from_json_str(authorized_trustees_json)?;
+    let trustees: Vec<WasmAuthorizedTrustee> = from_json_bounded_vec(
+        authorized_trustees_json,
+        "authorized trustees",
+        MAX_WASM_AUTHORIZED_TRUSTEES,
+    )?;
     let mut authorized = BTreeMap::new();
     for trustee in trustees {
         let did = exo_core::Did::new(&trustee.did)

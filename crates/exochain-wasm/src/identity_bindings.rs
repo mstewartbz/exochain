@@ -5,6 +5,8 @@ use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
+const MAX_WASM_SHAMIR_SHARES: usize = u8::MAX as usize;
+
 #[derive(serde::Deserialize)]
 struct RiskAssessmentMetadata {
     validity_ms: u64,
@@ -69,7 +71,8 @@ pub fn wasm_shamir_reconstruct(
     threshold: u8,
     total_shares: u8,
 ) -> Result<JsValue, JsValue> {
-    let shares: Vec<exo_identity::shamir::Share> = from_json_str(shares_json)?;
+    let shares: Vec<exo_identity::shamir::Share> =
+        from_json_bounded_vec(shares_json, "Shamir shares", MAX_WASM_SHAMIR_SHARES)?;
     let config = exo_identity::shamir::ShamirConfig {
         threshold,
         shares: total_shares,
