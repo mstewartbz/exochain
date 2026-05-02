@@ -522,9 +522,11 @@ impl SqliteDagStore {
             .conn
             .prepare_cached("SELECT 1 FROM committed WHERE hash = ?1")
             .map_err(store_err)?;
-        Ok(stmt
-            .query_row(params![hash.0.as_slice()], |_| Ok(()))
-            .is_ok())
+        match stmt.query_row(params![hash.0.as_slice()], |_| Ok(())) {
+            Ok(()) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(store_err(format!("committed.hash presence query: {e}"))),
+        }
     }
 
     /// Get the committed height for a specific hash (if committed).
@@ -576,13 +578,13 @@ impl SqliteDagStore {
             .prepare_cached("SELECT cbor_payload FROM dag_nodes WHERE hash = ?1")
             .map_err(store_err)?;
 
-        let result: Option<Vec<u8>> = stmt
-            .query_row(params![hash.0.as_slice()], |row| row.get(0))
-            .ok();
+        let result: Result<Vec<u8>, rusqlite::Error> =
+            stmt.query_row(params![hash.0.as_slice()], |row| row.get(0));
 
         match result {
-            Some(bytes) => Ok(Some(Self::decode_node(&bytes)?)),
-            None => Ok(None),
+            Ok(bytes) => Ok(Some(Self::decode_node(&bytes)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(store_err(format!("dag_nodes.cbor_payload: {e}"))),
         }
     }
 
@@ -616,11 +618,11 @@ impl SqliteDagStore {
             .prepare_cached("SELECT 1 FROM dag_nodes WHERE hash = ?1")
             .map_err(store_err)?;
 
-        let exists = stmt
-            .query_row(params![hash.0.as_slice()], |_| Ok(()))
-            .is_ok();
-
-        Ok(exists)
+        match stmt.query_row(params![hash.0.as_slice()], |_| Ok(())) {
+            Ok(()) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(store_err(format!("dag_nodes.hash presence query: {e}"))),
+        }
     }
 
     /// Sync version of `DagStore::tips`.
@@ -737,6 +739,26 @@ mod tests {
     }
 
     #[test]
+    fn production_store_presence_checks_do_not_squash_sqlite_errors() {
+        let source = include_str!("store.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(
+                ".query_row(params![hash.0.as_slice()], |_| Ok(()))\n            .is_ok()"
+            ),
+            "presence checks must distinguish missing rows from SQLite read errors"
+        );
+        assert!(
+            production.contains("Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false)"),
+            "missing rows may map to false, but other SQLite errors must propagate"
+        );
+    }
+
+    #[test]
     fn new_store_is_empty() {
         let store = temp_store();
         assert_eq!(store.committed_height_sync().unwrap(), 0);
@@ -759,6 +781,28 @@ mod tests {
         let store = temp_store();
         let result = store.get_sync(&Hash256::ZERO).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_sync_propagates_payload_read_errors() {
+        let store = temp_store();
+        let mut hash = [0u8; 32];
+        hash[0] = 0xD0;
+        let hash = Hash256::from_bytes(hash);
+        store
+            .conn
+            .execute(
+                "INSERT INTO dag_nodes (hash, cbor_payload) VALUES (?1, ?2)",
+                rusqlite::params![hash.0.as_slice(), 7_i64],
+            )
+            .unwrap();
+
+        let err = store.get_sync(&hash).unwrap_err();
+
+        assert!(
+            err.to_string().contains("dag_nodes.cbor_payload"),
+            "malformed persisted payload must surface as a store error"
+        );
     }
 
     #[test]
