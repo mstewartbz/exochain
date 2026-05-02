@@ -172,9 +172,9 @@ impl MetricsCollector {
 
     /// Record an authority verification result.
     pub fn record_authority_check(&mut self, passed: bool) {
-        self.authority_verification_total += 1;
+        increment_counter(&mut self.authority_verification_total);
         if passed {
-            self.authority_verification_passed += 1;
+            increment_counter(&mut self.authority_verification_passed);
         }
     }
 
@@ -185,33 +185,33 @@ impl MetricsCollector {
 
     /// Record an evidence completeness check.
     pub fn record_evidence_check(&mut self, complete: bool) {
-        self.evidence_checks_total += 1;
+        increment_counter(&mut self.evidence_checks_total);
         if complete {
-            self.evidence_checks_complete += 1;
+            increment_counter(&mut self.evidence_checks_complete);
         }
     }
 
     /// Record a quorum check.
     pub fn record_quorum_check(&mut self, met: bool) {
-        self.quorum_checks_total += 1;
+        increment_counter(&mut self.quorum_checks_total);
         if met {
-            self.quorum_checks_met += 1;
+            increment_counter(&mut self.quorum_checks_met);
         }
     }
 
     /// Record a human gate check.
     pub fn record_human_gate_check(&mut self, satisfied: bool) {
-        self.human_gate_checks_total += 1;
+        increment_counter(&mut self.human_gate_checks_total);
         if satisfied {
-            self.human_gate_checks_satisfied += 1;
+            increment_counter(&mut self.human_gate_checks_satisfied);
         }
     }
 
     /// Record a constitutional binding check.
     pub fn record_constitutional_check(&mut self, valid: bool) {
-        self.constitutional_binding_total += 1;
+        increment_counter(&mut self.constitutional_binding_total);
         if valid {
-            self.constitutional_binding_valid += 1;
+            increment_counter(&mut self.constitutional_binding_valid);
         }
     }
 
@@ -222,41 +222,41 @@ impl MetricsCollector {
 
     /// Record an emergency action.
     pub fn record_emergency(&mut self, ratified: bool) {
-        self.emergency_total += 1;
+        increment_counter(&mut self.emergency_total);
         if ratified {
-            self.emergency_ratified += 1;
+            increment_counter(&mut self.emergency_ratified);
         }
     }
 
     /// Record an accountability action.
     pub fn record_accountability(&mut self, completed: bool) {
-        self.accountability_total += 1;
+        increment_counter(&mut self.accountability_total);
         if completed {
-            self.accountability_completed += 1;
+            increment_counter(&mut self.accountability_completed);
         }
     }
 
     /// Record a consent check.
     pub fn record_consent_check(&mut self, verified: bool) {
-        self.consent_checks_total += 1;
+        increment_counter(&mut self.consent_checks_total);
         if verified {
-            self.consent_checks_verified += 1;
+            increment_counter(&mut self.consent_checks_verified);
         }
     }
 
     /// Record an identity check.
     pub fn record_identity_check(&mut self, verified: bool) {
-        self.identity_checks_total += 1;
+        increment_counter(&mut self.identity_checks_total);
         if verified {
-            self.identity_checks_verified += 1;
+            increment_counter(&mut self.identity_checks_verified);
         }
     }
 
     /// Record a self-modification check.
     pub fn record_self_mod(&mut self, compliant: bool) {
-        self.self_mod_total += 1;
+        increment_counter(&mut self.self_mod_total);
         if compliant {
-            self.self_mod_compliant += 1;
+            increment_counter(&mut self.self_mod_compliant);
         }
     }
 }
@@ -274,6 +274,10 @@ fn pct(numerator: u64, denominator: u64) -> u64 {
     }
     let pct = (u128::from(numerator) * 100) / u128::from(denominator);
     u64::try_from(pct.min(100)).unwrap_or(100)
+}
+
+fn increment_counter(value: &mut u64) {
+    *value = value.saturating_add(1);
 }
 
 fn push_bounded_latency_sample(values: &mut Vec<u64>, value: u64) {
@@ -420,6 +424,53 @@ mod tests {
         assert_eq!(pct(u64::MAX, 1), 100);
         assert_eq!(pct(u64::MAX, u64::MAX), 100);
         assert_eq!(pct(u64::MAX - 1, u64::MAX), 99);
+    }
+
+    #[test]
+    fn recorders_saturate_deserialized_counter_maxima_without_panicking() {
+        let mut m = MetricsCollector {
+            authority_verification_total: u64::MAX,
+            authority_verification_passed: u64::MAX,
+            revocation_latencies_ms: Vec::new(),
+            evidence_checks_total: u64::MAX,
+            evidence_checks_complete: u64::MAX,
+            quorum_checks_total: u64::MAX,
+            quorum_checks_met: u64::MAX,
+            human_gate_checks_total: u64::MAX,
+            human_gate_checks_satisfied: u64::MAX,
+            constitutional_binding_total: u64::MAX,
+            constitutional_binding_valid: u64::MAX,
+            challenge_resolution_times_ms: Vec::new(),
+            emergency_total: u64::MAX,
+            emergency_ratified: u64::MAX,
+            accountability_total: u64::MAX,
+            accountability_completed: u64::MAX,
+            consent_checks_total: u64::MAX,
+            consent_checks_verified: u64::MAX,
+            identity_checks_total: u64::MAX,
+            identity_checks_verified: u64::MAX,
+            self_mod_total: u64::MAX,
+            self_mod_compliant: u64::MAX,
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            m.record_authority_check(true);
+            m.record_evidence_check(true);
+            m.record_quorum_check(true);
+            m.record_human_gate_check(true);
+            m.record_constitutional_check(true);
+            m.record_emergency(true);
+            m.record_accountability(true);
+            m.record_consent_check(true);
+            m.record_identity_check(true);
+            m.record_self_mod(true);
+        }));
+
+        assert!(result.is_ok());
+        assert_eq!(m.authority_verification_total, u64::MAX);
+        assert_eq!(m.authority_verification_passed, u64::MAX);
+        assert_eq!(m.self_mod_total, u64::MAX);
+        assert_eq!(m.self_mod_compliant, u64::MAX);
     }
 
     #[test]
