@@ -138,7 +138,9 @@ mod tests {
     use super::*;
     use crate::{
         error::IdentityError,
-        registry::{DidRegistry, LocalDidRegistry, revocation_proof_payload},
+        registry::{
+            DidRegistry, LocalDidRegistry, key_rotation_proof_payload, revocation_proof_payload,
+        },
     };
 
     fn make_did(label: &str) -> Did {
@@ -157,6 +159,16 @@ mod tests {
             updated: Timestamp::new(1000, 0),
             revoked: false,
         }
+    }
+
+    fn rotation_signature(
+        did: &Did,
+        new_key: &PublicKey,
+        updated: Timestamp,
+        secret_key: &exo_core::SecretKey,
+    ) -> Signature {
+        let payload = key_rotation_proof_payload(did, new_key, updated).expect("rotation payload");
+        sign(&payload, secret_key)
     }
 
     #[test]
@@ -256,7 +268,7 @@ mod tests {
         reg.register(doc).unwrap();
 
         let (new_pk, _new_sk) = generate_keypair();
-        let proof = sign(new_pk.as_bytes(), &sk);
+        let proof = rotation_signature(&did, &new_pk, Timestamp::new(1001, 0), &sk);
         reg.rotate_key(&did, &new_pk, &proof, Timestamp::new(1001, 0))
             .unwrap();
 
@@ -270,7 +282,7 @@ mod tests {
         let (_pk, sk) = generate_keypair();
         let did = make_did("unknown2");
         let (new_pk, _) = generate_keypair();
-        let proof = sign(new_pk.as_bytes(), &sk);
+        let proof = rotation_signature(&did, &new_pk, Timestamp::new(1001, 0), &sk);
 
         let mut reg = LocalDidRegistry::new();
         let err = reg
@@ -296,7 +308,7 @@ mod tests {
         reg.revoke(&did, &revocation).unwrap();
 
         let (new_pk, _) = generate_keypair();
-        let proof = sign(new_pk.as_bytes(), &sk);
+        let proof = rotation_signature(&did, &new_pk, Timestamp::new(1001, 0), &sk);
         let err = reg
             .rotate_key(&did, &new_pk, &proof, Timestamp::new(1001, 0))
             .unwrap_err();
@@ -314,7 +326,7 @@ mod tests {
 
         let (new_pk, _) = generate_keypair();
         let (_other_pk, other_sk) = generate_keypair();
-        let bad_proof = sign(new_pk.as_bytes(), &other_sk);
+        let bad_proof = rotation_signature(&did, &new_pk, Timestamp::new(1001, 0), &other_sk);
         let err = reg
             .rotate_key(&did, &new_pk, &bad_proof, Timestamp::new(1001, 0))
             .unwrap_err();

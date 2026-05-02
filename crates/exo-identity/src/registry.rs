@@ -9,11 +9,20 @@ use crate::{
 };
 
 const DID_REVOCATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.revocation.v1";
+const DID_KEY_ROTATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.key_rotation.v1";
 
 #[derive(Serialize)]
 struct RevocationProofPayload<'a> {
     domain: &'static str,
     did: &'a Did,
+}
+
+#[derive(Serialize)]
+struct KeyRotationProofPayload<'a> {
+    domain: &'static str,
+    did: &'a Did,
+    new_public_key: &'a [u8; 32],
+    updated: Timestamp,
 }
 
 /// Build the canonical signable payload for DID revocation proofs.
@@ -29,6 +38,32 @@ pub(crate) fn revocation_proof_payload(did: &Did) -> Result<Vec<u8>, IdentityErr
     let mut encoded = Vec::new();
     ciborium::into_writer(&payload, &mut encoded).map_err(|e| {
         IdentityError::RevocationProofPayloadEncoding {
+            did: did.clone(),
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(encoded)
+}
+
+/// Build the canonical signable payload for DID key-rotation proofs.
+///
+/// The payload binds the signature to key rotation for one DID, one replacement
+/// public key, and one caller-supplied HLC timestamp so raw public-key
+/// signatures and stale rotation proofs cannot be replayed into this method.
+pub fn key_rotation_proof_payload(
+    did: &Did,
+    new_key: &PublicKey,
+    updated: Timestamp,
+) -> Result<Vec<u8>, IdentityError> {
+    let payload = KeyRotationProofPayload {
+        domain: DID_KEY_ROTATION_PROOF_DOMAIN,
+        did,
+        new_public_key: new_key.as_bytes(),
+        updated,
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&payload, &mut encoded).map_err(|e| {
+        IdentityError::KeyRotationProofPayloadEncoding {
             did: did.clone(),
             reason: e.to_string(),
         }
@@ -138,11 +173,11 @@ impl DidRegistry for LocalDidRegistry {
             return Err(IdentityError::DidRevoked(did.clone()));
         }
 
-        let msg = new_key.as_bytes();
+        let msg = key_rotation_proof_payload(did, new_key, updated)?;
         let valid = doc
             .public_keys
             .iter()
-            .any(|pk| crypto::verify(msg, proof, pk));
+            .any(|pk| crypto::verify(&msg, proof, pk));
 
         if !valid {
             return Err(IdentityError::InvalidSignature);
@@ -165,7 +200,10 @@ impl DidRegistry for LocalDidRegistry {
 
 #[cfg(test)]
 mod tests {
-    use exo_core::crypto::{generate_keypair, sign};
+    use exo_core::{
+        SecretKey,
+        crypto::{generate_keypair, sign},
+    };
 
     use super::*;
     use crate::did::DidDocument;
@@ -186,6 +224,16 @@ mod tests {
             updated: Timestamp::new(1000, 0),
             revoked: false,
         }
+    }
+
+    fn rotation_signature(
+        did: &Did,
+        new_key: &PublicKey,
+        updated: Timestamp,
+        secret_key: &SecretKey,
+    ) -> Signature {
+        let payload = key_rotation_proof_payload(did, new_key, updated).unwrap();
+        sign(&payload, secret_key)
     }
 
     #[test]
@@ -259,7 +307,7 @@ mod tests {
         reg.register(doc).unwrap();
 
         let (new_pk, _) = generate_keypair();
-        let proof = sign(new_pk.as_bytes(), &sk);
+        let proof = rotation_signature(&did, &new_pk, Timestamp::new(1001, 0), &sk);
 
         reg.rotate_key(&did, &new_pk, &proof, Timestamp::new(1001, 0))
             .unwrap();
@@ -279,7 +327,7 @@ mod tests {
         reg.register(doc).unwrap();
 
         let (new_pk, new_sk) = generate_keypair();
-        let proof = sign(new_pk.as_bytes(), &sk);
+        let proof = rotation_signature(&did, &new_pk, Timestamp::new(1001, 0), &sk);
         reg.rotate_key(&did, &new_pk, &proof, Timestamp::new(1001, 0))
             .unwrap();
 
@@ -291,19 +339,65 @@ mod tests {
         );
 
         let (third_pk, _) = generate_keypair();
-        let rotated_out_proof = sign(third_pk.as_bytes(), &sk);
+        let rotated_out_proof = rotation_signature(&did, &third_pk, Timestamp::new(1002, 0), &sk);
         let err = reg
             .rotate_key(&did, &third_pk, &rotated_out_proof, Timestamp::new(1002, 0))
             .unwrap_err();
         assert!(matches!(err, IdentityError::InvalidSignature));
 
-        let active_proof = sign(third_pk.as_bytes(), &new_sk);
+        let active_proof = rotation_signature(&did, &third_pk, Timestamp::new(1002, 0), &new_sk);
         reg.rotate_key(&did, &third_pk, &active_proof, Timestamp::new(1002, 0))
             .unwrap();
 
         let resolved = reg.resolve(&did).unwrap();
         assert_eq!(resolved.public_keys, vec![third_pk]);
         assert_eq!(resolved.updated, Timestamp::new(1002, 0));
+    }
+
+    #[test]
+    fn rotate_key_requires_domain_separated_payload_not_raw_new_key() {
+        let (pk, sk) = generate_keypair();
+        let did = make_did("domain-rotate");
+        let doc = make_doc(did.clone(), pk);
+
+        let mut reg = LocalDidRegistry::new();
+        reg.register(doc).unwrap();
+
+        let (new_pk, _) = generate_keypair();
+        let raw_proof = sign(new_pk.as_bytes(), &sk);
+        let updated = Timestamp::new(1001, 0);
+
+        let err = reg
+            .rotate_key(&did, &new_pk, &raw_proof, updated)
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidSignature));
+        assert_eq!(reg.resolve(&did).unwrap().public_keys, vec![pk]);
+
+        let proof = rotation_signature(&did, &new_pk, updated, &sk);
+        reg.rotate_key(&did, &new_pk, &proof, updated).unwrap();
+
+        assert_eq!(reg.resolve(&did).unwrap().public_keys, vec![new_pk]);
+    }
+
+    #[test]
+    fn rotate_key_rejects_replayed_payload_for_different_timestamp() {
+        let (pk, sk) = generate_keypair();
+        let did = make_did("timestamp-bound-rotate");
+        let doc = make_doc(did.clone(), pk);
+
+        let mut reg = LocalDidRegistry::new();
+        reg.register(doc).unwrap();
+
+        let (new_pk, _) = generate_keypair();
+        let signed_updated = Timestamp::new(1001, 0);
+        let replayed_updated = Timestamp::new(1002, 0);
+        let proof = rotation_signature(&did, &new_pk, signed_updated, &sk);
+
+        let err = reg
+            .rotate_key(&did, &new_pk, &proof, replayed_updated)
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::InvalidSignature));
+        assert_eq!(reg.resolve(&did).unwrap().public_keys, vec![pk]);
     }
 
     #[test]
@@ -316,7 +410,7 @@ mod tests {
         reg.register(doc).unwrap();
 
         let (new_pk, _) = generate_keypair();
-        let proof = sign(new_pk.as_bytes(), &sk);
+        let proof = rotation_signature(&did, &new_pk, Timestamp::new(1000, 0), &sk);
         let err = reg
             .rotate_key(&did, &new_pk, &proof, Timestamp::new(1000, 0))
             .unwrap_err();

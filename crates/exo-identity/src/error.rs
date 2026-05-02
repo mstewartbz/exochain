@@ -30,6 +30,9 @@ pub enum IdentityError {
     #[error("revocation proof payload encoding failed for DID {did}: {reason}")]
     RevocationProofPayloadEncoding { did: Did, reason: String },
 
+    #[error("key rotation proof payload encoding failed for DID {did}: {reason}")]
+    KeyRotationProofPayloadEncoding { did: Did, reason: String },
+
     #[error("public key not found on DID: {0}")]
     KeyNotFound(Did),
 
