@@ -121,6 +121,45 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_governance_bridge_bounds_untrusted_collection_inputs() {
+        let source = include_str!("governance_bindings.rs");
+        for required in [
+            "MAX_WASM_PUBLIC_KEYS",
+            "MAX_WASM_CLEARANCE_REGISTRY_ENTRIES",
+            "MAX_WASM_APPROVALS",
+            "MAX_WASM_CONFLICT_DECLARATIONS",
+            "MAX_WASM_AUDIT_ENTRIES",
+            "MAX_WASM_DELIBERATION_PARTICIPANTS",
+            "MAX_WASM_INDEPENDENCE_ACTORS",
+            "MAX_WASM_REGISTRY_RELATIONSHIPS",
+            "MAX_WASM_COORDINATION_ACTIONS",
+            "MAX_WASM_PROPOSAL_BYTES",
+            "MAX_WASM_CHALLENGE_EVIDENCE_BYTES",
+            "parse_bounded_vec",
+        ] {
+            assert!(
+                source.contains(required),
+                "governance WASM boundary must define and use {required}"
+            );
+        }
+
+        for forbidden in [
+            "let key_pairs: Vec<(String, String)> = from_json_str(public_keys_json)?;",
+            "let entries: Vec<WasmClearanceRegistryEntry> = from_json_str(registry_json)?;",
+            "let approvals: Vec<exo_governance::quorum::Approval> = from_json_str(approvals_json)?;",
+            "let entries: Vec<exo_governance::audit::AuditEntry> = from_json_str(entries_json)?;",
+            "let did_strs: Vec<String> = from_json_str(participants_json)?;",
+            "let did_strs: Vec<String> = from_json_str(actors_json)?;",
+            "let actions: Vec<exo_governance::crosscheck::TimestampedAction> = from_json_str(actions_json)?;",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "governance WASM boundary must not deserialize untrusted arrays without a count bound: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn wasm_messaging_bridge_requires_caller_supplied_envelope_metadata() {
         let source = include_str!("messaging_bindings.rs");
         assert!(

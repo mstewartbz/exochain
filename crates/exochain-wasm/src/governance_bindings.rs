@@ -1,14 +1,74 @@
 //! Governance bindings: quorum, clearance, conflict, challenge, audit
 
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
+
+const MAX_WASM_PUBLIC_KEYS: usize = 512;
+const MAX_WASM_CLEARANCE_REGISTRY_ENTRIES: usize = 512;
+const MAX_WASM_APPROVALS: usize = 1_024;
+const MAX_WASM_CONFLICT_DECLARATIONS: usize = 1_024;
+const MAX_WASM_AUDIT_ENTRIES: usize = 4_096;
+const MAX_WASM_DELIBERATION_PARTICIPANTS: usize = 1_024;
+const MAX_WASM_INDEPENDENCE_ACTORS: usize = 1_024;
+const MAX_WASM_REGISTRY_RELATIONSHIPS: usize = 4_096;
+const MAX_WASM_COORDINATION_ACTIONS: usize = 4_096;
+const MAX_WASM_PROPOSAL_BYTES: usize = 64 * 1_024;
+const MAX_WASM_CHALLENGE_EVIDENCE_BYTES: usize = 64 * 1_024;
 
 #[derive(Deserialize)]
 struct WasmClearanceRegistryEntry {
     did: String,
     level: exo_governance::clearance::ClearanceLevel,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn governance_boundary_error(_message: &str) -> JsValue {
+    JsValue::NULL
+}
+
+#[cfg(not(all(test, not(target_arch = "wasm32"))))]
+fn governance_boundary_error(message: &str) -> JsValue {
+    JsValue::from_str(message)
+}
+
+fn ensure_len_at_most(label: &str, len: usize, max_items: usize) -> Result<(), JsValue> {
+    if len > max_items {
+        return Err(governance_boundary_error(&format!(
+            "{label} contains {len} items, maximum is {max_items}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_bounded_vec<T: DeserializeOwned>(
+    json: &str,
+    label: &str,
+    max_items: usize,
+) -> Result<Vec<T>, JsValue> {
+    let values: Vec<T> = from_json_str(json)?;
+    ensure_len_at_most(label, values.len(), max_items)?;
+    Ok(values)
+}
+
+fn ensure_bytes_at_most(label: &str, len: usize, max_bytes: usize) -> Result<(), JsValue> {
+    if len > max_bytes {
+        return Err(governance_boundary_error(&format!(
+            "{label} contains {len} bytes, maximum is {max_bytes}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_hex_bytes_at_most(label: &str, hex_value: &str, max_bytes: usize) -> Result<(), JsValue> {
+    let max_hex_len = max_bytes * 2;
+    if hex_value.len() > max_hex_len {
+        return Err(governance_boundary_error(&format!(
+            "{label} exceeds maximum encoded length for {max_bytes} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_uuid(value: &str, label: &str) -> Result<uuid::Uuid, JsValue> {
@@ -42,7 +102,8 @@ fn parse_timestamp(
 fn parse_public_key_map(
     public_keys_json: &str,
 ) -> Result<std::collections::BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
-    let key_pairs: Vec<(String, String)> = from_json_str(public_keys_json)?;
+    let key_pairs: Vec<(String, String)> =
+        parse_bounded_vec(public_keys_json, "public keys", MAX_WASM_PUBLIC_KEYS)?;
     let mut keys = std::collections::BTreeMap::new();
     for (did_str, public_key_hex) in &key_pairs {
         let did = exo_core::Did::new(did_str)
@@ -60,7 +121,11 @@ fn parse_public_key_map(
 fn parse_clearance_registry(
     registry_json: &str,
 ) -> Result<exo_governance::clearance::ClearanceRegistry, JsValue> {
-    let entries: Vec<WasmClearanceRegistryEntry> = from_json_str(registry_json)?;
+    let entries: Vec<WasmClearanceRegistryEntry> = parse_bounded_vec(
+        registry_json,
+        "clearance registry",
+        MAX_WASM_CLEARANCE_REGISTRY_ENTRIES,
+    )?;
     let mut registry = exo_governance::clearance::ClearanceRegistry::default();
     for entry in entries {
         let did = exo_core::Did::new(&entry.did)
@@ -81,7 +146,8 @@ pub fn wasm_compute_quorum(
     policy_json: &str,
     public_keys_json: &str,
 ) -> Result<JsValue, JsValue> {
-    let approvals: Vec<exo_governance::quorum::Approval> = from_json_str(approvals_json)?;
+    let approvals: Vec<exo_governance::quorum::Approval> =
+        parse_bounded_vec(approvals_json, "approvals", MAX_WASM_APPROVALS)?;
     let policy: exo_governance::quorum::QuorumPolicy = from_json_str(policy_json)?;
     let public_keys = parse_public_key_map(public_keys_json)?;
     let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
@@ -142,8 +208,11 @@ pub fn wasm_check_conflicts(
     let actor =
         exo_core::Did::new(actor_did).map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let action: exo_governance::conflict::ActionRequest = from_json_str(action_json)?;
-    let declarations: Vec<exo_governance::conflict::ConflictDeclaration> =
-        from_json_str(declarations_json)?;
+    let declarations: Vec<exo_governance::conflict::ConflictDeclaration> = parse_bounded_vec(
+        declarations_json,
+        "conflict declarations",
+        MAX_WASM_CONFLICT_DECLARATIONS,
+    )?;
     let conflicts = exo_governance::conflict::check_conflicts(&actor, &action, &declarations);
     let must_recuse = exo_governance::conflict::must_recuse(&conflicts);
     to_js_value(&serde_json::json!({
@@ -197,7 +266,8 @@ pub fn wasm_audit_append(
 /// Verify the integrity of an audit log's hash chain
 #[wasm_bindgen]
 pub fn wasm_audit_verify(entries_json: &str) -> Result<JsValue, JsValue> {
-    let entries: Vec<exo_governance::audit::AuditEntry> = from_json_str(entries_json)?;
+    let entries: Vec<exo_governance::audit::AuditEntry> =
+        parse_bounded_vec(entries_json, "audit entries", MAX_WASM_AUDIT_ENTRIES)?;
     let mut log = exo_governance::audit::AuditLog::new();
     // Rebuild the log from entries
     for entry in entries {
@@ -225,9 +295,14 @@ pub fn wasm_open_deliberation(
     proposal_hex: &str,
     participants_json: &str,
 ) -> Result<JsValue, JsValue> {
+    ensure_hex_bytes_at_most("proposal", proposal_hex, MAX_WASM_PROPOSAL_BYTES)?;
     let proposal =
         hex::decode(proposal_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let did_strs: Vec<String> = from_json_str(participants_json)?;
+    let did_strs: Vec<String> = parse_bounded_vec(
+        participants_json,
+        "deliberation participants",
+        MAX_WASM_DELIBERATION_PARTICIPANTS,
+    )?;
     let mut participants = Vec::with_capacity(did_strs.len());
     for s in &did_strs {
         participants.push(
@@ -336,7 +411,11 @@ pub fn wasm_verify_independence(
 ) -> Result<JsValue, JsValue> {
     use std::collections::BTreeMap;
 
-    let did_strs: Vec<String> = from_json_str(actors_json)?;
+    let did_strs: Vec<String> = parse_bounded_vec(
+        actors_json,
+        "independence actors",
+        MAX_WASM_INDEPENDENCE_ACTORS,
+    )?;
     let mut actors = Vec::with_capacity(did_strs.len());
     for s in &did_strs {
         actors.push(
@@ -355,6 +434,16 @@ pub fn wasm_verify_independence(
         control_metadata: Vec<(String, String)>,
     }
     let input: RegistryInput = from_json_str(registry_json)?;
+    let registry_relationships = input
+        .signing_keys
+        .len()
+        .saturating_add(input.attestation_roots.len())
+        .saturating_add(input.control_metadata.len());
+    ensure_len_at_most(
+        "identity registry relationships",
+        registry_relationships,
+        MAX_WASM_REGISTRY_RELATIONSHIPS,
+    )?;
 
     let mut signing_keys = BTreeMap::new();
     for (did_str, key) in &input.signing_keys {
@@ -409,7 +498,11 @@ pub fn wasm_verify_independence(
 /// Detect coordination patterns in a set of timestamped actions.
 #[wasm_bindgen]
 pub fn wasm_detect_coordination(actions_json: &str) -> Result<JsValue, JsValue> {
-    let actions: Vec<exo_governance::crosscheck::TimestampedAction> = from_json_str(actions_json)?;
+    let actions: Vec<exo_governance::crosscheck::TimestampedAction> = parse_bounded_vec(
+        actions_json,
+        "coordination actions",
+        MAX_WASM_COORDINATION_ACTIONS,
+    )?;
     let signals = exo_governance::crosscheck::detect_coordination(&actions);
     // CoordinationSignal may not implement Serialize — manually flatten.
     let json: Vec<serde_json::Value> = signals
@@ -438,6 +531,11 @@ pub fn wasm_file_governance_challenge(
 ) -> Result<JsValue, JsValue> {
     let challenger = exo_core::Did::new(challenger_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+    ensure_bytes_at_most(
+        "challenge evidence",
+        evidence.len(),
+        MAX_WASM_CHALLENGE_EVIDENCE_BYTES,
+    )?;
     let target_bytes =
         hex::decode(target_hash_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
     let arr: [u8; 32] = target_bytes
@@ -470,8 +568,11 @@ pub fn wasm_conflict_enforce(
     let actor =
         exo_core::Did::new(actor_did).map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let action: exo_governance::conflict::ActionRequest = from_json_str(action_json)?;
-    let declarations: Vec<exo_governance::conflict::ConflictDeclaration> =
-        from_json_str(declarations_json)?;
+    let declarations: Vec<exo_governance::conflict::ConflictDeclaration> = parse_bounded_vec(
+        declarations_json,
+        "conflict declarations",
+        MAX_WASM_CONFLICT_DECLARATIONS,
+    )?;
     let conflicts = exo_governance::conflict::check_conflicts(&actor, &action, &declarations);
     exo_governance::conflict::check_and_block(&actor, &conflicts)
         .map_err(|e| JsValue::from_str(&format!("ConflictBlocked: {e}")))?;
@@ -547,5 +648,67 @@ mod tests {
             panic!("unknown action must be denied");
         };
         assert_eq!(missing_level.to_string(), "Governor");
+    }
+
+    #[test]
+    fn parse_bounded_vec_accepts_items_at_the_configured_limit() {
+        let input = vec!["did:exo:bounded"; MAX_WASM_PUBLIC_KEYS];
+        let json = serde_json::to_string(&input).expect("serialize bounded input");
+
+        let parsed: Vec<String> = parse_bounded_vec(&json, "public keys", MAX_WASM_PUBLIC_KEYS)
+            .expect("input at the limit is accepted");
+
+        assert_eq!(parsed.len(), MAX_WASM_PUBLIC_KEYS);
+    }
+
+    #[test]
+    fn parse_bounded_vec_rejects_items_over_the_configured_limit() {
+        let input = vec!["did:exo:bounded"; MAX_WASM_PUBLIC_KEYS + 1];
+        let json = serde_json::to_string(&input).expect("serialize oversized input");
+
+        let parsed: Result<Vec<String>, JsValue> =
+            parse_bounded_vec(&json, "public keys", MAX_WASM_PUBLIC_KEYS);
+
+        assert!(parsed.is_err(), "one item over the limit must fail closed");
+    }
+
+    #[test]
+    fn byte_caps_reject_oversized_proposal_and_evidence_payloads() {
+        let oversized_proposal = "ab".repeat(MAX_WASM_PROPOSAL_BYTES + 1);
+        assert!(
+            ensure_hex_bytes_at_most("proposal", &oversized_proposal, MAX_WASM_PROPOSAL_BYTES)
+                .is_err(),
+            "proposal hex larger than the byte cap must fail closed"
+        );
+
+        assert!(
+            ensure_bytes_at_most(
+                "challenge evidence",
+                MAX_WASM_CHALLENGE_EVIDENCE_BYTES + 1,
+                MAX_WASM_CHALLENGE_EVIDENCE_BYTES,
+            )
+            .is_err(),
+            "challenge evidence larger than the byte cap must fail closed"
+        );
+    }
+
+    #[test]
+    fn registry_relationship_bound_counts_all_nested_registry_vectors() {
+        let relationships =
+            MAX_WASM_REGISTRY_RELATIONSHIPS - MAX_WASM_PUBLIC_KEYS - MAX_WASM_APPROVALS;
+        let total = MAX_WASM_PUBLIC_KEYS
+            .saturating_add(MAX_WASM_APPROVALS)
+            .saturating_add(relationships)
+            .saturating_add(1);
+
+        assert!(
+            ensure_len_at_most(
+                "identity registry relationships",
+                total,
+                MAX_WASM_REGISTRY_RELATIONSHIPS,
+            )
+            .is_err(),
+            "aggregate nested registry relationships must be bounded"
+        );
     }
 }
