@@ -339,7 +339,14 @@ impl SyncEngine {
 
     /// Receive and apply a state snapshot chunk.
     async fn handle_snapshot_chunk(&mut self, msg: StateSnapshotChunkMsg) {
-        if !self.syncing && msg.nodes.is_empty() {
+        if !self.syncing {
+            tracing::warn!(
+                sender = %msg.sender,
+                from = msg.from_height,
+                to = msg.to_height,
+                nodes = msg.nodes.len(),
+                "Rejecting unsolicited snapshot chunk"
+            );
             return;
         }
 
@@ -923,6 +930,69 @@ mod tests {
             .iter()
             .any(|e| matches!(e, SyncEvent::Complete { .. }));
         assert!(complete, "Should emit SyncEvent::Complete");
+    }
+
+    #[tokio::test]
+    async fn unsolicited_snapshot_chunk_is_rejected_without_mutating_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteDagStore::open(dir.path()).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel(256);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut engine = SyncEngine::new(
+            SyncConfig {
+                node_did: test_did(),
+                chunk_size: 100,
+                max_sync_nodes: 200,
+            },
+            Arc::clone(&store),
+            net_handle,
+            event_tx,
+        );
+
+        let sign_fn = make_sign_fn();
+        let did = test_did();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"unsolicited-snapshot-node",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+
+        let chunk = StateSnapshotChunkMsg {
+            sender: Did::new("did:exo:unsolicited-sender").unwrap(),
+            from_height: 1,
+            nodes: vec![node.clone()],
+            to_height: 1,
+            has_more: false,
+        };
+
+        engine.handle_snapshot_chunk(chunk).await;
+
+        {
+            let st = store.lock().unwrap();
+            assert!(
+                !st.contains_sync(&node.hash).unwrap(),
+                "unsolicited snapshot chunks must not write DAG nodes"
+            );
+            assert_eq!(
+                st.committed_height_value().unwrap(),
+                0,
+                "unsolicited snapshot chunks must not mark committed heights"
+            );
+        }
+        assert!(
+            event_rx.try_recv().is_err(),
+            "rejected unsolicited chunks must not emit sync progress or completion"
+        );
     }
 
     #[tokio::test]
