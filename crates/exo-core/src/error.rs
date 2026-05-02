@@ -28,6 +28,10 @@ pub enum ExoError {
     #[error("clock overflow: cannot advance past physical={physical_ms}ms logical={logical}")]
     ClockOverflow { physical_ms: u64, logical: u32 },
 
+    /// The HLC wall-clock source could not produce a trustworthy timestamp.
+    #[error("clock unavailable: {reason}")]
+    ClockUnavailable { reason: String },
+
     /// A hash did not match the expected value.
     #[error("hash mismatch: expected {expected}, got {actual}")]
     HashMismatch { expected: String, actual: String },
@@ -82,6 +86,7 @@ impl ExoError {
                 | ExoError::Unauthorized { .. }
                 | ExoError::SybilDetected { .. }
                 | ExoError::HashMismatch { .. }
+                | ExoError::ClockUnavailable { .. }
         )
     }
 }
@@ -146,6 +151,12 @@ mod tests {
                     tolerance_ms: 1000,
                 },
                 "5000",
+            ),
+            (
+                ExoError::ClockUnavailable {
+                    reason: "clock source failed".into(),
+                },
+                "clock source failed",
             ),
             (
                 ExoError::HashMismatch {
@@ -221,6 +232,7 @@ mod tests {
             }
             .is_security_relevant()
         );
+        assert!(ExoError::ClockUnavailable { reason: "x".into() }.is_security_relevant());
     }
 
     #[test]

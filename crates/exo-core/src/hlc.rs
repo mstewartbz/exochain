@@ -29,7 +29,7 @@ pub struct HybridClock {
     /// Logical counter within the same physical millisecond.
     logical: u32,
     /// Wall-clock source — returns current millis since epoch.
-    wall_clock: Box<dyn Fn() -> u64 + Send>,
+    wall_clock: Box<dyn Fn() -> Result<u64> + Send>,
 }
 
 impl HybridClock {
@@ -49,6 +49,16 @@ impl HybridClock {
         Self {
             physical: 0,
             logical: 0,
+            wall_clock: Box::new(move || Ok(wall_clock())),
+        }
+    }
+
+    /// Create a clock with a fallible wall-clock source.
+    #[must_use]
+    pub fn with_fallible_wall_clock(wall_clock: impl Fn() -> Result<u64> + Send + 'static) -> Self {
+        Self {
+            physical: 0,
+            logical: 0,
             wall_clock: Box::new(wall_clock),
         }
     }
@@ -58,7 +68,7 @@ impl HybridClock {
     /// Guarantees: the returned timestamp is strictly greater than any
     /// previously returned by this clock.
     pub fn now(&mut self) -> Result<Timestamp> {
-        let wall = (self.wall_clock)();
+        let wall = (self.wall_clock)()?;
         if wall > self.physical {
             self.physical = wall;
             self.logical = 0;
@@ -78,7 +88,7 @@ impl HybridClock {
     /// Returns `ExoError::ClockDrift` if the remote timestamp is
     /// unreasonably far ahead of the local wall clock.
     pub fn update(&mut self, remote: &Timestamp) -> Result<Timestamp> {
-        let wall = (self.wall_clock)();
+        let wall = (self.wall_clock)()?;
 
         // Drift guard
         if remote.physical_ms > wall.saturating_add(MAX_DRIFT_MS) {
@@ -157,22 +167,36 @@ impl core::fmt::Debug for HybridClock {
 
 /// Default wall-clock implementation.
 #[cfg(not(target_arch = "wasm32"))]
-fn system_time_millis() -> u64 {
+fn system_time_millis() -> Result<u64> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+
+    let duration =
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ExoError::ClockUnavailable {
+                reason: "system time is before the Unix epoch".into(),
+            })?;
+
+    u64::try_from(duration.as_millis()).map_err(|_| ExoError::ClockUnavailable {
+        reason: "system time milliseconds exceed u64".into(),
+    })
 }
 
 /// WASM wall-clock: route through js_sys::Date::now().
 #[cfg(target_arch = "wasm32")]
-fn system_time_millis() -> u64 {
+fn system_time_millis() -> Result<u64> {
     let millis = js_sys::Date::now();
     if !millis.is_finite() || millis.is_sign_negative() {
-        return 0;
+        return Err(ExoError::ClockUnavailable {
+            reason: "Date.now returned a non-finite or negative value".into(),
+        });
     }
-    millis.to_string().parse::<u64>().unwrap_or(0)
+    millis
+        .to_string()
+        .parse::<u64>()
+        .map_err(|_| ExoError::ClockUnavailable {
+            reason: "Date.now milliseconds cannot be represented as u64".into(),
+        })
 }
 
 // ===========================================================================
@@ -428,9 +452,61 @@ mod tests {
     }
 
     #[test]
+    fn now_propagates_wall_clock_error_without_mutating_state() {
+        let mut clock = HybridClock::with_fallible_wall_clock(|| {
+            Err(ExoError::ClockUnavailable {
+                reason: "injected wall-clock failure".into(),
+            })
+        });
+
+        let err = clock
+            .now()
+            .expect_err("wall-clock failures must fail closed");
+
+        assert!(matches!(err, ExoError::ClockUnavailable { .. }));
+        assert_eq!(clock.current(), Timestamp::new(0, 0));
+    }
+
+    #[test]
+    fn update_propagates_wall_clock_error_without_mutating_state() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_for_clock = Arc::clone(&calls);
+        let mut clock = HybridClock::with_fallible_wall_clock(move || {
+            if calls_for_clock.fetch_add(1, Ordering::Relaxed) == 0 {
+                Ok(1000)
+            } else {
+                Err(ExoError::ClockUnavailable {
+                    reason: "injected wall-clock failure".into(),
+                })
+            }
+        });
+        let first = clock.now().expect("first timestamp");
+
+        let err = clock
+            .update(&Timestamp::new(1000, 0))
+            .expect_err("wall-clock failures must fail closed");
+
+        assert!(matches!(err, ExoError::ClockUnavailable { .. }));
+        assert_eq!(clock.current(), first);
+    }
+
+    #[test]
     fn system_time_millis_returns_nonzero() {
-        let ms = system_time_millis();
+        let ms = system_time_millis().expect("system clock should be available");
         assert!(ms > 0);
+    }
+
+    #[test]
+    fn default_wall_clock_source_has_no_epoch_zero_fallback() {
+        let production = include_str!("hlc.rs")
+            .split("// ===========================================================================")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(".unwrap_or(0)"),
+            "HLC wall-clock failures must propagate instead of silently using epoch zero"
+        );
     }
 
     #[test]
