@@ -314,7 +314,7 @@ mod tests {
         MulCircuit {
             x: Some(x),
             y: Some(y),
-            z: Some(x.wrapping_mul(y)),
+            z: Some(x.checked_mul(y).expect("test witness product fits u64")),
         }
     }
 

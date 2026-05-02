@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{ProofError, Result};
 
 // ---------------------------------------------------------------------------
 // Variable
@@ -61,7 +61,7 @@ impl LinearCombination {
 
     /// Evaluate the linear combination given variable assignments.
     /// `vars[i]` = value of variable i. The "one" variable (index MAX) = 1.
-    pub fn evaluate(&self, vars: &[u64]) -> u64 {
+    pub fn evaluate(&self, vars: &[u64]) -> Result<u64> {
         let mut sum: u64 = 0;
         for &(coeff, idx) in &self.terms {
             let val = if idx == usize::MAX {
@@ -69,11 +69,23 @@ impl LinearCombination {
             } else if idx < vars.len() {
                 vars[idx]
             } else {
-                0
+                return Err(ProofError::ConstraintError(format!(
+                    "linear combination references unallocated variable index {idx}; allocated variables: {}",
+                    vars.len()
+                )));
             };
-            sum = sum.wrapping_add(coeff.wrapping_mul(val));
+            let term = coeff.checked_mul(val).ok_or_else(|| {
+                ProofError::ConstraintError(format!(
+                    "linear combination term overflows u64: coefficient {coeff} multiplied by value {val}"
+                ))
+            })?;
+            sum = sum.checked_add(term).ok_or_else(|| {
+                ProofError::ConstraintError(format!(
+                    "linear combination sum overflows u64 when adding term {term}"
+                ))
+            })?;
         }
-        sum
+        Ok(sum)
     }
 
     fn references_only_allocated_variables(&self, variable_count: usize) -> bool {
@@ -153,10 +165,17 @@ impl ConstraintSystem {
             {
                 return false;
             }
-            let a = c.a_terms.evaluate(&vals);
-            let b = c.b_terms.evaluate(&vals);
-            let c_val = c.c_terms.evaluate(&vals);
-            if a.wrapping_mul(b) != c_val {
+            let (Ok(a), Ok(b), Ok(c_val)) = (
+                c.a_terms.evaluate(&vals),
+                c.b_terms.evaluate(&vals),
+                c.c_terms.evaluate(&vals),
+            ) else {
+                return false;
+            };
+            let Some(product) = a.checked_mul(b) else {
+                return false;
+            };
+            if product != c_val {
                 return false;
             }
         }
@@ -358,19 +377,19 @@ mod tests {
         lc.add_term(5, usize::MAX); // 5 * 1
 
         let vars = vec![10, 20]; // x0=10, x1=20
-        assert_eq!(lc.evaluate(&vars), 2 * 10 + 3 * 20 + 5);
+        assert_eq!(lc.evaluate(&vars).unwrap(), 2 * 10 + 3 * 20 + 5);
     }
 
     #[test]
     fn linear_combination_zero() {
         let lc = LinearCombination::zero();
-        assert_eq!(lc.evaluate(&[1, 2, 3]), 0);
+        assert_eq!(lc.evaluate(&[1, 2, 3]).unwrap(), 0);
     }
 
     #[test]
     fn linear_combination_constant() {
         let lc = LinearCombination::constant(42);
-        assert_eq!(lc.evaluate(&[]), 42);
+        assert_eq!(lc.evaluate(&[]).unwrap(), 42);
     }
 
     #[test]
@@ -380,7 +399,7 @@ mod tests {
             value: Some(7),
         };
         let lc = LinearCombination::from_variable(v);
-        assert_eq!(lc.evaluate(&[0, 0, 7]), 7);
+        assert_eq!(lc.evaluate(&[0, 0, 7]).unwrap(), 7);
     }
 
     #[test]
@@ -461,6 +480,49 @@ mod tests {
         assert!(
             !cs.is_satisfied(),
             "constraints must not satisfy by treating unallocated variables as zero"
+        );
+    }
+
+    #[test]
+    fn constraint_system_with_overflowing_linear_combination_is_not_satisfied() {
+        let mut cs = ConstraintSystem::new();
+        let x = allocate(&mut cs, Some(u64::MAX));
+        let y = allocate(&mut cs, Some(1));
+
+        let mut overflowing_sum = LinearCombination::zero();
+        overflowing_sum.add_term(1, x.index);
+        overflowing_sum.add_term(1, y.index);
+
+        enforce(
+            &mut cs,
+            &overflowing_sum,
+            &LinearCombination::constant(1),
+            &LinearCombination::constant(0),
+        );
+
+        assert!(
+            !cs.is_satisfied(),
+            "linear combination overflow must fail closed instead of wrapping to zero"
+        );
+    }
+
+    #[test]
+    fn constraint_system_with_overflowing_constraint_product_is_not_satisfied() {
+        let mut cs = ConstraintSystem::new();
+        let x = allocate(&mut cs, Some(u64::MAX));
+        let y = allocate(&mut cs, Some(2));
+        let z = allocate(&mut cs, Some(u64::MAX - 1));
+
+        enforce(
+            &mut cs,
+            &LinearCombination::from_variable(x),
+            &LinearCombination::from_variable(y),
+            &LinearCombination::from_variable(z),
+        );
+
+        assert!(
+            !cs.is_satisfied(),
+            "constraint multiplication overflow must fail closed instead of wrapping"
         );
     }
 
