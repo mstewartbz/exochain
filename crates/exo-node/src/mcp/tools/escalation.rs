@@ -11,6 +11,9 @@ use crate::mcp::{
 
 const MAX_ESCALATION_SIGNALS: usize = 256;
 const MAX_ESCALATION_SIGNAL_TEXT_BYTES: usize = 256;
+const MAX_ESCALATION_ID_BYTES: usize = 128;
+const MAX_ESCALATION_ENUM_BYTES: usize = 16;
+const MAX_ESCALATION_TEXT_BYTES: usize = 4096;
 
 fn input_too_large_error(field: &str, max_bytes: usize) -> ToolResult {
     ToolResult::error(
@@ -36,11 +39,65 @@ fn too_many_items_error(field: &str, max_items: usize) -> ToolResult {
     )
 }
 
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn missing_required_error(field: &str) -> ToolResult {
+    ToolResult::error(json!({"error": format!("missing required parameter: {field}")}).to_string())
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn invalid_string_error(field: &str) -> ToolResult {
+    ToolResult::error(json!({"error": format!("{field} must be a string")}).to_string())
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn invalid_enum_error(field: &str, allowed: &[&str]) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_escalation_invalid_enum",
+            "message": format!("{field} must be one of: {}", allowed.join(", ")),
+            "field": field,
+            "allowed": allowed,
+        })
+        .to_string(),
+    )
+}
+
 fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(), ToolResult> {
     if raw.len() > max_bytes {
         return Err(input_too_large_error(field, max_bytes));
     }
     Ok(())
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn required_bounded_str<'a>(
+    params: &'a Value,
+    field: &str,
+    max_bytes: usize,
+) -> Result<&'a str, ToolResult> {
+    let raw = match params.get(field) {
+        Some(Value::String(raw)) => raw.as_str(),
+        Some(_) => return Err(invalid_string_error(field)),
+        None => return Err(missing_required_error(field)),
+    };
+    validate_string_bytes(raw, field, max_bytes)?;
+    Ok(raw)
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn optional_bounded_str<'a>(
+    params: &'a Value,
+    field: &str,
+    max_bytes: usize,
+) -> Result<&'a str, ToolResult> {
+    let Some(value) = params.get(field) else {
+        return Ok("");
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(invalid_string_error(field));
+    };
+    validate_string_bytes(raw, field, max_bytes)?;
+    Ok(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -242,14 +299,17 @@ pub fn escalate_case_definition() -> ToolDefinition {
             "properties": {
                 "threat_assessment_id": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_ID_BYTES,
                     "description": "ID of the threat assessment being escalated."
                 },
                 "escalation_reason": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_TEXT_BYTES,
                     "description": "Reason for escalation."
                 },
                 "priority": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_ENUM_BYTES,
                     "enum": ["low", "medium", "high", "critical"],
                     "description": "Priority level for the case."
                 }
@@ -277,42 +337,24 @@ pub fn execute_escalate_case(params: &Value, _context: &NodeContext) -> ToolResu
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let threat_assessment_id = match params.get("threat_assessment_id").and_then(Value::as_str)
-        {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: threat_assessment_id"})
-                        .to_string(),
-                );
-            }
-        };
-        let escalation_reason = match params.get("escalation_reason").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: escalation_reason"}).to_string(),
-                );
-            }
-        };
-        let priority = match params.get("priority").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: priority"}).to_string(),
-                );
-            }
+        let threat_assessment_id =
+            match required_bounded_str(params, "threat_assessment_id", MAX_ESCALATION_ID_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+        let escalation_reason =
+            match required_bounded_str(params, "escalation_reason", MAX_ESCALATION_TEXT_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+        let priority = match required_bounded_str(params, "priority", MAX_ESCALATION_ENUM_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
 
         let valid_priorities = ["low", "medium", "high", "critical"];
         if !valid_priorities.contains(&priority) {
-            return ToolResult::error(
-                json!({"error": format!(
-                    "invalid priority '{}': must be one of {:?}",
-                    priority, valid_priorities
-                )})
-                .to_string(),
-            );
+            return invalid_enum_error("priority", &valid_priorities);
         }
 
         let case_id = match hash_structured(&(
@@ -359,14 +401,17 @@ pub fn triage_definition() -> ToolDefinition {
             "properties": {
                 "case_id": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_ID_BYTES,
                     "description": "ID of the case to triage."
                 },
                 "assessment": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_TEXT_BYTES,
                     "description": "Analyst assessment of the case."
                 },
                 "recommended_action": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_TEXT_BYTES,
                     "description": "Recommended response action."
                 }
             },
@@ -393,30 +438,20 @@ pub fn execute_triage(params: &Value, _context: &NodeContext) -> ToolResult {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let case_id = match params.get("case_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: case_id"}).to_string(),
-                );
-            }
+        let case_id = match required_bounded_str(params, "case_id", MAX_ESCALATION_ID_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let assessment = match params.get("assessment").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: assessment"}).to_string(),
-                );
-            }
+        let assessment = match required_bounded_str(params, "assessment", MAX_ESCALATION_TEXT_BYTES)
+        {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let recommended_action = match params.get("recommended_action").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: recommended_action"}).to_string(),
-                );
-            }
-        };
+        let recommended_action =
+            match required_bounded_str(params, "recommended_action", MAX_ESCALATION_TEXT_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
 
         let triage_id = match hash_structured(&(
             "exo.mcp.escalation.triage.v1",
@@ -462,15 +497,18 @@ pub fn record_feedback_definition() -> ToolDefinition {
             "properties": {
                 "case_id": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_ID_BYTES,
                     "description": "ID of the case to record feedback for."
                 },
                 "outcome": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_ENUM_BYTES,
                     "enum": ["true_positive", "false_positive", "inconclusive"],
                     "description": "Outcome classification of the case."
                 },
                 "notes": {
                     "type": "string",
+                    "maxLength": MAX_ESCALATION_TEXT_BYTES,
                     "description": "Optional analyst notes."
                 }
             },
@@ -497,35 +535,24 @@ pub fn execute_record_feedback(params: &Value, _context: &NodeContext) -> ToolRe
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let case_id = match params.get("case_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: case_id"}).to_string(),
-                );
-            }
+        let case_id = match required_bounded_str(params, "case_id", MAX_ESCALATION_ID_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let outcome = match params.get("outcome").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: outcome"}).to_string(),
-                );
-            }
+        let outcome = match required_bounded_str(params, "outcome", MAX_ESCALATION_ENUM_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
 
         let valid_outcomes = ["true_positive", "false_positive", "inconclusive"];
         if !valid_outcomes.contains(&outcome) {
-            return ToolResult::error(
-                json!({"error": format!(
-                    "invalid outcome '{}': must be one of {:?}",
-                    outcome, valid_outcomes
-                )})
-                .to_string(),
-            );
+            return invalid_enum_error("outcome", &valid_outcomes);
         }
 
-        let notes = params.get("notes").and_then(Value::as_str).unwrap_or("");
+        let notes = match optional_bounded_str(params, "notes", MAX_ESCALATION_TEXT_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
 
         let feedback_id =
             match hash_structured(&("exo.mcp.escalation.feedback.v1", case_id, outcome, notes)) {
@@ -689,6 +716,15 @@ mod tests {
         assert!(!def.description.is_empty());
     }
 
+    #[test]
+    fn escalate_case_definition_bounds_untrusted_strings() {
+        let def = escalate_case_definition();
+        let properties = &def.input_schema["properties"];
+        assert_eq!(properties["threat_assessment_id"]["maxLength"], 128);
+        assert_eq!(properties["escalation_reason"]["maxLength"], 4096);
+        assert_eq!(properties["priority"]["maxLength"], 16);
+    }
+
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
     fn execute_escalate_case_success() {
@@ -732,6 +768,49 @@ mod tests {
         assert!(result.is_error);
     }
 
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_escalate_case_rejects_oversized_reason_without_echoing_it() {
+        let oversized = "B".repeat(4097);
+        let result = execute_escalate_case(
+            &json!({
+                "threat_assessment_id": "ta_abc",
+                "escalation_reason": oversized,
+                "priority": "high",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("escalation_reason may contain at most"));
+        assert!(
+            !text.contains("BBBB"),
+            "oversized escalation reason must not be reflected in the error response"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_escalate_case_invalid_priority_does_not_echo_input() {
+        let result = execute_escalate_case(
+            &json!({
+                "threat_assessment_id": "ta_abc",
+                "escalation_reason": "test",
+                "priority": "urgent<script>",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("priority must be one of"));
+        assert!(
+            !text.contains("<script>"),
+            "invalid priority must not be reflected in the error response"
+        );
+    }
+
     #[test]
     fn execute_escalate_case_missing_reason() {
         let result = execute_escalate_case(
@@ -748,6 +827,15 @@ mod tests {
         let def = triage_definition();
         assert_eq!(def.name, "exochain_triage");
         assert!(!def.description.is_empty());
+    }
+
+    #[test]
+    fn triage_definition_bounds_untrusted_strings() {
+        let def = triage_definition();
+        let properties = &def.input_schema["properties"];
+        assert_eq!(properties["case_id"]["maxLength"], 128);
+        assert_eq!(properties["assessment"]["maxLength"], 4096);
+        assert_eq!(properties["recommended_action"]["maxLength"], 4096);
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -792,6 +880,28 @@ mod tests {
         assert!(result.is_error);
     }
 
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_triage_rejects_oversized_assessment_without_echoing_it() {
+        let oversized = "C".repeat(4097);
+        let result = execute_triage(
+            &json!({
+                "case_id": "case_abc",
+                "assessment": oversized,
+                "recommended_action": "block_source_ip",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("assessment may contain at most"));
+        assert!(
+            !text.contains("CCCC"),
+            "oversized assessment must not be reflected in the error response"
+        );
+    }
+
     // -- record_feedback ------------------------------------------------------
 
     #[test]
@@ -799,6 +909,15 @@ mod tests {
         let def = record_feedback_definition();
         assert_eq!(def.name, "exochain_record_feedback");
         assert!(!def.description.is_empty());
+    }
+
+    #[test]
+    fn record_feedback_definition_bounds_untrusted_strings() {
+        let def = record_feedback_definition();
+        let properties = &def.input_schema["properties"];
+        assert_eq!(properties["case_id"]["maxLength"], 128);
+        assert_eq!(properties["outcome"]["maxLength"], 16);
+        assert_eq!(properties["notes"]["maxLength"], 4096);
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -838,6 +957,43 @@ mod tests {
         let params = json!({"case_id": "case_abc", "outcome": "maybe"});
         let result = execute_record_feedback(&params, &NodeContext::empty());
         assert!(result.is_error);
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_record_feedback_invalid_outcome_does_not_echo_input() {
+        let params = json!({"case_id": "case_abc", "outcome": "maybe<script>"});
+        let result = execute_record_feedback(&params, &NodeContext::empty());
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("outcome must be one of"));
+        assert!(
+            !text.contains("<script>"),
+            "invalid outcome must not be reflected in the error response"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_record_feedback_rejects_oversized_notes_without_echoing_it() {
+        let oversized = "D".repeat(4097);
+        let result = execute_record_feedback(
+            &json!({
+                "case_id": "case_abc",
+                "outcome": "true_positive",
+                "notes": oversized,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("notes may contain at most"));
+        assert!(
+            !text.contains("DDDD"),
+            "oversized feedback notes must not be reflected in the error response"
+        );
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
