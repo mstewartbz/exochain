@@ -160,16 +160,23 @@ impl OtpChallenge {
         Ok((challenge, code_str))
     }
 
-    fn expires_at_ms(&self) -> u64 {
-        self.dispatched_ms.saturating_add(self.ttl_ms)
+    fn expires_at_ms(&self) -> Option<u64> {
+        self.dispatched_ms.checked_add(self.ttl_ms)
     }
 
-    fn locked_until_ms(&self) -> u64 {
-        self.expires_at_ms().saturating_add(OTP_LOCKOUT_MS)
+    fn locked_until_ms(&self) -> Option<u64> {
+        self.expires_at_ms()
+            .and_then(|expires_at| expires_at.checked_add(OTP_LOCKOUT_MS))
     }
 
-    fn resend_available_at_ms(&self) -> u64 {
-        self.dispatched_ms.saturating_add(OTP_RESEND_COOLDOWN_MS)
+    fn resend_available_at_ms(&self) -> Option<u64> {
+        self.dispatched_ms.checked_add(OTP_RESEND_COOLDOWN_MS)
+    }
+
+    fn locked_result(&self) -> OtpResult {
+        OtpResult::Locked {
+            locked_until_ms: self.locked_until_ms().unwrap_or(u64::MAX),
+        }
     }
 
     /// Verify a user-provided code.
@@ -186,27 +193,29 @@ impl OtpChallenge {
             OtpState::Verified => return OtpResult::AlreadyVerified,
             OtpState::LockedOut => {
                 // Compute when lock expires
-                let locked_until = self.locked_until_ms();
-                return OtpResult::Locked {
-                    locked_until_ms: locked_until,
-                };
+                return self.locked_result();
             }
             OtpState::Expired => return OtpResult::Expired,
             OtpState::Pending => {}
         }
 
         // Check TTL
-        if now_ms >= self.expires_at_ms() {
+        if self
+            .expires_at_ms()
+            .is_none_or(|expires_at| now_ms >= expires_at)
+        {
             self.state = OtpState::Expired;
             return OtpResult::Expired;
         }
 
         // Check lockout
         if self.is_locked(now_ms) {
-            let locked_until = self.locked_until_ms();
-            return OtpResult::Locked {
-                locked_until_ms: locked_until,
-            };
+            return self.locked_result();
+        }
+
+        if self.attempts >= self.max_attempts {
+            self.state = OtpState::LockedOut;
+            return self.locked_result();
         }
 
         // Derive expected code
@@ -219,17 +228,20 @@ impl OtpChallenge {
             Err(_) => return OtpResult::Expired, // treat internal error as expired
         };
 
-        self.attempts += 1;
+        self.attempts = match self.attempts.checked_add(1) {
+            Some(attempts) => attempts,
+            None => {
+                self.state = OtpState::LockedOut;
+                return self.locked_result();
+            }
+        };
 
         if constant_time_eq(code.as_bytes(), expected.as_bytes()) {
             self.state = OtpState::Verified;
             OtpResult::Success
         } else if self.attempts >= self.max_attempts {
             self.state = OtpState::LockedOut;
-            let locked_until = self.locked_until_ms();
-            OtpResult::Locked {
-                locked_until_ms: locked_until,
-            }
+            self.locked_result()
         } else {
             OtpResult::WrongCode {
                 attempts_remaining: self.max_attempts - self.attempts,
@@ -242,8 +254,9 @@ impl OtpChallenge {
     pub fn is_locked(&self, now_ms: u64) -> bool {
         if self.state == OtpState::LockedOut {
             // Lockout persists until TTL + lockout window after dispatch
-            let locked_until = self.locked_until_ms();
-            return now_ms < locked_until;
+            return self
+                .locked_until_ms()
+                .is_none_or(|locked_until| now_ms < locked_until);
         }
         false
     }
@@ -251,7 +264,10 @@ impl OtpChallenge {
     /// Whether the challenge can be re-dispatched (resend cooldown has elapsed).
     #[must_use]
     pub fn can_resend(&self, now_ms: u64) -> bool {
-        self.state == OtpState::Pending && now_ms >= self.resend_available_at_ms()
+        self.state == OtpState::Pending
+            && self
+                .resend_available_at_ms()
+                .is_some_and(|available_at| now_ms >= available_at)
     }
 }
 
@@ -560,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_locked_out_saturates_deadline_when_timestamp_overflows() {
+    fn verify_locked_out_uses_max_deadline_when_lockout_deadline_overflows() {
         let did = test_did();
         let (mut ch, _) =
             OtpChallenge::from_secret(&did, OtpChannel::Email, 1, [9u8; 32]).expect("new ok");
@@ -579,28 +595,44 @@ mod tests {
     }
 
     #[test]
-    fn verify_expiry_saturates_deadline_when_timestamp_overflows() {
+    fn verify_expiry_overflow_fails_closed_before_code_check() {
         let did = test_did();
         let (mut ch, _) =
             OtpChallenge::from_secret(&did, OtpChannel::Email, 1, [10u8; 32]).expect("new ok");
         ch.dispatched_ms = u64::MAX - 5;
         ch.ttl_ms = 10;
 
-        let result = ch.verify("000000", u64::MAX);
+        let result = ch.verify("000000", u64::MAX - 1);
 
         assert_eq!(result, OtpResult::Expired);
         assert_eq!(ch.state, OtpState::Expired);
+        assert_eq!(ch.attempts, 0);
     }
 
     #[test]
-    fn can_resend_saturates_cooldown_when_timestamp_overflows() {
+    fn can_resend_fails_closed_when_cooldown_deadline_overflows() {
         let did = test_did();
         let (mut ch, _) =
             OtpChallenge::from_secret(&did, OtpChannel::Email, 1, [11u8; 32]).expect("new ok");
         ch.dispatched_ms = u64::MAX - 1;
 
         assert!(!ch.can_resend(u64::MAX - 1));
-        assert!(ch.can_resend(u64::MAX));
+        assert!(!ch.can_resend(u64::MAX));
+    }
+
+    #[test]
+    fn verify_attempt_counter_overflow_locks_without_panic() {
+        let did = test_did();
+        let (mut ch, _) =
+            OtpChallenge::from_secret(&did, OtpChannel::Email, 1_000, [12u8; 32]).expect("new ok");
+        ch.attempts = u32::MAX;
+        ch.max_attempts = u32::MAX;
+
+        let result = ch.verify("000000", 1_001);
+
+        assert!(matches!(result, OtpResult::Locked { .. }));
+        assert_eq!(ch.state, OtpState::LockedOut);
+        assert_eq!(ch.attempts, u32::MAX);
     }
 
     // ---- can_resend ----
