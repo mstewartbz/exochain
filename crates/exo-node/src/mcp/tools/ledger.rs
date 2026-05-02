@@ -1,6 +1,8 @@
 //! Ledger MCP tools — event submission, retrieval, Merkle inclusion
 //! verification, and checkpoint queries against the DAG.
 
+use std::fmt::Display;
+
 #[cfg(feature = "unaudited-mcp-simulation-tools")]
 use exo_core::{Did, hash::hash_structured};
 use exo_core::{
@@ -29,6 +31,21 @@ fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(),
 fn parse_did_str(raw: &str, field: &str) -> Result<Did, String> {
     validate_string_bytes(raw, field, MAX_LEDGER_DID_BYTES)?;
     Did::new(raw).map_err(|_| format!("invalid {field} DID format"))
+}
+
+fn ledger_store_unavailable_error(operation: &str, error: impl Display) -> ToolResult {
+    tracing::error!(
+        operation,
+        error = %error,
+        "MCP ledger store operation failed"
+    );
+    ToolResult::error(
+        json!({
+            "error": "ledger store is temporarily unavailable",
+            "operation": operation,
+        })
+        .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -198,9 +215,7 @@ pub fn execute_get_event(params: &Value, context: &NodeContext) -> ToolResult {
         let node = match guard.get_sync(&event_hash) {
             Ok(node) => node,
             Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("store event lookup failed: {e}")}).to_string(),
-                );
+                return ledger_store_unavailable_error("event_lookup", e);
             }
         };
 
@@ -217,17 +232,13 @@ pub fn execute_get_event(params: &Value, context: &NodeContext) -> ToolResult {
         let children = match guard.children(&event_hash) {
             Ok(children) => children,
             Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("store child lookup failed: {e}")}).to_string(),
-                );
+                return ledger_store_unavailable_error("child_lookup", e);
             }
         };
         let committed_height = match guard.committed_height_for(&event_hash) {
             Ok(height) => height,
             Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("store commit lookup failed: {e}")}).to_string(),
-                );
+                return ledger_store_unavailable_error("commit_lookup", e);
             }
         };
 
@@ -445,10 +456,7 @@ pub fn execute_get_checkpoint(params: &Value, context: &NodeContext) -> ToolResu
             Ok(guard) => match guard.committed_height_value() {
                 Ok(height) => height,
                 Err(e) => {
-                    return ToolResult::error(
-                        json!({"error": format!("store committed height unavailable: {e}")})
-                            .to_string(),
-                    );
+                    return ledger_store_unavailable_error("committed_height", e);
                 }
             },
             Err(_) => {
@@ -759,6 +767,40 @@ mod tests {
         assert_eq!(v["child_count"], 1);
     }
 
+    #[test]
+    fn execute_get_event_redacts_store_commit_lookup_errors() {
+        let (context, dir, genesis_hash, _child_hash) = context_with_store_node();
+        let conn = rusqlite::Connection::open(dir.path().join("dag.db")).unwrap();
+        conn.execute(
+            "UPDATE committed SET height = ?1 WHERE hash = ?2",
+            rusqlite::params![-1_i64, genesis_hash.as_bytes().as_slice()],
+        )
+        .unwrap();
+
+        let result = execute_get_event(&json!({"event_hash": genesis_hash.to_string()}), &context);
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("ledger store is temporarily unavailable"));
+        assert!(
+            !text.contains("committed.height"),
+            "ledger MCP errors must not expose internal store column names: {text}"
+        );
+    }
+
+    #[test]
+    fn ledger_store_errors_do_not_format_internal_details_for_clients() {
+        let src = include_str!("ledger.rs");
+        let production = src
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production source section");
+        assert!(!production.contains("store event lookup failed: {e}"));
+        assert!(!production.contains("store child lookup failed: {e}"));
+        assert!(!production.contains("store commit lookup failed: {e}"));
+        assert!(!production.contains("store committed height unavailable: {e}"));
+    }
+
     // -- verify_inclusion -----------------------------------------------------
 
     #[test]
@@ -1020,8 +1062,11 @@ mod tests {
 
         assert!(result.is_error);
         let text = result.content[0].text();
-        assert!(text.contains("store committed height unavailable"));
-        assert!(text.contains("committed.height"));
+        assert!(text.contains("ledger store is temporarily unavailable"));
+        assert!(
+            !text.contains("committed.height"),
+            "ledger MCP errors must not expose internal store column names: {text}"
+        );
     }
 
     #[test]
