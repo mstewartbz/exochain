@@ -28,7 +28,10 @@ use tokio::sync::mpsc;
 use crate::{
     reactor::SharedReactorState,
     store::SqliteDagStore,
-    zerodentity::{store::SharedZerodentityStore, types::ZerodentityScore},
+    zerodentity::{
+        store::{SharedZerodentityStore, otp_challenge_expired},
+        types::ZerodentityScore,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -401,7 +404,7 @@ fn check_otp_cleanup(zerodentity: &SharedZerodentityStore) -> SentinelStatus {
         .all_otp_challenges()
         .iter()
         .filter(|ch| {
-            let expired = now > ch.dispatched_ms.saturating_add(ch.ttl_ms);
+            let expired = otp_challenge_expired(ch, now);
             let pending = ch.state == crate::zerodentity::types::OtpState::Pending;
             expired && pending
         })
@@ -899,6 +902,40 @@ mod tests {
                 channel: crate::zerodentity::types::OtpChannel::Email,
                 hmac_secret: crate::zerodentity::types::OtpHmacSecret::new([7u8; 32]).unwrap(),
                 dispatched_ms: now.saturating_sub(10_000),
+                ttl_ms: 1,
+                attempts: 0,
+                max_attempts: 3,
+                state: crate::zerodentity::types::OtpState::Pending,
+            };
+            zerodentity
+                .lock()
+                .unwrap()
+                .insert_otp_challenge(&challenge)
+                .unwrap();
+        }
+
+        let status = check_otp_cleanup(&zerodentity);
+
+        assert!(status.healthy);
+        assert_eq!(status.check, SentinelCheck::OtpCleanup);
+        assert!(
+            status
+                .message
+                .contains("Cleaned up 1 expired OTP challenge")
+        );
+        assert!(zerodentity.lock().unwrap().all_otp_challenges().is_empty());
+    }
+
+    #[test]
+    fn otp_cleanup_removes_pending_challenge_when_expiry_overflows() {
+        let zerodentity = crate::zerodentity::store::new_shared_store();
+        {
+            let challenge = crate::zerodentity::types::OtpChallenge {
+                challenge_id: "overflow-otp".into(),
+                subject_did: Did::new("did:exo:otp-overflow").unwrap(),
+                channel: crate::zerodentity::types::OtpChannel::Email,
+                hmac_secret: crate::zerodentity::types::OtpHmacSecret::new([8u8; 32]).unwrap(),
+                dispatched_ms: u64::MAX,
                 ttl_ms: 1,
                 attempts: 0,
                 max_attempts: 3,

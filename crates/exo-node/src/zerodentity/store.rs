@@ -119,6 +119,13 @@ fn canonicalize_behavioral_samples(samples: &mut [BehavioralSample]) {
     });
 }
 
+pub(crate) fn otp_challenge_expired(challenge: &OtpChallenge, now_ms: u64) -> bool {
+    challenge
+        .dispatched_ms
+        .checked_add(challenge.ttl_ms)
+        .is_none_or(|expires_at| now_ms >= expires_at)
+}
+
 // ---------------------------------------------------------------------------
 // ZerodentityStore
 // ---------------------------------------------------------------------------
@@ -784,7 +791,7 @@ impl ZerodentityStore {
     pub fn cleanup_expired_otp(&mut self, now_ms: u64) -> usize {
         let before = self.otp_challenges.len();
         self.otp_challenges.retain(|_, ch| {
-            let expired = now_ms > ch.dispatched_ms.saturating_add(ch.ttl_ms);
+            let expired = otp_challenge_expired(ch, now_ms);
             let pending = ch.state == super::types::OtpState::Pending;
             // Remove if both expired and still pending
             !(expired && pending)
@@ -1422,5 +1429,29 @@ mod tests {
         assert!(store.get_otp_challenge("exp-001").unwrap().is_none());
         assert!(store.get_otp_challenge("fresh-001").unwrap().is_some());
         assert!(store.get_otp_challenge("ver-001").unwrap().is_some());
+    }
+
+    #[test]
+    fn cleanup_expired_otp_removes_pending_when_expiry_overflows() {
+        use crate::zerodentity::types::{OtpChannel, OtpState};
+
+        let mut store = ZerodentityStore::new();
+        let challenge = OtpChallenge {
+            challenge_id: "overflow-001".into(),
+            subject_did: did("did:exo:otpoverflow"),
+            channel: OtpChannel::Email,
+            hmac_secret: otp_secret(5),
+            dispatched_ms: u64::MAX,
+            ttl_ms: 1,
+            attempts: 0,
+            max_attempts: 5,
+            state: OtpState::Pending,
+        };
+        store.insert_otp_challenge(&challenge).unwrap();
+
+        let cleaned = store.cleanup_expired_otp(1_000);
+
+        assert_eq!(cleaned, 1);
+        assert!(store.get_otp_challenge("overflow-001").unwrap().is_none());
     }
 }
