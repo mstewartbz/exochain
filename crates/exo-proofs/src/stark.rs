@@ -115,6 +115,13 @@ pub struct StarkProof {
     pub public_input_authentication_path: Vec<Hash256>,
     /// Merkle-authenticated trace openings for every Fiat-Shamir query.
     pub trace_query_proofs: Vec<TraceQueryProof>,
+    /// Complete committed trace rows.
+    ///
+    /// This keeps the unaudited pedagogical verifier fail-closed: it can
+    /// recompute the trace root, recompute the constraint commitment, and
+    /// evaluate every transition instead of trusting sampled openings as a
+    /// production STARK soundness argument.
+    pub trace_rows: Vec<Vec<u64>>,
 }
 
 impl PartialEq for StarkConfig {
@@ -227,6 +234,7 @@ pub fn prove_stark(
         constraints: constraints.to_vec(),
         public_input_authentication_path,
         trace_query_proofs,
+        trace_rows: trace.to_vec(),
     })
 }
 
@@ -263,8 +271,44 @@ pub fn verify_stark_with_constraints(
         || constraints.is_empty()
         || proof.constraints.is_empty()
         || proof.constraints != constraints
+        || proof.trace_rows.len() != proof.trace_length
     {
         return Ok(false);
+    }
+
+    if validate_trace_shape(&proof.trace_rows).is_err() {
+        return Ok(false);
+    }
+
+    let trace_leaves = trace_leaf_hashes(&proof.trace_rows);
+    if commit_trace_from_leaves(&trace_leaves) != proof.trace_commitment {
+        return Ok(false);
+    }
+
+    let expected_constraint_commitment =
+        match commit_constraints(&proof.trace_rows, constraints, proof.config.field_size) {
+            Ok(commitment) => commitment,
+            Err(_) => return Ok(false),
+        };
+    if expected_constraint_commitment != proof.constraint_commitment {
+        return Ok(false);
+    }
+
+    for window in proof.trace_rows.windows(2) {
+        for constraint in constraints {
+            let constraint_value = match evaluate_constraint(
+                constraint,
+                &window[0],
+                &window[1],
+                proof.config.field_size,
+            ) {
+                Ok(value) => value,
+                Err(_) => return Ok(false),
+            };
+            if constraint_value != 0 {
+                return Ok(false);
+            }
+        }
     }
 
     // Step 1: Re-derive query indices from commitments (Fiat-Shamir)
@@ -288,6 +332,12 @@ pub fn verify_stark_with_constraints(
     }
 
     // Step 3: Verify the public inputs match what was committed.
+    let Some(first_row) = proof.trace_rows.first() else {
+        return Ok(false);
+    };
+    if first_row.as_slice() != public_inputs {
+        return Ok(false);
+    }
     let public_hash = hash_row(public_inputs);
     if public_hash != proof.public_input_hash {
         return Ok(false);
@@ -319,10 +369,23 @@ pub fn verify_stark_with_constraints(
             return Ok(false);
         }
 
+        let Some(committed_row) = proof.trace_rows.get(query_proof.index) else {
+            return Ok(false);
+        };
+        if committed_row != &query_proof.row {
+            return Ok(false);
+        }
+
         let Some(next_index) = query_proof.index.checked_add(1) else {
             return Ok(false);
         };
         if next_index >= proof.trace_length {
+            return Ok(false);
+        }
+        let Some(committed_next_row) = proof.trace_rows.get(next_index) else {
+            return Ok(false);
+        };
+        if committed_next_row != &query_proof.next_row {
             return Ok(false);
         }
 
@@ -467,6 +530,28 @@ fn trace_leaf_hashes(trace: &[Vec<u64>]) -> Vec<Hash256> {
 fn commit_trace_from_leaves(leaves: &[Hash256]) -> Hash256 {
     merkle_root(leaves)
 }
+
+fn validate_trace_shape(trace: &[Vec<u64>]) -> Result<()> {
+    let Some(first_row) = trace.first() else {
+        return Err(ProofError::ProofGenerationFailed("empty trace".to_string()));
+    };
+    let trace_width = first_row.len();
+    if trace_width == 0 {
+        return Err(ProofError::ProofGenerationFailed(
+            "trace rows must contain at least one column".to_string(),
+        ));
+    }
+    for (row_idx, row) in trace.iter().enumerate() {
+        if row.len() != trace_width {
+            return Err(ProofError::ProofGenerationFailed(format!(
+                "trace row {row_idx} has width {}, expected {trace_width}",
+                row.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn commit_constraints(
     trace: &[Vec<u64>],
     constraints: &[StarkConstraint],
@@ -879,6 +964,76 @@ mod tests {
             constraints: constraints.clone(),
             public_input_authentication_path,
             trace_query_proofs,
+            trace_rows: trace.clone(),
+        };
+
+        assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
+    }
+
+    #[test]
+    fn verify_rejects_forged_trace_with_unqueried_constraint_violation() {
+        let config = StarkConfig {
+            num_queries: 4,
+            ..StarkConfig::default_config()
+        };
+        let constraints = vec![equality_constraint()];
+        let trace_len = 32usize;
+
+        let mut forged = None;
+        for bad_row in 1..(trace_len - 1) {
+            let mut trace = vec![vec![7u64]; trace_len];
+            trace[bad_row] = vec![9u64];
+            let trace_leaves = trace_leaf_hashes(&trace);
+            let trace_commitment = commit_trace_from_leaves(&trace_leaves);
+            let constraint_commitment =
+                commit_constraints(&trace, &constraints, config.field_size).unwrap();
+            let query_indices = derive_queries(
+                &trace_commitment,
+                &constraint_commitment,
+                config.num_queries,
+                trace.len() - 1,
+            )
+            .unwrap();
+            let queried: BTreeSet<usize> = query_indices.iter().copied().collect();
+            if !queried.contains(&(bad_row - 1)) && !queried.contains(&bad_row) {
+                forged = Some((
+                    trace,
+                    trace_leaves,
+                    trace_commitment,
+                    constraint_commitment,
+                    query_indices,
+                ));
+                break;
+            }
+        }
+
+        let Some((trace, trace_leaves, trace_commitment, constraint_commitment, query_indices)) =
+            forged
+        else {
+            panic!("test fixture must find an unqueried bad transition");
+        };
+        let fri_proof = build_fri_proof(
+            &trace,
+            &query_indices,
+            &config,
+            &trace_commitment,
+            &constraint_commitment,
+        );
+        let public_input_authentication_path = merkle_proof(&trace_leaves, 0).unwrap();
+        let trace_query_proofs =
+            build_trace_query_proofs(&trace, &trace_leaves, &query_indices).unwrap();
+        let proof = StarkProof {
+            trace_commitment,
+            constraint_commitment,
+            query_indices,
+            fri_proof,
+            config,
+            trace_length: trace.len(),
+            public_input_hash: hash_row(&trace[0]),
+            constraints: constraints.clone(),
+            public_input_authentication_path,
+            trace_query_proofs,
+            trace_rows: trace.clone(),
         };
 
         assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
@@ -990,6 +1145,7 @@ mod tests {
             constraints: constraints.clone(),
             public_input_authentication_path,
             trace_query_proofs,
+            trace_rows: trace.clone(),
         };
 
         assert!(!verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
