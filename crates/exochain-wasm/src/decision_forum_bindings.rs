@@ -200,6 +200,7 @@ pub fn wasm_workflow_stages() -> Result<JsValue, JsValue> {
 /// `signatures_json` — JSON array of `[did_str, signature_hex]` pairs.
 /// `quorum_json`     — JSON `{required_signatures, required_fraction_pct}`.
 /// `public_keys_json` — JSON array of `[did_str, public_key_hex]` eligible signer pairs.
+/// `timestamp_ms`    — caller-supplied ratification timestamp bound into signatures.
 #[wasm_bindgen]
 pub fn wasm_ratify_constitution(
     corpus_json: &str,
@@ -234,6 +235,7 @@ pub fn wasm_ratify_constitution(
 /// `signatures_json` — JSON array of `[did_str, signature_hex]` pairs.
 /// `quorum_json`     — JSON `{required_signatures, required_fraction_pct}`.
 /// `public_keys_json` — JSON array of `[did_str, public_key_hex]` eligible signer pairs.
+/// `timestamp_ms`    — caller-supplied amendment timestamp bound into signatures.
 #[wasm_bindgen]
 pub fn wasm_amend_constitution(
     corpus_json: &str,
@@ -241,6 +243,7 @@ pub fn wasm_amend_constitution(
     signatures_json: &str,
     quorum_json: &str,
     public_keys_json: &str,
+    timestamp_ms: u64,
 ) -> Result<JsValue, JsValue> {
     let mut corpus: decision_forum::constitution::ConstitutionCorpus = from_json_str(corpus_json)?;
     let amendment: decision_forum::constitution::Article = from_json_str(amendment_json)?;
@@ -249,12 +252,14 @@ pub fn wasm_amend_constitution(
     let public_keys = parse_public_key_pairs(public_keys_json)?;
     let eligible: std::collections::BTreeSet<exo_core::Did> = public_keys.keys().cloned().collect();
     let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
+    let ts = exo_core::types::Timestamp::new(timestamp_ms, 0);
 
     decision_forum::constitution::amend_verified(
         &mut corpus,
         amendment,
         &sigs,
         &quorum,
+        ts,
         &eligible,
         &resolver,
     )

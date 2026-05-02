@@ -22,6 +22,7 @@ const CONSTITUTION_RATIFICATION_SIGNATURE_DOMAIN: &str =
     "decision.forum.constitution_ratification_signature.v1";
 const CONSTITUTION_AMENDMENT_SIGNATURE_DOMAIN: &str =
     "decision.forum.constitution_amendment_signature.v1";
+const CONSTITUTION_AMENDMENT_HASH_DOMAIN: &str = "decision.forum.constitution_amendment_hash.v1";
 
 /// Document tier in the conflict resolution hierarchy (GOV-006).
 /// Articles override Bylaws, Bylaws override Resolutions, etc.
@@ -141,27 +142,57 @@ where
 #[derive(Debug, Clone, Serialize)]
 struct RatificationSignaturePayload<'a> {
     domain: &'static str,
+    action_type: &'static str,
+    signer_did: &'a Did,
     corpus_hash: &'a Hash256,
     version: &'a Version,
     amendment_count: u32,
+    quorum: &'a ConstitutionQuorum,
+    timestamp: &'a Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct AmendmentSignaturePayload<'a> {
     domain: &'static str,
+    action_type: &'static str,
+    signer_did: &'a Did,
     corpus_hash: &'a Hash256,
     version: &'a Version,
     amendment_count: u32,
+    amendment_hash: &'a Hash256,
+    quorum: &'a ConstitutionQuorum,
+    timestamp: &'a Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AmendmentHashPayload<'a> {
+    domain: &'static str,
     amendment: &'a Article,
 }
 
+fn amendment_hash(amendment: &Article) -> Result<Hash256> {
+    Ok(hash_structured(&AmendmentHashPayload {
+        domain: CONSTITUTION_AMENDMENT_HASH_DOMAIN,
+        amendment,
+    })?)
+}
+
 /// Canonical message bytes to sign for corpus ratification.
-pub fn ratification_signature_message(corpus: &ConstitutionCorpus) -> Result<Vec<u8>> {
+pub fn ratification_signature_message(
+    corpus: &ConstitutionCorpus,
+    signer_did: &Did,
+    quorum: &ConstitutionQuorum,
+    timestamp: Timestamp,
+) -> Result<Vec<u8>> {
     let digest = hash_structured(&RatificationSignaturePayload {
         domain: CONSTITUTION_RATIFICATION_SIGNATURE_DOMAIN,
+        action_type: "ratify",
+        signer_did,
         corpus_hash: &corpus.hash,
         version: &corpus.version,
         amendment_count: corpus.amendment_count,
+        quorum,
+        timestamp: &timestamp,
     })?;
     Ok(digest.as_ref().to_vec())
 }
@@ -170,13 +201,21 @@ pub fn ratification_signature_message(corpus: &ConstitutionCorpus) -> Result<Vec
 pub fn amendment_signature_message(
     corpus: &ConstitutionCorpus,
     amendment: &Article,
+    signer_did: &Did,
+    quorum: &ConstitutionQuorum,
+    timestamp: Timestamp,
 ) -> Result<Vec<u8>> {
+    let amendment_hash = amendment_hash(amendment)?;
     let digest = hash_structured(&AmendmentSignaturePayload {
         domain: CONSTITUTION_AMENDMENT_SIGNATURE_DOMAIN,
+        action_type: "amend",
+        signer_did,
         corpus_hash: &corpus.hash,
         version: &corpus.version,
         amendment_count: corpus.amendment_count,
-        amendment,
+        amendment_hash: &amendment_hash,
+        quorum,
+        timestamp: &timestamp,
     })?;
     Ok(digest.as_ref().to_vec())
 }
@@ -209,12 +248,16 @@ fn required_signature_count(quorum: &ConstitutionQuorum, eligible_count: usize) 
     Ok(quorum.required_signatures.max(by_fraction))
 }
 
-fn count_verified_signatures<R: PublicKeyResolver>(
-    message: &[u8],
+fn count_verified_signatures<R, F>(
     signatures: &[(Did, Signature)],
     eligible_signers: &BTreeSet<Did>,
     resolver: &R,
-) -> usize {
+    mut message_for: F,
+) -> Result<usize>
+where
+    R: PublicKeyResolver,
+    F: FnMut(&Did) -> Result<Vec<u8>>,
+{
     let mut verified = BTreeSet::new();
 
     for (did, signature) in signatures {
@@ -227,23 +270,28 @@ fn count_verified_signatures<R: PublicKeyResolver>(
         let Some(public_key) = resolver.resolve(did) else {
             continue;
         };
-        if crypto::verify(message, signature, &public_key) {
+        let message = message_for(did)?;
+        if crypto::verify(&message, signature, &public_key) {
             verified.insert(did.clone());
         }
     }
 
-    verified.len()
+    Ok(verified.len())
 }
 
-fn ensure_verified_quorum<R: PublicKeyResolver>(
-    message: &[u8],
+fn ensure_verified_quorum<R, F>(
     signatures: &[(Did, Signature)],
     quorum: &ConstitutionQuorum,
     eligible_signers: &BTreeSet<Did>,
     resolver: &R,
-) -> Result<usize> {
+    message_for: F,
+) -> Result<usize>
+where
+    R: PublicKeyResolver,
+    F: FnMut(&Did) -> Result<Vec<u8>>,
+{
     let required = required_signature_count(quorum, eligible_signers.len())?;
-    let actual = count_verified_signatures(message, signatures, eligible_signers, resolver);
+    let actual = count_verified_signatures(signatures, eligible_signers, resolver, message_for)?;
     if actual < required {
         return Err(ForumError::QuorumNotMet { required, actual });
     }
@@ -264,8 +312,9 @@ pub fn ratify_verified<R: PublicKeyResolver>(
             reason: "already ratified".into(),
         });
     }
-    let message = ratification_signature_message(corpus)?;
-    ensure_verified_quorum(&message, signatures, quorum, eligible_signers, resolver)?;
+    ensure_verified_quorum(signatures, quorum, eligible_signers, resolver, |did| {
+        ratification_signature_message(corpus, did, quorum, timestamp)
+    })?;
     corpus.ratified_at = Some(timestamp);
     Ok(())
 }
@@ -276,6 +325,7 @@ pub fn amend_verified<R: PublicKeyResolver>(
     amendment: Article,
     signatures: &[(Did, Signature)],
     quorum: &ConstitutionQuorum,
+    timestamp: Timestamp,
     eligible_signers: &BTreeSet<Did>,
     resolver: &R,
 ) -> Result<()> {
@@ -284,8 +334,9 @@ pub fn amend_verified<R: PublicKeyResolver>(
             reason: "not ratified".into(),
         });
     }
-    let message = amendment_signature_message(corpus, &amendment)?;
-    ensure_verified_quorum(&message, signatures, quorum, eligible_signers, resolver)?;
+    ensure_verified_quorum(signatures, quorum, eligible_signers, resolver, |did| {
+        amendment_signature_message(corpus, &amendment, did, quorum, timestamp)
+    })?;
 
     let next_version = Version(corpus.version.value().checked_add(1).ok_or_else(|| {
         ForumError::AmendmentFailed {
@@ -416,17 +467,28 @@ mod tests {
             .collect()
     }
 
-    fn sign_ratification(corpus: &ConstitutionCorpus, keypair: &KeyPair) -> Signature {
-        let message = ratification_signature_message(corpus).expect("ratification payload");
+    fn sign_ratification(
+        corpus: &ConstitutionCorpus,
+        signer_did: &Did,
+        quorum: &ConstitutionQuorum,
+        timestamp: Timestamp,
+        keypair: &KeyPair,
+    ) -> Signature {
+        let message = ratification_signature_message(corpus, signer_did, quorum, timestamp)
+            .expect("ratification payload");
         crypto::sign(&message, keypair.secret_key())
     }
 
     fn sign_amendment(
         corpus: &ConstitutionCorpus,
         amendment: &Article,
+        signer_did: &Did,
+        quorum: &ConstitutionQuorum,
+        timestamp: Timestamp,
         keypair: &KeyPair,
     ) -> Signature {
-        let message = amendment_signature_message(corpus, amendment).expect("amendment payload");
+        let message = amendment_signature_message(corpus, amendment, signer_did, quorum, timestamp)
+            .expect("amendment payload");
         crypto::sign(&message, keypair.secret_key())
     }
 
@@ -470,8 +532,14 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
-            (bob.clone(), sign_ratification(&c, &bob_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+            ),
+            (
+                bob.clone(),
+                sign_ratification(&c, &bob, &quorum(), Timestamp::ZERO, &bob_key),
+            ),
         ];
         ratify_verified(
             &mut c,
@@ -495,7 +563,10 @@ mod tests {
         let resolver = |d: &Did| keys.get(d).copied();
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
-        let sigs = vec![(alice.clone(), sign_ratification(&c, &alice_key))];
+        let sigs = vec![(
+            alice.clone(),
+            sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+        )];
         let err = ratify_verified(
             &mut c,
             &sigs,
@@ -519,8 +590,14 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
-            (bob.clone(), sign_ratification(&c, &bob_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+            ),
+            (
+                bob.clone(),
+                sign_ratification(&c, &bob, &quorum(), Timestamp::ZERO, &bob_key),
+            ),
         ];
         ratify_verified(
             &mut c,
@@ -555,7 +632,10 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+            ),
             (bob.clone(), empty_sig()),
         ];
         assert!(
@@ -582,8 +662,14 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let ratify_sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
-            (bob.clone(), sign_ratification(&c, &bob_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+            ),
+            (
+                bob.clone(),
+                sign_ratification(&c, &bob, &quorum(), Timestamp::ZERO, &bob_key),
+            ),
         ];
         ratify_verified(
             &mut c,
@@ -597,14 +683,28 @@ mod tests {
         let old_hash = c.hash;
         let amendment = article("a2", DocumentTier::Bylaws);
         let amendment_sigs = vec![
-            (alice.clone(), sign_amendment(&c, &amendment, &alice_key)),
-            (bob.clone(), sign_amendment(&c, &amendment, &bob_key)),
+            (
+                alice.clone(),
+                sign_amendment(
+                    &c,
+                    &amendment,
+                    &alice,
+                    &quorum(),
+                    Timestamp::ZERO,
+                    &alice_key,
+                ),
+            ),
+            (
+                bob.clone(),
+                sign_amendment(&c, &amendment, &bob, &quorum(), Timestamp::ZERO, &bob_key),
+            ),
         ];
         amend_verified(
             &mut c,
             amendment,
             &amendment_sigs,
             &quorum(),
+            Timestamp::ZERO,
             &eligible(&[alice, bob]),
             &resolver,
         )
@@ -624,17 +724,21 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let amendment = article("a2", DocumentTier::Bylaws);
-        let amendment_sigs = vec![(alice.clone(), sign_amendment(&c, &amendment, &alice_key))];
         let q = ConstitutionQuorum {
             required_signatures: 1,
             required_fraction_pct: 100,
         };
+        let amendment_sigs = vec![(
+            alice.clone(),
+            sign_amendment(&c, &amendment, &alice, &q, Timestamp::ZERO, &alice_key),
+        )];
         assert!(
             amend_verified(
                 &mut c,
                 amendment,
                 &amendment_sigs,
                 &q,
+                Timestamp::ZERO,
                 &eligible(&[alice]),
                 &resolver,
             )
@@ -653,8 +757,14 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let ratify_sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
-            (bob.clone(), sign_ratification(&c, &bob_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+            ),
+            (
+                bob.clone(),
+                sign_ratification(&c, &bob, &quorum(), Timestamp::ZERO, &bob_key),
+            ),
         ];
         ratify_verified(
             &mut c,
@@ -672,6 +782,7 @@ mod tests {
                 amendment,
                 &[(alice.clone(), empty_sig())],
                 &quorum(),
+                Timestamp::ZERO,
                 &eligible(&[alice, bob]),
                 &resolver,
             )
@@ -797,8 +908,14 @@ mod tests {
             required_fraction_pct: 75,
         };
         let sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
-            (bob.clone(), sign_ratification(&c, &bob_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &q, Timestamp::ZERO, &alice_key),
+            ),
+            (
+                bob.clone(),
+                sign_ratification(&c, &bob, &q, Timestamp::ZERO, &bob_key),
+            ),
         ];
 
         let err = ratify_verified(
@@ -822,6 +939,141 @@ mod tests {
     }
 
     #[test]
+    fn ratification_payload_is_bound_to_signer_quorum_and_timestamp() {
+        let alice = did("alice");
+        let bob = did("bob");
+        let c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
+            .expect("valid corpus");
+        let base_quorum = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 50,
+        };
+        let stricter_quorum = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 100,
+        };
+
+        let alice_payload =
+            ratification_signature_message(&c, &alice, &base_quorum, Timestamp::new(1000, 0))
+                .expect("payload");
+        let bob_payload =
+            ratification_signature_message(&c, &bob, &base_quorum, Timestamp::new(1000, 0))
+                .expect("payload");
+        let later_payload =
+            ratification_signature_message(&c, &alice, &base_quorum, Timestamp::new(1001, 0))
+                .expect("payload");
+        let stricter_payload =
+            ratification_signature_message(&c, &alice, &stricter_quorum, Timestamp::new(1000, 0))
+                .expect("payload");
+
+        assert_ne!(alice_payload, bob_payload);
+        assert_ne!(alice_payload, later_payload);
+        assert_ne!(alice_payload, stricter_payload);
+    }
+
+    #[test]
+    fn ratify_verified_rejects_signature_replayed_under_different_timestamp() {
+        let alice = did("alice");
+        let alice_key = keypair(1);
+        let keys = public_key_map(&[(alice.clone(), &alice_key)]);
+        let resolver = |d: &Did| keys.get(d).copied();
+        let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
+            .expect("valid corpus");
+        let q = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 100,
+        };
+        let collected_at = Timestamp::new(1000, 0);
+        let replayed_at = Timestamp::new(1001, 0);
+        let message = ratification_signature_message(&c, &alice, &q, collected_at)
+            .expect("ratification payload");
+        let signature = crypto::sign(&message, alice_key.secret_key());
+
+        let err = ratify_verified(
+            &mut c,
+            &[(alice.clone(), signature)],
+            &q,
+            replayed_at,
+            &eligible(&[alice]),
+            &resolver,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            ForumError::QuorumNotMet {
+                required: 1,
+                actual: 0
+            }
+        );
+        assert!(!c.is_ratified());
+    }
+
+    #[test]
+    fn amendment_payload_is_bound_to_signer_quorum_timestamp_and_amendment_hash() {
+        let alice = did("alice");
+        let bob = did("bob");
+        let c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
+            .expect("valid corpus");
+        let amendment = article("a2", DocumentTier::Bylaws);
+        let other_amendment = article("a3", DocumentTier::Bylaws);
+        let base_quorum = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 50,
+        };
+        let stricter_quorum = ConstitutionQuorum {
+            required_signatures: 1,
+            required_fraction_pct: 100,
+        };
+
+        let alice_payload = amendment_signature_message(
+            &c,
+            &amendment,
+            &alice,
+            &base_quorum,
+            Timestamp::new(2000, 0),
+        )
+        .expect("payload");
+        let bob_payload = amendment_signature_message(
+            &c,
+            &amendment,
+            &bob,
+            &base_quorum,
+            Timestamp::new(2000, 0),
+        )
+        .expect("payload");
+        let later_payload = amendment_signature_message(
+            &c,
+            &amendment,
+            &alice,
+            &base_quorum,
+            Timestamp::new(2001, 0),
+        )
+        .expect("payload");
+        let stricter_payload = amendment_signature_message(
+            &c,
+            &amendment,
+            &alice,
+            &stricter_quorum,
+            Timestamp::new(2000, 0),
+        )
+        .expect("payload");
+        let other_amendment_payload = amendment_signature_message(
+            &c,
+            &other_amendment,
+            &alice,
+            &base_quorum,
+            Timestamp::new(2000, 0),
+        )
+        .expect("payload");
+
+        assert_ne!(alice_payload, bob_payload);
+        assert_ne!(alice_payload, later_payload);
+        assert_ne!(alice_payload, stricter_payload);
+        assert_ne!(alice_payload, other_amendment_payload);
+    }
+
+    #[test]
     fn ratify_verified_accepts_distinct_valid_signatures() {
         let alice = did("alice");
         let bob = did("bob");
@@ -832,8 +1084,14 @@ mod tests {
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
         let sigs = vec![
-            (alice.clone(), sign_ratification(&c, &alice_key)),
-            (bob.clone(), sign_ratification(&c, &bob_key)),
+            (
+                alice.clone(),
+                sign_ratification(&c, &alice, &quorum(), Timestamp::ZERO, &alice_key),
+            ),
+            (
+                bob.clone(),
+                sign_ratification(&c, &bob, &quorum(), Timestamp::ZERO, &bob_key),
+            ),
         ];
 
         ratify_verified(
@@ -857,11 +1115,11 @@ mod tests {
         let resolver = |d: &Did| keys.get(d).copied();
         let mut c = ConstitutionCorpus::new(vec![article("a1", DocumentTier::Articles)])
             .expect("valid corpus");
-        let sig = sign_ratification(&c, &alice_key);
         let q = ConstitutionQuorum {
             required_signatures: 2,
             required_fraction_pct: 100,
         };
+        let sig = sign_ratification(&c, &alice, &q, Timestamp::ZERO, &alice_key);
 
         let err = ratify_verified(
             &mut c,
@@ -889,7 +1147,7 @@ mod tests {
             required_signatures: 1,
             required_fraction_pct: 100,
         };
-        let ratify_sig = sign_ratification(&c, &alice_key);
+        let ratify_sig = sign_ratification(&c, &alice, &q, Timestamp::ZERO, &alice_key);
         ratify_verified(
             &mut c,
             &[(alice.clone(), ratify_sig)],
@@ -906,6 +1164,7 @@ mod tests {
             amendment,
             &[(alice.clone(), sig())],
             &q,
+            Timestamp::ZERO,
             &eligible(&[alice]),
             &resolver,
         )
@@ -926,7 +1185,7 @@ mod tests {
             required_signatures: 1,
             required_fraction_pct: 100,
         };
-        let ratify_sig = sign_ratification(&c, &alice_key);
+        let ratify_sig = sign_ratification(&c, &alice, &q, Timestamp::ZERO, &alice_key);
         ratify_verified(
             &mut c,
             &[(alice.clone(), ratify_sig)],
@@ -938,13 +1197,14 @@ mod tests {
         .expect("ratified");
         let old_hash = c.hash;
         let amendment = article("a2", DocumentTier::Bylaws);
-        let amendment_sig = sign_amendment(&c, &amendment, &alice_key);
+        let amendment_sig = sign_amendment(&c, &amendment, &alice, &q, Timestamp::ZERO, &alice_key);
 
         amend_verified(
             &mut c,
             amendment,
             &[(alice.clone(), amendment_sig)],
             &q,
+            Timestamp::ZERO,
             &eligible(&[alice]),
             &resolver,
         )
@@ -966,7 +1226,7 @@ mod tests {
             required_signatures: 1,
             required_fraction_pct: 100,
         };
-        let ratify_sig = sign_ratification(&c, &alice_key);
+        let ratify_sig = sign_ratification(&c, &alice, &q, Timestamp::ZERO, &alice_key);
         ratify_verified(
             &mut c,
             &[(alice.clone(), ratify_sig)],
@@ -979,13 +1239,14 @@ mod tests {
         c.amendment_count = u32::MAX;
         let before = c.clone();
         let amendment = article("a2", DocumentTier::Bylaws);
-        let amendment_sig = sign_amendment(&c, &amendment, &alice_key);
+        let amendment_sig = sign_amendment(&c, &amendment, &alice, &q, Timestamp::ZERO, &alice_key);
 
         let err = amend_verified(
             &mut c,
             amendment,
             &[(alice.clone(), amendment_sig)],
             &q,
+            Timestamp::ZERO,
             &eligible(&[alice]),
             &resolver,
         )
@@ -1014,7 +1275,7 @@ mod tests {
             required_signatures: 1,
             required_fraction_pct: 100,
         };
-        let ratify_sig = sign_ratification(&c, &alice_key);
+        let ratify_sig = sign_ratification(&c, &alice, &q, Timestamp::ZERO, &alice_key);
         ratify_verified(
             &mut c,
             &[(alice.clone(), ratify_sig)],
@@ -1027,13 +1288,14 @@ mod tests {
         c.version = Version(u64::MAX);
         let before = c.clone();
         let amendment = article("a2", DocumentTier::Bylaws);
-        let amendment_sig = sign_amendment(&c, &amendment, &alice_key);
+        let amendment_sig = sign_amendment(&c, &amendment, &alice, &q, Timestamp::ZERO, &alice_key);
 
         let err = amend_verified(
             &mut c,
             amendment,
             &[(alice.clone(), amendment_sig)],
             &q,
+            Timestamp::ZERO,
             &eligible(&[alice]),
             &resolver,
         )
