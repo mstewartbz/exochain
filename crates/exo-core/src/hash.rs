@@ -120,6 +120,13 @@ pub fn verify_merkle_proof(
     proof: &[Hash256],
     index: usize,
 ) -> bool {
+    let current = merkle_root_from_proof(leaf, proof, index);
+    hash256_eq_constant_time(&current, root)
+}
+
+/// Reconstruct the Merkle root implied by a leaf, proof path, and leaf index.
+#[must_use]
+pub fn merkle_root_from_proof(leaf: &Hash256, proof: &[Hash256], index: usize) -> Hash256 {
     let mut current = *leaf;
     let mut idx = index;
 
@@ -132,7 +139,7 @@ pub fn verify_merkle_proof(
         idx /= 2;
     }
 
-    hash256_eq_constant_time(&current, root)
+    current
 }
 
 /// Compare two `Hash256` values without data-dependent early exit.
@@ -351,6 +358,23 @@ mod tests {
         let proof = merkle_proof(&leaves, 0).expect("ok");
         let wrong_root = Hash256::digest(b"wrong root");
         assert!(!verify_merkle_proof(&wrong_root, &leaves[0], &proof, 0));
+    }
+
+    #[test]
+    fn merkle_root_from_proof_matches_canonical_root() {
+        let leaves = vec![
+            Hash256::digest(b"root-proof-a"),
+            Hash256::digest(b"root-proof-b"),
+            Hash256::digest(b"root-proof-c"),
+            Hash256::digest(b"root-proof-d"),
+            Hash256::digest(b"root-proof-e"),
+        ];
+        let root = merkle_root(&leaves);
+
+        for (index, leaf) in leaves.iter().enumerate() {
+            let proof = merkle_proof(&leaves, index).expect("proof");
+            assert_eq!(merkle_root_from_proof(leaf, &proof, index), root);
+        }
     }
 
     #[test]

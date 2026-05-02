@@ -1,9 +1,12 @@
 //! Ledger MCP tools — event submission, retrieval, Merkle inclusion
 //! verification, and checkpoint queries against the DAG.
 
-use exo_core::Hash256;
 #[cfg(feature = "unaudited-mcp-simulation-tools")]
 use exo_core::{Did, hash::hash_structured};
+use exo_core::{
+    Hash256,
+    hash::{merkle_root_from_proof, verify_merkle_proof},
+};
 use serde_json::{Value, json};
 
 use crate::mcp::{
@@ -316,29 +319,6 @@ fn decode_hash256_hex(field: &str, value: &str) -> Result<Hash256, String> {
     Ok(Hash256::from_bytes(hash_bytes))
 }
 
-fn hash_merkle_pair(left: &Hash256, right: &Hash256) -> Hash256 {
-    let mut combined = [0u8; 64];
-    combined[..32].copy_from_slice(left.as_bytes());
-    combined[32..].copy_from_slice(right.as_bytes());
-    Hash256::digest(&combined)
-}
-
-fn derive_merkle_root_from_proof(leaf: &Hash256, proof: &[Hash256], index: usize) -> Hash256 {
-    let mut current = *leaf;
-    let mut idx = index;
-
-    for sibling in proof {
-        current = if idx % 2 == 0 {
-            hash_merkle_pair(&current, sibling)
-        } else {
-            hash_merkle_pair(sibling, &current)
-        };
-        idx /= 2;
-    }
-
-    current
-}
-
 /// Execute the `exochain_verify_inclusion` tool.
 #[must_use]
 pub fn execute_verify_inclusion(params: &Value, _context: &NodeContext) -> ToolResult {
@@ -420,8 +400,8 @@ pub fn execute_verify_inclusion(params: &Value, _context: &NodeContext) -> ToolR
         }
     }
 
-    let computed_root = derive_merkle_root_from_proof(&event_hash, &proof, target_index);
-    let verified = computed_root == root_hash;
+    let computed_root = merkle_root_from_proof(&event_hash, &proof, target_index);
+    let verified = verify_merkle_proof(&root_hash, &event_hash, &proof, target_index);
 
     let response = json!({
         "event_hash": event_hash.to_string(),
@@ -848,6 +828,35 @@ mod tests {
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
         assert_eq!(v["verified"], true);
         assert_eq!(v["computed_root"], root.to_string());
+    }
+
+    #[test]
+    fn verify_inclusion_uses_core_merkle_verifier_not_local_hashing() {
+        let source = include_str!("ledger.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production section");
+        let verifier = production
+            .split("pub fn execute_verify_inclusion")
+            .nth(1)
+            .expect("execute_verify_inclusion source")
+            .split("// ---------------------------------------------------------------------------\n// exochain_get_checkpoint")
+            .next()
+            .expect("execute_verify_inclusion section");
+
+        assert!(
+            verifier.contains("verify_merkle_proof("),
+            "MCP inclusion verification must delegate to exo_core's canonical Merkle verifier"
+        );
+        assert!(
+            !production.contains("fn hash_merkle_pair"),
+            "MCP ledger must not maintain a second Merkle hash-combination algorithm"
+        );
+        assert!(
+            !production.contains("fn derive_merkle_root_from_proof"),
+            "MCP ledger must not maintain a second Merkle proof-folding algorithm"
+        );
     }
 
     #[test]
