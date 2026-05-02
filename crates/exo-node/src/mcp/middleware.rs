@@ -18,13 +18,14 @@
 
 use std::sync::Arc;
 
-use exo_core::{Did, Hash256, PublicKey, Signature, SignerType};
+use exo_core::{Did, Hash256, PublicKey, Signature, SignerType, hash::hash_structured};
 use exo_gatekeeper::{
     invariants::InvariantSet,
     kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
     mcp::{self, McpContext, McpRule},
     types::{BailmentState, Permission, PermissionSet},
 };
+use serde::Serialize;
 use serde_json::Value;
 
 use super::{
@@ -34,6 +35,15 @@ use super::{
 };
 
 const CONSTITUTIONAL_CONTEXT_FIELD: &str = "constitutional_context";
+const MCP_DELEGATION_ID_DOMAIN: &str = "exo.node.mcp.middleware.delegation_id.v1";
+
+#[derive(Serialize)]
+struct McpDelegationIdPayload<'a> {
+    domain: &'static str,
+    actor_did: &'a Did,
+    action: &'a str,
+    bcts_scope: &'a str,
+}
 
 /// Constitutional enforcement middleware wrapping every MCP tool invocation.
 ///
@@ -247,15 +257,11 @@ impl ConstitutionalMiddleware {
 
         let bcts_scope = Self::parse_required_str(context_value, "bcts_scope")?.to_owned();
         let output_marking = Self::parse_required_str(context_value, "output_marking")?;
-        let delegation_id = {
-            let mut payload = Vec::new();
-            payload.extend_from_slice(actor_did.as_str().as_bytes());
-            payload.push(0x00);
-            payload.extend_from_slice(action.as_bytes());
-            payload.push(0x00);
-            payload.extend_from_slice(bcts_scope.as_bytes());
-            Hash256::digest(&payload)
-        };
+        let delegation_id = mcp_delegation_id(actor_did, action, &bcts_scope).map_err(|err| {
+            McpError::ConstitutionalViolation(format!(
+                "verified MCP invocation context delegation_id encoding failed: {err}"
+            ))
+        })?;
         let mcp_context = McpContext {
             actor_did: actor_did.clone(),
             signer_type: SignerType::Ai { delegation_id },
@@ -315,6 +321,15 @@ impl ConstitutionalMiddleware {
         self.adjudicate(actor_did, action, &invocation.adjudication_context)?;
         Ok(())
     }
+}
+
+fn mcp_delegation_id(actor_did: &Did, action: &str, bcts_scope: &str) -> exo_core::Result<Hash256> {
+    hash_structured(&McpDelegationIdPayload {
+        domain: MCP_DELEGATION_ID_DOMAIN,
+        actor_did,
+        action,
+        bcts_scope,
+    })
 }
 
 impl Default for ConstitutionalMiddleware {
@@ -603,6 +618,63 @@ mod tests {
         assert!(
             production.contains("violation.rule.id()"),
             "MCP middleware errors must expose explicit stable MCP rule identifiers"
+        );
+    }
+
+    #[test]
+    fn production_delegation_id_uses_domain_separated_cbor() {
+        let src = std::fs::read_to_string("src/mcp/middleware.rs")
+            .expect("middleware.rs readable from crate root");
+        let production = src
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("middleware production section must be present");
+
+        assert!(
+            production.contains("MCP_DELEGATION_ID_DOMAIN"),
+            "MCP delegation IDs must carry an explicit domain separator"
+        );
+        assert!(
+            production.contains("hash_structured"),
+            "MCP delegation IDs must use canonical CBOR structured hashing"
+        );
+        assert!(
+            !production.contains("payload.push(0x00)"),
+            "MCP delegation IDs must not use ad hoc null separators"
+        );
+        assert!(
+            !production.contains("Hash256::digest(&payload)"),
+            "MCP delegation IDs must not hash raw delimiter payloads"
+        );
+    }
+
+    #[test]
+    fn delegation_id_rejects_legacy_delimiter_shape() {
+        let actor = test_did();
+        let action = "exochain_node_status";
+        let bcts_scope = "mcp:tools";
+
+        let structured =
+            mcp_delegation_id(&actor, action, bcts_scope).expect("canonical delegation id");
+        let repeat = mcp_delegation_id(&actor, action, bcts_scope)
+            .expect("canonical delegation id is deterministic");
+        let mut legacy_payload = Vec::new();
+        legacy_payload.extend_from_slice(actor.as_str().as_bytes());
+        legacy_payload.push(0x00);
+        legacy_payload.extend_from_slice(action.as_bytes());
+        legacy_payload.push(0x00);
+        legacy_payload.extend_from_slice(bcts_scope.as_bytes());
+        let legacy = Hash256::digest(&legacy_payload);
+
+        assert_eq!(structured, repeat);
+        assert_ne!(structured, legacy);
+        assert_ne!(
+            structured,
+            mcp_delegation_id(&actor, "other_action", bcts_scope).expect("canonical delegation id")
+        );
+        assert_ne!(
+            structured,
+            mcp_delegation_id(&actor, action, "other_scope").expect("canonical delegation id")
         );
     }
 }
