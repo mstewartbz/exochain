@@ -561,7 +561,7 @@ pub fn assess_breach(
 ///
 /// # Errors
 ///
-/// Returns `ConsentError::Denied` if hashing fails.
+/// Returns `ConsentError::Denied` if the version would overflow or hashing fails.
 pub fn amend(
     original: &ComposedContract,
     new_params: &ContractParams,
@@ -600,7 +600,12 @@ pub fn amend(
     // NOTE: We only re-render non-amended clauses from original template bodies
     // For simplicity, amended clauses are already re-rendered above.
 
-    let new_version = original.version + 1;
+    let new_version = original.version.checked_add(1).ok_or_else(|| {
+        ConsentError::Denied(format!(
+            "contract version overflow for contract '{}' at version {}",
+            original.id, original.version
+        ))
+    })?;
 
     let payload = ContractHashPayload {
         template_id: &original.template_id,
@@ -1600,6 +1605,29 @@ mod tests {
         assert_eq!(amended.version, original.version + 1);
         assert_eq!(amended.parent_contract_id, Some(original.id.clone()));
         assert_ne!(amended.id, original.id);
+    }
+
+    #[test]
+    fn test_amend_rejects_version_overflow() {
+        let mut original = compose_custody();
+        original.version = u32::MAX;
+
+        let err = amend(
+            &original,
+            &test_params(),
+            &[],
+            "overflow-amendment",
+            ts(1_700_000_000_350),
+        )
+        .unwrap_err();
+
+        match err {
+            ConsentError::Denied(reason) => {
+                assert!(reason.contains("contract version overflow"));
+                assert!(reason.contains(&original.id));
+            }
+            other => panic!("expected denial for version overflow, got {other:?}"),
+        }
     }
 
     // -- Test 13: amend preserves parent hash --
