@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::MessagingError;
 
 const DEATH_CONFIRMATION_SIGNING_DOMAIN: &str = "exo.messaging.death-trigger.confirmation.v1";
+const MIN_DEATH_CONFIRMATIONS: u8 = 2;
 
 /// Status of a death verification request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,18 +214,6 @@ impl DeathVerification {
             return Err(MessagingError::SignatureVerificationFailed);
         }
 
-        let now = metadata.created_at;
-        let status = if required_confirmations == 1 {
-            DeathVerificationStatus::Verified
-        } else {
-            DeathVerificationStatus::Pending
-        };
-        let resolved_at = if status == DeathVerificationStatus::Verified {
-            Some(now)
-        } else {
-            None
-        };
-
         Ok(Self {
             subject_did,
             initiated_by: initiated_by.clone(),
@@ -235,11 +224,11 @@ impl DeathVerification {
                 trustee_did: initiated_by,
                 public_key: initiator_public_key,
                 signature: initiator_signature,
-                confirmed_at: now,
+                confirmed_at: metadata.created_at,
             }],
-            status,
-            created: now,
-            resolved_at,
+            status: DeathVerificationStatus::Pending,
+            created: metadata.created_at,
+            resolved_at: None,
         })
     }
 
@@ -346,10 +335,10 @@ fn validate_death_verification_request(
     authorized_trustees: &BTreeMap<Did, PublicKey>,
     claim_nonce: &[u8],
 ) -> Result<(), MessagingError> {
-    if required_confirmations == 0 {
-        return Err(MessagingError::InvalidDeathVerification(
-            "required_confirmations must be at least 1".to_owned(),
-        ));
+    if required_confirmations < MIN_DEATH_CONFIRMATIONS {
+        return Err(MessagingError::InvalidDeathVerification(format!(
+            "required_confirmations must be at least {MIN_DEATH_CONFIRMATIONS}"
+        )));
     }
     if authorized_trustees.is_empty() {
         return Err(MessagingError::InvalidDeathVerification(
@@ -519,6 +508,30 @@ mod tests {
         assert_eq!(dv.confirmations[0].public_key, *bob_key.public_key());
         assert_eq!(dv.status, DeathVerificationStatus::Pending);
         assert_eq!(dv.confirmations_remaining(), 1);
+    }
+
+    #[test]
+    fn one_trustee_death_verification_rejected_even_with_valid_signature() {
+        let subject = did("alice");
+        let bob = did("bob");
+        let bob_key = keypair(1);
+        let authorized = authorized_trustees(&[(&bob, &bob_key)]);
+        let nonce = b"r6-claim-one-trustee".to_vec();
+        let signature = initial_signature(&subject, &bob, 1, &authorized, &nonce, &bob_key);
+
+        let result = DeathVerification::new(
+            subject,
+            bob,
+            1,
+            authorized,
+            nonce,
+            signature,
+            creation_metadata(1_003),
+        );
+
+        assert!(
+            matches!(result, Err(MessagingError::InvalidDeathVerification(reason)) if reason.contains("at least 2"))
+        );
     }
 
     #[test]
@@ -877,18 +890,21 @@ mod tests {
     fn creation_preserves_caller_supplied_timestamps() {
         let subject = did("alice");
         let bob = did("bob");
+        let carol = did("carol");
         let bob_key = keypair(1);
-        let authorized = authorized_trustees(&[(&bob, &bob_key)]);
-        let nonce = b"r6-claim-single".to_vec();
-        let signature = initial_signature(&subject, &bob, 1, &authorized, &nonce, &bob_key);
+        let carol_key = keypair(2);
+        let authorized = authorized_trustees(&[(&bob, &bob_key), (&carol, &carol_key)]);
+        let nonce = b"r6-claim-created-at".to_vec();
+        let signature = initial_signature(&subject, &bob, 2, &authorized, &nonce, &bob_key);
         let metadata = creation_metadata(7_001);
 
-        let dv = DeathVerification::new(subject, bob, 1, authorized, nonce, signature, metadata)
+        let dv = DeathVerification::new(subject, bob, 2, authorized, nonce, signature, metadata)
             .unwrap();
 
         assert_eq!(dv.created, timestamp(7_001));
         assert_eq!(dv.confirmations[0].confirmed_at, timestamp(7_001));
-        assert_eq!(dv.resolved_at, Some(timestamp(7_001)));
+        assert_eq!(dv.status, DeathVerificationStatus::Pending);
+        assert_eq!(dv.resolved_at, None);
     }
 
     #[test]
