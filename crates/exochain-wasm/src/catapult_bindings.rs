@@ -267,7 +267,8 @@ pub fn wasm_oda_authority_chain(newco_json: &str) -> Result<JsValue, JsValue> {
     newco
         .validate()
         .map_err(|e| JsValue::from_str(&format!("Newco validation error: {e}")))?;
-    let pace = exo_catapult::integration::build_pace_config(&newco);
+    let pace = exo_catapult::integration::build_operational_pace_config(&newco)
+        .map_err(|e| JsValue::from_str(&format!("PACE config error: {e}")))?;
     to_js_value(&serde_json::json!({
         "primary": pace.primary.map(|d| d.to_string()),
         "alternates": pace.alternates.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
@@ -481,6 +482,24 @@ mod tests {
         assert!(
             !production.contains("format!(\"{:?}\", a.severity)"),
             "WASM heartbeat alert severity must not depend on Rust Debug output"
+        );
+    }
+
+    #[test]
+    fn authority_chain_export_requires_operational_pace_config() {
+        let source = include_str!("catapult_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("build_operational_pace_config"),
+            "WASM authority-chain export must fail closed on incomplete PACE rosters"
+        );
+        assert!(
+            !production.contains("build_pace_config(&newco)"),
+            "WASM authority-chain export must not return summary PACE defaults as operational config"
         );
     }
 

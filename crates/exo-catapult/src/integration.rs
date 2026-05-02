@@ -7,7 +7,12 @@
 use exo_core::Did;
 use uuid::Uuid;
 
-use crate::{newco::Newco, oda::OdaSlot};
+use crate::{
+    agent::AgentStatus,
+    error::{CatapultError, Result},
+    newco::Newco,
+    oda::OdaSlot,
+};
 
 /// PACE (Primary-Alternate-Contingency-Emergency) configuration
 /// derived from the ODA command hierarchy.
@@ -33,20 +38,9 @@ pub struct PaceConfig {
 #[must_use]
 pub fn build_pace_config(newco: &Newco) -> PaceConfig {
     PaceConfig {
-        primary: newco
-            .roster
-            .get(&OdaSlot::VentureCommander)
-            .map(|a| a.did.clone()),
-        alternates: newco
-            .roster
-            .get(&OdaSlot::OperationsDeputy)
-            .map(|a| vec![a.did.clone()])
-            .unwrap_or_default(),
-        contingency: newco
-            .roster
-            .get(&OdaSlot::ProcessArchitect)
-            .map(|a| vec![a.did.clone()])
-            .unwrap_or_default(),
+        primary: slot_did(newco, OdaSlot::VentureCommander),
+        alternates: slot_did_vec(newco, OdaSlot::OperationsDeputy),
+        contingency: slot_did_vec(newco, OdaSlot::ProcessArchitect),
         emergency: newco
             .roster
             .founding_agents()
@@ -54,6 +48,72 @@ pub fn build_pace_config(newco: &Newco) -> PaceConfig {
             .map(|a| a.did.clone())
             .collect(),
     }
+}
+
+/// Build an operational PACE configuration for authority-chain use.
+///
+/// Unlike [`build_pace_config`], this function is fail-closed: all command
+/// continuity levels must be staffed by active agents before the config can be
+/// exported as an operational authority chain.
+///
+/// # Errors
+/// Returns [`CatapultError`] when the newco is invalid, required PACE slots are
+/// missing, or any required operator is not active.
+pub fn build_operational_pace_config(newco: &Newco) -> Result<PaceConfig> {
+    newco.validate()?;
+
+    Ok(PaceConfig {
+        primary: Some(require_active_slot(
+            newco,
+            OdaSlot::VentureCommander,
+            "primary",
+        )?),
+        alternates: vec![require_active_slot(
+            newco,
+            OdaSlot::OperationsDeputy,
+            "alternate",
+        )?],
+        contingency: vec![require_active_slot(
+            newco,
+            OdaSlot::ProcessArchitect,
+            "contingency",
+        )?],
+        emergency: vec![
+            require_active_slot(newco, OdaSlot::HrPeopleOps1, "emergency")?,
+            require_active_slot(newco, OdaSlot::DeepResearcher, "emergency")?,
+        ],
+    })
+}
+
+fn slot_did(newco: &Newco, slot: OdaSlot) -> Option<Did> {
+    newco.roster.get(&slot).map(|agent| agent.did.clone())
+}
+
+fn slot_did_vec(newco: &Newco, slot: OdaSlot) -> Vec<Did> {
+    slot_did(newco, slot).map_or_else(Vec::new, |did| vec![did])
+}
+
+fn require_active_slot(newco: &Newco, slot: OdaSlot, level: &str) -> Result<Did> {
+    let agent = newco
+        .roster
+        .get(&slot)
+        .ok_or_else(|| CatapultError::InvalidNewco {
+            reason: format!(
+                "operational PACE {level} slot {} must be staffed",
+                slot.slug()
+            ),
+        })?;
+
+    if agent.status != AgentStatus::Active {
+        return Err(CatapultError::InvalidNewco {
+            reason: format!(
+                "operational PACE {level} slot {} must be active",
+                slot.slug()
+            ),
+        });
+    }
+
+    Ok(agent.did.clone())
 }
 
 /// Decision classification based on ODA authority levels.
@@ -200,6 +260,81 @@ mod tests {
             .unwrap();
 
         let pace = build_pace_config(&newco);
+        assert!(pace.primary.is_some());
+        assert_eq!(pace.alternates.len(), 1);
+        assert_eq!(pace.contingency.len(), 1);
+        assert_eq!(pace.emergency.len(), 2);
+    }
+
+    #[test]
+    fn operational_pace_config_rejects_missing_command_slot() {
+        let mut newco = make_newco();
+        newco
+            .hire_agent(make_agent(OdaSlot::VentureCommander, "vc"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::ProcessArchitect, "pa"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::HrPeopleOps1, "hr"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::DeepResearcher, "dr"))
+            .unwrap();
+
+        let err = build_operational_pace_config(&newco)
+            .expect_err("missing OperationsDeputy must fail closed")
+            .to_string();
+        assert!(err.contains("operationsdeputy"));
+        assert!(err.contains("must be staffed"));
+    }
+
+    #[test]
+    fn operational_pace_config_rejects_inactive_operator() {
+        let mut newco = make_newco();
+        newco
+            .hire_agent(make_agent(OdaSlot::VentureCommander, "vc"))
+            .unwrap();
+        let mut deputy = make_agent(OdaSlot::OperationsDeputy, "od");
+        deputy.status = AgentStatus::Suspended;
+        newco.hire_agent(deputy).unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::ProcessArchitect, "pa"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::HrPeopleOps1, "hr"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::DeepResearcher, "dr"))
+            .unwrap();
+
+        let err = build_operational_pace_config(&newco)
+            .expect_err("inactive OperationsDeputy must fail closed")
+            .to_string();
+        assert!(err.contains("operationsdeputy"));
+        assert!(err.contains("must be active"));
+    }
+
+    #[test]
+    fn operational_pace_config_requires_all_active_levels() {
+        let mut newco = make_newco();
+        newco
+            .hire_agent(make_agent(OdaSlot::VentureCommander, "vc"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::OperationsDeputy, "od"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::ProcessArchitect, "pa"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::HrPeopleOps1, "hr"))
+            .unwrap();
+        newco
+            .hire_agent(make_agent(OdaSlot::DeepResearcher, "dr"))
+            .unwrap();
+
+        let pace = build_operational_pace_config(&newco).expect("complete active PACE");
         assert!(pace.primary.is_some());
         assert_eq!(pace.alternates.len(), 1);
         assert_eq!(pace.contingency.len(), 1);
