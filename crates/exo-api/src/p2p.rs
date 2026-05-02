@@ -368,7 +368,9 @@ pub fn identify_stale_peers(
         .iter()
         .filter(|p| {
             // A peer is stale when its last_seen is older than now - max_age_ms.
-            now.physical_ms.saturating_sub(p.last_seen.physical_ms) > max_age_ms
+            now.physical_ms
+                .checked_sub(p.last_seen.physical_ms)
+                .is_none_or(|age| age > max_age_ms)
         })
         .map(|p| p.info.id.clone())
         .collect()
@@ -779,6 +781,16 @@ mod tests {
         assert_eq!(stale.len(), 2);
         assert!(stale.contains(&pid("stale1")));
         assert!(stale.contains(&pid("stale2")));
+    }
+
+    #[test]
+    fn identify_stale_peers_treats_future_last_seen_as_stale() {
+        let now = Timestamp::new(10_000_000, 0);
+        let peers = vec![peer_meta("future", Some(1), 10_001_000)];
+
+        let stale = identify_stale_peers(&peers, &now, 7_200_000);
+
+        assert_eq!(stale, vec![pid("future")]);
     }
 
     // 6. Stale peers evicted and replaced with diverse candidates

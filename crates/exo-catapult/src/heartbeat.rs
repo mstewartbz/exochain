@@ -189,7 +189,15 @@ impl HeartbeatMonitor {
     pub fn check_health(&self, now: &Timestamp) -> Vec<HeartbeatAlert> {
         let mut alerts = Vec::new();
         for (did, last) in &self.last_seen {
-            let elapsed_ms = now.physical_ms.saturating_sub(last.physical_ms);
+            let Some(elapsed_ms) = now.physical_ms.checked_sub(last.physical_ms) else {
+                alerts.push(HeartbeatAlert {
+                    agent_did: did.clone(),
+                    last_seen: *last,
+                    elapsed_ms: 0,
+                    severity: AlertSeverity::Critical,
+                });
+                continue;
+            };
             if elapsed_ms >= self.timeout_ms {
                 alerts.push(HeartbeatAlert {
                     agent_did: did.clone(),
@@ -485,6 +493,19 @@ mod tests {
             logical: 0,
         };
         assert!(monitor.check_health(&now).is_empty());
+    }
+
+    #[test]
+    fn future_dated_heartbeat_alerts_critical() {
+        let mut monitor = HeartbeatMonitor::with_thresholds(100, 200);
+        let did = test_did("agent1");
+        monitor.record(make_heartbeat(did.clone(), 1_500)).unwrap();
+
+        let alerts = monitor.check_health(&Timestamp::new(1_000, 0));
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].agent_did, did);
+        assert_eq!(alerts[0].severity, AlertSeverity::Critical);
     }
 
     #[test]
