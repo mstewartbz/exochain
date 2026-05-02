@@ -300,7 +300,15 @@ fn check_attestation_policy(
 
     // Check age.
     if policy.max_age_ms > 0 {
-        let age = policy.current_time_ms.saturating_sub(attestation.timestamp);
+        let age = policy
+            .current_time_ms
+            .checked_sub(attestation.timestamp)
+            .ok_or_else(|| {
+                GatekeeperError::TeeError(format!(
+                    "Attestation timestamp {} is in the future relative to policy time {}",
+                    attestation.timestamp, policy.current_time_ms
+                ))
+            })?;
         if age > policy.max_age_ms {
             return Err(GatekeeperError::TeeError(format!(
                 "Attestation is too old: {} ms (max: {} ms)",
@@ -590,6 +598,23 @@ mod tests {
             environment: TeeEnvironment::Testing,
         };
         assert!(verify_attestation(&att, &policy).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_future_dated_attestation_when_age_limit_is_enforced() {
+        let att = generate_attestation(&TeePlatform::Simulated, MEASUREMENT, TIMESTAMP + 5_000);
+        let policy = TeePolicy {
+            accepted_platforms: vec![TeePlatform::Simulated],
+            required_measurements: vec![],
+            max_age_ms: 1_000,
+            current_time_ms: TIMESTAMP,
+            environment: TeeEnvironment::Testing,
+        };
+
+        let result = verify_attestation(&att, &policy);
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("future"));
     }
 
     #[test]
