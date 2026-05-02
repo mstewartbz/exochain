@@ -8,7 +8,7 @@ use crate::{
     errors::GovernanceError,
     quorum::{
         Approval, IndependenceAttestation, PublicKeyResolver, QuorumPolicy, QuorumResult, Role,
-        compute_quorum, compute_quorum_verified,
+        compute_quorum_verified,
     },
 };
 
@@ -210,8 +210,11 @@ fn result_from_quorum(
     }
 }
 
-/// Close a deliberation, tally votes, and return the result based on quorum policy.
-pub fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> DeliberationResult {
+/// Close a deliberation with structural quorum checks for legacy unit tests.
+#[cfg(test)]
+fn close(delib: &mut Deliberation, quorum_policy: &QuorumPolicy) -> DeliberationResult {
+    use crate::quorum::compute_quorum;
+
     if let Some(result) = not_open_result(delib) {
         return result;
     }
@@ -277,6 +280,39 @@ mod tests {
     fn open_with_id(id: u128, proposal: &[u8], participants: &[Did]) -> Deliberation {
         open_deliberation(delib_id(id), ts(10_000), proposal, participants)
             .expect("deterministic deliberation")
+    }
+
+    #[test]
+    fn production_deliberation_closure_uses_verified_quorum_only() {
+        let source = include_str!("deliberation.rs");
+        let before_tests = source
+            .split("#[cfg(test)]\n#[allow")
+            .next()
+            .expect("non-test source section");
+        let close_verified = before_tests
+            .split("pub fn close_verified")
+            .nth(1)
+            .expect("close_verified source")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("close_verified source end");
+
+        assert!(
+            before_tests.contains("pub fn close_verified"),
+            "production deliberation closure must expose the verified quorum path"
+        );
+        assert!(
+            !before_tests.contains("pub fn close("),
+            "structural deliberation close must not be exposed in production builds"
+        );
+        assert!(
+            before_tests.contains("#[cfg(test)]\nfn close("),
+            "structural deliberation close may exist only as a test-only helper"
+        );
+        assert!(
+            !close_verified.contains("compute_quorum(&approvals"),
+            "production deliberation closure must not call structural quorum"
+        );
     }
 
     fn vote(name: &str, pos: Position) -> Vote {
