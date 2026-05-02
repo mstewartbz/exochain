@@ -160,6 +160,9 @@ pub fn prove_stark(
             ));
         }
     }
+    for constraint in constraints {
+        validate_constraint_shape(constraint, num_cols)?;
+    }
 
     // Step 1: Verify constraints are satisfied
     for (row_idx, window) in trace.windows(2).enumerate() {
@@ -388,30 +391,55 @@ fn evaluate_constraint(
             "field_size must be non-zero".to_string(),
         ));
     }
+    if current.len() != next.len() {
+        return Err(ProofError::ConstraintError(format!(
+            "constraint '{}' cannot evaluate rows with mismatched widths: current {} != next {}",
+            constraint.name,
+            current.len(),
+            next.len()
+        )));
+    }
+    validate_constraint_shape(constraint, current.len())?;
 
     let modulus = u128::from(field_size);
     let mut sum: u128 = 0;
     for (i, &col_idx) in constraint.column_indices.iter().enumerate() {
-        if i < constraint.coefficients.len() {
-            let (curr_coeff, next_coeff) = constraint.coefficients[i];
-            let curr_val = if col_idx < current.len() {
-                current[col_idx]
-            } else {
-                0
-            };
-            let next_val = if col_idx < next.len() {
-                next[col_idx]
-            } else {
-                0
-            };
-            let curr_term = (u128::from(curr_coeff) * u128::from(curr_val)) % modulus;
-            let next_term = (u128::from(next_coeff) * u128::from(next_val)) % modulus;
-            sum = (sum + curr_term + next_term) % modulus;
-        }
+        let (curr_coeff, next_coeff) = constraint.coefficients[i];
+        let curr_val = current[col_idx];
+        let next_val = next[col_idx];
+        let curr_term = (u128::from(curr_coeff) * u128::from(curr_val)) % modulus;
+        let next_term = (u128::from(next_coeff) * u128::from(next_val)) % modulus;
+        sum = (sum + curr_term + next_term) % modulus;
     }
     u64::try_from(sum).map_err(|_| {
         ProofError::ProofGenerationFailed("constraint evaluation overflowed u64".to_string())
     })
+}
+
+fn validate_constraint_shape(constraint: &StarkConstraint, trace_width: usize) -> Result<()> {
+    if constraint.column_indices.is_empty() {
+        return Err(ProofError::ConstraintError(format!(
+            "constraint '{}' must reference at least one trace column",
+            constraint.name
+        )));
+    }
+    if constraint.column_indices.len() != constraint.coefficients.len() {
+        return Err(ProofError::ConstraintError(format!(
+            "constraint '{}' column_indices length {} must match coefficients length {}",
+            constraint.name,
+            constraint.column_indices.len(),
+            constraint.coefficients.len()
+        )));
+    }
+    for &col_idx in &constraint.column_indices {
+        if col_idx >= trace_width {
+            return Err(ProofError::ConstraintError(format!(
+                "constraint '{}' column index {col_idx} is outside trace width {trace_width}",
+                constraint.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn hash_row(row: &[u64]) -> Hash256 {
@@ -890,41 +918,36 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_constraint_oob_column() {
-        // col_idx beyond trace width — the else branches return 0.
-        // Non-zero trace values (7, 11) ensure the test catches regressions where the OOB
-        // branch returns a wrong non-zero value (e.g. current[col_idx % len]): that would
-        // give sum = 1*7 + 1*11 = 18 ≠ 0, causing prove_stark to return Err.
+    fn malformed_constraint_oob_column_is_rejected() {
         let config = StarkConfig::default_config();
-        let trace = vec![vec![7u64], vec![11u64]]; // 1-column trace, non-zero values
+        let trace = vec![vec![7u64], vec![11u64]];
         let constraint = StarkConstraint {
             name: "oob".to_string(),
-            column_indices: vec![5], // beyond trace width → curr_val and next_val both become 0
-            coefficients: vec![(1, 1)], // non-zero: 1*0 + 1*0 == 0, but would be non-zero if OOB returned column data
+            column_indices: vec![5],
+            coefficients: vec![(1, 1)],
         };
         let constraints = vec![constraint];
-        let proof = prove_stark(&trace, &constraints, &config).unwrap();
-        assert!(verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
+        let err = prove_stark(&trace, &constraints, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("outside trace width"),
+            "out-of-bounds constraint columns must fail closed: {err}"
+        );
     }
 
     #[test]
-    fn evaluate_constraint_fewer_coefficients_than_columns() {
-        // column_indices has more entries than coefficients — the extra column index is skipped.
-        // Column 1 has non-zero values (5, 7) to catch regressions in the loop guard
-        // (if i < constraint.coefficients.len()):
-        //   - Removing the guard would panic at coefficients[1] (index out of bounds).
-        //   - A wrap-around regression (coefficients[i % len]) would silently produce
-        //     sum = 1*5 + 1*7 = 12 ≠ 0, causing prove_stark to return Err.
-        // Column 0 stays 0 so the constraint sum == 0 (test passes correctly).
+    fn malformed_constraint_missing_coefficients_is_rejected() {
         let config = StarkConfig::default_config();
         let trace = vec![vec![0u64, 5u64], vec![0u64, 7u64]];
         let constraint = StarkConstraint {
             name: "partial".to_string(),
-            column_indices: vec![0, 1], // two indices
-            coefficients: vec![(1, 1)], // non-zero, one entry — index 1 is silently skipped
+            column_indices: vec![0, 1],
+            coefficients: vec![(1, 1)],
         };
         let constraints = vec![constraint];
-        let proof = prove_stark(&trace, &constraints, &config).unwrap();
-        assert!(verify_stark_with_constraints(&proof, &trace[0], &constraints).unwrap());
+        let err = prove_stark(&trace, &constraints, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("must match coefficients"),
+            "constraint columns without matching coefficients must fail closed: {err}"
+        );
     }
 }
