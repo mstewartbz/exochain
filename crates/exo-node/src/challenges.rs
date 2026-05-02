@@ -29,6 +29,7 @@ use axum::{
 use exo_core::{Did, PublicKey, Signature, crypto, types::Timestamp};
 use exo_escalation::challenge::{self, ContestHold, SignedChallengeAdmission};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tower::limit::ConcurrencyLimitLayer;
 use uuid::Uuid;
 
@@ -38,6 +39,9 @@ use uuid::Uuid;
 
 const MAX_CHALLENGE_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHALLENGE_API_CONCURRENT_REQUESTS: usize = 64;
+const MAX_CHALLENGE_STORE_HOLDS: usize = 1024;
+const MAX_ACTIVE_CHALLENGES_PER_ACTOR: usize = 32;
+const MAX_ACTIVE_CHALLENGES_PER_ACTION: usize = 64;
 const CHALLENGE_TRANSITION_DOMAIN: &str = "exo.node.challenge.transition.v1";
 const CHALLENGE_TRANSITION_SCHEMA_VERSION: u16 = 1;
 const CHALLENGE_TRANSITION_REVIEW: &str = "review";
@@ -46,6 +50,51 @@ const CHALLENGE_TRANSITION_DISMISS: &str = "dismiss";
 
 fn contest_status_label(status: &challenge::ContestStatus) -> &'static str {
     status.as_str()
+}
+
+fn is_active_contest_status(status: &challenge::ContestStatus) -> bool {
+    matches!(
+        status,
+        challenge::ContestStatus::PauseEligible | challenge::ContestStatus::UnderReview
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ChallengeAdmissionLimitError {
+    #[error("challenge hold {id} already exists")]
+    DuplicateHold { id: Uuid },
+    #[error("challenge store capacity reached: {current_holds}/{max_holds} holds")]
+    StoreCapacity {
+        current_holds: usize,
+        max_holds: usize,
+    },
+    #[error(
+        "active challenge admission limit reached for actor {actor}: {active_holds}/{max_holds}"
+    )]
+    ActorActiveLimit {
+        actor: Did,
+        active_holds: usize,
+        max_holds: usize,
+    },
+    #[error(
+        "active challenge admission limit reached for action {action_hash}: {active_holds}/{max_holds}"
+    )]
+    ActionActiveLimit {
+        action_hash: String,
+        active_holds: usize,
+        max_holds: usize,
+    },
+}
+
+impl ChallengeAdmissionLimitError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::DuplicateHold { .. } => StatusCode::CONFLICT,
+            Self::StoreCapacity { .. }
+            | Self::ActorActiveLimit { .. }
+            | Self::ActionActiveLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
+        }
+    }
 }
 
 /// In-memory challenge store.
@@ -67,8 +116,59 @@ impl ChallengeStore {
         }
     }
 
+    #[cfg(test)]
     pub fn insert(&mut self, hold: ContestHold) {
         self.holds.insert(hold.id, hold);
+    }
+
+    pub fn try_insert_admitted_hold(
+        &mut self,
+        hold: ContestHold,
+    ) -> Result<(), ChallengeAdmissionLimitError> {
+        if self.holds.contains_key(&hold.id) {
+            return Err(ChallengeAdmissionLimitError::DuplicateHold { id: hold.id });
+        }
+
+        if self.holds.len() >= MAX_CHALLENGE_STORE_HOLDS {
+            return Err(ChallengeAdmissionLimitError::StoreCapacity {
+                current_holds: self.holds.len(),
+                max_holds: MAX_CHALLENGE_STORE_HOLDS,
+            });
+        }
+
+        let actor_active_holds = self
+            .holds
+            .values()
+            .filter(|existing| {
+                existing.admitted_by == hold.admitted_by
+                    && is_active_contest_status(&existing.status)
+            })
+            .count();
+        if actor_active_holds >= MAX_ACTIVE_CHALLENGES_PER_ACTOR {
+            return Err(ChallengeAdmissionLimitError::ActorActiveLimit {
+                actor: hold.admitted_by,
+                active_holds: actor_active_holds,
+                max_holds: MAX_ACTIVE_CHALLENGES_PER_ACTOR,
+            });
+        }
+
+        let action_active_holds = self
+            .holds
+            .values()
+            .filter(|existing| {
+                existing.action_id == hold.action_id && is_active_contest_status(&existing.status)
+            })
+            .count();
+        if action_active_holds >= MAX_ACTIVE_CHALLENGES_PER_ACTION {
+            return Err(ChallengeAdmissionLimitError::ActionActiveLimit {
+                action_hash: hex::encode(hold.action_id),
+                active_holds: action_active_holds,
+                max_holds: MAX_ACTIVE_CHALLENGES_PER_ACTION,
+            });
+        }
+
+        self.holds.insert(hold.id, hold);
+        Ok(())
     }
 
     #[must_use]
@@ -343,8 +443,8 @@ async fn handle_file(
     let resp = ChallengeResponse::from(&hold);
 
     with_challenge_store_blocking(store, move |st| {
-        st.insert(hold);
-        Ok(())
+        st.try_insert_admitted_hold(hold)
+            .map_err(|e| (e.status_code(), e.to_string()))
     })
     .await?;
 
@@ -891,6 +991,95 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn file_challenge_rejects_actor_admission_quota_without_storing_extra_hold() {
+        let store = test_store();
+        {
+            let mut st = store.lock().unwrap();
+            for marker in 10..42 {
+                st.insert(
+                    challenge::admit_challenge(signed_challenge(
+                        marker,
+                        action_id(marker),
+                        SybilChallengeGround::QuorumContamination,
+                        ts(u64::from(marker) * 100),
+                    ))
+                    .unwrap(),
+                );
+            }
+        }
+
+        let app = challenge_router(Arc::clone(&store));
+        let body = signed_challenge(
+            42,
+            action_id(42),
+            SybilChallengeGround::QuorumContamination,
+            ts(4200),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/challenges")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let stored_count = {
+            let st = store.lock().unwrap();
+            st.list().len()
+        };
+        assert_eq!(stored_count, 32);
+    }
+
+    #[tokio::test]
+    async fn file_challenge_rejects_duplicate_hold_id_without_replacing_existing_hold() {
+        let store = test_store();
+        {
+            let mut st = store.lock().unwrap();
+            st.insert(
+                challenge::admit_challenge(signed_challenge(
+                    50,
+                    action_id(1),
+                    SybilChallengeGround::ConcealedCommonControl,
+                    ts(1000),
+                ))
+                .unwrap(),
+            );
+        }
+
+        let app = challenge_router(Arc::clone(&store));
+        let body = signed_challenge(
+            50,
+            action_id(2),
+            SybilChallengeGround::SyntheticHumanMisrepresentation,
+            ts(2000),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/challenges")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let stored = {
+            let st = store.lock().unwrap();
+            st.get(&uuid(50)).unwrap().clone()
+        };
+        assert_eq!(stored.action_id, action_id(1));
+        assert_eq!(stored.ground, SybilChallengeGround::ConcealedCommonControl);
     }
 
     #[tokio::test]
