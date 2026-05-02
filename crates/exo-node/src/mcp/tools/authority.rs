@@ -6,10 +6,9 @@
 // mutually-exclusive `#[cfg(feature = "...")]` branch.
 #![allow(clippy::needless_return)]
 
+use exo_core::Did;
 #[cfg(test)]
 use exo_core::Hash256;
-#[cfg_attr(not(feature = "unaudited-mcp-simulation-tools"), allow(unused_imports))]
-use exo_core::{Did, hash::hash_structured};
 #[cfg(test)]
 use exo_gatekeeper::{authority_link_signature_message, provenance_signature_message};
 use exo_gatekeeper::{
@@ -39,13 +38,13 @@ const MAX_PERMISSION_NAME_BYTES: usize = 256;
 const ED25519_SIGNATURE_HEX_CHARS: usize = 128;
 const ED25519_PUBLIC_KEY_HEX_CHARS: usize = 64;
 
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 fn authority_tool_refused(tool_name: &str) -> ToolResult {
     tracing::warn!(
         tool = %tool_name,
         "refusing MCP authority simulation tool: handler cannot create or adjudicate \
-         authority without caller-supplied signed context. Build with \
-         --features exo-node/unaudited-mcp-simulation-tools only for dev simulation. \
+         authority without caller-supplied signed context or signed store persistence. \
+         The unaudited-mcp-simulation-tools feature does not enable mutating \
+         synthetic delegation. \
          Tracked in Initiatives/fix-mcp-authority-simulation-tools.md."
     );
     ToolResult::error(
@@ -55,8 +54,8 @@ fn authority_tool_refused(tool_name: &str) -> ToolResult {
             "message": "This MCP authority tool would otherwise return a \
                         simulation success without a signed authority store \
                         write or caller-supplied verified context. It is \
-                        disabled by default to prevent AI agents from acting \
-                        on false authority signals.",
+                        disabled in every build until it is wired to signed \
+                        authority-store persistence.",
             "feature_flag": "unaudited-mcp-simulation-tools",
             "initiative": "Initiatives/fix-mcp-authority-simulation-tools.md",
             "refusal_source": format!("exo-node/mcp/tools/authority.rs::{tool_name}"),
@@ -414,111 +413,8 @@ pub fn delegate_authority_definition() -> ToolDefinition {
 /// Execute the `exochain_delegate_authority` tool.
 #[must_use]
 pub fn execute_delegate_authority(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        return authority_tool_refused("exochain_delegate_authority");
-    }
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        tracing::warn!(
-            "UNAUDITED MCP authority simulation tool in use: \
-             exochain_delegate_authority. Returns synthetic delegation_id \
-             without signed store persistence. MUST NOT be enabled in production."
-        );
-        let grantor_str = match params.get("grantor_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: grantor_did"}).to_string(),
-                );
-            }
-        };
-        let grantee_str = match params.get("grantee_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: grantee_did"}).to_string(),
-                );
-            }
-        };
-        let permissions_val = match params.get("permissions").and_then(Value::as_array) {
-            Some(arr) => arr,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: permissions (must be an array)"})
-                        .to_string(),
-                );
-            }
-        };
-
-        if let Err(err) = parse_did_str(grantor_str, "grantor") {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-        if let Err(err) = parse_did_str(grantee_str, "grantee") {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-
-        if permissions_val.len() > MAX_PERMISSION_SET_ENTRIES {
-            return ToolResult::error(
-                json!({
-                    "error": format!(
-                        "permissions may contain at most {MAX_PERMISSION_SET_ENTRIES} permission names"
-                    )
-                })
-                .to_string(),
-            );
-        }
-
-        let mut permissions = Vec::with_capacity(permissions_val.len());
-        for (idx, permission_val) in permissions_val.iter().enumerate() {
-            let Some(permission) = permission_val.as_str().filter(|s| !s.is_empty()) else {
-                return ToolResult::error(
-                    json!({"error": format!("permissions[{idx}] must be a non-empty string")})
-                        .to_string(),
-                );
-            };
-            if let Err(err) = validate_string_bytes(
-                permission,
-                &format!("permissions[{idx}]"),
-                MAX_PERMISSION_NAME_BYTES,
-            ) {
-                return ToolResult::error(json!({"error": err}).to_string());
-            }
-            permissions.push(permission.to_owned());
-        }
-
-        if permissions.is_empty() {
-            return ToolResult::error(
-                json!({"error": "permissions array must contain at least one permission"})
-                    .to_string(),
-            );
-        }
-
-        let delegation_id = match hash_structured(&(
-            "exo.mcp.authority.delegation.v1",
-            grantor_str,
-            grantee_str,
-            &permissions,
-        )) {
-            Ok(hash) => hash.to_string(),
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("failed to hash delegation payload: {e}")}).to_string(),
-                );
-            }
-        };
-
-        let response = json!({
-            "delegation_id": delegation_id,
-            "grantor": grantor_str,
-            "grantee": grantee_str,
-            "permissions": permissions,
-            "created_at": null,
-            "created_at_source": "simulation_no_persistence_timestamp",
-        });
-        ToolResult::success(response.to_string())
-    }
+    let _ = params;
+    authority_tool_refused("exochain_delegate_authority")
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,28 +918,19 @@ mod tests {
 
     #[test]
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    fn execute_delegate_authority_success() {
+    fn execute_delegate_authority_refuses_synthetic_success_even_with_simulation_feature() {
         let params = json!({
                 "grantor_did": "did:exo:root",
                 "grantee_did": "did:exo:alice",
                 "permissions": ["read", "write"],
         });
         let result = execute_delegate_authority(&params, &NodeContext::empty());
-        let repeat = execute_delegate_authority(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        assert!(!repeat.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        let repeat_v: Value = serde_json::from_str(repeat.content[0].text()).expect("valid JSON");
-        assert_eq!(v["grantor"], "did:exo:root");
-        assert_eq!(v["grantee"], "did:exo:alice");
-        assert_eq!(v["permissions"].as_array().expect("perms").len(), 2);
-        assert!(!v["delegation_id"].as_str().expect("id").is_empty());
-        assert_eq!(v["delegation_id"], repeat_v["delegation_id"]);
-        assert!(v["created_at"].is_null());
-        assert_eq!(
-            v["created_at_source"],
-            "simulation_no_persistence_timestamp"
-        );
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_authority_tool_disabled"));
+        assert!(!text.contains("delegation_id"));
+        let synthetic_timestamp = ["simulation", "_no_", "persistence", "_timestamp"].concat();
+        assert!(!text.contains(&synthetic_timestamp));
     }
 
     #[test]
@@ -1094,7 +981,7 @@ mod tests {
         assert!(result.is_error);
         let text = result.content[0].text();
         assert_text_omits_raw_input(text, attacker_marker);
-        assert!(text.contains("invalid grantor"));
+        assert!(text.contains("mcp_authority_tool_disabled"));
     }
 
     #[test]
@@ -1111,7 +998,7 @@ mod tests {
 
         assert!(result.is_error);
         let text = result.content[0].text();
-        assert!(text.contains("permissions[1]"));
+        assert!(text.contains("mcp_authority_tool_disabled"));
         assert_text_omits_raw_input(text, "42");
     }
 
