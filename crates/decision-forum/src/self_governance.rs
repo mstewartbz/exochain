@@ -96,9 +96,9 @@ impl ComplianceTracker {
 
     /// Record a modification.
     pub fn record(&mut self, compliant: bool) {
-        self.total_modifications += 1;
+        self.total_modifications = self.total_modifications.saturating_add(1);
         if compliant {
-            self.compliant_modifications += 1;
+            self.compliant_modifications = self.compliant_modifications.saturating_add(1);
         }
     }
 
@@ -288,6 +288,22 @@ mod tests {
         };
 
         assert_eq!(t.compliance_rate_pct(), 100);
+    }
+
+    #[test]
+    fn compliance_tracker_record_saturates_deserialized_counter_maxima_without_panicking() {
+        let mut t = ComplianceTracker {
+            total_modifications: u64::MAX,
+            compliant_modifications: u64::MAX,
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            t.record(true);
+        }));
+
+        assert!(result.is_ok());
+        assert_eq!(t.total_modifications, u64::MAX);
+        assert_eq!(t.compliant_modifications, u64::MAX);
     }
 
     #[test]
