@@ -659,6 +659,19 @@ fn metadata_error_response(error: GatewayError) -> axum::response::Response {
         .into_response()
 }
 
+fn internal_error_response(
+    error: impl fmt::Display,
+    context: &'static str,
+    client_error: &'static str,
+) -> Response {
+    tracing::error!(error = %error, context, "gateway internal operation failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": client_error })),
+    )
+        .into_response()
+}
+
 fn generate_session_token() -> Result<String> {
     let mut token_bytes = [0u8; 32];
     getrandom::getrandom(&mut token_bytes)
@@ -1090,22 +1103,16 @@ async fn handle_decision_get(
     {
         Ok(Some(row)) => match row.try_get::<serde_json::Value, _>("payload") {
             Ok(payload) => Json::<serde_json::Value>(payload).into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response(),
+            Err(e) => {
+                internal_error_response(e, "decision payload decode", "decision lookup failed")
+            }
         },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "decision not found" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "decision lookup query", "decision lookup failed"),
     }
 }
 
@@ -1151,11 +1158,7 @@ async fn handle_audit_trail(
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "audit trail query", "audit trail unavailable"),
     }
 }
 
@@ -1284,13 +1287,7 @@ async fn handle_auth_login(
     }
     let token = match generate_session_token() {
         Ok(token) => token,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return internal_error_response(e, "session token generation", "login failed"),
     };
     match sqlx::query(
         "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
@@ -1309,11 +1306,7 @@ async fn handle_auth_login(
             "expires_at": metadata.expires_at,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "session insert", "login failed"),
     }
 }
 
@@ -1383,11 +1376,7 @@ async fn handle_auth_refresh(
             "expires_at": metadata.expires_at,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "session refresh update", "session refresh failed"),
     }
 }
 
@@ -1430,11 +1419,7 @@ async fn handle_auth_logout(
         )
             .into_response(),
         Ok(_) => Json(serde_json::json!({ "status": "logged_out" })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "session logout update", "logout failed"),
     }
 }
 
@@ -1686,11 +1671,7 @@ fn auth_boundary_error_response(err: GatewayError) -> Response {
             Json(serde_json::json!({"error": "database unavailable"})),
         )
             .into_response(),
-        other => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": other.to_string() })),
-        )
-            .into_response(),
+        other => internal_error_response(other, "authentication boundary", "authentication failed"),
     }
 }
 
@@ -1839,11 +1820,7 @@ async fn handle_layout_template_put(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "layout template upsert", "template save failed"),
     }
 }
 
@@ -1878,11 +1855,7 @@ async fn handle_layout_template_delete(
             Json(serde_json::json!({ "error": "template not found or is built-in" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "layout template delete", "template delete failed"),
     }
 }
 
@@ -1923,11 +1896,7 @@ async fn handle_layout_templates_list(
                 .collect();
             Json(serde_json::json!({ "templates": templates })).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "layout template list", "templates unavailable"),
     }
 }
 
@@ -2019,11 +1988,9 @@ async fn handle_feedback_issue_create(
             Json(serde_json::json!({ "id": metadata.id, "status": "filed" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            internal_error_response(e, "feedback issue insert", "feedback issue filing failed")
+        }
     }
 }
 
@@ -2069,11 +2036,7 @@ async fn handle_feedback_issues_list(
                 .collect();
             Json(serde_json::json!({ "issues": issues })).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e, "feedback issue list", "feedback issues unavailable"),
     }
 }
 
@@ -2139,11 +2102,9 @@ async fn handle_feedback_issue_update(
             Json(serde_json::json!({ "error": "issue not found" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            internal_error_response(e, "feedback issue update", "feedback issue update failed")
+        }
     }
 }
 
@@ -2966,6 +2927,25 @@ mod tests {
             production.contains("\"error\": \"database unavailable\""),
             "database-unavailable responses should use a generic client-facing error"
         );
+    }
+
+    #[test]
+    fn internal_http_errors_do_not_expose_display_strings_to_clients() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        for needle in [
+            "Json(serde_json::json!({ \"error\": e.to_string() }))",
+            "Json(serde_json::json!({ \"error\": other.to_string() }))",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "gateway HTTP 5xx responses must log internal errors and return generic client messages: {needle}"
+            );
+        }
     }
 
     #[tokio::test]
