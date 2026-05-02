@@ -1,7 +1,6 @@
 //! Core bindings: crypto, hashing, BCTS state machine, events, HLC
 
 use wasm_bindgen::prelude::*;
-use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
@@ -50,26 +49,24 @@ fn parse_hash256_array(
         .collect()
 }
 
-fn parse_ed25519_secret_array_hex(
-    label: &str,
-    secret_hex: &str,
-) -> Result<Zeroizing<[u8; 32]>, JsValue> {
-    let secret_bytes = Zeroizing::new(
-        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?,
-    );
-    let arr: [u8; 32] = secret_bytes
-        .as_slice()
+fn parse_public_key_hex(label: &str, public_hex: &str) -> Result<exo_core::PublicKey, JsValue> {
+    let bytes =
+        hex::decode(public_hex).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?;
+    let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| JsValue::from_str(&format!("{label} must be 32 bytes")))?;
-    Ok(Zeroizing::new(arr))
+    if arr.iter().all(|byte| *byte == 0) {
+        return Err(JsValue::from_str(&format!("{label} must not be all-zero")));
+    }
+    Ok(exo_core::PublicKey::from_bytes(arr))
 }
 
-fn parse_ed25519_signing_seed_hex(
-    label: &str,
-    secret_hex: &str,
-) -> Result<exo_core::SecretKey, JsValue> {
-    let secret_arr = parse_ed25519_secret_array_hex(label, secret_hex)?;
-    Ok(exo_core::SecretKey::from_bytes(*secret_arr))
+fn parse_signature_json(label: &str, signature_json: &str) -> Result<exo_core::Signature, JsValue> {
+    let signature: exo_core::Signature = from_json_str(signature_json)?;
+    if signature.is_empty() {
+        return Err(JsValue::from_str(&format!("{label} must not be empty")));
+    }
+    Ok(signature)
 }
 
 // ── Hashing ──────────────────────────────────────────────────────
@@ -145,20 +142,17 @@ pub fn wasm_sign_with_ephemeral_key(message: &[u8]) -> Result<JsValue, JsValue> 
 }
 
 #[wasm_bindgen]
-pub fn wasm_sign(message: &[u8], secret_hex: &str) -> Result<String, JsValue> {
-    let secret = parse_ed25519_signing_seed_hex("secret key", secret_hex)?;
-    let sig = exo_core::crypto::sign(message, &secret);
-    let sig_json =
-        serde_json::to_string(&sig).map_err(|e| JsValue::from_str(&format!("serialize: {e}")))?;
-    Ok(sig_json)
+pub fn wasm_sign(_message: &[u8], _secret_hex: &str) -> Result<String, JsValue> {
+    Err(JsValue::from_str(
+        "raw secret-key signing is disabled at the WASM boundary; use wasm_sign_with_ephemeral_key or sign wasm_event_signing_payload bytes with WebCrypto",
+    ))
 }
 
 #[wasm_bindgen]
-pub fn wasm_ed25519_public_from_secret(secret_hex: &str) -> Result<String, JsValue> {
-    let secret_arr = parse_ed25519_secret_array_hex("secret key", secret_hex)?;
-    let keypair = exo_core::crypto::KeyPair::from_secret_bytes(*secret_arr)
-        .map_err(|e| JsValue::from_str(&format!("keypair: {e}")))?;
-    Ok(hex::encode(keypair.public_key().as_bytes()))
+pub fn wasm_ed25519_public_from_secret(_secret_hex: &str) -> Result<String, JsValue> {
+    Err(JsValue::from_str(
+        "raw secret-key public derivation is disabled at the WASM boundary; derive public keys with WebCrypto or native key management before calling WASM",
+    ))
 }
 
 #[wasm_bindgen]
@@ -168,11 +162,7 @@ pub fn wasm_verify(
     public_hex: &str,
 ) -> Result<bool, JsValue> {
     let sig: exo_core::Signature = from_json_str(signature_json)?;
-    let pub_bytes = hex::decode(public_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = pub_bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("public key must be 32 bytes"))?;
-    let pubkey = exo_core::PublicKey::from_bytes(arr);
+    let pubkey = parse_public_key_hex("public key", public_hex)?;
     Ok(exo_core::crypto::verify(message, &sig, &pubkey))
 }
 
@@ -271,6 +261,27 @@ fn caller_timestamp(
     Ok(exo_core::Timestamp::new(physical_ms, logical))
 }
 
+fn unsigned_event(
+    event_type_json: &str,
+    payload: &[u8],
+    source_did: &str,
+    event_id: &str,
+    timestamp_physical_ms: u64,
+    timestamp_logical: u32,
+) -> Result<exo_core::events::Event, JsValue> {
+    let event_type: exo_core::events::EventType = from_json_str(event_type_json)?;
+    let did = exo_core::Did::new(source_did)
+        .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
+    Ok(exo_core::events::Event {
+        id: caller_event_id(event_id)?,
+        timestamp: caller_timestamp(timestamp_physical_ms, timestamp_logical, "event timestamp")?,
+        event_type,
+        payload: payload.to_vec(),
+        source_did: did,
+        signature: exo_core::Signature::Empty,
+    })
+}
+
 /// Derive an event correlation ID from caller-supplied seed bytes.
 #[wasm_bindgen]
 pub fn wasm_compute_event_id(seed: &[u8]) -> Result<String, JsValue> {
@@ -287,11 +298,7 @@ pub fn wasm_compute_event_id(seed: &[u8]) -> Result<String, JsValue> {
 #[wasm_bindgen]
 pub fn wasm_verify_event(event_json: &str, public_hex: &str) -> Result<bool, JsValue> {
     let event: exo_core::events::Event = from_json_str(event_json)?;
-    let pub_bytes = hex::decode(public_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-    let arr: [u8; 32] = pub_bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("public key must be 32 bytes"))?;
-    let pubkey = exo_core::PublicKey::from_bytes(arr);
+    let pubkey = parse_public_key_hex("public key", public_hex)?;
     Ok(exo_core::events::verify_event(&event, &pubkey))
 }
 
@@ -325,16 +332,73 @@ pub fn wasm_create_signed_event(
     timestamp_physical_ms: u64,
     timestamp_logical: u32,
 ) -> Result<JsValue, JsValue> {
-    let event_type: exo_core::events::EventType = from_json_str(event_type_json)?;
-    let did = exo_core::Did::new(source_did)
-        .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-    let secret = parse_ed25519_signing_seed_hex("secret key", secret_hex)?;
+    let _ = (
+        event_type_json,
+        payload,
+        source_did,
+        secret_hex,
+        event_id,
+        timestamp_physical_ms,
+        timestamp_logical,
+    );
+    Err(JsValue::from_str(
+        "raw secret-key event signing is disabled at the WASM boundary; call wasm_event_signing_payload, sign externally, then call wasm_create_event_with_signature",
+    ))
+}
 
-    let corr = caller_event_id(event_id)?;
-    let ts = caller_timestamp(timestamp_physical_ms, timestamp_logical, "event timestamp")?;
+/// Return canonical event signing bytes as a hex string.
+///
+/// JavaScript callers sign these bytes with WebCrypto or native key
+/// management, then pass the resulting signature to
+/// `wasm_create_event_with_signature`.
+#[wasm_bindgen]
+pub fn wasm_event_signing_payload(
+    event_type_json: &str,
+    payload: &[u8],
+    source_did: &str,
+    event_id: &str,
+    timestamp_physical_ms: u64,
+    timestamp_logical: u32,
+) -> Result<String, JsValue> {
+    let event = unsigned_event(
+        event_type_json,
+        payload,
+        source_did,
+        event_id,
+        timestamp_physical_ms,
+        timestamp_logical,
+    )?;
+    let bytes = event
+        .signable_bytes()
+        .map_err(|_| JsValue::from_str("event signing payload serialization failed"))?;
+    Ok(hex::encode(bytes))
+}
 
-    let event =
-        exo_core::events::create_signed_event(corr, ts, event_type, payload.to_vec(), did, &secret)
-            .map_err(|e| JsValue::from_str(&format!("event signing error: {e}")))?;
+/// Create an event from a caller-produced Ed25519 signature.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn wasm_create_event_with_signature(
+    event_type_json: &str,
+    payload: &[u8],
+    source_did: &str,
+    signature_json: &str,
+    public_hex: &str,
+    event_id: &str,
+    timestamp_physical_ms: u64,
+    timestamp_logical: u32,
+) -> Result<JsValue, JsValue> {
+    let mut event = unsigned_event(
+        event_type_json,
+        payload,
+        source_did,
+        event_id,
+        timestamp_physical_ms,
+        timestamp_logical,
+    )?;
+    event.signature = parse_signature_json("event signature", signature_json)?;
+    let public_key = parse_public_key_hex("event public key", public_hex)?;
+    if !exo_core::events::verify_event(&event, &public_key) {
+        return Err(JsValue::from_str("event signature verification failed"));
+    }
     to_js_value(&event)
 }

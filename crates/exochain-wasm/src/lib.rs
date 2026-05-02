@@ -216,6 +216,60 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_core_bridge_does_not_decode_raw_secret_keys() {
+        let source = include_str!("core_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            production.contains("wasm_event_signing_payload"),
+            "core WASM events must expose canonical signing bytes for external signers"
+        );
+        assert!(
+            production.contains("wasm_create_event_with_signature"),
+            "core WASM events must accept caller-produced signatures without importing secrets"
+        );
+
+        for pattern in [
+            "parse_ed25519_secret_array_hex",
+            "parse_ed25519_signing_seed_hex",
+            "SecretKey::from_bytes",
+            "KeyPair::from_secret_bytes",
+            "exo_core::events::create_signed_event",
+        ] {
+            assert!(
+                !production.contains(pattern),
+                "core WASM bindings must not decode or use raw secret keys via {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_core_legacy_raw_secret_entrypoints_fail_closed() {
+        let source = include_str!("core_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            production.contains("raw secret-key signing is disabled at the WASM boundary"),
+            "legacy raw-secret signing entrypoint must fail closed"
+        );
+        assert!(
+            production
+                .contains("raw secret-key public derivation is disabled at the WASM boundary"),
+            "legacy raw-secret public-key derivation entrypoint must fail closed"
+        );
+        assert!(
+            production.contains("raw secret-key event signing is disabled at the WASM boundary"),
+            "legacy raw-secret event creation entrypoint must fail closed"
+        );
+    }
+
+    #[test]
     fn wasm_core_merkle_bindings_bound_untrusted_arrays() {
         let source = include_str!("core_bindings.rs");
         assert!(
@@ -231,7 +285,6 @@ mod source_guard_tests {
     #[test]
     fn wasm_secret_key_decoding_zeroizes_rust_owned_buffers() {
         let sources = [
-            ("core_bindings.rs", include_str!("core_bindings.rs")),
             ("identity_bindings.rs", include_str!("identity_bindings.rs")),
             (
                 "messaging_bindings.rs",
@@ -245,12 +298,6 @@ mod source_guard_tests {
                 "{path} must wrap decoded secret-key buffers in zeroize::Zeroizing"
             );
         }
-
-        let core = include_str!("core_bindings.rs");
-        assert!(
-            core.contains("parse_ed25519_signing_seed_hex"),
-            "core WASM signing functions must share a zeroizing Ed25519 signing-seed parser"
-        );
 
         let messaging = include_str!("messaging_bindings.rs");
         assert!(
