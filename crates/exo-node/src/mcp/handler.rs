@@ -42,6 +42,10 @@ fn serialize_json_rpc_response(response: &JsonRpcResponse) -> String {
     }
 }
 
+fn json_rpc_internal_error(id: Option<Value>, public_message: &'static str) -> JsonRpcResponse {
+    JsonRpcResponse::error(id, INTERNAL_ERROR, public_message.to_string())
+}
+
 /// MCP server that processes JSON-RPC messages from AI clients.
 ///
 /// Each server instance is bound to a specific actor DID, ensuring that
@@ -231,11 +235,10 @@ impl McpServer {
 
         match serde_json::to_value(&result) {
             Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
-            Err(e) => JsonRpcResponse::error(
-                request.id.clone(),
-                INTERNAL_ERROR,
-                format!("serialization error: {e}"),
-            ),
+            Err(error) => {
+                tracing::error!(err = %error, "failed to serialize MCP initialize result");
+                json_rpc_internal_error(request.id.clone(), "internal error")
+            }
         }
     }
 
@@ -245,12 +248,13 @@ impl McpServer {
         for tool in self.registry.list() {
             match serde_json::to_value(tool) {
                 Ok(value) => tools.push(value),
-                Err(e) => {
-                    return JsonRpcResponse::error(
-                        request.id.clone(),
-                        INTERNAL_ERROR,
-                        format!("tool definition serialization error: {e}"),
+                Err(error) => {
+                    tracing::error!(
+                        err = %error,
+                        tool = %tool.name,
+                        "failed to serialize MCP tool definition"
                     );
+                    return json_rpc_internal_error(request.id.clone(), "internal error");
                 }
             }
         }
@@ -295,11 +299,13 @@ impl McpServer {
             let error_result = ToolResult::error(format!("Constitutional enforcement failed: {e}"));
             return match serde_json::to_value(&error_result) {
                 Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
-                Err(ser_err) => JsonRpcResponse::error(
-                    request.id.clone(),
-                    INTERNAL_ERROR,
-                    format!("serialization error: {ser_err}"),
-                ),
+                Err(error) => {
+                    tracing::error!(
+                        err = %error,
+                        "failed to serialize MCP constitutional enforcement error result"
+                    );
+                    json_rpc_internal_error(request.id.clone(), "internal error")
+                }
             };
         }
 
@@ -310,21 +316,23 @@ impl McpServer {
         {
             Ok(result) => match serde_json::to_value(&result) {
                 Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
-                Err(e) => JsonRpcResponse::error(
-                    request.id.clone(),
-                    INTERNAL_ERROR,
-                    format!("serialization error: {e}"),
-                ),
+                Err(error) => {
+                    tracing::error!(err = %error, tool = %tool_name, "failed to serialize MCP tool result");
+                    json_rpc_internal_error(request.id.clone(), "internal error")
+                }
             },
             Err(McpError::ToolNotFound(name)) => {
                 let error_result = ToolResult::error(format!("Tool not found: {name}"));
                 match serde_json::to_value(&error_result) {
                     Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
-                    Err(ser_err) => JsonRpcResponse::error(
-                        request.id.clone(),
-                        INVALID_REQUEST,
-                        format!("tool not found: {name} (serialization error: {ser_err})"),
-                    ),
+                    Err(error) => {
+                        tracing::error!(
+                            err = %error,
+                            tool = %name,
+                            "failed to serialize MCP tool-not-found result"
+                        );
+                        json_rpc_internal_error(request.id.clone(), "internal error")
+                    }
                 }
             }
             // Schema validation failure surfaces as a standard JSON-RPC
@@ -335,11 +343,10 @@ impl McpServer {
                 INVALID_PARAMS,
                 format!("invalid params for tool `{tool_name}`: {msg}"),
             ),
-            Err(e) => JsonRpcResponse::error(
-                request.id.clone(),
-                INTERNAL_ERROR,
-                format!("tool execution error: {e}"),
-            ),
+            Err(error) => {
+                tracing::error!(err = %error, tool = %tool_name, "MCP tool execution failed");
+                json_rpc_internal_error(request.id.clone(), "internal error")
+            }
         }
     }
 
@@ -349,12 +356,13 @@ impl McpServer {
         for resource in self.resources.list() {
             match serde_json::to_value(resource) {
                 Ok(value) => resources.push(value),
-                Err(e) => {
-                    return JsonRpcResponse::error(
-                        request.id.clone(),
-                        INTERNAL_ERROR,
-                        format!("resource definition serialization error: {e}"),
+                Err(error) => {
+                    tracing::error!(
+                        err = %error,
+                        uri = %resource.uri,
+                        "failed to serialize MCP resource definition"
                     );
+                    return json_rpc_internal_error(request.id.clone(), "internal error");
                 }
             }
         }
@@ -395,11 +403,14 @@ impl McpServer {
                     request.id.clone(),
                     serde_json::json!({ "contents": [value] }),
                 ),
-                Err(e) => JsonRpcResponse::error(
-                    request.id.clone(),
-                    INTERNAL_ERROR,
-                    format!("serialization error: {e}"),
-                ),
+                Err(error) => {
+                    tracing::error!(
+                        err = %error,
+                        uri = %uri,
+                        "failed to serialize MCP resource content"
+                    );
+                    json_rpc_internal_error(request.id.clone(), "internal error")
+                }
             },
             None => JsonRpcResponse::error(
                 request.id.clone(),
@@ -415,12 +426,13 @@ impl McpServer {
         for prompt in self.prompts.list() {
             match serde_json::to_value(prompt) {
                 Ok(value) => prompts.push(value),
-                Err(e) => {
-                    return JsonRpcResponse::error(
-                        request.id.clone(),
-                        INTERNAL_ERROR,
-                        format!("prompt definition serialization error: {e}"),
+                Err(error) => {
+                    tracing::error!(
+                        err = %error,
+                        prompt = %prompt.name,
+                        "failed to serialize MCP prompt definition"
                     );
+                    return json_rpc_internal_error(request.id.clone(), "internal error");
                 }
             }
         }
@@ -472,11 +484,14 @@ impl McpServer {
         match self.prompts.get(name, &args) {
             Some(result) => match serde_json::to_value(&result) {
                 Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
-                Err(e) => JsonRpcResponse::error(
-                    request.id.clone(),
-                    INTERNAL_ERROR,
-                    format!("serialization error: {e}"),
-                ),
+                Err(error) => {
+                    tracing::error!(
+                        err = %error,
+                        prompt = %name,
+                        "failed to serialize MCP prompt result"
+                    );
+                    json_rpc_internal_error(request.id.clone(), "internal error")
+                }
             },
             None => JsonRpcResponse::error(
                 request.id.clone(),
@@ -756,6 +771,28 @@ mod tests {
         assert!(
             !production.contains(".filter_map(|"),
             "MCP handler list endpoints must not silently drop unserializable entries"
+        );
+    }
+
+    #[test]
+    fn handler_internal_errors_do_not_echo_internal_details_to_clients() {
+        let source = include_str!("handler.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("handler production section must be present");
+
+        assert!(
+            !production.contains("serialization error: {e}"),
+            "MCP JSON-RPC internal serialization failures must be logged, not echoed to clients"
+        );
+        assert!(
+            !production.contains("tool execution error: {e}"),
+            "MCP tool execution internals must be logged, not echoed to clients"
+        );
+        assert!(
+            !production.contains("serialization error: {ser_err}"),
+            "MCP tool-result serialization internals must be logged, not echoed to clients"
         );
     }
 
