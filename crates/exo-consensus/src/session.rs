@@ -263,23 +263,25 @@ impl DeliberationSession {
             serious_objection = review.serious_objection;
         }
 
-        let panelists_count = u32::try_from(
+        let panelists_count = usize_to_u32(
+            "panelists_count",
             self.panel
                 .models
                 .iter()
                 .filter(|m| m.role == ModelRole::Panelist)
                 .count(),
-        )
-        .unwrap_or(0);
+        )?;
+        let minority_reports_count =
+            usize_to_u32("minority_reports_count", minority_reports.len())?;
+        let rounds_to_convergence = usize_to_u32("rounds_to_convergence", self.rounds.len())?;
 
         let inputs = PanelConfidenceInputs {
-            models_agreeing: panelists_count
-                .saturating_sub(u32::try_from(minority_reports.len()).unwrap_or(0)),
+            models_agreeing: panelists_count.saturating_sub(minority_reports_count),
             total_models: panelists_count,
-            rounds_to_convergence: u32::try_from(self.rounds.len()).unwrap_or(0),
+            rounds_to_convergence,
             max_rounds: self.panel.max_rounds,
             devil_found_serious_objection: serious_objection,
-            minority_reports_count: u32::try_from(minority_reports.len()).unwrap_or(0),
+            minority_reports_count,
         };
 
         let pci = calculate_panel_confidence(&inputs);
@@ -291,7 +293,7 @@ impl DeliberationSession {
             final_consensus,
             minority_reports,
             panel_confidence_index_bps: pci,
-            rounds_to_convergence: u32::try_from(self.rounds.len()).unwrap_or(0),
+            rounds_to_convergence,
             devil_advocate_summary: da_summary,
             deliberation_hash: Hash256::ZERO,
             completed_at: timing.completed_at,
@@ -382,6 +384,14 @@ fn missing_consensus_claims(position: &ModelPosition, consensus_claims: &[String
         .filter(|claim| !position_claims.contains(claim))
         .cloned()
         .collect()
+}
+
+fn usize_to_u32(field: &'static str, value: usize) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        ConsensusError::StateError(format!(
+            "finalization count {field} value {value} exceeds u32::MAX"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -730,6 +740,28 @@ mod tests {
 
         assert_eq!(result.minority_reports.len(), 1);
         assert_eq!(result.minority_reports[0].divergence_score_bps, 0);
+    }
+
+    #[test]
+    fn production_finalization_does_not_default_failed_u32_conversions_to_zero() {
+        let source = include_str!("session.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(".unwrap_or(0)"),
+            "failed finalization count conversions must fail closed instead of defaulting to zero"
+        );
+        assert!(
+            production.contains("usize_to_u32(\"rounds_to_convergence\""),
+            "round count conversion must use the typed finalization count helper"
+        );
+        assert!(
+            production.contains("usize_to_u32(\"minority_reports_count\""),
+            "minority report count conversion must use the typed finalization count helper"
+        );
     }
 
     #[test]
