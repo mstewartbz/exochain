@@ -477,3 +477,75 @@ pub fn wasm_conflict_enforce(
         .map_err(|e| JsValue::from_str(&format!("ConflictBlocked: {e}")))?;
     to_js_value(&serde_json::json!({ "allowed": true }))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use exo_core::Did;
+    use exo_governance::clearance::{
+        ActionPolicy, ClearanceDecision, ClearanceLevel, ClearancePolicy, check_clearance,
+    };
+
+    use super::*;
+
+    fn did(value: &str) -> Did {
+        Did::new(value).expect("valid DID")
+    }
+
+    fn single_action_policy(action: &str, required_level: ClearanceLevel) -> ClearancePolicy {
+        let mut actions = BTreeMap::new();
+        actions.insert(
+            action.to_owned(),
+            ActionPolicy {
+                required_level,
+                quorum_policy: None,
+                independence_required: false,
+            },
+        );
+        ClearancePolicy {
+            actions,
+            policy_hash: [0xA5; 32],
+        }
+    }
+
+    #[test]
+    fn wasm_governance_bindings_registry_denies_low_clearance_actor() {
+        let actor = did("did:exo:alice");
+        let policy = single_action_policy("release-kernel", ClearanceLevel::Steward);
+        let registry =
+            parse_clearance_registry(r#"[{"did":"did:exo:alice","level":"Contributor"}]"#)
+                .expect("valid registry");
+
+        let decision = check_clearance(&actor, "release-kernel", &policy, &registry);
+
+        assert_eq!(
+            decision,
+            ClearanceDecision::Denied {
+                missing_level: ClearanceLevel::Steward
+            }
+        );
+    }
+
+    #[test]
+    fn wasm_governance_bindings_registry_grants_only_policy_permitted_action() {
+        let actor = did("did:exo:alice");
+        let policy = single_action_policy("release-kernel", ClearanceLevel::Steward);
+        let registry = parse_clearance_registry(r#"[{"did":"did:exo:alice","level":"Steward"}]"#)
+            .expect("valid registry");
+
+        let allowed = check_clearance(&actor, "release-kernel", &policy, &registry);
+        let unknown_action = check_clearance(&actor, "mint-root", &policy, &registry);
+
+        assert_eq!(
+            allowed,
+            ClearanceDecision::Granted {
+                policy_hash: [0xA5; 32]
+            }
+        );
+        let ClearanceDecision::Denied { missing_level } = unknown_action else {
+            panic!("unknown action must be denied");
+        };
+        assert_eq!(missing_level.to_string(), "Governor");
+    }
+}
