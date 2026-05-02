@@ -4,6 +4,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
+const MAX_WASM_LEGAL_AUDIT_ACTIONS: usize = 4_096;
+const MAX_WASM_EDISCOVERY_CORPUS_ITEMS: usize = 4_096;
+const MAX_WASM_RETENTION_RECORDS: usize = 4_096;
+
 /// Create a new piece of evidence with chain of custody
 #[wasm_bindgen]
 pub fn wasm_create_evidence(
@@ -38,7 +42,11 @@ pub fn wasm_verify_chain_of_custody(evidence_json: &str) -> Result<JsValue, JsVa
 #[wasm_bindgen]
 pub fn wasm_check_fiduciary_duty(duty_json: &str, actions_json: &str) -> Result<JsValue, JsValue> {
     let duty: exo_legal::fiduciary::FiduciaryDuty = from_json_str(duty_json)?;
-    let actions: Vec<exo_legal::fiduciary::AuditEntry> = from_json_str(actions_json)?;
+    let actions: Vec<exo_legal::fiduciary::AuditEntry> = from_json_bounded_vec(
+        actions_json,
+        "legal audit actions",
+        MAX_WASM_LEGAL_AUDIT_ACTIONS,
+    )?;
     let result = exo_legal::fiduciary::check_duty_compliance(&duty, &actions);
     to_js_value(&result)
 }
@@ -47,7 +55,11 @@ pub fn wasm_check_fiduciary_duty(duty_json: &str, actions_json: &str) -> Result<
 #[wasm_bindgen]
 pub fn wasm_ediscovery_search(request_json: &str, corpus_json: &str) -> Result<JsValue, JsValue> {
     let request: exo_legal::ediscovery::DiscoveryRequest = from_json_str(request_json)?;
-    let corpus: Vec<exo_legal::evidence::Evidence> = from_json_str(corpus_json)?;
+    let corpus: Vec<exo_legal::evidence::Evidence> = from_json_bounded_vec(
+        corpus_json,
+        "eDiscovery corpus items",
+        MAX_WASM_EDISCOVERY_CORPUS_ITEMS,
+    )?;
     let response = exo_legal::ediscovery::search(&request, &corpus)
         .map_err(|e| JsValue::from_str(&format!("eDiscovery error: {e}")))?;
     to_js_value(&response)
@@ -126,7 +138,11 @@ pub fn wasm_apply_retention(
     policy_json: &str,
     now_ms: u64,
 ) -> Result<JsValue, JsValue> {
-    let mut records: Vec<exo_legal::records::Record> = from_json_str(records_json)?;
+    let mut records: Vec<exo_legal::records::Record> = from_json_bounded_vec(
+        records_json,
+        "retention records",
+        MAX_WASM_RETENTION_RECORDS,
+    )?;
     let policy: exo_legal::records::RetentionPolicy = from_json_str(policy_json)?;
     let now = exo_core::types::Timestamp::new(now_ms, 0);
     exo_legal::records::apply_retention(&mut records, &policy, &now);

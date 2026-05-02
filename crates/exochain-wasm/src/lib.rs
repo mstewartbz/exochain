@@ -197,6 +197,21 @@ mod source_guard_tests {
                 include_str!("messaging_bindings.rs"),
                 "MAX_WASM_AUTHORIZED_TRUSTEES",
             ),
+            (
+                "legal_bindings.rs",
+                include_str!("legal_bindings.rs"),
+                "MAX_WASM_LEGAL_AUDIT_ACTIONS",
+            ),
+            (
+                "legal_bindings.rs",
+                include_str!("legal_bindings.rs"),
+                "MAX_WASM_EDISCOVERY_CORPUS_ITEMS",
+            ),
+            (
+                "legal_bindings.rs",
+                include_str!("legal_bindings.rs"),
+                "MAX_WASM_RETENTION_RECORDS",
+            ),
         ];
 
         for (path, source, required_name) in required {
@@ -246,6 +261,21 @@ mod source_guard_tests {
                 "messaging_bindings.rs",
                 include_str!("messaging_bindings.rs"),
                 "let trustees: Vec<WasmAuthorizedTrustee> = from_json_str(authorized_trustees_json)?;",
+            ),
+            (
+                "legal_bindings.rs",
+                include_str!("legal_bindings.rs"),
+                "let actions: Vec<exo_legal::fiduciary::AuditEntry> = from_json_str(actions_json)?;",
+            ),
+            (
+                "legal_bindings.rs",
+                include_str!("legal_bindings.rs"),
+                "let corpus: Vec<exo_legal::evidence::Evidence> = from_json_str(corpus_json)?;",
+            ),
+            (
+                "legal_bindings.rs",
+                include_str!("legal_bindings.rs"),
+                "let mut records: Vec<exo_legal::records::Record> = from_json_str(records_json)?;",
             ),
         ];
 
