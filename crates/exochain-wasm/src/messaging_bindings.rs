@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
-use zeroize::Zeroizing;
 
 use crate::serde_bridge::*;
 
@@ -12,21 +11,6 @@ use crate::serde_bridge::*;
 struct WasmAuthorizedTrustee {
     did: String,
     public_key_hex: String,
-}
-
-fn parse_ed25519_signing_seed_hex(
-    label: &str,
-    secret_hex: &str,
-) -> Result<exo_core::SecretKey, JsValue> {
-    let secret_bytes = Zeroizing::new(
-        hex::decode(secret_hex).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?,
-    );
-    let arr: [u8; 32] = secret_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| JsValue::from_str(&format!("{label} must be 32 bytes")))?;
-    let arr = Zeroizing::new(arr);
-    Ok(exo_core::SecretKey::from_bytes(*arr))
 }
 
 /// Generate a new X25519 public key for Diffie-Hellman key exchange.
@@ -42,12 +26,10 @@ pub fn wasm_generate_x25519_keypair() -> Result<JsValue, JsValue> {
 /// Derive an X25519 public key from a secret key hex string.
 /// Returns `{ public_key_hex }`.
 #[wasm_bindgen]
-pub fn wasm_x25519_public_from_secret(secret_hex: &str) -> Result<JsValue, JsValue> {
-    let secret = exo_messaging::X25519SecretKey::from_hex(secret_hex)
-        .map_err(|e| JsValue::from_str(&format!("invalid secret key: {e}")))?;
-    to_js_value(&serde_json::json!({
-        "public_key_hex": secret.public_key().to_hex(),
-    }))
+pub fn wasm_x25519_public_from_secret(_secret_hex: &str) -> Result<JsValue, JsValue> {
+    Err(JsValue::from_str(
+        "raw X25519 secret public derivation is disabled at the WASM boundary; derive public keys in external key management before calling WASM",
+    ))
 }
 
 /// Encrypt a message for a specific recipient (Lock & Send).
@@ -57,7 +39,7 @@ pub fn wasm_x25519_public_from_secret(secret_hex: &str) -> Result<JsValue, JsVal
 /// - `content_type_json`: Content type as JSON string (e.g., `"\"Text\""`)
 /// - `sender_did`: Sender's DID string
 /// - `recipient_did`: Recipient's DID string
-/// - `sender_signing_key_hex`: Sender's Ed25519 secret key (hex)
+/// - `_legacy_sender_key_hex`: ignored; raw sender signing keys are refused
 /// - `recipient_x25519_public_hex`: Recipient's X25519 public key (hex)
 /// - `message_id`: Caller-supplied non-nil message UUID
 /// - `created_physical_ms`: Caller-supplied non-zero HLC physical milliseconds
@@ -77,7 +59,39 @@ pub fn wasm_encrypt_message(
     content_type_json: &str,
     sender_did: &str,
     recipient_did: &str,
-    sender_signing_key_hex: &str,
+    _legacy_sender_key_hex: &str,
+    recipient_x25519_public_hex: &str,
+    message_id: &str,
+    created_physical_ms: u64,
+    created_logical: u32,
+    release_on_death: bool,
+    release_delay_hours: u32,
+) -> Result<JsValue, JsValue> {
+    let _ = (
+        plaintext,
+        content_type_json,
+        sender_did,
+        recipient_did,
+        recipient_x25519_public_hex,
+        message_id,
+        created_physical_ms,
+        created_logical,
+        release_on_death,
+        release_delay_hours,
+    );
+    Err(JsValue::from_str(
+        "raw Ed25519 sender signing is disabled at the WASM boundary; call wasm_prepare_encrypted_message, sign externally, then call wasm_attach_message_signature",
+    ))
+}
+
+/// Encrypt a message and return an unsigned envelope plus canonical signing bytes.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn wasm_prepare_encrypted_message(
+    plaintext: &str,
+    content_type_json: &str,
+    sender_did: &str,
+    recipient_did: &str,
     recipient_x25519_public_hex: &str,
     message_id: &str,
     created_physical_ms: u64,
@@ -92,8 +106,6 @@ pub fn wasm_encrypt_message(
     let recipient = exo_core::Did::new(recipient_did)
         .map_err(|e| JsValue::from_str(&format!("invalid recipient DID: {e}")))?;
 
-    let sender_sk = parse_ed25519_signing_seed_hex("sender signing key", sender_signing_key_hex)?;
-
     let recipient_pub = exo_messaging::X25519PublicKey::from_hex(recipient_x25519_public_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid recipient X25519 key: {e}")))?;
     let message_uuid = uuid::Uuid::parse_str(message_id)
@@ -104,18 +116,40 @@ pub fn wasm_encrypt_message(
     )
     .map_err(|e| JsValue::from_str(&format!("invalid envelope metadata: {e}")))?;
 
-    let envelope = exo_messaging::lock_and_send(
+    let envelope = exo_messaging::prepare_envelope_for_signing(
         plaintext.as_bytes(),
         content_type,
         &sender,
         &recipient,
-        &sender_sk,
         &recipient_pub,
         metadata,
         release_on_death,
         release_delay_hours,
     )
     .map_err(|e| JsValue::from_str(&format!("encryption failed: {e}")))?;
+    let signing_payload = envelope
+        .signing_payload()
+        .map_err(|e| JsValue::from_str(&format!("signature payload failed: {e}")))?;
+
+    to_js_value(&serde_json::json!({
+        "envelope": envelope,
+        "signing_payload_hex": hex::encode(signing_payload),
+    }))
+}
+
+/// Attach a caller-produced Ed25519 signature to a prepared encrypted envelope.
+#[wasm_bindgen]
+pub fn wasm_attach_message_signature(
+    envelope_json: &str,
+    sender_ed25519_public_hex: &str,
+    signature_hex: &str,
+) -> Result<JsValue, JsValue> {
+    let envelope: exo_messaging::EncryptedEnvelope = from_json_str(envelope_json)?;
+    let sender_public =
+        parse_ed25519_public_key_hex("sender Ed25519 public key", sender_ed25519_public_hex)?;
+    let signature = parse_ed25519_signature_hex("sender envelope signature", signature_hex)?;
+    let envelope = exo_messaging::attach_verified_signature(envelope, signature, &sender_public)
+        .map_err(|e| JsValue::from_str(&format!("signature attachment failed: {e}")))?;
 
     to_js_value(&envelope)
 }

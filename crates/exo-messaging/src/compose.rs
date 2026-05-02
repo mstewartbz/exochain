@@ -4,7 +4,7 @@
 //! public key, derives a symmetric key via HKDF, encrypts the plaintext with
 //! XChaCha20-Poly1305, and signs the envelope with the sender's Ed25519 key.
 
-use exo_core::{Did, Hash256, SecretKey, Timestamp};
+use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp};
 use exo_identity::vault::VaultEncryptor;
 use uuid::Uuid;
 
@@ -78,6 +78,32 @@ pub fn lock_and_send(
     release_on_death: bool,
     release_delay_hours: u32,
 ) -> Result<EncryptedEnvelope, MessagingError> {
+    let envelope = prepare_envelope_for_signing(
+        plaintext,
+        content_type,
+        sender_did,
+        recipient_did,
+        recipient_x25519_public,
+        metadata,
+        release_on_death,
+        release_delay_hours,
+    )?;
+    sign_prepared_envelope(envelope, sender_signing_key)
+}
+
+/// Encrypt a message and return the unsigned envelope whose signing payload
+/// can be signed outside this crate.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_envelope_for_signing(
+    plaintext: &[u8],
+    content_type: ContentType,
+    sender_did: &Did,
+    recipient_did: &Did,
+    recipient_x25519_public: &X25519PublicKey,
+    metadata: ComposeMetadata,
+    release_on_death: bool,
+    release_delay_hours: u32,
+) -> Result<EncryptedEnvelope, MessagingError> {
     // 1. Generate ephemeral X25519 keypair
     let ephemeral = kex::generate_ephemeral();
 
@@ -99,7 +125,7 @@ pub fn lock_and_send(
     let plaintext_hash = Hash256::digest(plaintext);
 
     // 5. Build envelope (without signature first)
-    let mut envelope = EncryptedEnvelope {
+    let envelope = EncryptedEnvelope {
         id: metadata.id.to_string(),
         sender_did: sender_did.clone(),
         recipient_did: recipient_did.clone(),
@@ -113,11 +139,36 @@ pub fn lock_and_send(
         created: metadata.created,
     };
 
-    // 6. Sign the envelope
+    Ok(envelope)
+}
+
+/// Sign a prepared envelope with an in-process Ed25519 secret key.
+pub fn sign_prepared_envelope(
+    mut envelope: EncryptedEnvelope,
+    sender_signing_key: &SecretKey,
+) -> Result<EncryptedEnvelope, MessagingError> {
     let signable = envelope.signing_payload()?;
     let signature = exo_core::crypto::sign(&signable, sender_signing_key);
     envelope.signature = signature;
 
+    Ok(envelope)
+}
+
+/// Attach and verify a caller-produced Ed25519 signature to a prepared envelope.
+pub fn attach_verified_signature(
+    mut envelope: EncryptedEnvelope,
+    signature: Signature,
+    sender_public_key: &PublicKey,
+) -> Result<EncryptedEnvelope, MessagingError> {
+    if signature.is_empty() {
+        return Err(MessagingError::SignatureVerificationFailed);
+    }
+
+    let signable = envelope.signing_payload()?;
+    if !exo_core::crypto::verify(&signable, &signature, sender_public_key) {
+        return Err(MessagingError::SignatureVerificationFailed);
+    }
+    envelope.signature = signature;
     Ok(envelope)
 }
 
@@ -172,6 +223,95 @@ mod tests {
         assert!(!envelope.ciphertext.is_empty());
         assert!(!envelope.release_on_death);
         assert_ne!(envelope.signature, exo_core::Signature::empty());
+    }
+
+    #[test]
+    fn prepare_envelope_for_signing_returns_canonical_payload_without_signature() {
+        let sender_did = Did::new("did:exo:alice").unwrap();
+        let recipient_did = Did::new("did:exo:bob").unwrap();
+        let recipient_kp = kex::X25519KeyPair::generate();
+
+        let envelope = prepare_envelope_for_signing(
+            b"external signer",
+            ContentType::Secret,
+            &sender_did,
+            &recipient_did,
+            &recipient_kp.public,
+            metadata(),
+            false,
+            0,
+        )
+        .expect("prepare envelope");
+
+        assert_eq!(envelope.signature, exo_core::Signature::empty());
+        assert!(
+            !envelope
+                .signing_payload()
+                .expect("signing payload")
+                .is_empty(),
+            "prepared envelopes must expose canonical bytes for external signing"
+        );
+    }
+
+    #[test]
+    fn attach_verified_signature_accepts_external_signature() {
+        let sender_did = Did::new("did:exo:alice").unwrap();
+        let recipient_did = Did::new("did:exo:bob").unwrap();
+        let (sender_pk, sender_sk) = generate_keypair();
+        let recipient_kp = kex::X25519KeyPair::generate();
+
+        let envelope = prepare_envelope_for_signing(
+            b"external signer",
+            ContentType::Secret,
+            &sender_did,
+            &recipient_did,
+            &recipient_kp.public,
+            metadata(),
+            false,
+            0,
+        )
+        .expect("prepare envelope");
+        let signature = exo_core::crypto::sign(
+            &envelope.signing_payload().expect("signing payload"),
+            &sender_sk,
+        );
+
+        let signed =
+            attach_verified_signature(envelope, signature, &sender_pk).expect("attach signature");
+
+        assert_ne!(signed.signature, exo_core::Signature::empty());
+    }
+
+    #[test]
+    fn attach_verified_signature_rejects_wrong_sender_key() {
+        let sender_did = Did::new("did:exo:alice").unwrap();
+        let recipient_did = Did::new("did:exo:bob").unwrap();
+        let (_, sender_sk) = generate_keypair();
+        let (wrong_pk, _) = generate_keypair();
+        let recipient_kp = kex::X25519KeyPair::generate();
+
+        let envelope = prepare_envelope_for_signing(
+            b"external signer",
+            ContentType::Secret,
+            &sender_did,
+            &recipient_did,
+            &recipient_kp.public,
+            metadata(),
+            false,
+            0,
+        )
+        .expect("prepare envelope");
+        let signature = exo_core::crypto::sign(
+            &envelope.signing_payload().expect("signing payload"),
+            &sender_sk,
+        );
+
+        let result = attach_verified_signature(envelope, signature, &wrong_pk);
+
+        assert!(matches!(
+            result,
+            Err(MessagingError::SignatureVerificationFailed)
+        ));
     }
 
     #[test]

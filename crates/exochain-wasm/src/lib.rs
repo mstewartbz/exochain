@@ -168,6 +168,55 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_messaging_bridge_does_not_decode_ed25519_signing_secrets() {
+        let source = include_str!("messaging_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            production.contains("wasm_prepare_encrypted_message"),
+            "messaging WASM must expose unsigned encrypted envelopes plus signing bytes"
+        );
+        assert!(
+            production.contains("wasm_attach_message_signature"),
+            "messaging WASM must attach caller-produced signatures without importing sender secrets"
+        );
+
+        for pattern in [
+            "parse_ed25519_signing_seed_hex",
+            "sender_signing_key_hex",
+            "SecretKey::from_bytes",
+            "lock_and_send(",
+        ] {
+            assert!(
+                !production.contains(pattern),
+                "messaging WASM bindings must not decode or use Ed25519 signing secrets via {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_messaging_legacy_raw_secret_entrypoints_fail_closed() {
+        let source = include_str!("messaging_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            production
+                .contains("raw X25519 secret public derivation is disabled at the WASM boundary"),
+            "legacy X25519 raw-secret public derivation must fail closed"
+        );
+        assert!(
+            production.contains("raw Ed25519 sender signing is disabled at the WASM boundary"),
+            "legacy raw-secret message encryption must fail closed"
+        );
+    }
+
+    #[test]
     fn wasm_identity_risk_bridge_requires_caller_supplied_signer_and_time() {
         let source = include_str!("identity_bindings.rs");
         assert!(
@@ -284,13 +333,7 @@ mod source_guard_tests {
 
     #[test]
     fn wasm_secret_key_decoding_zeroizes_rust_owned_buffers() {
-        let sources = [
-            ("identity_bindings.rs", include_str!("identity_bindings.rs")),
-            (
-                "messaging_bindings.rs",
-                include_str!("messaging_bindings.rs"),
-            ),
-        ];
+        let sources = [("identity_bindings.rs", include_str!("identity_bindings.rs"))];
 
         for (path, source) in sources {
             assert!(
@@ -298,12 +341,6 @@ mod source_guard_tests {
                 "{path} must wrap decoded secret-key buffers in zeroize::Zeroizing"
             );
         }
-
-        let messaging = include_str!("messaging_bindings.rs");
-        assert!(
-            messaging.contains("parse_ed25519_signing_seed_hex"),
-            "messaging WASM encryption must use a zeroizing Ed25519 signing-seed parser"
-        );
     }
 
     #[test]

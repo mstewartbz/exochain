@@ -17,7 +17,10 @@ pub mod error;
 pub mod kex;
 pub mod open;
 
-pub use compose::{ComposeMetadata, lock_and_send};
+pub use compose::{
+    ComposeMetadata, attach_verified_signature, lock_and_send, prepare_envelope_for_signing,
+    sign_prepared_envelope,
+};
 pub use envelope::{ContentType, EncryptedEnvelope};
 pub use error::MessagingError;
 pub use kex::{X25519KeyPair, X25519PublicKey, X25519SecretKey};
