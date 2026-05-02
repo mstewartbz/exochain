@@ -292,7 +292,7 @@ pub fn has_permission(chain: &AuthorityChain, permission: &Permission) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     use exo_core::crypto::KeyPair;
 
@@ -308,15 +308,30 @@ mod tests {
         ts(5000)
     }
 
+    #[test]
+    fn chain_module_does_not_use_hashmap_or_hashset() {
+        let source = include_str!("chain.rs");
+        let nondeterministic_map = ["Hash", "Map"].concat();
+        let nondeterministic_set = ["Hash", "Set"].concat();
+        assert!(
+            !source.contains(&nondeterministic_map),
+            "authority chain code and tests must use deterministic maps"
+        );
+        assert!(
+            !source.contains(&nondeterministic_set),
+            "authority chain code and tests must use deterministic sets"
+        );
+    }
+
     /// A test key registry mapping DIDs to keypairs.
     struct KeyRegistry {
-        keys: HashMap<String, KeyPair>,
+        keys: BTreeMap<String, KeyPair>,
     }
 
     impl KeyRegistry {
         fn new() -> Self {
             Self {
-                keys: HashMap::new(),
+                keys: BTreeMap::new(),
             }
         }
 
