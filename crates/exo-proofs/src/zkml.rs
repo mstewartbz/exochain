@@ -23,7 +23,7 @@
 use exo_core::types::{Hash256, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{ProofError, Result};
 
 // ---------------------------------------------------------------------------
 // ModelCommitment
@@ -106,38 +106,48 @@ pub struct HumanAttestation {
 
 impl HumanAttestation {
     /// Compute the canonical message that must be signed by the reviewer.
-    #[must_use]
+    ///
+    /// The reviewer DID length is part of the signed frame. If it cannot be
+    /// represented exactly, the message is rejected instead of being encoded
+    /// with a saturated sentinel length.
     pub fn signing_message(
         reviewer_did: &str,
         ai_recommendation_hash: &Hash256,
         final_decision_hash: &Hash256,
         decision: &AttestationDecision,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let decision_byte: u8 = match decision {
             AttestationDecision::Adopted => 0x01,
             AttestationDecision::Modified => 0x02,
             AttestationDecision::Rejected => 0x03,
         };
         let reviewer_did_bytes = reviewer_did.as_bytes();
-        let reviewer_did_len = u64::try_from(reviewer_did_bytes.len()).unwrap_or(u64::MAX);
+        let reviewer_did_len = u64::try_from(reviewer_did_bytes.len()).map_err(|_| {
+            ProofError::InvalidProofFormat(format!(
+                "reviewer DID length {} cannot be represented in canonical attestation frame",
+                reviewer_did_bytes.len()
+            ))
+        })?;
         let mut msg = b"zkml:attestation:".to_vec();
         msg.extend_from_slice(&reviewer_did_len.to_le_bytes());
         msg.extend_from_slice(reviewer_did_bytes);
         msg.extend_from_slice(ai_recommendation_hash.as_bytes());
         msg.extend_from_slice(final_decision_hash.as_bytes());
         msg.push(decision_byte);
-        msg
+        Ok(msg)
     }
 
     /// Verify the Ed25519 signature on this attestation.
     #[must_use]
     pub fn verify_signature(&self) -> bool {
-        let msg = Self::signing_message(
+        let Ok(msg) = Self::signing_message(
             &self.reviewer_did,
             &self.ai_recommendation_hash,
             &self.final_decision_hash,
             &self.decision,
-        );
+        ) else {
+            return false;
+        };
         exo_core::crypto::verify(&msg, &self.signature, &self.reviewer_public_key)
     }
 }
@@ -577,7 +587,8 @@ mod tests {
         let ai_rec = Hash256::digest(b"ai says: approve");
         let final_dec = Hash256::digest(b"human says: reject");
 
-        let msg = HumanAttestation::signing_message(&reviewer_did, &ai_rec, &final_dec, &decision);
+        let msg = HumanAttestation::signing_message(&reviewer_did, &ai_rec, &final_dec, &decision)
+            .unwrap();
         let signature = crypto::sign(&msg, &secret_key);
 
         let att = HumanAttestation {
@@ -611,7 +622,8 @@ mod tests {
             &ai_rec,
             &final_dec,
             &AttestationDecision::Modified,
-        );
+        )
+        .unwrap();
 
         let domain = b"zkml:attestation:";
         assert!(msg.starts_with(domain));
@@ -637,6 +649,23 @@ mod tests {
         legacy.extend_from_slice(final_dec.as_bytes());
         legacy.push(0x02);
         assert_ne!(msg, legacy, "new attestations must not use legacy framing");
+    }
+
+    #[test]
+    fn human_attestation_signing_message_does_not_saturate_reviewer_did_length() {
+        let production = include_str!("zkml.rs");
+        let signing_message_section = production
+            .split("pub fn signing_message")
+            .nth(1)
+            .expect("signing_message function must exist")
+            .split("pub fn verify_signature")
+            .next()
+            .expect("verify_signature function must follow signing_message");
+
+        assert!(
+            !signing_message_section.contains("unwrap_or(u64::MAX)"),
+            "canonical attestation framing must fail closed instead of saturating reviewer DID length"
+        );
     }
 
     #[test]
