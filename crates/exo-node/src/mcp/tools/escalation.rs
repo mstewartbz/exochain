@@ -9,6 +9,40 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
+const MAX_ESCALATION_SIGNALS: usize = 256;
+const MAX_ESCALATION_SIGNAL_TEXT_BYTES: usize = 256;
+
+fn input_too_large_error(field: &str, max_bytes: usize) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_escalation_input_too_large",
+            "message": format!("{field} may contain at most {max_bytes} bytes"),
+            "field": field,
+            "max_bytes": max_bytes,
+        })
+        .to_string(),
+    )
+}
+
+fn too_many_items_error(field: &str, max_items: usize) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_escalation_too_many_items",
+            "message": format!("{field} may contain at most {max_items} items"),
+            "field": field,
+            "max_items": max_items,
+        })
+        .to_string(),
+    )
+}
+
+fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(), ToolResult> {
+    if raw.len() > max_bytes {
+        return Err(input_too_large_error(field, max_bytes));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // exochain_evaluate_threat
 // ---------------------------------------------------------------------------
@@ -24,12 +58,19 @@ pub fn evaluate_threat_definition() -> ToolDefinition {
             "properties": {
                 "signals": {
                     "type": "array",
+                    "maxItems": MAX_ESCALATION_SIGNALS,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "type": { "type": "string" },
+                            "type": {
+                                "type": "string",
+                                "maxLength": MAX_ESCALATION_SIGNAL_TEXT_BYTES
+                            },
                             "severity": { "type": "integer", "minimum": 0, "maximum": 10 },
-                            "source": { "type": "string" }
+                            "source": {
+                                "type": "string",
+                                "maxLength": MAX_ESCALATION_SIGNAL_TEXT_BYTES
+                            }
                         }
                     },
                     "description": "Array of detection signals, each with type, integer severity (0-10), and source."
@@ -63,12 +104,15 @@ pub fn execute_evaluate_threat(params: &Value, _context: &NodeContext) -> ToolRe
             json!({"error": "signals array must contain at least one signal"}).to_string(),
         );
     }
+    if signals.len() > MAX_ESCALATION_SIGNALS {
+        return too_many_items_error("signals", MAX_ESCALATION_SIGNALS);
+    }
 
     // Validate and collect signals. Severity is 0-10 as an integer.
     let mut total_severity: i64 = 0;
     let mut max_severity: i64 = 0;
-    let mut signal_summaries: Vec<Value> = Vec::new();
-    let mut signal_inputs: Vec<(String, i64, String)> = Vec::new();
+    let mut signal_summaries: Vec<Value> = Vec::with_capacity(signals.len());
+    let mut signal_inputs: Vec<(String, i64, String)> = Vec::with_capacity(signals.len());
 
     for (i, signal) in signals.iter().enumerate() {
         let signal_type = match signal.get("type").and_then(Value::as_str) {
@@ -79,6 +123,13 @@ pub fn execute_evaluate_threat(params: &Value, _context: &NodeContext) -> ToolRe
                 );
             }
         };
+        if let Err(result) = validate_string_bytes(
+            signal_type,
+            &format!("signals[{i}].type"),
+            MAX_ESCALATION_SIGNAL_TEXT_BYTES,
+        ) {
+            return result;
+        }
         let severity = match signal.get("severity").and_then(Value::as_i64) {
             Some(s) => s,
             None => {
@@ -96,6 +147,13 @@ pub fn execute_evaluate_threat(params: &Value, _context: &NodeContext) -> ToolRe
                 );
             }
         };
+        if let Err(result) = validate_string_bytes(
+            source,
+            &format!("signals[{i}].source"),
+            MAX_ESCALATION_SIGNAL_TEXT_BYTES,
+        ) {
+            return result;
+        }
 
         if !(0..=10).contains(&severity) {
             return ToolResult::error(
@@ -571,6 +629,55 @@ mod tests {
     fn execute_evaluate_threat_missing_signals() {
         let result = execute_evaluate_threat(&json!({}), &NodeContext::empty());
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn evaluate_threat_definition_bounds_untrusted_signal_input() {
+        let def = evaluate_threat_definition();
+        let signals = &def.input_schema["properties"]["signals"];
+        assert_eq!(signals["maxItems"], 256);
+        assert_eq!(signals["items"]["properties"]["type"]["maxLength"], 256);
+        assert_eq!(signals["items"]["properties"]["source"]["maxLength"], 256);
+    }
+
+    #[test]
+    fn execute_evaluate_threat_rejects_oversized_signal_array() {
+        let signals: Vec<Value> = (0..257)
+            .map(|idx| {
+                json!({
+                    "type": format!("signal-{idx}"),
+                    "severity": 1,
+                    "source": "detector",
+                })
+            })
+            .collect();
+
+        let result = execute_evaluate_threat(&json!({"signals": signals}), &NodeContext::empty());
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("signals may contain at most"));
+    }
+
+    #[test]
+    fn execute_evaluate_threat_rejects_oversized_signal_text_without_echoing_it() {
+        let oversized = "A".repeat(257);
+        let result = execute_evaluate_threat(
+            &json!({
+                "signals": [
+                    {"type": oversized, "severity": 1, "source": "detector"},
+                ],
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("signals[0].type may contain at most"));
+        assert!(
+            !text.contains("AAAA"),
+            "oversized signal text must not be reflected in the error response"
+        );
     }
 
     // -- escalate_case --------------------------------------------------------
