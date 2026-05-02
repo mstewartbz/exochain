@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::Html,
     routing::{get, post},
@@ -38,6 +38,8 @@ pub type SharedForgeState = Arc<Mutex<ForgeState>>;
 /// The dashboard only renders recent activity, so retaining an unbounded log
 /// inside the node process creates avoidable memory exhaustion risk.
 const MAX_FORGE_ACTIVITY_LOG_ENTRIES: usize = 256;
+const MAX_FORGE_LOG_MESSAGE_BYTES: usize = 4_096;
+const MAX_FORGE_API_BODY_BYTES: usize = 64 * 1024;
 
 /// A single task in the build orchestration graph, tracking phase, status, and agent assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +288,13 @@ fn push_activity_log_bounded(activity_log: &mut Vec<ActivityEntry>, entry: Activ
         activity_log.drain(0..remove_count).for_each(drop);
     }
     activity_log.push(entry);
+}
+
+fn validate_log_message_size(message: &str) -> Result<(), StatusCode> {
+    if message.len() > MAX_FORGE_LOG_MESSAGE_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines, unused_assignments)]
@@ -1091,6 +1100,7 @@ async fn append_log(
     State(state): State<SharedForgeState>,
     Json(body): Json<LogEntry>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    validate_log_message_size(&body.message)?;
     append_log_state(state, body.message, body.task_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1708,6 +1718,7 @@ pub fn exoforge_router(state: SharedForgeState) -> Router {
         .route("/api/v1/forge/tasks/:id/escalate", post(escalate_task))
         .route("/api/v1/forge/log", post(append_log))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_FORGE_API_BODY_BYTES))
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────
@@ -1873,6 +1884,106 @@ mod tests {
             "oldest entries should be evicted first, after preserving a fixed-size recent log"
         );
         assert_eq!(state.activity_log.last().unwrap().message, "entry-299");
+    }
+
+    #[tokio::test]
+    async fn append_log_rejects_oversized_messages_before_state_mutation() {
+        let state: SharedForgeState = Arc::new(Mutex::new(test_state()));
+        let router = exoforge_router(Arc::clone(&state));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "message": "x".repeat(MAX_FORGE_LOG_MESSAGE_BYTES + 1),
+            "task_id": null,
+        }))
+        .unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/forge/log")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.activity_log.len(),
+            3,
+            "oversized log messages must be rejected before mutating forge state"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_log_accepts_max_sized_message() {
+        let state: SharedForgeState = Arc::new(Mutex::new(test_state()));
+        let router = exoforge_router(Arc::clone(&state));
+        let message = "x".repeat(MAX_FORGE_LOG_MESSAGE_BYTES);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "message": message,
+            "task_id": null,
+        }))
+        .unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/forge/log")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.activity_log.len(), 4);
+        assert_eq!(
+            state.activity_log.last().unwrap().message.len(),
+            MAX_FORGE_LOG_MESSAGE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn exoforge_router_rejects_oversized_request_body_before_state_mutation() {
+        let state: SharedForgeState = Arc::new(Mutex::new(test_state()));
+        let router = exoforge_router(Arc::clone(&state));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "status": "InProgress",
+            "padding": "x".repeat(MAX_FORGE_API_BODY_BYTES + 1),
+        }))
+        .unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/forge/tasks/1/status")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.tasks[0].status, TaskStatus::Queued);
+        assert_eq!(
+            state.activity_log.len(),
+            3,
+            "oversized request bodies must be rejected before mutating forge state"
+        );
+    }
+
+    #[test]
+    fn exoforge_router_applies_explicit_request_body_limit() {
+        let source = include_str!("exoforge.rs");
+        let router = source
+            .split("pub fn exoforge_router")
+            .nth(1)
+            .expect("router marker present")
+            .split("// ─── Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            router.contains("DefaultBodyLimit::max(MAX_FORGE_API_BODY_BYTES)"),
+            "ExoForge routes must carry an explicit local body cap"
+        );
     }
 
     struct FailingSerialize;
