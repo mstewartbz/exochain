@@ -143,7 +143,13 @@ pub fn create_emergency_action(
     let deadline_ms = input
         .created_at
         .physical_ms
-        .saturating_add(policy.ratification_window_ms);
+        .checked_add(policy.ratification_window_ms)
+        .ok_or_else(|| ForumError::InvalidProvenance {
+            reason: format!(
+                "emergency ratification deadline overflows u64 for action {}",
+                input.id
+            ),
+        })?;
     Ok(EmergencyAction {
         id: input.id,
         action_type: input.action_type,
@@ -347,6 +353,21 @@ mod tests {
             zero_evidence,
             ForumError::InvalidProvenance { .. }
         ));
+    }
+
+    #[test]
+    fn create_action_rejects_ratification_deadline_overflow() {
+        let err = create_emergency_action(
+            EmergencyActionInput {
+                created_at: Timestamp::new(u64::MAX, 0),
+                ..emergency_input(Uuid::from_u128(35), EmergencyActionType::SystemHalt)
+            },
+            &policy(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ForumError::InvalidProvenance { .. }));
+        assert!(err.to_string().contains("ratification deadline"));
     }
 
     #[test]

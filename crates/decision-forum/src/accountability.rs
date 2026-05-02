@@ -85,7 +85,13 @@ pub fn propose(input: AccountabilityInput) -> Result<AccountabilityAction> {
     let due_process_deadline_ms = input
         .proposed_at
         .physical_ms
-        .saturating_add(DUE_PROCESS_WINDOW_MS);
+        .checked_add(DUE_PROCESS_WINDOW_MS)
+        .ok_or_else(|| ForumError::InvalidProvenance {
+            reason: format!(
+                "accountability due process deadline overflows u64 for action {}",
+                input.id
+            ),
+        })?;
     Ok(AccountabilityAction {
         id: input.id,
         action_type: input.action_type,
@@ -257,6 +263,18 @@ mod tests {
             zero_evidence,
             ForumError::InvalidProvenance { .. }
         ));
+    }
+
+    #[test]
+    fn propose_rejects_due_process_deadline_overflow() {
+        let err = propose(AccountabilityInput {
+            proposed_at: Timestamp::new(u64::MAX, 0),
+            ..action_input(Uuid::from_u128(25), AccountabilityActionType::Censure)
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, ForumError::InvalidProvenance { .. }));
+        assert!(err.to_string().contains("due process deadline"));
     }
 
     #[test]
