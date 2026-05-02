@@ -140,7 +140,7 @@ pub struct HolonManagerConfig {
     /// Signs canonical authority/provenance payload hashes for infrastructure Holon context.
     pub root_signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
     /// Supplies deterministic HLC metadata for each signed Holon provenance record.
-    pub provenance_timestamp_source: Arc<dyn Fn() -> Timestamp + Send + Sync>,
+    pub provenance_timestamp_source: Arc<dyn Fn() -> Result<Timestamp, String> + Send + Sync>,
     /// How often to run the topology optimizer (seconds).
     pub topology_interval_secs: u64,
     /// How often to run the scaling advisor (seconds).
@@ -167,23 +167,26 @@ impl std::fmt::Debug for HolonManagerConfig {
 #[must_use]
 pub fn deterministic_provenance_timestamp_source(
     start_physical_ms: u64,
-) -> Arc<dyn Fn() -> Timestamp + Send + Sync> {
+) -> Arc<dyn Fn() -> Result<Timestamp, String> + Send + Sync> {
     let next_physical_ms = Arc::new(AtomicU64::new(start_physical_ms.max(1)));
     Arc::new(move || {
         let physical_ms = next_physical_ms.fetch_add(1, Ordering::Relaxed);
-        Timestamp::new(physical_ms, 0)
+        Ok(Timestamp::new(physical_ms, 0))
     })
 }
 
 /// Build an HLC-backed provenance timestamp source for runtime Holon steps.
 #[must_use]
-pub fn hlc_provenance_timestamp_source() -> Arc<dyn Fn() -> Timestamp + Send + Sync> {
+pub fn hlc_provenance_timestamp_source() -> Arc<dyn Fn() -> Result<Timestamp, String> + Send + Sync>
+{
     let clock = Arc::new(std::sync::Mutex::new(exo_core::hlc::HybridClock::new()));
     Arc::new(move || {
         let mut clock = clock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        clock.now()
+        clock
+            .now()
+            .map_err(|err| format!("Holon provenance HLC exhausted: {err}"))
     })
 }
 
@@ -434,7 +437,7 @@ fn signed_provenance(
 }
 
 fn next_provenance_timestamp(config: &HolonManagerConfig) -> Result<Timestamp, String> {
-    let timestamp = (config.provenance_timestamp_source)();
+    let timestamp = (config.provenance_timestamp_source)()?;
     if timestamp == Timestamp::ZERO {
         return Err("Holon provenance timestamp source returned zero HLC timestamp".into());
     }
@@ -1029,7 +1032,7 @@ mod tests {
     #[test]
     fn holon_provenance_uses_configured_hlc_timestamp_source() {
         let mut config = test_config();
-        config.provenance_timestamp_source = Arc::new(|| Timestamp::new(42_424, 7));
+        config.provenance_timestamp_source = Arc::new(|| Ok(Timestamp::new(42_424, 7)));
         let h = create_health_holon(&test_did());
 
         let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
@@ -1041,7 +1044,7 @@ mod tests {
     #[test]
     fn holon_provenance_rejects_zero_hlc_timestamp_source() {
         let mut config = test_config();
-        config.provenance_timestamp_source = Arc::new(|| Timestamp::ZERO);
+        config.provenance_timestamp_source = Arc::new(|| Ok(Timestamp::ZERO));
         let h = create_health_holon(&test_did());
 
         let result = build_holon_adjudication_context(&h, &config);

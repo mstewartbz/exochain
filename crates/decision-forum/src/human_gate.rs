@@ -105,7 +105,7 @@ mod tests {
             voter_did: Did::new("did:exo:human-alice").expect("ok"),
             choice: VoteChoice::Approve,
             actor_kind: ActorKind::Human,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::digest(b"human-sig"),
         }
     }
@@ -118,7 +118,7 @@ mod tests {
                 delegation_id: "d1".into(),
                 ceiling_class: DecisionClass::Operational,
             },
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::digest(b"ai-sig"),
         }
     }
@@ -129,7 +129,7 @@ mod tests {
             title: "test".into(),
             class,
             constitutional_hash: Hash256::digest(b"constitution"),
-            created_at: clock.now(),
+            created_at: clock.now().expect("HLC timestamp"),
         })
         .expect("valid decision")
     }

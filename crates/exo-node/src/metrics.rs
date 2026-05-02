@@ -55,7 +55,13 @@ impl NodeMetrics {
     /// Create a new metrics registry with an explicit HLC source.
     #[must_use]
     pub fn new_with_clock(mut clock: HybridClock) -> Self {
-        let start_time = clock.now();
+        let start_time = match clock.now() {
+            Ok(timestamp) => timestamp,
+            Err(err) => {
+                tracing::error!(error = %err, "NodeMetrics HLC exhausted at startup");
+                Timestamp::ZERO
+            }
+        };
         Self {
             peer_count: AtomicU64::new(0),
             consensus_round: AtomicU64::new(0),
@@ -71,13 +77,18 @@ impl NodeMetrics {
 
     fn uptime_seconds(&self) -> u64 {
         match self.clock.lock() {
-            Ok(mut clock) => {
-                clock
-                    .now()
-                    .physical_ms
-                    .saturating_sub(self.start_time.physical_ms)
-                    / 1000
-            }
+            Ok(mut clock) => match clock.now() {
+                Ok(timestamp) => {
+                    timestamp
+                        .physical_ms
+                        .saturating_sub(self.start_time.physical_ms)
+                        / 1000
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "NodeMetrics HLC exhausted while rendering uptime");
+                    0
+                }
+            },
             Err(_) => {
                 tracing::error!("NodeMetrics HLC mutex poisoned while rendering uptime");
                 0

@@ -793,8 +793,10 @@ async fn start_node(
     let receipt_dashboard_router = receipt_dashboard::receipt_dashboard_router();
 
     // Build the ExoForge build orchestration dashboard.
-    let forge_state: exoforge::SharedForgeState =
-        Arc::new(Mutex::new(exoforge::ForgeState::new_zerodentity()));
+    let forge_state: exoforge::SharedForgeState = Arc::new(Mutex::new(
+        exoforge::ForgeState::new_zerodentity()
+            .map_err(|error| anyhow::anyhow!("ExoForge HLC initialization failed: {error}"))?,
+    ));
     let forge_router = exoforge::exoforge_router(forge_state);
     tracing::info!("ExoForge initialized — 0dentity spec loaded, 56 tasks across 12 phases");
 

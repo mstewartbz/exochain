@@ -363,12 +363,14 @@ impl AppState {
         Arc::new(Mutex::new(Self::with_registry(registry)))
     }
 
-    fn next_timestamp(&mut self) -> Timestamp {
-        self.clock.now()
+    fn next_timestamp(&mut self) -> GqlResult<Timestamp> {
+        self.clock
+            .now()
+            .map_err(|err| async_graphql::Error::new(format!("HLC clock exhausted: {err}")))
     }
 
-    fn now_str(&mut self) -> String {
-        self.next_timestamp().to_string()
+    fn now_str(&mut self) -> GqlResult<String> {
+        Ok(self.next_timestamp()?.to_string())
     }
 
     fn append_audit(&mut self, decision_id: &str, event_type: &str, actor: &str) -> GqlResult<()> {
@@ -382,7 +384,7 @@ impl AppState {
         let next_seq = seq
             .checked_add(1)
             .ok_or_else(|| async_graphql::Error::new("audit sequence exhausted"))?;
-        let ts = self.now_str();
+        let ts = self.now_str()?;
 
         if let Some(rec) = self.decisions.get_mut(decision_id) {
             self.next_audit_seq = next_seq;
@@ -744,7 +746,7 @@ impl MutationRoot {
         guard_graphql_execution()?;
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
-        let created = guard.next_timestamp();
+        let created = guard.next_timestamp()?;
         let created_at = created.to_string();
         let id = graphql_hash_hex(&GraphqlDecisionIdPayload {
             domain: "exo.gateway.graphql.decision_id.v1",
@@ -852,7 +854,7 @@ impl MutationRoot {
         }
         // Caller DID comes from auth context in production; use placeholder here.
         let voter = "did:exo:caller".to_string();
-        let timestamp = guard.now_str();
+        let timestamp = guard.now_str()?;
         let vote = GqlVote {
             voter: voter.clone(),
             choice,
@@ -891,7 +893,7 @@ impl MutationRoot {
         }
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
-        let now = guard.next_timestamp();
+        let now = guard.next_timestamp()?;
         let id = graphql_hash_hex(&GraphqlDelegationIdPayload {
             domain: "exo.gateway.graphql.delegation_id.v1",
             delegator: "did:exo:caller",
@@ -946,7 +948,7 @@ impl MutationRoot {
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
-        let challenge_created = guard.next_timestamp();
+        let challenge_created = guard.next_timestamp()?;
         let challenge_id = graphql_hash_hex(&GraphqlChallengeIdPayload {
             domain: "exo.gateway.graphql.challenge_id.v1",
             decision_id: &id_str,
@@ -1010,7 +1012,7 @@ impl MutationRoot {
             .decision
             .tenant_id
             .clone();
-        let now = guard.next_timestamp();
+        let now = guard.next_timestamp()?;
         let action_id = graphql_hash_hex(&GraphqlEmergencyActionIdPayload {
             domain: "exo.gateway.graphql.emergency_action_id.v1",
             decision_id: &id_str,
@@ -1065,7 +1067,7 @@ impl MutationRoot {
             discloser: "did:exo:caller".into(),
             description: description.clone(),
             nature: nature.clone(),
-            timestamp: guard.now_str(),
+            timestamp: guard.now_str()?,
         };
         guard.append_audit(
             &id_str,
@@ -1325,8 +1327,14 @@ mod tests {
         let mut state =
             AppState::with_registry_and_clock(registry, HybridClock::with_wall_clock(|| 42_000));
 
-        assert_eq!(state.next_timestamp(), Timestamp::new(42_000, 0));
-        assert_eq!(state.next_timestamp(), Timestamp::new(42_000, 1));
+        assert_eq!(
+            state.next_timestamp().expect("HLC timestamp"),
+            Timestamp::new(42_000, 0)
+        );
+        assert_eq!(
+            state.next_timestamp().expect("HLC timestamp"),
+            Timestamp::new(42_000, 1)
+        );
     }
 
     #[cfg(not(feature = "unaudited-gateway-graphql-api"))]

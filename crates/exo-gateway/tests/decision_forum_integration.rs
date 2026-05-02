@@ -42,7 +42,7 @@ fn routine_decision(clock: &mut HybridClock) -> DecisionObject {
         title: "Routine test decision".into(),
         class: DecisionClass::Routine,
         constitutional_hash: Hash256::digest(b"test-constitution-v1"),
-        created_at: clock.now(),
+        created_at: clock.now().expect("HLC timestamp"),
     })
     .expect("valid decision")
 }
@@ -52,7 +52,7 @@ fn human_approve(name: &str, clock: &mut HybridClock) -> Vote {
         voter_did: did(&format!("did:exo:{name}")),
         choice: VoteChoice::Approve,
         actor_kind: ActorKind::Human,
-        timestamp: clock.now(),
+        timestamp: clock.now().expect("HLC timestamp"),
         signature_hash: Hash256::digest(name.as_bytes()),
     }
 }
@@ -119,7 +119,7 @@ fn duplicate_voter_rejected() {
             voter_did: did("did:exo:alice"),
             choice: VoteChoice::Reject,
             actor_kind: ActorKind::Human,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::digest(b"alice-second"),
         })
         .unwrap_err();
@@ -156,7 +156,7 @@ fn terminal_decision_rejects_votes() {
         BctsState::Closed,
     ];
     for state in lifecycle {
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         decision
             .transition_at(state, &actor, ts)
             .expect("transition ok");

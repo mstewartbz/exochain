@@ -148,7 +148,13 @@ impl AppState {
         // Bootstrap kernel with the all-invariants set.
         // constitution bytes are hashed for immutability verification.
         let kernel = Kernel::new(b"exochain-constitution-v1", InvariantSet::all());
-        let start_time = clock.now();
+        let start_time = match clock.now() {
+            Ok(timestamp) => timestamp,
+            Err(err) => {
+                tracing::error!(error = %err, "Gateway AppState HLC exhausted at startup");
+                Timestamp::ZERO
+            }
+        };
         Self {
             pool,
             registry,
@@ -160,7 +166,13 @@ impl AppState {
 
     fn now_ms(&self) -> u64 {
         match self.clock.lock() {
-            Ok(mut clock) => clock.now().physical_ms,
+            Ok(mut clock) => match clock.now() {
+                Ok(timestamp) => timestamp.physical_ms,
+                Err(err) => {
+                    tracing::error!(error = %err, "Gateway AppState HLC exhausted while reading timestamp");
+                    0
+                }
+            },
             Err(_) => {
                 tracing::error!("Gateway AppState HLC mutex poisoned while reading timestamp");
                 0

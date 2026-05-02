@@ -25,7 +25,7 @@ use axum::{
     response::Html,
     routing::{get, post},
 };
-use exo_core::{Timestamp, hlc::HybridClock};
+use exo_core::{ExoError, Timestamp, hlc::HybridClock};
 use serde::{Deserialize, Serialize};
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -176,17 +176,17 @@ pub struct LogEntry {
 
 impl ForgeState {
     /// Create a new forge state pre-loaded with the 0DENTITY spec task graph.
-    pub fn new_zerodentity() -> Self {
+    pub fn new_zerodentity() -> Result<Self, ExoError> {
         Self::new_zerodentity_with_clock(HybridClock::new())
     }
 
     /// Create a new forge state with an explicit HLC source.
-    pub fn new_zerodentity_with_clock(mut clock: HybridClock) -> Self {
+    pub fn new_zerodentity_with_clock(mut clock: HybridClock) -> Result<Self, ExoError> {
         let tasks = build_zerodentity_tasks();
-        let started = clock.now();
-        let decomposed_at = clock.now();
-        let awaiting_at = clock.now();
-        ForgeState {
+        let started = clock.now()?;
+        let decomposed_at = clock.now()?;
+        let awaiting_at = clock.now()?;
+        Ok(ForgeState {
             spec_name: "0DENTITY-APP-SPEC.md".into(),
             spec_path: "docs/0DENTITY-APP-SPEC.md".into(),
             tasks,
@@ -209,11 +209,13 @@ impl ForgeState {
             ],
             started_at: started,
             clock,
-        }
+        })
     }
 
-    fn next_timestamp(&mut self) -> Timestamp {
-        self.clock.now()
+    fn next_timestamp(&mut self) -> Result<Timestamp, StatusCode> {
+        self.clock
+            .now()
+            .map_err(|err| forge_clock_error("forge_state_timestamp", err))
     }
 
     /// Compute aggregate and per-phase completion statistics from the current task list.
@@ -823,6 +825,15 @@ fn forge_join_error(context: &'static str, error: tokio::task::JoinError) -> Sta
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
+fn forge_clock_error(context: &'static str, error: ExoError) -> StatusCode {
+    tracing::error!(
+        context,
+        err = %error,
+        "ForgeState HLC exhausted while creating timestamp"
+    );
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
 async fn read_forge_state<T, F>(
     state: SharedForgeState,
     context: &'static str,
@@ -905,7 +916,7 @@ async fn update_task_status_state(
             .iter()
             .position(|task| task.id == task_id)
             .ok_or(StatusCode::NOT_FOUND)?;
-        let timestamp = state.next_timestamp();
+        let timestamp = state.next_timestamp()?;
         let task = &mut state.tasks[task_index];
 
         let old_status = task.status.clone();
@@ -947,7 +958,7 @@ async fn assign_agent_state(
             .iter()
             .position(|task| task.id == task_id)
             .ok_or(StatusCode::NOT_FOUND)?;
-        let timestamp = state.next_timestamp();
+        let timestamp = state.next_timestamp()?;
         let task = &mut state.tasks[task_index];
 
         let task_title = task.title.clone();
@@ -991,7 +1002,7 @@ async fn escalate_task_state(
             .iter()
             .position(|task| task.id == task_id)
             .ok_or(StatusCode::NOT_FOUND)?;
-        let timestamp = state.next_timestamp();
+        let timestamp = state.next_timestamp()?;
         let task = &mut state.tasks[task_index];
 
         task.escalation = level.clone();
@@ -1018,7 +1029,7 @@ async fn append_log_state(
     task_id: Option<u32>,
 ) -> Result<(), StatusCode> {
     mutate_forge_state(state, "append_log", move |state| {
-        let timestamp = state.next_timestamp();
+        let timestamp = state.next_timestamp()?;
         push_activity_log_bounded(
             &mut state.activity_log,
             ActivityEntry {
@@ -1730,6 +1741,7 @@ mod tests {
 
     fn test_state() -> ForgeState {
         ForgeState::new_zerodentity_with_clock(HybridClock::with_wall_clock(|| 42_000))
+            .expect("forge state")
     }
 
     #[test]

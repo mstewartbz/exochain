@@ -75,7 +75,13 @@ impl OnboardingState {
             .clock
             .lock()
             .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Clock lock error"))?;
-        Ok(clock.now().physical_ms)
+        clock
+            .now()
+            .map(|timestamp| timestamp.physical_ms)
+            .map_err(|err| {
+                tracing::error!(error = %err, "0dentity onboarding HLC exhausted");
+                json_error(StatusCode::INTERNAL_SERVER_ERROR, "Clock exhausted")
+            })
     }
 }
 

@@ -250,7 +250,7 @@ impl BailmentTransaction for Transaction {
             });
         }
 
-        let timestamp = clock.now();
+        let timestamp = clock.now()?;
         let receipt_hash = self.compute_receipt(from, to, &timestamp, actor)?;
 
         let transition = BctsTransition {

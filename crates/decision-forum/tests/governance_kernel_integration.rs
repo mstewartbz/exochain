@@ -119,7 +119,7 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
         title: "Integration Test Decision".into(),
         class,
         constitutional_hash: const_hash,
-        created_at: clock.now(),
+        created_at: clock.now().expect("HLC timestamp"),
     })
     .expect("valid decision");
 
@@ -128,7 +128,7 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
         delegation_hash: Hash256::digest(b"root-delegation-v1"),
-        timestamp: clock.now(),
+        timestamp: clock.now().expect("HLC timestamp"),
     })
     .expect("add authority link");
 
@@ -136,7 +136,7 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
     d.add_evidence(EvidenceItem {
         hash: Hash256::digest(b"impact-assessment-v1"),
         description: "Strategic impact assessment".to_string(),
-        attached_at: clock.now(),
+        attached_at: clock.now().expect("HLC timestamp"),
     })
     .expect("add evidence");
 
@@ -150,7 +150,7 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
         BctsState::Governed,
         BctsState::Approved,
     ] {
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.transition_at(state, &actor, ts)
             .expect("lifecycle transition");
     }
@@ -364,14 +364,14 @@ fn full_lifecycle_adjudicated_at_each_transition() {
         title: "Lifecycle Test".into(),
         class: DecisionClass::Operational,
         constitutional_hash: const_hash,
-        created_at: clock.now(),
+        created_at: clock.now().expect("HLC timestamp"),
     })
     .expect("valid decision");
     d.add_authority_link(ForumAuthorityLink {
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
         delegation_hash: Hash256::digest(b"lifecycle-delegation"),
-        timestamp: clock.now(),
+        timestamp: clock.now().expect("HLC timestamp"),
     })
     .expect("add authority link");
 
@@ -398,7 +398,7 @@ fn full_lifecycle_adjudicated_at_each_transition() {
     ];
 
     for state in transitions {
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.transition_at(state, &actor, ts)
             .expect("lifecycle transition");
         let verdict = kernel.adjudicate(&action, &context);
@@ -606,20 +606,20 @@ fn denied_forum_decision_correlates_with_kernel_denial() {
         title: "Denied Decision".into(),
         class: DecisionClass::Operational,
         constitutional_hash: const_hash,
-        created_at: clock.now(),
+        created_at: clock.now().expect("HLC timestamp"),
     })
     .expect("valid decision");
     d.add_authority_link(ForumAuthorityLink {
         actor_did: actor.clone(),
         actor_kind: ActorKind::Human,
         delegation_hash: Hash256::digest(b"delegation"),
-        timestamp: clock.now(),
+        timestamp: clock.now().expect("HLC timestamp"),
     })
     .expect("add link");
-    let ts = clock.now();
+    let ts = clock.now().expect("HLC timestamp");
     d.transition_at(BctsState::Submitted, &actor, ts)
         .expect("submit");
-    let ts = clock.now();
+    let ts = clock.now().expect("HLC timestamp");
     d.transition_at(BctsState::Denied, &actor, ts)
         .expect("deny");
     assert_eq!(d.state, BctsState::Denied);

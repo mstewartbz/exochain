@@ -57,16 +57,15 @@ impl HybridClock {
     ///
     /// Guarantees: the returned timestamp is strictly greater than any
     /// previously returned by this clock.
-    #[must_use]
-    pub fn now(&mut self) -> Timestamp {
+    pub fn now(&mut self) -> Result<Timestamp> {
         let wall = (self.wall_clock)();
         if wall > self.physical {
             self.physical = wall;
             self.logical = 0;
         } else {
-            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical)?;
         }
-        Timestamp::new(self.physical, self.logical)
+        Ok(Timestamp::new(self.physical, self.logical))
     }
 
     /// Merge a remote timestamp and advance the local clock.
@@ -96,15 +95,15 @@ impl HybridClock {
         } else if self.physical == remote.physical_ms {
             // Same physical — advance logical past both
             self.logical = self.logical.max(remote.logical);
-            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical)?;
         } else if remote.physical_ms > self.physical {
             // Remote is ahead — adopt remote physical, advance logical
             self.physical = remote.physical_ms;
             self.logical = remote.logical;
-            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical)?;
         } else {
             // Local is ahead — advance own logical
-            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical);
+            advance_logical_or_carry_physical(&mut self.physical, &mut self.logical)?;
         }
 
         Ok(Timestamp::new(self.physical, self.logical))
@@ -123,14 +122,21 @@ impl HybridClock {
     }
 }
 
-fn advance_logical_or_carry_physical(physical: &mut u64, logical: &mut u32) {
+fn advance_logical_or_carry_physical(physical: &mut u64, logical: &mut u32) -> Result<()> {
     if *logical == u32::MAX {
         if let Some(next_physical) = physical.checked_add(1) {
             *physical = next_physical;
             *logical = 0;
+            Ok(())
+        } else {
+            Err(ExoError::ClockOverflow {
+                physical_ms: *physical,
+                logical: *logical,
+            })
         }
     } else {
         *logical += 1;
+        Ok(())
     }
 }
 
@@ -193,9 +199,9 @@ mod tests {
     #[test]
     fn now_monotonic_same_wall_time() {
         let (mut clock, _wall) = test_clock(1000);
-        let t1 = clock.now();
-        let t2 = clock.now();
-        let t3 = clock.now();
+        let t1 = clock.now().expect("HLC timestamp");
+        let t2 = clock.now().expect("HLC timestamp");
+        let t3 = clock.now().expect("HLC timestamp");
         assert!(t1 < t2);
         assert!(t2 < t3);
         // All share the same physical
@@ -211,9 +217,9 @@ mod tests {
     #[test]
     fn now_advances_with_wall_clock() {
         let (mut clock, wall) = test_clock(1000);
-        let t1 = clock.now();
+        let t1 = clock.now().expect("HLC timestamp");
         wall.store(2000, Ordering::Relaxed);
-        let t2 = clock.now();
+        let t2 = clock.now().expect("HLC timestamp");
         assert!(t1 < t2);
         assert_eq!(t2.physical_ms, 2000);
         assert_eq!(t2.logical, 0);
@@ -222,9 +228,9 @@ mod tests {
     #[test]
     fn now_handles_backward_wall_clock() {
         let (mut clock, wall) = test_clock(2000);
-        let t1 = clock.now();
+        let t1 = clock.now().expect("HLC timestamp");
         wall.store(1000, Ordering::Relaxed); // wall goes backward
-        let t2 = clock.now();
+        let t2 = clock.now().expect("HLC timestamp");
         assert!(t1 < t2);
         // Physical stays at 2000, logical increments
         assert_eq!(t2.physical_ms, 2000);
@@ -234,7 +240,7 @@ mod tests {
     #[test]
     fn update_wall_ahead_of_both() {
         let (mut clock, wall) = test_clock(1000);
-        let _ = clock.now();
+        let _ = clock.now().expect("HLC timestamp");
         wall.store(5000, Ordering::Relaxed);
         let remote = Timestamp::new(3000, 5);
         let result = clock.update(&remote).expect("ok");
@@ -245,7 +251,7 @@ mod tests {
     #[test]
     fn update_remote_ahead() {
         let (mut clock, _wall) = test_clock(1000);
-        let _ = clock.now();
+        let _ = clock.now().expect("HLC timestamp");
         let remote = Timestamp::new(2000, 10);
         let result = clock.update(&remote).expect("ok");
         assert_eq!(result.physical_ms, 2000);
@@ -255,7 +261,7 @@ mod tests {
     #[test]
     fn update_same_physical() {
         let (mut clock, _wall) = test_clock(1000);
-        let _ = clock.now(); // physical=1000, logical=0
+        let _ = clock.now().expect("HLC timestamp"); // physical=1000, logical=0
         let remote = Timestamp::new(1000, 5);
         let result = clock.update(&remote).expect("ok");
         assert_eq!(result.physical_ms, 1000);
@@ -266,7 +272,7 @@ mod tests {
     #[test]
     fn update_local_ahead() {
         let (mut clock, wall) = test_clock(3000);
-        let _ = clock.now(); // physical=3000, logical=0
+        let _ = clock.now().expect("HLC timestamp"); // physical=3000, logical=0
         wall.store(1000, Ordering::Relaxed); // wall backward
         let remote = Timestamp::new(2000, 0);
         let result = clock.update(&remote).expect("ok");
@@ -306,7 +312,7 @@ mod tests {
     #[test]
     fn current_does_not_advance() {
         let (mut clock, _wall) = test_clock(1000);
-        let _ = clock.now();
+        let _ = clock.now().expect("HLC timestamp");
         let c1 = clock.current();
         let c2 = clock.current();
         assert_eq!(c1, c2);
@@ -322,7 +328,7 @@ mod tests {
     #[test]
     fn default_clock() {
         let mut clock = HybridClock::default();
-        let t = clock.now();
+        let t = clock.now().expect("HLC timestamp");
         // Should have a reasonable physical time (non-zero)
         assert!(t.physical_ms > 0);
     }
@@ -330,7 +336,7 @@ mod tests {
     #[test]
     fn concurrent_updates_maintain_monotonicity() {
         let (mut clock, wall) = test_clock(100);
-        let _ = clock.now();
+        let _ = clock.now().expect("HLC timestamp");
 
         // Simulate multiple rapid remote updates
         let remotes = [
@@ -349,7 +355,7 @@ mod tests {
 
         // Then advance wall clock
         wall.store(200, Ordering::Relaxed);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         assert!(ts > last);
         assert_eq!(ts.physical_ms, 200);
         assert_eq!(ts.logical, 0);
@@ -361,7 +367,7 @@ mod tests {
         clock.physical = 1000;
         clock.logical = u32::MAX;
 
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
 
         assert!(ts > Timestamp::new(1000, u32::MAX));
         assert_eq!(ts.physical_ms, 1001);
@@ -379,6 +385,46 @@ mod tests {
         assert!(ts > Timestamp::new(1000, u32::MAX));
         assert_eq!(ts.physical_ms, 1001);
         assert_eq!(ts.logical, 0);
+    }
+
+    #[test]
+    fn now_rejects_terminal_clock_exhaustion_without_reusing_timestamp() {
+        let (mut clock, _wall) = test_clock(u64::MAX);
+        clock.physical = u64::MAX;
+        clock.logical = u32::MAX;
+
+        let err = clock
+            .now()
+            .expect_err("terminal HLC state must fail closed");
+
+        assert!(matches!(
+            err,
+            ExoError::ClockOverflow {
+                physical_ms: u64::MAX,
+                logical: u32::MAX
+            }
+        ));
+        assert_eq!(clock.current(), Timestamp::new(u64::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn update_rejects_terminal_clock_exhaustion_without_reusing_timestamp() {
+        let (mut clock, _wall) = test_clock(u64::MAX);
+        clock.physical = u64::MAX;
+        clock.logical = u32::MAX;
+
+        let err = clock
+            .update(&Timestamp::new(u64::MAX, u32::MAX))
+            .expect_err("terminal HLC update must fail closed");
+
+        assert!(matches!(
+            err,
+            ExoError::ClockOverflow {
+                physical_ms: u64::MAX,
+                logical: u32::MAX
+            }
+        ));
+        assert_eq!(clock.current(), Timestamp::new(u64::MAX, u32::MAX));
     }
 
     #[test]

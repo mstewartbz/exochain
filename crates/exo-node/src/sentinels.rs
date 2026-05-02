@@ -114,7 +114,13 @@ pub(crate) fn now_ms() -> u64 {
     static SENTINEL_CLOCK: OnceLock<Mutex<HybridClock>> = OnceLock::new();
     let clock = SENTINEL_CLOCK.get_or_init(|| Mutex::new(HybridClock::new()));
     match clock.lock() {
-        Ok(mut clock) => clock.now().physical_ms,
+        Ok(mut clock) => match clock.now() {
+            Ok(timestamp) => timestamp.physical_ms,
+            Err(err) => {
+                tracing::error!(error = %err, "Sentinel HLC exhausted while reading timestamp");
+                0
+            }
+        },
         Err(_) => {
             tracing::error!("Sentinel HLC mutex poisoned while reading timestamp");
             0

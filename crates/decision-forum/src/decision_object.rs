@@ -347,7 +347,7 @@ mod tests {
             title: "Test Decision".into(),
             class: DecisionClass::Operational,
             constitutional_hash: Hash256::digest(b"const-v1"),
-            created_at: clock.now(),
+            created_at: clock.now().expect("HLC timestamp"),
         })
         .expect("valid decision")
     }
@@ -443,7 +443,7 @@ mod tests {
     fn transition_draft_to_submitted() {
         let mut clock = test_clock();
         let mut d = make_decision(&mut clock);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.transition_at(BctsState::Submitted, &test_did(), ts)
             .expect("ok");
         assert_eq!(d.state, BctsState::Submitted);
@@ -454,7 +454,7 @@ mod tests {
     fn transition_invalid_rejects() {
         let mut clock = test_clock();
         let mut d = make_decision(&mut clock);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         let err = d
             .transition_at(BctsState::Closed, &test_did(), ts)
             .unwrap_err();
@@ -479,7 +479,7 @@ mod tests {
             BctsState::Closed,
         ];
         for s in steps {
-            let ts = clock.now();
+            let ts = clock.now().expect("HLC timestamp");
             d.transition_at(s, &actor, ts).expect("ok");
         }
         assert!(d.is_terminal());
@@ -503,17 +503,17 @@ mod tests {
             BctsState::Recorded,
             BctsState::Closed,
         ] {
-            let ts = clock.now();
+            let ts = clock.now().expect("HLC timestamp");
             d.transition_at(s, &actor, ts).expect("ok");
         }
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         assert!(d.transition_at(BctsState::Draft, &actor, ts).is_err());
         assert!(
             d.add_vote(Vote {
                 voter_did: actor.clone(),
                 choice: VoteChoice::Approve,
                 actor_kind: ActorKind::Human,
-                timestamp: clock.now(),
+                timestamp: clock.now().expect("HLC timestamp"),
                 signature_hash: Hash256::ZERO,
             })
             .is_err()
@@ -522,7 +522,7 @@ mod tests {
             d.add_evidence(EvidenceItem {
                 hash: Hash256::ZERO,
                 description: "x".into(),
-                attached_at: clock.now(),
+                attached_at: clock.now().expect("HLC timestamp"),
             })
             .is_err()
         );
@@ -555,7 +555,7 @@ mod tests {
         let mut clock = test_clock();
         let actor = test_did();
         let mut d = make_decision(&mut clock);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.add_vote(Vote {
             voter_did: actor.clone(),
             choice: VoteChoice::Approve,
@@ -591,7 +591,7 @@ mod tests {
         let actor = test_did();
         let mut d = make_decision(&mut clock);
         let h1 = d.content_hash().expect("ok");
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.transition_at(BctsState::Submitted, &actor, ts)
             .expect("ok");
         let h2 = d.content_hash().expect("ok");
@@ -603,10 +603,10 @@ mod tests {
         let mut clock = test_clock();
         let actor = test_did();
         let mut d = make_decision(&mut clock);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.transition_at(BctsState::Submitted, &actor, ts)
             .expect("ok");
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.transition_at(BctsState::IdentityResolved, &actor, ts)
             .expect("ok");
         assert_ne!(
@@ -631,7 +631,7 @@ mod tests {
             title: "test".into(),
             class: DecisionClass::Routine,
             constitutional_hash: hash,
-            created_at: clock.now(),
+            created_at: clock.now().expect("HLC timestamp"),
         })
         .expect("valid");
         assert_eq!(d.constitutional_hash, hash);
@@ -641,7 +641,7 @@ mod tests {
     fn add_authority_link() {
         let mut clock = test_clock();
         let mut d = make_decision(&mut clock);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.add_authority_link(AuthorityLink {
             actor_did: test_did(),
             actor_kind: ActorKind::Human,

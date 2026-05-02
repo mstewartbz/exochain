@@ -203,7 +203,7 @@ mod tests {
             voter_did: Did::new(&format!("did:exo:{name}")).expect("ok"),
             choice: VoteChoice::Approve,
             actor_kind: ActorKind::Human,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::digest(name.as_bytes()),
         }
     }
@@ -216,7 +216,7 @@ mod tests {
                 delegation_id: "d1".into(),
                 ceiling_class: DecisionClass::Operational,
             },
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::digest(name.as_bytes()),
         }
     }
@@ -226,7 +226,7 @@ mod tests {
             voter_did: Did::new(&format!("did:exo:{name}")).expect("ok"),
             choice: VoteChoice::Reject,
             actor_kind: ActorKind::Human,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::digest(name.as_bytes()),
         }
     }
@@ -237,7 +237,7 @@ mod tests {
             title: title.into(),
             class,
             constitutional_hash: Hash256::digest(b"constitution"),
-            created_at: clock.now(),
+            created_at: clock.now().expect("HLC timestamp"),
         })
         .expect("valid decision")
     }

@@ -24,6 +24,10 @@ pub enum ExoError {
     #[error("clock drift detected: physical={physical_ms}ms, tolerance={tolerance_ms}ms")]
     ClockDrift { physical_ms: u64, tolerance_ms: u64 },
 
+    /// The HLC cannot advance because the timestamp space is exhausted.
+    #[error("clock overflow: cannot advance past physical={physical_ms}ms logical={logical}")]
+    ClockOverflow { physical_ms: u64, logical: u32 },
+
     /// A hash did not match the expected value.
     #[error("hash mismatch: expected {expected}, got {actual}")]
     HashMismatch { expected: String, actual: String },

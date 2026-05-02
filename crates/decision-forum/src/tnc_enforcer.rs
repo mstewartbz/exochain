@@ -255,14 +255,14 @@ mod tests {
             title: "test".into(),
             class,
             constitutional_hash: Hash256::digest(b"constitution"),
-            created_at: clock.now(),
+            created_at: clock.now().expect("HLC timestamp"),
         })
         .expect("valid decision")
     }
 
     fn decision_with_authority(clock: &mut HybridClock) -> DecisionObject {
         let mut d = make_decision(DecisionClass::Operational, clock);
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.add_authority_link(AuthorityLink {
             actor_did: Did::new("did:exo:root").expect("ok"),
             actor_kind: ActorKind::Human,
@@ -362,7 +362,7 @@ mod tests {
             BctsState::Recorded,
             BctsState::Closed,
         ] {
-            let ts = clock.now();
+            let ts = clock.now().expect("HLC timestamp");
             d.transition_at(s, &actor, ts).expect("ok");
         }
         let ctx = passing_ctx(&d);
@@ -378,10 +378,10 @@ mod tests {
             actor_did: Did::new("did:exo:root").expect("ok"),
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::ZERO,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
         })
         .expect("ok");
-        let ts = clock.now();
+        let ts = clock.now().expect("HLC timestamp");
         d.add_vote(Vote {
             voter_did: Did::new("did:exo:ai-bot").expect("ok"),
             choice: VoteChoice::Approve,
@@ -449,7 +449,7 @@ mod tests {
             actor_did: Did::new("did:exo:human-root").expect("ok"),
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::ZERO,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
         })
         .expect("ok");
         d.add_vote(Vote {
@@ -459,7 +459,7 @@ mod tests {
                 delegation_id: "del-001".into(),
                 ceiling_class: DecisionClass::Operational, // self-declared
             },
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::ZERO,
         })
         .expect("ok");
@@ -485,7 +485,7 @@ mod tests {
             actor_did: Did::new("did:exo:human-root").expect("ok"),
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::ZERO,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
         })
         .expect("ok");
         d.add_vote(Vote {
@@ -495,7 +495,7 @@ mod tests {
                 delegation_id: "del-001".into(),
                 ceiling_class: DecisionClass::Routine,
             },
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::ZERO,
         })
         .expect("ok");
@@ -513,7 +513,7 @@ mod tests {
             actor_did: Did::new("did:exo:human-root").expect("ok"),
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::ZERO,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
         })
         .expect("ok");
         d.add_vote(Vote {
@@ -523,7 +523,7 @@ mod tests {
                 delegation_id: "del-001".into(),
                 ceiling_class: DecisionClass::Operational,
             },
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::ZERO,
         })
         .expect("ok");
@@ -541,7 +541,7 @@ mod tests {
             actor_did: Did::new("did:exo:human-root").expect("ok"),
             actor_kind: ActorKind::Human,
             delegation_hash: Hash256::ZERO,
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
         })
         .expect("ok");
         d.add_vote(Vote {
@@ -551,7 +551,7 @@ mod tests {
                 delegation_id: "del-001".into(),
                 ceiling_class: DecisionClass::Operational, // registry says Operational
             },
-            timestamp: clock.now(),
+            timestamp: clock.now().expect("HLC timestamp"),
             signature_hash: Hash256::ZERO,
         })
         .expect("ok");
