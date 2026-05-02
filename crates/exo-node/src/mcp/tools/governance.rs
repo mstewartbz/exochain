@@ -31,6 +31,44 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
+const MAX_GOVERNANCE_MCP_TITLE_BYTES: usize = 512;
+const MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES: usize = 16 * 1024;
+const MAX_GOVERNANCE_MCP_RATIONALE_BYTES: usize = 4 * 1024;
+const MAX_GOVERNANCE_MCP_ID_BYTES: usize = 256;
+const MAX_GOVERNANCE_MCP_DID_BYTES: usize = 512;
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn input_too_large_error(field: &str, max_bytes: usize) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_governance_input_too_large",
+            "field": field,
+            "max_bytes": max_bytes,
+        })
+        .to_string(),
+    )
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn validate_string_bytes(value: &str, field: &str, max_bytes: usize) -> Result<(), ToolResult> {
+    if value.len() > max_bytes {
+        return Err(input_too_large_error(field, max_bytes));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn invalid_parameter_error(field: &str, message: &str) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_governance_invalid_parameter",
+            "field": field,
+            "message": message,
+        })
+        .to_string(),
+    )
+}
+
 /// Build the structured refusal body for a gated simulation tool.
 ///
 /// Keeps refusal shape consistent across tools and makes the feature-flag
@@ -79,18 +117,22 @@ pub fn create_decision_definition() -> ToolDefinition {
             "properties": {
                 "title": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_TITLE_BYTES,
                     "description": "Title of the governance decision."
                 },
                 "description": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
                     "description": "Detailed description of the decision."
                 },
                 "proposer_did": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_DID_BYTES,
                     "description": "DID of the proposer."
                 },
                 "decision_class": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_ID_BYTES,
                     "description": "Classification of the decision (default: standard)."
                 }
             },
@@ -141,10 +183,26 @@ pub fn execute_create_decision(params: &Value, _context: &NodeContext) -> ToolRe
             }
         };
 
+        if let Err(result) = validate_string_bytes(title, "title", MAX_GOVERNANCE_MCP_TITLE_BYTES) {
+            return result;
+        }
+        if let Err(result) = validate_string_bytes(
+            description,
+            "description",
+            MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
+        ) {
+            return result;
+        }
+        if let Err(result) =
+            validate_string_bytes(proposer_str, "proposer_did", MAX_GOVERNANCE_MCP_DID_BYTES)
+        {
+            return result;
+        }
+
         if Did::new(proposer_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid proposer DID format: {proposer_str}")})
-                    .to_string(),
+            return invalid_parameter_error(
+                "proposer_did",
+                "must be a syntactically valid EXO DID",
             );
         }
 
@@ -152,6 +210,13 @@ pub fn execute_create_decision(params: &Value, _context: &NodeContext) -> ToolRe
             .get("decision_class")
             .and_then(Value::as_str)
             .unwrap_or("standard");
+        if let Err(result) = validate_string_bytes(
+            decision_class,
+            "decision_class",
+            MAX_GOVERNANCE_MCP_ID_BYTES,
+        ) {
+            return result;
+        }
 
         let decision_id = match hash_structured(&(
             "exo.mcp.governance.decision.v1",
@@ -197,10 +262,12 @@ pub fn cast_vote_definition() -> ToolDefinition {
             "properties": {
                 "decision_id": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_ID_BYTES,
                     "description": "The ID of the decision to vote on."
                 },
                 "voter_did": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_DID_BYTES,
                     "description": "DID of the voter."
                 },
                 "choice": {
@@ -210,6 +277,7 @@ pub fn cast_vote_definition() -> ToolDefinition {
                 },
                 "rationale": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_RATIONALE_BYTES,
                     "description": "Optional rationale for the vote."
                 }
             },
@@ -260,17 +328,24 @@ pub fn execute_cast_vote(params: &Value, _context: &NodeContext) -> ToolResult {
             }
         };
 
+        if let Err(result) =
+            validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
+        {
+            return result;
+        }
+        if let Err(result) =
+            validate_string_bytes(voter_str, "voter_did", MAX_GOVERNANCE_MCP_DID_BYTES)
+        {
+            return result;
+        }
+
         if Did::new(voter_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid voter DID format: {voter_str}")}).to_string(),
-            );
+            return invalid_parameter_error("voter_did", "must be a syntactically valid EXO DID");
         }
 
         let valid_choices = ["approve", "reject", "abstain"];
         if !valid_choices.contains(&choice) {
-            return ToolResult::error(
-            json!({"error": format!("invalid choice: {choice}. Must be one of: approve, reject, abstain")}).to_string(),
-        );
+            return invalid_parameter_error("choice", "must be approve, reject, or abstain");
         }
 
         if decision_id.is_empty() {
@@ -283,6 +358,11 @@ pub fn execute_cast_vote(params: &Value, _context: &NodeContext) -> ToolResult {
             .get("rationale")
             .and_then(Value::as_str)
             .unwrap_or("");
+        if let Err(result) =
+            validate_string_bytes(rationale, "rationale", MAX_GOVERNANCE_MCP_RATIONALE_BYTES)
+        {
+            return result;
+        }
 
         let response = json!({
             "decision_id": decision_id,
@@ -311,10 +391,12 @@ pub fn check_quorum_definition() -> ToolDefinition {
             "properties": {
                 "decision_id": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_ID_BYTES,
                     "description": "The ID of the decision to check."
                 },
                 "threshold": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 1,
                     "description": "Required number of authentic approvals for quorum."
                 }
             },
@@ -357,10 +439,19 @@ pub fn execute_check_quorum(params: &Value, _context: &NodeContext) -> ToolResul
             }
         };
 
+        if let Err(result) =
+            validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
+        {
+            return result;
+        }
+
         if decision_id.is_empty() {
             return ToolResult::error(
                 json!({"error": "decision_id must not be empty"}).to_string(),
             );
+        }
+        if threshold == 0 {
+            return invalid_parameter_error("threshold", "must be a positive integer");
         }
 
         let response = json!({
@@ -390,6 +481,7 @@ pub fn get_decision_status_definition() -> ToolDefinition {
             "properties": {
                 "decision_id": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_ID_BYTES,
                     "description": "The ID of the decision."
                 }
             },
@@ -423,6 +515,12 @@ pub fn execute_get_decision_status(params: &Value, _context: &NodeContext) -> To
             }
         };
 
+        if let Err(result) =
+            validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
+        {
+            return result;
+        }
+
         if decision_id.is_empty() {
             return ToolResult::error(
                 json!({"error": "decision_id must not be empty"}).to_string(),
@@ -453,14 +551,17 @@ pub fn propose_amendment_definition() -> ToolDefinition {
             "properties": {
                 "title": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_TITLE_BYTES,
                     "description": "Title of the proposed amendment."
                 },
                 "description": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
                     "description": "Full description of the proposed amendment."
                 },
                 "proposer_did": {
                     "type": "string",
+                    "maxLength": MAX_GOVERNANCE_MCP_DID_BYTES,
                     "description": "DID of the proposer."
                 },
                 "target": {
@@ -523,18 +624,35 @@ pub fn execute_propose_amendment(params: &Value, _context: &NodeContext) -> Tool
             }
         };
 
+        if let Err(result) = validate_string_bytes(title, "title", MAX_GOVERNANCE_MCP_TITLE_BYTES) {
+            return result;
+        }
+        if let Err(result) = validate_string_bytes(
+            description,
+            "description",
+            MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
+        ) {
+            return result;
+        }
+        if let Err(result) =
+            validate_string_bytes(proposer_str, "proposer_did", MAX_GOVERNANCE_MCP_DID_BYTES)
+        {
+            return result;
+        }
+
         if Did::new(proposer_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid proposer DID format: {proposer_str}")})
-                    .to_string(),
+            return invalid_parameter_error(
+                "proposer_did",
+                "must be a syntactically valid EXO DID",
             );
         }
 
         let valid_targets = ["constitution", "invariant_registry", "kernel_binary"];
         if !valid_targets.contains(&target) {
-            return ToolResult::error(
-            json!({"error": format!("invalid target: {target}. Must be one of: constitution, invariant_registry, kernel_binary")}).to_string(),
-        );
+            return invalid_parameter_error(
+                "target",
+                "must be constitution, invariant_registry, or kernel_binary",
+            );
         }
 
         let amendment_id = match hash_structured(&(
@@ -633,6 +751,51 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
+    fn execute_create_decision_invalid_proposer_does_not_echo_input() {
+        let attacker_input = "bad-forged-log-line";
+        let result = execute_create_decision(
+            &json!({
+                "title": "Test",
+                "description": "Test",
+                "proposer_did": attacker_input,
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+        assert!(
+            !result.content[0].text().contains(attacker_input),
+            "governance MCP errors must not echo user-controlled proposer DIDs"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_create_decision_rejects_oversized_title_and_description() {
+        let oversized_title = "T".repeat(65_537);
+        let result = execute_create_decision(
+            &json!({
+                "title": oversized_title,
+                "description": "Test",
+                "proposer_did": "did:exo:alice",
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+
+        let oversized_description = "D".repeat(65_537);
+        let result = execute_create_decision(
+            &json!({
+                "title": "Test",
+                "description": oversized_description,
+                "proposer_did": "did:exo:alice",
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
     fn execute_create_decision_missing_title() {
         let result = execute_create_decision(
             &json!({
@@ -683,6 +846,41 @@ mod tests {
                 "decision_id": "abc123",
                 "voter_did": "did:exo:bob",
                 "choice": "maybe",
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_cast_vote_invalid_choice_does_not_echo_input() {
+        let attacker_input = "maybe-forged-log-line";
+        let result = execute_cast_vote(
+            &json!({
+                "decision_id": "abc123",
+                "voter_did": "did:exo:bob",
+                "choice": attacker_input,
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+        assert!(
+            !result.content[0].text().contains(attacker_input),
+            "governance MCP errors must not echo user-controlled vote choices"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_cast_vote_rejects_oversized_rationale() {
+        let oversized_rationale = "R".repeat(65_537);
+        let result = execute_cast_vote(
+            &json!({
+                "decision_id": "abc123",
+                "voter_did": "did:exo:bob",
+                "choice": "approve",
+                "rationale": oversized_rationale,
             }),
             &NodeContext::empty(),
         );
@@ -817,6 +1015,54 @@ mod tests {
                 "description": "Test",
                 "proposer_did": "did:exo:alice",
                 "target": "invalid_target",
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_propose_amendment_invalid_target_does_not_echo_input() {
+        let attacker_input = "invalid-target-forged-log-line";
+        let result = execute_propose_amendment(
+            &json!({
+                "title": "Test",
+                "description": "Test",
+                "proposer_did": "did:exo:alice",
+                "target": attacker_input,
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+        assert!(
+            !result.content[0].text().contains(attacker_input),
+            "governance MCP errors must not echo user-controlled amendment targets"
+        );
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_propose_amendment_rejects_oversized_title_and_description() {
+        let oversized_title = "T".repeat(65_537);
+        let result = execute_propose_amendment(
+            &json!({
+                "title": oversized_title,
+                "description": "Test",
+                "proposer_did": "did:exo:alice",
+                "target": "constitution",
+            }),
+            &NodeContext::empty(),
+        );
+        assert!(result.is_error);
+
+        let oversized_description = "D".repeat(65_537);
+        let result = execute_propose_amendment(
+            &json!({
+                "title": "Test",
+                "description": oversized_description,
+                "proposer_did": "did:exo:alice",
+                "target": "constitution",
             }),
             &NodeContext::empty(),
         );
