@@ -595,6 +595,13 @@ async fn execute_governance_action(
     reactor::broadcast_governance_event(state, net_handle, action_type, payload.to_vec()).await
 }
 
+fn encode_validator_change(change: &ValidatorChange) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(change, &mut buf)
+        .map_err(|err| format!("failed to encode validator-set change payload: {err}"))?;
+    Ok(buf)
+}
+
 // ---------------------------------------------------------------------------
 // Holon manager — runs all infrastructure Holons as a background task
 // ---------------------------------------------------------------------------
@@ -794,26 +801,34 @@ pub async fn run_holon_manager(
                             let change = ValidatorChange::AddValidator {
                                 did: candidate.clone(),
                             };
-                            let mut buf = Vec::new();
-                            if ciborium::into_writer(&change, &mut buf).is_ok() {
-                                if let Err(e) = execute_governance_action(
-                                    &reactor_state,
-                                    &shared_store,
-                                    &net_handle,
-                                    GovernanceEventType::ValidatorSetChange,
-                                    &buf,
-                                )
-                                .await
-                                {
+                            match encode_validator_change(&change) {
+                                Ok(buf) => {
+                                    if let Err(e) = execute_governance_action(
+                                        &reactor_state,
+                                        &shared_store,
+                                        &net_handle,
+                                        GovernanceEventType::ValidatorSetChange,
+                                        &buf,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            err = %e,
+                                            candidate = %candidate,
+                                            "Scaling Holon: auto-promotion failed"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            candidate = %candidate,
+                                            "Scaling Holon: auto-promoted candidate"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
                                     tracing::warn!(
                                         err = %e,
                                         candidate = %candidate,
-                                        "Scaling Holon: auto-promotion failed"
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        candidate = %candidate,
-                                        "Scaling Holon: auto-promoted candidate"
+                                        "Scaling Holon: validator-set change encoding failed"
                                     );
                                 }
                             }
@@ -988,6 +1003,31 @@ mod tests {
         assert!(
             production.contains("hash_structured"),
             "Holon provenance action hashes must use canonical structured hashing"
+        );
+    }
+
+    #[test]
+    fn scaling_auto_promotion_serialization_errors_are_not_silently_dropped() {
+        let source = include_str!("holons.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let auto_promotion = production
+            .split("let change = ValidatorChange::AddValidator")
+            .nth(1)
+            .expect("scaling auto-promotion block")
+            .split("tracing::debug!(")
+            .next()
+            .expect("auto-promotion serialization block");
+
+        assert!(
+            !auto_promotion.contains("ciborium::into_writer(&change, &mut buf).is_ok()"),
+            "validator-change CBOR serialization must not be silently dropped on error"
+        );
+        assert!(
+            auto_promotion.contains("encode_validator_change(&change)"),
+            "validator-change CBOR serialization must use the fail-closed helper"
         );
     }
 
