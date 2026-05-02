@@ -602,6 +602,16 @@ fn encode_validator_change(change: &ValidatorChange) -> Result<Vec<u8>, String> 
     Ok(buf)
 }
 
+async fn read_holon_peer_count(
+    net_handle: &NetworkHandle,
+    holon_name: &'static str,
+) -> Result<usize, String> {
+    net_handle
+        .peer_count()
+        .await
+        .map_err(|err| format!("{holon_name} Holon peer-count read failed: {err}"))
+}
+
 // ---------------------------------------------------------------------------
 // Holon manager — runs all infrastructure Holons as a background task
 // ---------------------------------------------------------------------------
@@ -685,7 +695,13 @@ pub async fn run_holon_manager(
                     continue;
                 }
 
-                let peer_count = net_handle.peer_count().await.unwrap_or(0);
+                let peer_count = match read_holon_peer_count(&net_handle, "Topology").await {
+                    Ok(peer_count) => peer_count,
+                    Err(e) => {
+                        tracing::error!(err = %e, "Topology Holon peer-count read failed");
+                        continue;
+                    }
+                };
                 let (diversity_score_bp, recommendation) = analyze_topology(peer_count, &net_handle);
 
                 let input = CombinatorInput::new()
@@ -755,7 +771,23 @@ pub async fn run_holon_manager(
                     };
                 let validator_count = scaling_snapshot.validator_count;
                 // Estimate node count from peer count + 1 (self).
-                let node_count = net_handle.peer_count().await.unwrap_or(0) + 1;
+                let peer_count = match read_holon_peer_count(&net_handle, "Scaling").await {
+                    Ok(peer_count) => peer_count,
+                    Err(e) => {
+                        tracing::error!(err = %e, "Scaling Holon peer-count read failed");
+                        continue;
+                    }
+                };
+                let node_count = match peer_count.checked_add(1) {
+                    Some(node_count) => node_count,
+                    None => {
+                        tracing::error!(
+                            peer_count,
+                            "Scaling Holon node-count computation overflowed"
+                        );
+                        continue;
+                    }
+                };
 
                 let recommendation = analyze_scaling(validator_count, node_count);
 
@@ -1029,6 +1061,38 @@ mod tests {
             auto_promotion.contains("encode_validator_change(&change)"),
             "validator-change CBOR serialization must use the fail-closed helper"
         );
+    }
+
+    #[test]
+    fn production_holon_manager_does_not_default_failed_peer_count_reads_to_zero() {
+        let source = include_str!("holons.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("peer_count().await.unwrap_or(0)"),
+            "network peer-count read failures must not be fabricated as zero peers"
+        );
+        assert!(
+            production.contains("read_holon_peer_count"),
+            "Holon manager must use a fail-closed peer-count read helper"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_holon_peer_count_propagates_network_errors() {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let err = read_holon_peer_count(&net_handle, "Topology")
+            .await
+            .expect_err("closed network command channel must be an error");
+
+        assert!(err.contains("Topology Holon peer-count read failed"));
+        assert!(err.contains("Network task has stopped"));
     }
 
     #[test]
