@@ -12,6 +12,21 @@ use crate::mcp::{
 };
 
 const MAX_MERKLE_PROOF_HASHES: usize = 64;
+const MAX_LEDGER_DID_BYTES: usize = 512;
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(), String> {
+    if raw.len() > max_bytes {
+        return Err(format!("{field} may contain at most {max_bytes} bytes"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn parse_did_str(raw: &str, field: &str) -> Result<Did, String> {
+    validate_string_bytes(raw, field, MAX_LEDGER_DID_BYTES)?;
+    Did::new(raw).map_err(|_| format!("invalid {field} DID format"))
+}
 
 // ---------------------------------------------------------------------------
 // exochain_submit_event
@@ -36,6 +51,7 @@ pub fn submit_event_definition() -> ToolDefinition {
                 },
                 "author_did": {
                     "type": "string",
+                    "maxLength": MAX_LEDGER_DID_BYTES,
                     "description": "DID of the event author."
                 }
             },
@@ -87,11 +103,8 @@ pub fn execute_submit_event(params: &Value, _context: &NodeContext) -> ToolResul
             }
         };
 
-        // Validate DID format.
-        if Did::new(author_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {author_did_str}")}).to_string(),
-            );
+        if let Err(err) = parse_did_str(author_did_str, "author_did") {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
 
         // Validate hex payload.
@@ -579,6 +592,14 @@ mod tests {
         Hash256::digest(&combined)
     }
 
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    fn assert_text_omits_raw_input(text: &str, raw_input: &str) {
+        assert!(
+            !text.contains(raw_input),
+            "MCP error output must not reflect raw caller input: {text}"
+        );
+    }
+
     // -- submit_event ---------------------------------------------------------
 
     #[test]
@@ -630,6 +651,25 @@ mod tests {
         });
         let result = execute_submit_event(&params, &NodeContext::empty());
         assert!(result.is_error);
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_submit_event_invalid_author_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-author-{attacker_marker}");
+        let params = json!({
+            "event_type": "transfer",
+            "payload_hex": "deadbeef",
+            "author_did": attacker_input,
+        });
+
+        let result = execute_submit_event(&params, &NodeContext::empty());
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("author_did"));
     }
 
     #[test]

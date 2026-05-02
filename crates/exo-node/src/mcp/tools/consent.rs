@@ -13,6 +13,11 @@ use crate::mcp::{
 
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 const MCP_CONSENT_READ_INITIATIVE: &str = "Initiatives/fix-mcp-consent-read-store-refusal.md";
+const MAX_CONSENT_DID_BYTES: usize = 512;
+const MAX_CONSENT_SCOPE_BYTES: usize = 4 * 1024;
+const MAX_CONSENT_ID_BYTES: usize = 256;
+const MAX_CONSENT_REASON_BYTES: usize = 4 * 1024;
+const MAX_CONSENT_STATUS_FILTER_BYTES: usize = 32;
 
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 fn consent_registry_unavailable(tool_name: &str) -> ToolResult {
@@ -26,6 +31,26 @@ fn consent_registry_unavailable(tool_name: &str) -> ToolResult {
         })
         .to_string(),
     )
+}
+
+fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(), String> {
+    if raw.len() > max_bytes {
+        return Err(format!("{field} may contain at most {max_bytes} bytes"));
+    }
+    Ok(())
+}
+
+fn invalid_did_message(field: &str) -> String {
+    if field == "did" {
+        "invalid DID format".to_owned()
+    } else {
+        format!("invalid {field} DID format")
+    }
+}
+
+fn parse_did_str(raw: &str, field: &str) -> Result<Did, String> {
+    validate_string_bytes(raw, field, MAX_CONSENT_DID_BYTES)?;
+    Did::new(raw).map_err(|_| invalid_did_message(field))
 }
 
 // ---------------------------------------------------------------------------
@@ -43,14 +68,17 @@ pub fn propose_bailment_definition() -> ToolDefinition {
             "properties": {
                 "bailor_did": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_DID_BYTES,
                     "description": "DID of the data owner (bailor)."
                 },
                 "bailee_did": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_DID_BYTES,
                     "description": "DID of the data accessor (bailee)."
                 },
                 "scope": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_SCOPE_BYTES,
                     "description": "Data scope for the bailment (e.g. \"data:medical:records\")."
                 },
                 "duration_hours": {
@@ -107,15 +135,17 @@ pub fn execute_propose_bailment(params: &Value, _context: &NodeContext) -> ToolR
             }
         };
 
-        if Did::new(bailor_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid bailor DID format: {bailor_str}")}).to_string(),
-            );
+        if let Err(err) = parse_did_str(bailor_str, "bailor") {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
-        if Did::new(bailee_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid bailee DID format: {bailee_str}")}).to_string(),
-            );
+        if let Err(err) = parse_did_str(bailee_str, "bailee") {
+            return ToolResult::error(json!({"error": err}).to_string());
+        }
+        if scope.is_empty() {
+            return ToolResult::error(json!({"error": "scope must not be empty"}).to_string());
+        }
+        if let Err(err) = validate_string_bytes(scope, "scope", MAX_CONSENT_SCOPE_BYTES) {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
 
         let duration_hours = match params.get("duration_hours") {
@@ -174,10 +204,12 @@ pub fn check_consent_definition() -> ToolDefinition {
             "properties": {
                 "actor_did": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_DID_BYTES,
                     "description": "DID of the actor to check consent for."
                 },
                 "scope": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_SCOPE_BYTES,
                     "description": "Data scope to check (e.g. \"data:medical\")."
                 }
             },
@@ -207,10 +239,14 @@ pub fn execute_check_consent(params: &Value, _context: &NodeContext) -> ToolResu
         }
     };
 
-    if Did::new(actor_str).is_err() {
-        return ToolResult::error(
-            json!({"error": format!("invalid actor DID format: {actor_str}")}).to_string(),
-        );
+    if let Err(err) = parse_did_str(actor_str, "actor") {
+        return ToolResult::error(json!({"error": err}).to_string());
+    }
+    if scope.is_empty() {
+        return ToolResult::error(json!({"error": "scope must not be empty"}).to_string());
+    }
+    if let Err(err) = validate_string_bytes(scope, "scope", MAX_CONSENT_SCOPE_BYTES) {
+        return ToolResult::error(json!({"error": err}).to_string());
     }
 
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
@@ -248,10 +284,12 @@ pub fn list_bailments_definition() -> ToolDefinition {
             "properties": {
                 "did": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_DID_BYTES,
                     "description": "The DID to list bailments for."
                 },
                 "status_filter": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_STATUS_FILTER_BYTES,
                     "enum": ["all", "active", "proposed", "terminated"],
                     "description": "Filter bailments by status (default: all)."
                 }
@@ -274,10 +312,8 @@ pub fn execute_list_bailments(params: &Value, _context: &NodeContext) -> ToolRes
         }
     };
 
-    if Did::new(did_str).is_err() {
-        return ToolResult::error(
-            json!({"error": format!("invalid DID format: {did_str}")}).to_string(),
-        );
+    if let Err(err) = parse_did_str(did_str, "did") {
+        return ToolResult::error(json!({"error": err}).to_string());
     }
 
     let filter = params
@@ -286,9 +322,14 @@ pub fn execute_list_bailments(params: &Value, _context: &NodeContext) -> ToolRes
         .unwrap_or("all");
 
     let valid_filters = ["all", "active", "proposed", "terminated"];
+    if let Err(err) =
+        validate_string_bytes(filter, "status_filter", MAX_CONSENT_STATUS_FILTER_BYTES)
+    {
+        return ToolResult::error(json!({"error": err}).to_string());
+    }
     if !valid_filters.contains(&filter) {
         return ToolResult::error(
-            json!({"error": format!("invalid status_filter: {filter}. Must be one of: all, active, proposed, terminated")}).to_string(),
+            json!({"error": "invalid status_filter. Must be one of: all, active, proposed, terminated"}).to_string(),
         );
     }
 
@@ -327,10 +368,12 @@ pub fn terminate_bailment_definition() -> ToolDefinition {
             "properties": {
                 "bailment_id": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_ID_BYTES,
                     "description": "The ID of the bailment to terminate."
                 },
                 "reason": {
                     "type": "string",
+                    "maxLength": MAX_CONSENT_REASON_BYTES,
                     "description": "Reason for termination."
                 }
             },
@@ -379,8 +422,14 @@ pub fn execute_terminate_bailment(params: &Value, _context: &NodeContext) -> Too
                 json!({"error": "bailment_id must not be empty"}).to_string(),
             );
         }
+        if let Err(err) = validate_string_bytes(bailment_id, "bailment_id", MAX_CONSENT_ID_BYTES) {
+            return ToolResult::error(json!({"error": err}).to_string());
+        }
         if reason.is_empty() {
             return ToolResult::error(json!({"error": "reason must not be empty"}).to_string());
+        }
+        if let Err(err) = validate_string_bytes(reason, "reason", MAX_CONSENT_REASON_BYTES) {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
 
         let response = json!({
@@ -401,6 +450,13 @@ pub fn execute_terminate_bailment(params: &Value, _context: &NodeContext) -> Too
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_text_omits_raw_input(text: &str, raw_input: &str) {
+        assert!(
+            !text.contains(raw_input),
+            "MCP error output must not reflect raw caller input: {text}"
+        );
+    }
 
     // -- propose_bailment --------------------------------------------------
 
@@ -462,6 +518,46 @@ mod tests {
             &NodeContext::empty(),
         );
         assert!(result.is_error);
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_propose_bailment_invalid_bailor_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-bailor-{attacker_marker}");
+        let result = execute_propose_bailment(
+            &json!({
+                "bailor_did": attacker_input,
+                "bailee_did": "did:exo:bob",
+                "scope": "data:medical",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("bailor"));
+    }
+
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    #[test]
+    fn execute_propose_bailment_invalid_bailee_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-bailee-{attacker_marker}");
+        let result = execute_propose_bailment(
+            &json!({
+                "bailor_did": "did:exo:alice",
+                "bailee_did": attacker_input,
+                "scope": "data:medical",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("bailee"));
     }
 
     #[test]
@@ -532,6 +628,24 @@ mod tests {
     }
 
     #[test]
+    fn execute_check_consent_invalid_actor_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-actor-{attacker_marker}");
+        let result = execute_check_consent(
+            &json!({
+                "actor_did": attacker_input,
+                "scope": "data:medical",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("actor"));
+    }
+
+    #[test]
     fn execute_check_consent_missing_scope() {
         let result = execute_check_consent(
             &json!({
@@ -595,12 +709,44 @@ mod tests {
     }
 
     #[test]
+    fn execute_list_bailments_invalid_did_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-did-{attacker_marker}");
+        let result = execute_list_bailments(
+            &json!({
+                "did": attacker_input,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("DID"));
+    }
+
+    #[test]
     fn execute_list_bailments_invalid_filter() {
         let result = execute_list_bailments(
             &json!({"did": "did:exo:alice", "status_filter": "invalid_filter"}),
             &NodeContext::empty(),
         );
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn execute_list_bailments_invalid_filter_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("invalid-{attacker_marker}");
+        let result = execute_list_bailments(
+            &json!({"did": "did:exo:alice", "status_filter": attacker_input}),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("status_filter"));
     }
 
     // -- terminate_bailment ------------------------------------------------
