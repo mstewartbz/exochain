@@ -478,8 +478,10 @@ fn verify_inner(
     let recomputed = compute_bundle_hash(bundle)?;
     let hash_valid = recomputed == bundle.bundle_hash;
 
-    let event_chain_valid = validate_event_ordering(&bundle.events).is_ok();
-    let causal_order_valid = validate_causal_chain(&bundle.events).is_ok();
+    validate_event_ordering(&bundle.events)?;
+    validate_causal_chain(&bundle.events)?;
+    let event_chain_valid = true;
+    let causal_order_valid = true;
 
     let signatures_valid: Vec<SignatureCheck> = bundle
         .signatures
@@ -1129,6 +1131,26 @@ mod tests {
         assert!(result.event_chain_valid);
         assert!(result.causal_order_valid);
         assert!(result.overall);
+    }
+
+    #[test]
+    fn verify_returns_error_for_structurally_invalid_event_ordering() {
+        let mut bundle = assemble_minimal();
+        bundle.events[0].sequence = 1;
+
+        let err = verify(&bundle).unwrap_err();
+
+        assert!(err.to_string().contains("expected 0"));
+    }
+
+    #[test]
+    fn verify_returns_error_for_structurally_invalid_causal_chain() {
+        let mut bundle = assemble_minimal();
+        bundle.events[0].parent_hashes = vec![Hash256::digest(b"phantom-parent")];
+
+        let err = verify(&bundle).unwrap_err();
+
+        assert!(err.to_string().contains("genesis event"));
     }
 
     #[test]
