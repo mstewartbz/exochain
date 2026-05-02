@@ -44,7 +44,8 @@ use std::{
 };
 
 use exo_core::{
-    Hash256, PublicKey, Signature,
+    PublicKey, Signature,
+    hash::hash_structured,
     types::{Did, Timestamp},
 };
 use exo_gatekeeper::{
@@ -59,6 +60,7 @@ use exo_gatekeeper::{
         PermissionSet, Provenance, Role,
     },
 };
+use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -373,6 +375,14 @@ pub fn create_infrastructure_kernel() -> Kernel {
 /// Infrastructure Holons operate under the Executive branch with
 /// read-only + recommend permissions. They cannot self-grant or
 /// modify the kernel.
+#[derive(Serialize)]
+struct InfrastructureHolonStepActionPayload<'a> {
+    domain: &'static str,
+    holon_id: &'a Did,
+    holon_state: HolonState,
+    capabilities: &'a PermissionSet,
+}
+
 fn signed_authority_link(
     holon: &Holon,
     config: &HolonManagerConfig,
@@ -397,9 +407,15 @@ fn signed_provenance(
     provenance_timestamp: Timestamp,
 ) -> Result<Provenance, String> {
     let timestamp = provenance_timestamp.to_string();
-    let action_hash = Hash256::digest(format!("infrastructure-holon-step:{}", holon.id).as_bytes())
-        .as_bytes()
-        .to_vec();
+    let action_hash = hash_structured(&InfrastructureHolonStepActionPayload {
+        domain: "exo.node.infrastructure_holon.step_action.v1",
+        holon_id: &holon.id,
+        holon_state: holon.state,
+        capabilities: &holon.capabilities,
+    })
+    .map_err(|err| format!("failed to encode Holon provenance action hash payload: {err}"))?
+    .as_bytes()
+    .to_vec();
     let mut provenance = Provenance {
         actor: holon.id.clone(),
         timestamp,
@@ -951,6 +967,24 @@ mod tests {
         assert!(
             !src.contains(&forbidden_timestamp),
             "Holon provenance must use caller-supplied deterministic HLC metadata, not a hardcoded timestamp"
+        );
+    }
+
+    #[test]
+    fn holon_provenance_action_hash_uses_structured_payload() {
+        let source = include_str!("holons.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+
+        assert!(
+            !production.contains("Hash256::digest(format!"),
+            "Holon provenance action hashes must not use raw formatted string hashing"
+        );
+        assert!(
+            production.contains("hash_structured"),
+            "Holon provenance action hashes must use canonical structured hashing"
         );
     }
 
