@@ -18,6 +18,9 @@ use crate::mcp::{
 
 const MCP_CGR_PROOF_INITIATIVE: &str = "Initiatives/fix-mcp-cgr-proof-verification-stub.md";
 const MAX_MERKLE_PROOF_LEAVES: usize = 1024;
+const CGR_PROOF_HASH_HEX_CHARS: usize = 64;
+const MAX_CGR_INVARIANTS_CHECKED: usize = 16;
+const MAX_CGR_INVARIANT_NAME_BYTES: usize = 128;
 
 fn tool_error(message: impl Into<String>) -> ToolResult {
     let message = message.into();
@@ -118,6 +121,63 @@ fn parse_hash256_hex(value: &str, name: &str) -> std::result::Result<Hash256, To
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&decoded);
     Ok(Hash256::from_bytes(bytes))
+}
+
+fn required_hash256_hex_claim(params: &Value, name: &str) -> std::result::Result<(), ToolResult> {
+    let value = match params.get(name).and_then(Value::as_str) {
+        Some(value) => value,
+        None => return Err(tool_error(format!("missing required parameter: {name}"))),
+    };
+
+    if value.len() != CGR_PROOF_HASH_HEX_CHARS {
+        return Err(tool_error(format!(
+            "{name} must be exactly {CGR_PROOF_HASH_HEX_CHARS} hex characters"
+        )));
+    }
+
+    if !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(tool_error(format!("{name} must be valid hexadecimal")));
+    }
+
+    Ok(())
+}
+
+fn required_bounded_string_array_len(
+    params: &Value,
+    name: &str,
+    max_items: usize,
+    max_item_bytes: usize,
+) -> std::result::Result<usize, ToolResult> {
+    let items = match params.get(name).and_then(Value::as_array) {
+        Some(items) => items,
+        None => {
+            return Err(tool_error(format!(
+                "missing required parameter: {name} (must be an array)"
+            )));
+        }
+    };
+
+    if items.len() > max_items {
+        return Err(tool_error(format!(
+            "{name} may contain at most {max_items} entries"
+        )));
+    }
+
+    for (index, item) in items.iter().enumerate() {
+        let Some(value) = item.as_str() else {
+            return Err(tool_error(format!("{name}[{index}] must be a string")));
+        };
+        if value.trim().is_empty() {
+            return Err(tool_error(format!("{name}[{index}] must not be empty")));
+        }
+        if value.len() > max_item_bytes {
+            return Err(tool_error(format!(
+                "{name}[{index}] may contain at most {max_item_bytes} bytes"
+            )));
+        }
+    }
+
+    Ok(items.len())
 }
 
 fn final_custodian(evidence: &exo_legal::evidence::Evidence) -> &Did {
@@ -622,11 +682,17 @@ pub fn verify_cgr_proof_definition() -> ToolDefinition {
             "properties": {
                 "proof_hash": {
                     "type": "string",
+                    "minLength": CGR_PROOF_HASH_HEX_CHARS,
+                    "maxLength": CGR_PROOF_HASH_HEX_CHARS,
                     "description": "Hex-encoded hash claim for the CGR proof. Hash-only verification is refused."
                 },
                 "invariants_checked": {
                     "type": "array",
-                    "items": { "type": "string" },
+                    "items": {
+                        "type": "string",
+                        "maxLength": MAX_CGR_INVARIANT_NAME_BYTES
+                    },
+                    "maxItems": MAX_CGR_INVARIANTS_CHECKED,
                     "description": "Caller-declared invariant names. These are not accepted as proof of verification."
                 },
                 "verified_at_ms": {
@@ -643,48 +709,29 @@ pub fn verify_cgr_proof_definition() -> ToolDefinition {
 /// Execute the `exochain_verify_cgr_proof` tool.
 #[must_use]
 pub fn execute_verify_cgr_proof(params: &Value, _context: &NodeContext) -> ToolResult {
-    let proof_hash = match params.get("proof_hash").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: proof_hash"}).to_string(),
-            );
-        }
+    if let Err(result) = required_hash256_hex_claim(params, "proof_hash") {
+        return result;
     };
-    let invariants = match params.get("invariants_checked").and_then(Value::as_array) {
-        Some(arr) => arr,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: invariants_checked (must be an array)"})
-                    .to_string(),
-            );
-        }
+    let invariant_count = match required_bounded_string_array_len(
+        params,
+        "invariants_checked",
+        MAX_CGR_INVARIANTS_CHECKED,
+        MAX_CGR_INVARIANT_NAME_BYTES,
+    ) {
+        Ok(count) => count,
+        Err(result) => return result,
     };
     let verified_at_ms = match required_nonzero_u64(params, "verified_at_ms") {
         Ok(value) => value,
         Err(result) => return result,
     };
 
-    // Validate hex format.
-    if hex::decode(proof_hash).is_err() {
-        return ToolResult::error(
-            json!({"error": "invalid proof_hash: not valid hexadecimal"}).to_string(),
-        );
-    }
-
-    let invariant_names: Vec<String> = invariants
-        .iter()
-        .filter_map(Value::as_str)
-        .map(String::from)
-        .collect();
-
     ToolResult::error(
         json!({
             "error": format!(
                 "CGR proof verification is unavailable: exochain_verify_cgr_proof has no proof bytes, public inputs, checkpoint root, validator signature set, or production CGR proof verifier wired; refusing hash-only verification claims. See {MCP_CGR_PROOF_INITIATIVE}."
             ),
-            "proof_hash": proof_hash,
-            "invariants_requested": invariant_names,
+            "invariant_count": invariant_count,
             "refused_at": format!("{}:0", verified_at_ms),
             "initiative": MCP_CGR_PROOF_INITIATIVE,
         })
@@ -1096,9 +1143,31 @@ mod tests {
     }
 
     #[test]
+    fn verify_cgr_proof_definition_bounds_inputs() {
+        let def = verify_cgr_proof_definition();
+
+        assert_eq!(
+            def.input_schema["properties"]["proof_hash"]["minLength"],
+            64
+        );
+        assert_eq!(
+            def.input_schema["properties"]["proof_hash"]["maxLength"],
+            64
+        );
+        assert_eq!(
+            def.input_schema["properties"]["invariants_checked"]["maxItems"],
+            16
+        );
+        assert_eq!(
+            def.input_schema["properties"]["invariants_checked"]["items"]["maxLength"],
+            128
+        );
+    }
+
+    #[test]
     fn execute_verify_cgr_proof_refuses_hash_only_claims() {
         let params = json!({
-            "proof_hash": "abcdef01",
+            "proof_hash": "ab".repeat(32),
             "invariants_checked": ["consent_required", "no_self_dealing"],
             "verified_at_ms": 1700000000002_u64,
         });
@@ -1112,10 +1181,76 @@ mod tests {
     }
 
     #[test]
+    fn execute_verify_cgr_proof_rejects_oversized_hash_without_echoing() {
+        let oversized_hash = "ab".repeat(4096);
+        let result = execute_verify_cgr_proof(
+            &json!({
+                "proof_hash": oversized_hash,
+                "invariants_checked": [],
+                "verified_at_ms": 1700000000002_u64,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("proof_hash must be exactly 64 hex characters"));
+        assert!(
+            !text.contains(&oversized_hash),
+            "validation errors must not reflect unbounded proof_hash input"
+        );
+    }
+
+    #[test]
+    fn execute_verify_cgr_proof_rejects_excessive_invariants_without_echoing() {
+        let invariants: Vec<String> = (0..=16)
+            .map(|idx| format!("SensitiveInvariantName{idx}"))
+            .collect();
+        let result = execute_verify_cgr_proof(
+            &json!({
+                "proof_hash": "ab".repeat(32),
+                "invariants_checked": invariants,
+                "verified_at_ms": 1700000000002_u64,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("invariants_checked may contain at most 16 entries"));
+        assert!(
+            !text.contains("SensitiveInvariantName16"),
+            "validation errors must not reflect unbounded invariant names"
+        );
+    }
+
+    #[test]
+    fn execute_verify_cgr_proof_refusal_does_not_echo_caller_inputs() {
+        let proof_hash = "cd".repeat(32);
+        let invariant_name = "SensitiveTenantSpecificInvariant";
+        let result = execute_verify_cgr_proof(
+            &json!({
+                "proof_hash": proof_hash,
+                "invariants_checked": [invariant_name],
+                "verified_at_ms": 1700000000002_u64,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(!text.contains(&proof_hash));
+        assert!(!text.contains(invariant_name));
+        let v: Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(v["invariant_count"], 1);
+    }
+
+    #[test]
     fn execute_verify_cgr_proof_invalid_hex() {
-        let params = json!({"proof_hash": "zzzz", "invariants_checked": [], "verified_at_ms": 1700000000002_u64});
+        let params = json!({"proof_hash": "zz".repeat(32), "invariants_checked": [], "verified_at_ms": 1700000000002_u64});
         let result = execute_verify_cgr_proof(&params, &NodeContext::empty());
         assert!(result.is_error);
+        assert!(result.content[0].text().contains("valid hexadecimal"));
     }
 
     #[test]
