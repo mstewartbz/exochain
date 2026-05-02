@@ -66,7 +66,10 @@ impl KanbanBoard {
     /// Total cases across all columns.
     #[must_use]
     pub fn total_cases(&self) -> usize {
-        self.columns.values().map(|v| v.len()).sum()
+        self.columns
+            .values()
+            .map(Vec::len)
+            .fold(0usize, usize::saturating_add)
     }
 }
 
@@ -197,5 +200,18 @@ mod tests {
         );
         assert_eq!(KanbanColumn::InProgress.to_string(), "InProgress");
         assert_eq!(KanbanColumn::Resolved.to_string(), "Resolved");
+    }
+
+    #[test]
+    fn production_total_case_count_has_no_unchecked_sum() {
+        let production = include_str!("kanban.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(".sum()"),
+            "production kanban counters must use explicit saturating accumulation"
+        );
     }
 }

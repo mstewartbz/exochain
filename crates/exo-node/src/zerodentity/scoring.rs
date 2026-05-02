@@ -517,7 +517,7 @@ pub(crate) fn compute_symmetry(axes: &[u32; 8]) -> u32 {
             let diff = u128::from(a.abs_diff(mean));
             diff * diff
         })
-        .sum();
+        .fold(0u128, u128::saturating_add);
     let variance = u128_to_u64_saturating(variance_sum / 8);
     let std_dev = u64_to_u32_saturating(isqrt(variance));
     let cv_bp = u64_to_u32_saturating(u64::from(std_dev).saturating_mul(10_000) / u64::from(mean));
@@ -940,6 +940,19 @@ mod tests {
         assert!(
             score.axes.behavioral_signature > 0,
             "feature-on build must preserve existing behavioral scoring"
+        );
+    }
+
+    #[test]
+    fn production_symmetry_has_no_unchecked_sum() {
+        let production = include_str!("scoring.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(".sum()"),
+            "production 0dentity scoring must use explicit bounded accumulation"
         );
     }
 }

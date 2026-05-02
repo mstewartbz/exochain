@@ -71,7 +71,7 @@ pub fn histogram_similarity(a: &[u32], b: &[u32]) -> u32 {
             let bi = u64::from(b.get(i).copied().unwrap_or(0));
             ai.min(bi)
         })
-        .sum();
+        .fold(0u64, u64::saturating_add);
 
     let sum_max: u64 = (0..len)
         .map(|i| {
@@ -79,7 +79,7 @@ pub fn histogram_similarity(a: &[u32], b: &[u32]) -> u32 {
             let bi = u64::from(b.get(i).copied().unwrap_or(0));
             ai.max(bi)
         })
-        .sum();
+        .fold(0u64, u64::saturating_add);
 
     if sum_max == 0 {
         return 10_000; // all zeros = trivially identical
@@ -119,7 +119,7 @@ pub fn compute_baseline_similarity(
                 s.sample_hash.as_bytes(),
             ))
         })
-        .sum();
+        .fold(0u64, u64::saturating_add);
 
     Some(u32::try_from(sum / u64::try_from(matching.len()).unwrap_or(1)).unwrap_or(u32::MAX))
 }
@@ -138,12 +138,12 @@ fn byte_similarity(a: &[u8; 32], b: &[u8; 32]) -> u32 {
         .iter()
         .zip(b.iter())
         .map(|(&ai, &bi)| u32::from(ai.min(bi)))
-        .sum();
+        .fold(0u32, u32::saturating_add);
     let sum_max: u32 = a
         .iter()
         .zip(b.iter())
         .map(|(&ai, &bi)| u32::from(ai.max(bi)))
-        .sum();
+        .fold(0u32, u32::saturating_add);
     if sum_max == 0 {
         return 10_000;
     }
@@ -278,5 +278,18 @@ mod tests {
     fn byte_similarity_identical() {
         let h = hash(b"identical");
         assert_eq!(byte_similarity(h.as_bytes(), h.as_bytes()), 10_000);
+    }
+
+    #[test]
+    fn production_behavioral_similarity_has_no_unchecked_sum() {
+        let production = include_str!("behavioral.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains(".sum()"),
+            "production behavioral scoring must use explicit saturating accumulation"
+        );
     }
 }
