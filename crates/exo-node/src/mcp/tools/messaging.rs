@@ -1,15 +1,26 @@
-//! Messaging MCP tools — encrypted message sending, receiving, and
-//! afterlife (death trigger) message configuration.
+//! Messaging MCP tools.
+//!
+//! These endpoints intentionally fail closed until the node has a real
+//! encrypted-message backend with key resolution, storage, and transport.
 
-use exo_core::Did;
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
-use exo_core::{Hash256, hash::hash_structured};
 use serde_json::{Value, json};
 
 use crate::mcp::{
     context::NodeContext,
     protocol::{ToolDefinition, ToolResult},
 };
+
+fn messaging_delivery_unavailable(tool_name: &str) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_messaging_delivery_unavailable",
+            "tool": tool_name,
+            "message": "Encrypted MCP messaging requires a real message store, sender signing-key resolver, recipient X25519 key resolver, and delivery transport. This node fails closed instead of simulating encryption, hashing plaintext, or returning delivery-shaped success.",
+            "status": "refused",
+        })
+        .to_string(),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // exochain_send_encrypted
@@ -20,7 +31,7 @@ use crate::mcp::{
 pub fn send_encrypted_definition() -> ToolDefinition {
     ToolDefinition {
         name: "exochain_send_encrypted".to_owned(),
-        description: "Send an end-to-end encrypted message from one DID to another. Returns the envelope ID and encryption metadata.".to_owned(),
+        description: "Fail-closed encrypted message delivery entry point. Current node builds reject this tool until a real message store, key resolver, and delivery transport are attached.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -38,7 +49,7 @@ pub fn send_encrypted_definition() -> ToolDefinition {
                 },
                 "plaintext": {
                     "type": "string",
-                    "description": "The plaintext message content to encrypt and send."
+                    "description": "Plaintext requested for encrypted delivery. Current node builds reject this input before hashing, storing, or transmitting it."
                 }
             },
             "required": ["sender_did", "recipient_did", "plaintext"],
@@ -49,97 +60,8 @@ pub fn send_encrypted_definition() -> ToolDefinition {
 
 /// Execute the `exochain_send_encrypted` tool.
 #[must_use]
-pub fn execute_send_encrypted(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        super::simulation_tool_refused(
-            "exochain_send_encrypted",
-            "Initiatives/fix-mcp-default-simulation-gates.md",
-            "This MCP tool currently simulates encrypted delivery by hashing \
-             plaintext without sending or storing an envelope. Build with \
-             `unaudited-mcp-simulation-tools` only for explicit dev simulation.",
-        )
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let sender_did_str = match params.get("sender_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: sender_did"}).to_string(),
-                );
-            }
-        };
-        let recipient_did_str = match params.get("recipient_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: recipient_did"}).to_string(),
-                );
-            }
-        };
-        let plaintext = match params.get("plaintext").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: plaintext"}).to_string(),
-                );
-            }
-        };
-
-        let content_type = params
-            .get("content_type")
-            .and_then(Value::as_str)
-            .unwrap_or("text/plain");
-
-        // Validate DIDs.
-        if Did::new(sender_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {sender_did_str}")}).to_string(),
-            );
-        }
-        if Did::new(recipient_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {recipient_did_str}")}).to_string(),
-            );
-        }
-
-        let envelope_id = match hash_structured(&(
-            "exo.mcp.messaging.envelope.v1",
-            sender_did_str,
-            recipient_did_str,
-            content_type,
-            plaintext,
-        )) {
-            Ok(hash) => hash,
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("envelope ID serialization failed: {e}")}).to_string(),
-                );
-            }
-        };
-
-        // Simulate encryption by hashing the plaintext (not real encryption).
-        let ciphertext_hash = Hash256::digest(plaintext.as_bytes());
-
-        let response = json!({
-            "envelope_id": envelope_id.to_string(),
-            "sender_did": sender_did_str,
-            "recipient_did": recipient_did_str,
-            "content_type": content_type,
-            "encryption": {
-                "algorithm": "X25519-XSalsa20-Poly1305",
-                "ciphertext_hash": ciphertext_hash.to_string(),
-                "plaintext_length": plaintext.len(),
-            },
-            "status": "sent",
-            "sent_at": Value::Null,
-            "sent_at_source": "simulation_no_delivery_timestamp",
-        });
-        ToolResult::success(response.to_string())
-    }
+pub fn execute_send_encrypted(_params: &Value, _context: &NodeContext) -> ToolResult {
+    messaging_delivery_unavailable("exochain_send_encrypted")
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +73,7 @@ pub fn execute_send_encrypted(params: &Value, _context: &NodeContext) -> ToolRes
 pub fn receive_encrypted_definition() -> ToolDefinition {
     ToolDefinition {
         name: "exochain_receive_encrypted".to_owned(),
-        description: "Decrypt and verify a received encrypted message by envelope ID.".to_owned(),
+        description: "Fail-closed encrypted message receive entry point. Current node builds reject this tool until a real message store and recipient key resolver are attached.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -172,43 +94,8 @@ pub fn receive_encrypted_definition() -> ToolDefinition {
 
 /// Execute the `exochain_receive_encrypted` tool.
 #[must_use]
-pub fn execute_receive_encrypted(params: &Value, _context: &NodeContext) -> ToolResult {
-    let envelope_id = match params.get("envelope_id").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: envelope_id"}).to_string(),
-            );
-        }
-    };
-    let recipient_did_str = match params.get("recipient_did").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: recipient_did"}).to_string(),
-            );
-        }
-    };
-
-    // Validate DID.
-    if Did::new(recipient_did_str).is_err() {
-        return ToolResult::error(
-            json!({"error": format!("invalid DID format: {recipient_did_str}")}).to_string(),
-        );
-    }
-
-    // In the current state we don't have a message store, so return a
-    // structured "not found" response.
-    let response = json!({
-        "envelope_id": envelope_id,
-        "recipient_did": recipient_did_str,
-        "decryption_status": "envelope_not_found",
-        "verified": false,
-        "checked_at": Value::Null,
-        "checked_at_source": "unavailable_no_message_store",
-        "note": "No message store is available in this node instance.",
-    });
-    ToolResult::success(response.to_string())
+pub fn execute_receive_encrypted(_params: &Value, _context: &NodeContext) -> ToolResult {
+    messaging_delivery_unavailable("exochain_receive_encrypted")
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +107,7 @@ pub fn execute_receive_encrypted(params: &Value, _context: &NodeContext) -> Tool
 pub fn configure_death_trigger_definition() -> ToolDefinition {
     ToolDefinition {
         name: "exochain_configure_death_trigger".to_owned(),
-        description: "Configure an afterlife message release trigger. The message will be delivered to the recipient when the trigger condition is met.".to_owned(),
+        description: "Fail-closed afterlife message trigger entry point. Current node builds reject this tool until real sealed-envelope storage and release transport are attached.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -254,113 +141,8 @@ pub fn configure_death_trigger_definition() -> ToolDefinition {
 
 /// Execute the `exochain_configure_death_trigger` tool.
 #[must_use]
-pub fn execute_configure_death_trigger(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        super::simulation_tool_refused(
-            "exochain_configure_death_trigger",
-            "Initiatives/fix-mcp-default-simulation-gates.md",
-            "This MCP tool currently returns simulated death-trigger configuration \
-             without storing a trigger or sealed envelope. Build with \
-             `unaudited-mcp-simulation-tools` only for explicit dev simulation.",
-        )
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let owner_did_str = match params.get("owner_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: owner_did"}).to_string(),
-                );
-            }
-        };
-        let recipient_did_str = match params.get("recipient_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: recipient_did"}).to_string(),
-                );
-            }
-        };
-        let message = match params.get("message").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: message"}).to_string(),
-                );
-            }
-        };
-        let trigger_type = match params.get("trigger_type").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: trigger_type"}).to_string(),
-                );
-            }
-        };
-
-        // Validate trigger type.
-        let valid_types = ["inactivity", "explicit", "date"];
-        if !valid_types.contains(&trigger_type) {
-            return ToolResult::error(
-                json!({"error": format!(
-                    "invalid trigger_type '{}': must be one of {:?}",
-                    trigger_type, valid_types
-                )})
-                .to_string(),
-            );
-        }
-
-        // Validate DIDs.
-        if Did::new(owner_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {owner_did_str}")}).to_string(),
-            );
-        }
-        if Did::new(recipient_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {recipient_did_str}")}).to_string(),
-            );
-        }
-
-        let trigger_params = params.get("trigger_params").cloned().unwrap_or(json!({}));
-
-        let trigger_id = match hash_structured(&(
-            "exo.mcp.messaging.death_trigger.v1",
-            owner_did_str,
-            recipient_did_str,
-            trigger_type,
-            &trigger_params,
-            message,
-        )) {
-            Ok(hash) => hash,
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("trigger ID serialization failed: {e}")}).to_string(),
-                );
-            }
-        };
-
-        // Hash the message for the sealed envelope.
-        let message_hash = Hash256::digest(message.as_bytes());
-
-        let response = json!({
-            "trigger_id": trigger_id.to_string(),
-            "owner_did": owner_did_str,
-            "recipient_did": recipient_did_str,
-            "trigger_type": trigger_type,
-            "trigger_params": trigger_params,
-            "message_hash": message_hash.to_string(),
-            "message_length": message.len(),
-            "status": "configured",
-            "configured_at": Value::Null,
-            "configured_at_source": "simulation_no_persistence_timestamp",
-        });
-        ToolResult::success(response.to_string())
-    }
+pub fn execute_configure_death_trigger(_params: &Value, _context: &NodeContext) -> ToolResult {
+    messaging_delivery_unavailable("exochain_configure_death_trigger")
 }
 
 // ===========================================================================
@@ -383,21 +165,19 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_send_encrypted_success() {
+    fn execute_send_encrypted_refuses_even_with_simulation_feature_enabled() {
         let params = json!({
             "sender_did": "did:exo:alice",
             "recipient_did": "did:exo:bob",
             "plaintext": "Hello, Bob!",
         });
         let result = execute_send_encrypted(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["sender_did"], "did:exo:alice");
-        assert_eq!(v["recipient_did"], "did:exo:bob");
-        assert_eq!(v["content_type"], "text/plain");
-        assert_eq!(v["status"], "sent");
-        assert!(v["envelope_id"].as_str().is_some());
-        assert_eq!(v["encryption"]["algorithm"], "X25519-XSalsa20-Poly1305");
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_messaging_delivery_unavailable"));
+        assert!(!text.contains("X25519-XSalsa20-Poly1305"));
+        assert!(!text.contains("ciphertext_hash"));
+        assert!(!text.contains("Hello, Bob!"));
     }
 
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
@@ -411,14 +191,14 @@ mod tests {
         let result = execute_send_encrypted(&params, &NodeContext::empty());
         assert!(result.is_error);
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("unaudited-mcp-simulation-tools"));
-        assert!(text.contains("fix-mcp-default-simulation-gates.md"));
+        assert!(text.contains("mcp_messaging_delivery_unavailable"));
+        assert!(text.contains("exochain_send_encrypted"));
+        assert!(!text.contains("Hello, Bob!"));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_send_encrypted_with_content_type() {
+    fn execute_send_encrypted_with_content_type_refuses_without_real_delivery() {
         let params = json!({
             "sender_did": "did:exo:alice",
             "recipient_did": "did:exo:bob",
@@ -426,9 +206,12 @@ mod tests {
             "plaintext": "{}",
         });
         let result = execute_send_encrypted(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["content_type"], "application/json");
+        assert!(result.is_error);
+        assert!(
+            result.content[0]
+                .text()
+                .contains("mcp_messaging_delivery_unavailable")
+        );
     }
 
     #[test]
@@ -467,12 +250,10 @@ mod tests {
             "recipient_did": "did:exo:bob",
         });
         let result = execute_receive_encrypted(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["envelope_id"], "env_abc123");
-        assert_eq!(v["decryption_status"], "envelope_not_found");
-        assert!(v["checked_at"].is_null());
-        assert_eq!(v["checked_at_source"], "unavailable_no_message_store");
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_messaging_delivery_unavailable"));
+        assert!(!text.contains("env_abc123"));
     }
 
     #[test]
@@ -483,6 +264,20 @@ mod tests {
         });
         let result = execute_receive_encrypted(&params, &NodeContext::empty());
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn execute_receive_encrypted_invalid_did_does_not_reflect_input() {
+        let malicious_did = "bad\n<script>alert(1)</script>";
+        let params = json!({
+            "envelope_id": "env_abc",
+            "recipient_did": malicious_did,
+        });
+        let result = execute_receive_encrypted(&params, &NodeContext::empty());
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(!text.contains(malicious_did));
+        assert!(!text.contains("<script>"));
     }
 
     #[test]
@@ -505,7 +300,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_configure_death_trigger_success() {
+    fn execute_configure_death_trigger_refuses_even_with_simulation_feature_enabled() {
         let params = json!({
             "owner_did": "did:exo:alice",
             "recipient_did": "did:exo:bob",
@@ -514,13 +309,12 @@ mod tests {
             "trigger_params": {"inactivity_days": 365},
         });
         let result = execute_configure_death_trigger(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["trigger_type"], "inactivity");
-        assert_eq!(v["status"], "configured");
-        assert!(v["trigger_id"].as_str().is_some());
-        assert!(v["message_hash"].as_str().is_some());
-        assert_eq!(v["trigger_params"]["inactivity_days"], 365);
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_messaging_delivery_unavailable"));
+        assert!(!text.contains("trigger_id"));
+        assert!(!text.contains("message_hash"));
+        assert!(!text.contains("If you are reading this"));
     }
 
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
@@ -536,9 +330,9 @@ mod tests {
         let result = execute_configure_death_trigger(&params, &NodeContext::empty());
         assert!(result.is_error);
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("unaudited-mcp-simulation-tools"));
-        assert!(text.contains("fix-mcp-default-simulation-gates.md"));
+        assert!(text.contains("mcp_messaging_delivery_unavailable"));
+        assert!(text.contains("exochain_configure_death_trigger"));
+        assert!(!text.contains("If you are reading this"));
     }
 
     #[test]
@@ -567,7 +361,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_configure_death_trigger_no_params() {
+    fn execute_configure_death_trigger_no_params_refuses_without_real_delivery() {
         let params = json!({
             "owner_did": "did:exo:alice",
             "recipient_did": "did:exo:bob",
@@ -575,8 +369,11 @@ mod tests {
             "trigger_type": "date",
         });
         let result = execute_configure_death_trigger(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["trigger_params"], json!({}));
+        assert!(result.is_error);
+        assert!(
+            result.content[0]
+                .text()
+                .contains("mcp_messaging_delivery_unavailable")
+        );
     }
 }
