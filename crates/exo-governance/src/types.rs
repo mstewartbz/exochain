@@ -11,6 +11,7 @@
 
 use exo_core::{Did, Hash256, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 /// Tenant identifier — opaque string, unique per organization.
 pub type TenantId = String;
@@ -23,7 +24,7 @@ pub type TenantId = String;
 pub const FINANCIAL_HUMAN_GATE_THRESHOLD_CENTS: u64 = 100_000;
 
 /// Semantic version for constitutional documents.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SemVer {
     pub major: u32,
     pub minor: u32,
@@ -46,6 +47,21 @@ impl SemVer {
         self.major == other.major
             && (self.minor > other.minor
                 || (self.minor == other.minor && self.patch >= other.patch))
+    }
+}
+
+impl Ord for SemVer {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.major
+            .cmp(&other.major)
+            .then_with(|| self.minor.cmp(&other.minor))
+            .then_with(|| self.patch.cmp(&other.patch))
+    }
+}
+
+impl PartialOrd for SemVer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -227,6 +243,32 @@ mod tests {
         assert!(v1.is_compatible_with(&v2));
         assert!(!v2.is_compatible_with(&v1));
         assert!(!v1.is_compatible_with(&v3));
+    }
+
+    #[test]
+    fn test_semver_ordering_is_explicit_precedence_not_compatibility() {
+        assert!(
+            SemVer::new(1, 10, 0) > SemVer::new(1, 2, 99),
+            "semantic precedence must compare numeric major, minor, then patch components"
+        );
+        assert!(
+            SemVer::new(2, 0, 0) > SemVer::new(1, u32::MAX, u32::MAX),
+            "major version precedence must dominate minor and patch components"
+        );
+        assert!(
+            !SemVer::new(2, 0, 0).is_compatible_with(&SemVer::new(1, u32::MAX, u32::MAX)),
+            "ordering precedence must not imply constitutional compatibility"
+        );
+
+        let source = include_str!("types.rs");
+        assert!(
+            !source.contains(concat!("Partial", "Ord, Ord")),
+            "SemVer ordering must be implemented explicitly instead of derived"
+        );
+        assert!(
+            source.contains(concat!("impl Ord", " for SemVer")),
+            "SemVer must document precedence through an explicit Ord implementation"
+        );
     }
 
     #[test]
