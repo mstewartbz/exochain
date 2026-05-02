@@ -292,11 +292,16 @@ impl McpServer {
             .unwrap_or_else(|| serde_json::json!({}));
 
         // Constitutional enforcement before tool execution.
-        if let Err(e) = self
+        if let Err(error) = self
             .middleware
             .enforce_tool_call(&self.actor_did, tool_name, params)
         {
-            let error_result = ToolResult::error(format!("Constitutional enforcement failed: {e}"));
+            tracing::warn!(
+                err = %error,
+                tool = %tool_name,
+                "MCP constitutional enforcement rejected tool call"
+            );
+            let error_result = ToolResult::error("constitutional enforcement failed");
             return match serde_json::to_value(&error_result) {
                 Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
                 Err(error) => {
@@ -794,6 +799,39 @@ mod tests {
             !production.contains("serialization error: {ser_err}"),
             "MCP tool-result serialization internals must be logged, not echoed to clients"
         );
+        assert!(
+            !production.contains("Constitutional enforcement failed: {e}"),
+            "MCP constitutional enforcement internals must be logged, not echoed to clients"
+        );
+    }
+
+    #[test]
+    fn handler_constitutional_enforcement_errors_do_not_echo_internal_details() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 500,
+            "method": "tools/call",
+            "params": {
+                "name": "exochain_node_status",
+                "arguments": {},
+                "constitutional_context": {
+                    "bcts_scope": "SensitiveTenantScopeShouldNotEcho"
+                }
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        let result = parsed.result.expect("tool result");
+        assert_eq!(result["is_error"], true);
+        let text = result["content"][0]["text"].as_str().expect("text content");
+
+        assert_eq!(text, "constitutional enforcement failed");
+        assert!(!text.contains("verified MCP invocation context"));
+        assert!(!text.contains("SensitiveTenantScopeShouldNotEcho"));
     }
 
     #[test]
