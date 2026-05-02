@@ -83,22 +83,20 @@ impl ConsentGate {
             actor: actor.clone(),
             action_type: action.into(),
         };
-        let active: Vec<ActiveConsent> = self
-            .consents
-            .get(actor.as_str())
-            .map(|regs| {
-                regs.iter()
-                    .filter(|r| bailment::is_active(&r.bailment, now))
-                    .map(|r| ActiveConsent {
-                        grantor: r.bailment.bailor_did.clone(),
-                        action_type: r.action_type.clone(),
-                        role: r.role.clone(),
-                        clearance_level: r.clearance_level,
-                        bailment: r.bailment.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let active: Vec<ActiveConsent> = match self.consents.get(actor.as_str()) {
+            Some(regs) => regs
+                .iter()
+                .filter(|r| bailment::is_active(&r.bailment, now))
+                .map(|r| ActiveConsent {
+                    grantor: r.bailment.bailor_did.clone(),
+                    action_type: r.action_type.clone(),
+                    role: r.role.clone(),
+                    clearance_level: r.clearance_level,
+                    bailment: r.bailment.clone(),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
 
         self.engine.evaluate(&self.policy, &active, &req, now)
     }
@@ -175,6 +173,28 @@ mod tests {
             g.check(&bob(), "read", &now()),
             ConsentDecision::Denied { .. }
         ));
+    }
+
+    #[test]
+    fn check_uses_explicit_default_deny_for_missing_actor_consent() {
+        let source = include_str!("gatekeeper.rs");
+        let check_source = source
+            .split("pub fn check(")
+            .nth(1)
+            .and_then(|section| section.split("    #[must_use]").next())
+            .expect("check function source must be present");
+
+        assert!(
+            !check_source.contains("unwrap_or_default"),
+            "missing consent registrations must flow through an explicit default-deny branch"
+        );
+        assert!(
+            matches!(
+                ConsentGate::new(strict_policy()).check(&charlie(), "read", &now()),
+                ConsentDecision::Denied { .. }
+            ),
+            "unregistered actors must remain denied"
+        );
     }
 
     #[test]
