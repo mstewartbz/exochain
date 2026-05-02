@@ -12,6 +12,10 @@ use crate::mcp::{
 };
 
 const MAX_IDENTITY_EVIDENCE_TYPES: usize = 32;
+const ED25519_PUBLIC_KEY_HEX_CHARS: usize = 64;
+const ED25519_SIGNATURE_HEX_CHARS: usize = 128;
+const MAX_SIGNATURE_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_SIGNATURE_MESSAGE_HEX_CHARS: usize = MAX_SIGNATURE_MESSAGE_BYTES * 2;
 
 #[cfg(feature = "unaudited-mcp-simulation-tools")]
 const SIMULATED_DID_HASH_PREFIX_CHARS: usize = 16;
@@ -68,6 +72,58 @@ fn identity_tool_refused(tool_name: &str, reason: &str) -> ToolResult {
         })
         .to_string(),
     )
+}
+
+fn hex_param_error(message: String) -> ToolResult {
+    ToolResult::error(json!({ "error": message }).to_string())
+}
+
+fn required_hex_param<'a>(params: &'a Value, field: &str) -> Result<&'a str, ToolResult> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| hex_param_error(format!("missing required parameter: {field}")))
+}
+
+fn decode_hex_param(field: &str, value: &str) -> Result<Vec<u8>, ToolResult> {
+    if value.len() % 2 != 0 {
+        return Err(hex_param_error(format!(
+            "{field} must contain an even number of hex characters"
+        )));
+    }
+    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(hex_param_error(format!("{field} must be valid hex")));
+    }
+    hex::decode(value).map_err(|_| hex_param_error(format!("{field} must be valid hex")))
+}
+
+fn decode_exact_hex_param(
+    params: &Value,
+    field: &str,
+    expected_hex_chars: usize,
+) -> Result<Vec<u8>, ToolResult> {
+    let value = required_hex_param(params, field)?;
+    if value.len() != expected_hex_chars {
+        return Err(hex_param_error(format!(
+            "{field} must be exactly {expected_hex_chars} hex characters"
+        )));
+    }
+    decode_hex_param(field, value)
+}
+
+fn decode_bounded_hex_param(
+    params: &Value,
+    field: &str,
+    max_hex_chars: usize,
+) -> Result<Vec<u8>, ToolResult> {
+    let value = required_hex_param(params, field)?;
+    if value.len() > max_hex_chars {
+        return Err(hex_param_error(format!(
+            "{field} length {} exceeds maximum {max_hex_chars} hex characters",
+            value.len()
+        )));
+    }
+    decode_hex_param(field, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,14 +377,19 @@ pub fn verify_signature_definition() -> ToolDefinition {
             "properties": {
                 "public_key_hex": {
                     "type": "string",
+                    "minLength": ED25519_PUBLIC_KEY_HEX_CHARS,
+                    "maxLength": ED25519_PUBLIC_KEY_HEX_CHARS,
                     "description": "Hex-encoded Ed25519 public key (32 bytes / 64 hex chars)."
                 },
                 "message_hex": {
                     "type": "string",
+                    "maxLength": MAX_SIGNATURE_MESSAGE_HEX_CHARS,
                     "description": "Hex-encoded message that was signed."
                 },
                 "signature_hex": {
                     "type": "string",
+                    "minLength": ED25519_SIGNATURE_HEX_CHARS,
+                    "maxLength": ED25519_SIGNATURE_HEX_CHARS,
                     "description": "Hex-encoded Ed25519 signature (64 bytes / 128 hex chars)."
                 }
             },
@@ -341,66 +402,21 @@ pub fn verify_signature_definition() -> ToolDefinition {
 /// Execute the `exochain_verify_signature` tool.
 #[must_use]
 pub fn execute_verify_signature(params: &Value, _context: &NodeContext) -> ToolResult {
-    let pk_hex = match params.get("public_key_hex").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: public_key_hex"}).to_string(),
-            );
-        }
-    };
-    let msg_hex = match params.get("message_hex").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: message_hex"}).to_string(),
-            );
-        }
-    };
-    let sig_hex = match params.get("signature_hex").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ToolResult::error(
-                json!({"error": "missing required parameter: signature_hex"}).to_string(),
-            );
-        }
-    };
-
-    let pk_bytes = match hex::decode(pk_hex) {
-        Ok(b) => b,
-        Err(e) => {
-            return ToolResult::error(
-                json!({"error": format!("invalid public_key_hex: {e}")}).to_string(),
-            );
-        }
-    };
-    let msg_bytes = match hex::decode(msg_hex) {
-        Ok(b) => b,
-        Err(e) => {
-            return ToolResult::error(
-                json!({"error": format!("invalid message_hex: {e}")}).to_string(),
-            );
-        }
-    };
-    let sig_bytes = match hex::decode(sig_hex) {
-        Ok(b) => b,
-        Err(e) => {
-            return ToolResult::error(
-                json!({"error": format!("invalid signature_hex: {e}")}).to_string(),
-            );
-        }
-    };
-
-    if pk_bytes.len() != 32 {
-        return ToolResult::error(
-            json!({"error": "public key must be exactly 32 bytes"}).to_string(),
-        );
-    }
-    if sig_bytes.len() != 64 {
-        return ToolResult::error(
-            json!({"error": "signature must be exactly 64 bytes"}).to_string(),
-        );
-    }
+    let pk_bytes =
+        match decode_exact_hex_param(params, "public_key_hex", ED25519_PUBLIC_KEY_HEX_CHARS) {
+            Ok(bytes) => bytes,
+            Err(error) => return error,
+        };
+    let msg_bytes =
+        match decode_bounded_hex_param(params, "message_hex", MAX_SIGNATURE_MESSAGE_HEX_CHARS) {
+            Ok(bytes) => bytes,
+            Err(error) => return error,
+        };
+    let sig_bytes =
+        match decode_exact_hex_param(params, "signature_hex", ED25519_SIGNATURE_HEX_CHARS) {
+            Ok(bytes) => bytes,
+            Err(error) => return error,
+        };
 
     let mut pk_arr = [0u8; 32];
     pk_arr.copy_from_slice(&pk_bytes);
@@ -761,6 +777,20 @@ mod tests {
     }
 
     #[test]
+    fn verify_signature_definition_bounds_hex_inputs() {
+        let def = verify_signature_definition();
+        let properties = def.input_schema["properties"]
+            .as_object()
+            .expect("properties object");
+
+        assert_eq!(properties["public_key_hex"]["minLength"], 64);
+        assert_eq!(properties["public_key_hex"]["maxLength"], 64);
+        assert_eq!(properties["message_hex"]["maxLength"], 128 * 1024);
+        assert_eq!(properties["signature_hex"]["minLength"], 128);
+        assert_eq!(properties["signature_hex"]["maxLength"], 128);
+    }
+
+    #[test]
     fn execute_verify_signature_valid() {
         let (pk, sk) = crypto::generate_keypair();
         let message = b"test message";
@@ -803,6 +833,45 @@ mod tests {
             &NodeContext::empty(),
         );
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn execute_verify_signature_rejects_oversized_message_without_echoing_it() {
+        let (pk, _sk) = crypto::generate_keypair();
+        let oversized = "aa".repeat((64 * 1024) + 1);
+        let result = execute_verify_signature(
+            &json!({
+                "public_key_hex": hex::encode(pk.as_bytes()),
+                "message_hex": oversized,
+                "signature_hex": hex::encode([0u8; 64]),
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("message_hex"));
+        assert!(text.contains("exceeds maximum"));
+        assert!(!text.contains("aaaaaa"));
+    }
+
+    #[test]
+    fn execute_verify_signature_rejects_oversized_key_without_echoing_it() {
+        let oversized = "aa".repeat(33);
+        let result = execute_verify_signature(
+            &json!({
+                "public_key_hex": oversized,
+                "message_hex": "00",
+                "signature_hex": hex::encode([0u8; 64]),
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("public_key_hex"));
+        assert!(text.contains("exactly 64 hex characters"));
+        assert!(!text.contains("aaaaaaaa"));
     }
 
     // -- get_passport ------------------------------------------------------
