@@ -11,6 +11,10 @@ use crate::mcp::{
 };
 
 const MAX_SAFE_HARBOR_INTERESTED_PARTIES: usize = 1_000;
+const MAX_LEGAL_DID_BYTES: usize = 512;
+const MAX_LEGAL_ID_BYTES: usize = 256;
+const MAX_LEGAL_QUERY_BYTES: usize = 4 * 1024;
+const MAX_LEGAL_TEXT_BYTES: usize = 16 * 1024;
 
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 const MCP_LEGAL_SIMULATION_INITIATIVE: &str = "Initiatives/fix-mcp-legal-simulation-tools.md";
@@ -28,12 +32,16 @@ fn legal_simulation_refused(tool_name: &str) -> ToolResult {
 }
 
 #[cfg(feature = "unaudited-mcp-simulation-tools")]
-fn required_nonempty_str<'a>(
+fn required_bounded_nonempty_str<'a>(
     params: &'a Value,
     name: &str,
+    max_bytes: usize,
 ) -> std::result::Result<&'a str, ToolResult> {
     match params.get(name).and_then(Value::as_str) {
-        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(value) if !value.trim().is_empty() => {
+            validate_bounded_str(value, name, max_bytes)?;
+            Ok(value)
+        }
         Some(_) => Err(ToolResult::error(
             json!({"error": format!("{name} must not be empty")}).to_string(),
         )),
@@ -41,6 +49,49 @@ fn required_nonempty_str<'a>(
             json!({"error": format!("missing required parameter: {name}")}).to_string(),
         )),
     }
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn optional_bounded_str<'a>(
+    params: &'a Value,
+    name: &str,
+    max_bytes: usize,
+) -> std::result::Result<Option<&'a str>, ToolResult> {
+    let Some(value) = params.get(name) else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(ToolResult::error(
+            json!({"error": format!("{name} must be a string")}).to_string(),
+        ));
+    };
+    validate_bounded_str(raw, name, max_bytes)?;
+    Ok(Some(raw))
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn validate_bounded_str(
+    value: &str,
+    name: &str,
+    max_bytes: usize,
+) -> std::result::Result<(), ToolResult> {
+    if value.len() > max_bytes {
+        return Err(ToolResult::error(
+            json!({"error": format!("{name} may contain at most {max_bytes} bytes")}).to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "unaudited-mcp-simulation-tools")]
+fn required_did_str<'a>(params: &'a Value, name: &str) -> std::result::Result<&'a str, ToolResult> {
+    let raw = required_bounded_nonempty_str(params, name, MAX_LEGAL_DID_BYTES)?;
+    if Did::new(raw).is_err() {
+        return Err(ToolResult::error(
+            json!({"error": format!("invalid {name} DID format")}).to_string(),
+        ));
+    }
+    Ok(raw)
 }
 
 #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -71,22 +122,27 @@ pub fn ediscovery_search_definition() -> ToolDefinition {
             "properties": {
                 "query": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_QUERY_BYTES,
                     "description": "Search query string."
                 },
                 "scope": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Optional scope restriction (e.g. \"emails\", \"contracts\", \"all\")."
                 },
                 "date_range_start": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Optional ISO-8601 start date for the search window."
                 },
                 "date_range_end": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Optional ISO-8601 end date for the search window."
                 },
                 "search_id": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Caller-supplied non-placeholder search ID."
                 },
                 "searched_at_ms": {
@@ -111,17 +167,17 @@ pub fn execute_ediscovery_search(params: &Value, _context: &NodeContext) -> Tool
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let query = match params.get("query").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: query"}).to_string(),
-                );
-            }
+        let query = match required_bounded_nonempty_str(params, "query", MAX_LEGAL_QUERY_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
 
-        let scope = params.get("scope").and_then(Value::as_str).unwrap_or("all");
-        let search_id = match required_nonempty_str(params, "search_id") {
+        let scope = match optional_bounded_str(params, "scope", MAX_LEGAL_ID_BYTES) {
+            Ok(value) => value.unwrap_or("all"),
+            Err(result) => return result,
+        };
+        let search_id = match required_bounded_nonempty_str(params, "search_id", MAX_LEGAL_ID_BYTES)
+        {
             Ok(value) => value,
             Err(result) => return result,
         };
@@ -129,14 +185,16 @@ pub fn execute_ediscovery_search(params: &Value, _context: &NodeContext) -> Tool
             Ok(value) => value,
             Err(result) => return result,
         };
-        let date_range_start = params
-            .get("date_range_start")
-            .and_then(Value::as_str)
-            .map(String::from);
-        let date_range_end = params
-            .get("date_range_end")
-            .and_then(Value::as_str)
-            .map(String::from);
+        let date_range_start =
+            match optional_bounded_str(params, "date_range_start", MAX_LEGAL_ID_BYTES) {
+                Ok(value) => value.map(String::from),
+                Err(result) => return result,
+            };
+        let date_range_end =
+            match optional_bounded_str(params, "date_range_end", MAX_LEGAL_ID_BYTES) {
+                Ok(value) => value.map(String::from),
+                Err(result) => return result,
+            };
 
         let response = json!({
             "search_id": search_id,
@@ -173,19 +231,23 @@ pub fn assert_privilege_definition() -> ToolDefinition {
             "properties": {
                 "evidence_id": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "ID of the evidence to assert privilege over."
                 },
                 "privilege_type": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "enum": ["attorney_client", "work_product", "deliberative"],
                     "description": "Type of privilege to assert."
                 },
                 "asserter_did": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_DID_BYTES,
                     "description": "DID of the person asserting privilege."
                 },
                 "assertion_id": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Caller-supplied non-placeholder privilege assertion ID."
                 },
                 "asserted_at_ms": {
@@ -210,34 +272,25 @@ pub fn execute_assert_privilege(params: &Value, _context: &NodeContext) -> ToolR
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let evidence_id = match params.get("evidence_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: evidence_id"}).to_string(),
-                );
-            }
-        };
-        let privilege_type = match params.get("privilege_type").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: privilege_type"}).to_string(),
-                );
-            }
-        };
-        let asserter_did_str = match params.get("asserter_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: asserter_did"}).to_string(),
-                );
-            }
-        };
-        let assertion_id = match required_nonempty_str(params, "assertion_id") {
+        let evidence_id =
+            match required_bounded_nonempty_str(params, "evidence_id", MAX_LEGAL_ID_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+        let privilege_type =
+            match required_bounded_nonempty_str(params, "privilege_type", MAX_LEGAL_ID_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+        let asserter_did_str = match required_did_str(params, "asserter_did") {
             Ok(value) => value,
             Err(result) => return result,
         };
+        let assertion_id =
+            match required_bounded_nonempty_str(params, "assertion_id", MAX_LEGAL_ID_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
         let asserted_at_ms = match required_nonzero_u64(params, "asserted_at_ms") {
             Ok(value) => value,
             Err(result) => return result,
@@ -247,18 +300,11 @@ pub fn execute_assert_privilege(params: &Value, _context: &NodeContext) -> ToolR
         let valid_types = ["attorney_client", "work_product", "deliberative"];
         if !valid_types.contains(&privilege_type) {
             return ToolResult::error(
-                json!({"error": format!(
-                    "invalid privilege_type '{}': must be one of {:?}",
-                    privilege_type, valid_types
-                )})
+                json!({
+                    "error": "invalid privilege_type",
+                    "allowed": valid_types,
+                })
                 .to_string(),
-            );
-        }
-
-        // Validate DID.
-        if Did::new(asserter_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {asserter_did_str}")}).to_string(),
             );
         }
 
@@ -289,20 +335,23 @@ pub fn initiate_safe_harbor_definition() -> ToolDefinition {
             "properties": {
                 "initiator_did": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_DID_BYTES,
                     "description": "DID of the person initiating the safe harbor process."
                 },
                 "transaction_description": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_TEXT_BYTES,
                     "description": "Description of the transaction requiring safe harbor."
                 },
                 "interested_parties": {
                     "type": "array",
-                    "items": { "type": "string" },
+                    "items": { "type": "string", "maxLength": MAX_LEGAL_DID_BYTES },
                     "maxItems": MAX_SAFE_HARBOR_INTERESTED_PARTIES,
                     "description": "Array of DID strings for the interested parties."
                 },
                 "process_id": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Caller-supplied non-placeholder safe-harbor process ID."
                 },
                 "initiated_at_ms": {
@@ -327,25 +376,17 @@ pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> T
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let initiator_did_str = match params.get("initiator_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: initiator_did"}).to_string(),
-                );
-            }
+        let initiator_did_str = match required_did_str(params, "initiator_did") {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let transaction_description = match params
-            .get("transaction_description")
-            .and_then(Value::as_str)
-        {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: transaction_description"})
-                        .to_string(),
-                );
-            }
+        let transaction_description = match required_bounded_nonempty_str(
+            params,
+            "transaction_description",
+            MAX_LEGAL_TEXT_BYTES,
+        ) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
         let interested_parties = match params.get("interested_parties").and_then(Value::as_array) {
             Some(arr) => arr,
@@ -366,32 +407,30 @@ pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> T
                 .to_string(),
             );
         }
-        let process_id = match required_nonempty_str(params, "process_id") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
+        let process_id =
+            match required_bounded_nonempty_str(params, "process_id", MAX_LEGAL_ID_BYTES) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
         let initiated_at_ms = match required_nonzero_u64(params, "initiated_at_ms") {
             Ok(value) => value,
             Err(result) => return result,
         };
-
-        // Validate initiator DID.
-        if Did::new(initiator_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {initiator_did_str}")}).to_string(),
-            );
-        }
 
         // Validate each interested party DID.
         let mut party_dids: Vec<String> = Vec::with_capacity(interested_parties.len());
         for (i, party) in interested_parties.iter().enumerate() {
             match party.as_str() {
                 Some(s) => {
+                    let field = format!("interested_parties[{i}]");
+                    if let Err(result) = validate_bounded_str(s, &field, MAX_LEGAL_DID_BYTES) {
+                        return result;
+                    }
                     if Did::new(s).is_err() {
                         return ToolResult::error(
-                        json!({"error": format!("invalid DID at interested_parties[{i}]: {s}")})
-                            .to_string(),
-                    );
+                            json!({"error": format!("invalid DID at interested_parties[{i}]")})
+                                .to_string(),
+                        );
                     }
                     party_dids.push(s.to_owned());
                 }
@@ -442,18 +481,22 @@ pub fn check_fiduciary_duty_definition() -> ToolDefinition {
             "properties": {
                 "actor_did": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_DID_BYTES,
                     "description": "DID of the actor whose fiduciary duty is being assessed."
                 },
                 "action": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_TEXT_BYTES,
                     "description": "Description of the proposed action."
                 },
                 "beneficiary_did": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_DID_BYTES,
                     "description": "DID of the beneficiary owed the fiduciary duty."
                 },
                 "check_id": {
                     "type": "string",
+                    "maxLength": MAX_LEGAL_ID_BYTES,
                     "description": "Caller-supplied non-placeholder fiduciary check ID."
                 },
                 "checked_at_ms": {
@@ -478,31 +521,19 @@ pub fn execute_check_fiduciary_duty(params: &Value, _context: &NodeContext) -> T
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     {
-        let actor_did_str = match params.get("actor_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: actor_did"}).to_string(),
-                );
-            }
+        let actor_did_str = match required_did_str(params, "actor_did") {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let action = match params.get("action").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: action"}).to_string(),
-                );
-            }
+        let action = match required_bounded_nonempty_str(params, "action", MAX_LEGAL_TEXT_BYTES) {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let beneficiary_did_str = match params.get("beneficiary_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: beneficiary_did"}).to_string(),
-                );
-            }
+        let beneficiary_did_str = match required_did_str(params, "beneficiary_did") {
+            Ok(value) => value,
+            Err(result) => return result,
         };
-        let check_id = match required_nonempty_str(params, "check_id") {
+        let check_id = match required_bounded_nonempty_str(params, "check_id", MAX_LEGAL_ID_BYTES) {
             Ok(value) => value,
             Err(result) => return result,
         };
@@ -510,18 +541,6 @@ pub fn execute_check_fiduciary_duty(params: &Value, _context: &NodeContext) -> T
             Ok(value) => value,
             Err(result) => return result,
         };
-
-        // Validate DIDs.
-        if Did::new(actor_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {actor_did_str}")}).to_string(),
-            );
-        }
-        if Did::new(beneficiary_did_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid DID format: {beneficiary_did_str}")}).to_string(),
-            );
-        }
 
         // Assess fiduciary duties: loyalty, care, good faith.
         let duties = vec![
@@ -888,6 +907,72 @@ mod tests {
         });
         let result = execute_check_fiduciary_duty(&params, &NodeContext::empty());
         assert_legal_simulation_refused(result, "exochain_check_fiduciary_duty");
+    }
+
+    #[test]
+    fn feature_gated_legal_errors_do_not_reflect_raw_untrusted_dids() {
+        let source = include_str!("legal.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("tests marker present");
+        for needle in [
+            "invalid DID format: {asserter_did_str}",
+            "invalid DID format: {initiator_did_str}",
+            "invalid DID at interested_parties[{i}]: {s}",
+            "invalid DID format: {actor_did_str}",
+            "invalid DID format: {beneficiary_did_str}",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "legal MCP tool errors must not reflect raw DID input: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_gated_legal_tools_bound_untrusted_strings_before_copying() {
+        let source = include_str!("legal.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("tests marker present");
+        for needle in [
+            "const MAX_LEGAL_DID_BYTES",
+            "const MAX_LEGAL_ID_BYTES",
+            "const MAX_LEGAL_QUERY_BYTES",
+            "const MAX_LEGAL_TEXT_BYTES",
+            "required_bounded_nonempty_str",
+            "optional_bounded_str",
+        ] {
+            assert!(
+                production.contains(needle),
+                "legal MCP feature-on simulation inputs must be bounded before allocation: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    fn execute_initiate_safe_harbor_rejects_oversized_party_did_without_echoing_it() {
+        let oversized = format!("did:exo:{}", "a".repeat(MAX_LEGAL_DID_BYTES + 1));
+        let params = json!({
+            "initiator_did": "did:exo:alice",
+            "transaction_description": "test",
+            "interested_parties": [oversized],
+            "process_id": "safe-harbor-oversized-party",
+            "initiated_at_ms": 1700000000024_u64,
+        });
+
+        let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("interested_parties[0] may contain at most"));
+        assert!(
+            !text.contains("aaaa"),
+            "oversized party DID must not be reflected into the error response"
+        );
     }
 
     #[test]
