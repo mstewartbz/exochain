@@ -30,7 +30,12 @@ use crate::mcp::{
 /// Constitution bytes used to initialise the CGR Kernel for adjudication.
 const CONSTITUTION: &[u8] = b"We the people of the EXOCHAIN constitutional trust fabric...";
 const MAX_AUTHORITY_CHAIN_LINKS: usize = 5;
+const MAX_AUTHORITY_DID_BYTES: usize = 512;
+const MAX_AUTHORITY_ACTION_BYTES: usize = 16 * 1024;
 const MAX_PERMISSION_SET_ENTRIES: usize = 64;
+const MAX_PERMISSION_NAME_BYTES: usize = 256;
+const ED25519_SIGNATURE_HEX_CHARS: usize = 128;
+const ED25519_PUBLIC_KEY_HEX_CHARS: usize = 64;
 
 #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 fn authority_tool_refused(tool_name: &str) -> ToolResult {
@@ -77,15 +82,37 @@ fn parse_required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stri
         .ok_or_else(|| format!("missing required parameter: {field}"))
 }
 
+fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(), String> {
+    if raw.len() > max_bytes {
+        return Err(format!("{field} may contain at most {max_bytes} bytes"));
+    }
+    Ok(())
+}
+
+fn invalid_did_message(field: &str) -> String {
+    format!("invalid {field} DID format")
+}
+
+fn parse_did_str(raw: &str, field: &str) -> Result<Did, String> {
+    validate_string_bytes(raw, field, MAX_AUTHORITY_DID_BYTES)?;
+    Did::new(raw).map_err(|_| invalid_did_message(field))
+}
+
 fn parse_did_field(value: &Value, field: &str) -> Result<Did, String> {
     let raw = parse_required_str(value, field)?;
-    Did::new(raw).map_err(|_| format!("invalid {field} DID format: {raw}"))
+    parse_did_str(raw, field)
 }
 
 fn parse_hex_field(value: &Value, field: &str, expected_len: usize) -> Result<Vec<u8>, String> {
     let raw = parse_required_str(value, field)?;
     let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
-    let bytes = hex::decode(trimmed).map_err(|err| format!("{field} is not valid hex: {err}"))?;
+    let expected_hex_chars = expected_len * 2;
+    if trimmed.len() != expected_hex_chars {
+        return Err(format!(
+            "{field} must be {expected_hex_chars} hex characters"
+        ));
+    }
+    let bytes = hex::decode(trimmed).map_err(|_| format!("{field} is not valid hex"))?;
     if bytes.len() != expected_len {
         return Err(format!(
             "{field} must decode to {expected_len} bytes, got {}",
@@ -111,6 +138,7 @@ fn parse_permission_set(value: &Value, field: &str) -> Result<PermissionSet, Str
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{field}[{idx}] must be a non-empty string"))?;
+        validate_string_bytes(raw, &format!("{field}[{idx}]"), MAX_PERMISSION_NAME_BYTES)?;
         permissions.push(Permission::new(raw));
     }
     if permissions.is_empty() {
@@ -221,7 +249,7 @@ fn parse_branch(value: &str) -> Result<GovernmentBranch, String> {
         "Legislative" | "legislative" => Ok(GovernmentBranch::Legislative),
         "Executive" | "executive" => Ok(GovernmentBranch::Executive),
         "Judicial" | "judicial" => Ok(GovernmentBranch::Judicial),
-        other => Err(format!("unknown government branch: {other}")),
+        _ => Err("unknown government branch".to_owned()),
     }
 }
 
@@ -287,7 +315,7 @@ fn parse_bailment_state(value: &Value) -> Result<BailmentState, String> {
             reason: parse_required_str(bailment, "reason")?.to_owned(),
         }),
         "terminated" | "Terminated" => Ok(BailmentState::Terminated),
-        other => Err(format!("unknown bailment_state.state: {other}")),
+        _ => Err("unknown bailment_state.state".to_owned()),
     }
 }
 
@@ -357,16 +385,21 @@ pub fn delegate_authority_definition() -> ToolDefinition {
             "properties": {
                 "grantor_did": {
                     "type": "string",
+                    "maxLength": MAX_AUTHORITY_DID_BYTES,
                     "description": "DID of the authority grantor."
                 },
                 "grantee_did": {
                     "type": "string",
+                    "maxLength": MAX_AUTHORITY_DID_BYTES,
                     "description": "DID of the authority grantee."
                 },
                 "permissions": {
                     "type": "array",
                     "maxItems": MAX_PERMISSION_SET_ENTRIES,
-                    "items": { "type": "string" },
+                    "items": {
+                        "type": "string",
+                        "maxLength": MAX_PERMISSION_NAME_BYTES
+                    },
                     "description": "List of permission names to delegate."
                 }
             },
@@ -417,22 +450,41 @@ pub fn execute_delegate_authority(params: &Value, _context: &NodeContext) -> Too
             }
         };
 
-        if Did::new(grantor_str).is_err() {
-            return ToolResult::error(
-                json!({"error": format!("invalid grantor DID format: {grantor_str}")}).to_string(),
-            );
+        if let Err(err) = parse_did_str(grantor_str, "grantor") {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
-        if Did::new(grantee_str).is_err() {
+        if let Err(err) = parse_did_str(grantee_str, "grantee") {
+            return ToolResult::error(json!({"error": err}).to_string());
+        }
+
+        if permissions_val.len() > MAX_PERMISSION_SET_ENTRIES {
             return ToolResult::error(
-                json!({"error": format!("invalid grantee DID format: {grantee_str}")}).to_string(),
+                json!({
+                    "error": format!(
+                        "permissions may contain at most {MAX_PERMISSION_SET_ENTRIES} permission names"
+                    )
+                })
+                .to_string(),
             );
         }
 
-        let permissions: Vec<String> = permissions_val
-            .iter()
-            .filter_map(Value::as_str)
-            .map(String::from)
-            .collect();
+        let mut permissions = Vec::with_capacity(permissions_val.len());
+        for (idx, permission_val) in permissions_val.iter().enumerate() {
+            let Some(permission) = permission_val.as_str().filter(|s| !s.is_empty()) else {
+                return ToolResult::error(
+                    json!({"error": format!("permissions[{idx}] must be a non-empty string")})
+                        .to_string(),
+                );
+            };
+            if let Err(err) = validate_string_bytes(
+                permission,
+                &format!("permissions[{idx}]"),
+                MAX_PERMISSION_NAME_BYTES,
+            ) {
+                return ToolResult::error(json!({"error": err}).to_string());
+            }
+            permissions.push(permission.to_owned());
+        }
 
         if permissions.is_empty() {
             return ToolResult::error(
@@ -486,19 +538,32 @@ pub fn verify_authority_chain_definition() -> ToolDefinition {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "grantor": { "type": "string" },
-                            "grantee": { "type": "string" },
+                            "grantor": {
+                                "type": "string",
+                                "maxLength": MAX_AUTHORITY_DID_BYTES
+                            },
+                            "grantee": {
+                                "type": "string",
+                                "maxLength": MAX_AUTHORITY_DID_BYTES
+                            },
                             "permissions": {
                                 "type": "array",
                                 "maxItems": MAX_PERMISSION_SET_ENTRIES,
-                                "items": { "type": "string" }
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": MAX_PERMISSION_NAME_BYTES
+                                }
                             },
                             "signature": {
                                 "type": "string",
+                                "minLength": ED25519_SIGNATURE_HEX_CHARS,
+                                "maxLength": ED25519_SIGNATURE_HEX_CHARS,
                                 "description": "Hex Ed25519 signature over the canonical authority-link payload."
                             },
                             "grantor_public_key": {
                                 "type": "string",
+                                "minLength": ED25519_PUBLIC_KEY_HEX_CHARS,
+                                "maxLength": ED25519_PUBLIC_KEY_HEX_CHARS,
                                 "description": "Hex Ed25519 public key for the grantor."
                             }
                         },
@@ -508,6 +573,7 @@ pub fn verify_authority_chain_definition() -> ToolDefinition {
                 },
                 "terminal_actor": {
                     "type": "string",
+                    "maxLength": MAX_AUTHORITY_DID_BYTES,
                     "description": "DID of the terminal actor who should be the final grantee."
                 }
             },
@@ -535,13 +601,10 @@ pub fn execute_verify_authority_chain(params: &Value, _context: &NodeContext) ->
         }
     };
 
-    let terminal = match Did::new(terminal_str) {
+    let terminal = match parse_did_str(terminal_str, "terminal_actor") {
         Ok(terminal) => terminal,
-        Err(_) => {
-            return ToolResult::error(
-                json!({"error": format!("invalid terminal_actor DID format: {terminal_str}")})
-                    .to_string(),
-            );
+        Err(err) => {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
     };
 
@@ -582,10 +645,12 @@ pub fn check_permission_definition() -> ToolDefinition {
             "properties": {
                 "actor_did": {
                     "type": "string",
+                    "maxLength": MAX_AUTHORITY_DID_BYTES,
                     "description": "DID of the actor to check."
                 },
                 "permission": {
                     "type": "string",
+                    "maxLength": MAX_PERMISSION_NAME_BYTES,
                     "description": "Permission name to check (e.g. \"read\", \"write\", \"vote\")."
                 },
                 "chain": {
@@ -620,15 +685,17 @@ pub fn execute_check_permission(params: &Value, _context: &NodeContext) -> ToolR
         }
     };
 
-    if Did::new(actor_str).is_err() {
-        return ToolResult::error(
-            json!({"error": format!("invalid actor DID format: {actor_str}")}).to_string(),
-        );
-    }
-
     if permission.is_empty() {
         return ToolResult::error(json!({"error": "permission must not be empty"}).to_string());
     }
+    if let Err(err) = validate_string_bytes(permission, "permission", MAX_PERMISSION_NAME_BYTES) {
+        return ToolResult::error(json!({"error": err}).to_string());
+    }
+
+    let actor = match parse_did_str(actor_str, "actor") {
+        Ok(actor) => actor,
+        Err(err) => return ToolResult::error(json!({"error": err}).to_string()),
+    };
 
     let Some(chain_value) = params.get("chain") else {
         return tool_error(
@@ -648,14 +715,6 @@ pub fn execute_check_permission(params: &Value, _context: &NodeContext) -> ToolR
                     "issues": issues,
                 })
                 .to_string(),
-            );
-        }
-    };
-    let actor = match Did::new(actor_str) {
-        Ok(actor) => actor,
-        Err(_) => {
-            return ToolResult::error(
-                json!({"error": format!("invalid actor DID format: {actor_str}")}).to_string(),
             );
         }
     };
@@ -703,16 +762,21 @@ pub fn adjudicate_action_definition() -> ToolDefinition {
             "properties": {
                 "actor_did": {
                     "type": "string",
+                    "maxLength": MAX_AUTHORITY_DID_BYTES,
                     "description": "DID of the actor performing the action."
                 },
                 "action": {
                     "type": "string",
+                    "maxLength": MAX_AUTHORITY_ACTION_BYTES,
                     "description": "Description of the action to adjudicate."
                 },
                 "required_permissions": {
                     "type": "array",
                     "maxItems": MAX_PERMISSION_SET_ENTRIES,
-                    "items": { "type": "string" },
+                    "items": {
+                        "type": "string",
+                        "maxLength": MAX_PERMISSION_NAME_BYTES
+                    },
                     "description": "Permissions required by this action."
                 },
                 "is_self_grant": {
@@ -758,14 +822,15 @@ pub fn execute_adjudicate_action(params: &Value, _context: &NodeContext) -> Tool
         }
     };
 
-    let actor = match Did::new(actor_str) {
-        Ok(d) => d,
-        Err(_) => {
-            return ToolResult::error(
-                json!({"error": format!("invalid actor DID format: {actor_str}")}).to_string(),
-            );
+    let actor = match parse_did_str(actor_str, "actor") {
+        Ok(actor) => actor,
+        Err(err) => {
+            return ToolResult::error(json!({"error": err}).to_string());
         }
     };
+    if let Err(err) = validate_string_bytes(action, "action", MAX_AUTHORITY_ACTION_BYTES) {
+        return ToolResult::error(json!({"error": err}).to_string());
+    }
 
     let is_self_grant = params
         .get("is_self_grant")
@@ -932,6 +997,13 @@ mod tests {
         })
     }
 
+    fn assert_text_omits_raw_input(text: &str, raw_input: &str) {
+        assert!(
+            !text.contains(raw_input),
+            "MCP error output must not reflect raw caller input: {text}"
+        );
+    }
+
     // -- delegate_authority -------------------------------------------------
 
     #[test]
@@ -996,6 +1068,44 @@ mod tests {
             &NodeContext::empty(),
         );
         assert!(result.is_error);
+    }
+
+    #[test]
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    fn execute_delegate_authority_invalid_grantor_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-grantor-{attacker_marker}");
+        let result = execute_delegate_authority(
+            &json!({
+                "grantor_did": attacker_input,
+                "grantee_did": "did:exo:alice",
+                "permissions": ["read"],
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("invalid grantor"));
+    }
+
+    #[test]
+    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    fn execute_delegate_authority_rejects_non_string_permissions() {
+        let result = execute_delegate_authority(
+            &json!({
+                "grantor_did": "did:exo:root",
+                "grantee_did": "did:exo:alice",
+                "permissions": ["read", 42, "write"],
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("permissions[1]"));
+        assert_text_omits_raw_input(text, "42");
     }
 
     #[test]
@@ -1132,6 +1242,48 @@ mod tests {
     }
 
     #[test]
+    fn execute_verify_authority_chain_invalid_terminal_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-terminal-{attacker_marker}");
+        let result = execute_verify_authority_chain(
+            &json!({
+                "chain": [],
+                "terminal_actor": attacker_input,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("terminal_actor"));
+    }
+
+    #[test]
+    fn execute_verify_authority_chain_link_issue_omits_raw_did_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-grantor-{attacker_marker}");
+        let result = execute_verify_authority_chain(
+            &json!({
+                "chain": [{
+                    "grantor": attacker_input,
+                    "grantee": "did:exo:leaf",
+                    "permissions": ["read"],
+                    "signature": "00".repeat(64),
+                    "grantor_public_key": "00".repeat(32),
+                }],
+                "terminal_actor": "did:exo:leaf",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(!result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("grantor"));
+    }
+
+    #[test]
     fn parse_authority_chain_rejects_excessive_link_count() {
         let chain = Value::Array((0..=MAX_AUTHORITY_CHAIN_LINKS).map(|_| json!({})).collect());
 
@@ -1239,6 +1391,24 @@ mod tests {
             &NodeContext::empty(),
         );
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn execute_check_permission_invalid_actor_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-actor-{attacker_marker}");
+        let result = execute_check_permission(
+            &json!({
+                "actor_did": attacker_input,
+                "permission": "read",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("actor"));
     }
 
     #[test]
@@ -1351,6 +1521,72 @@ mod tests {
             &NodeContext::empty(),
         );
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn execute_adjudicate_action_invalid_actor_omits_raw_input() {
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("bad-actor-{attacker_marker}");
+        let result = execute_adjudicate_action(
+            &json!({
+                "actor_did": attacker_input,
+                "action": "read",
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("actor"));
+    }
+
+    #[test]
+    fn execute_adjudicate_action_context_branch_error_omits_raw_input() {
+        let action = "read medical record";
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("Executive-{attacker_marker}");
+        let mut context = adjudication_context_json("did:exo:alice", action);
+        context["actor_roles"][0]["branch"] = json!(attacker_input);
+
+        let result = execute_adjudicate_action(
+            &json!({
+                "actor_did": "did:exo:alice",
+                "action": action,
+                "required_permissions": ["execute"],
+                "context": context,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("actor_roles[0]"));
+    }
+
+    #[test]
+    fn execute_adjudicate_action_context_bailment_state_error_omits_raw_input() {
+        let action = "read medical record";
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("active-{attacker_marker}");
+        let mut context = adjudication_context_json("did:exo:alice", action);
+        context["bailment_state"]["state"] = json!(attacker_input);
+
+        let result = execute_adjudicate_action(
+            &json!({
+                "actor_did": "did:exo:alice",
+                "action": action,
+                "required_permissions": ["execute"],
+                "context": context,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("bailment_state"));
     }
 
     #[test]
