@@ -539,6 +539,7 @@ impl NetworkHandle {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use libp2p_core::multiaddr::Protocol;
 
     #[test]
     fn libp2p_peer_to_exo_deterministic() {
@@ -678,37 +679,35 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    #[tokio::test]
-    async fn two_nodes_connect_via_dial() {
-        let mut swarm1 = build_swarm().unwrap();
-        let mut swarm2 = build_swarm().unwrap();
+    async fn wait_for_tcp_listen_addr(swarm: &mut Swarm<ExochainBehaviour>) -> Multiaddr {
+        for _ in 0..100 {
+            if let Ok(Some(SwarmEvent::NewListenAddr { address, .. })) =
+                tokio::time::timeout(Duration::from_millis(50), swarm.next()).await
+            {
+                if address
+                    .iter()
+                    .any(|protocol| matches!(protocol, Protocol::Tcp(_)))
+                {
+                    return address;
+                }
+            }
+        }
 
-        // Listen on random TCP ports on loopback
-        swarm1
-            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
-            .unwrap();
+        panic!("swarm should have a TCP listen address");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_nodes_connect_via_dial() {
+        let swarm1 = build_swarm().unwrap();
+        let mut swarm2 = build_swarm().unwrap();
+        let peer2 = *swarm2.local_peer_id();
+
         swarm2
             .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
             .unwrap();
 
-        // Pump swarm2 briefly to capture its listen address
-        let mut addr2: Option<Multiaddr> = None;
-        for _ in 0..20 {
-            if let Ok(Some(event)) =
-                tokio::time::timeout(Duration::from_millis(50), swarm2.next()).await
-            {
-                if let SwarmEvent::NewListenAddr { address, .. } = event {
-                    if address.to_string().contains("tcp") {
-                        addr2 = Some(address);
-                        break;
-                    }
-                }
-            }
-        }
-        let addr2 = addr2.expect("swarm2 should have a listen addr");
-
-        // Dial swarm2 from swarm1
-        swarm1.dial(addr2).unwrap();
+        let mut addr2 = wait_for_tcp_listen_addr(&mut swarm2).await;
+        addr2.push(Protocol::P2p(peer2));
 
         let (cmd_tx1, cmd_rx1) = mpsc::channel(32);
         let (event_tx1, mut event_rx1) = mpsc::channel(32);
@@ -722,10 +721,12 @@ mod tests {
         let handle1 = NetworkHandle::new(cmd_tx1);
         let _handle2 = NetworkHandle::new(cmd_tx2);
 
-        // Wait for connection (up to 5 seconds)
-        let discovered = tokio::time::timeout(Duration::from_secs(5), async {
+        handle1.dial(addr2).await.unwrap();
+
+        // Wait for connection under full-suite scheduler load.
+        let discovered = tokio::time::timeout(Duration::from_secs(15), async {
             while let Some(event) = event_rx1.recv().await {
-                if matches!(event, NetworkEvent::PeerDiscovered { .. }) {
+                if matches!(event, NetworkEvent::PeerDiscovered { peer_id } if peer_id == peer2) {
                     return true;
                 }
             }
@@ -739,7 +740,17 @@ mod tests {
         );
 
         // Verify peer count
-        let count = handle1.peer_count().await.unwrap();
+        let count = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let count = handle1.peer_count().await.unwrap();
+                if count == 1 {
+                    return count;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or(0);
         assert_eq!(count, 1, "Should have exactly 1 peer");
     }
 }

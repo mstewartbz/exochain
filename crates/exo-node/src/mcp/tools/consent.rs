@@ -2,8 +2,6 @@
 //! and bailment termination.
 
 use exo_core::Did;
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
-use exo_core::hash::hash_structured;
 use serde_json::{Value, json};
 
 use crate::mcp::{
@@ -11,7 +9,6 @@ use crate::mcp::{
     protocol::{ToolDefinition, ToolResult},
 };
 
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 const MCP_CONSENT_READ_INITIATIVE: &str = "Initiatives/fix-mcp-consent-read-store-refusal.md";
 const MAX_CONSENT_DID_BYTES: usize = 512;
 const MAX_CONSENT_SCOPE_BYTES: usize = 4 * 1024;
@@ -19,13 +16,25 @@ const MAX_CONSENT_ID_BYTES: usize = 256;
 const MAX_CONSENT_REASON_BYTES: usize = 4 * 1024;
 const MAX_CONSENT_STATUS_FILTER_BYTES: usize = 32;
 
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 fn consent_registry_unavailable(tool_name: &str) -> ToolResult {
     ToolResult::error(
         json!({
             "error": "mcp_consent_registry_unavailable",
             "tool": tool_name,
-            "message": "This MCP consent read has no live consent registry attached, so it cannot prove active consent or enumerate bailments. Build with `unaudited-mcp-simulation-tools` only for explicit dev simulation.",
+            "message": "This MCP consent read has no live consent registry attached, so it cannot prove active consent or enumerate bailments. The `unaudited-mcp-simulation-tools` feature does not enable fabricated consent registry reads.",
+            "feature_flag": "unaudited-mcp-simulation-tools",
+            "initiative": MCP_CONSENT_READ_INITIATIVE,
+        })
+        .to_string(),
+    )
+}
+
+fn consent_store_unavailable(tool_name: &str) -> ToolResult {
+    ToolResult::error(
+        json!({
+            "error": "mcp_consent_store_unavailable",
+            "tool": tool_name,
+            "message": "This MCP consent mutation has no live signed consent store attached, so it cannot create or terminate bailments. The `unaudited-mcp-simulation-tools` feature does not enable synthetic consent writes.",
             "feature_flag": "unaudited-mcp-simulation-tools",
             "initiative": MCP_CONSENT_READ_INITIATIVE,
         })
@@ -96,97 +105,8 @@ pub fn propose_bailment_definition() -> ToolDefinition {
 /// Execute the `exochain_propose_bailment` tool.
 #[must_use]
 pub fn execute_propose_bailment(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        super::simulation_tool_refused(
-            "exochain_propose_bailment",
-            "Initiatives/fix-mcp-default-simulation-gates.md",
-            "This MCP tool currently returns a simulated bailment proposal without \
-             persisting consent state. Build with `unaudited-mcp-simulation-tools` \
-             only for explicit dev simulation.",
-        )
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let bailor_str = match params.get("bailor_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: bailor_did"}).to_string(),
-                );
-            }
-        };
-        let bailee_str = match params.get("bailee_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: bailee_did"}).to_string(),
-                );
-            }
-        };
-        let scope = match params.get("scope").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: scope"}).to_string(),
-                );
-            }
-        };
-
-        if let Err(err) = parse_did_str(bailor_str, "bailor") {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-        if let Err(err) = parse_did_str(bailee_str, "bailee") {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-        if scope.is_empty() {
-            return ToolResult::error(json!({"error": "scope must not be empty"}).to_string());
-        }
-        if let Err(err) = validate_string_bytes(scope, "scope", MAX_CONSENT_SCOPE_BYTES) {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-
-        let duration_hours = match params.get("duration_hours") {
-            Some(value) => match value.as_u64() {
-                Some(hours) if hours > 0 => hours,
-                _ => {
-                    return ToolResult::error(
-                        json!({"error": "duration_hours must be a positive integer"}).to_string(),
-                    );
-                }
-            },
-            None => 24,
-        };
-
-        let proposal_id = match hash_structured(&(
-            "exo.mcp.consent.proposal.v1",
-            bailor_str,
-            bailee_str,
-            scope,
-            duration_hours,
-        )) {
-            Ok(hash) => hash.to_string(),
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("proposal ID serialization failed: {e}")}).to_string(),
-                );
-            }
-        };
-
-        let response = json!({
-            "proposal_id": proposal_id,
-            "bailor": bailor_str,
-            "bailee": bailee_str,
-            "scope": scope,
-            "status": "proposed",
-            "expires_at": Value::Null,
-            "expires_at_source": "simulation_no_start_timestamp",
-            "expires_after_hours": duration_hours,
-        });
-        ToolResult::success(response.to_string())
-    }
+    let _ = params;
+    consent_store_unavailable("exochain_propose_bailment")
 }
 
 // ---------------------------------------------------------------------------
@@ -249,23 +169,8 @@ pub fn execute_check_consent(params: &Value, _context: &NodeContext) -> ToolResu
         return ToolResult::error(json!({"error": err}).to_string());
     }
 
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = scope;
-        consent_registry_unavailable("exochain_check_consent")
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let response = json!({
-            "actor": actor_str,
-            "scope": scope,
-            "consent_active": false,
-            "bailment_state": "none",
-            "source": "simulation_no_consent_registry",
-        });
-        ToolResult::success(response.to_string())
-    }
+    let _ = (actor_str, scope);
+    consent_registry_unavailable("exochain_check_consent")
 }
 
 // ---------------------------------------------------------------------------
@@ -333,23 +238,8 @@ pub fn execute_list_bailments(params: &Value, _context: &NodeContext) -> ToolRes
         );
     }
 
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = filter;
-        consent_registry_unavailable("exochain_list_bailments")
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let response = json!({
-            "did": did_str,
-            "filter": filter,
-            "bailments": [],
-            "count": 0,
-            "source": "simulation_no_consent_registry",
-        });
-        ToolResult::success(response.to_string())
-    }
+    let _ = (did_str, filter);
+    consent_registry_unavailable("exochain_list_bailments")
 }
 
 // ---------------------------------------------------------------------------
@@ -386,61 +276,8 @@ pub fn terminate_bailment_definition() -> ToolDefinition {
 /// Execute the `exochain_terminate_bailment` tool.
 #[must_use]
 pub fn execute_terminate_bailment(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        super::simulation_tool_refused(
-            "exochain_terminate_bailment",
-            "Initiatives/fix-mcp-default-simulation-gates.md",
-            "This MCP tool currently returns a simulated bailment termination \
-             without mutating consent state. Build with \
-             `unaudited-mcp-simulation-tools` only for explicit dev simulation.",
-        )
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let bailment_id = match params.get("bailment_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: bailment_id"}).to_string(),
-                );
-            }
-        };
-        let reason = match params.get("reason").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: reason"}).to_string(),
-                );
-            }
-        };
-
-        if bailment_id.is_empty() {
-            return ToolResult::error(
-                json!({"error": "bailment_id must not be empty"}).to_string(),
-            );
-        }
-        if let Err(err) = validate_string_bytes(bailment_id, "bailment_id", MAX_CONSENT_ID_BYTES) {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-        if reason.is_empty() {
-            return ToolResult::error(json!({"error": "reason must not be empty"}).to_string());
-        }
-        if let Err(err) = validate_string_bytes(reason, "reason", MAX_CONSENT_REASON_BYTES) {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-
-        let response = json!({
-            "bailment_id": bailment_id,
-            "status": "terminated",
-            "reason": reason,
-            "terminated_at": Value::Null,
-            "terminated_at_source": "simulation_no_persistence_timestamp",
-        });
-        ToolResult::success(response.to_string())
-    }
+    let _ = params;
+    consent_store_unavailable("exochain_terminate_bailment")
 }
 
 // ===========================================================================
@@ -469,7 +306,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_propose_bailment_success() {
+    fn execute_propose_bailment_refuses_without_signed_store_even_with_simulation_feature() {
         let result = execute_propose_bailment(
             &json!({
                 "bailor_did": "did:exo:alice",
@@ -478,15 +315,12 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["bailor"], "did:exo:alice");
-        assert_eq!(v["bailee"], "did:exo:bob");
-        assert_eq!(v["scope"], "data:medical");
-        assert_eq!(v["status"], "proposed");
-        assert!(!v["proposal_id"].as_str().expect("id").is_empty());
-        assert!(v["expires_at"].is_null());
-        assert_eq!(v["expires_after_hours"], 24);
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_consent_store_unavailable"));
+        assert!(!text.contains("proposal_id"));
+        let synthetic_timestamp = ["simulation", "_no_", "start", "_timestamp"].concat();
+        assert!(!text.contains(&synthetic_timestamp));
     }
 
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
@@ -502,9 +336,9 @@ mod tests {
         );
         assert!(result.is_error);
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
+        assert!(text.contains("mcp_consent_store_unavailable"));
         assert!(text.contains("unaudited-mcp-simulation-tools"));
-        assert!(text.contains("fix-mcp-default-simulation-gates.md"));
+        assert!(text.contains("fix-mcp-consent-read-store-refusal.md"));
     }
 
     #[test]
@@ -537,7 +371,7 @@ mod tests {
         assert!(result.is_error);
         let text = result.content[0].text();
         assert_text_omits_raw_input(text, attacker_marker);
-        assert!(text.contains("bailor"));
+        assert!(text.contains("mcp_consent_store_unavailable"));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -557,7 +391,7 @@ mod tests {
         assert!(result.is_error);
         let text = result.content[0].text();
         assert_text_omits_raw_input(text, attacker_marker);
-        assert!(text.contains("bailee"));
+        assert!(text.contains("mcp_consent_store_unavailable"));
     }
 
     #[test]
@@ -600,7 +434,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_check_consent_simulation_success() {
+    fn execute_check_consent_refuses_without_live_registry_even_with_simulation_feature() {
         let result = execute_check_consent(
             &json!({
                 "actor_did": "did:exo:alice",
@@ -608,11 +442,12 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["consent_active"], false);
-        assert_eq!(v["bailment_state"], "none");
-        assert_eq!(v["source"], "simulation_no_consent_registry");
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_consent_registry_unavailable"));
+        assert!(!text.contains("consent_active"));
+        let synthetic_registry = ["simulation", "_no_", "consent", "_registry"].concat();
+        assert!(!text.contains(&synthetic_registry));
     }
 
     #[test]
@@ -679,27 +514,30 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_list_bailments_simulation_success() {
+    fn execute_list_bailments_refuses_without_live_registry_even_with_simulation_feature() {
         let result =
             execute_list_bailments(&json!({"did": "did:exo:alice"}), &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["count"], 0);
-        assert_eq!(v["filter"], "all");
-        assert!(v["bailments"].as_array().expect("arr").is_empty());
-        assert_eq!(v["source"], "simulation_no_consent_registry");
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_consent_registry_unavailable"));
+        assert!(!text.contains("\"bailments\""));
+        assert!(!text.contains("\"count\""));
+        let synthetic_registry = ["simulation", "_no_", "consent", "_registry"].concat();
+        assert!(!text.contains(&synthetic_registry));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_list_bailments_with_filter() {
+    fn execute_list_bailments_with_filter_refuses_without_live_registry() {
         let result = execute_list_bailments(
             &json!({"did": "did:exo:alice", "status_filter": "active"}),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["filter"], "active");
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_consent_registry_unavailable"));
+        assert!(!text.contains("\"bailments\""));
+        assert!(!text.contains("\"count\""));
     }
 
     #[test]
@@ -760,7 +598,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_terminate_bailment_success() {
+    fn execute_terminate_bailment_refuses_without_signed_store_even_with_simulation_feature() {
         let result = execute_terminate_bailment(
             &json!({
                 "bailment_id": "abc123",
@@ -768,12 +606,12 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["bailment_id"], "abc123");
-        assert_eq!(v["status"], "terminated");
-        assert_eq!(v["reason"], "data access no longer needed");
-        assert!(v["terminated_at"].is_null());
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_consent_store_unavailable"));
+        assert!(!text.contains("terminated_at"));
+        let synthetic_timestamp = ["simulation", "_no_", "persistence", "_timestamp"].concat();
+        assert!(!text.contains(&synthetic_timestamp));
     }
 
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
@@ -788,9 +626,9 @@ mod tests {
         );
         assert!(result.is_error);
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
+        assert!(text.contains("mcp_consent_store_unavailable"));
         assert!(text.contains("unaudited-mcp-simulation-tools"));
-        assert!(text.contains("fix-mcp-default-simulation-gates.md"));
+        assert!(text.contains("fix-mcp-consent-read-store-refusal.md"));
     }
 
     #[test]
