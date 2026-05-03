@@ -44,6 +44,13 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::error::{ExoError, ExoResult};
 
+/// Maximum delegation links accepted in an SDK authority chain.
+///
+/// This bound prevents untrusted chain material from driving unbounded memory
+/// growth while remaining far above the constitutional delegation depths used
+/// by the runtime.
+pub const MAX_CHAIN_DEPTH: usize = 64;
+
 /// Builder for a validated authority chain.
 ///
 /// Links are appended one at a time with [`AuthorityChainBuilder::add_link`]
@@ -67,6 +74,7 @@ use crate::error::{ExoError, ExoResult};
 #[derive(Debug, Clone, Default)]
 pub struct AuthorityChainBuilder {
     links: Vec<ChainLink>,
+    overflowed: bool,
 }
 
 impl AuthorityChainBuilder {
@@ -81,7 +89,10 @@ impl AuthorityChainBuilder {
     /// ```
     #[must_use]
     pub fn new() -> Self {
-        Self { links: Vec::new() }
+        Self {
+            links: Vec::new(),
+            overflowed: false,
+        }
     }
 
     /// Append a new delegation link.
@@ -103,6 +114,10 @@ impl AuthorityChainBuilder {
     /// ```
     #[must_use]
     pub fn add_link(mut self, grantor: Did, grantee: Did, permissions: Vec<String>) -> Self {
+        if self.links.len() >= MAX_CHAIN_DEPTH {
+            self.overflowed = true;
+            return self;
+        }
         self.links.push(ChainLink {
             grantor,
             grantee,
@@ -163,6 +178,11 @@ impl AuthorityChainBuilder {
     /// assert!(matches!(err, ExoError::Authority(_)));
     /// ```
     pub fn build(self, terminal_actor: &Did) -> ExoResult<ValidatedChain> {
+        if self.overflowed {
+            return Err(ExoError::Authority(format!(
+                "authority chain depth exceeds maximum of {MAX_CHAIN_DEPTH}"
+            )));
+        }
         let depth = self.links.len();
         validate_chain_parts(depth, &self.links, terminal_actor).map_err(ExoError::Authority)?;
         Ok(ValidatedChain {
@@ -170,6 +190,53 @@ impl AuthorityChainBuilder {
             links: self.links,
             terminal: terminal_actor.clone(),
         })
+    }
+}
+
+struct BoundedChainLinks(Vec<ChainLink>);
+
+impl<'de> Deserialize<'de> for BoundedChainLinks {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(BoundedChainLinksVisitor)
+    }
+}
+
+struct BoundedChainLinksVisitor;
+
+impl<'de> de::Visitor<'de> for BoundedChainLinksVisitor {
+    type Value = BoundedChainLinks;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "an authority chain containing at most {MAX_CHAIN_DEPTH} links"
+        )
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        if seq.size_hint().is_some_and(|hint| hint > MAX_CHAIN_DEPTH) {
+            return Err(de::Error::custom(format!(
+                "authority chain depth exceeds maximum of {MAX_CHAIN_DEPTH}"
+            )));
+        }
+
+        let mut links = Vec::new();
+        while let Some(link) = seq.next_element()? {
+            if links.len() >= MAX_CHAIN_DEPTH {
+                return Err(de::Error::custom(format!(
+                    "authority chain depth exceeds maximum of {MAX_CHAIN_DEPTH}"
+                )));
+            }
+            links.push(link);
+        }
+
+        Ok(BoundedChainLinks(links))
     }
 }
 
@@ -203,21 +270,27 @@ impl<'de> Deserialize<'de> for ValidatedChain {
         #[derive(Deserialize)]
         struct WireValidatedChain {
             depth: usize,
-            links: Vec<ChainLink>,
+            links: BoundedChainLinks,
             terminal: Did,
         }
 
         let wire = WireValidatedChain::deserialize(deserializer)?;
-        validate_chain_parts(wire.depth, &wire.links, &wire.terminal).map_err(de::Error::custom)?;
+        let links = wire.links.0;
+        validate_chain_parts(wire.depth, &links, &wire.terminal).map_err(de::Error::custom)?;
         Ok(Self {
             depth: wire.depth,
-            links: wire.links,
+            links,
             terminal: wire.terminal,
         })
     }
 }
 
 fn validate_chain_parts(depth: usize, links: &[ChainLink], terminal: &Did) -> Result<(), String> {
+    if depth > MAX_CHAIN_DEPTH || links.len() > MAX_CHAIN_DEPTH {
+        return Err(format!(
+            "authority chain depth exceeds maximum of {MAX_CHAIN_DEPTH}"
+        ));
+    }
     if links.is_empty() {
         return Err("authority chain is empty".into());
     }
@@ -381,6 +454,107 @@ mod tests {
             result.is_err(),
             "deserialization must reject forged depth metadata"
         );
+    }
+
+    #[test]
+    fn builder_rejects_chain_beyond_maximum_depth() {
+        let mut builder = AuthorityChainBuilder::new();
+        for i in 0..65 {
+            builder = builder.add_link(
+                did(&format!("did:exo:node-{i}")),
+                did(&format!("did:exo:node-{}", i + 1)),
+                vec!["read".into()],
+            );
+        }
+
+        let err = builder
+            .build(&did("did:exo:node-65"))
+            .expect_err("authority chains deeper than 64 links must be rejected");
+
+        assert!(matches!(err, ExoError::Authority(_)));
+    }
+
+    #[test]
+    fn builder_accepts_chain_at_maximum_depth() {
+        let mut builder = AuthorityChainBuilder::new();
+        for i in 0..MAX_CHAIN_DEPTH {
+            builder = builder.add_link(
+                did(&format!("did:exo:max-node-{i}")),
+                did(&format!("did:exo:max-node-{}", i + 1)),
+                vec!["read".into()],
+            );
+        }
+
+        let chain = builder
+            .build(&did(&format!("did:exo:max-node-{MAX_CHAIN_DEPTH}")))
+            .expect("authority chains at the maximum depth must remain valid");
+
+        assert_eq!(chain.depth, MAX_CHAIN_DEPTH);
+    }
+
+    #[test]
+    fn builder_does_not_retain_links_beyond_maximum_depth() {
+        let mut builder = AuthorityChainBuilder::new();
+        for i in 0..(MAX_CHAIN_DEPTH + 10) {
+            builder = builder.add_link(
+                did(&format!("did:exo:capped-node-{i}")),
+                did(&format!("did:exo:capped-node-{}", i + 1)),
+                vec!["read".into()],
+            );
+        }
+
+        assert_eq!(builder.links.len(), MAX_CHAIN_DEPTH);
+        assert!(
+            builder.overflowed,
+            "builder must remember that an over-depth chain was attempted"
+        );
+    }
+
+    #[test]
+    fn validated_chain_deserialization_rejects_chain_beyond_maximum_depth() {
+        let links: Vec<_> = (0..65)
+            .map(|i| {
+                serde_json::json!({
+                    "grantor": format!("did:exo:node-{i}"),
+                    "grantee": format!("did:exo:node-{}", i + 1),
+                    "permissions": ["read"]
+                })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "depth": 65,
+            "links": links,
+            "terminal": "did:exo:node-65"
+        });
+
+        assert!(
+            serde_json::from_value::<ValidatedChain>(json).is_err(),
+            "deserialization must reject authority chains deeper than 64 links"
+        );
+    }
+
+    #[test]
+    fn validated_chain_deserialization_accepts_chain_at_maximum_depth() {
+        let links: Vec<_> = (0..MAX_CHAIN_DEPTH)
+            .map(|i| {
+                serde_json::json!({
+                    "grantor": format!("did:exo:serde-max-node-{i}"),
+                    "grantee": format!("did:exo:serde-max-node-{}", i + 1),
+                    "permissions": ["read"]
+                })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "depth": MAX_CHAIN_DEPTH,
+            "links": links,
+            "terminal": format!("did:exo:serde-max-node-{MAX_CHAIN_DEPTH}")
+        });
+
+        let chain =
+            serde_json::from_value::<ValidatedChain>(json).expect("max-depth chain is valid");
+
+        assert_eq!(chain.depth, MAX_CHAIN_DEPTH);
+        assert_eq!(chain.links.len(), MAX_CHAIN_DEPTH);
     }
 
     #[test]
