@@ -1,7 +1,6 @@
 //! Legal MCP tools — e-discovery search, privilege assertion, DGCL safe harbor,
 //! and fiduciary duty compliance checking.
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 use exo_core::Did;
 use serde_json::{Value, json};
 
@@ -16,22 +15,26 @@ const MAX_LEGAL_ID_BYTES: usize = 256;
 const MAX_LEGAL_QUERY_BYTES: usize = 4 * 1024;
 const MAX_LEGAL_TEXT_BYTES: usize = 16 * 1024;
 
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
 const MCP_LEGAL_SIMULATION_INITIATIVE: &str = "Initiatives/fix-mcp-legal-simulation-tools.md";
 
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-fn legal_simulation_refused(tool_name: &str) -> ToolResult {
-    super::simulation_tool_refused(
-        tool_name,
-        MCP_LEGAL_SIMULATION_INITIATIVE,
-        "This MCP legal tool returns legal/evidence workflow state without \
-         querying or mutating a live legal/evidence store. It is disabled by \
-         default to avoid false legal-status signals; build with \
-         `unaudited-mcp-simulation-tools` only for explicit dev simulation.",
+fn legal_runtime_unavailable(tool_name: &str) -> ToolResult {
+    tracing::warn!(
+        tool = %tool_name,
+        "refusing MCP legal operation: no live legal/evidence runtime is attached"
+    );
+    ToolResult::error(
+        json!({
+            "error": "mcp_legal_runtime_unavailable",
+            "tool": tool_name,
+            "message": "This MCP legal tool has no live legal/evidence runtime attached, so it cannot search evidence, assert privilege, initiate safe harbor, or assess fiduciary duty. The `unaudited-mcp-simulation-tools` feature does not enable synthetic legal workflow state.",
+            "feature_flag": "unaudited-mcp-simulation-tools",
+            "initiative": MCP_LEGAL_SIMULATION_INITIATIVE,
+            "refusal_source": format!("exo-node/mcp/tools/legal.rs::{tool_name}"),
+        })
+        .to_string(),
     )
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn required_bounded_nonempty_str<'a>(
     params: &'a Value,
     name: &str,
@@ -51,7 +54,6 @@ fn required_bounded_nonempty_str<'a>(
     }
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn optional_bounded_str<'a>(
     params: &'a Value,
     name: &str,
@@ -69,7 +71,6 @@ fn optional_bounded_str<'a>(
     Ok(Some(raw))
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn validate_bounded_str(
     value: &str,
     name: &str,
@@ -83,7 +84,6 @@ fn validate_bounded_str(
     Ok(())
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn required_did_str<'a>(params: &'a Value, name: &str) -> std::result::Result<&'a str, ToolResult> {
     let raw = required_bounded_nonempty_str(params, name, MAX_LEGAL_DID_BYTES)?;
     if Did::new(raw).is_err() {
@@ -94,7 +94,6 @@ fn required_did_str<'a>(params: &'a Value, name: &str) -> std::result::Result<&'
     Ok(raw)
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn required_nonzero_u64(params: &Value, name: &str) -> std::result::Result<u64, ToolResult> {
     match params.get(name).and_then(Value::as_u64) {
         Some(value) if value > 0 => Ok(value),
@@ -159,59 +158,25 @@ pub fn ediscovery_search_definition() -> ToolDefinition {
 /// Execute the `exochain_ediscovery_search` tool.
 #[must_use]
 pub fn execute_ediscovery_search(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        legal_simulation_refused("exochain_ediscovery_search")
+    if let Err(result) = required_bounded_nonempty_str(params, "query", MAX_LEGAL_QUERY_BYTES) {
+        return result;
     }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let query = match required_bounded_nonempty_str(params, "query", MAX_LEGAL_QUERY_BYTES) {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-
-        let scope = match optional_bounded_str(params, "scope", MAX_LEGAL_ID_BYTES) {
-            Ok(value) => value.unwrap_or("all"),
-            Err(result) => return result,
-        };
-        let search_id = match required_bounded_nonempty_str(params, "search_id", MAX_LEGAL_ID_BYTES)
-        {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let searched_at_ms = match required_nonzero_u64(params, "searched_at_ms") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let date_range_start =
-            match optional_bounded_str(params, "date_range_start", MAX_LEGAL_ID_BYTES) {
-                Ok(value) => value.map(String::from),
-                Err(result) => return result,
-            };
-        let date_range_end =
-            match optional_bounded_str(params, "date_range_end", MAX_LEGAL_ID_BYTES) {
-                Ok(value) => value.map(String::from),
-                Err(result) => return result,
-            };
-
-        let response = json!({
-            "search_id": search_id,
-            "query": query,
-            "scope": scope,
-            "date_range": {
-                "start": date_range_start,
-                "end": date_range_end,
-            },
-            "results": [],
-            "total_matches": 0,
-            "status": "completed",
-            "searched_at": format!("{}:0", searched_at_ms),
-            "note": "No evidence corpus is loaded in this node instance.",
-        });
-        ToolResult::success(response.to_string())
+    if let Err(result) = optional_bounded_str(params, "scope", MAX_LEGAL_ID_BYTES) {
+        return result;
     }
+    if let Err(result) = required_bounded_nonempty_str(params, "search_id", MAX_LEGAL_ID_BYTES) {
+        return result;
+    }
+    if let Err(result) = required_nonzero_u64(params, "searched_at_ms") {
+        return result;
+    }
+    if let Err(result) = optional_bounded_str(params, "date_range_start", MAX_LEGAL_ID_BYTES) {
+        return result;
+    }
+    if let Err(result) = optional_bounded_str(params, "date_range_end", MAX_LEGAL_ID_BYTES) {
+        return result;
+    }
+    legal_runtime_unavailable("exochain_ediscovery_search")
 }
 
 // ---------------------------------------------------------------------------
@@ -264,60 +229,36 @@ pub fn assert_privilege_definition() -> ToolDefinition {
 /// Execute the `exochain_assert_privilege` tool.
 #[must_use]
 pub fn execute_assert_privilege(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        legal_simulation_refused("exochain_assert_privilege")
+    if let Err(result) = required_bounded_nonempty_str(params, "evidence_id", MAX_LEGAL_ID_BYTES) {
+        return result;
     }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let evidence_id =
-            match required_bounded_nonempty_str(params, "evidence_id", MAX_LEGAL_ID_BYTES) {
-                Ok(value) => value,
-                Err(result) => return result,
-            };
-        let privilege_type =
-            match required_bounded_nonempty_str(params, "privilege_type", MAX_LEGAL_ID_BYTES) {
-                Ok(value) => value,
-                Err(result) => return result,
-            };
-        let asserter_did_str = match required_did_str(params, "asserter_did") {
+    let privilege_type =
+        match required_bounded_nonempty_str(params, "privilege_type", MAX_LEGAL_ID_BYTES) {
             Ok(value) => value,
             Err(result) => return result,
         };
-        let assertion_id =
-            match required_bounded_nonempty_str(params, "assertion_id", MAX_LEGAL_ID_BYTES) {
-                Ok(value) => value,
-                Err(result) => return result,
-            };
-        let asserted_at_ms = match required_nonzero_u64(params, "asserted_at_ms") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-
-        // Validate privilege type.
-        let valid_types = ["attorney_client", "work_product", "deliberative"];
-        if !valid_types.contains(&privilege_type) {
-            return ToolResult::error(
-                json!({
-                    "error": "invalid privilege_type",
-                    "allowed": valid_types,
-                })
-                .to_string(),
-            );
-        }
-
-        let response = json!({
-            "assertion_id": assertion_id,
-            "evidence_id": evidence_id,
-            "privilege_type": privilege_type,
-            "asserter_did": asserter_did_str,
-            "status": "asserted",
-            "asserted_at": format!("{}:0", asserted_at_ms),
-        });
-        ToolResult::success(response.to_string())
+    if let Err(result) = required_did_str(params, "asserter_did") {
+        return result;
     }
+    if let Err(result) = required_bounded_nonempty_str(params, "assertion_id", MAX_LEGAL_ID_BYTES) {
+        return result;
+    }
+    if let Err(result) = required_nonzero_u64(params, "asserted_at_ms") {
+        return result;
+    }
+
+    let valid_types = ["attorney_client", "work_product", "deliberative"];
+    if !valid_types.contains(&privilege_type) {
+        return ToolResult::error(
+            json!({
+                "error": "invalid privilege_type",
+                "allowed": valid_types,
+            })
+            .to_string(),
+        );
+    }
+
+    legal_runtime_unavailable("exochain_assert_privilege")
 }
 
 // ---------------------------------------------------------------------------
@@ -368,102 +309,64 @@ pub fn initiate_safe_harbor_definition() -> ToolDefinition {
 /// Execute the `exochain_initiate_safe_harbor` tool.
 #[must_use]
 pub fn execute_initiate_safe_harbor(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        legal_simulation_refused("exochain_initiate_safe_harbor")
+    if let Err(result) = required_did_str(params, "initiator_did") {
+        return result;
     }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    if let Err(result) =
+        required_bounded_nonempty_str(params, "transaction_description", MAX_LEGAL_TEXT_BYTES)
     {
-        let initiator_did_str = match required_did_str(params, "initiator_did") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let transaction_description = match required_bounded_nonempty_str(
-            params,
-            "transaction_description",
-            MAX_LEGAL_TEXT_BYTES,
-        ) {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let interested_parties = match params.get("interested_parties").and_then(Value::as_array) {
-            Some(arr) => arr,
-            None => {
-                return ToolResult::error(
+        return result;
+    }
+    let interested_parties = match params.get("interested_parties").and_then(Value::as_array) {
+        Some(arr) => arr,
+        None => {
+            return ToolResult::error(
                 json!({"error": "missing required parameter: interested_parties (must be an array)"})
                     .to_string(),
             );
-            }
-        };
-        if interested_parties.len() > MAX_SAFE_HARBOR_INTERESTED_PARTIES {
-            return ToolResult::error(
-                json!({
-                    "error": format!(
-                        "interested_parties may contain at most {MAX_SAFE_HARBOR_INTERESTED_PARTIES} DIDs"
-                    )
-                })
-                .to_string(),
-            );
         }
-        let process_id =
-            match required_bounded_nonempty_str(params, "process_id", MAX_LEGAL_ID_BYTES) {
-                Ok(value) => value,
-                Err(result) => return result,
-            };
-        let initiated_at_ms = match required_nonzero_u64(params, "initiated_at_ms") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
+    };
+    if interested_parties.len() > MAX_SAFE_HARBOR_INTERESTED_PARTIES {
+        return ToolResult::error(
+            json!({
+                "error": format!(
+                    "interested_parties may contain at most {MAX_SAFE_HARBOR_INTERESTED_PARTIES} DIDs"
+                )
+            })
+            .to_string(),
+        );
+    }
+    if let Err(result) = required_bounded_nonempty_str(params, "process_id", MAX_LEGAL_ID_BYTES) {
+        return result;
+    }
+    if let Err(result) = required_nonzero_u64(params, "initiated_at_ms") {
+        return result;
+    }
 
-        // Validate each interested party DID.
-        let mut party_dids: Vec<String> = Vec::with_capacity(interested_parties.len());
-        for (i, party) in interested_parties.iter().enumerate() {
-            match party.as_str() {
-                Some(s) => {
-                    let field = format!("interested_parties[{i}]");
-                    if let Err(result) = validate_bounded_str(s, &field, MAX_LEGAL_DID_BYTES) {
-                        return result;
-                    }
-                    if Did::new(s).is_err() {
-                        return ToolResult::error(
-                            json!({"error": format!("invalid DID at interested_parties[{i}]")})
-                                .to_string(),
-                        );
-                    }
-                    party_dids.push(s.to_owned());
+    for (i, party) in interested_parties.iter().enumerate() {
+        match party.as_str() {
+            Some(s) => {
+                let field = format!("interested_parties[{i}]");
+                if let Err(result) = validate_bounded_str(s, &field, MAX_LEGAL_DID_BYTES) {
+                    return result;
                 }
-                None => {
+                if Did::new(s).is_err() {
                     return ToolResult::error(
-                        json!({"error": format!("interested_parties[{i}] is not a string")})
+                        json!({"error": format!("invalid DID at interested_parties[{i}]")})
                             .to_string(),
                     );
                 }
             }
+            None => {
+                return ToolResult::error(
+                    json!({"error": format!("interested_parties[{i}] is not a string")})
+                        .to_string(),
+                );
+            }
         }
-
-        let mut disclosure_requirements: Vec<Value> = Vec::with_capacity(party_dids.len());
-        for did in &party_dids {
-            disclosure_requirements.push(json!({
-                    "party_did": did,
-                    "disclosure_status": "pending",
-                    "requires": ["material_interest", "relationship_disclosure"],
-            }));
-        }
-
-        let response = json!({
-            "process_id": process_id,
-            "initiator_did": initiator_did_str,
-            "transaction_description": transaction_description,
-            "interested_parties": party_dids,
-            "disclosure_requirements": disclosure_requirements,
-            "dgcl_section": "144",
-            "status": "initiated",
-            "initiated_at": format!("{}:0", initiated_at_ms),
-        });
-        ToolResult::success(response.to_string())
     }
+
+    legal_runtime_unavailable("exochain_initiate_safe_harbor")
 }
 
 // ---------------------------------------------------------------------------
@@ -513,66 +416,23 @@ pub fn check_fiduciary_duty_definition() -> ToolDefinition {
 /// Execute the `exochain_check_fiduciary_duty` tool.
 #[must_use]
 pub fn execute_check_fiduciary_duty(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        legal_simulation_refused("exochain_check_fiduciary_duty")
+    if let Err(result) = required_did_str(params, "actor_did") {
+        return result;
+    }
+    if let Err(result) = required_bounded_nonempty_str(params, "action", MAX_LEGAL_TEXT_BYTES) {
+        return result;
+    }
+    if let Err(result) = required_did_str(params, "beneficiary_did") {
+        return result;
+    }
+    if let Err(result) = required_bounded_nonempty_str(params, "check_id", MAX_LEGAL_ID_BYTES) {
+        return result;
+    }
+    if let Err(result) = required_nonzero_u64(params, "checked_at_ms") {
+        return result;
     }
 
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let actor_did_str = match required_did_str(params, "actor_did") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let action = match required_bounded_nonempty_str(params, "action", MAX_LEGAL_TEXT_BYTES) {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let beneficiary_did_str = match required_did_str(params, "beneficiary_did") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let check_id = match required_bounded_nonempty_str(params, "check_id", MAX_LEGAL_ID_BYTES) {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let checked_at_ms = match required_nonzero_u64(params, "checked_at_ms") {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-
-        // Assess fiduciary duties: loyalty, care, good faith.
-        let duties = vec![
-            json!({
-                "duty": "loyalty",
-                "description": "Act in the best interest of the beneficiary, avoiding self-dealing.",
-                "status": "requires_review",
-            }),
-            json!({
-                "duty": "care",
-                "description": "Exercise the care of an ordinarily prudent person.",
-                "status": "requires_review",
-            }),
-            json!({
-                "duty": "good_faith",
-                "description": "Act honestly and not for an improper purpose.",
-                "status": "requires_review",
-            }),
-        ];
-
-        let response = json!({
-            "check_id": check_id,
-            "actor_did": actor_did_str,
-            "action": action,
-            "beneficiary_did": beneficiary_did_str,
-            "duties_assessed": duties,
-            "overall_status": "requires_review",
-            "checked_at": format!("{}:0", checked_at_ms),
-            "note": "Automated pre-screening complete. Human review required for final determination.",
-        });
-        ToolResult::success(response.to_string())
-    }
+    legal_runtime_unavailable("exochain_check_fiduciary_duty")
 }
 
 // ===========================================================================
@@ -584,17 +444,27 @@ pub fn execute_check_fiduciary_duty(params: &Value, _context: &NodeContext) -> T
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    fn assert_legal_simulation_refused(result: ToolResult, tool_name: &str) {
+    fn assert_legal_runtime_unavailable(result: ToolResult, tool_name: &str) {
         assert!(
             result.is_error,
             "{tool_name} must refuse by default until legal/evidence stores are wired"
         );
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
+        assert!(text.contains("mcp_legal_runtime_unavailable"));
         assert!(text.contains(tool_name));
         assert!(text.contains("unaudited-mcp-simulation-tools"));
         assert!(text.contains("fix-mcp-legal-simulation-tools.md"));
+        for forbidden in [
+            "\"status\":\"completed\"",
+            "\"status\":\"asserted\"",
+            "\"status\":\"initiated\"",
+            "\"overall_status\":\"requires_review\"",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{tool_name} must not emit synthetic legal status field {forbidden}"
+            );
+        }
     }
 
     // -- ediscovery_search ----------------------------------------------------
@@ -608,19 +478,14 @@ mod tests {
 
     #[test]
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    fn execute_ediscovery_search_success() {
+    fn execute_ediscovery_search_refuses_without_legal_runtime_even_with_simulation_feature() {
         let params = json!({
             "query": "contract breach",
             "search_id": "search-001",
             "searched_at_ms": 1700000000000_u64,
         });
         let result = execute_ediscovery_search(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["query"], "contract breach");
-        assert_eq!(v["scope"], "all");
-        assert_eq!(v["status"], "completed");
-        assert_eq!(v["search_id"], "search-001");
+        assert_legal_runtime_unavailable(result, "exochain_ediscovery_search");
     }
 
     #[test]
@@ -635,9 +500,7 @@ mod tests {
             "searched_at_ms": 1700000000001_u64,
         });
         let result = execute_ediscovery_search(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["scope"], "emails");
+        assert_legal_runtime_unavailable(result, "exochain_ediscovery_search");
     }
 
     #[test]
@@ -667,7 +530,7 @@ mod tests {
             "searched_at_ms": 1700000000000_u64,
         });
         let result = execute_ediscovery_search(&params, &NodeContext::empty());
-        assert_legal_simulation_refused(result, "exochain_ediscovery_search");
+        assert_legal_runtime_unavailable(result, "exochain_ediscovery_search");
     }
 
     // -- assert_privilege -----------------------------------------------------
@@ -681,7 +544,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    fn execute_assert_privilege_success() {
+    fn execute_assert_privilege_refuses_without_legal_runtime_even_with_simulation_feature() {
         let params = json!({
             "evidence_id": "ev123",
             "privilege_type": "attorney_client",
@@ -690,11 +553,7 @@ mod tests {
             "asserted_at_ms": 1700000000010_u64,
         });
         let result = execute_assert_privilege(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["privilege_type"], "attorney_client");
-        assert_eq!(v["status"], "asserted");
-        assert_eq!(v["assertion_id"], "assertion-001");
+        assert_legal_runtime_unavailable(result, "exochain_assert_privilege");
     }
 
     #[test]
@@ -736,7 +595,7 @@ mod tests {
             "asserted_at_ms": 1700000000010_u64,
         });
         let result = execute_assert_privilege(&params, &NodeContext::empty());
-        assert_legal_simulation_refused(result, "exochain_assert_privilege");
+        assert_legal_runtime_unavailable(result, "exochain_assert_privilege");
     }
 
     // -- initiate_safe_harbor -------------------------------------------------
@@ -750,7 +609,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    fn execute_initiate_safe_harbor_success() {
+    fn execute_initiate_safe_harbor_refuses_without_legal_runtime_even_with_simulation_feature() {
         let params = json!({
             "initiator_did": "did:exo:alice",
             "transaction_description": "Acquisition of subsidiary",
@@ -759,22 +618,7 @@ mod tests {
             "initiated_at_ms": 1700000000020_u64,
         });
         let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["dgcl_section"], "144");
-        assert_eq!(v["status"], "initiated");
-        assert_eq!(v["process_id"], "safe-harbor-001");
-        assert_eq!(
-            v["interested_parties"].as_array().expect("parties").len(),
-            2
-        );
-        assert_eq!(
-            v["disclosure_requirements"]
-                .as_array()
-                .expect("disclosures")
-                .len(),
-            2
-        );
+        assert_legal_runtime_unavailable(result, "exochain_initiate_safe_harbor");
     }
 
     #[test]
@@ -840,7 +684,7 @@ mod tests {
             "initiated_at_ms": 1700000000020_u64,
         });
         let result = execute_initiate_safe_harbor(&params, &NodeContext::empty());
-        assert_legal_simulation_refused(result, "exochain_initiate_safe_harbor");
+        assert_legal_runtime_unavailable(result, "exochain_initiate_safe_harbor");
     }
 
     // -- check_fiduciary_duty -------------------------------------------------
@@ -854,7 +698,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    fn execute_check_fiduciary_duty_success() {
+    fn execute_check_fiduciary_duty_refuses_without_legal_runtime_even_with_simulation_feature() {
         let params = json!({
             "actor_did": "did:exo:director",
             "action": "approve merger with personal interest",
@@ -863,12 +707,7 @@ mod tests {
             "checked_at_ms": 1700000000030_u64,
         });
         let result = execute_check_fiduciary_duty(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["overall_status"], "requires_review");
-        let duties = v["duties_assessed"].as_array().expect("duties");
-        assert_eq!(duties.len(), 3);
-        assert_eq!(v["check_id"], "fiduciary-001");
+        assert_legal_runtime_unavailable(result, "exochain_check_fiduciary_duty");
     }
 
     #[test]
@@ -906,7 +745,7 @@ mod tests {
             "checked_at_ms": 1700000000030_u64,
         });
         let result = execute_check_fiduciary_duty(&params, &NodeContext::empty());
-        assert_legal_simulation_refused(result, "exochain_check_fiduciary_duty");
+        assert_legal_runtime_unavailable(result, "exochain_check_fiduciary_duty");
     }
 
     #[test]
@@ -979,29 +818,36 @@ mod tests {
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     fn default_build_source_guard_refuses_before_legal_status_json() {
         let source = include_str!("legal.rs");
-        for function in [
-            "execute_ediscovery_search",
-            "execute_assert_privilege",
-            "execute_initiate_safe_harbor",
-            "execute_check_fiduciary_duty",
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("tests marker present");
+        for (function, tool_name) in [
+            ("execute_ediscovery_search", "exochain_ediscovery_search"),
+            ("execute_assert_privilege", "exochain_assert_privilege"),
+            (
+                "execute_initiate_safe_harbor",
+                "exochain_initiate_safe_harbor",
+            ),
+            (
+                "execute_check_fiduciary_duty",
+                "exochain_check_fiduciary_duty",
+            ),
         ] {
-            let default_body = source
-                .split(&format!("pub fn {function}"))
-                .nth(1)
-                .expect("function exists")
-                .split("#[cfg(feature = \"unaudited-mcp-simulation-tools\")]")
-                .next()
-                .expect("default body exists");
             assert!(
-                default_body.contains("legal_simulation_refused"),
-                "{function} must refuse before feature-gated legal simulation behavior"
+                production.contains(&format!("legal_runtime_unavailable(\"{tool_name}\")")),
+                "{function} must fail closed through the legal runtime-unavailable path"
             );
+        }
+        for forbidden in [
+            "\"status\": \"completed\"",
+            "\"status\": \"asserted\"",
+            "\"status\": \"initiated\"",
+            "\"overall_status\": \"requires_review\"",
+        ] {
             assert!(
-                !default_body.contains("\"status\": \"completed\"")
-                    && !default_body.contains("\"status\": \"asserted\"")
-                    && !default_body.contains("\"status\": \"initiated\"")
-                    && !default_body.contains("\"overall_status\": \"requires_review\""),
-                "{function} default path must not emit legal-status simulation JSON"
+                !production.contains(forbidden),
+                "production legal MCP paths must not emit synthetic legal-status JSON: {forbidden}"
             );
         }
     }

@@ -21,24 +21,6 @@ use super::{
     protocol::{ToolDefinition, ToolResult},
 };
 
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-pub(crate) fn simulation_tool_refused(
-    tool_name: &str,
-    initiative: &str,
-    reason: &str,
-) -> ToolResult {
-    ToolResult::error(
-        serde_json::json!({
-            "error": "mcp_simulation_tool_disabled",
-            "tool": tool_name,
-            "message": reason,
-            "feature_flag": "unaudited-mcp-simulation-tools",
-            "initiative": initiative,
-        })
-        .to_string(),
-    )
-}
-
 /// A tool definition plus its compiled JSON Schema validator.
 ///
 /// Schemas are compiled once at registration time; each `execute()` call
