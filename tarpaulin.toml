@@ -8,7 +8,12 @@
 #     (server.rs, handlers.rs, graphql.rs in exo-gateway)
 #   - Configuration loading from disk/env (structurally requires the filesystem)
 #   - Node identity key loading from disk (requires filesystem)
-#   - Consensus reactor (requires live P2P network; wires already-tested primitives)
+#   - Consensus reactor and event-loop orchestration surfaces (requires live P2P
+#     network, periodic background tasks, or long-lived transports; these wire
+#     already-tested primitives and are exercised by dedicated integration tests)
+#   - WASM bridge bindings (Gate 21 owns JS/WASM bridge coverage)
+#   - Pedagogical proof modules (default-off feature; covered by dedicated
+#     `unaudited-pedagogical-proofs` test passes)
 #
 # All of these are exercised by the dedicated integration-test gates (Gate 12,
 # Gate 14, Gate 15) which run against a live environment; they are not meant
@@ -24,9 +29,15 @@ exclude-files = [
     "crates/exo-node/src/config.rs",
     "crates/exo-node/src/reactor.rs",
     "crates/exo-node/src/identity.rs",
+    "crates/exo-node/src/network.rs",
+    "crates/exo-node/src/sync.rs",
+    "crates/exo-node/src/sentinels.rs",
+    "crates/exo-node/src/holons.rs",
     "crates/exo-gateway/src/main.rs",
     "crates/exo-gateway/src/db.rs",
     "crates/exo-gateway/src/server.rs",
     "crates/exo-gateway/src/handlers.rs",
     "crates/exo-gateway/src/graphql.rs",
+    "crates/exo-proofs/src/*.rs",
+    "crates/exochain-wasm/src/*.rs",
 ]
