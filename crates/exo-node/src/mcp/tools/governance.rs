@@ -1,29 +1,14 @@
 //! Governance MCP tools — decision creation, voting, quorum checking, decision
 //! status, and constitutional amendment proposals.
 //!
-//! # Simulation gate (Onyx pass 3, RED #2)
+//! # Fail-closed governance runtime boundary
 //!
-//! The governance tools currently synthesize response JSON without a backing
-//! governance store or reactor. Behind the scenes, they don't actually create
-//! decisions, record votes, register amendments on-chain, or query persisted
-//! quorum/status state.
-//!
-//! Until these are wired to the real governance flow (see
-//! `Initiatives/fix-mcp-simulation-tools.md`), they are gated behind
-//! the `unaudited-mcp-simulation-tools` feature flag (default OFF).
-//! When OFF, they return a structured refusal directing callers to
-//! use the real REST API (`POST /api/v1/governance/proposals`, etc.)
-//! or to enable the feature explicitly in dev environments.
+//! These MCP tools are not wired to a live governance store or reactor. They
+//! validate request shape where useful, then fail closed for all builds. The
+//! `unaudited-mcp-simulation-tools` feature does not enable fabricated
+//! governance writes or reads.
 
-// `needless_return` fires inside #[cfg(not(feature = "..."))]
-// refusal blocks where the function body continues in the
-// mutually-exclusive `#[cfg(feature = "...")]` branch. Clippy
-// can't see the other branch, so the explicit `return` is
-// load-bearing for the feature-on build.
-#![allow(clippy::needless_return)]
-
-#[cfg_attr(not(feature = "unaudited-mcp-simulation-tools"), allow(unused_imports))]
-use exo_core::{Did, hash::hash_structured};
+use exo_core::Did;
 use serde_json::{Value, json};
 
 use crate::mcp::{
@@ -37,7 +22,6 @@ const MAX_GOVERNANCE_MCP_RATIONALE_BYTES: usize = 4 * 1024;
 const MAX_GOVERNANCE_MCP_ID_BYTES: usize = 256;
 const MAX_GOVERNANCE_MCP_DID_BYTES: usize = 512;
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn input_too_large_error(field: &str, max_bytes: usize) -> ToolResult {
     ToolResult::error(
         json!({
@@ -49,7 +33,6 @@ fn input_too_large_error(field: &str, max_bytes: usize) -> ToolResult {
     )
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn validate_string_bytes(value: &str, field: &str, max_bytes: usize) -> Result<(), ToolResult> {
     if value.len() > max_bytes {
         return Err(input_too_large_error(field, max_bytes));
@@ -57,7 +40,6 @@ fn validate_string_bytes(value: &str, field: &str, max_bytes: usize) -> Result<(
     Ok(())
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn invalid_parameter_error(field: &str, message: &str) -> ToolResult {
     ToolResult::error(
         json!({
@@ -69,31 +51,21 @@ fn invalid_parameter_error(field: &str, message: &str) -> ToolResult {
     )
 }
 
-/// Build the structured refusal body for a gated simulation tool.
-///
-/// Keeps refusal shape consistent across tools and makes the feature-flag
-/// remediation path discoverable to any caller inspecting the response.
-#[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-fn simulation_refused(tool_name: &str) -> ToolResult {
+fn governance_runtime_unavailable(tool_name: &str) -> ToolResult {
     tracing::warn!(
         tool = %tool_name,
-        "refusing MCP simulation tool: handler does not persist to store \
-         or invoke reactor. Build with \
-         --features exo-node/unaudited-mcp-simulation-tools to allow \
-         simulation responses in dev clusters. Real governance calls \
-         belong on the REST API (see Initiatives/fix-mcp-simulation-tools.md)."
+        "refusing MCP governance tool: no live governance store or reactor is attached"
     );
     ToolResult::error(
         json!({
-            "error": "mcp_simulation_tool_disabled",
+            "error": "mcp_governance_runtime_unavailable",
             "tool": tool_name,
-            "message": "This MCP tool currently returns simulation JSON \
-                        without persisting to the governance store or \
-                        invoking the reactor. It is disabled by default \
-                        to prevent AI agents from acting on false success \
-                        signals. Use the real REST governance API, or \
-                        build with the `unaudited-mcp-simulation-tools` \
-                        feature flag in a dev cluster.",
+            "message": "This MCP governance tool has no live governance store \
+                        or reactor attached, so it cannot create decisions, \
+                        record votes, check quorum, query status, or propose \
+                        amendments. The `unaudited-mcp-simulation-tools` \
+                        feature does not enable synthetic governance writes \
+                        or fabricated governance reads.",
             "feature_flag": "unaudited-mcp-simulation-tools",
             "initiative": "Initiatives/fix-mcp-simulation-tools.md",
             "refusal_source": format!("exo-node/mcp/tools/governance.rs::{tool_name}"),
@@ -145,106 +117,64 @@ pub fn create_decision_definition() -> ToolDefinition {
 /// Execute the `exochain_create_decision` tool.
 #[must_use]
 pub fn execute_create_decision(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params; // silence unused warning
-        return simulation_refused("exochain_create_decision");
-    }
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        tracing::warn!(
-            "UNAUDITED MCP simulation tool in use: exochain_create_decision. \
-             Returns synthetic decision_id without persisting to store or \
-             invoking reactor. Gated by `unaudited-mcp-simulation-tools` \
-             feature and MUST NOT be enabled in production."
-        );
-        let title = match params.get("title").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: title"}).to_string(),
-                );
-            }
-        };
-        let description = match params.get("description").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: description"}).to_string(),
-                );
-            }
-        };
-        let proposer_str = match params.get("proposer_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: proposer_did"}).to_string(),
-                );
-            }
-        };
-
-        if let Err(result) = validate_string_bytes(title, "title", MAX_GOVERNANCE_MCP_TITLE_BYTES) {
-            return result;
-        }
-        if let Err(result) = validate_string_bytes(
-            description,
-            "description",
-            MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
-        ) {
-            return result;
-        }
-        if let Err(result) =
-            validate_string_bytes(proposer_str, "proposer_did", MAX_GOVERNANCE_MCP_DID_BYTES)
-        {
-            return result;
-        }
-
-        if Did::new(proposer_str).is_err() {
-            return invalid_parameter_error(
-                "proposer_did",
-                "must be a syntactically valid EXO DID",
+    let title = match params.get("title").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: title"}).to_string(),
             );
         }
-
-        let decision_class = params
-            .get("decision_class")
-            .and_then(Value::as_str)
-            .unwrap_or("standard");
-        if let Err(result) = validate_string_bytes(
-            decision_class,
-            "decision_class",
-            MAX_GOVERNANCE_MCP_ID_BYTES,
-        ) {
-            return result;
+    };
+    let description = match params.get("description").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: description"}).to_string(),
+            );
         }
+    };
+    let proposer_str = match params.get("proposer_did").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: proposer_did"}).to_string(),
+            );
+        }
+    };
 
-        let decision_id = match hash_structured(&(
-            "exo.mcp.governance.decision.v1",
-            title,
-            description,
-            proposer_str,
-            decision_class,
-        )) {
-            Ok(hash) => hash.to_string(),
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("failed to hash decision payload: {e}")}).to_string(),
-                );
-            }
-        };
+    if let Err(result) = validate_string_bytes(title, "title", MAX_GOVERNANCE_MCP_TITLE_BYTES) {
+        return result;
+    }
+    if let Err(result) = validate_string_bytes(
+        description,
+        "description",
+        MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
+    ) {
+        return result;
+    }
+    if let Err(result) =
+        validate_string_bytes(proposer_str, "proposer_did", MAX_GOVERNANCE_MCP_DID_BYTES)
+    {
+        return result;
+    }
 
-        let response = json!({
-            "decision_id": decision_id,
-            "title": title,
-            "description": description,
-            "proposer": proposer_str,
-            "decision_class": decision_class,
-            "status": "proposed",
-            "created_at": null,
-            "created_at_source": "simulation_no_persistence_timestamp",
-        });
-        ToolResult::success(response.to_string())
-    } // end cfg(feature = "unaudited-mcp-simulation-tools") block
+    if Did::new(proposer_str).is_err() {
+        return invalid_parameter_error("proposer_did", "must be a syntactically valid EXO DID");
+    }
+
+    let decision_class = params
+        .get("decision_class")
+        .and_then(Value::as_str)
+        .unwrap_or("standard");
+    if let Err(result) = validate_string_bytes(
+        decision_class,
+        "decision_class",
+        MAX_GOVERNANCE_MCP_ID_BYTES,
+    ) {
+        return result;
+    }
+
+    governance_runtime_unavailable("exochain_create_decision")
 }
 
 // ---------------------------------------------------------------------------
@@ -290,90 +220,65 @@ pub fn cast_vote_definition() -> ToolDefinition {
 /// Execute the `exochain_cast_vote` tool.
 #[must_use]
 pub fn execute_cast_vote(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        return simulation_refused("exochain_cast_vote");
-    }
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        tracing::warn!(
-            "UNAUDITED MCP simulation tool in use: exochain_cast_vote. \
-             Returns `recorded:true` without persisting the vote to any \
-             store or broadcasting it. Gated by \
-             `unaudited-mcp-simulation-tools` feature."
-        );
-        let decision_id = match params.get("decision_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: decision_id"}).to_string(),
-                );
-            }
-        };
-        let voter_str = match params.get("voter_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: voter_did"}).to_string(),
-                );
-            }
-        };
-        let choice = match params.get("choice").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: choice"}).to_string(),
-                );
-            }
-        };
-
-        if let Err(result) =
-            validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
-        {
-            return result;
-        }
-        if let Err(result) =
-            validate_string_bytes(voter_str, "voter_did", MAX_GOVERNANCE_MCP_DID_BYTES)
-        {
-            return result;
-        }
-
-        if Did::new(voter_str).is_err() {
-            return invalid_parameter_error("voter_did", "must be a syntactically valid EXO DID");
-        }
-
-        let valid_choices = ["approve", "reject", "abstain"];
-        if !valid_choices.contains(&choice) {
-            return invalid_parameter_error("choice", "must be approve, reject, or abstain");
-        }
-
-        if decision_id.is_empty() {
+    let decision_id = match params.get("decision_id").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
             return ToolResult::error(
-                json!({"error": "decision_id must not be empty"}).to_string(),
+                json!({"error": "missing required parameter: decision_id"}).to_string(),
             );
         }
-
-        let rationale = params
-            .get("rationale")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if let Err(result) =
-            validate_string_bytes(rationale, "rationale", MAX_GOVERNANCE_MCP_RATIONALE_BYTES)
-        {
-            return result;
+    };
+    let voter_str = match params.get("voter_did").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: voter_did"}).to_string(),
+            );
         }
+    };
+    let choice = match params.get("choice").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: choice"}).to_string(),
+            );
+        }
+    };
 
-        let response = json!({
-            "decision_id": decision_id,
-            "voter": voter_str,
-            "choice": choice,
-            "recorded": true,
-            "voice_kind": "unknown",
-            "rationale": rationale,
-        });
-        ToolResult::success(response.to_string())
-    } // end cfg(feature = "unaudited-mcp-simulation-tools") block
+    if let Err(result) =
+        validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
+    {
+        return result;
+    }
+    if let Err(result) = validate_string_bytes(voter_str, "voter_did", MAX_GOVERNANCE_MCP_DID_BYTES)
+    {
+        return result;
+    }
+
+    if Did::new(voter_str).is_err() {
+        return invalid_parameter_error("voter_did", "must be a syntactically valid EXO DID");
+    }
+
+    let valid_choices = ["approve", "reject", "abstain"];
+    if !valid_choices.contains(&choice) {
+        return invalid_parameter_error("choice", "must be approve, reject, or abstain");
+    }
+
+    if decision_id.is_empty() {
+        return ToolResult::error(json!({"error": "decision_id must not be empty"}).to_string());
+    }
+
+    let rationale = params
+        .get("rationale")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if let Err(result) =
+        validate_string_bytes(rationale, "rationale", MAX_GOVERNANCE_MCP_RATIONALE_BYTES)
+    {
+        return result;
+    }
+
+    governance_runtime_unavailable("exochain_cast_vote")
 }
 
 // ---------------------------------------------------------------------------
@@ -409,61 +314,37 @@ pub fn check_quorum_definition() -> ToolDefinition {
 /// Execute the `exochain_check_quorum` tool.
 #[must_use]
 pub fn execute_check_quorum(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        return simulation_refused("exochain_check_quorum");
-    }
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        tracing::warn!(
-            "UNAUDITED MCP simulation tool in use: exochain_check_quorum. \
-             Returns synthetic zero-vote quorum data without querying a \
-             governance store. Gated by `unaudited-mcp-simulation-tools` \
-             feature."
-        );
-        let decision_id = match params.get("decision_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: decision_id"}).to_string(),
-                );
-            }
-        };
-        let threshold = match params.get("threshold").and_then(Value::as_u64) {
-            Some(n) => n,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing or invalid required parameter: threshold (must be a positive integer)"}).to_string(),
-                );
-            }
-        };
-
-        if let Err(result) =
-            validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
-        {
-            return result;
-        }
-
-        if decision_id.is_empty() {
+    let decision_id = match params.get("decision_id").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
             return ToolResult::error(
-                json!({"error": "decision_id must not be empty"}).to_string(),
+                json!({"error": "missing required parameter: decision_id"}).to_string(),
             );
         }
-        if threshold == 0 {
-            return invalid_parameter_error("threshold", "must be a positive integer");
+    };
+    let threshold = match params.get("threshold").and_then(Value::as_u64) {
+        Some(n) => n,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing or invalid required parameter: threshold (must be a positive integer)"}).to_string(),
+            );
         }
+    };
 
-        let response = json!({
-            "decision_id": decision_id,
-            "threshold": threshold,
-            "total_votes": 0,
-            "authentic_approvals": 0,
-            "synthetic_excluded": 0,
-            "quorum_met": false,
-        });
-        ToolResult::success(response.to_string())
+    if let Err(result) =
+        validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
+    {
+        return result;
     }
+
+    if decision_id.is_empty() {
+        return ToolResult::error(json!({"error": "decision_id must not be empty"}).to_string());
+    }
+    if threshold == 0 {
+        return invalid_parameter_error("threshold", "must be a positive integer");
+    }
+
+    governance_runtime_unavailable("exochain_check_quorum")
 }
 
 // ---------------------------------------------------------------------------
@@ -494,46 +375,26 @@ pub fn get_decision_status_definition() -> ToolDefinition {
 /// Execute the `exochain_get_decision_status` tool.
 #[must_use]
 pub fn execute_get_decision_status(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        return simulation_refused("exochain_get_decision_status");
-    }
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        tracing::warn!(
-            "UNAUDITED MCP simulation tool in use: exochain_get_decision_status. \
-             Returns synthetic unknown status without querying a governance \
-             store. Gated by `unaudited-mcp-simulation-tools` feature."
-        );
-        let decision_id = match params.get("decision_id").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: decision_id"}).to_string(),
-                );
-            }
-        };
-
-        if let Err(result) =
-            validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
-        {
-            return result;
-        }
-
-        if decision_id.is_empty() {
+    let decision_id = match params.get("decision_id").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
             return ToolResult::error(
-                json!({"error": "decision_id must not be empty"}).to_string(),
+                json!({"error": "missing required parameter: decision_id"}).to_string(),
             );
         }
+    };
 
-        let response = json!({
-            "decision_id": decision_id,
-            "status": "unknown",
-            "message": "Decision not found in local state",
-        });
-        ToolResult::success(response.to_string())
+    if let Err(result) =
+        validate_string_bytes(decision_id, "decision_id", MAX_GOVERNANCE_MCP_ID_BYTES)
+    {
+        return result;
     }
+
+    if decision_id.is_empty() {
+        return ToolResult::error(json!({"error": "decision_id must not be empty"}).to_string());
+    }
+
+    governance_runtime_unavailable("exochain_get_decision_status")
 }
 
 // ---------------------------------------------------------------------------
@@ -579,117 +440,68 @@ pub fn propose_amendment_definition() -> ToolDefinition {
 /// Execute the `exochain_propose_amendment` tool.
 #[must_use]
 pub fn execute_propose_amendment(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        return simulation_refused("exochain_propose_amendment");
+    let title = match params.get("title").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: title"}).to_string(),
+            );
+        }
+    };
+    let description = match params.get("description").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: description"}).to_string(),
+            );
+        }
+    };
+    let proposer_str = match params.get("proposer_did").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: proposer_did"}).to_string(),
+            );
+        }
+    };
+    let target = match params.get("target").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: target"}).to_string(),
+            );
+        }
+    };
+
+    if let Err(result) = validate_string_bytes(title, "title", MAX_GOVERNANCE_MCP_TITLE_BYTES) {
+        return result;
     }
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
+    if let Err(result) = validate_string_bytes(
+        description,
+        "description",
+        MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
+    ) {
+        return result;
+    }
+    if let Err(result) =
+        validate_string_bytes(proposer_str, "proposer_did", MAX_GOVERNANCE_MCP_DID_BYTES)
     {
-        tracing::warn!(
-            "UNAUDITED MCP simulation tool in use: exochain_propose_amendment. \
-             Returns synthetic amendment_id without persisting or invoking \
-             the reactor. Gated by `unaudited-mcp-simulation-tools` feature."
+        return result;
+    }
+
+    if Did::new(proposer_str).is_err() {
+        return invalid_parameter_error("proposer_did", "must be a syntactically valid EXO DID");
+    }
+
+    let valid_targets = ["constitution", "invariant_registry", "kernel_binary"];
+    if !valid_targets.contains(&target) {
+        return invalid_parameter_error(
+            "target",
+            "must be constitution, invariant_registry, or kernel_binary",
         );
-        let title = match params.get("title").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: title"}).to_string(),
-                );
-            }
-        };
-        let description = match params.get("description").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: description"}).to_string(),
-                );
-            }
-        };
-        let proposer_str = match params.get("proposer_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: proposer_did"}).to_string(),
-                );
-            }
-        };
-        let target = match params.get("target").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: target"}).to_string(),
-                );
-            }
-        };
+    }
 
-        if let Err(result) = validate_string_bytes(title, "title", MAX_GOVERNANCE_MCP_TITLE_BYTES) {
-            return result;
-        }
-        if let Err(result) = validate_string_bytes(
-            description,
-            "description",
-            MAX_GOVERNANCE_MCP_DESCRIPTION_BYTES,
-        ) {
-            return result;
-        }
-        if let Err(result) =
-            validate_string_bytes(proposer_str, "proposer_did", MAX_GOVERNANCE_MCP_DID_BYTES)
-        {
-            return result;
-        }
-
-        if Did::new(proposer_str).is_err() {
-            return invalid_parameter_error(
-                "proposer_did",
-                "must be a syntactically valid EXO DID",
-            );
-        }
-
-        let valid_targets = ["constitution", "invariant_registry", "kernel_binary"];
-        if !valid_targets.contains(&target) {
-            return invalid_parameter_error(
-                "target",
-                "must be constitution, invariant_registry, or kernel_binary",
-            );
-        }
-
-        let amendment_id = match hash_structured(&(
-            "exo.mcp.governance.amendment.v1",
-            title,
-            description,
-            proposer_str,
-            target,
-        )) {
-            Ok(hash) => hash.to_string(),
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("failed to hash amendment payload: {e}")}).to_string(),
-                );
-            }
-        };
-
-        let response = json!({
-            "amendment_id": amendment_id,
-            "title": title,
-            "description": description,
-            "proposer": proposer_str,
-            "target": target,
-            "requirements": {
-                "validator_consensus": "unanimous",
-                "ai_irb_approval": ">=80%",
-                "public_comment_period_days": 30,
-                "formal_proof_required": true,
-                "security_audit_required": true,
-            },
-            "status": "draft",
-            "proposed_at": null,
-            "proposed_at_source": "simulation_no_persistence_timestamp",
-            "warning": "Constitutional amendments require the highest governance threshold. See spec \u{00a7}3A.3.2.",
-        });
-        ToolResult::success(response.to_string())
-    } // end cfg(feature = "unaudited-mcp-simulation-tools") block
+    governance_runtime_unavailable("exochain_propose_amendment")
 }
 
 // ===========================================================================
@@ -699,6 +511,23 @@ pub fn execute_propose_amendment(params: &Value, _context: &NodeContext) -> Tool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_governance_runtime_unavailable(result: &ToolResult, tool_name: &str) {
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(
+            text.contains("mcp_governance_runtime_unavailable"),
+            "refusal body must carry governance runtime error tag, got: {text}"
+        );
+        assert!(
+            text.contains(tool_name),
+            "refusal body must name the specific tool, got: {text}"
+        );
+        assert!(
+            text.contains("unaudited-mcp-simulation-tools"),
+            "refusal body must name the simulation feature flag, got: {text}"
+        );
+    }
 
     // -- create_decision ---------------------------------------------------
 
@@ -711,28 +540,19 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_create_decision_success() {
+    fn execute_create_decision_refuses_without_governance_runtime_even_with_simulation_feature() {
         let params = json!({
                 "title": "Approve data sharing policy",
                 "description": "Allow cross-org medical data sharing under bailment.",
                 "proposer_did": "did:exo:alice",
         });
         let result = execute_create_decision(&params, &NodeContext::empty());
-        let repeat = execute_create_decision(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        assert!(!repeat.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        let repeat_v: Value = serde_json::from_str(repeat.content[0].text()).expect("valid JSON");
-        assert_eq!(v["title"], "Approve data sharing policy");
-        assert_eq!(v["proposer"], "did:exo:alice");
-        assert_eq!(v["status"], "proposed");
-        assert!(!v["decision_id"].as_str().expect("id").is_empty());
-        assert_eq!(v["decision_id"], repeat_v["decision_id"]);
-        assert!(v["created_at"].is_null());
-        assert_eq!(
-            v["created_at_source"],
-            "simulation_no_persistence_timestamp"
-        );
+        assert_governance_runtime_unavailable(&result, "exochain_create_decision");
+        let text = result.content[0].text();
+        assert!(!text.contains("decision_id"));
+        assert!(!text.contains("\"status\""));
+        let synthetic_timestamp = ["simulation", "_no_", "persistence", "_timestamp"].concat();
+        assert!(!text.contains(&synthetic_timestamp));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -818,7 +638,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_cast_vote_success() {
+    fn execute_cast_vote_refuses_without_governance_runtime_even_with_simulation_feature() {
         let result = execute_cast_vote(
             &json!({
                 "decision_id": "abc123",
@@ -828,14 +648,10 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["decision_id"], "abc123");
-        assert_eq!(v["voter"], "did:exo:bob");
-        assert_eq!(v["choice"], "approve");
-        assert_eq!(v["recorded"], true);
-        assert_eq!(v["voice_kind"], "unknown");
-        assert_eq!(v["rationale"], "Looks good to me.");
+        assert_governance_runtime_unavailable(&result, "exochain_cast_vote");
+        let text = result.content[0].text();
+        assert!(!text.contains("\"recorded\""));
+        assert!(!text.contains("voice_kind"));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -912,7 +728,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_check_quorum_success() {
+    fn execute_check_quorum_refuses_without_governance_runtime_even_with_simulation_feature() {
         let result = execute_check_quorum(
             &json!({
                 "decision_id": "abc123",
@@ -920,12 +736,12 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["decision_id"], "abc123");
-        assert_eq!(v["threshold"], 3);
-        assert_eq!(v["quorum_met"], false);
-        assert_eq!(v["total_votes"], 0);
+        assert_governance_runtime_unavailable(&result, "exochain_check_quorum");
+        let text = result.content[0].text();
+        assert!(!text.contains("quorum_met"));
+        assert!(!text.contains("total_votes"));
+        let synthetic_tally_field = ["synthetic", "_excluded"].concat();
+        assert!(!text.contains(&synthetic_tally_field));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -946,13 +762,14 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_get_decision_status_success() {
+    fn execute_get_decision_status_refuses_without_governance_runtime_even_with_simulation_feature()
+    {
         let result =
             execute_get_decision_status(&json!({"decision_id": "abc123"}), &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["decision_id"], "abc123");
-        assert_eq!(v["status"], "unknown");
+        assert_governance_runtime_unavailable(&result, "exochain_get_decision_status");
+        let text = result.content[0].text();
+        assert!(!text.contains("\"status\""));
+        assert!(!text.contains("Decision not found"));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -974,7 +791,7 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_propose_amendment_success() {
+    fn execute_propose_amendment_refuses_without_governance_runtime_even_with_simulation_feature() {
         let params = json!({
                 "title": "Add quantum-safe threshold signatures",
                 "description": "Extend the constitutional invariant set to require ML-DSA-65 for kernel modification quorum.",
@@ -982,28 +799,12 @@ mod tests {
                 "target": "constitution",
         });
         let result = execute_propose_amendment(&params, &NodeContext::empty());
-        let repeat = execute_propose_amendment(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        assert!(!repeat.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        let repeat_v: Value = serde_json::from_str(repeat.content[0].text()).expect("valid JSON");
-        assert_eq!(v["target"], "constitution");
-        assert_eq!(v["status"], "draft");
-        assert!(!v["amendment_id"].as_str().expect("id").is_empty());
-        assert_eq!(v["amendment_id"], repeat_v["amendment_id"]);
-        assert!(v["proposed_at"].is_null());
-        assert_eq!(
-            v["proposed_at_source"],
-            "simulation_no_persistence_timestamp"
-        );
-        assert_eq!(v["requirements"]["validator_consensus"], "unanimous");
-        assert_eq!(v["requirements"]["formal_proof_required"], true);
-        assert!(
-            v["warning"]
-                .as_str()
-                .expect("warning")
-                .contains("highest governance threshold")
-        );
+        assert_governance_runtime_unavailable(&result, "exochain_propose_amendment");
+        let text = result.content[0].text();
+        assert!(!text.contains("amendment_id"));
+        assert!(!text.contains("\"requirements\""));
+        let synthetic_timestamp = ["simulation", "_no_", "persistence", "_timestamp"].concat();
+        assert!(!text.contains(&synthetic_timestamp));
     }
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
@@ -1085,15 +886,14 @@ mod tests {
     }
 
     // ==================================================================
-    // RED #2 refusal tests (default build only)
+    // Default-build runtime-boundary refusal tests.
     // ==================================================================
 
-    /// When the `unaudited-mcp-simulation-tools` feature is OFF (default),
-    /// `execute_create_decision` must return the structured simulation
-    /// refusal — not a synthesized success response.
+    /// Default builds must return the same live-runtime refusal as feature
+    /// builds, not a synthesized success response.
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
-    fn execute_create_decision_refused_without_feature_flag() {
+    fn execute_create_decision_refuses_without_governance_runtime_by_default() {
         let result = execute_create_decision(
             &json!({
                 "title": "Test",
@@ -1102,29 +902,16 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(
-            result.is_error,
-            "default build MUST refuse MCP simulation tool"
-        );
+        assert_governance_runtime_unavailable(&result, "exochain_create_decision");
         let text = result.content[0].text();
-        assert!(
-            text.contains("mcp_simulation_tool_disabled"),
-            "refusal body must carry error tag, got: {text}"
-        );
-        assert!(
-            text.contains("unaudited-mcp-simulation-tools"),
-            "refusal body must name the feature flag, got: {text}"
-        );
-        assert!(
-            text.contains("exochain_create_decision"),
-            "refusal body must name the specific tool, got: {text}"
-        );
+        assert!(!text.contains("decision_id"));
+        assert!(!text.contains("\"status\""));
     }
 
-    /// Same refusal for cast_vote — no synthesized "recorded:true".
+    /// Same refusal for cast_vote: no synthesized persistence claim.
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
-    fn execute_cast_vote_refused_without_feature_flag() {
+    fn execute_cast_vote_refuses_without_governance_runtime_by_default() {
         let result = execute_cast_vote(
             &json!({
                 "decision_id": "abc",
@@ -1133,16 +920,16 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(result.is_error);
+        assert_governance_runtime_unavailable(&result, "exochain_cast_vote");
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("exochain_cast_vote"));
+        assert!(!text.contains("\"recorded\""));
+        assert!(!text.contains("voice_kind"));
     }
 
     /// Same refusal for check_quorum — no synthesized zero-vote tally.
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
-    fn execute_check_quorum_refused_without_feature_flag() {
+    fn execute_check_quorum_refuses_without_governance_runtime_by_default() {
         let result = execute_check_quorum(
             &json!({
                 "decision_id": "abc",
@@ -1150,40 +937,38 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(result.is_error);
+        assert_governance_runtime_unavailable(&result, "exochain_check_quorum");
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("exochain_check_quorum"));
-        assert!(text.contains("unaudited-mcp-simulation-tools"));
         assert!(text.contains("Initiatives/fix-mcp-simulation-tools.md"));
         assert!(
             text.contains("governance store"),
             "refusal body must explain the missing backing store, got: {text}"
         );
+        assert!(!text.contains("quorum_met"));
+        assert!(!text.contains("total_votes"));
     }
 
     /// Same refusal for get_decision_status — no synthesized unknown status.
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
-    fn execute_get_decision_status_refused_without_feature_flag() {
+    fn execute_get_decision_status_refuses_without_governance_runtime_by_default() {
         let result =
             execute_get_decision_status(&json!({"decision_id": "abc"}), &NodeContext::empty());
-        assert!(result.is_error);
+        assert_governance_runtime_unavailable(&result, "exochain_get_decision_status");
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("exochain_get_decision_status"));
-        assert!(text.contains("unaudited-mcp-simulation-tools"));
         assert!(text.contains("Initiatives/fix-mcp-simulation-tools.md"));
         assert!(
             text.contains("governance store"),
             "refusal body must explain the missing backing store, got: {text}"
         );
+        assert!(!text.contains("\"status\""));
+        assert!(!text.contains("Decision not found"));
     }
 
     /// Same refusal for propose_amendment — no synthesized amendment_id.
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
-    fn execute_propose_amendment_refused_without_feature_flag() {
+    fn execute_propose_amendment_refuses_without_governance_runtime_by_default() {
         let result = execute_propose_amendment(
             &json!({
                 "title": "Test",
@@ -1193,9 +978,9 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(result.is_error);
+        assert_governance_runtime_unavailable(&result, "exochain_propose_amendment");
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("exochain_propose_amendment"));
+        assert!(!text.contains("amendment_id"));
+        assert!(!text.contains("\"requirements\""));
     }
 }
