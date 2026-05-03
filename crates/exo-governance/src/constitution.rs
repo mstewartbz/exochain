@@ -2,12 +2,14 @@
 //!
 //! Satisfies: GOV-001, GOV-002, GOV-006, TNC-04
 
+use std::cell::Cell;
+
 use exo_core::{
     Did,
     hash::hash_structured,
     types::{Hash256, Timestamp},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{delegation::DelegationScope, errors::GovernanceError, types::*};
 
@@ -66,7 +68,7 @@ pub enum ConstraintExpression {
     MaxDelegationDepth { max_depth: u32 },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub enum Expr {
     Variable(String),
     Literal(String),
@@ -84,6 +86,61 @@ pub struct CustomConstraint {
 
 /// Maximum permitted depth for recursive custom constraint expressions.
 pub const MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH: usize = 64;
+
+thread_local! {
+    static CUSTOM_EXPR_DESERIALIZE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct CustomExprDeserializeDepthGuard;
+
+impl Drop for CustomExprDeserializeDepthGuard {
+    fn drop(&mut self) {
+        CUSTOM_EXPR_DESERIALIZE_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+fn enter_custom_expr_deserialize_depth<E>() -> Result<CustomExprDeserializeDepthGuard, E>
+where
+    E: de::Error,
+{
+    CUSTOM_EXPR_DESERIALIZE_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current > MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH {
+            return Err(de::Error::custom(format!(
+                "maximum custom constraint expression depth exceeded: more than {MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH}"
+            )));
+        }
+        depth.set(current + 1);
+        Ok(CustomExprDeserializeDepthGuard)
+    })
+}
+
+#[derive(Deserialize)]
+enum ExprDeserializeProxy {
+    Variable(String),
+    Literal(String),
+    Eq(Box<Expr>, Box<Expr>),
+    GreaterThan(Box<Expr>, Box<Expr>),
+    Contains(Box<Expr>, Box<Expr>),
+}
+
+impl<'de> Deserialize<'de> for Expr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let _depth_guard = enter_custom_expr_deserialize_depth::<D::Error>()?;
+        Ok(match ExprDeserializeProxy::deserialize(deserializer)? {
+            ExprDeserializeProxy::Variable(name) => Self::Variable(name),
+            ExprDeserializeProxy::Literal(value) => Self::Literal(value),
+            ExprDeserializeProxy::Eq(left, right) => Self::Eq(left, right),
+            ExprDeserializeProxy::GreaterThan(left, right) => Self::GreaterThan(left, right),
+            ExprDeserializeProxy::Contains(left, right) => Self::Contains(left, right),
+        })
+    }
+}
 
 pub struct CustomConstraintEvaluator;
 
@@ -1252,6 +1309,38 @@ mod tests {
             GovernanceError::ConstitutionalViolation { constraint_id, .. }
                 if constraint_id == "EXPR_TOO_DEEP"
         ));
+    }
+
+    fn nested_eq_json(depth: usize) -> serde_json::Value {
+        let mut expr = serde_json::json!({"Literal": "same"});
+        for _ in 0..depth {
+            expr = serde_json::json!({
+                "Eq": [expr, {"Literal": "same"}],
+            });
+        }
+        expr
+    }
+
+    #[test]
+    fn custom_expr_deserialization_rejects_excessive_depth() {
+        let valid: Expr = serde_json::from_value(nested_eq_json(MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH))
+            .expect("configured maximum expression depth must deserialize");
+        assert!(
+            CustomConstraintEvaluator::evaluate_expr(&valid, &exo_core::DeterministicMap::new())
+                .is_ok(),
+            "deserialized expression at the configured depth should remain evaluable"
+        );
+
+        let err =
+            serde_json::from_value::<Expr>(nested_eq_json(MAX_CUSTOM_CONSTRAINT_EXPR_DEPTH + 1))
+                .expect_err(
+                    "expression deserialization must reject excessive nesting before evaluation",
+                );
+        assert!(
+            err.to_string()
+                .contains("maximum custom constraint expression depth"),
+            "unexpected deserialization error: {err}"
+        );
     }
 
     // CustomConstraintEvaluator: Contains returns "false" when substring absent
