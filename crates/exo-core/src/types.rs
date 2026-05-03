@@ -8,7 +8,10 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, SeqAccess, Visitor},
+};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -205,12 +208,23 @@ pub enum Signature {
     Empty,
 }
 
-/// Serde-friendly proxy that mirrors `Signature` but uses `Vec<u8>` instead of `[u8; 64]`.
-#[derive(Serialize, Deserialize)]
-enum SignatureProxy {
-    Ed25519(Vec<u8>),
-    PostQuantum(Vec<u8>),
-    Hybrid { classical: Vec<u8>, pq: Vec<u8> },
+#[derive(Serialize)]
+enum SignatureSerializeProxy<'a> {
+    Ed25519(&'a [u8]),
+    PostQuantum(&'a [u8]),
+    Hybrid { classical: &'a [u8], pq: &'a [u8] },
+    Empty,
+}
+
+/// Deserialize proxy whose byte fields are bounded before allocation.
+#[derive(Deserialize)]
+enum SignatureDeserializeProxy {
+    Ed25519(BoundedSignatureBytes<64>),
+    PostQuantum(BoundedSignatureBytes<ML_DSA_65_SIGNATURE_MAX_BYTES>),
+    Hybrid {
+        classical: BoundedSignatureBytes<64>,
+        pq: BoundedSignatureBytes<ML_DSA_65_SIGNATURE_MAX_BYTES>,
+    },
     Empty,
 }
 
@@ -220,13 +234,10 @@ impl Serialize for Signature {
         serializer: S,
     ) -> core::result::Result<S::Ok, S::Error> {
         let proxy = match self {
-            Self::Ed25519(b) => SignatureProxy::Ed25519(b.to_vec()),
-            Self::PostQuantum(b) => SignatureProxy::PostQuantum(b.clone()),
-            Self::Hybrid { classical, pq } => SignatureProxy::Hybrid {
-                classical: classical.to_vec(),
-                pq: pq.clone(),
-            },
-            Self::Empty => SignatureProxy::Empty,
+            Self::Ed25519(b) => SignatureSerializeProxy::Ed25519(b),
+            Self::PostQuantum(b) => SignatureSerializeProxy::PostQuantum(b),
+            Self::Hybrid { classical, pq } => SignatureSerializeProxy::Hybrid { classical, pq },
+            Self::Empty => SignatureSerializeProxy::Empty,
         };
         proxy.serialize(serializer)
     }
@@ -236,9 +247,9 @@ impl<'de> Deserialize<'de> for Signature {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> core::result::Result<Self, D::Error> {
-        let proxy = SignatureProxy::deserialize(deserializer)?;
+        let proxy = SignatureDeserializeProxy::deserialize(deserializer)?;
         match proxy {
-            SignatureProxy::Ed25519(b) => {
+            SignatureDeserializeProxy::Ed25519(BoundedSignatureBytes(b)) => {
                 if b.len() != 64 {
                     return Err(serde::de::Error::invalid_length(
                         b.len(),
@@ -249,32 +260,95 @@ impl<'de> Deserialize<'de> for Signature {
                 buf.copy_from_slice(&b);
                 Ok(Self::Ed25519(buf))
             }
-            SignatureProxy::PostQuantum(b) => {
-                validate_pq_signature_len::<D::Error>(b.len())?;
+            SignatureDeserializeProxy::PostQuantum(BoundedSignatureBytes(b)) => {
                 Ok(Self::PostQuantum(b))
             }
-            SignatureProxy::Hybrid { classical, pq } => {
+            SignatureDeserializeProxy::Hybrid {
+                classical: BoundedSignatureBytes(classical),
+                pq: BoundedSignatureBytes(pq),
+            } => {
                 if classical.len() != 64 {
                     return Err(serde::de::Error::invalid_length(
                         classical.len(),
                         &"64 bytes for classical",
                     ));
                 }
-                validate_pq_signature_len::<D::Error>(pq.len())?;
                 let mut buf = [0u8; 64];
                 buf.copy_from_slice(&classical);
                 Ok(Self::Hybrid { classical: buf, pq })
             }
-            SignatureProxy::Empty => Ok(Self::Empty),
+            SignatureDeserializeProxy::Empty => Ok(Self::Empty),
         }
     }
 }
 
-fn validate_pq_signature_len<E: serde::de::Error>(len: usize) -> core::result::Result<(), E> {
-    if len > ML_DSA_65_SIGNATURE_MAX_BYTES {
+struct BoundedSignatureBytes<const MAX: usize>(Vec<u8>);
+
+impl<'de, const MAX: usize> Deserialize<'de> for BoundedSignatureBytes<MAX> {
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_byte_buf(BoundedSignatureBytesVisitor::<MAX>)
+    }
+}
+
+struct BoundedSignatureBytesVisitor<const MAX: usize>;
+
+impl<'de, const MAX: usize> Visitor<'de> for BoundedSignatureBytesVisitor<MAX> {
+    type Value = BoundedSignatureBytes<MAX>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "signature bytes no longer than {MAX} bytes")
+    }
+
+    fn visit_bytes<E>(self, value: &[u8]) -> core::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        validate_signature_byte_len::<E>(value.len(), MAX)?;
+        Ok(BoundedSignatureBytes(value.to_vec()))
+    }
+
+    fn visit_byte_buf<E>(self, value: Vec<u8>) -> core::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        validate_signature_byte_len::<E>(value.len(), MAX)?;
+        Ok(BoundedSignatureBytes(value))
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> core::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if let Some(size_hint) = seq.size_hint() {
+            validate_signature_byte_len::<A::Error>(size_hint, MAX)?;
+        }
+
+        let capacity = seq.size_hint().unwrap_or(0).min(MAX);
+        let mut bytes = Vec::with_capacity(capacity);
+        while let Some(byte) = seq.next_element::<u8>()? {
+            if bytes.len() == MAX {
+                return Err(de::Error::invalid_length(
+                    MAX + 1,
+                    &"signature byte sequence within the configured maximum",
+                ));
+            }
+            bytes.push(byte);
+        }
+        Ok(BoundedSignatureBytes(bytes))
+    }
+}
+
+fn validate_signature_byte_len<E: serde::de::Error>(
+    len: usize,
+    max: usize,
+) -> core::result::Result<(), E> {
+    if len > max {
         return Err(serde::de::Error::invalid_length(
             len,
-            &"at most 3309 bytes for ML-DSA-65 signature material",
+            &"signature byte sequence within the configured maximum",
         ));
     }
     Ok(())
@@ -1405,6 +1479,18 @@ mod tests {
     }
 
     #[test]
+    fn signature_deserialization_rejects_oversized_ed25519_bytes() {
+        let json = serde_json::json!({
+            "Ed25519": vec![0u8; 65],
+        });
+        let result: std::result::Result<Signature, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "Ed25519 signature bytes must be rejected above their fixed size"
+        );
+    }
+
+    #[test]
     fn hybrid_signature_deserialization_rejects_oversized_post_quantum_bytes() {
         let oversized = Signature::Hybrid {
             classical: [0xab; 64],
@@ -1415,6 +1501,64 @@ mod tests {
         assert!(
             result.is_err(),
             "hybrid post-quantum signature bytes must be bounded"
+        );
+    }
+
+    #[test]
+    fn post_quantum_signature_cbor_roundtrip_and_bound_check() {
+        let valid = Signature::PostQuantum(vec![0x5a; ML_DSA_65_SIGNATURE_MAX_BYTES]);
+        let mut valid_cbor = Vec::new();
+        ciborium::into_writer(&valid, &mut valid_cbor).expect("encode valid PQ signature");
+        let decoded: Signature =
+            ciborium::from_reader(valid_cbor.as_slice()).expect("decode valid PQ signature");
+        assert_eq!(decoded, valid);
+
+        let oversized = Signature::PostQuantum(vec![0x5a; ML_DSA_65_SIGNATURE_MAX_BYTES + 1]);
+        let mut oversized_cbor = Vec::new();
+        ciborium::into_writer(&oversized, &mut oversized_cbor)
+            .expect("encode oversized PQ signature");
+        let result: std::result::Result<Signature, _> =
+            ciborium::from_reader(oversized_cbor.as_slice());
+        assert!(
+            result.is_err(),
+            "CBOR post-quantum signature bytes must be bounded"
+        );
+    }
+
+    #[test]
+    fn signature_deserialization_proxy_uses_bounded_byte_visitors() {
+        let source = include_str!("types.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("types production source must precede tests");
+        let deserialize_proxy = production
+            .split("enum SignatureDeserializeProxy")
+            .nth(1)
+            .expect("signature deserialization must use a dedicated bounded proxy")
+            .split("impl<'de> Deserialize<'de> for Signature")
+            .next()
+            .expect("bounded proxy must be declared before Signature deserialization");
+
+        assert!(
+            deserialize_proxy.contains("BoundedSignatureBytes<64>"),
+            "Ed25519 deserialization must be bounded before allocation"
+        );
+        assert!(
+            deserialize_proxy.contains("BoundedSignatureBytes<ML_DSA_65_SIGNATURE_MAX_BYTES>"),
+            "post-quantum deserialization must be bounded before allocation"
+        );
+        assert!(
+            !deserialize_proxy.contains("PostQuantum(Vec<u8>)"),
+            "post-quantum signature deserialization must not materialize an unbounded Vec first"
+        );
+        assert!(
+            !deserialize_proxy.contains("pq: Vec<u8>"),
+            "hybrid PQ signature deserialization must not materialize an unbounded Vec first"
+        );
+        assert!(
+            production.contains("deserialize_byte_buf(BoundedSignatureBytesVisitor"),
+            "bounded signature bytes must use a visitor that can reject oversized inputs early"
         );
     }
 
