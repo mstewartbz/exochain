@@ -29,30 +29,11 @@ all-features = true
 # Each entry is tracked for upgrade in a follow-up dependency-hygiene sprint.
 [advisories]
 ignore = [
-    # ring 0.16.x — AES functions may panic when overflow-checks are enabled.
-    # Impact: only triggered in debug builds with overflow-checks=true.
-    # Our release profile has overflow-checks=false (lto=true, codegen-units=1).
-    # ring 0.16.x is a transitive dep via rustls-webpki (pre-existing in main).
-    # Upgrade tracked in APE-12 dependency-hygiene sprint.
-    { id = "RUSTSEC-2025-0009", reason = "pre-existing transitive via rustls-webpki; only affects debug overflow-check builds; release profile safe" },
-
-    # ring 0.16.x — versions prior to 0.17 are unmaintained.
-    # Same transitive dep as above; same tracking issue.
-    { id = "RUSTSEC-2025-0010", reason = "pre-existing transitive via rustls-webpki; upgrade tracked in hygiene sprint" },
-
     # paste — no longer maintained.
     # Transitive dep via async-graphql macro infrastructure (pre-existing in main).
     # paste is a proc-macro utility; the unmaintained status poses no runtime risk.
     # Upgrade tracked in APE-12 hygiene sprint.
     { id = "RUSTSEC-2024-0436", reason = "pre-existing transitive via async-graphql; proc-macro only; no runtime security impact" },
-
-    # core2 0.4.0 — maintainer stopped maintenance, all versions yanked.
-    # Transitive dep via multihash → libp2p-core → libp2p (pre-existing).
-    # No safe upgrade exists upstream (embedded-io / no-std-io2 are alternatives
-    # but libp2p-core has not migrated). The workspace does not call core2
-    # directly — it is used internally by multihash for no_std I/O abstraction.
-    # Upgrade blocked on libp2p-core; tracked for libp2p bump sprint.
-    { id = "RUSTSEC-2026-0105", reason = "pre-existing transitive via multihash/libp2p; no safe upgrade; workspace does not use core2 directly" },
 
     # rustls-webpki 0.101.7 — name constraint URI names incorrectly accepted.
     # Transitive dep via libp2p-tls → libp2p-quic → libp2p (pre-existing).
@@ -90,11 +71,9 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
     "CC0-1.0",
     "BSL-1.0",
-    "OpenSSL",
     "CDLA-Permissive-2.0",
     # MPL-2.0 is file-level copyleft, compatible with Apache-2.0 for combined works
     # Required by: ascii_utils (via async-graphql), fast_chemail (via async-graphql)
