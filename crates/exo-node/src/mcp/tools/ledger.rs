@@ -3,10 +3,8 @@
 
 use std::fmt::Display;
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
-use exo_core::{Did, hash::hash_structured};
 use exo_core::{
-    Hash256,
+    Did, Hash256,
     hash::{merkle_root_from_proof, verify_merkle_proof},
 };
 use serde_json::{Value, json};
@@ -19,7 +17,6 @@ use crate::mcp::{
 const MAX_MERKLE_PROOF_HASHES: usize = 64;
 const MAX_LEDGER_DID_BYTES: usize = 512;
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(), String> {
     if raw.len() > max_bytes {
         return Err(format!("{field} may contain at most {max_bytes} bytes"));
@@ -27,10 +24,30 @@ fn validate_string_bytes(raw: &str, field: &str, max_bytes: usize) -> Result<(),
     Ok(())
 }
 
-#[cfg(feature = "unaudited-mcp-simulation-tools")]
 fn parse_did_str(raw: &str, field: &str) -> Result<Did, String> {
     validate_string_bytes(raw, field, MAX_LEDGER_DID_BYTES)?;
     Did::new(raw).map_err(|_| format!("invalid {field} DID format"))
+}
+
+fn ledger_runtime_unavailable(tool_name: &str) -> ToolResult {
+    tracing::warn!(
+        tool = %tool_name,
+        "refusing MCP ledger mutation: no live DAG append store is attached"
+    );
+    ToolResult::error(
+        json!({
+            "error": "mcp_ledger_runtime_unavailable",
+            "tool": tool_name,
+            "message": "This MCP ledger mutation has no live DAG append store \
+                        attached, so it cannot submit events or return durable \
+                        event IDs. The `unaudited-mcp-simulation-tools` feature \
+                        does not enable synthetic ledger writes.",
+            "feature_flag": "unaudited-mcp-simulation-tools",
+            "initiative": "Initiatives/fix-mcp-simulation-tools.md",
+            "refusal_source": format!("exo-node/mcp/tools/ledger.rs::{tool_name}"),
+        })
+        .to_string(),
+    )
 }
 
 fn ledger_store_unavailable_error(operation: &str, error: impl Display) -> ToolResult {
@@ -84,80 +101,43 @@ pub fn submit_event_definition() -> ToolDefinition {
 /// Execute the `exochain_submit_event` tool.
 #[must_use]
 pub fn execute_submit_event(params: &Value, _context: &NodeContext) -> ToolResult {
-    #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
-    {
-        let _ = params;
-        super::simulation_tool_refused(
-            "exochain_submit_event",
-            "Initiatives/fix-mcp-default-simulation-gates.md",
-            "This MCP tool currently returns simulated DAG acceptance without \
-             appending an event to a live store. Build with \
-             `unaudited-mcp-simulation-tools` only for explicit dev simulation.",
-        )
-    }
-
-    #[cfg(feature = "unaudited-mcp-simulation-tools")]
-    {
-        let event_type = match params.get("event_type").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: event_type"}).to_string(),
-                );
-            }
-        };
-        let payload_hex = match params.get("payload_hex").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: payload_hex"}).to_string(),
-                );
-            }
-        };
-        let author_did_str = match params.get("author_did").and_then(Value::as_str) {
-            Some(s) => s,
-            None => {
-                return ToolResult::error(
-                    json!({"error": "missing required parameter: author_did"}).to_string(),
-                );
-            }
-        };
-
-        if let Err(err) = parse_did_str(author_did_str, "author_did") {
-            return ToolResult::error(json!({"error": err}).to_string());
-        }
-
-        // Validate hex payload.
-        if hex::decode(payload_hex).is_err() {
+    let _event_type = match params.get("event_type").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
             return ToolResult::error(
-                json!({"error": "invalid payload_hex: not valid hexadecimal"}).to_string(),
+                json!({"error": "missing required parameter: event_type"}).to_string(),
             );
         }
+    };
+    let payload_hex = match params.get("payload_hex").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: payload_hex"}).to_string(),
+            );
+        }
+    };
+    let author_did_str = match params.get("author_did").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ToolResult::error(
+                json!({"error": "missing required parameter: author_did"}).to_string(),
+            );
+        }
+    };
 
-        let event_id = match hash_structured(&(
-            "exo.mcp.ledger.submit_event.v1",
-            event_type,
-            payload_hex,
-            author_did_str,
-        )) {
-            Ok(hash) => hash,
-            Err(e) => {
-                return ToolResult::error(
-                    json!({"error": format!("event ID serialization failed: {e}")}).to_string(),
-                );
-            }
-        };
-
-        let response = json!({
-            "event_id": event_id.to_string(),
-            "event_type": event_type,
-            "author_did": author_did_str,
-            "status": "accepted",
-            "submitted_at": Value::Null,
-            "submitted_at_source": "simulation_no_persistence_timestamp",
-        });
-        ToolResult::success(response.to_string())
+    if let Err(err) = parse_did_str(author_did_str, "author_did") {
+        return ToolResult::error(json!({"error": err}).to_string());
     }
+
+    // Validate hex payload.
+    if hex::decode(payload_hex).is_err() {
+        return ToolResult::error(
+            json!({"error": "invalid payload_hex: not valid hexadecimal"}).to_string(),
+        );
+    }
+
+    ledger_runtime_unavailable("exochain_submit_event")
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +560,23 @@ mod tests {
         Hash256::digest(&combined)
     }
 
+    fn assert_ledger_runtime_unavailable(result: &ToolResult, tool_name: &str) {
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(
+            text.contains("mcp_ledger_runtime_unavailable"),
+            "refusal body must carry ledger runtime error tag, got: {text}"
+        );
+        assert!(
+            text.contains(tool_name),
+            "refusal body must name the specific tool, got: {text}"
+        );
+        assert!(
+            text.contains("unaudited-mcp-simulation-tools"),
+            "refusal body must name the simulation feature flag, got: {text}"
+        );
+    }
+
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     fn assert_text_omits_raw_input(text: &str, raw_input: &str) {
         assert!(
@@ -599,35 +596,37 @@ mod tests {
 
     #[cfg(feature = "unaudited-mcp-simulation-tools")]
     #[test]
-    fn execute_submit_event_success() {
+    fn execute_submit_event_refuses_without_ledger_runtime_even_with_simulation_feature() {
         let params = json!({
             "event_type": "transfer",
             "payload_hex": "deadbeef",
             "author_did": "did:exo:alice",
         });
         let result = execute_submit_event(&params, &NodeContext::empty());
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert!(v["event_id"].as_str().is_some());
-        assert_eq!(v["event_type"], "transfer");
-        assert_eq!(v["author_did"], "did:exo:alice");
-        assert_eq!(v["status"], "accepted");
+        assert_ledger_runtime_unavailable(&result, "exochain_submit_event");
+        let text = result.content[0].text();
+        assert!(!text.contains("event_id"));
+        assert!(!text.contains("\"status\""));
+        assert!(!text.contains("\"accepted\""));
+        let synthetic_timestamp = ["simulation", "_no_", "persistence", "_timestamp"].concat();
+        assert!(!text.contains(&synthetic_timestamp));
     }
 
     #[cfg(not(feature = "unaudited-mcp-simulation-tools"))]
     #[test]
-    fn execute_submit_event_refuses_by_default() {
+    fn execute_submit_event_refuses_without_ledger_runtime_by_default() {
         let params = json!({
             "event_type": "transfer",
             "payload_hex": "deadbeef",
             "author_did": "did:exo:alice",
         });
         let result = execute_submit_event(&params, &NodeContext::empty());
-        assert!(result.is_error);
+        assert_ledger_runtime_unavailable(&result, "exochain_submit_event");
         let text = result.content[0].text();
-        assert!(text.contains("mcp_simulation_tool_disabled"));
-        assert!(text.contains("unaudited-mcp-simulation-tools"));
-        assert!(text.contains("fix-mcp-default-simulation-gates.md"));
+        assert!(text.contains("fix-mcp-simulation-tools.md"));
+        assert!(!text.contains("event_id"));
+        assert!(!text.contains("\"status\""));
+        assert!(!text.contains("\"accepted\""));
     }
 
     #[test]
