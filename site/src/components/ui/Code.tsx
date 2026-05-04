@@ -1,0 +1,30 @@
+import * as React from 'react';
+
+export function Code({ children }: { children: React.ReactNode }) {
+  return (
+    <code className="font-mono text-[0.9em] px-1 py-0.5 rounded bg-ink/5 dark:bg-vellum-soft/10">
+      {children}
+    </code>
+  );
+}
+
+export function Pre({
+  children,
+  caption
+}: {
+  children: React.ReactNode;
+  caption?: string;
+}) {
+  return (
+    <figure className="border border-ink/10 dark:border-vellum-soft/10 rounded-md bg-ink-soft text-vellum-soft overflow-x-auto">
+      <pre className="p-5 text-[12.5px] leading-relaxed font-mono">
+        {children}
+      </pre>
+      {caption && (
+        <figcaption className="px-5 py-2 text-[11px] uppercase tracking-eyebrow text-vellum-soft/50 border-t border-vellum-soft/10">
+          {caption}
+        </figcaption>
+      )}
+    </figure>
+  );
+}

@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+  --grain: radial-gradient(ellipse at top,
+      rgba(63, 182, 200, 0.04),
+      transparent 60%);
+}
+
+html,
+body {
+  background: theme('colors.vellum.soft');
+  color: theme('colors.ink.DEFAULT');
+  font-family: theme('fontFamily.sans');
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+html.dark,
+html.dark body {
+  background: theme('colors.ink.deep');
+  color: theme('colors.vellum.soft');
+}
+
+/* Subtle texture used in hero sections; never glow, never neon. */
+.surface-grain {
+  background-image: var(--grain);
+}
+
+.text-eyebrow {
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.hairline {
+  border-color: rgba(0, 0, 0, 0.08);
+}
+.dark .hairline {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.prose-exo p {
+  margin-block: 0.9em;
+  line-height: 1.7;
+}
+.prose-exo p:first-child {
+  margin-top: 0;
+}
+.prose-exo h2 {
+  font-size: 1.5rem;
+  margin-top: 2.25rem;
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.prose-exo h3 {
+  font-size: 1.125rem;
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+.prose-exo ul {
+  margin-block: 0.75em;
+  padding-left: 1.25rem;
+}
+.prose-exo li {
+  margin-block: 0.35em;
+}
+.prose-exo code {
+  font-family: theme('fontFamily.mono');
+  font-size: 0.9em;
+  padding: 0.05em 0.3em;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 3px;
+}
+.dark .prose-exo code {
+  background: rgba(255, 255, 255, 0.07);
+}
