@@ -1,4 +1,5 @@
-import { Section, Eyebrow, H1, H2, Lede } from '@/components/ui/Section';
+import { ContactForm } from './ContactForm';
+import { Section, Eyebrow, H1, Lede } from '@/components/ui/Section';
 import { Card, CardBody, CardHeader } from '@/components/ui/Card';
 
 export const metadata = { title: 'Contact' };
@@ -20,47 +21,7 @@ export default function Page() {
           <Card>
             <CardHeader title="Early access form" />
             <CardBody>
-              <form className="space-y-4 text-sm">
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="block">
-                    <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Name</div>
-                    <input className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent" required />
-                  </label>
-                  <label className="block">
-                    <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Email</div>
-                    <input className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent" type="email" required />
-                  </label>
-                </div>
-                <label className="block">
-                  <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Organization</div>
-                  <input className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent" />
-                </label>
-                <label className="block">
-                  <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Role</div>
-                  <select className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent">
-                    <option>Developer</option>
-                    <option>Enterprise / buyer</option>
-                    <option>Validator / node operator</option>
-                    <option>Researcher</option>
-                    <option>Press</option>
-                    <option>Other</option>
-                  </select>
-                </label>
-                <label className="block">
-                  <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Intended use</div>
-                  <textarea className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent min-h-[120px]" />
-                </label>
-                <button
-                  type="button"
-                  className="border hairline rounded-sm px-3 py-2 text-sm"
-                >
-                  Submit (placeholder)
-                </button>
-                <p className="text-xs text-ink/60 dark:text-vellum-soft/60">
-                  This is a placeholder form for v0. The wired endpoint
-                  arrives in v0.5 and routes into the internal support queue.
-                </p>
-              </form>
+              <ContactForm />
             </CardBody>
           </Card>
           <div className="space-y-4">
