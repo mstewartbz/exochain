@@ -4,12 +4,12 @@
 //! policy reference existence).
 //!
 //! All maps and sets are `BTreeMap`/`BTreeSet` so iteration order is
-//! deterministic. Persistence is **out of scope** for this MVP and is
-//! the subject of a follow-up PR.
+//! deterministic. Runtime adapters can provide durable storage by
+//! implementing the same registry traits.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use exo_core::{Did, Hash256, PublicKey, Timestamp};
+use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 
 use crate::{
     credential::AutonomousVolitionCredential, error::AvcError, receipt::AvcTrustReceipt,
@@ -84,40 +84,62 @@ impl InMemoryAvcRegistry {
         self.receipts.len()
     }
 
-    /// Mark a credential as revoked using a deterministic placeholder
-    /// revocation record signed by `revoker_did`. The placeholder
-    /// signature is empty because no key material is available in this
-    /// administrative path; downstream validation will still observe
-    /// `is_revoked == true` regardless of signature presence.
-    ///
-    /// # Errors
-    /// Returns [`AvcError::InvalidInput`] when `revoker_did` is malformed.
-    pub fn mark_revoked_with(
-        &mut self,
-        credential_id: Hash256,
-        revoker_did: Did,
-    ) -> Result<(), AvcError> {
-        self.revocations
-            .entry(credential_id)
-            .or_insert(AvcRevocation {
-                schema_version: crate::credential::AVC_SCHEMA_VERSION,
-                credential_id,
-                revoker_did,
-                reason: crate::revocation::AvcRevocationReason::IssuerRevoked,
-                created_at: Timestamp::ZERO,
-                signature: exo_core::Signature::empty(),
+    fn validate_revocation(&self, revocation: &AvcRevocation) -> Result<(), AvcError> {
+        if revocation.schema_version != crate::credential::AVC_SCHEMA_VERSION {
+            return Err(AvcError::UnsupportedSchema {
+                got: revocation.schema_version,
+                supported: crate::credential::AVC_SCHEMA_VERSION,
             });
-        Ok(())
-    }
+        }
+        if revocation.signature.is_empty() {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "revocation signature for credential {} must not be empty",
+                    revocation.credential_id
+                ),
+            });
+        }
 
-    /// Test convenience around [`Self::mark_revoked_with`] using a
-    /// fixed administrative DID. Production callers should use
-    /// [`AvcRegistryWrite::put_revocation`] with a properly signed
-    /// `AvcRevocation` instead.
-    #[cfg(test)]
-    pub fn mark_revoked(&mut self, credential_id: Hash256) {
-        let did = Did::new("did:exo:test-revoker").unwrap();
-        let _ = self.mark_revoked_with(credential_id, did);
+        let credential = self
+            .credentials
+            .get(&revocation.credential_id)
+            .ok_or_else(|| AvcError::InvalidInput {
+                reason: format!(
+                    "revocation references unknown credential {}",
+                    revocation.credential_id
+                ),
+            })?;
+        if revocation.revoker_did != credential.issuer_did
+            && revocation.revoker_did != credential.principal_did
+        {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "revoker {} is not authorized to revoke credential {}",
+                    revocation.revoker_did, revocation.credential_id
+                ),
+            });
+        }
+
+        let public_key = self
+            .public_keys
+            .get(&revocation.revoker_did)
+            .ok_or_else(|| AvcError::InvalidInput {
+                reason: format!(
+                    "revocation public key for {} is unresolved",
+                    revocation.revoker_did
+                ),
+            })?;
+        let payload = revocation.signing_payload()?;
+        if !crypto::verify(&payload, &revocation.signature, public_key) {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "revocation signature for credential {} is invalid",
+                    revocation.credential_id
+                ),
+            });
+        }
+
+        Ok(())
     }
 
     /// Get the receipt with the given hash, if present.
@@ -187,6 +209,7 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
                 reason: format!("duplicate revocation for credential {id}"),
             });
         }
+        self.validate_revocation(&revocation)?;
         self.revocations.insert(id, revocation);
         Ok(())
     }
@@ -225,7 +248,7 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
 
 #[cfg(test)]
 mod tests {
-    use exo_core::Signature;
+    use exo_core::{Signature, crypto::KeyPair};
 
     use super::*;
     use crate::{
@@ -233,11 +256,30 @@ mod tests {
             issue_avc,
             test_support::{baseline_draft, did, h256, ts},
         },
-        revocation::{AvcRevocation, AvcRevocationReason},
+        revocation::{AvcRevocation, AvcRevocationReason, revoke_avc},
     };
 
     fn fixed_signature() -> Signature {
         Signature::from_bytes([7u8; 64])
+    }
+
+    fn keypair(seed: u8) -> KeyPair {
+        KeyPair::from_secret_bytes([seed; 32]).unwrap()
+    }
+
+    fn signed_revocation(
+        id: Hash256,
+        revoker_did: Did,
+        revoker_keypair: &KeyPair,
+    ) -> AvcRevocation {
+        revoke_avc(
+            id,
+            revoker_did,
+            AvcRevocationReason::IssuerRevoked,
+            ts(2),
+            |bytes| revoker_keypair.sign(bytes),
+        )
+        .unwrap()
     }
 
     fn fresh_registry() -> InMemoryAvcRegistry {
@@ -248,15 +290,19 @@ mod tests {
         issue_avc(baseline_draft(), |_| fixed_signature()).unwrap()
     }
 
-    fn sample_revocation(id: Hash256) -> AvcRevocation {
-        AvcRevocation {
-            schema_version: crate::credential::AVC_SCHEMA_VERSION,
-            credential_id: id,
-            revoker_did: did("revoker"),
-            reason: AvcRevocationReason::IssuerRevoked,
-            created_at: ts(1),
-            signature: fixed_signature(),
-        }
+    fn register_sample_credential_and_issuer_key(
+        reg: &mut InMemoryAvcRegistry,
+    ) -> (Hash256, KeyPair) {
+        let cred = sample_credential();
+        let id = cred.id().unwrap();
+        let issuer_keypair = keypair(0x11);
+        reg.put_credential(cred).unwrap();
+        reg.put_public_key(did("issuer"), issuer_keypair.public);
+        (id, issuer_keypair)
+    }
+
+    fn sample_issuer_revocation(id: Hash256, issuer_keypair: &KeyPair) -> AvcRevocation {
+        signed_revocation(id, did("issuer"), issuer_keypair)
     }
 
     fn sample_receipt() -> AvcTrustReceipt {
@@ -305,21 +351,130 @@ mod tests {
     #[test]
     fn put_revocation_rejects_duplicates() {
         let mut reg = fresh_registry();
-        let cred = sample_credential();
-        let id = cred.id().unwrap();
-        let revocation = sample_revocation(id);
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let revocation = sample_issuer_revocation(id, &issuer_keypair);
         reg.put_revocation(revocation.clone()).unwrap();
         let err = reg.put_revocation(revocation).unwrap_err();
         assert!(matches!(err, AvcError::Registry { .. }));
     }
 
     #[test]
-    fn revoked_state_visible_via_is_revoked_and_get() {
+    fn put_revocation_rejects_empty_signature_without_marking_revoked() {
+        let mut reg = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+
+        let mut revocation = sample_issuer_revocation(id, &issuer_keypair);
+        revocation.signature = Signature::empty();
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("revocation signature"));
+            }
+            other => panic!("expected invalid input for unsigned revocation, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "unsigned revocation must not create a tombstone"
+        );
+    }
+
+    #[test]
+    fn put_revocation_rejects_revoker_that_is_not_issuer_or_principal() {
         let mut reg = fresh_registry();
         let cred = sample_credential();
         let id = cred.id().unwrap();
+        let attacker = did("attacker");
+        let attacker_keypair = keypair(0x22);
+        reg.put_credential(cred).unwrap();
+        reg.put_public_key(attacker.clone(), attacker_keypair.public);
+
+        let revocation = signed_revocation(id, attacker, &attacker_keypair);
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("not authorized"));
+            }
+            other => panic!("expected invalid input for unauthorized revoker, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "unauthorized revoker must not create a tombstone"
+        );
+    }
+
+    #[test]
+    fn put_revocation_rejects_wrong_signature_key_without_marking_revoked() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let attacker_keypair = keypair(0x22);
+        let revocation = signed_revocation(id, did("issuer"), &attacker_keypair);
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("signature"));
+                assert!(reason.contains("invalid"));
+            }
+            other => panic!("expected invalid input for wrong signing key, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "wrong signing key must not create a tombstone"
+        );
+    }
+
+    #[test]
+    fn put_revocation_rejects_unresolved_revoker_key_without_marking_revoked() {
+        let mut reg = fresh_registry();
+        let cred = sample_credential();
+        let id = cred.id().unwrap();
+        let issuer_keypair = keypair(0x11);
+        reg.put_credential(cred).unwrap();
+        let revocation = sample_issuer_revocation(id, &issuer_keypair);
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("public key"));
+                assert!(reason.contains("unresolved"));
+            }
+            other => panic!("expected invalid input for unresolved revoker key, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "unresolved revoker key must not create a tombstone"
+        );
+    }
+
+    #[test]
+    fn put_revocation_rejects_unknown_credential_without_marking_revoked() {
+        let mut reg = fresh_registry();
+        let id = h256(0x42);
+        let issuer_keypair = keypair(0x11);
+        reg.put_public_key(did("issuer"), issuer_keypair.public);
+        let revocation = sample_issuer_revocation(id, &issuer_keypair);
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("unknown credential"));
+            }
+            other => panic!("expected invalid input for unknown credential, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "unknown credential must not create a tombstone"
+        );
+    }
+
+    #[test]
+    fn revoked_state_visible_via_is_revoked_and_get() {
+        let mut reg = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
         assert!(!reg.is_revoked(&id));
-        let revocation = sample_revocation(id);
+        let revocation = sample_issuer_revocation(id, &issuer_keypair);
         reg.put_revocation(revocation.clone()).unwrap();
         assert!(reg.is_revoked(&id));
         assert_eq!(reg.get_revocation(&id).unwrap(), revocation);
@@ -369,35 +524,6 @@ mod tests {
         assert!(reg.authority_chain_valid(&chain, &ts(1)));
         reg.revoke_authority_chain(&chain);
         assert!(!reg.authority_chain_valid(&chain, &ts(1)));
-    }
-
-    #[test]
-    fn mark_revoked_inserts_placeholder_record() {
-        let mut reg = fresh_registry();
-        let id = h256(0x77);
-        assert!(!reg.is_revoked(&id));
-        reg.mark_revoked(id);
-        assert!(reg.is_revoked(&id));
-        let revocation = reg.get_revocation(&id).unwrap();
-        assert_eq!(revocation.credential_id, id);
-        assert!(matches!(
-            revocation.reason,
-            AvcRevocationReason::IssuerRevoked
-        ));
-    }
-
-    #[test]
-    fn mark_revoked_with_uses_supplied_did_and_is_idempotent() {
-        let mut reg = fresh_registry();
-        let id = h256(0x88);
-        let did = did("revoker-x");
-        reg.mark_revoked_with(id, did.clone()).unwrap();
-        let first = reg.get_revocation(&id).unwrap();
-        // Calling again must not overwrite the existing record.
-        reg.mark_revoked_with(id, did.clone()).unwrap();
-        let second = reg.get_revocation(&id).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first.revoker_did, did);
     }
 
     #[test]

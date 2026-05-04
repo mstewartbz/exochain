@@ -374,6 +374,7 @@ mod tests {
             ConsentRef, PolicyRef, TimeWindow, issue_avc, test_support::*,
         },
         registry::{AvcRegistryWrite, InMemoryAvcRegistry},
+        revocation::{AvcRevocationReason, revoke_avc},
     };
 
     const ISSUER_SEED: [u8; 32] = [0x11; 32];
@@ -533,7 +534,16 @@ mod tests {
         let mut h = Harness::new();
         let cred = h.issue(baseline_draft());
         let id = cred.id().unwrap();
-        h.registry.mark_revoked(id);
+        h.registry.put_credential(cred.clone()).unwrap();
+        let revocation = revoke_avc(
+            id,
+            did("issuer"),
+            AvcRevocationReason::IssuerRevoked,
+            ts(1_250_000),
+            |bytes| issuer_keypair().sign(bytes),
+        )
+        .unwrap();
+        h.registry.put_revocation(revocation).unwrap();
         let result = validate_avc(&baseline_request(cred, ts(1_500_000)), &h.registry).unwrap();
         assert_eq!(result.decision, AvcDecision::Deny);
         assert!(result.reason_codes.contains(&AvcReasonCode::Revoked));
