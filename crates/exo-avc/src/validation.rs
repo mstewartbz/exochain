@@ -16,9 +16,9 @@
 use std::collections::BTreeSet;
 
 use exo_authority::permission::Permission;
-use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 #[cfg(test)]
 use exo_core::Signature;
+use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
 use crate::{
