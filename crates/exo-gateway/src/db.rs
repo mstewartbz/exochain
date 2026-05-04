@@ -16,6 +16,7 @@ use thiserror::Error;
 
 pub const MAX_DB_LIST_ROWS: i64 = 1_000;
 const DB_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 5;
+const LOCATION_CONSENT_SCOPE: &str = "location";
 
 #[derive(Debug, Error)]
 pub enum DbInitError {
@@ -79,6 +80,17 @@ pub enum GatewayIdentityErasureError {
     #[error("identity erasure timestamp must be positive: {erased_at_ms}")]
     InvalidTimestamp { erased_at_ms: i64 },
     #[error("gateway identity erasure query failed")]
+    Query {
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ScanReceiptInsertError {
+    #[error("scan receipt location requires active location consent")]
+    LocationConsentRequired,
+    #[error("scan receipt insert query failed")]
     Query {
         #[source]
         source: sqlx::Error,
@@ -1105,14 +1117,50 @@ pub async fn insert_scan_receipt(
     consent_expires_at_ms: i64,
     audit_receipt_hash: &str,
     anchor_receipt: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ScanReceiptInsertError> {
+    if location.is_some()
+        && !scan_receipt_location_consent_exists(pool, subscriber_did, responder_did, scanned_at_ms)
+            .await
+            .map_err(|source| ScanReceiptInsertError::Query { source })?
+    {
+        return Err(ScanReceiptInsertError::LocationConsentRequired);
+    }
+
     sqlx::query(
         "INSERT INTO scan_receipts (scan_id, subscriber_did, responder_did, location, scanned_at_ms, consent_expires_at_ms, audit_receipt_hash, anchor_receipt)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
     ).bind(scan_id).bind(subscriber_did).bind(responder_did).bind(location)
     .bind(scanned_at_ms).bind(consent_expires_at_ms).bind(audit_receipt_hash).bind(anchor_receipt)
-    .execute(pool).await?;
+    .execute(pool).await
+    .map_err(|source| ScanReceiptInsertError::Query { source })?;
     Ok(())
+}
+
+async fn scan_receipt_location_consent_exists(
+    pool: &PgPool,
+    subscriber_did: &str,
+    responder_did: &str,
+    scanned_at_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    let location_scope = serde_json::json!([LOCATION_CONSENT_SCOPE]);
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM consent_anchors
+            WHERE subscriber_did = $1
+              AND provider_did = $2
+              AND granted_at_ms <= $3
+              AND (expires_at_ms IS NULL OR expires_at_ms > $3)
+              AND revoked_at_ms IS NULL
+              AND scope @> $4::jsonb
+        )",
+    )
+    .bind(subscriber_did)
+    .bind(responder_did)
+    .bind(scanned_at_ms)
+    .bind(location_scope)
+    .fetch_one(pool)
+    .await
 }
 
 /// List scan receipts for a subscriber, most recent first.
@@ -1508,8 +1556,9 @@ pub async fn update_feedback_issue_status(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::{Did, Timestamp};
+
+    use super::*;
 
     fn production_source() -> &'static str {
         let source = include_str!("db.rs");
@@ -1849,6 +1898,123 @@ mod tests {
             helper.contains("revoked = true") && helper.contains("erased_at_ms"),
             "DID document erasure must tombstone the DID instead of deleting the reuse guard"
         );
+    }
+
+    #[test]
+    fn scan_receipt_location_writes_require_active_location_consent() {
+        let source = production_source();
+        let insert = function_source(source, "insert_scan_receipt");
+
+        assert!(
+            source.contains("pub enum ScanReceiptInsertError"),
+            "scan receipt writes must distinguish consent denial from SQL failure"
+        );
+        assert!(
+            source.contains("const LOCATION_CONSENT_SCOPE: &str = \"location\";"),
+            "location consent scope must be explicit and centrally named"
+        );
+        assert!(
+            insert.contains("location.is_some()"),
+            "scan receipts without location may be stored, but location-bearing receipts need consent"
+        );
+        assert!(
+            insert.contains("scan_receipt_location_consent_exists"),
+            "location-bearing scan receipts must check active consent before insert"
+        );
+        assert!(
+            contains_in_order(
+                insert,
+                "scan_receipt_location_consent_exists",
+                "INSERT INTO scan_receipts"
+            ),
+            "location consent must be checked before writing the scan_receipts row"
+        );
+        assert!(
+            insert.contains("ScanReceiptInsertError::LocationConsentRequired"),
+            "missing active location consent must fail closed with a typed error"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_scan_receipt_rejects_location_without_active_location_consent()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = gateway_test_pool().await else {
+            return Ok(());
+        };
+        let subscriber = "did:exo:scan-location-subscriber-denied";
+        let responder = "did:exo:scan-location-responder-denied";
+        cleanup_identity_erasure_fixture(&pool, subscriber).await?;
+        cleanup_identity_erasure_fixture(&pool, responder).await?;
+
+        let err = insert_scan_receipt(
+            &pool,
+            "scan-location-denied",
+            subscriber,
+            responder,
+            Some("40.7128,-74.0060"),
+            1_000,
+            2_000,
+            "audit-location-denied",
+            None,
+        )
+        .await
+        .expect_err("location-bearing scan receipt must require active location consent");
+
+        assert!(
+            err.to_string().contains("active location consent"),
+            "missing location consent should produce a typed consent error: {err}"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scan_receipts WHERE scan_id = $1")
+                .bind("scan-location-denied")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_scan_receipt_accepts_location_with_active_location_consent()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = gateway_test_pool().await else {
+            return Ok(());
+        };
+        let subscriber = "did:exo:scan-location-subscriber-allowed";
+        let responder = "did:exo:scan-location-responder-allowed";
+        cleanup_identity_erasure_fixture(&pool, subscriber).await?;
+        cleanup_identity_erasure_fixture(&pool, responder).await?;
+
+        insert_consent_anchor(
+            &pool,
+            "consent-location-allowed",
+            subscriber,
+            responder,
+            &serde_json::json!(["location"]),
+            900,
+            Some(2_000),
+            "audit-location-consent",
+        )
+        .await?;
+        insert_scan_receipt(
+            &pool,
+            "scan-location-allowed",
+            subscriber,
+            responder,
+            Some("40.7128,-74.0060"),
+            1_000,
+            2_000,
+            "audit-location-allowed",
+            None,
+        )
+        .await?;
+
+        let rows = list_scan_receipts(&pool, subscriber).await?;
+        assert!(
+            rows.iter().any(|row| row.scan_id == "scan-location-allowed"
+                && row.location.as_deref() == Some("40.7128,-74.0060")),
+            "location should persist only when active location consent exists"
+        );
+        Ok(())
     }
 
     #[tokio::test]
