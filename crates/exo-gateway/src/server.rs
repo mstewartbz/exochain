@@ -1085,7 +1085,15 @@ async fn handle_auth_me(State(state): State<AppState>, headers: HeaderMap) -> im
 }
 
 /// GET /api/v1/agents — list all registered DID identifiers.
-async fn handle_agents_list(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Requires a DB-backed bearer session before reading registry state.
+async fn handle_agents_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
+        return auth_boundary_error_response(e);
+    }
     match registry_list_dids(Arc::clone(&state.registry)).await {
         Ok(dids) => Json(serde_json::json!({ "agents": dids })).into_response(),
         Err(e) => {
@@ -1100,10 +1108,16 @@ async fn handle_agents_list(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 /// GET /api/v1/agents/:did — resolve a single DID document by its identifier.
+///
+/// Requires a DB-backed bearer session before reading registry state.
 async fn handle_agent_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(did_str): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
+        return auth_boundary_error_response(e);
+    }
     let did = match Did::new(&did_str) {
         Ok(d) => d,
         Err(_) => {
@@ -1243,8 +1257,12 @@ async fn handle_get_constitution(Path(_id): Path<String>) -> impl IntoResponse {
 ///
 /// Currently backed by the same DID registry as the agents list.  In a multi-tenant
 /// deployment the user and agent registries would be separated; for now they share
-/// the in-memory store.
-async fn handle_users_list(State(state): State<AppState>) -> impl IntoResponse {
+/// the in-memory store. Requires a DB-backed bearer session before reading registry
+/// state.
+async fn handle_users_list(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
+        return auth_boundary_error_response(e);
+    }
     match registry_list_dids(Arc::clone(&state.registry)).await {
         Ok(dids) => Json(serde_json::json!({ "users": dids })).into_response(),
         Err(e) => {
@@ -1261,11 +1279,16 @@ async fn handle_users_list(State(state): State<AppState>) -> impl IntoResponse {
 /// GET /api/v1/decisions/:id — retrieve a specific decision record.
 ///
 /// Returns the full serialized `DecisionObject` stored in the `decisions` table.
-/// Requires a DB pool; returns 503 when the gateway starts without `DATABASE_URL`.
+/// Requires a DB-backed bearer session and a DB pool; returns 503 when the gateway
+/// starts without `DATABASE_URL`.
 async fn handle_decision_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
+        return auth_boundary_error_response(e);
+    }
     let db = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
@@ -1298,11 +1321,16 @@ async fn handle_decision_get(
 
 /// GET /api/v1/audit/:decision_id — retrieve the audit trail for a decision.
 ///
-/// Queries the `audit_entries` table populated by the vote handler.  Requires a DB pool.
+/// Queries the `audit_entries` table populated by the vote handler. Requires a
+/// DB-backed bearer session and a DB pool.
 async fn handle_audit_trail(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(decision_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
+        return auth_boundary_error_response(e);
+    }
     let pool = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
@@ -3141,6 +3169,25 @@ mod tests {
         Some(pool)
     }
 
+    async fn insert_test_session(pool: &sqlx::PgPool, token: &str, actor_did: &str) {
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(token)
+        .bind(actor_did)
+        .bind(10_000_i64)
+        .bind(20_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     // --- GatewayConfig / start() (existing tests preserved) ---
 
     #[test]
@@ -3559,6 +3606,55 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_read_handlers_require_session_before_state_reads() {
+        let source = include_str!("server.rs");
+        let agents_list = source_between(
+            source,
+            "async fn handle_agents_list",
+            "/// GET /api/v1/agents/:did",
+        );
+        let agent_get = source_between(
+            source,
+            "async fn handle_agent_get",
+            "/// GET /api/v1/identity/:did/score",
+        );
+        let users_list = source_between(
+            source,
+            "async fn handle_users_list",
+            "/// GET /api/v1/decisions/:id",
+        );
+        let decision_get = source_between(
+            source,
+            "async fn handle_decision_get",
+            "/// GET /api/v1/audit/:decision_id",
+        );
+        let audit_trail = source_between(
+            source,
+            "async fn handle_audit_trail",
+            "/// POST /api/v1/agents/enroll",
+        );
+
+        for (name, handler, state_read) in [
+            ("agents list", agents_list, "registry_list_dids"),
+            ("agent get", agent_get, "registry_resolve_document"),
+            ("users list", users_list, "registry_list_dids"),
+            ("decision get", decision_get, "state.require_db"),
+            ("audit trail", audit_trail, "state.require_db"),
+        ] {
+            let auth = handler
+                .find("require_authenticated_session_actor_from_header")
+                .unwrap_or_else(|| panic!("{name} must authenticate the bearer session"));
+            let read = handler
+                .find(state_read)
+                .unwrap_or_else(|| panic!("{name} must read protected state through {state_read}"));
+            assert!(
+                auth < read,
+                "{name} must authenticate before reading protected gateway state"
+            );
+        }
+    }
+
+    #[test]
     fn async_registry_handlers_do_not_block_workers_or_leak_register_errors() {
         let source = include_str!("server.rs");
         let production = source
@@ -3668,7 +3764,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_list_returns_registered_dids() {
+    async fn agents_list_missing_session_returns_401_before_registry_read() {
         let doc = minimal_doc("did:exo:listed");
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
@@ -3678,6 +3774,100 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn agent_get_missing_session_returns_401_before_registry_read() {
+        let doc = minimal_doc("did:exo:agent-get");
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(None, registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:agent-get")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn users_list_missing_session_returns_401_before_registry_read() {
+        let doc = minimal_doc("did:exo:user-listed");
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(None, registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn decision_get_missing_session_returns_401_before_db_lookup() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/decisions/some-decision-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn audit_trail_missing_session_returns_401_before_db_lookup() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/decision-123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn agents_list_returns_registered_dids() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_session(&pool, "agents-list-token", "did:exo:reader").await;
+        let doc = minimal_doc("did:exo:listed");
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let st = AppState::new(Some(pool.clone()), registry);
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents")
+                    .header("authorization", "Bearer agents-list-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3694,40 +3884,72 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("did:exo:listed"))
         );
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("agents-list-token")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn agent_get_known_did_returns_200() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_session(&pool, "agent-get-token", "did:exo:reader").await;
         let doc = minimal_doc("did:exo:agent-get");
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
-        let st = AppState::new(None, registry);
+        let st = AppState::new(Some(pool.clone()), registry);
         let app = build_router(st);
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/did:exo:agent-get")
+                    .header("authorization", "Bearer agent-get-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("agent-get-token")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn agent_get_unknown_returns_404() {
-        let app = build_router(state());
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_session(&pool, "agent-get-unknown-token", "did:exo:reader").await;
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/did:exo:nobody")
+                    .header("authorization", "Bearer agent-get-unknown-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("agent-get-unknown-token")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3970,17 +4192,42 @@ mod tests {
 
     #[tokio::test]
     async fn users_list_returns_200() {
-        let app = build_router(state());
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_session(&pool, "users-list-token", "did:exo:reader").await;
+        let doc = minimal_doc("did:exo:user-listed");
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        registry.write().unwrap().register(doc).unwrap();
+        let app = build_router(AppState::new(Some(pool.clone()), registry));
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/users")
+                    .header("authorization", "Bearer users-list-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            val["users"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("did:exo:user-listed"))
+        );
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("users-list-token")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3990,6 +4237,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/decisions/some-decision-id")
+                    .header("authorization", "Bearer some-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3999,18 +4248,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decision_get_authenticated_session_returns_payload() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_session(&pool, "decision-get-token", "did:exo:reader").await;
+        sqlx::query("DELETE FROM decisions WHERE id_hash = $1")
+            .bind("decision-get-authenticated")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let payload = serde_json::json!({
+            "id": "decision-get-authenticated",
+            "tenant_id": "tenant-read",
+            "status": "Open",
+        });
+        db::insert_decision(
+            &pool,
+            "decision-get-authenticated",
+            "tenant-read",
+            "Open",
+            "Authenticated read",
+            "Routine",
+            "did:exo:author",
+            10_000,
+            "exochain-constitution-v1",
+            &payload,
+        )
+        .await
+        .unwrap();
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/decisions/decision-get-authenticated")
+                    .header("authorization", "Bearer decision-get-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val, payload);
+
+        sqlx::query("DELETE FROM decisions WHERE id_hash = $1")
+            .bind("decision-get-authenticated")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("decision-get-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn audit_trail_without_db_returns_503() {
         let app = build_router(state());
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/audit/decision-123")
+                    .header("authorization", "Bearer some-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn audit_trail_authenticated_session_returns_entries() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_session(&pool, "audit-trail-token", "did:exo:reader").await;
+        sqlx::query("DELETE FROM audit_entries WHERE sequence = $1 OR decision_id = $2")
+            .bind(901_004_i64)
+            .bind("audit-authenticated-decision")
+            .execute(&pool)
+            .await
+            .unwrap();
+        db::insert_audit_entry(
+            &pool,
+            901_004,
+            "prev",
+            "event",
+            "VoteCast",
+            "did:exo:reader",
+            "tenant-read",
+            "audit-authenticated-decision",
+            10_000,
+            0,
+            "entry",
+        )
+        .await
+        .unwrap();
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/audit-authenticated-decision")
+                    .header("authorization", "Bearer audit-trail-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["decision_id"], "audit-authenticated-decision");
+        assert_eq!(val["audit_entries"].as_array().unwrap().len(), 1);
+        assert_eq!(val["audit_entries"][0]["actor"], "did:exo:reader");
+
+        sqlx::query("DELETE FROM audit_entries WHERE sequence = $1 OR decision_id = $2")
+            .bind(901_004_i64)
+            .bind("audit-authenticated-decision")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("audit-trail-token")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     // --- Session auth handler tests (no DB — expect 503 or 400/401) ---
