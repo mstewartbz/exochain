@@ -1,0 +1,117 @@
+'use client';
+
+import { FormEvent, useState } from 'react';
+
+type SubmitStatus = { type: 'idle' | 'success' | 'error'; message: string };
+
+export function ContactForm() {
+  const [status, setStatus] = useState<SubmitStatus>({ type: 'idle', message: '' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+
+    setIsSubmitting(true);
+    setStatus({ type: 'idle', message: '' });
+
+    try {
+      const response = await fetch('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: formData.get('name'),
+          email: formData.get('email'),
+          organization: formData.get('organization'),
+          role: formData.get('role'),
+          intendedUse: formData.get('intendedUse'),
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Submission failed. Please try again.');
+      }
+
+      setStatus({ type: 'success', message: 'Thanks — your inquiry is queued for support.' });
+      form.reset();
+    } catch (error) {
+      setStatus({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Unable to submit form right now.',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <form className="space-y-4 text-sm" onSubmit={onSubmit}>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Name</div>
+          <input
+            name="name"
+            className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent"
+            required
+          />
+        </label>
+        <label className="block">
+          <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Email</div>
+          <input
+            name="email"
+            className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent"
+            type="email"
+            required
+          />
+        </label>
+      </div>
+      <label className="block">
+        <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Organization</div>
+        <input
+          name="organization"
+          className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent"
+        />
+      </label>
+      <label className="block">
+        <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Role</div>
+        <select
+          name="role"
+          className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent"
+        >
+          <option>Developer</option>
+          <option>Enterprise / Buyer</option>
+          <option>Validator / Node Operator</option>
+          <option>Researcher</option>
+          <option>Press</option>
+          <option>Other</option>
+        </select>
+      </label>
+      <label className="block">
+        <div className="text-eyebrow text-ink/60 dark:text-vellum-soft/60">Intended use</div>
+        <textarea
+          name="intendedUse"
+          className="mt-1 w-full border hairline rounded-sm px-3 py-2 bg-transparent min-h-[120px]"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={isSubmitting}
+        className="border hairline rounded-sm px-3 py-2 text-sm disabled:opacity-50"
+      >
+        {isSubmitting ? 'Submitting…' : 'Submit'}
+      </button>
+      {status.message && (
+        <p
+          className={`text-xs ${status.type === 'success' ? 'text-emerald-500' : 'text-amber-500'}`}
+        >
+          {status.message}
+        </p>
+      )}
+      <p className="text-xs text-ink/60 dark:text-vellum-soft/60">
+        Submissions are delivered to support@exochain.io.
+      </p>
+    </form>
+  );
+}
