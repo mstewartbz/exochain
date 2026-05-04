@@ -8,11 +8,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::EconomyError;
-use crate::revenue_share::RevenueShareTemplate;
-use crate::types::{
-    ActorClass, AssuranceClass, BasisPoints, EventClass, MAX_BASIS_POINTS, MAX_MULTIPLIER_BP,
-    MicroExo, NEUTRAL_MULTIPLIER_BP,
+use crate::{
+    error::EconomyError,
+    revenue_share::RevenueShareTemplate,
+    types::{
+        ActorClass, AssuranceClass, BasisPoints, EventClass, MAX_BASIS_POINTS, MAX_MULTIPLIER_BP,
+        MicroExo, NEUTRAL_MULTIPLIER_BP,
+    },
 };
 
 /// Domain tag for canonical policy hashes.

@@ -8,10 +8,9 @@ use std::collections::BTreeMap;
 
 use exo_core::Hash256;
 
-use crate::error::EconomyError;
-use crate::policy::PricingPolicy;
-use crate::quote::SettlementQuote;
-use crate::receipt::SettlementReceipt;
+use crate::{
+    error::EconomyError, policy::PricingPolicy, quote::SettlementQuote, receipt::SettlementReceipt,
+};
 
 pub trait EconomyStore {
     fn put_quote(&mut self, quote: SettlementQuote) -> Result<(), EconomyError>;
@@ -115,13 +114,16 @@ impl EconomyStore for InMemoryEconomyStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::policy::PricingPolicy;
-    use crate::price::PricingInputs;
-    use crate::quote::quote;
-    use crate::settlement::{SettlementContext, settle};
-    use crate::types::{ActorClass, AssuranceClass, EventClass};
     use exo_core::{Did, Signature, Timestamp};
+
+    use super::*;
+    use crate::{
+        policy::PricingPolicy,
+        price::PricingInputs,
+        quote::quote,
+        settlement::{SettlementContext, settle},
+        types::{ActorClass, AssuranceClass, EventClass},
+    };
 
     fn fixed_signature() -> Signature {
         Signature::from_bytes([7u8; 64])

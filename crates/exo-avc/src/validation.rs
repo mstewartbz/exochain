@@ -16,9 +16,9 @@
 use std::collections::BTreeSet;
 
 use exo_authority::permission::Permission;
-use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 #[cfg(test)]
 use exo_core::Signature;
+use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -365,13 +365,16 @@ fn enforce_forbidden_action(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::credential::{
-        AVC_SCHEMA_VERSION, AuthorityChainRef, AvcConstraints, AvcDraft, AvcSubjectKind,
-        ConsentRef, PolicyRef, TimeWindow, issue_avc, test_support::*,
-    };
-    use crate::registry::{AvcRegistryWrite, InMemoryAvcRegistry};
     use exo_core::crypto::KeyPair;
+
+    use super::*;
+    use crate::{
+        credential::{
+            AVC_SCHEMA_VERSION, AuthorityChainRef, AvcConstraints, AvcDraft, AvcSubjectKind,
+            ConsentRef, PolicyRef, TimeWindow, issue_avc, test_support::*,
+        },
+        registry::{AvcRegistryWrite, InMemoryAvcRegistry},
+    };
 
     const ISSUER_SEED: [u8; 32] = [0x11; 32];
 

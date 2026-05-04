@@ -5,9 +5,11 @@
 use exo_core::{Did, Hash256, Signature, Timestamp, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
-use crate::error::EconomyError;
-use crate::revenue_share::RevenueShareLine;
-use crate::types::{EventClass, MicroExo, ZeroFeeReason};
+use crate::{
+    error::EconomyError,
+    revenue_share::RevenueShareLine,
+    types::{EventClass, MicroExo, ZeroFeeReason},
+};
 
 /// Domain tag used when computing the canonical settlement-receipt hash.
 pub const SETTLEMENT_RECEIPT_HASH_DOMAIN: &str = "exo.economy.settlement_receipt.v1";

@@ -8,9 +8,11 @@
 use exo_core::{Hash256, Signature, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::EconomyError;
-use crate::quote::SettlementQuote;
-use crate::receipt::{SettlementReceipt, canonical_content_hash};
+use crate::{
+    error::EconomyError,
+    quote::SettlementQuote,
+    receipt::{SettlementReceipt, canonical_content_hash},
+};
 
 /// Caller-supplied settlement context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,12 +82,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::policy::PricingPolicy;
-    use crate::price::PricingInputs;
-    use crate::quote::quote;
-    use crate::types::{ActorClass, AssuranceClass, EventClass};
     use exo_core::{Did, Timestamp};
+
+    use super::*;
+    use crate::{
+        policy::PricingPolicy,
+        price::PricingInputs,
+        quote::quote,
+        types::{ActorClass, AssuranceClass, EventClass},
+    };
 
     fn fixed_signature() -> Signature {
         Signature::from_bytes([7u8; 64])

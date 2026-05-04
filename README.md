@@ -10,13 +10,15 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 > Run `bash tools/repo_truth.sh` to regenerate these numbers from source.
 >
-> The crate count includes `exo-catapult`, `exo-consensus`, `exo-messaging`, and `exochain-sdk` (four crates previously not listed in this README).
+> The crate count includes `exo-catapult`, `exo-consensus`, `exo-messaging`,
+> `exochain-sdk`, `exo-avc`, and `exo-economy` (six crates previously not
+> listed in this README).
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Rust crates | 20 | `ls -d crates/*/` |
-| Rust source files | 266 | `find crates -name '*.rs'` |
-| Rust LOC | 148414 | `wc -l` |
+| Rust crates | 22 | `ls -d crates/*/` |
+| Rust source files | 288 | `find crates -name '*.rs'` |
+| Rust LOC | 156564 | `wc -l` |
 | Workspace tests | 3,638 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 20 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | None (pre-release) | `git tag -l` |
@@ -78,7 +80,7 @@ pricing on by policy without modifying AVC validation.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 20 crates, 148414 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 22 crates, 156564 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
          cryptographic proofs, 3,638 listed workspace tests
 
@@ -110,7 +112,7 @@ Layer 5: ExoForge           (exoforge/)
 
 ## Repository Structure
 
-### Core Crates (20)
+### Core Crates (22)
 
 | Crate | Description |
 |-------|-------------|
@@ -134,6 +136,8 @@ Layer 5: ExoForge           (exoforge/)
 | `exo-messaging` | Encrypted messaging envelopes, death-trigger checks, and compose/open flows |
 | `exo-consensus` | Multi-model consensus session, scoring, commitment, and report primitives |
 | `exochain-sdk` | Rust SDK facade for identity, consent, authority, governance, and kernel calls |
+| `exo-avc` | Autonomous Volition Credentials: signed scope, delegation, revocation, and validation |
+| `exo-economy` | Custody-native zero-priced quote, settlement, receipt, revenue-share, and store primitives |
 
 ### Governance & Infrastructure
 
