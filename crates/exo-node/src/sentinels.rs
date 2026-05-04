@@ -640,6 +640,10 @@ pub async fn run_sentinel_loop(
         .await;
         prev_round = next_prev_round;
 
+        // Publish the snapshot before sending alerts so alert consumers cannot
+        // observe an unhealthy alert while the status API still exposes stale state.
+        replace_sentinel_state(Arc::clone(&sentinel_state), statuses.clone()).await;
+
         // Emit alerts for unhealthy sentinels.
         for status in &statuses {
             if !status.healthy {
@@ -664,9 +668,6 @@ pub async fn run_sentinel_loop(
                 }
             }
         }
-
-        // Update shared state.
-        replace_sentinel_state(Arc::clone(&sentinel_state), statuses).await;
     }
 }
 
@@ -773,6 +774,30 @@ mod tests {
         .unwrap();
         std::mem::forget(dir);
         Arc::new(Mutex::new(store))
+    }
+
+    #[test]
+    fn sentinel_loop_source_updates_shared_state_before_emitting_alerts() {
+        let source = include_str!("sentinels.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production sentinel source exists");
+        let loop_body = production
+            .split("pub async fn run_sentinel_loop")
+            .nth(1)
+            .expect("run_sentinel_loop source exists");
+        let state_update = loop_body
+            .find("replace_sentinel_state(")
+            .expect("sentinel loop updates shared state");
+        let alert_emit = loop_body
+            .find("for status in &statuses")
+            .expect("sentinel loop emits unhealthy alerts");
+
+        assert!(
+            state_update < alert_emit,
+            "sentinel loop must publish the status snapshot before any alert can be observed"
+        );
     }
 
     fn store_with_malformed_receipt() -> Arc<Mutex<SqliteDagStore>> {
