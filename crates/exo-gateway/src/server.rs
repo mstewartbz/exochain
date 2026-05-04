@@ -25,6 +25,7 @@ use exo_gatekeeper::{
 use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::{
     did::DidDocument,
+    error::IdentityError,
     registry::{DidRegistry, LocalDidRegistry},
 };
 use percent_encoding::percent_decode_str;
@@ -411,6 +412,7 @@ impl AppState {
 
 #[derive(Debug)]
 enum RegistryBlockingError {
+    Registration(IdentityError),
     Operation(String),
     Join(String),
 }
@@ -418,9 +420,39 @@ enum RegistryBlockingError {
 impl fmt::Display for RegistryBlockingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Registration(error) => write!(f, "registry registration failed: {error}"),
             Self::Operation(error) => write!(f, "registry operation failed: {error}"),
             Self::Join(error) => write!(f, "registry blocking task failed: {error}"),
         }
+    }
+}
+
+fn did_registration_rejection_response(
+    error: IdentityError,
+    duplicate_message: &'static str,
+) -> Response {
+    match error {
+        IdentityError::DuplicateDid(_) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": duplicate_message })),
+        )
+            .into_response(),
+        IdentityError::RegistryCapacityExceeded { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "DID registry capacity exhausted" })),
+        )
+            .into_response(),
+        IdentityError::InvalidDidDocumentField { .. }
+        | IdentityError::DidDocumentFieldTooLarge { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid DID document" })),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "DID registration rejected" })),
+        )
+            .into_response(),
     }
 }
 
@@ -431,7 +463,7 @@ async fn registry_register_document(
     tokio::task::spawn_blocking(move || {
         let mut reg = registry.write().unwrap_or_else(|e| e.into_inner());
         reg.register(doc)
-            .map_err(|e| RegistryBlockingError::Operation(e.to_string()))
+            .map_err(RegistryBlockingError::Registration)
     })
     .await
     .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
@@ -999,13 +1031,9 @@ async fn handle_auth_register(
             Json(serde_json::json!({ "did": did_str, "status": "registered" })),
         )
             .into_response(),
-        Err(RegistryBlockingError::Operation(e)) => {
+        Err(RegistryBlockingError::Registration(e)) => {
             tracing::warn!(error = %e, did = %did_str, "DID registration rejected");
-            (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({ "error": "DID already registered" })),
-            )
-                .into_response()
+            did_registration_rejection_response(e, "DID already registered")
         }
         Err(e) => {
             tracing::error!(error = %e, "DID registry registration task failed");
@@ -1319,13 +1347,9 @@ async fn handle_agents_enroll(
             Json(serde_json::json!({ "did": did_str, "status": "enrolled" })),
         )
             .into_response(),
-        Err(RegistryBlockingError::Operation(e)) => {
+        Err(RegistryBlockingError::Registration(e)) => {
             tracing::warn!(error = %e, did = %did_str, "agent enrollment rejected");
-            (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({ "error": "DID already enrolled" })),
-            )
-                .into_response()
+            did_registration_rejection_response(e, "DID already enrolled")
         }
         Err(e) => {
             tracing::error!(error = %e, "DID registry enrollment task failed");
@@ -3346,6 +3370,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn auth_register_returns_503_when_local_did_registry_capacity_is_exhausted() {
+        let (pk, _) = generate_keypair();
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        {
+            let mut guard = registry.write().unwrap();
+            for i in 0..exo_identity::registry::MAX_LOCAL_DID_REGISTRY_DOCUMENTS {
+                let mut doc = minimal_doc(&format!("did:exo:capacity-{i:05}"));
+                doc.public_keys.push(pk);
+                guard.register(doc).unwrap();
+            }
+        }
+
+        let st = AppState::new(None, registry);
+        let body = serde_json::to_string(&minimal_doc("did:exo:capacity-overflow")).unwrap();
+        let app = build_router(st);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

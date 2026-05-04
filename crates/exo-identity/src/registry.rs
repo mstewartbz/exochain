@@ -10,6 +10,16 @@ use crate::{
 
 const DID_REVOCATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.revocation.v1";
 const DID_KEY_ROTATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.key_rotation.v1";
+pub const MAX_LOCAL_DID_REGISTRY_DOCUMENTS: usize = 16_384;
+const MAX_DID_DOCUMENT_ID_BYTES: usize = 512;
+const MAX_DID_DOCUMENT_PUBLIC_KEYS: usize = 16;
+const MAX_DID_DOCUMENT_AUTHENTICATION_METHODS: usize = 32;
+const MAX_DID_DOCUMENT_VERIFICATION_METHODS: usize = 32;
+const MAX_DID_DOCUMENT_HYBRID_VERIFICATION_METHODS: usize = 16;
+const MAX_DID_DOCUMENT_SERVICE_ENDPOINTS: usize = 32;
+const MAX_DID_DOCUMENT_FIELD_BYTES: usize = 1024;
+const MAX_DID_DOCUMENT_PQ_MULTIBASE_BYTES: usize = 4096;
+const MAX_DID_DOCUMENT_ENDPOINT_BYTES: usize = 2048;
 
 #[derive(Serialize)]
 struct RevocationProofPayload<'a> {
@@ -97,15 +107,33 @@ pub trait DidRegistry {
 }
 
 /// A local, in-memory implementation of the `DidRegistry` trait.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LocalDidRegistry {
     documents: BTreeMap<String, DidDocument>,
+    max_documents: usize,
+}
+
+impl Default for LocalDidRegistry {
+    fn default() -> Self {
+        Self {
+            documents: BTreeMap::new(),
+            max_documents: MAX_LOCAL_DID_REGISTRY_DOCUMENTS,
+        }
+    }
 }
 
 impl LocalDidRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_max_documents(max_documents: usize) -> Self {
+        Self {
+            documents: BTreeMap::new(),
+            max_documents,
+        }
     }
 
     #[must_use]
@@ -124,10 +152,182 @@ impl LocalDidRegistry {
     }
 }
 
+fn ensure_byte_bound(did: &str, field: &str, value: &str, max: usize) -> Result<(), IdentityError> {
+    let actual = value.len();
+    if actual > max {
+        return Err(IdentityError::DidDocumentFieldTooLarge {
+            did: did.to_owned(),
+            field: field.to_owned(),
+            max,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_len_bound(
+    did: &str,
+    field: &str,
+    actual: usize,
+    max: usize,
+) -> Result<(), IdentityError> {
+    if actual > max {
+        return Err(IdentityError::DidDocumentFieldTooLarge {
+            did: did.to_owned(),
+            field: field.to_owned(),
+            max,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn validate_registered_did_document(doc: &DidDocument) -> Result<(), IdentityError> {
+    let did = doc.id.as_str();
+    Did::new(did).map_err(|e| IdentityError::InvalidDidDocumentField {
+        did: did.to_owned(),
+        field: "id".to_owned(),
+        reason: e.to_string(),
+    })?;
+    ensure_byte_bound(did, "id", did, MAX_DID_DOCUMENT_ID_BYTES)?;
+    ensure_len_bound(
+        did,
+        "public_keys",
+        doc.public_keys.len(),
+        MAX_DID_DOCUMENT_PUBLIC_KEYS,
+    )?;
+    ensure_len_bound(
+        did,
+        "authentication",
+        doc.authentication.len(),
+        MAX_DID_DOCUMENT_AUTHENTICATION_METHODS,
+    )?;
+    ensure_len_bound(
+        did,
+        "verification_methods",
+        doc.verification_methods.len(),
+        MAX_DID_DOCUMENT_VERIFICATION_METHODS,
+    )?;
+    ensure_len_bound(
+        did,
+        "hybrid_verification_methods",
+        doc.hybrid_verification_methods.len(),
+        MAX_DID_DOCUMENT_HYBRID_VERIFICATION_METHODS,
+    )?;
+    ensure_len_bound(
+        did,
+        "service_endpoints",
+        doc.service_endpoints.len(),
+        MAX_DID_DOCUMENT_SERVICE_ENDPOINTS,
+    )?;
+
+    for method in &doc.authentication {
+        ensure_byte_bound(
+            did,
+            "authentication.id",
+            &method.id,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "authentication.method_type",
+            &method.method_type,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+    }
+    for method in &doc.verification_methods {
+        ensure_byte_bound(
+            did,
+            "verification_methods.id",
+            &method.id,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "verification_methods.key_type",
+            &method.key_type,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "verification_methods.controller",
+            method.controller.as_str(),
+            MAX_DID_DOCUMENT_ID_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "verification_methods.public_key_multibase",
+            &method.public_key_multibase,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+    }
+    for method in &doc.hybrid_verification_methods {
+        ensure_byte_bound(
+            did,
+            "hybrid_verification_methods.id",
+            &method.id,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "hybrid_verification_methods.key_type",
+            &method.key_type,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "hybrid_verification_methods.controller",
+            method.controller.as_str(),
+            MAX_DID_DOCUMENT_ID_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "hybrid_verification_methods.classical_public_key_multibase",
+            &method.classical_public_key_multibase,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "hybrid_verification_methods.pq_public_key_multibase",
+            &method.pq_public_key_multibase,
+            MAX_DID_DOCUMENT_PQ_MULTIBASE_BYTES,
+        )?;
+    }
+    for endpoint in &doc.service_endpoints {
+        ensure_byte_bound(
+            did,
+            "service_endpoints.id",
+            &endpoint.id,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "service_endpoints.service_type",
+            &endpoint.service_type,
+            MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        ensure_byte_bound(
+            did,
+            "service_endpoints.endpoint",
+            &endpoint.endpoint,
+            MAX_DID_DOCUMENT_ENDPOINT_BYTES,
+        )?;
+    }
+
+    Ok(())
+}
+
 impl DidRegistry for LocalDidRegistry {
     fn register(&mut self, doc: DidDocument) -> Result<(), IdentityError> {
         if self.documents.contains_key(doc.id.as_str()) {
             return Err(IdentityError::DuplicateDid(doc.id));
+        }
+        validate_registered_did_document(&doc)?;
+        if self.documents.len() >= self.max_documents {
+            return Err(IdentityError::RegistryCapacityExceeded {
+                max_documents: self.max_documents,
+                attempted_documents: self.documents.len().saturating_add(1),
+            });
         }
         self.documents.insert(doc.id.as_str().to_owned(), doc);
         Ok(())
@@ -226,6 +426,10 @@ mod tests {
         }
     }
 
+    fn make_doc_with_label(label: &str, pk: PublicKey) -> DidDocument {
+        make_doc(make_did(label), pk)
+    }
+
     fn rotation_signature(
         did: &Did,
         new_key: &PublicKey,
@@ -248,6 +452,65 @@ mod tests {
 
         let resolved = reg.resolve(&did).unwrap();
         assert_eq!(resolved.id, did);
+    }
+
+    #[test]
+    fn register_rejects_documents_after_default_registry_capacity() {
+        let (pk, _) = generate_keypair();
+        let mut reg = LocalDidRegistry::new();
+
+        for i in 0..MAX_LOCAL_DID_REGISTRY_DOCUMENTS {
+            reg.register(make_doc_with_label(&format!("capacity-{i:05}"), pk))
+                .unwrap();
+        }
+
+        let err = reg
+            .register(make_doc_with_label("capacity-overflow", pk))
+            .expect_err("registry must reject documents after the fixed capacity");
+
+        assert!(
+            err.to_string().contains("capacity"),
+            "capacity error should carry diagnostic context: {err}"
+        );
+        assert_eq!(reg.len(), MAX_LOCAL_DID_REGISTRY_DOCUMENTS);
+    }
+
+    #[test]
+    fn register_rejects_did_document_with_unbounded_public_keys() {
+        let (pk, _) = generate_keypair();
+        let mut doc = make_doc_with_label("too-many-keys", pk);
+        doc.public_keys = vec![pk; 17];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("oversized DID document vectors must be rejected");
+
+        assert!(
+            err.to_string().contains("public_keys"),
+            "field-specific bound error should identify public_keys: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_revalidates_deserialized_did_document_id() {
+        let (pk, _) = generate_keypair();
+        let mut value =
+            serde_json::to_value(make_doc_with_label("deserialized-invalid-did", pk)).unwrap();
+        value["id"] = serde_json::json!("not-a-did");
+        let doc: DidDocument = serde_json::from_value(value).unwrap();
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("registry must reject deserialized DIDs that bypass Did::new");
+
+        assert!(
+            err.to_string().contains("id"),
+            "invalid DID error should identify the id field: {err}"
+        );
+        assert_eq!(reg.len(), 0);
     }
 
     #[test]

@@ -8,6 +8,29 @@ pub enum IdentityError {
     #[error("DID already registered: {0}")]
     DuplicateDid(Did),
 
+    #[error(
+        "DID registry capacity exceeded: max_documents={max_documents}, attempted_documents={attempted_documents}"
+    )]
+    RegistryCapacityExceeded {
+        max_documents: usize,
+        attempted_documents: usize,
+    },
+
+    #[error("DID document for {did} has invalid field {field}: {reason}")]
+    InvalidDidDocumentField {
+        did: String,
+        field: String,
+        reason: String,
+    },
+
+    #[error("DID document for {did} exceeds {field} bound: max={max}, actual={actual}")]
+    DidDocumentFieldTooLarge {
+        did: String,
+        field: String,
+        max: usize,
+        actual: usize,
+    },
+
     #[error("DID not found: {0}")]
     DidNotFound(Did),
 
