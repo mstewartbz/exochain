@@ -22,10 +22,12 @@
 
 mod api;
 mod auth;
+mod avc;
 mod challenges;
 mod cli;
 mod config;
 mod dashboard;
+mod economy;
 mod exoforge;
 mod holons;
 mod identity;
@@ -853,6 +855,20 @@ async fn start_node(
         drop(alert_rx);
     }
 
+    // Build the AVC API router (Autonomous Volition Credentials).
+    let avc_state = Arc::new(avc::AvcApiState::new());
+    let avc_router = avc::avc_router(Arc::clone(&avc_state));
+    tracing::info!(
+        "AVC router ready — /api/v1/avc/{{issue,validate,delegate,revoke,:id}}, /api/v1/agents/:did/avcs"
+    );
+
+    // Build the economy API router (zero-priced launch settlement).
+    let economy_state = Arc::new(economy::EconomyApiState::new());
+    let economy_router = economy::economy_router(Arc::clone(&economy_state));
+    tracing::info!(
+        "Economy router ready — /api/v1/economy/{{quote,settle,receipts/:id,policy/active}} (zero-priced launch policy active)"
+    );
+
     // Build 0dentity routers.
     let zd_onboarding_state =
         zerodentity::onboarding::OnboardingState::new(std::sync::Arc::clone(&zerodentity_store));
@@ -881,6 +897,8 @@ async fn start_node(
         .merge(receipt_dashboard_router)
         .merge(sentinel_router)
         .merge(forge_router)
+        .merge(avc_router)
+        .merge(economy_router)
         .merge(zerodentity_onboarding_router)
         .merge(zerodentity_api_router)
         .merge(zerodentity_dashboard_router)

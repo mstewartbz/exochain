@@ -145,6 +145,38 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
 | **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
 
+## Autonomous Volition Credential (AVC) Layer
+
+| Req | Requirement | Crate / Module | Test Location | Status |
+|---|---|---|---|---|
+| **AVC-001** | Credential model with deterministic ID via canonical CBOR + BLAKE3 | `exo-avc::credential` | `crates/exo-avc/src/credential.rs` (mod tests) | 🟢 |
+| **AVC-002** | Domain-separated signing payload (`exo.avc.credential.v1`) | `exo-avc::credential` | `crates/exo-avc/src/credential.rs` (mod tests) | 🟢 |
+| **AVC-003** | Fail-closed validation with sorted, deduped reason codes | `exo-avc::validation` | `crates/exo-avc/src/validation.rs` (mod tests) | 🟢 |
+| **AVC-004** | Strict scope-narrowing on delegation across every dimension | `exo-avc::delegation` | `crates/exo-avc/src/delegation.rs` (mod tests) | 🟢 |
+| **AVC-005** | Domain-separated, signed revocations (`exo.avc.revocation.v1`) | `exo-avc::revocation` | `crates/exo-avc/src/revocation.rs` (mod tests) | 🟢 |
+| **AVC-006** | Domain-separated trust receipts (`exo.avc.receipt.v1`) | `exo-avc::receipt` | `crates/exo-avc/src/receipt.rs` (mod tests) | 🟢 |
+| **AVC-007** | In-memory registry with deterministic iteration | `exo-avc::registry` | `crates/exo-avc/src/registry.rs` (mod tests) | 🟢 |
+| **AVC-008** | Node API: issue, validate, delegate, revoke, get, list per subject | `exo-node::avc` | `crates/exo-node/src/avc.rs` (mod tests) | 🟢 |
+| **AVC-009** | SDK re-exports for Rust consumers | `exochain-sdk::avc` | `crates/exochain-sdk/src/avc.rs` | 🟢 |
+| **AVC-010** | Trust validation independent of pricing/payment state | cross-layer | `crates/exo-avc/src/validation.rs::validation_does_not_consult_payment_state` | 🟢 |
+
+## Custody-Native Economy Layer (zero-priced launch)
+
+| Req | Requirement | Crate / Module | Test Location | Status |
+|---|---|---|---|---|
+| **ECO-001** | Integer-only `MicroExo` accounting, bounded basis points | `exo-economy::types` | `crates/exo-economy/src/types.rs` (mod tests) | 🟢 |
+| **ECO-002** | Zero-launch policy with neutral multipliers and zero rates/fees | `exo-economy::policy` | `crates/exo-economy/src/policy.rs` (mod tests) | 🟢 |
+| **ECO-003** | Deterministic price formula with saturating arithmetic | `exo-economy::price` | `crates/exo-economy/src/price.rs` (mod tests) | 🟢 |
+| **ECO-004** | Quote with deterministic hash, explicit `ZeroFeeReason` | `exo-economy::quote` | `crates/exo-economy/src/quote.rs` (mod tests) | 🟢 |
+| **ECO-005** | Hash-chained settlement receipts (`exo.economy.settlement_receipt.v1`) | `exo-economy::receipt` | `crates/exo-economy/src/receipt.rs` (mod tests) | 🟢 |
+| **ECO-006** | Settlement validates quote freshness, hash integrity | `exo-economy::settlement` | `crates/exo-economy/src/settlement.rs` (mod tests) | 🟢 |
+| **ECO-007** | Revenue-share templates allocate zero amounts under zero policy | `exo-economy::revenue_share` | `crates/exo-economy/src/revenue_share.rs` (mod tests) | 🟢 |
+| **ECO-008** | In-memory store with deterministic ordering | `exo-economy::store` | `crates/exo-economy/src/store.rs` (mod tests) | 🟢 |
+| **ECO-009** | Node API: quote, settle, get receipt, active policy | `exo-node::economy` | `crates/exo-node/src/economy.rs` (mod tests) | 🟢 |
+| **ECO-010** | SDK re-exports for Rust consumers | `exochain-sdk::economy` | `crates/exochain-sdk/src/economy.rs` | 🟢 |
+| **ECO-011** | Every active charge resolves to zero across all input combinations | `exo-economy::quote` | `crates/exo-economy/src/quote.rs::every_actor_event_assurance_combination_quotes_zero_under_zero_launch` | 🟢 |
+| **ECO-012** | No floats, no `HashMap`/`HashSet`, no system clock in production paths | `exo-economy::lib` (hygiene) | `crates/exo-economy/src/lib.rs::hygiene_tests` | 🟢 |
+
 ## Summary
 
 | Category | Requirements | 🟢 | 🟡 | 🔴 |
@@ -160,7 +192,9 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | P2P/API/Gateway/Tenant (§16–17) | 4 | 4 | 0 | 0 |
 | Decision Forum (GOV/TNC/M) | 15 | 15 | 0 | 0 |
 | Governance Monitoring (MON) | 12 | 9 | 1 | 2 |
-| **TOTAL** | **86** | **83** | **1** | **2** |
+| AVC (Autonomous Volition Credential) | 10 | 10 | 0 | 0 |
+| Custody-Native Economy (zero-launch) | 12 | 12 | 0 | 0 |
+| **TOTAL** | **108** | **105** | **1** | **2** |
 
-**Coverage: 83/86 requirements traced to code (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial (T-14 Rust attestation verification).**
-**Workspace inventory: 3,638 listed tests across 20 packages and 266 Rust files.**
+**Coverage: 105/108 requirements traced to code (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial (T-14 Rust attestation verification).**
+**Workspace inventory: 3,638+ listed tests across 22 packages and 266+ Rust files (AVC and economy crates added).**

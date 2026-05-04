@@ -1357,6 +1357,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "exo-avc"
+version = "0.1.0-beta"
+dependencies = [
+ "ciborium",
+ "exo-authority",
+ "exo-core",
+ "serde",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "exo-catapult"
 version = "0.1.0-beta"
 dependencies = [
@@ -1432,6 +1443,16 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "exo-economy"
+version = "0.1.0-beta"
+dependencies = [
+ "ciborium",
+ "exo-core",
+ "serde",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1585,9 +1606,12 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "exo-api",
+ "exo-authority",
+ "exo-avc",
  "exo-consent",
  "exo-core",
  "exo-dag",
+ "exo-economy",
  "exo-escalation",
  "exo-gatekeeper",
  "exo-gateway",
@@ -1658,7 +1682,9 @@ name = "exochain-sdk"
 version = "0.1.0-beta"
 dependencies = [
  "blake3",
+ "exo-avc",
  "exo-core",
+ "exo-economy",
  "exo-gatekeeper",
  "exo-identity",
  "serde",

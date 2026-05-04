@@ -154,8 +154,10 @@
 pub const PROTOCOL_VERSION: &str = "0.1.0-beta";
 
 pub mod authority;
+pub mod avc;
 pub mod consent;
 pub mod crypto;
+pub mod economy;
 pub mod error;
 pub mod governance;
 pub mod identity;

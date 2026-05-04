@@ -27,6 +27,9 @@ exo-identity = { path = "../exo-identity" }
 exo-consent = { path = "../exo-consent" }
 exo-escalation = { path = "../exo-escalation" }
 exo-legal = { path = "../exo-legal" }
+exo-avc = { path = "../exo-avc" }
+exo-authority = { path = "../exo-authority" }
+exo-economy = { path = "../exo-economy" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

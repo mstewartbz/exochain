@@ -54,6 +54,27 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - Agent passport API and trust receipt endpoints on exo-node
 - National AI Policy Framework compliance extensions
 
+## Autonomous Volition Credentials and the zero-priced economy
+
+EXOCHAIN now ships two additional core crates:
+
+- [`crates/exo-avc`](crates/exo-avc/) — **AVC** (Autonomous Volition
+  Credential) is a portable, signed, machine-verifiable credential that
+  declares what an autonomous actor is authorized to pursue before it
+  acts. Validation is fail-closed and deterministic. Delegation
+  strictly narrows scope. See [`docs/avc/README.md`](docs/avc/README.md).
+- [`crates/exo-economy`](crates/exo-economy/) — the custody-native
+  settlement scaffold. Quotes, settlements, revenue-share lines, and
+  hash-chained settlement receipts run end-to-end. The launch policy
+  resolves every active price to **zero** with an explicit
+  `ZeroFeeReason`, so trust is never paywalled. See
+  [`docs/economy/README.md`](docs/economy/README.md).
+
+The two layers are **independent**: AVC validity does not consult
+pricing or settlement state, and the economy layer never gates trust on
+payment availability. Future governance amendments can switch nonzero
+pricing on by policy without modifying AVC validation.
+
 ## Architecture
 
 ```

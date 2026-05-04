@@ -18,6 +18,8 @@ workspace = true
 exo-core = { path = "../exo-core" }
 exo-identity = { path = "../exo-identity" }
 exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-avc = { path = "../exo-avc" }
+exo-economy = { path = "../exo-economy" }
 
 # Serialization
 serde = { workspace = true }
