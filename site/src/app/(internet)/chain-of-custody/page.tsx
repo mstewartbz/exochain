@@ -35,7 +35,7 @@ export default function ChainOfCustodyPage() {
             <CardBody>
               <p className="text-sm">
                 The blockchain mechanism preserves order. Each block extends
-                the prior block's hash, and the order in which receipts are
+                the prior block&apos;s hash, and the order in which receipts are
                 committed cannot be revised after finality without detection.
               </p>
             </CardBody>

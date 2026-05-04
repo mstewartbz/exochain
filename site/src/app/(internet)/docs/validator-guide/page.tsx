@@ -22,7 +22,7 @@ export default function Page() {
       <h2>Attestation</h2>
       <p>
         Hardware attestation is required before joining the validator set.
-        Attestation evidence is recorded as part of the validator's
+        Attestation evidence is recorded as part of the validator&apos;s
         registration AVC.
       </p>
       <h2>Observation period</h2>

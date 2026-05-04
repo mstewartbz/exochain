@@ -27,7 +27,7 @@ export default function Page() {
       <p>
         Actors include humans, organizations, agents, holons, services, and
         validators. The actor your code represents is the <em>subject</em> of
-        the AVC you'll issue next.
+        the AVC you&apos;ll issue next.
       </p>
       <h2>Issue an AVC</h2>
       <p>

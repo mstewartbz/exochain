@@ -101,7 +101,7 @@ export default function WhyPage() {
               <p className="text-sm">
                 A research consortium grants a holon read-only access to a
                 shared dataset for the duration of an approved study. The
-                holon's verifier daemon produces a receipt for every read.
+                holon&apos;s verifier daemon produces a receipt for every read.
                 When the study closes, the consortium revokes; outstanding
                 receipts remain valid evidence of past access.
               </p>

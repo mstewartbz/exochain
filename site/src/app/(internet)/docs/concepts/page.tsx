@@ -27,7 +27,7 @@ export default function Page() {
       </p>
       <h2>Consent</h2>
       <p>
-        A principal's grant. Consent is recorded as part of the AVC issuance
+        A principal&apos;s grant. Consent is recorded as part of the AVC issuance
         flow and persists with a scope hash that proves what was agreed to,
         independent of presentation.
       </p>

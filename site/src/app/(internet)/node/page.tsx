@@ -42,7 +42,7 @@ export default function Page() {
         </div>
       </Section>
       <Section className="py-8">
-        <H2>What you'll need</H2>
+        <H2>What you&apos;ll need</H2>
         <ul className="mt-3 list-disc pl-6 text-sm space-y-1.5">
           <li>An organization registered on EXOCHAIN.</li>
           <li>A signing key pair you control. HSM strongly recommended for validators.</li>

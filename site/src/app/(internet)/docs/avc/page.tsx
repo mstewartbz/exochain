@@ -13,8 +13,8 @@ export default function Page() {
       </p>
       <h2>Delegation</h2>
       <p>
-        Delegation strictly narrows scope: a child AVC's permitted actions
-        and constraints must be a subset of its parent's. Validation rejects
+        Delegation strictly narrows scope: a child AVC&apos;s permitted actions
+        and constraints must be a subset of its parent&apos;s. Validation rejects
         any attempt to widen scope beyond the parent.
       </p>
       <h2>Validation rules</h2>
@@ -24,7 +24,7 @@ export default function Page() {
         <li>Subject actor is <code>active</code>.</li>
         <li>Issuer actor is <code>active</code> and authorized to issue in the policy domain.</li>
         <li>Parent AVC, if present, is itself valid and not revoked.</li>
-        <li>Scope is contained within the parent's scope.</li>
+        <li>Scope is contained within the parent&apos;s scope.</li>
         <li>Policy expressions evaluate without error.</li>
       </ul>
       <p>Validation is fail-closed and deterministic.</p>

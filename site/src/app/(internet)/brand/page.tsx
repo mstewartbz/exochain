@@ -11,7 +11,7 @@ export default function Page() {
         <Eyebrow>Brand</Eyebrow>
         <H1 className="mt-3">Brand & press kit.</H1>
         <Lede className="mt-5 max-w-prose">
-          EXOCHAIN's brand reads as evidentiary trust substrate, not crypto
+          EXOCHAIN&apos;s brand reads as evidentiary trust substrate, not crypto
           startup. Use the marks and language consistently with the
           guidance below.
         </Lede>

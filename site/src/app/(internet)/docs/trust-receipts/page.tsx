@@ -22,13 +22,13 @@ export default function Page() {
       </p>
       <h2>Custody chain</h2>
       <p>
-        Each receipt's <code>custody_hash</code> binds it to its{' '}
+        Each receipt&apos;s <code>custody_hash</code> binds it to its{' '}
         <code>prev_hash</code>, forming a per-actor hash chain. The chain is
         anchored to the EXOCHAIN ledger at block boundaries.
       </p>
       <h2>Verification</h2>
       <p>
-        Receipts are verifiable offline given the issuer's public key, the
+        Receipts are verifiable offline given the issuer&apos;s public key, the
         AVC, and the policy in effect at execution time. The SDK exposes a
         verifier that returns a structured result with reason codes.
       </p>

@@ -39,8 +39,8 @@ export default function Page() {
         <Card>
           <CardHeader title="When it ships" />
           <CardBody>
-            <p className="text-sm">
-              We will mount Redocly here, served from the gateway's
+              <p className="text-sm">
+              We will mount Redocly here, served from the gateway&apos;s
               authoritative <code>openapi.yaml</code>. Versioned snapshots
               will be linked from the Trust Center.
             </p>

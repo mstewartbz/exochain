@@ -63,7 +63,7 @@ export default function Page() {
       <Section className="py-8">
         <H2>Three surfaces, three trust postures</H2>
         <p className="mt-3 text-sm max-w-prose">
-          EXOCHAIN's web presence is split across three surfaces with hard
+          EXOCHAIN&apos;s web presence is split across three surfaces with hard
           separation. Each surface enforces its own auth and capability
           rules at the route boundary.
         </p>
