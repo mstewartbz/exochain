@@ -4,7 +4,7 @@
 //! Complex governance objects (DecisionObject, Delegation) are stored as
 //! JSONB payloads with indexed scalar columns for efficient queries.
 
-use std::{fmt, time::Duration};
+use std::time::Duration;
 
 use exo_identity::did::DidDocument;
 use serde_json::Value as JsonValue;
@@ -465,16 +465,19 @@ pub async fn insert_user(
 pub async fn find_user_by_email(
     pool: &PgPool,
     email: &str,
-) -> Result<Option<UserRow>, sqlx::Error> {
-    sqlx::query_as::<_, UserRow>(
-        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, password_hash, salt, mfa_enabled FROM users WHERE email = $1"
+) -> Result<Option<PublicUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, PublicUserRow>(
+        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, mfa_enabled FROM users WHERE email = $1"
     ).bind(email).fetch_optional(pool).await
 }
 
 /// Look up a user by DID, returning `None` if not found.
-pub async fn find_user_by_did(pool: &PgPool, did: &str) -> Result<Option<UserRow>, sqlx::Error> {
-    sqlx::query_as::<_, UserRow>(
-        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, password_hash, salt, mfa_enabled FROM users WHERE did = $1"
+pub async fn find_user_by_did(
+    pool: &PgPool,
+    did: &str,
+) -> Result<Option<PublicUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, PublicUserRow>(
+        "SELECT did, display_name, email, roles, tenant_id, created_at, status, pace_status, mfa_enabled FROM users WHERE did = $1"
     ).bind(did).fetch_optional(pool).await
 }
 
@@ -519,22 +522,6 @@ pub async fn count_users(pool: &PgPool) -> Result<i64, sqlx::Error> {
         .get::<i64, _>("cnt"))
 }
 
-/// Row representation of a user record from the `users` table.
-#[derive(Clone, sqlx::FromRow)]
-pub struct UserRow {
-    pub did: String,
-    pub display_name: String,
-    pub email: String,
-    pub roles: JsonValue,
-    pub tenant_id: String,
-    pub created_at: i64,
-    pub status: String,
-    pub pace_status: String,
-    pub password_hash: String,
-    pub salt: String,
-    pub mfa_enabled: bool,
-}
-
 /// Non-secret user projection for list APIs and administrative directories.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PublicUserRow {
@@ -547,24 +534,6 @@ pub struct PublicUserRow {
     pub status: String,
     pub pace_status: String,
     pub mfa_enabled: bool,
-}
-
-impl fmt::Debug for UserRow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("UserRow")
-            .field("did", &self.did)
-            .field("display_name", &self.display_name)
-            .field("email", &self.email)
-            .field("roles", &self.roles)
-            .field("tenant_id", &self.tenant_id)
-            .field("created_at", &self.created_at)
-            .field("status", &self.status)
-            .field("pace_status", &self.pace_status)
-            .field("password_hash", &"<redacted>")
-            .field("salt", &"<redacted>")
-            .field("mfa_enabled", &self.mfa_enabled)
-            .finish()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2359,28 +2328,6 @@ mod tests {
     }
 
     #[test]
-    fn user_row_debug_redacts_password_hash_and_salt() {
-        let row = UserRow {
-            did: "did:exo:user".to_owned(),
-            display_name: "User".to_owned(),
-            email: "user@example.invalid".to_owned(),
-            roles: serde_json::json!(["member"]),
-            tenant_id: "tenant".to_owned(),
-            created_at: 1,
-            status: "active".to_owned(),
-            pace_status: "normal".to_owned(),
-            password_hash: "argon2id-secret-hash".to_owned(),
-            salt: "secret-salt".to_owned(),
-            mfa_enabled: true,
-        };
-
-        let debug = format!("{row:?}");
-        assert!(!debug.contains("argon2id-secret-hash"));
-        assert!(!debug.contains("secret-salt"));
-        assert!(debug.contains("<redacted>"));
-    }
-
-    #[test]
     fn public_user_row_has_no_password_material() {
         let row = PublicUserRow {
             did: "did:exo:user".to_owned(),
@@ -2425,5 +2372,39 @@ mod tests {
             list_users_source.contains("Result<Vec<PublicUserRow>"),
             "list_users_db must return the public user projection"
         );
+    }
+
+    #[test]
+    fn user_lookup_apis_never_select_password_material() {
+        let source = include_str!("db.rs");
+        for (name, terminator) in [
+            ("find_user_by_email", "/// Look up a user by DID"),
+            (
+                "find_user_by_did",
+                "/// List users for a tenant ordered by creation time.",
+            ),
+        ] {
+            let Some(fn_start) = source.find(&format!("pub async fn {name}")) else {
+                panic!("{name} source must be present");
+            };
+            let after_start = &source[fn_start..];
+            let Some(fn_end) = after_start.find(terminator) else {
+                panic!("{name} source terminator must be present");
+            };
+            let lookup_source = &after_start[..fn_end];
+
+            assert!(
+                !lookup_source.contains("password_hash"),
+                "{name} must not select password hashes"
+            );
+            assert!(
+                !lookup_source.contains("salt"),
+                "{name} must not select password salts"
+            );
+            assert!(
+                lookup_source.contains("Result<Option<PublicUserRow>"),
+                "{name} must return the non-secret public user projection"
+            );
+        }
     }
 }
