@@ -336,7 +336,7 @@ mod tests {
         AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDecision, AvcDraft,
         AvcRevocationReason, AvcSubjectKind, DelegatedIntent, issue_avc, revoke_avc,
     };
-    use exo_core::{Hash256, Timestamp, crypto::KeyPair};
+    use exo_core::{Hash256, Signature, Timestamp, crypto::KeyPair};
     use tower::ServiceExt;
 
     use super::*;
@@ -469,10 +469,18 @@ mod tests {
         let id = credential.id().unwrap();
         // Pre-register and revoke.
         {
+            let kp = issuer_keypair();
             let mut reg = state.registry.lock().unwrap();
             reg.put_credential(credential.clone()).unwrap();
-            reg.mark_revoked_with(id, Did::new("did:exo:revoker").unwrap())
-                .unwrap();
+            let revocation = revoke_avc(
+                id,
+                Did::new("did:exo:issuer").unwrap(),
+                AvcRevocationReason::IssuerRevoked,
+                Timestamp::new(2, 0),
+                |bytes| kp.sign(bytes),
+            )
+            .unwrap();
+            reg.put_revocation(revocation).unwrap();
         }
         let request = AvcValidationRequest {
             credential,
@@ -533,6 +541,49 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(state.registry.lock().unwrap().is_revoked(&id));
+    }
+
+    #[tokio::test]
+    async fn revoke_rejects_unsigned_revocation_without_marking_credential_revoked() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let credential = baseline_credential();
+        let id = credential.id().unwrap();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential)
+            .unwrap();
+        let kp = issuer_keypair();
+        let mut revocation = revoke_avc(
+            id,
+            Did::new("did:exo:issuer").unwrap(),
+            AvcRevocationReason::IssuerRevoked,
+            Timestamp::new(2, 0),
+            |bytes| kp.sign(bytes),
+        )
+        .unwrap();
+        revocation.signature = Signature::empty();
+
+        let body = serde_json::to_vec(&RevokeRequest { revocation }).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/revoke")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !state.registry.lock().unwrap().is_revoked(&id),
+            "unsigned revocation must not create a tombstone"
+        );
     }
 
     #[tokio::test]
