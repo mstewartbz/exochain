@@ -40,7 +40,7 @@ pub struct ActionRequest {
 }
 
 /// The result of evaluating a consent policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsentDecision {
     Granted { expires: Option<Timestamp> },
     Denied { reason: String },

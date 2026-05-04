@@ -23,6 +23,12 @@ pub enum ConsentError {
     #[error("consent denied: {0}")]
     Denied(String),
 
+    #[error("bailment has been revoked: {bailment_id}")]
+    Revoked { bailment_id: String },
+
+    #[error("consent audit sequence overflow for {counter}")]
+    SequenceOverflow { counter: String },
+
     #[error("serialization error: {0}")]
     Serialization(String),
 }
