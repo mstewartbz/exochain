@@ -52,7 +52,7 @@ fn parse_passport_did(did: &str) -> PassportResult<exo_core::types::Did> {
 #[derive(Clone)]
 pub struct PassportApiState {
     pub reactor_state: SharedReactorState,
-    /// Store for future delegation/consent/attestation persistence queries.
+    /// DAG store shared with the node API.
     #[allow(dead_code)]
     pub store: Arc<Mutex<SqliteDagStore>>,
     /// 0dentity store for sovereign identity score lookup.
@@ -156,21 +156,25 @@ pub struct IdentityProfile {
 /// Delegation portion of the passport.
 #[derive(Debug, Serialize)]
 pub struct DelegationProfile {
+    /// Whether this passport can prove delegation state from a live source.
+    pub source_status: String,
     /// Number of active delegations where this agent is the delegator.
-    pub delegations_granted: u64,
+    pub delegations_granted: Option<u64>,
     /// Number of active delegations where this agent is the delegate.
-    pub delegations_received: u64,
+    pub delegations_received: Option<u64>,
     /// Permission scope summary (list of permission types held).
-    pub active_permissions: Vec<String>,
+    pub active_permissions: Option<Vec<String>>,
 }
 
 /// Consent portion of the passport.
 #[derive(Debug, Serialize)]
 pub struct ConsentProfile {
+    /// Whether this passport can prove consent state from a live source.
+    pub source_status: String,
     /// Number of active bailments where this agent is bailor.
-    pub bailments_as_bailor: u64,
+    pub bailments_as_bailor: Option<u64>,
     /// Number of active bailments where this agent is bailee.
-    pub bailments_as_bailee: u64,
+    pub bailments_as_bailee: Option<u64>,
     /// Whether default-deny consent posture is enforced.
     pub default_deny_enforced: bool,
 }
@@ -315,37 +319,20 @@ async fn handle_passport(
 
 /// `GET /api/v1/agents/:did/delegations` — active authority chains.
 async fn handle_delegations(
-    State(state): State<Arc<PassportApiState>>,
+    State(_state): State<Arc<PassportApiState>>,
     Path(did): Path<String>,
 ) -> Result<Json<DelegationListResponse>, (StatusCode, String)> {
-    // Validate DID format.
-    let _did_obj = parse_passport_did(&did)?;
-
-    let _ = &state; // used for future delegation registry queries
-
-    Ok(Json(DelegationListResponse {
-        did,
-        delegations_granted: 0,
-        delegations_received: 0,
-        active_permissions: Vec::new(),
-    }))
+    parse_passport_did(&did)?;
+    Err(delegation_source_unavailable())
 }
 
 /// `GET /api/v1/agents/:did/consent` — active bailments.
 async fn handle_consent(
-    State(state): State<Arc<PassportApiState>>,
+    State(_state): State<Arc<PassportApiState>>,
     Path(did): Path<String>,
 ) -> Result<Json<ConsentListResponse>, (StatusCode, String)> {
-    let _did_obj = parse_passport_did(&did)?;
-
-    let _ = &state;
-
-    Ok(Json(ConsentListResponse {
-        did,
-        bailments_as_bailor: 0,
-        bailments_as_bailee: 0,
-        default_deny_enforced: true,
-    }))
+    parse_passport_did(&did)?;
+    Err(consent_source_unavailable())
 }
 
 /// `GET /api/v1/agents/:did/standing` — sanctions and revocation status.
@@ -398,27 +385,37 @@ fn build_identity_profile(did: &str, known: bool) -> IdentityProfile {
 }
 
 fn build_delegation_profile() -> DelegationProfile {
-    // The DelegationRegistry in exo-authority and DelegatedAuthority in
-    // decision-forum track live delegation chains. These are in-memory
-    // per-crate structures; wiring them here requires a shared delegation
-    // DAG persistence shipped (GAP-001). Delegation persistence TBD.
     DelegationProfile {
-        delegations_granted: 0,
-        delegations_received: 0,
-        active_permissions: Vec::new(),
+        source_status: "unavailable".into(),
+        delegations_granted: None,
+        delegations_received: None,
+        active_permissions: None,
     }
 }
 
 fn build_consent_profile() -> ConsentProfile {
-    // Bailment lifecycle (propose → accept → terminate) is implemented in
-    // exo-consent and gatekeeper.  Wiring requires a shared consent store
-    // that persists bailment state across the node. DAG persistence shipped (GAP-001). Consent persistence TBD.
-    // Default-deny is always enforced by the constitutional kernel.
     ConsentProfile {
-        bailments_as_bailor: 0,
-        bailments_as_bailee: 0,
+        source_status: "unavailable".into(),
+        bailments_as_bailor: None,
+        bailments_as_bailee: None,
         default_deny_enforced: true,
     }
+}
+
+fn delegation_source_unavailable() -> PassportError {
+    tracing::warn!("passport delegation source unavailable");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Delegation source unavailable".to_string(),
+    )
+}
+
+fn consent_source_unavailable() -> PassportError {
+    tracing::warn!("passport consent source unavailable");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Consent source unavailable".to_string(),
+    )
 }
 
 fn build_standing_profile(
@@ -751,7 +748,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegations_endpoint_returns_empty_for_known_did() {
+    async fn delegations_endpoint_fails_closed_when_delegation_source_unavailable() {
         let state = test_passport_state();
         let app = passport_test_routes(state);
 
@@ -765,15 +762,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result["did"], "did:exo:v0");
-        assert_eq!(result["delegations_granted"], 0);
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(message, "Delegation source unavailable");
     }
 
     #[tokio::test]
-    async fn consent_endpoint_returns_default_deny() {
+    async fn consent_endpoint_fails_closed_when_consent_source_unavailable() {
         let state = test_passport_state();
         let app = passport_test_routes(state);
 
@@ -787,10 +783,81 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result["default_deny_enforced"], true);
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(message, "Consent source unavailable");
+    }
+
+    #[tokio::test]
+    async fn passport_marks_unavailable_trust_sources_without_fabricated_counts() {
+        let state = test_passport_state();
+        let app = passport_test_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:v0/passport")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let passport: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(passport["delegations"]["source_status"], "unavailable");
+        assert!(passport["delegations"]["delegations_granted"].is_null());
+        assert!(passport["delegations"]["delegations_received"].is_null());
+        assert!(passport["delegations"]["active_permissions"].is_null());
+        assert_eq!(passport["consent"]["source_status"], "unavailable");
+        assert!(passport["consent"]["bailments_as_bailor"].is_null());
+        assert!(passport["consent"]["bailments_as_bailee"].is_null());
+        assert_eq!(passport["consent"]["default_deny_enforced"], true);
+    }
+
+    #[tokio::test]
+    async fn delegations_endpoint_does_not_emit_synthetic_empty_counts() {
+        let state = test_passport_state();
+        let app = passport_test_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:v0/delegations")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(message, "Delegation source unavailable");
+    }
+
+    #[tokio::test]
+    async fn consent_endpoint_does_not_emit_synthetic_bailment_counts() {
+        let state = test_passport_state();
+        let app = passport_test_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:v1/consent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(message, "Consent source unavailable");
     }
 
     #[tokio::test]
