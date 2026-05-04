@@ -327,17 +327,19 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use axum::body::{self, Body};
-    use axum::http::{Method, Request};
+    use axum::{
+        body::{self, Body},
+        http::{Method, Request},
+    };
     use exo_authority::permission::Permission;
     use exo_avc::{
         AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDecision, AvcDraft,
         AvcRevocationReason, AvcSubjectKind, DelegatedIntent, issue_avc, revoke_avc,
     };
-    use exo_core::crypto::KeyPair;
-    use exo_core::{Hash256, Timestamp};
+    use exo_core::{Hash256, Timestamp, crypto::KeyPair};
     use tower::ServiceExt;
+
+    use super::*;
 
     const ISSUER_SEED: [u8; 32] = [0x11; 32];
 

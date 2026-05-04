@@ -244,12 +244,15 @@ pub fn economy_router(state: Arc<EconomyApiState>) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use axum::body::{self, Body};
-    use axum::http::{Method, Request};
+    use axum::{
+        body::{self, Body},
+        http::{Method, Request},
+    };
     use exo_core::{Did, Timestamp};
     use exo_economy::{ActorClass, AssuranceClass, EventClass, ZeroFeeReason};
     use tower::ServiceExt;
+
+    use super::*;
 
     fn fresh_state() -> Arc<EconomyApiState> {
         Arc::new(EconomyApiState::new())

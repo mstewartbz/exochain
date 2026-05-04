@@ -7,8 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::EconomyError;
-use crate::types::{BasisPoints, EventClass, MAX_BASIS_POINTS, MicroExo, RevenueRecipient};
+use crate::{
+    error::EconomyError,
+    types::{BasisPoints, EventClass, MAX_BASIS_POINTS, MicroExo, RevenueRecipient},
+};
 
 /// A single recipient share within a revenue allocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

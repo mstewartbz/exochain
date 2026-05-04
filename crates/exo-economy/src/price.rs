@@ -15,11 +15,13 @@
 use exo_core::{Did, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::EconomyError;
-use crate::policy::PricingPolicy;
-use crate::types::{
-    ActorClass, AssuranceClass, BasisPoints, EventClass, MAX_BASIS_POINTS, MicroExo,
-    NEUTRAL_MULTIPLIER_BP,
+use crate::{
+    error::EconomyError,
+    policy::PricingPolicy,
+    types::{
+        ActorClass, AssuranceClass, BasisPoints, EventClass, MAX_BASIS_POINTS, MicroExo,
+        NEUTRAL_MULTIPLIER_BP,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

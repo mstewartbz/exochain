@@ -638,8 +638,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::*;
-    use super::*;
+    use super::{test_support::*, *};
 
     fn fixed_signature() -> Signature {
         Signature::from_bytes([7u8; 64])

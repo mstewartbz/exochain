@@ -225,13 +225,16 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::credential::{
-        issue_avc,
-        test_support::{baseline_draft, did, h256, ts},
-    };
-    use crate::revocation::{AvcRevocation, AvcRevocationReason};
     use exo_core::Signature;
+
+    use super::*;
+    use crate::{
+        credential::{
+            issue_avc,
+            test_support::{baseline_draft, did, h256, ts},
+        },
+        revocation::{AvcRevocation, AvcRevocationReason},
+    };
 
     fn fixed_signature() -> Signature {
         Signature::from_bytes([7u8; 64])

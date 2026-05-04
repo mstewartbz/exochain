@@ -5,11 +5,13 @@
 use exo_core::{Did, Hash256, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::error::EconomyError;
-use crate::policy::PricingPolicy;
-use crate::price::{PriceBreakdown, PricingInputs, compute_breakdown};
-use crate::revenue_share::{RevenueShareLine, distribute_revenue};
-use crate::types::{ActorClass, AssuranceClass, EventClass, MicroExo, PricingMode, ZeroFeeReason};
+use crate::{
+    error::EconomyError,
+    policy::PricingPolicy,
+    price::{PriceBreakdown, PricingInputs, compute_breakdown},
+    revenue_share::{RevenueShareLine, distribute_revenue},
+    types::{ActorClass, AssuranceClass, EventClass, MicroExo, PricingMode, ZeroFeeReason},
+};
 
 /// Domain tag used when computing the canonical quote hash.
 pub const ECONOMY_QUOTE_HASH_DOMAIN: &str = "exo.economy.quote.v1";

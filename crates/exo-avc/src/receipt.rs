@@ -128,14 +128,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::credential::{
-        issue_avc,
-        test_support::{baseline_draft, did, ts},
-    };
-    use crate::registry::AvcRegistryWrite;
-    use crate::validation::{AvcDecision, AvcReasonCode, AvcValidationRequest, validate_avc};
     use exo_core::crypto::KeyPair;
+
+    use super::*;
+    use crate::{
+        credential::{
+            issue_avc,
+            test_support::{baseline_draft, did, ts},
+        },
+        registry::AvcRegistryWrite,
+        validation::{AvcDecision, AvcReasonCode, AvcValidationRequest, validate_avc},
+    };
 
     fn fixed_signature() -> Signature {
         Signature::from_bytes([7u8; 64])
