@@ -149,7 +149,7 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, DbInitError> {
         .await
         .map_err(|source| DbInitError::Migrate { source })?;
 
-    println!("[DB] Connected to PostgreSQL, migrations applied");
+    tracing::info!("PostgreSQL connection pool ready and migrations applied");
     Ok(pool)
 }
 
@@ -1726,6 +1726,25 @@ mod tests {
         assert!(
             !init_pool_source.contains("#[allow(clippy::expect_used)]"),
             "init_pool must not suppress panic linting"
+        );
+    }
+
+    #[test]
+    fn init_pool_uses_structured_tracing_not_stdout() {
+        let source = production_source();
+        let init_pool_source = function_source(source, "init_pool");
+
+        assert!(
+            init_pool_source.contains("tracing::info!"),
+            "database initialization events must flow through structured tracing"
+        );
+        assert!(
+            !init_pool_source.contains("println!("),
+            "database initialization must not bypass structured tracing with stdout logging"
+        );
+        assert!(
+            !init_pool_source.contains("eprintln!("),
+            "database initialization must not bypass structured tracing with stderr logging"
         );
     }
 
