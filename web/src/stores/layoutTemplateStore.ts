@@ -59,7 +59,7 @@ async function saveToServer(template: LayoutTemplate) {
       body: JSON.stringify({
         id: template.id,
         name: template.name,
-        layout: JSON.stringify(template.layout),
+        layout: template.layout,
         hiddenPanels: template.hiddenPanels,
         isBuiltIn: template.isBuiltIn,
         createdAt: template.createdAt,
