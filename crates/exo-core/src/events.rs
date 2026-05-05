@@ -13,6 +13,10 @@ use crate::{
     types::{CorrelationId, Did, PqPublicKey, PublicKey, Signature, Timestamp},
 };
 
+/// Domain separation tag for EXOCHAIN event signatures.
+pub const EVENT_SIGNING_DOMAIN: &str = "exo.core.event.signable.v1";
+const EVENT_SIGNING_SCHEMA_VERSION: u16 = 1;
+
 // ---------------------------------------------------------------------------
 // EventType
 // ---------------------------------------------------------------------------
@@ -86,8 +90,9 @@ impl fmt::Debug for Event {
 impl Event {
     /// Construct the canonical bytes that are signed.
     ///
-    /// The signed content is: `id || timestamp || event_type || payload || source_did`
-    /// serialized as CBOR.
+    /// The signed content is a domain-separated, schema-versioned CBOR
+    /// envelope over `id`, `timestamp`, `event_type`, `payload`, and
+    /// `source_did`.
     ///
     /// # Errors
     ///
@@ -95,6 +100,8 @@ impl Event {
     pub fn write_signable_bytes<W: Write>(&self, writer: W) -> crate::Result<()> {
         #[derive(Serialize)]
         struct Signable<'a> {
+            domain: &'static str,
+            schema_version: u16,
             id: &'a CorrelationId,
             timestamp: &'a Timestamp,
             event_type: &'a EventType,
@@ -102,6 +109,8 @@ impl Event {
             source_did: &'a Did,
         }
         let s = Signable {
+            domain: EVENT_SIGNING_DOMAIN,
+            schema_version: EVENT_SIGNING_SCHEMA_VERSION,
             id: &self.id,
             timestamp: &self.timestamp,
             event_type: &self.event_type,
@@ -545,6 +554,34 @@ mod tests {
         let b1 = event.signable_bytes().expect("serialize signable bytes");
         let b2 = event.signable_bytes().expect("serialize signable bytes");
         assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn signable_bytes_are_domain_separated_and_versioned_cbor() {
+        #[derive(Deserialize)]
+        struct EventSignableEnvelope {
+            domain: String,
+            schema_version: u16,
+            id: CorrelationId,
+            timestamp: Timestamp,
+            event_type: EventType,
+            payload: Vec<u8>,
+            source_did: Did,
+        }
+
+        let kp = KeyPair::generate();
+        let event = make_event(&kp);
+        let bytes = event.signable_bytes().expect("serialize signable bytes");
+        let envelope: EventSignableEnvelope =
+            ciborium::from_reader(&bytes[..]).expect("domain-separated event signing payload");
+
+        assert_eq!(envelope.domain, "exo.core.event.signable.v1");
+        assert_eq!(envelope.schema_version, 1);
+        assert_eq!(envelope.id, event.id);
+        assert_eq!(envelope.timestamp, event.timestamp);
+        assert_eq!(envelope.event_type, event.event_type);
+        assert_eq!(envelope.payload, event.payload);
+        assert_eq!(envelope.source_did, event.source_did);
     }
 
     #[test]
