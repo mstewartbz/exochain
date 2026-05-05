@@ -778,10 +778,19 @@ test('wasm_terminate_bailment_signed rejects caller-supplied DID key material', 
 
 console.log('\n--- Shamir ---');
 
-test('wasm_shamir_split', () =>
-  wasm.wasm_shamir_split(TEXT_BYTES, 2, 3));
+const SHAMIR_ENTROPY = new TextEncoder().encode('exo-wasm-shamir-entropy-v1-explicit');
 
-const shares = setup(() => wasm.wasm_shamir_split(TEXT_BYTES, 2, 3));
+test('wasm_shamir_split rejects missing caller entropy', () =>
+  expectErrorContains(
+    'wasm_shamir_split',
+    () => wasm.wasm_shamir_split(TEXT_BYTES, 2, 3),
+    'caller-supplied entropy'
+  ));
+
+test('wasm_shamir_split_with_entropy', () =>
+  wasm.wasm_shamir_split_with_entropy(TEXT_BYTES, 2, 3, SHAMIR_ENTROPY));
+
+const shares = setup(() => wasm.wasm_shamir_split_with_entropy(TEXT_BYTES, 2, 3, SHAMIR_ENTROPY));
 
 test('wasm_shamir_reconstruct', () => {
   if (!shares) throw new Error('skipped -- no shares from setup');

@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::IdentityError;
 
+/// Minimum caller-supplied entropy bytes required for threshold Shamir splitting.
+pub const SHAMIR_ENTROPY_MIN_BYTES: usize = 32;
+
 #[inline]
 fn gf256_mul(mut a: u8, mut b: u8) -> u8 {
     let mut result: u8 = 0;
@@ -87,6 +90,26 @@ impl fmt::Debug for Share {
 pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, IdentityError> {
     config.validate()?;
 
+    if config.threshold > 1 {
+        return Err(IdentityError::InvalidShamirEntropy {
+            min_bytes: SHAMIR_ENTROPY_MIN_BYTES,
+            got_bytes: 0,
+            reason: "threshold greater than one requires caller-supplied entropy".into(),
+        });
+    }
+
+    split_with_entropy(secret, config, &[])
+}
+
+/// Split a secret using caller-supplied entropy to derive deterministic Shamir coefficients.
+pub fn split_with_entropy(
+    secret: &[u8],
+    config: &ShamirConfig,
+    entropy: &[u8],
+) -> Result<Vec<Share>, IdentityError> {
+    config.validate()?;
+    validate_shamir_entropy(config, entropy)?;
+
     let commitment: [u8; 32] = *blake3::hash(secret).as_bytes();
     let k: usize = config.threshold.into();
     let n: usize = config.shares.into();
@@ -105,15 +128,18 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
         })
         .collect::<Result<Vec<_>, IdentityError>>()?;
 
-    let mut rng = rand::rngs::OsRng;
-
-    for &secret_byte in secret {
+    for (byte_idx, &secret_byte) in secret.iter().enumerate() {
         let mut coeffs = vec![0u8; k];
         coeffs[0] = secret_byte;
-        for coeff in coeffs.iter_mut().skip(1) {
-            let mut random_byte = [0u8; 1];
-            rand::RngCore::fill_bytes(&mut rng, &mut random_byte);
-            *coeff = random_byte[0];
+        for (coeff_idx, coeff) in coeffs.iter_mut().enumerate().skip(1) {
+            *coeff = derive_shamir_coefficient(
+                entropy,
+                &commitment,
+                config,
+                secret.len(),
+                byte_idx,
+                coeff_idx,
+            )?;
         }
 
         for share in shares.iter_mut() {
@@ -129,6 +155,65 @@ pub fn split(secret: &[u8], config: &ShamirConfig) -> Result<Vec<Share>, Identit
     }
 
     Ok(shares)
+}
+
+fn validate_shamir_entropy(config: &ShamirConfig, entropy: &[u8]) -> Result<(), IdentityError> {
+    if config.threshold <= 1 {
+        return Ok(());
+    }
+
+    if entropy.len() < SHAMIR_ENTROPY_MIN_BYTES {
+        return Err(IdentityError::InvalidShamirEntropy {
+            min_bytes: SHAMIR_ENTROPY_MIN_BYTES,
+            got_bytes: entropy.len(),
+            reason: "threshold greater than one requires at least 32 entropy bytes".into(),
+        });
+    }
+
+    if entropy.iter().all(|byte| *byte == 0) {
+        return Err(IdentityError::InvalidShamirEntropy {
+            min_bytes: SHAMIR_ENTROPY_MIN_BYTES,
+            got_bytes: entropy.len(),
+            reason: "caller-supplied Shamir entropy must not be all-zero".into(),
+        });
+    }
+
+    Ok(())
+}
+
+fn encode_usize_for_shamir(value: usize, field: &'static str) -> Result<[u8; 8], IdentityError> {
+    let value = u64::try_from(value).map_err(|_| IdentityError::ShamirInputTooLarge {
+        field,
+        max: u64::MAX,
+        got: value,
+    })?;
+    Ok(value.to_be_bytes())
+}
+
+fn derive_shamir_coefficient(
+    entropy: &[u8],
+    commitment: &[u8; 32],
+    config: &ShamirConfig,
+    secret_len: usize,
+    byte_idx: usize,
+    coeff_idx: usize,
+) -> Result<u8, IdentityError> {
+    let entropy_len = encode_usize_for_shamir(entropy.len(), "entropy_len")?;
+    let secret_len = encode_usize_for_shamir(secret_len, "secret_len")?;
+    let byte_idx = encode_usize_for_shamir(byte_idx, "byte_idx")?;
+    let coeff_idx = encode_usize_for_shamir(coeff_idx, "coefficient_idx")?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"exo.identity.shamir.coefficient.v1");
+    hasher.update(&entropy_len);
+    hasher.update(entropy);
+    hasher.update(commitment);
+    hasher.update(&[config.threshold, config.shares]);
+    hasher.update(&secret_len);
+    hasher.update(&byte_idx);
+    hasher.update(&coeff_idx);
+    let digest = hasher.finalize();
+    Ok(digest.as_bytes()[0])
 }
 
 fn validate_shares(
@@ -245,6 +330,9 @@ pub fn reconstruct(shares: &[Share], config: &ShamirConfig) -> Result<Vec<u8>, I
 mod tests {
     use super::*;
 
+    const TEST_SHAMIR_ENTROPY: &[u8] = b"exo-identity-test-shamir-entropy-v1";
+    const OTHER_TEST_SHAMIR_ENTROPY: &[u8] = b"exo-identity-test-shamir-entropy-v2";
+
     #[test]
     fn gf256_mul_identity() {
         for a in 0..=255u16 {
@@ -280,7 +368,7 @@ mod tests {
             threshold: 2,
             shares: 3,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         assert_eq!(shares.len(), 3);
 
         for combo in [[0, 1], [0, 2], [1, 2]] {
@@ -288,6 +376,89 @@ mod tests {
             let recovered = reconstruct(&subset, &config).unwrap();
             assert_eq!(recovered, secret);
         }
+    }
+
+    #[test]
+    fn split_requires_caller_supplied_entropy_for_threshold_above_one() {
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+
+        assert!(
+            split(b"entropy must be explicit", &config).is_err(),
+            "threshold > 1 Shamir splitting must fail closed unless entropy is caller supplied"
+        );
+    }
+
+    #[test]
+    fn split_with_entropy_is_deterministic_for_same_inputs() {
+        let secret = b"deterministic coefficient derivation";
+        let config = ShamirConfig {
+            threshold: 3,
+            shares: 5,
+        };
+
+        let first = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
+        let second = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn split_with_entropy_changes_share_data_when_entropy_changes() {
+        let secret = b"entropy-bound coefficient derivation";
+        let config = ShamirConfig {
+            threshold: 3,
+            shares: 5,
+        };
+
+        let first = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
+        let second = split_with_entropy(secret, &config, OTHER_TEST_SHAMIR_ENTROPY).unwrap();
+
+        assert_ne!(
+            first.iter().map(|share| &share.data).collect::<Vec<_>>(),
+            second.iter().map(|share| &share.data).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn split_with_entropy_rejects_short_entropy() {
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+
+        let err = split_with_entropy(b"short entropy", &config, b"short").unwrap_err();
+
+        assert!(matches!(
+            err,
+            IdentityError::InvalidShamirEntropy {
+                min_bytes: SHAMIR_ENTROPY_MIN_BYTES,
+                got_bytes: 5,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn split_with_entropy_rejects_all_zero_entropy() {
+        let config = ShamirConfig {
+            threshold: 2,
+            shares: 3,
+        };
+        let entropy = [0u8; SHAMIR_ENTROPY_MIN_BYTES];
+
+        let err = split_with_entropy(b"zero entropy", &config, &entropy).unwrap_err();
+
+        assert!(matches!(
+            err,
+            IdentityError::InvalidShamirEntropy {
+                min_bytes: SHAMIR_ENTROPY_MIN_BYTES,
+                got_bytes: SHAMIR_ENTROPY_MIN_BYTES,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -321,7 +492,7 @@ mod tests {
             threshold: 3,
             shares: 5,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         assert_eq!(shares.len(), 5);
 
         let combos = [[0, 1, 2], [0, 2, 4], [1, 3, 4], [2, 3, 4]];
@@ -339,7 +510,7 @@ mod tests {
             threshold: 1,
             shares: 1,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         assert_eq!(shares.len(), 1);
         let recovered = reconstruct(&shares, &config).unwrap();
         assert_eq!(recovered, secret);
@@ -352,7 +523,7 @@ mod tests {
             threshold: 5,
             shares: 5,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         let recovered = reconstruct(&shares, &config).unwrap();
         assert_eq!(recovered, secret);
     }
@@ -364,7 +535,7 @@ mod tests {
             threshold: 3,
             shares: 5,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         let subset = vec![shares[0].clone(), shares[1].clone()];
         let err = reconstruct(&subset, &config).unwrap_err();
         assert!(matches!(
@@ -448,7 +619,7 @@ mod tests {
     }
 
     fn split_for_test(secret: &[u8], config: &ShamirConfig) -> Vec<Share> {
-        match split(secret, config) {
+        match split_with_entropy(secret, config, TEST_SHAMIR_ENTROPY) {
             Ok(shares) => shares,
             Err(err) => panic!("test split must succeed: {err}"),
         }
@@ -588,18 +759,23 @@ mod tests {
     }
 
     #[test]
-    fn split_uses_operating_system_csprng_for_coefficients() {
+    fn split_does_not_use_internal_randomness_for_coefficients() {
         let source = include_str!("shamir.rs");
-        let forbidden_rng = ["thread", "_rng"].concat();
-        let required_rng = ["Os", "Rng"].concat();
+        let split_source = source
+            .split("pub fn split(")
+            .nth(1)
+            .expect("split source exists")
+            .split("fn validate_shares")
+            .next()
+            .expect("split source ends before share validation");
 
         assert!(
-            !source.contains(&forbidden_rng),
-            "Shamir coefficients must not use an ambient thread RNG"
+            !split_source.contains("OsRng"),
+            "Shamir coefficients must not draw hidden entropy from the operating system"
         );
         assert!(
-            source.contains(&required_rng),
-            "Shamir coefficients must be generated with the operating-system CSPRNG"
+            !split_source.contains("fill_bytes"),
+            "Shamir coefficients must not use internal RNG byte filling"
         );
     }
 
@@ -632,7 +808,7 @@ mod tests {
             threshold: 2,
             shares: 3,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         let expected: [u8; 32] = *blake3::hash(secret).as_bytes();
         for share in &shares {
             assert_eq!(share.commitment, expected);
@@ -646,7 +822,7 @@ mod tests {
             threshold: 2,
             shares: 3,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         let recovered = reconstruct(&shares[..2], &config).unwrap();
         assert_eq!(recovered, secret);
     }
@@ -658,7 +834,7 @@ mod tests {
             threshold: 2,
             shares: 3,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         let recovered = reconstruct(&shares[..2], &config).unwrap();
         assert_eq!(recovered, secret);
     }
@@ -670,7 +846,7 @@ mod tests {
             threshold: 2,
             shares: 5,
         };
-        let shares = split(secret, &config).unwrap();
+        let shares = split_with_entropy(secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
         let recovered = reconstruct(&shares, &config).unwrap();
         assert_eq!(recovered, secret);
     }
@@ -681,6 +857,8 @@ mod proptests {
     use proptest::prelude::*;
 
     use super::*;
+
+    const TEST_SHAMIR_ENTROPY: &[u8] = b"exo-identity-proptest-shamir-entropy";
 
     proptest! {
         #[test]
@@ -694,7 +872,7 @@ mod proptests {
                 return Ok(());
             }
             let config = ShamirConfig { threshold: k, shares: n };
-            let shares = split(&secret, &config).unwrap();
+            let shares = split_with_entropy(&secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
             let subset: Vec<Share> = shares.into_iter().take(usize::from(k)).collect();
             let recovered = reconstruct(&subset, &config).unwrap();
             prop_assert_eq!(recovered, secret);
@@ -707,7 +885,7 @@ mod proptests {
         ) {
             let n = k.saturating_add(2);
             let config = ShamirConfig { threshold: k, shares: n };
-            let shares = split(&secret, &config).unwrap();
+            let shares = split_with_entropy(&secret, &config, TEST_SHAMIR_ENTROPY).unwrap();
             let subset: Vec<Share> = shares.into_iter().take(usize::from(k - 1)).collect();
             let result = reconstruct(&subset, &config);
             prop_assert!(result.is_err());

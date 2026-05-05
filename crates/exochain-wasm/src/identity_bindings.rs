@@ -64,6 +64,20 @@ pub fn wasm_shamir_split(secret: &[u8], threshold: u8, shares: u8) -> Result<JsV
     to_js_value(&result)
 }
 
+/// Split a secret using Shamir's Secret Sharing with caller-supplied entropy.
+#[wasm_bindgen]
+pub fn wasm_shamir_split_with_entropy(
+    secret: &[u8],
+    threshold: u8,
+    shares: u8,
+    entropy: &[u8],
+) -> Result<JsValue, JsValue> {
+    let config = exo_identity::shamir::ShamirConfig { threshold, shares };
+    let result = exo_identity::shamir::split_with_entropy(secret, &config, entropy)
+        .map_err(|e| JsValue::from_str(&format!("Shamir split error: {e}")))?;
+    to_js_value(&result)
+}
+
 /// Reconstruct a secret from Shamir shares
 #[wasm_bindgen]
 pub fn wasm_shamir_reconstruct(

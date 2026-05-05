@@ -13,12 +13,14 @@
 use exo_core::Did;
 use exo_identity::{
     pace::{PaceConfig, PaceState, deescalate, escalate, resolve_operator},
-    shamir::{ShamirConfig, Share, reconstruct, split},
+    shamir::{ShamirConfig, Share, reconstruct, split_with_entropy},
 };
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const TEST_SHAMIR_ENTROPY: &[u8] = b"livesafe-integration-shamir-entropy";
 
 fn did(label: &str) -> Did {
     match Did::new(&format!("did:exo:{label}")) {
@@ -51,7 +53,7 @@ fn deescalate_ok(state: &mut PaceState) -> PaceState {
 }
 
 fn split_ok(secret: &[u8], config: &ShamirConfig) -> Vec<Share> {
-    match split(secret, config) {
+    match split_with_entropy(secret, config, TEST_SHAMIR_ENTROPY) {
         Ok(shares) => shares,
         Err(err) => panic!("expected Shamir split to succeed: {err}"),
     }

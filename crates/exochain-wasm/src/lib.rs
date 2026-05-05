@@ -518,6 +518,28 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_shamir_split_exposes_caller_supplied_entropy_boundary() {
+        let source = include_str!("identity_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            production.contains("wasm_shamir_split_with_entropy"),
+            "WASM Shamir splitting must expose a caller-supplied entropy entrypoint"
+        );
+        assert!(
+            production.contains("exo_identity::shamir::split_with_entropy"),
+            "WASM Shamir splitting must call the entropy-explicit core split API"
+        );
+        assert!(
+            production.contains("entropy"),
+            "WASM Shamir split boundary must keep entropy explicit in the public API"
+        );
+    }
+
+    #[test]
     fn wasm_identity_secret_metadata_has_no_debug_surface() {
         let source = include_str!("identity_bindings.rs");
         let production = source

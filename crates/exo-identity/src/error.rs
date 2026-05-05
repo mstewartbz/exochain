@@ -68,6 +68,22 @@ pub enum IdentityError {
     #[error("invalid Shamir config: threshold={threshold}, shares={shares}")]
     InvalidShamirConfig { threshold: u8, shares: u8 },
 
+    #[error(
+        "invalid Shamir entropy: min_bytes={min_bytes}, got_bytes={got_bytes}, reason={reason}"
+    )]
+    InvalidShamirEntropy {
+        min_bytes: usize,
+        got_bytes: usize,
+        reason: String,
+    },
+
+    #[error("Shamir input {field} exceeds deterministic encoding bound: max={max}, got={got}")]
+    ShamirInputTooLarge {
+        field: &'static str,
+        max: u64,
+        got: usize,
+    },
+
     #[error("insufficient shares: need {need}, got {got}")]
     InsufficientShares { need: u8, got: u8 },
 
