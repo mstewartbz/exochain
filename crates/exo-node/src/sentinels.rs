@@ -110,19 +110,23 @@ pub type AlertReceiver = mpsc::Receiver<SentinelAlert>;
 
 type PreviousRound = Option<u64>;
 
-pub(crate) fn now_ms() -> u64 {
+fn sentinel_now_ms() -> Result<u64, String> {
     static SENTINEL_CLOCK: OnceLock<Mutex<HybridClock>> = OnceLock::new();
     let clock = SENTINEL_CLOCK.get_or_init(|| Mutex::new(HybridClock::new()));
-    match clock.lock() {
-        Ok(mut clock) => match clock.now() {
-            Ok(timestamp) => timestamp.physical_ms,
-            Err(err) => {
-                tracing::error!(error = %err, "Sentinel HLC exhausted while reading timestamp");
-                0
-            }
-        },
-        Err(_) => {
-            tracing::error!("Sentinel HLC mutex poisoned while reading timestamp");
+    let mut clock = clock
+        .lock()
+        .map_err(|_| "Sentinel HLC mutex poisoned while reading timestamp".to_owned())?;
+    clock
+        .now()
+        .map(|timestamp| timestamp.physical_ms)
+        .map_err(|err| format!("Sentinel HLC exhausted while reading timestamp: {err}"))
+}
+
+pub(crate) fn now_ms() -> u64 {
+    match sentinel_now_ms() {
+        Ok(now) => now,
+        Err(message) => {
+            tracing::error!(%message, "Sentinel timestamp unavailable");
             0
         }
     }
@@ -426,6 +430,25 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
 ///
 /// Spec §10.4 — ensures no stale challenges linger in memory.
 fn check_otp_cleanup(zerodentity: &SharedZerodentityStore) -> SentinelStatus {
+    check_otp_cleanup_with_time(zerodentity, sentinel_now_ms())
+}
+
+fn check_otp_cleanup_with_time(
+    zerodentity: &SharedZerodentityStore,
+    now_result: Result<u64, String>,
+) -> SentinelStatus {
+    let now = match now_result {
+        Ok(now) => now,
+        Err(message) => {
+            return SentinelStatus {
+                check: SentinelCheck::OtpCleanup,
+                healthy: false,
+                message,
+                last_run_ms: 0,
+            };
+        }
+    };
+
     let mut zstore = match zerodentity.lock() {
         Ok(s) => s,
         Err(_) => {
@@ -438,7 +461,6 @@ fn check_otp_cleanup(zerodentity: &SharedZerodentityStore) -> SentinelStatus {
             };
         }
     };
-    let now = now_ms();
 
     // Count expired-but-pending challenges before cleanup
     let expired_pending = zstore
@@ -978,6 +1000,44 @@ mod tests {
         assert!(status.healthy);
         assert_eq!(status.check, SentinelCheck::OtpCleanup);
         assert_eq!(status.message, "No expired pending OTP challenges");
+    }
+
+    #[test]
+    fn otp_cleanup_does_not_use_zero_timestamp_fallback() {
+        let source = include_str!("sentinels.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+        let otp_cleanup = production
+            .split("fn check_otp_cleanup")
+            .nth(1)
+            .and_then(|section| section.split("fn check_store_consistency").next())
+            .expect("OTP cleanup sentinel present");
+
+        assert!(
+            otp_cleanup.contains("sentinel_now_ms()"),
+            "OTP cleanup must use the fallible sentinel clock before evaluating expiry"
+        );
+        assert!(
+            !otp_cleanup.contains("let now = now_ms()"),
+            "OTP cleanup must not evaluate expiry with the zero timestamp fallback"
+        );
+    }
+
+    #[test]
+    fn otp_cleanup_fails_closed_when_timestamp_unavailable() {
+        let zerodentity = crate::zerodentity::store::new_shared_store();
+
+        let status = check_otp_cleanup_with_time(
+            &zerodentity,
+            Err("injected sentinel clock failure".to_owned()),
+        );
+
+        assert!(!status.healthy);
+        assert_eq!(status.check, SentinelCheck::OtpCleanup);
+        assert!(status.message.contains("clock failure"));
+        assert_eq!(status.last_run_ms, 0);
     }
 
     #[test]
