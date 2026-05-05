@@ -131,8 +131,8 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Audit dependencies (strict — vulnerabilities, unsound, unmaintained)
-        # Historically this was `--deny warnings` (all warning classes,
-        # including yanked). That fails today because `core2` was yanked
+        # Historically this denied all warning classes, including yanked.
+        # That fails today because `core2` was yanked
         # post-hoc by its maintainer and there is no safe upgrade path —
         # libp2p-core still depends on it. We deny the three classes we
         # can actually act on (vulnerability / unsound / unmaintained)
@@ -235,6 +235,8 @@ jobs:
         run: bash tools/test_github_actions_pinned.sh
       - name: Repo truth and public claims
         run: bash tools/test_repo_truth.sh
+      - name: Audit policy documentation truth
+        run: bash tools/test_audit_policy_docs.sh
       - name: CR-001 status consistency
         run: bash tools/test_cr001_status.sh
       - name: GAP registry truth
