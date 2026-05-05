@@ -1,9 +1,9 @@
 //! Hybrid Logical Clock (HLC) for causal ordering.
 //!
-//! The HLC combines a physical wall-clock component (milliseconds since
-//! epoch) with a logical counter so that:
+//! The HLC combines a caller-supplied physical component with a logical
+//! counter so that:
 //!
-//! 1. Timestamps are **monotonically increasing** even when the wall clock
+//! 1. Timestamps are **monotonically increasing** even when the physical source
 //!    is stale or drifts backward.
 //! 2. Causally-related events are always ordered correctly.
 //! 3. No floating-point arithmetic is involved.
@@ -14,52 +14,71 @@ use crate::{
 };
 
 /// Maximum tolerable forward drift in milliseconds.
-/// If a remote timestamp is more than this far ahead of our wall clock
-/// we reject it as drift.
+/// If a remote timestamp is more than this far ahead of our local physical
+/// source, we reject it as drift.
 const MAX_DRIFT_MS: u64 = 60_000; // 60 seconds
+/// Deterministic non-zero epoch for default clocks. This intentionally keeps
+/// zero-epoch records stale without reading host wall-clock time.
+const DEFAULT_DETERMINISTIC_PHYSICAL_MS: u64 = 1_000_000;
 
 /// A Hybrid Logical Clock instance.
 ///
 /// Each node in the EXOCHAIN network maintains its own `HybridClock`.
-/// The clock is driven by a wall-clock source (injectable for testing)
-/// and a logical counter.
+/// The clock is driven by a deterministic physical source and a logical
+/// counter. The default constructor does not read host time; runtime adapters
+/// that need deployment-specific physical metadata must inject an explicit HLC
+/// source.
 pub struct HybridClock {
-    /// Last-known physical time in milliseconds since epoch.
+    /// Last-known HLC physical milliseconds.
     physical: u64,
     /// Logical counter within the same physical millisecond.
     logical: u32,
-    /// Wall-clock source — returns current millis since epoch.
-    wall_clock: Box<dyn Fn() -> Result<u64> + Send>,
+    /// Physical source — returns current HLC physical milliseconds.
+    physical_source: Box<dyn Fn() -> Result<u64> + Send>,
 }
 
 impl HybridClock {
-    /// Create a new clock driven by the system wall clock.
+    /// Create a new clock driven by EXOCHAIN's deterministic default source.
     #[must_use]
     pub fn new() -> Self {
+        let next_physical_ms = std::sync::atomic::AtomicU64::new(DEFAULT_DETERMINISTIC_PHYSICAL_MS);
         Self {
             physical: 0,
             logical: 0,
-            wall_clock: Box::new(system_time_millis),
+            physical_source: Box::new(move || {
+                next_physical_ms
+                    .fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |current| current.checked_add(1),
+                    )
+                    .map_err(|current| ExoError::ClockOverflow {
+                        physical_ms: current,
+                        logical: u32::MAX,
+                    })
+            }),
         }
     }
 
-    /// Create a clock with a custom wall-clock source (for testing).
+    /// Create a clock with a custom physical source.
     #[must_use]
-    pub fn with_wall_clock(wall_clock: impl Fn() -> u64 + Send + 'static) -> Self {
+    pub fn with_wall_clock(physical_source: impl Fn() -> u64 + Send + 'static) -> Self {
         Self {
             physical: 0,
             logical: 0,
-            wall_clock: Box::new(move || Ok(wall_clock())),
+            physical_source: Box::new(move || Ok(physical_source())),
         }
     }
 
-    /// Create a clock with a fallible wall-clock source.
+    /// Create a clock with a fallible physical source.
     #[must_use]
-    pub fn with_fallible_wall_clock(wall_clock: impl Fn() -> Result<u64> + Send + 'static) -> Self {
+    pub fn with_fallible_wall_clock(
+        physical_source: impl Fn() -> Result<u64> + Send + 'static,
+    ) -> Self {
         Self {
             physical: 0,
             logical: 0,
-            wall_clock: Box::new(wall_clock),
+            physical_source: Box::new(physical_source),
         }
     }
 
@@ -68,9 +87,9 @@ impl HybridClock {
     /// Guarantees: the returned timestamp is strictly greater than any
     /// previously returned by this clock.
     pub fn now(&mut self) -> Result<Timestamp> {
-        let wall = (self.wall_clock)()?;
-        if wall > self.physical {
-            self.physical = wall;
+        let physical_now = (self.physical_source)()?;
+        if physical_now > self.physical {
+            self.physical = physical_now;
             self.logical = 0;
         } else {
             advance_logical_or_carry_physical(&mut self.physical, &mut self.logical)?;
@@ -86,21 +105,21 @@ impl HybridClock {
     /// # Errors
     ///
     /// Returns `ExoError::ClockDrift` if the remote timestamp is
-    /// unreasonably far ahead of the local wall clock.
+    /// unreasonably far ahead of the local physical source.
     pub fn update(&mut self, remote: &Timestamp) -> Result<Timestamp> {
-        let wall = (self.wall_clock)()?;
+        let physical_now = (self.physical_source)()?;
 
         // Drift guard
-        if remote.physical_ms > wall.saturating_add(MAX_DRIFT_MS) {
+        if remote.physical_ms > physical_now.saturating_add(MAX_DRIFT_MS) {
             return Err(ExoError::ClockDrift {
                 physical_ms: remote.physical_ms,
                 tolerance_ms: MAX_DRIFT_MS,
             });
         }
 
-        if wall > self.physical && wall > remote.physical_ms {
-            // Wall clock is ahead of both — reset logical
-            self.physical = wall;
+        if physical_now > self.physical && physical_now > remote.physical_ms {
+            // Local physical source is ahead of both — reset logical
+            self.physical = physical_now;
             self.logical = 0;
         } else if self.physical == remote.physical_ms {
             // Same physical — advance logical past both
@@ -163,40 +182,6 @@ impl core::fmt::Debug for HybridClock {
             .field("logical", &self.logical)
             .finish()
     }
-}
-
-/// Default wall-clock implementation.
-#[cfg(not(target_arch = "wasm32"))]
-fn system_time_millis() -> Result<u64> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let duration =
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| ExoError::ClockUnavailable {
-                reason: "system time is before the Unix epoch".into(),
-            })?;
-
-    u64::try_from(duration.as_millis()).map_err(|_| ExoError::ClockUnavailable {
-        reason: "system time milliseconds exceed u64".into(),
-    })
-}
-
-/// WASM wall-clock: route through js_sys::Date::now().
-#[cfg(target_arch = "wasm32")]
-fn system_time_millis() -> Result<u64> {
-    let millis = js_sys::Date::now();
-    if !millis.is_finite() || millis.is_sign_negative() {
-        return Err(ExoError::ClockUnavailable {
-            reason: "Date.now returned a non-finite or negative value".into(),
-        });
-    }
-    millis
-        .to_string()
-        .parse::<u64>()
-        .map_err(|_| ExoError::ClockUnavailable {
-            reason: "Date.now milliseconds cannot be represented as u64".into(),
-        })
 }
 
 // ===========================================================================
@@ -353,8 +338,53 @@ mod tests {
     fn default_clock() {
         let mut clock = HybridClock::default();
         let t = clock.now().expect("HLC timestamp");
-        // Should have a reasonable physical time (non-zero)
-        assert!(t.physical_ms > 0);
+        assert_eq!(t, Timestamp::new(DEFAULT_DETERMINISTIC_PHYSICAL_MS, 0));
+    }
+
+    #[test]
+    fn default_clock_advances_physical_time_deterministically() {
+        let mut clock = HybridClock::default();
+
+        let first = clock.now().expect("first HLC timestamp");
+        let second = clock.now().expect("second HLC timestamp");
+        let third = clock.now().expect("third HLC timestamp");
+
+        assert_eq!(first, Timestamp::new(DEFAULT_DETERMINISTIC_PHYSICAL_MS, 0));
+        assert_eq!(
+            second,
+            Timestamp::new(DEFAULT_DETERMINISTIC_PHYSICAL_MS + 1, 0)
+        );
+        assert_eq!(
+            third,
+            Timestamp::new(DEFAULT_DETERMINISTIC_PHYSICAL_MS + 2, 0)
+        );
+    }
+
+    #[test]
+    fn production_hlc_source_does_not_read_host_wall_clock() {
+        let production = include_str!("hlc.rs")
+            .split("// ===========================================================================")
+            .next()
+            .expect("production section");
+        let system_time_now = format!("{}{}", "SystemTime::", "now()");
+        let date_now = format!("{}{}", "Date::", "now()");
+
+        assert!(
+            !production.contains(&system_time_now),
+            "production HLC must not read host SystemTime; callers must use deterministic HLC sources"
+        );
+        assert!(
+            !production.contains(&date_now),
+            "production HLC must not read browser Date.now; callers must use deterministic HLC sources"
+        );
+        assert!(
+            !production.contains("std::time"),
+            "production HLC must not import host wall-clock APIs"
+        );
+        assert!(
+            !production.contains("js_sys::Date"),
+            "production HLC must not import browser wall-clock APIs"
+        );
     }
 
     #[test]
@@ -491,13 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn system_time_millis_returns_nonzero() {
-        let ms = system_time_millis().expect("system clock should be available");
-        assert!(ms > 0);
-    }
-
-    #[test]
-    fn default_wall_clock_source_has_no_epoch_zero_fallback() {
+    fn default_source_has_no_epoch_zero_fallback() {
         let production = include_str!("hlc.rs")
             .split("// ===========================================================================")
             .next()
@@ -506,27 +530,6 @@ mod tests {
         assert!(
             !production.contains(".unwrap_or(0)"),
             "HLC wall-clock failures must propagate instead of silently using epoch zero"
-        );
-    }
-
-    #[test]
-    fn wasm_clock_source_uses_checked_date_now_conversion() {
-        let source = include_str!("hlc.rs");
-        let wasm_clock_source = source
-            .split("/// WASM wall-clock: route through js_sys::Date::now().")
-            .nth(1)
-            .expect("WASM clock source exists")
-            .split("// ===========================================================================")
-            .next()
-            .expect("WASM clock source ends before tests");
-
-        assert!(
-            !wasm_clock_source.contains("clippy::as_conversions"),
-            "WASM HLC clock conversion must not suppress checked conversion lints"
-        );
-        assert!(
-            !wasm_clock_source.contains("Date::now() as u64"),
-            "WASM HLC clock conversion must not use lossy float-to-integer casts"
         );
     }
 }
