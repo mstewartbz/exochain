@@ -495,20 +495,10 @@ class SyntaxisCompiler {
         };
 
       case 'proof-generate':
-        return {
-          ...baseInputs,
-          dataHash: this._hashObject(proposal),
-          prover: proposal.proposer,
-          proofType: 'PROPOSAL_VALIDITY'
-        };
+        return this._buildProofGenerateInputs(baseInputs, proposal);
 
       case 'proof-verify':
-        return {
-          ...baseInputs,
-          proofId: `proof_${proposal.id}`,
-          proofHash: this._hashObject(proposal),
-          verifier: 'KERNEL_PANEL'
-        };
+        return this._buildProofVerifyInputs(baseInputs, proposal);
 
       case 'dag-append':
         return {
@@ -592,6 +582,33 @@ class SyntaxisCompiler {
       default:
         return baseInputs;
     }
+  }
+
+  _buildProofGenerateInputs(baseInputs, proposal) {
+    return {
+      ...baseInputs,
+      dataHash: this._hashObject(proposal),
+      prover: proposal.proposer,
+      proofType: 'PROPOSAL_VALIDITY',
+      proofData: proposal.proofData || {}
+    };
+  }
+
+  _buildProofVerifyInputs(baseInputs, proposal) {
+    const proofInputs = this._buildProofGenerateInputs(baseInputs, proposal);
+    const generated = NODE_IMPLEMENTATIONS['proof-generate'].execute({ inputs: proofInputs });
+
+    return {
+      ...baseInputs,
+      proofId: generated.outputs.proofId,
+      proofHash: generated.outputs.proofHash,
+      dataHash: generated.outputs.dataHash,
+      proofType: generated.outputs.proofType,
+      prover: generated.outputs.prover,
+      proofData: proofInputs.proofData,
+      generatedAtHlc: generated.outputs.generatedAtHlc,
+      verifier: 'KERNEL_PANEL'
+    };
   }
 
   _getConsentRequirementBasisPoints(nodeType) {

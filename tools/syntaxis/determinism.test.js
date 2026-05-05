@@ -5,6 +5,7 @@ const path = require('path');
 const { SyntaxisCompiler } = require('./compiler');
 const { NODE_IMPLEMENTATIONS } = require('./nodes');
 const { SolutionsBuilder } = require('./solutions-builder');
+const { deterministicId, hashCanonical } = require('./determinism');
 
 const HLC = { physicalMs: 1700000000000, logical: 7 };
 const DEPLOY_HLC = { physicalMs: 1700000000001, logical: 0 };
@@ -110,6 +111,108 @@ function run() {
   });
   assert.strictEqual(adjudication.outputs.confidenceBasisPoints, 6666);
   assert.ok(!Object.prototype.hasOwnProperty.call(adjudication.outputs, 'confidence'));
+
+  const proofInputs = {
+    dataHash: `0x${'11'.repeat(32)}`,
+    prover: 'GOVERNANCE_PANEL',
+    proofType: 'PROPOSAL_VALIDITY',
+    proofData: { claim: 'proposal-hash' },
+    timestampHlc: HLC
+  };
+  const generatedProof = NODE_IMPLEMENTATIONS['proof-generate'].execute({ inputs: proofInputs });
+  const proofVerificationInputs = {
+    proofId: generatedProof.outputs.proofId,
+    proofHash: generatedProof.outputs.proofHash,
+    dataHash: generatedProof.outputs.dataHash,
+    proofType: generatedProof.outputs.proofType,
+    prover: generatedProof.outputs.prover,
+    proofData: proofInputs.proofData,
+    generatedAtHlc: generatedProof.outputs.generatedAtHlc,
+    verifier: 'KERNEL_PANEL',
+    timestampHlc: HLC
+  };
+  const proofVerification = NODE_IMPLEMENTATIONS['proof-verify'].execute({
+    inputs: proofVerificationInputs
+  });
+  assert.strictEqual(proofVerification.outputs.verified, true);
+  assert.strictEqual(proofVerification.nextState, 'PROOF_VERIFIED');
+
+  const forgedShapeOnlyProof = NODE_IMPLEMENTATIONS['proof-verify'].execute({
+    inputs: {
+      proofId: 'proof_untrusted',
+      proofHash: 'proof_hash_attacker_controlled',
+      verifier: 'KERNEL_PANEL',
+      timestampHlc: HLC
+    }
+  });
+  assert.strictEqual(
+    forgedShapeOnlyProof.outputs.verified,
+    false,
+    'proof-verify must reject caller-controlled proofId/proofHash strings without a generated proof statement'
+  );
+  assert.strictEqual(forgedShapeOnlyProof.nextState, 'PROOF_INVALID');
+
+  const omittedStatementFieldsProof = NODE_IMPLEMENTATIONS['proof-verify'].execute({
+    inputs: {
+      proofId: deterministicId('proof', { proofData: {}, timestampHlc: HLC }),
+      proofHash: `proof_hash_${hashCanonical({ proofData: {} }).slice(0, 32)}`,
+      generatedAtHlc: HLC,
+      verifier: 'KERNEL_PANEL',
+      timestampHlc: HLC
+    }
+  });
+  assert.strictEqual(
+    omittedStatementFieldsProof.outputs.verified,
+    false,
+    'proof-verify execute must fail closed when dataHash, proofType, or prover are omitted'
+  );
+  assert.strictEqual(omittedStatementFieldsProof.nextState, 'PROOF_INVALID');
+
+  const tamperedProof = NODE_IMPLEMENTATIONS['proof-verify'].execute({
+    inputs: {
+      ...proofVerificationInputs,
+      proofHash: `proof_hash_${'00'.repeat(16)}`
+    }
+  });
+  assert.strictEqual(tamperedProof.outputs.verified, false);
+  assert.strictEqual(tamperedProof.nextState, 'PROOF_INVALID');
+
+  const missingStatementValidation = NODE_IMPLEMENTATIONS['proof-verify'].validate({
+    proofId: generatedProof.outputs.proofId,
+    proofHash: generatedProof.outputs.proofHash,
+    verifier: 'KERNEL_PANEL'
+  });
+  assert.strictEqual(missingStatementValidation.valid, false);
+  assert.ok(
+    missingStatementValidation.errors.some(error => error.includes('dataHash is required')),
+    'proof-verify validation must require the proof statement, not just proofId/proofHash'
+  );
+
+  const bugFixWorkflow = compiler.compileSyntaxis(verdict(), {
+    ...proposal(),
+    id: 'proposal-bugfix-001',
+    type: 'bug-fix',
+    proposer: 'ENGINEERING_PANEL'
+  });
+  assert.deepStrictEqual(
+    compiler.validateSyntaxisWorkflow(bugFixWorkflow),
+    { valid: true, errors: [], nodeCount: 5, dependencyCount: 4 },
+    'compiled bug-fix workflows must satisfy proof node validation'
+  );
+  const proofGenerateNode = bugFixWorkflow.nodes.find(node => node.type === 'proof-generate');
+  const proofVerifyNode = bugFixWorkflow.nodes.find(node => node.type === 'proof-verify');
+  const generatedWorkflowProof = NODE_IMPLEMENTATIONS['proof-generate'].execute({
+    inputs: proofGenerateNode.inputs
+  });
+  assert.strictEqual(
+    proofVerifyNode.inputs.proofId,
+    generatedWorkflowProof.outputs.proofId,
+    'compiled proof-verify node must bind to the proof generated for the same workflow statement'
+  );
+  const compiledProofVerification = NODE_IMPLEMENTATIONS['proof-verify'].execute({
+    inputs: proofVerifyNode.inputs
+  });
+  assert.strictEqual(compiledProofVerification.outputs.verified, true);
 
   const builder = new SolutionsBuilder();
   const solutionA = builder.createSolution('security-patch', {

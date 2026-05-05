@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node determinism.test.js && node test.js",
-    "validate": "node validate.js"
+    "validate": "node determinism.test.js && node test.js"
   },
   "keywords": [
     "exochain",
