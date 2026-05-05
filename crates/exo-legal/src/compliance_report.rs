@@ -229,11 +229,7 @@ fn derive_status_and_evidence(
         }
 
         ConstitutionalInvariant::ProvenanceVerifiable => {
-            let mcp_count = report.mcp_rule_outcomes.iter().fold(0u64, |acc, outcome| {
-                acc.saturating_add(outcome.allowed)
-                    .saturating_add(outcome.blocked)
-                    .saturating_add(outcome.escalated)
-            });
+            let (_, _, _, mcp_count) = mcp_enforcement_totals(report);
             if mcp_count == 0 {
                 (
                     AttestationStatus::NotApplicable,
@@ -280,17 +276,99 @@ fn derive_status_and_evidence(
 
         ConstitutionalInvariant::SeparationOfPowers
         | ConstitutionalInvariant::ConsentRequired
-        | ConstitutionalInvariant::NoSelfGrant
-        | ConstitutionalInvariant::KernelImmutability
-        | ConstitutionalInvariant::QuorumLegitimate => (
+        | ConstitutionalInvariant::NoSelfGrant => {
+            derive_action_dependent_kernel_attestation(invariant, report)
+        }
+
+        ConstitutionalInvariant::KernelImmutability => (
             AttestationStatus::Compliant,
             format!(
-                "{} enforced synchronously by InvariantEngine::enforce_all(). \
-                 No violations recorded this period.",
+                "{} enforced by immutable Kernel construction and invariant-set binding. \
+                 This is a static kernel configuration attestation, not an action-count claim.",
                 invariant.id()
             ),
         ),
+
+        ConstitutionalInvariant::QuorumLegitimate => derive_quorum_attestation(report),
     }
+}
+
+fn derive_action_dependent_kernel_attestation(
+    invariant: ConstitutionalInvariant,
+    report: &AiTransparencyReport,
+) -> (AttestationStatus, String) {
+    let (allowed, blocked, escalated, mcp_count) = mcp_enforcement_totals(report);
+    if report.ai_agent_action_count == 0 {
+        return (
+            AttestationStatus::NotApplicable,
+            format!(
+                "No AI actions recorded this period; {} is not attested for action \
+                 execution. Kernel enforcement remains configured, but this report \
+                 does not claim period compliance without action evidence.",
+                invariant.id()
+            ),
+        );
+    }
+    if mcp_count == 0 {
+        return (
+            AttestationStatus::Gap,
+            format!(
+                "{} cannot be attested: {} AI actions were recorded, but no MCP \
+                 enforcement outcome summary is present.",
+                invariant.id(),
+                report.ai_agent_action_count
+            ),
+        );
+    }
+
+    (
+        AttestationStatus::Compliant,
+        format!(
+            "{} enforced by InvariantEngine::enforce_all() across {} AI actions \
+             captured in the verified MCP audit log (allowed: {allowed}, blocked: \
+             {blocked}, escalated: {escalated}). Blocked and escalated outcomes \
+             are enforcement evidence, not a silent all-clear claim.",
+            invariant.id(),
+            report.ai_agent_action_count
+        ),
+    )
+}
+
+fn derive_quorum_attestation(report: &AiTransparencyReport) -> (AttestationStatus, String) {
+    if report.ai_agent_action_count == 0 {
+        (
+            AttestationStatus::NotApplicable,
+            "No AI actions recorded this period; quorum legitimacy is not attested \
+             without quorum-bearing decision evidence."
+                .into(),
+        )
+    } else {
+        (
+            AttestationStatus::NotApplicable,
+            format!(
+                "This AI transparency report covers {} MCP actions but does not \
+                 include quorum-bearing governance decision evidence; \
+                 QuorumLegitimate is therefore not attested by this report.",
+                report.ai_agent_action_count
+            ),
+        )
+    }
+}
+
+fn mcp_enforcement_totals(report: &AiTransparencyReport) -> (u64, u64, u64, u64) {
+    report.mcp_rule_outcomes.iter().fold(
+        (0u64, 0u64, 0u64, 0u64),
+        |(allowed_acc, blocked_acc, escalated_acc, total_acc), outcome| {
+            let allowed = allowed_acc.saturating_add(outcome.allowed);
+            let blocked = blocked_acc.saturating_add(outcome.blocked);
+            let escalated = escalated_acc.saturating_add(outcome.escalated);
+            let total = total_acc
+                .saturating_add(outcome.allowed)
+                .saturating_add(outcome.blocked)
+                .saturating_add(outcome.escalated);
+            (allowed, blocked, escalated, total)
+        },
+    )
 }
 
 fn redact_delegation_count(report: &AiTransparencyReport, mode: &ComplianceReportMode) -> usize {
@@ -395,7 +473,10 @@ fn hash_report_payload(payload: &ComplianceReportHashPayload<'_>) -> Result<[u8;
 mod tests {
     use exo_authority::{AuthorityChain, AuthorityLink, DelegateeKind, Permission};
     use exo_core::{Did, Signature, Timestamp, crypto::KeyPair};
-    use exo_gatekeeper::mcp_audit::McpAuditLog;
+    use exo_gatekeeper::{
+        mcp::McpRule,
+        mcp_audit::{McpAuditLog, McpEnforcementOutcome, append, create_record},
+    };
 
     use super::*;
     use crate::ai_transparency::{
@@ -451,6 +532,33 @@ mod tests {
             period_end: ts(9999),
             legal_jurisdiction: "EU-AI-ACT",
             mcp_log: &McpAuditLog::new(),
+            ai_delegation_grants: vec![],
+            ai_delegation_revocations: vec![],
+            authority_clearance: &clearance,
+        })
+        .expect("ok")
+    }
+
+    fn report_with_mcp_action(tenant: &Did) -> AiTransparencyReport {
+        let clearance = verified_clearance(tenant);
+        let mut mcp_log = McpAuditLog::new();
+        let record = create_record(
+            &mcp_log,
+            uuid::Uuid::from_u128(0xA11CE),
+            ts(2_000),
+            McpRule::Mcp001BctsScope,
+            did("mcp-actor"),
+            McpEnforcementOutcome::Allowed,
+            Some("EU-WEST-1".into()),
+        )
+        .expect("deterministic MCP audit record");
+        append(&mut mcp_log, record).expect("MCP audit append");
+        generate_report(ReportParams {
+            tenant_id: tenant,
+            period_start: ts(0),
+            period_end: ts(9999),
+            legal_jurisdiction: "EU-AI-ACT",
+            mcp_log: &mcp_log,
             ai_delegation_grants: vec![],
             ai_delegation_revocations: vec![],
             authority_clearance: &clearance,
@@ -610,17 +718,41 @@ mod tests {
         let tenant = did("tenant");
         let tr = empty_report(&tenant);
         let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000)).expect("ok");
-        for att in &report.attestations {
-            if att.invariant == ConstitutionalInvariant::ProvenanceVerifiable.id() {
-                assert_eq!(att.status, AttestationStatus::NotApplicable);
-            } else {
-                assert_eq!(
-                    att.status,
-                    AttestationStatus::Compliant,
-                    "invariant {} should be Compliant",
-                    att.invariant
-                );
-            }
+        for invariant in [
+            ConstitutionalInvariant::HumanOverride,
+            ConstitutionalInvariant::KernelImmutability,
+            ConstitutionalInvariant::AuthorityChainValid,
+        ] {
+            let att = report
+                .attestations
+                .iter()
+                .find(|a| a.invariant == invariant.id())
+                .expect("invariant must appear in compliance report");
+            assert_eq!(
+                att.status,
+                AttestationStatus::Compliant,
+                "{} has static or report-generation evidence in an empty period",
+                invariant.id()
+            );
+        }
+        for invariant in [
+            ConstitutionalInvariant::SeparationOfPowers,
+            ConstitutionalInvariant::ConsentRequired,
+            ConstitutionalInvariant::NoSelfGrant,
+            ConstitutionalInvariant::QuorumLegitimate,
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ] {
+            let att = report
+                .attestations
+                .iter()
+                .find(|a| a.invariant == invariant.id())
+                .expect("invariant must appear in compliance report");
+            assert_eq!(
+                att.status,
+                AttestationStatus::NotApplicable,
+                "{} should not be marked Compliant without period evidence",
+                invariant.id()
+            );
         }
     }
 
@@ -657,6 +789,82 @@ mod tests {
                 .evidence_summary
                 .contains("Authority chain verified for all actions"),
             "authority attestations must name concrete verified evidence, not all-action prose"
+        );
+    }
+
+    #[test]
+    fn empty_period_does_not_attest_action_dependent_invariant_compliance() {
+        let tenant = did("tenant");
+        let tr = empty_report(&tenant);
+        assert_eq!(tr.ai_agent_action_count, 0);
+        let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000)).expect("ok");
+
+        for invariant in [
+            ConstitutionalInvariant::SeparationOfPowers,
+            ConstitutionalInvariant::ConsentRequired,
+            ConstitutionalInvariant::NoSelfGrant,
+            ConstitutionalInvariant::QuorumLegitimate,
+        ] {
+            let attestation = report
+                .attestations
+                .iter()
+                .find(|a| a.invariant == invariant.id())
+                .expect("invariant must appear in compliance report");
+            assert_eq!(
+                attestation.status,
+                AttestationStatus::NotApplicable,
+                "{} must not be marked Compliant without period action evidence",
+                invariant.id()
+            );
+            assert!(
+                attestation
+                    .evidence_summary
+                    .contains("No AI actions recorded"),
+                "{} summary must explain the absent evidence",
+                invariant.id()
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_action_period_attests_action_dependent_kernel_invariant_compliance() {
+        let tenant = did("tenant");
+        let tr = report_with_mcp_action(&tenant);
+        assert_eq!(tr.ai_agent_action_count, 1);
+        let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000)).expect("ok");
+
+        for invariant in [
+            ConstitutionalInvariant::SeparationOfPowers,
+            ConstitutionalInvariant::ConsentRequired,
+            ConstitutionalInvariant::NoSelfGrant,
+        ] {
+            let attestation = report
+                .attestations
+                .iter()
+                .find(|a| a.invariant == invariant.id())
+                .expect("invariant must appear in compliance report");
+            assert_eq!(
+                attestation.status,
+                AttestationStatus::Compliant,
+                "{} should be attested from verified MCP action evidence",
+                invariant.id()
+            );
+            assert!(
+                attestation.evidence_summary.contains("allowed: 1"),
+                "{} summary must name the enforcement evidence count",
+                invariant.id()
+            );
+        }
+
+        let quorum = report
+            .attestations
+            .iter()
+            .find(|a| a.invariant == ConstitutionalInvariant::QuorumLegitimate.id())
+            .expect("QuorumLegitimate must appear in compliance report");
+        assert_eq!(
+            quorum.status,
+            AttestationStatus::NotApplicable,
+            "MCP action counts alone must not attest quorum legitimacy"
         );
     }
 
