@@ -1547,7 +1547,6 @@ dependencies = [
  "getrandom 0.2.16",
  "hkdf",
  "proptest",
- "rand 0.8.6",
  "serde",
  "serde_json",
  "sha2",

@@ -152,6 +152,12 @@ pub enum IdentityError {
     #[error("vault key derivation failed: {0}")]
     VaultKeyDerivationFailed(String),
 
+    #[error("vault encryption requires a caller-supplied nonce")]
+    VaultNonceRequired,
+
+    #[error("invalid vault nonce: {reason}")]
+    InvalidVaultNonce { reason: String },
+
     #[error("vault encryption failed: {0}")]
     VaultEncryptionFailed(String),
 
