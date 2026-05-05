@@ -53,9 +53,10 @@ EXPOSE 4001 4002 8080
 # repaired at startup; deploy/entrypoint.sh drops to the exochain user before
 # launching the node process.
 
-# Probe the effective API port (Railway sets $PORT; otherwise $API_PORT or 8080).
+# Probe the dependency-validating readiness endpoint on the effective API port
+# (Railway sets $PORT; otherwise $API_PORT or 8080).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -sf "http://localhost:${PORT:-${API_PORT:-8080}}/health" || exit 1
+    CMD curl -sf "http://localhost:${PORT:-${API_PORT:-8080}}/ready" || exit 1
 
 # ENTRYPOINT (exec form) ensures the script is always invoked and signals
 # reach the child binary via entrypoint.sh's `exec exochain ...`.
