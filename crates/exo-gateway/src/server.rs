@@ -644,27 +644,6 @@ async fn resolve_did_document(
     }
 }
 
-async fn registry_list_dids(
-    registry: Arc<RwLock<LocalDidRegistry>>,
-) -> std::result::Result<Vec<String>, RegistryBlockingError> {
-    tokio::task::spawn_blocking(move || {
-        let reg = registry.read().unwrap_or_else(|e| e.into_inner());
-        Ok(reg.list_dids().into_iter().map(|s| s.to_owned()).collect())
-    })
-    .await
-    .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
-}
-
-async fn list_dids(state: &AppState) -> std::result::Result<Vec<String>, RegistryBlockingError> {
-    if let Some(pool) = state.pool.as_ref() {
-        db::list_did_document_ids(pool)
-            .await
-            .map_err(|e| RegistryBlockingError::Persistence(e.to_string()))
-    } else {
-        registry_list_dids(Arc::clone(&state.registry)).await
-    }
-}
-
 async fn registry_len(
     registry: Arc<RwLock<LocalDidRegistry>>,
 ) -> std::result::Result<usize, RegistryBlockingError> {
@@ -1776,40 +1755,50 @@ async fn handle_auth_me(State(state): State<AppState>, headers: HeaderMap) -> im
     }
 }
 
-/// GET /api/v1/agents — list all registered DID identifiers.
+/// GET /api/v1/agents — list tenant-scoped agent DID identifiers.
 ///
-/// Requires a DB-backed bearer session before reading registry state.
+/// Requires a DB-backed bearer session and derives tenant scope from the
+/// authenticated user profile before reading agent directory state.
 async fn handle_agents_list(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
-        return auth_boundary_error_response(e);
-    }
-    match list_dids(&state).await {
-        Ok(dids) => Json(serde_json::json!({ "agents": dids })).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "DID registry listing failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+    let actor = match require_authenticated_session_user_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
-                .into_response()
+                .into_response();
         }
+    };
+    match db::list_agents_db(db, actor.tenant_id.as_str()).await {
+        Ok(rows) => {
+            let agents: Vec<String> = rows.into_iter().map(|row| row.did).collect();
+            Json(serde_json::json!({ "agents": agents })).into_response()
+        }
+        Err(e) => internal_error_response(e, "agents list query", "agents list unavailable"),
     }
 }
 
 /// GET /api/v1/agents/:did — resolve a single DID document by its identifier.
 ///
-/// Requires a DB-backed bearer session before reading registry state.
+/// Requires a DB-backed bearer session and proves tenant membership before
+/// reading registry state.
 async fn handle_agent_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(did_str): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
-        return auth_boundary_error_response(e);
-    }
+    let actor = match require_authenticated_session_user_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
     let did = match Did::new(&did_str) {
         Ok(d) => d,
         Err(_) => {
@@ -1820,6 +1809,27 @@ async fn handle_agent_get(
                 .into_response();
         }
     };
+    let db = match state.require_db() {
+        Ok(db) => db,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "database unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    match db::find_agent_by_did(db, did.as_str(), actor.tenant_id.as_str()).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "DID not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error_response(e, "agent lookup query", "agent lookup failed"),
+    }
     match resolve_did_document(&state, did).await {
         Ok(Some(doc)) => Json(doc).into_response(),
         Ok(None) => (
@@ -2044,26 +2054,31 @@ async fn handle_get_constitution(Path(_id): Path<String>) -> impl IntoResponse {
     }))
 }
 
-/// GET /api/v1/users — list all registered user DIDs.
+/// GET /api/v1/users — list tenant-scoped user DIDs.
 ///
-/// Currently backed by the same DID registry as the agents list.  In a multi-tenant
-/// deployment the user and agent registries would be separated; for now they share
-/// the in-memory store. Requires a DB-backed bearer session before reading registry
-/// state.
+/// Requires a DB-backed bearer session and derives tenant scope from the
+/// authenticated user profile before reading user directory state.
 async fn handle_users_list(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
-        return auth_boundary_error_response(e);
-    }
-    match list_dids(&state).await {
-        Ok(dids) => Json(serde_json::json!({ "users": dids })).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "DID registry listing failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "DID registry unavailable" })),
+    let actor = match require_authenticated_session_user_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "database unavailable"})),
             )
-                .into_response()
+                .into_response();
         }
+    };
+    match db::list_users_db(db, &actor.tenant_id).await {
+        Ok(rows) => {
+            let users: Vec<String> = rows.into_iter().map(|row| row.did).collect();
+            Json(serde_json::json!({ "users": users })).into_response()
+        }
+        Err(e) => internal_error_response(e, "users list query", "users list unavailable"),
     }
 }
 
@@ -4706,9 +4721,9 @@ mod tests {
         );
 
         for (name, handler, state_read) in [
-            ("agents list", agents_list, "list_dids"),
+            ("agents list", agents_list, "state.require_db"),
             ("agent get", agent_get, "resolve_did_document"),
-            ("users list", users_list, "list_dids"),
+            ("users list", users_list, "state.require_db"),
             ("decision create", decision_create, "state.require_db"),
             ("decision get", decision_get, "state.require_db"),
             ("audit trail", audit_trail, "state.require_db"),
@@ -4772,6 +4787,88 @@ mod tests {
         assert!(
             !handler.contains("db::list_audit_entries_for_decision(pool, &decision_id)"),
             "audit trail must not perform an unscoped decision_id lookup"
+        );
+    }
+
+    #[test]
+    fn directory_list_handlers_use_authenticated_tenant_scope() {
+        let source = include_str!("server.rs");
+        let agents_list = source_between(
+            source,
+            "async fn handle_agents_list",
+            "/// GET /api/v1/agents/:did",
+        );
+        let users_list = source_between(
+            source,
+            "async fn handle_users_list",
+            "/// POST /api/v1/decisions",
+        );
+
+        assert!(
+            agents_list.contains("require_authenticated_session_user_from_header"),
+            "agents list must load the authenticated session actor's tenant profile"
+        );
+        assert!(
+            agents_list.contains("state.require_db()"),
+            "agents list must fail closed without the DB-backed tenant directory"
+        );
+        assert!(
+            agents_list.contains("db::list_agents_db(db, actor.tenant_id.as_str())"),
+            "agents list must query agents using the authenticated actor tenant"
+        );
+        assert!(
+            !agents_list.contains("list_dids(&state).await"),
+            "agents list must not enumerate global DID ids across tenants"
+        );
+
+        assert!(
+            users_list.contains("require_authenticated_session_user_from_header"),
+            "users list must load the authenticated session actor's tenant profile"
+        );
+        assert!(
+            users_list.contains("state.require_db()"),
+            "users list must fail closed without the DB-backed tenant directory"
+        );
+        assert!(
+            users_list.contains("db::list_users_db(db, &actor.tenant_id)"),
+            "users list must query users using the authenticated actor tenant"
+        );
+        assert!(
+            !users_list.contains("list_dids(&state).await"),
+            "users list must not enumerate global DID ids across tenants"
+        );
+    }
+
+    #[test]
+    fn agent_get_uses_authenticated_actor_tenant_for_lookup() {
+        let source = include_str!("server.rs");
+        let handler = source_between(
+            source,
+            "async fn handle_agent_get",
+            "/// GET /api/v1/identity/:did/score",
+        );
+
+        assert!(
+            handler.contains("require_authenticated_session_user_from_header"),
+            "agent get must load the authenticated session actor's tenant profile"
+        );
+        assert!(
+            handler.contains("state.require_db()"),
+            "agent get must fail closed without the DB-backed tenant directory"
+        );
+        assert!(
+            handler.contains("db::find_agent_by_did(db, did.as_str(), actor.tenant_id.as_str())"),
+            "agent get must query agents using the authenticated actor tenant"
+        );
+        let agent_lookup = handler
+            .find("db::find_agent_by_did(db, did.as_str(), actor.tenant_id.as_str())")
+            .expect("agent lookup must exist");
+        let did_resolution = handler
+            .find("resolve_did_document(&state, did).await")
+            .expect("tenant-proven agent lookup must resolve the persisted DID document");
+        assert!(
+            agent_lookup < did_resolution,
+            "agent get must prove tenant membership before resolving any DID document"
         );
     }
 
@@ -4894,8 +4991,12 @@ mod tests {
             "/// GET /api/v1/agents/:did",
         );
         assert!(
-            agents_list.contains("list_dids(&state).await"),
-            "agents list must read persisted DID ids when a DB pool is configured"
+            agents_list.contains("db::list_agents_db(db, actor.tenant_id.as_str())"),
+            "agents list must read tenant-scoped DB agent ids when a DB pool is configured"
+        );
+        assert!(
+            !agents_list.contains("list_dids(&state).await"),
+            "agents list must not read the global DID directory"
         );
 
         let agent_get = source_between(
@@ -4944,8 +5045,12 @@ mod tests {
             "/// POST /api/v1/decisions",
         );
         assert!(
-            users_list.contains("list_dids(&state).await"),
-            "users list must read persisted DID ids when a DB pool is configured"
+            users_list.contains("db::list_users_db(db, &actor.tenant_id)"),
+            "users list must read tenant-scoped DB user ids when a DB pool is configured"
+        );
+        assert!(
+            !users_list.contains("list_dids(&state).await"),
+            "users list must not read the global DID directory"
         );
     }
 
@@ -5207,11 +5312,21 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        insert_test_session(&pool, "agents-list-token", "did:exo:reader").await;
-        let doc = minimal_doc("did:exo:listed");
-        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
-        registry.write().unwrap().register(doc).unwrap();
-        let st = AppState::new(Some(pool.clone()), registry);
+        let reader = "did:exo:agent-list-reader";
+        let listed_agent = "did:exo:listed-agent";
+        insert_test_user(&pool, reader, "tenant-agents-list").await;
+        insert_test_session(&pool, "agents-list-token", reader).await;
+        insert_test_agent(
+            &pool,
+            listed_agent,
+            "did:exo:listed-agent-owner",
+            "tenant-agents-list",
+        )
+        .await;
+        let st = AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        );
         let app = build_router(st);
         let resp = app
             .oneshot(
@@ -5233,10 +5348,90 @@ mod tests {
             val["agents"]
                 .as_array()
                 .unwrap()
-                .contains(&serde_json::json!("did:exo:listed"))
+                .contains(&serde_json::json!(listed_agent))
         );
+        sqlx::query("DELETE FROM agents WHERE did = $1")
+            .bind(listed_agent)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind("agents-list-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn agents_list_filters_to_authenticated_actor_tenant() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let reader = "did:exo:agent-directory-reader";
+        let tenant_agent = "did:exo:tenant-agent-visible";
+        let other_agent = "did:exo:tenant-agent-hidden";
+        insert_test_user(&pool, reader, "tenant-agent-directory-a").await;
+        insert_test_session(&pool, "agents-list-tenant-token", reader).await;
+        insert_test_agent(
+            &pool,
+            tenant_agent,
+            "did:exo:tenant-agent-owner",
+            "tenant-agent-directory-a",
+        )
+        .await;
+        insert_test_agent(
+            &pool,
+            other_agent,
+            "did:exo:other-agent-owner",
+            "tenant-agent-directory-b",
+        )
+        .await;
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents")
+                    .header("authorization", "Bearer agents-list-tenant-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let agents = val["agents"].as_array().expect("agents array");
+        assert!(agents.contains(&serde_json::json!(tenant_agent)));
+        assert!(
+            !agents.contains(&serde_json::json!(other_agent)),
+            "agents list must not disclose agents from another tenant"
+        );
+
+        sqlx::query("DELETE FROM agents WHERE did = $1 OR did = $2")
+            .bind(tenant_agent)
+            .bind(other_agent)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("agents-list-tenant-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
             .execute(&pool)
             .await
             .unwrap();
@@ -5708,11 +5903,15 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        insert_test_session(&pool, "users-list-token", "did:exo:reader").await;
-        let doc = minimal_doc("did:exo:user-listed");
-        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
-        registry.write().unwrap().register(doc).unwrap();
-        let app = build_router(AppState::new(Some(pool.clone()), registry));
+        let reader = "did:exo:user-list-reader";
+        let listed_user = "did:exo:user-listed";
+        insert_test_user(&pool, reader, "tenant-users-list").await;
+        insert_test_user(&pool, listed_user, "tenant-users-list").await;
+        insert_test_session(&pool, "users-list-token", reader).await;
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -5733,10 +5932,72 @@ mod tests {
             val["users"]
                 .as_array()
                 .unwrap()
-                .contains(&serde_json::json!("did:exo:user-listed"))
+                .contains(&serde_json::json!(listed_user))
         );
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind("users-list-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1 OR did = $2")
+            .bind(reader)
+            .bind(listed_user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn users_list_filters_to_authenticated_actor_tenant() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let reader = "did:exo:user-directory-reader";
+        let tenant_user = "did:exo:tenant-user-visible";
+        let other_user = "did:exo:tenant-user-hidden";
+        insert_test_user(&pool, reader, "tenant-user-directory-a").await;
+        insert_test_user(&pool, tenant_user, "tenant-user-directory-a").await;
+        insert_test_user(&pool, other_user, "tenant-user-directory-b").await;
+        insert_test_session(&pool, "users-list-tenant-token", reader).await;
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .header("authorization", "Bearer users-list-tenant-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let users = val["users"].as_array().expect("users array");
+        assert!(users.contains(&serde_json::json!(reader)));
+        assert!(users.contains(&serde_json::json!(tenant_user)));
+        assert!(
+            !users.contains(&serde_json::json!(other_user)),
+            "users list must not disclose users from another tenant"
+        );
+
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("users-list-tenant-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1 OR did = $2 OR did = $3")
+            .bind(reader)
+            .bind(tenant_user)
+            .bind(other_user)
             .execute(&pool)
             .await
             .unwrap();
@@ -7121,6 +7382,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_get_rejects_cross_tenant_registered_did() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let reader = "did:exo:agent-get-tenant-b-reader";
+        let agent = "did:exo:agent-get-tenant-a-agent";
+        let token = "agent-get-cross-tenant-token";
+        insert_test_user(&pool, reader, "tenant-agent-get-b").await;
+        insert_test_session(&pool, token, reader).await;
+        insert_test_agent(
+            &pool,
+            agent,
+            "did:exo:agent-get-tenant-a-owner",
+            "tenant-agent-get-a",
+        )
+        .await;
+
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        registry
+            .write()
+            .unwrap()
+            .register(minimal_doc(agent))
+            .unwrap();
+        let app = build_router(AppState::new(Some(pool.clone()), registry));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/agents/{agent}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "agent get must not disclose a DID document for an agent outside the authenticated actor tenant"
+        );
+
+        sqlx::query("DELETE FROM agents WHERE did = $1 OR owner_did = $2")
+            .bind(agent)
+            .bind("did:exo:agent-get-tenant-a-owner")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn advance_pace_without_authority_returns_403() {
         let pool = match gateway_test_pool().await {
             Some(pool) => pool,
@@ -7240,7 +7562,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let persisted = db::find_agent_by_did(&pool, did).await.unwrap().unwrap();
+        let persisted = db::find_agent_by_did(&pool, did, "tenant-pace-agent")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(persisted.pace_status, "Advanced");
 
         cleanup_pace_route_fixture(&pool, did, token).await;

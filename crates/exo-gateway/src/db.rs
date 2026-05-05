@@ -585,26 +585,21 @@ pub async fn insert_agent(
 }
 
 /// Look up an agent by DID, returning `None` if not found.
-pub async fn find_agent_by_did(pool: &PgPool, did: &str) -> Result<Option<AgentRow>, sqlx::Error> {
+pub async fn find_agent_by_did(
+    pool: &PgPool,
+    did: &str,
+    tenant_id: &str,
+) -> Result<Option<AgentRow>, sqlx::Error> {
     sqlx::query_as::<_, AgentRow>(
-        "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents WHERE did = $1"
-    ).bind(did).fetch_optional(pool).await
+        "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents WHERE did = $1 AND tenant_id = $2"
+    ).bind(did).bind(tenant_id).fetch_optional(pool).await
 }
 
-/// List agents, optionally filtered by tenant ID, ordered by creation time.
-pub async fn list_agents_db(
-    pool: &PgPool,
-    tenant_id: Option<&str>,
-) -> Result<Vec<AgentRow>, sqlx::Error> {
-    if let Some(tid) = tenant_id {
-        sqlx::query_as::<_, AgentRow>(
-            "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents WHERE tenant_id = $1 ORDER BY created_at LIMIT $2"
-        ).bind(tid).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
-    } else {
-        sqlx::query_as::<_, AgentRow>(
-            "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents ORDER BY created_at LIMIT $1"
-        ).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
-    }
+/// List agents for a tenant, ordered by creation time.
+pub async fn list_agents_db(pool: &PgPool, tenant_id: &str) -> Result<Vec<AgentRow>, sqlx::Error> {
+    sqlx::query_as::<_, AgentRow>(
+        "SELECT did, agent_name, agent_type, owner_did, tenant_id, capabilities, trust_tier, trust_score, delegation_id, pace_status, created_at, status, max_decision_class FROM agents WHERE tenant_id = $1 ORDER BY created_at LIMIT $2"
+    ).bind(tenant_id).bind(MAX_DB_LIST_ROWS).fetch_all(pool).await
 }
 
 /// Update an agent's PACE enrollment status.
@@ -1778,7 +1773,7 @@ mod tests {
 
         for (name, expected_limit_clauses) in [
             ("list_users_db", 1),
-            ("list_agents_db", 2),
+            ("list_agents_db", 1),
             ("list_decisions_db", 1),
             ("list_conflict_declaration_payloads_db", 1),
             ("list_delegations_db", 1),
@@ -2311,6 +2306,8 @@ mod tests {
     fn user_and_decision_list_queries_require_tenant_scope() {
         let source = production_source();
         let users = function_source(source, "list_users_db");
+        let agent_lookup = function_source(source, "find_agent_by_did");
+        let agents = function_source(source, "list_agents_db");
         let decisions = function_source(source, "list_decisions_db");
 
         assert!(
@@ -2325,6 +2322,37 @@ mod tests {
         assert!(
             contains_in_order(users, ".bind(tenant_id)", ".bind(MAX_DB_LIST_ROWS)"),
             "list_users_db must bind tenant_id before the row limit"
+        );
+
+        assert!(
+            agents.contains("tenant_id: &str"),
+            "list_agents_db must require an explicit tenant scope"
+        );
+        assert!(
+            compact_sql(agents)
+                .contains("FROM agents WHERE tenant_id = $1 ORDER BY created_at LIMIT $2"),
+            "list_agents_db must filter by tenant_id before ordering or limiting rows"
+        );
+        assert!(
+            contains_in_order(agents, ".bind(tenant_id)", ".bind(MAX_DB_LIST_ROWS)"),
+            "list_agents_db must bind tenant_id before the row limit"
+        );
+        assert!(
+            !compact_sql(agents).contains("FROM agents ORDER BY created_at LIMIT $1"),
+            "list_agents_db must not retain an unscoped global listing query"
+        );
+
+        assert!(
+            agent_lookup.contains("tenant_id: &str"),
+            "find_agent_by_did must require an explicit tenant scope"
+        );
+        assert!(
+            compact_sql(agent_lookup).contains("FROM agents WHERE did = $1 AND tenant_id = $2"),
+            "find_agent_by_did must constrain agent lookup by DID and tenant_id"
+        );
+        assert!(
+            contains_in_order(agent_lookup, ".bind(did)", ".bind(tenant_id)"),
+            "find_agent_by_did must bind DID and tenant_id together"
         );
 
         assert!(
