@@ -5,10 +5,18 @@
 //! constitutional constraints through the middleware, and returns properly
 //! formatted JSON-RPC responses.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
-use exo_core::{Did, PublicKey, Signature};
+use exo_core::{Did, PublicKey, Signature, Timestamp, hlc::HybridClock};
+use exo_gatekeeper::{
+    mcp::McpRule,
+    mcp_audit::{self, McpAuditLog, McpEnforcementOutcome},
+};
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::{
     context::NodeContext,
@@ -50,6 +58,40 @@ fn json_rpc_internal_error(id: Option<Value>, public_message: &'static str) -> J
     JsonRpcResponse::error(id, INTERNAL_ERROR, public_message.to_string())
 }
 
+fn next_mcp_audit_record_id(log: &McpAuditLog) -> std::result::Result<Uuid, McpError> {
+    let next_index = match log.len().checked_add(1) {
+        Some(next_index) => next_index,
+        None => return Err(McpError::Internal("MCP audit log length overflow".into())),
+    };
+    let id_value = match u128::try_from(next_index) {
+        Ok(id_value) => id_value,
+        Err(error) => {
+            return Err(McpError::Internal(format!(
+                "MCP audit record id conversion failed: {error}"
+            )));
+        }
+    };
+    let record_id = Uuid::from_u128(id_value);
+    if record_id.is_nil() {
+        return Err(McpError::Internal(
+            "MCP audit record id derivation produced nil UUID".into(),
+        ));
+    }
+    Ok(record_id)
+}
+
+fn mcp_rule_for_error(error: &McpError) -> McpRule {
+    if let McpError::McpRuleViolation { rule: rule_id, .. } = error {
+        for rule in McpRule::all() {
+            if rule.id() == rule_id {
+                return rule;
+            }
+        }
+    }
+
+    McpRule::Mcp003ProvenanceRequired
+}
+
 /// MCP server that processes JSON-RPC messages from AI clients.
 ///
 /// Each server instance is bound to a specific actor DID, ensuring that
@@ -61,6 +103,8 @@ pub struct McpServer {
     prompts: PromptRegistry,
     middleware: ConstitutionalMiddleware,
     context: NodeContext,
+    mcp_audit_log: Mutex<McpAuditLog>,
+    mcp_audit_clock: Mutex<HybridClock>,
 }
 
 impl McpServer {
@@ -84,6 +128,8 @@ impl McpServer {
                 authority_signer,
             ),
             context: NodeContext::empty(),
+            mcp_audit_log: Mutex::new(McpAuditLog::new()),
+            mcp_audit_clock: Mutex::new(HybridClock::new()),
         }
     }
 
@@ -103,6 +149,8 @@ impl McpServer {
             prompts: PromptRegistry::default(),
             middleware: ConstitutionalMiddleware::new(),
             context,
+            mcp_audit_log: Mutex::new(McpAuditLog::new()),
+            mcp_audit_clock: Mutex::new(HybridClock::new()),
         }
     }
 
@@ -127,6 +175,8 @@ impl McpServer {
                 authority_signer,
             ),
             context,
+            mcp_audit_log: Mutex::new(McpAuditLog::new()),
+            mcp_audit_clock: Mutex::new(HybridClock::new()),
         }
     }
 
@@ -271,6 +321,14 @@ impl McpServer {
         let params = match &request.params {
             Some(p) => p,
             None => {
+                if let Err(error) = self.record_mcp_tool_call_outcome(
+                    "<missing>",
+                    McpEnforcementOutcome::Blocked,
+                    Some(McpRule::Mcp003ProvenanceRequired),
+                ) {
+                    tracing::error!(err = %error, "MCP audit failed for malformed tools/call");
+                    return json_rpc_internal_error(request.id.clone(), "internal error");
+                }
                 return JsonRpcResponse::error(
                     request.id.clone(),
                     INVALID_PARAMS,
@@ -282,6 +340,14 @@ impl McpServer {
         let tool_name = match params.get("name").and_then(|n| n.as_str()) {
             Some(name) => name,
             None => {
+                if let Err(error) = self.record_mcp_tool_call_outcome(
+                    "<missing>",
+                    McpEnforcementOutcome::Blocked,
+                    Some(McpRule::Mcp003ProvenanceRequired),
+                ) {
+                    tracing::error!(err = %error, "MCP audit failed for unnamed tools/call");
+                    return json_rpc_internal_error(request.id.clone(), "internal error");
+                }
                 return JsonRpcResponse::error(
                     request.id.clone(),
                     INVALID_PARAMS,
@@ -300,9 +366,25 @@ impl McpServer {
             .middleware
             .enforce_tool_call(&self.actor_did, tool_name, params)
         {
+            let failed_rule = mcp_rule_for_error(&error);
+            if let Err(audit_error) = self.record_mcp_tool_call_outcome(
+                tool_name,
+                McpEnforcementOutcome::Blocked,
+                Some(failed_rule),
+            ) {
+                tracing::error!(
+                    err = %audit_error,
+                    actor = %self.actor_did,
+                    tool = %tool_name,
+                    "MCP audit failed for constitutionally rejected tool call"
+                );
+                return json_rpc_internal_error(request.id.clone(), "internal error");
+            }
             tracing::warn!(
                 err = %error,
+                actor = %self.actor_did,
                 tool = %tool_name,
+                outcome = "blocked",
                 "MCP constitutional enforcement rejected tool call"
             );
             let error_result = ToolResult::error("constitutional enforcement failed");
@@ -316,6 +398,18 @@ impl McpServer {
                     json_rpc_internal_error(request.id.clone(), "internal error")
                 }
             };
+        }
+
+        if let Err(error) =
+            self.record_mcp_tool_call_outcome(tool_name, McpEnforcementOutcome::Allowed, None)
+        {
+            tracing::error!(
+                err = %error,
+                actor = %self.actor_did,
+                tool = %tool_name,
+                "MCP audit failed for constitutionally allowed tool call"
+            );
+            return json_rpc_internal_error(request.id.clone(), "internal error");
         }
 
         // Execute the tool.
@@ -356,6 +450,100 @@ impl McpServer {
                 tracing::error!(err = %error, tool = %tool_name, "MCP tool execution failed");
                 json_rpc_internal_error(request.id.clone(), "internal error")
             }
+        }
+    }
+
+    fn record_mcp_tool_call_outcome(
+        &self,
+        tool_name: &str,
+        outcome: McpEnforcementOutcome,
+        failed_rule: Option<McpRule>,
+    ) -> std::result::Result<usize, McpError> {
+        let rules = failed_rule.map_or_else(McpRule::all, |rule| vec![rule]);
+        let mut appended_records = 0usize;
+
+        for rule in rules {
+            self.append_mcp_audit_record(rule, outcome)?;
+            appended_records = appended_records.saturating_add(1);
+        }
+
+        tracing::info!(
+            actor = %self.actor_did,
+            tool = %tool_name,
+            outcome = ?outcome,
+            audit_records = appended_records,
+            "MCP tool call audit recorded"
+        );
+
+        Ok(appended_records)
+    }
+
+    fn append_mcp_audit_record(
+        &self,
+        rule: McpRule,
+        outcome: McpEnforcementOutcome,
+    ) -> std::result::Result<(), McpError> {
+        let timestamp = self.next_mcp_audit_timestamp()?;
+
+        let mut log = match self.mcp_audit_log.lock() {
+            Ok(log) => log,
+            Err(_) => return Err(McpError::Internal("MCP audit log mutex poisoned".into())),
+        };
+
+        let record_id = next_mcp_audit_record_id(&log)?;
+
+        let record = match mcp_audit::create_record(
+            &log,
+            record_id,
+            timestamp,
+            rule,
+            self.actor_did.clone(),
+            outcome,
+            None,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::error!(
+                    err = %error,
+                    actor = %self.actor_did,
+                    rule = %rule.id(),
+                    outcome = ?outcome,
+                    "failed to create MCP audit record"
+                );
+                return Err(McpError::Internal(
+                    "failed to create MCP audit record".into(),
+                ));
+            }
+        };
+
+        if let Err(error) = mcp_audit::append(&mut log, record) {
+            tracing::error!(
+                err = %error,
+                actor = %self.actor_did,
+                rule = %rule.id(),
+                outcome = ?outcome,
+                "failed to append MCP audit record"
+            );
+            return Err(McpError::Internal(
+                "failed to append MCP audit record".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn next_mcp_audit_timestamp(&self) -> std::result::Result<Timestamp, McpError> {
+        let mut clock = match self.mcp_audit_clock.lock() {
+            Ok(clock) => clock,
+            Err(_) => return Err(McpError::Internal("MCP audit HLC mutex poisoned".into())),
+        };
+
+        match clock.now() {
+            Ok(timestamp) if timestamp != Timestamp::ZERO => Ok(timestamp),
+            Ok(_) => Err(McpError::Internal(
+                "MCP audit HLC returned zero timestamp".into(),
+            )),
+            Err(error) => Err(McpError::Internal(format!("MCP audit HLC failed: {error}"))),
         }
     }
 
@@ -576,6 +764,14 @@ mod tests {
         )
     }
 
+    fn mcp_audit_snapshot(server: &McpServer) -> McpAuditLog {
+        server
+            .mcp_audit_log
+            .lock()
+            .expect("MCP audit log mutex should not be poisoned in tests")
+            .clone()
+    }
+
     fn constitutional_context(actor_did: &str, action: &str) -> Value {
         let actor = Did::new(actor_did).expect("valid DID");
         let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x4D; 32]).unwrap();
@@ -758,6 +954,34 @@ mod tests {
     }
 
     #[test]
+    fn handler_tools_call_node_status_appends_allowed_mcp_audit_chain() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 303,
+            "method": "tools/call",
+            "params": tool_call_params("exochain_node_status", serde_json::json!({}))
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+
+        let audit = mcp_audit_snapshot(&server);
+        assert_eq!(audit.len(), McpRule::all().len());
+        exo_gatekeeper::mcp_audit::verify_chain(&audit).expect("MCP audit chain must verify");
+
+        let audited_rules: Vec<McpRule> = audit.records.iter().map(|record| record.rule).collect();
+        assert_eq!(audited_rules, McpRule::all());
+        for record in &audit.records {
+            assert_eq!(record.actor.as_str(), "did:exo:test-ai-agent");
+            assert_ne!(record.timestamp, Timestamp::ZERO);
+            assert_eq!(record.outcome, McpEnforcementOutcome::Allowed);
+        }
+    }
+
+    #[test]
     fn handler_tools_call_unknown() {
         let server = test_server();
         let msg = serde_json::json!({
@@ -847,6 +1071,52 @@ mod tests {
     }
 
     #[test]
+    fn handler_records_mcp_tool_calls_in_hash_chained_audit_without_raw_arguments() {
+        let source = include_str!("handler.rs");
+        let production = source
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("handler production section must be present");
+
+        assert!(
+            production.contains("McpAuditLog"),
+            "MCP handler must own a hash-chained audit log for tool-call outcomes"
+        );
+        assert!(
+            production.contains("record_mcp_tool_call_outcome"),
+            "MCP handler must route every tools/call outcome through one audit helper"
+        );
+        assert!(
+            production.contains("mcp_audit::append"),
+            "MCP handler must append tool-call outcomes to the gatekeeper MCP audit chain"
+        );
+        assert!(
+            production.contains("McpEnforcementOutcome::Allowed"),
+            "successful MCP tool-call enforcement must be audited"
+        );
+        assert!(
+            production.contains("McpEnforcementOutcome::Blocked"),
+            "blocked MCP tool-call enforcement must be audited"
+        );
+
+        for forbidden in [
+            "arguments = %",
+            "arguments = ?",
+            "tool_params = %",
+            "tool_params = ?",
+            "params = %params",
+            "params = ?params",
+            "params = %tool_params",
+            "params = ?tool_params",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "MCP call audit logging must not emit raw caller arguments: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn handler_constitutional_enforcement_errors_do_not_echo_internal_details() {
         let server = test_server();
         let msg = serde_json::json!({
@@ -873,6 +1143,36 @@ mod tests {
         assert_eq!(text, "constitutional enforcement failed");
         assert!(!text.contains("verified MCP invocation context"));
         assert!(!text.contains("SensitiveTenantScopeShouldNotEcho"));
+    }
+
+    #[test]
+    fn handler_tools_call_appends_blocked_mcp_audit_record_on_enforcement_failure() {
+        let server = test_server();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "tools/call",
+            "params": {
+                "name": "exochain_node_status",
+                "arguments": {}
+            }
+        })
+        .to_string();
+
+        let response = server.handle_message(&msg).unwrap();
+        let parsed: JsonRpcResponse = serde_json::from_str(&response).unwrap();
+        assert!(parsed.error.is_none());
+        assert_eq!(parsed.result.unwrap()["is_error"], true);
+
+        let audit = mcp_audit_snapshot(&server);
+        assert_eq!(audit.len(), 1);
+        exo_gatekeeper::mcp_audit::verify_chain(&audit)
+            .expect("MCP blocked audit chain must verify");
+        let record = &audit.records[0];
+        assert_eq!(record.actor.as_str(), "did:exo:test-ai-agent");
+        assert_eq!(record.rule, McpRule::Mcp003ProvenanceRequired);
+        assert_eq!(record.outcome, McpEnforcementOutcome::Blocked);
+        assert_ne!(record.timestamp, Timestamp::ZERO);
     }
 
     #[test]
