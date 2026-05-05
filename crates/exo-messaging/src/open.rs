@@ -75,7 +75,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        compose::{ComposeMetadata, lock_and_send},
+        compose::{ComposeMetadata, lock_and_send_with_ephemeral},
         envelope::{ContentType, EncryptedEnvelope},
         kex::X25519KeyPair,
     };
@@ -83,6 +83,10 @@ mod tests {
     fn metadata(suffix: u128) -> ComposeMetadata {
         ComposeMetadata::new(Uuid::from_u128(suffix), Timestamp::new(8_000, 0))
             .expect("valid compose metadata")
+    }
+
+    fn x25519_keypair(seed: u8) -> X25519KeyPair {
+        X25519KeyPair::from_secret_bytes([seed; 32]).expect("valid deterministic X25519 keypair")
     }
 
     fn legacy_signable_bytes(envelope: &EncryptedEnvelope) -> Vec<u8> {
@@ -106,17 +110,19 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x41);
+        let ephemeral_kp = x25519_keypair(0x51);
 
         let plaintext = b"super secret password: correcthorsebatterystaple";
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             plaintext,
             ContentType::Password,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1101),
             false,
             0,
@@ -133,16 +139,18 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = X25519KeyPair::generate();
-        let wrong_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x42);
+        let wrong_kp = x25519_keypair(0x52);
+        let ephemeral_kp = x25519_keypair(0x62);
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             b"secret",
             ContentType::Secret,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1102),
             false,
             0,
@@ -159,15 +167,17 @@ mod tests {
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (_, sender_sk) = generate_keypair();
         let (wrong_pk, _) = generate_keypair(); // different sender's public key
-        let recipient_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x43);
+        let ephemeral_kp = x25519_keypair(0x53);
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             b"secret",
             ContentType::Secret,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1103),
             false,
             0,
@@ -186,15 +196,17 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x44);
+        let ephemeral_kp = x25519_keypair(0x54);
 
-        let mut envelope = lock_and_send(
+        let mut envelope = lock_and_send_with_ephemeral(
             b"secret",
             ContentType::Secret,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1121),
             false,
             0,
@@ -215,17 +227,19 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:family").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x45);
+        let ephemeral_kp = x25519_keypair(0x55);
 
         let plaintext = b"I love you all. The safe combination is 42-17-93.";
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             plaintext,
             ContentType::AfterlifeMessage,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1104),
             true,
             72,
@@ -244,15 +258,17 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x46);
+        let ephemeral_kp = x25519_keypair(0x56);
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             b"",
             ContentType::Text,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1105),
             false,
             0,
@@ -268,17 +284,19 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x47);
+        let ephemeral_kp = x25519_keypair(0x57);
 
         let plaintext = vec![0xab_u8; 100_000]; // 100 KB
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             &plaintext,
             ContentType::Attachment,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(0x018f_7a96_8ad0_7c4f_8e0f_1111_1111_1106),
             false,
             0,

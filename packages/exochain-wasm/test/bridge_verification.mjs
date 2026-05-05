@@ -290,15 +290,14 @@ test('wasm_verify_event', () => {
 
 console.log('\n--- Messaging / Death Verification ---');
 
-test('wasm_generate_x25519_keypair', () => {
-  const keypair = wasm.wasm_generate_x25519_keypair();
-  if (keypair.public_key_hex.length !== 64 || keypair.secret_key_hex !== undefined) {
-    throw new Error('X25519 keypair must return only the 32-byte public key');
-  }
-  return keypair;
-});
+test('wasm_generate_x25519_keypair rejects internal X25519 key generation', () =>
+  expectErrorContains(
+    'wasm_generate_x25519_keypair',
+    () => wasm.wasm_generate_x25519_keypair(),
+    'external key management'
+  ));
 
-const recipientKex = setup(() => wasm.wasm_generate_x25519_keypair());
+const recipientKex = { public_key_hex: NONZERO_32_HEX };
 
 test('wasm_x25519_public_from_secret rejects raw X25519 secret derivation', () =>
   expectErrorContains(
@@ -335,6 +334,7 @@ const preparedEnvelope = setup(() =>
     TEST_DID,
     TEST_DID_2,
     recipientKex.public_key_hex,
+    DUMMY_SECRET_HEX_2,
     '018f7a96-8ad0-7c4f-8e0f-111111111202',
     7001n,
     0,

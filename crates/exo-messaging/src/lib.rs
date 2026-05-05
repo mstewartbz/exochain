@@ -2,7 +2,7 @@
 //!
 //! This crate provides:
 //!
-//! - **Key exchange** (`kex`) — X25519 Diffie-Hellman ephemeral key exchange
+//! - **Key exchange** (`kex`) — X25519 Diffie-Hellman with caller-supplied key material
 //! - **Message envelopes** (`envelope`) — Encrypted message container types
 //! - **Compose & lock** (`compose`) — Sender-side: encrypt + sign → Lock & Send
 //! - **Open & verify** (`open`) — Recipient-side: decrypt + verify signature
@@ -18,7 +18,8 @@ pub mod kex;
 pub mod open;
 
 pub use compose::{
-    ComposeMetadata, attach_verified_signature, lock_and_send, prepare_envelope_for_signing,
+    ComposeMetadata, attach_verified_signature, lock_and_send, lock_and_send_with_ephemeral,
+    prepare_envelope_for_signing, prepare_envelope_for_signing_with_ephemeral,
     sign_prepared_envelope,
 };
 pub use envelope::{ContentType, EncryptedEnvelope};

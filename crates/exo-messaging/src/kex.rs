@@ -1,7 +1,7 @@
 //! X25519 Diffie-Hellman key exchange for E2E encrypted messaging.
 //!
-//! Generates ephemeral X25519 keypairs and derives shared secrets via ECDH.
-//! The shared secret is then expanded via HKDF-SHA256 into a 256-bit
+//! Requires caller-supplied X25519 key material and derives shared secrets via
+//! ECDH. The shared secret is then expanded via HKDF-SHA256 into a 256-bit
 //! symmetric key suitable for XChaCha20-Poly1305.
 
 use hkdf::Hkdf;
@@ -87,9 +87,9 @@ impl core::fmt::Debug for X25519PublicKey {
 pub struct X25519SecretKey([u8; 32]);
 
 impl X25519SecretKey {
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, MessagingError> {
+        validate_x25519_secret_key(&bytes)?;
+        Ok(Self(bytes))
     }
 
     /// Create from hex string.
@@ -106,7 +106,7 @@ impl X25519SecretKey {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
-        Ok(Self(arr))
+        Self::from_bytes(arr)
     }
 
     /// Derive the public key corresponding to this secret key.
@@ -138,26 +138,22 @@ pub struct X25519KeyPair {
 }
 
 impl X25519KeyPair {
-    /// Generate a fresh random X25519 keypair.
-    #[must_use]
-    pub fn generate() -> Self {
-        let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let public = PublicKey::from(&secret);
-        Self {
-            public: X25519PublicKey::from_trusted_bytes(public.to_bytes()),
-            secret: X25519SecretKey(secret.to_bytes()),
-        }
+    /// Fail closed for legacy callers that previously relied on internal RNG.
+    ///
+    /// EXOCHAIN runtime adapters must receive X25519 key material from an
+    /// explicit caller-controlled key-management boundary.
+    pub fn generate() -> Result<Self, MessagingError> {
+        Err(MessagingError::KeyExchangeFailed(
+            "X25519 keypair generation requires caller-supplied key material".to_owned(),
+        ))
     }
 
     /// Reconstruct from raw secret bytes.
-    #[must_use]
-    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(bytes);
-        let public = PublicKey::from(&secret);
-        Self {
-            public: X25519PublicKey::from_trusted_bytes(public.to_bytes()),
-            secret: X25519SecretKey(secret.to_bytes()),
-        }
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Result<Self, MessagingError> {
+        let secret = X25519SecretKey::from_bytes(bytes)?;
+        let public = secret.public_key();
+        validate_x25519_public_key(public.as_bytes())?;
+        Ok(Self { public, secret })
     }
 }
 
@@ -223,14 +219,22 @@ fn validate_x25519_public_key(bytes: &[u8; 32]) -> Result<(), MessagingError> {
     Ok(())
 }
 
-/// Generate an ephemeral X25519 keypair for one-time use in message encryption.
-///
-/// This uses `EphemeralSecret` which is consumed after a single DH operation,
-/// but we return the raw bytes so the ephemeral public key can be included
-/// in the message envelope.
-#[must_use]
-pub fn generate_ephemeral() -> X25519KeyPair {
-    X25519KeyPair::generate()
+fn validate_x25519_secret_key(bytes: &[u8; 32]) -> Result<(), MessagingError> {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err(MessagingError::KeyExchangeFailed(
+            "invalid X25519 secret key: all-zero value".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Fail closed for legacy callers that previously generated an ephemeral
+/// X25519 keypair inside the messaging crate.
+pub fn generate_ephemeral() -> Result<X25519KeyPair, MessagingError> {
+    Err(MessagingError::KeyExchangeFailed(
+        "ephemeral X25519 key generation requires caller-supplied key material".to_owned(),
+    ))
 }
 
 // ===========================================================================
@@ -241,20 +245,40 @@ pub fn generate_ephemeral() -> X25519KeyPair {
 mod tests {
     use super::*;
 
+    fn keypair(seed: u8) -> X25519KeyPair {
+        X25519KeyPair::from_secret_bytes([seed; 32]).expect("valid deterministic X25519 keypair")
+    }
+
     #[test]
-    fn keypair_generation() {
-        let kp = X25519KeyPair::generate();
-        assert_ne!(
-            *kp.public.as_bytes(),
-            [0u8; 32],
-            "public key should not be all zeros"
+    fn keypair_generation_fails_closed_without_caller_material() {
+        let result = X25519KeyPair::generate();
+
+        assert!(
+            matches!(result, Err(MessagingError::KeyExchangeFailed(reason)) if reason.contains("caller-supplied key material")),
+            "legacy X25519 key generation must fail closed"
         );
     }
 
     #[test]
+    fn x25519_keypair_source_does_not_generate_internal_entropy() {
+        let source = include_str!("kex.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .expect("production section");
+
+        for pattern in ["random_from_rng", "OsRng", "fill_bytes", "rand::"] {
+            assert!(
+                !production.contains(pattern),
+                "X25519 key exchange must require caller-supplied key material instead of internal entropy via {pattern}"
+            );
+        }
+    }
+
+    #[test]
     fn ecdh_shared_secret_agreement() {
-        let alice = X25519KeyPair::generate();
-        let bob = X25519KeyPair::generate();
+        let alice = keypair(0xA1);
+        let bob = keypair(0xB2);
         let context = b"test-context";
 
         let alice_key =
@@ -266,8 +290,8 @@ mod tests {
 
     #[test]
     fn different_contexts_produce_different_keys() {
-        let alice = X25519KeyPair::generate();
-        let bob = X25519KeyPair::generate();
+        let alice = keypair(0xA3);
+        let bob = keypair(0xB4);
 
         let key1 = derive_shared_key(&alice.secret, &bob.public, b"context-a").expect("derive");
         let key2 = derive_shared_key(&alice.secret, &bob.public, b"context-b").expect("derive");
@@ -277,8 +301,8 @@ mod tests {
 
     #[test]
     fn from_secret_bytes_deterministic() {
-        let secret = X25519SecretKey::from_bytes([7u8; 32]);
-        let kp1 = X25519KeyPair::from_secret_bytes([7u8; 32]);
+        let secret = X25519SecretKey::from_bytes([7u8; 32]).expect("valid secret");
+        let kp1 = X25519KeyPair::from_secret_bytes([7u8; 32]).expect("valid keypair");
         let kp2 = X25519KeyPair {
             public: secret.public_key(),
             secret,
@@ -293,10 +317,22 @@ mod tests {
 
     #[test]
     fn hex_round_trip() {
-        let kp = X25519KeyPair::generate();
+        let kp = keypair(0xC5);
         let hex = kp.public.to_hex();
         let recovered = X25519PublicKey::from_hex(&hex).expect("from_hex");
         assert_eq!(kp.public, recovered);
+    }
+
+    #[test]
+    fn x25519_secret_key_rejects_all_zero_hex() {
+        let zero_hex = "00".repeat(32);
+
+        let result = X25519SecretKey::from_hex(&zero_hex);
+
+        assert!(
+            matches!(result, Err(MessagingError::KeyExchangeFailed(reason)) if reason.contains("all-zero")),
+            "all-zero X25519 secret keys must be rejected"
+        );
     }
 
     #[test]

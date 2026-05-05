@@ -445,6 +445,24 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_messaging_bridge_does_not_generate_x25519_keypairs() {
+        let source = include_str!("messaging_bindings.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .unwrap_or(source);
+
+        assert!(
+            !production.contains("X25519KeyPair::generate"),
+            "messaging WASM must not generate X25519 key material inside the bridge"
+        );
+        assert!(
+            production.contains("ephemeral_x25519_secret_hex"),
+            "messaging WASM encryption must receive caller-supplied ephemeral X25519 material"
+        );
+    }
+
+    #[test]
     fn wasm_messaging_bridge_does_not_decode_ed25519_signing_secrets() {
         let source = include_str!("messaging_bindings.rs");
         let production = source
