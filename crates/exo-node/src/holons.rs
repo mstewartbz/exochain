@@ -404,7 +404,7 @@ pub fn build_holon_adjudication_context(
     let provenance_timestamp = next_provenance_timestamp(config)?;
     Ok(AdjudicationContext {
         actor_roles: vec![Role {
-            name: "infrastructure-agent".into(),
+            name: "worker".into(),
             branch: GovernmentBranch::Executive,
         }],
         authority_chain: AuthorityChain {

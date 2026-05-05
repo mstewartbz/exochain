@@ -414,7 +414,7 @@ mod tests {
                 "self_escalation": false,
                 "adjudication_context": {
                     "actor_roles": [
-                        { "name": "mcp-agent", "branch": "Judicial" }
+                        { "name": "operator", "branch": "Executive" }
                     ],
                     "authority_chain": [
                         {

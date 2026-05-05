@@ -179,7 +179,7 @@ fn make_approved_decision(class: DecisionClass, clock: &mut HybridClock) -> Deci
 fn valid_adj_context(actor: &Did) -> AdjudicationContext {
     AdjudicationContext {
         actor_roles: vec![Role {
-            name: "governance-judge".into(),
+            name: "judge".into(),
             branch: GovernmentBranch::Judicial,
         }],
         authority_chain: AuthorityChain {
@@ -705,15 +705,15 @@ fn all_eight_invariants_exercised() {
             mutate: |_, ctx| {
                 ctx.actor_roles = vec![
                     Role {
-                        name: "l".into(),
+                        name: "legislator".into(),
                         branch: GovernmentBranch::Legislative,
                     },
                     Role {
-                        name: "e".into(),
+                        name: "worker".into(),
                         branch: GovernmentBranch::Executive,
                     },
                     Role {
-                        name: "j".into(),
+                        name: "judge".into(),
                         branch: GovernmentBranch::Judicial,
                     },
                 ];

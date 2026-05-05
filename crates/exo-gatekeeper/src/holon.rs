@@ -306,11 +306,11 @@ mod tests {
         let mut ctx = valid_adj(&h.id);
         ctx.actor_roles = vec![
             Role {
-                name: "j".into(),
+                name: "judge".into(),
                 branch: GovernmentBranch::Judicial,
             },
             Role {
-                name: "s".into(),
+                name: "senator".into(),
                 branch: GovernmentBranch::Legislative,
             },
         ];

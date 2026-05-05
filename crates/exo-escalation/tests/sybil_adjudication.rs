@@ -139,7 +139,7 @@ fn signed_provenance(actor: &Did) -> Provenance {
 fn valid_kernel_context(actor: &Did, challenge_reason: Option<String>) -> AdjudicationContext {
     AdjudicationContext {
         actor_roles: vec![Role {
-            name: "reviewer".into(),
+            name: "judge".into(),
             branch: GovernmentBranch::Judicial,
         }],
         authority_chain: AuthorityChain {
