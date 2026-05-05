@@ -18,7 +18,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 22 | `ls -d crates/*/` |
 | Rust source files | 288 | `find crates -name '*.rs'` |
-| Rust LOC | 164704 | `wc -l` |
+| Rust LOC | 164792 | `wc -l` |
 | Workspace tests | 4,033 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 20 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | None (pre-release) | `git tag -l` |
@@ -80,7 +80,11 @@ pricing on by policy without modifying AVC validation.
 ## Architecture
 
 ```
+<<<<<<< HEAD
 Layer 1: CGR Kernel         (Rust, 22 crates, 164704 tracked LOC under crates/)
+=======
+Layer 1: CGR Kernel         (Rust, 22 crates, 164755 tracked LOC under crates/)
+>>>>>>> da492c56 (Harden checkpoint signing preimage)
          Constitutional governance runtime — deterministic, no floats,
          cryptographic proofs, 4,033 listed workspace tests
 
