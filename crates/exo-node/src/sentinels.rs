@@ -21,7 +21,10 @@ use std::{
 };
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use exo_core::hlc::HybridClock;
+use exo_core::{
+    hlc::HybridClock,
+    types::{Did, Hash256},
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -130,6 +133,13 @@ pub(crate) fn now_ms() -> u64 {
             0
         }
     }
+}
+
+fn redacted_did_ref(did: &Did) -> String {
+    let mut material = b"exo.sentinel.did_ref.v1:".to_vec();
+    material.extend_from_slice(did.as_str().as_bytes());
+    let digest = Hash256::digest(&material);
+    format!("did_ref={}", hex::encode(digest.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -349,8 +359,8 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
                 check: SentinelCheck::ScoreIntegrity,
                 healthy: false,
                 message: format!(
-                    "Zerodentity claims unavailable for DID {}: {e}",
-                    did.as_str()
+                    "Zerodentity claims unavailable for {}: {e}",
+                    redacted_did_ref(&did)
                 ),
                 last_run_ms: now_ms(),
             };
@@ -365,8 +375,8 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
                 check: SentinelCheck::ScoreIntegrity,
                 healthy: false,
                 message: format!(
-                    "Zerodentity fingerprints unavailable for DID {}: {e}",
-                    did.as_str()
+                    "Zerodentity fingerprints unavailable for {}: {e}",
+                    redacted_did_ref(&did)
                 ),
                 last_run_ms: now_ms(),
             };
@@ -379,8 +389,8 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
                 check: SentinelCheck::ScoreIntegrity,
                 healthy: false,
                 message: format!(
-                    "Zerodentity behavioral samples unavailable for DID {}: {e}",
-                    did.as_str()
+                    "Zerodentity behavioral samples unavailable for {}: {e}",
+                    redacted_did_ref(&did)
                 ),
                 last_run_ms: now_ms(),
             };
@@ -406,8 +416,8 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
             check: SentinelCheck::ScoreIntegrity,
             healthy: false,
             message: format!(
-                "Score drift {drift} bp detected for DID {} (stored={}, recomputed={})",
-                did.as_str(),
+                "Score drift {drift} bp detected for {} (stored={}, recomputed={})",
+                redacted_did_ref(&did),
                 stored.composite,
                 recomputed.composite
             ),
@@ -419,8 +429,8 @@ fn check_score_integrity(zerodentity: &SharedZerodentityStore) -> SentinelStatus
         check: SentinelCheck::ScoreIntegrity,
         healthy: true,
         message: format!(
-            "Score integrity verified — DID {} checked (drift {drift} bp)",
-            did.as_str()
+            "Score integrity verified for {} (drift {drift} bp)",
+            redacted_did_ref(&did)
         ),
         last_run_ms: now_ms(),
     }
@@ -955,6 +965,57 @@ mod tests {
                 .message
                 .contains("Zerodentity behavioral samples unavailable")
         );
+    }
+
+    #[test]
+    fn score_integrity_status_messages_redact_subject_dids() {
+        let raw_did = "did:exo:scored-sensitive";
+
+        let read_failures = [
+            crate::zerodentity::store::ZerodentityReadFailure::Claims,
+            crate::zerodentity::store::ZerodentityReadFailure::Fingerprints,
+            crate::zerodentity::store::ZerodentityReadFailure::Behavioral,
+        ];
+        for failure in read_failures {
+            let zerodentity = crate::zerodentity::store::new_shared_store();
+            {
+                let did = Did::new(raw_did).unwrap();
+                let mut store = zerodentity.lock().unwrap();
+                store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+                store.inject_read_failure(failure);
+            }
+
+            let status = check_score_integrity(&zerodentity);
+
+            assert!(!status.message.contains(raw_did));
+            assert!(status.message.contains("did_ref="));
+        }
+
+        let zerodentity = crate::zerodentity::store::new_shared_store();
+        {
+            let did = Did::new(raw_did).unwrap();
+            let mut store = zerodentity.lock().unwrap();
+            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+        }
+
+        let status = check_score_integrity(&zerodentity);
+
+        assert!(!status.message.contains(raw_did));
+        assert!(status.message.contains("did_ref="));
+
+        let zerodentity = crate::zerodentity::store::new_shared_store();
+        {
+            let did = Did::new(raw_did).unwrap();
+            let mut score = ZerodentityScore::compute(&did, &[], &[], &[], 1000);
+            score.composite = score.composite.saturating_add(1000).min(10_000);
+            let mut store = zerodentity.lock().unwrap();
+            store.put_score(score);
+        }
+
+        let status = check_score_integrity(&zerodentity);
+
+        assert!(!status.message.contains(raw_did));
+        assert!(status.message.contains("did_ref="));
     }
 
     #[test]
