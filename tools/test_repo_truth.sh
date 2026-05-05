@@ -16,6 +16,10 @@ if grep -n -- 'grep -oP' tools/repo_truth.sh >/tmp/repo_truth_portability.txt; t
   fail "tools/repo_truth.sh must not use grep -P; macOS grep does not support it"
 fi
 
+if git grep -nE '^(<<<<<<<|=======|>>>>>>>)( |$)' -- ':!docs/superpowers/**'; then
+  fail "tracked files contain unresolved merge conflict markers"
+fi
+
 err_file=$(mktemp)
 json_file=$(mktemp)
 fake_err_file=$(mktemp)

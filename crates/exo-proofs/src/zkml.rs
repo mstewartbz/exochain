@@ -198,8 +198,23 @@ impl DaubertChecklist {
     /// Returns true if all required Daubert elements are satisfied.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.methodology_documented && self.peer_reviewable && self.generally_accepted
+        self.methodology_documented
+            && self.peer_reviewable
+            && self
+                .known_error_rate
+                .as_ref()
+                .is_some_and(|error_rate| !error_rate.trim().is_empty())
+            && self.generally_accepted
     }
+}
+
+/// Fail-closed Daubert admissibility decision for an inference proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DaubertAdmissibility {
+    /// All provenance required for Daubert/FRE 702 review is present.
+    Admissible,
+    /// Required provenance is missing or invalid.
+    Inadmissible { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +262,92 @@ pub struct InferenceProof {
     /// Daubert admissibility checklist for FRE 702 compliance.
     #[serde(default)]
     pub daubert_checklist: Option<DaubertChecklist>,
+}
+
+impl InferenceProof {
+    /// Return the fail-closed Daubert admissibility status for this proof.
+    #[must_use]
+    pub fn daubert_admissibility_status(&self) -> DaubertAdmissibility {
+        if let Err(err) = crate::guard_unaudited("zkml::daubert_admissibility_status") {
+            return DaubertAdmissibility::Inadmissible {
+                reason: err.to_string(),
+            };
+        }
+
+        if !self.proof_integrity_valid() {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "proof integrity check failed".into(),
+            };
+        }
+
+        if self.prompt_hash.is_none() {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "prompt_hash is required for Daubert admissibility".into(),
+            };
+        }
+
+        let Some(attestation) = &self.human_attestation else {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "human_attestation is required for Daubert admissibility".into(),
+            };
+        };
+
+        if !attestation.verify_signature() {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "human_attestation signature failed verification".into(),
+            };
+        }
+
+        if attestation.ai_recommendation_hash != self.output_hash {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "human_attestation AI recommendation does not match proof output_hash"
+                    .into(),
+            };
+        }
+
+        let Some(ai_delta) = &self.ai_delta else {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "ai_delta is required for Daubert admissibility".into(),
+            };
+        };
+
+        if ai_delta.ai_output_hash != attestation.ai_recommendation_hash
+            || ai_delta.human_output_hash != attestation.final_decision_hash
+        {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "ai_delta does not match human_attestation hashes".into(),
+            };
+        }
+
+        let Some(checklist) = &self.daubert_checklist else {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "daubert_checklist is required for Daubert admissibility".into(),
+            };
+        };
+
+        if !checklist.is_complete() {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "daubert_checklist is incomplete".into(),
+            };
+        }
+
+        DaubertAdmissibility::Admissible
+    }
+
+    fn proof_integrity_valid(&self) -> bool {
+        let model_hash = self.model_commitment.commitment_hash();
+        let expected_proof =
+            compute_inference_proof(&model_hash, &self.input_hash, &self.output_hash);
+        let expected_tag = compute_verification_tag(
+            &model_hash,
+            &self.input_hash,
+            &self.output_hash,
+            &self.proof,
+        );
+
+        constant_time_hash256_eq(&expected_proof, &self.proof)
+            & constant_time_hash256_eq(&expected_tag, &self.verification_tag)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +869,21 @@ mod tests {
     }
 
     #[test]
+    fn daubert_checklist_incomplete_without_known_error_rate() {
+        let checklist = DaubertChecklist {
+            methodology_documented: true,
+            peer_reviewable: true,
+            known_error_rate: None,
+            generally_accepted: true,
+        };
+
+        assert!(
+            !checklist.is_complete(),
+            "Daubert admissibility requires a known or potential error rate"
+        );
+    }
+
+    #[test]
     fn daubert_checklist_completeness_all_fields_required() {
         // Each false flag independently makes the checklist incomplete.
         for (doc, peer, accepted) in [
@@ -783,6 +899,124 @@ mod tests {
             };
             assert!(!c.is_complete(), "Incomplete checklist must not pass");
         }
+    }
+
+    #[test]
+    fn zkml_source_exposes_fail_closed_daubert_admissibility_status() {
+        let source = include_str!("zkml.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section exists");
+
+        assert!(
+            production.contains("pub enum DaubertAdmissibility"),
+            "InferenceProof needs a typed Daubert admissibility decision"
+        );
+        assert!(
+            production.contains("pub fn daubert_admissibility_status(&self)"),
+            "InferenceProof callers need a fail-closed admissibility status API"
+        );
+    }
+
+    fn complete_daubert_checklist() -> DaubertChecklist {
+        DaubertChecklist {
+            methodology_documented: true,
+            peer_reviewable: true,
+            known_error_rate: Some("< 2%".into()),
+            generally_accepted: true,
+        }
+    }
+
+    fn admissible_inference_proof() -> InferenceProof {
+        let model = make_model();
+        let ai_output = b"ai says: approve";
+        let human_output = b"human says: reject";
+        let mut proof = prove_inference_with_provenance(
+            &model,
+            b"constitutionally bounded prompt",
+            b"case context",
+            ai_output,
+        )
+        .unwrap();
+        let (attestation, _) = make_attestation(AttestationDecision::Rejected);
+        proof.human_attestation = Some(attestation);
+        proof.ai_delta = Some(AiDelta::new(ai_output, human_output));
+        proof.daubert_checklist = Some(complete_daubert_checklist());
+        proof
+    }
+
+    #[test]
+    fn daubert_admissibility_accepts_complete_verified_provenance() {
+        let proof = admissible_inference_proof();
+
+        assert!(verify_inference(&proof).unwrap());
+        assert_eq!(
+            proof.daubert_admissibility_status(),
+            DaubertAdmissibility::Admissible
+        );
+    }
+
+    #[test]
+    fn daubert_admissibility_rejects_missing_prompt_hash() {
+        let mut proof = admissible_inference_proof();
+        proof.prompt_hash = None;
+
+        let status = proof.daubert_admissibility_status();
+
+        assert!(
+            matches!(status, DaubertAdmissibility::Inadmissible { ref reason } if reason.contains("prompt_hash")),
+            "missing prompt hash must be inadmissible, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn daubert_admissibility_rejects_invalid_human_attestation() {
+        let mut proof = admissible_inference_proof();
+        let attestation = proof
+            .human_attestation
+            .as_mut()
+            .expect("test proof has attestation");
+        attestation.decision = AttestationDecision::Adopted;
+
+        let status = proof.daubert_admissibility_status();
+
+        assert!(
+            matches!(status, DaubertAdmissibility::Inadmissible { ref reason } if reason.contains("human_attestation")),
+            "invalid attestation must be inadmissible, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn daubert_admissibility_rejects_inconsistent_ai_delta() {
+        let mut proof = admissible_inference_proof();
+        let delta = proof.ai_delta.as_mut().expect("test proof has AI delta");
+        delta.ai_output_hash = Hash256::digest(b"different AI output");
+
+        let status = proof.daubert_admissibility_status();
+
+        assert!(
+            matches!(status, DaubertAdmissibility::Inadmissible { ref reason } if reason.contains("ai_delta")),
+            "inconsistent AI delta must be inadmissible, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn daubert_admissibility_rejects_incomplete_checklist() {
+        let mut proof = admissible_inference_proof();
+        proof.daubert_checklist = Some(DaubertChecklist {
+            methodology_documented: true,
+            peer_reviewable: true,
+            known_error_rate: None,
+            generally_accepted: true,
+        });
+
+        let status = proof.daubert_admissibility_status();
+
+        assert!(
+            matches!(status, DaubertAdmissibility::Inadmissible { ref reason } if reason.contains("daubert_checklist")),
+            "incomplete checklist must be inadmissible, got {status:?}"
+        );
     }
 
     // ---- zkml_tampered_model_detected (alias of existing test) ----
