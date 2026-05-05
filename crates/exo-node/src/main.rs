@@ -62,10 +62,23 @@ use network::{NetworkConfig, NetworkEvent, NetworkHandle};
 use reactor::{ReactorConfig, ReactorEvent};
 use sync::{SyncConfig, SyncEngine, SyncEvent};
 use tokio::sync::mpsc;
+use tracing_subscriber::EnvFilter;
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .json()
+        .flatten_event(true)
+        .with_current_span(true)
+        .with_span_list(true)
+        .init();
+}
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -1180,6 +1193,38 @@ mod tests {
         assert_eq!(addrs[0].to_string(), "/ip4/127.0.0.1/tcp/4001");
         assert_eq!(addrs[1].to_string(), "/ip4/192.0.2.10/tcp/4002");
         assert_eq!(addrs[2].to_string(), "/dns4/seed1.exochain.io/tcp/4003");
+    }
+
+    #[test]
+    fn node_tracing_uses_env_filter_and_json_output() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        let init_tracing = source
+            .split("fn init_tracing()")
+            .nth(1)
+            .and_then(|section| section.split("#[tokio::main]").next())
+            .expect("init_tracing must appear before main");
+        let bare_fmt_init = concat!("tracing_subscriber::fmt", "::init()");
+
+        assert!(
+            !production.contains(bare_fmt_init),
+            "node runtime must not use bare tracing_subscriber::fmt::init()"
+        );
+        assert!(
+            init_tracing.contains("EnvFilter::try_from_default_env"),
+            "node runtime logging must honor RUST_LOG via EnvFilter"
+        );
+        assert!(
+            init_tracing.contains(".with_env_filter("),
+            "node runtime logging must attach the EnvFilter to the subscriber"
+        );
+        assert!(
+            init_tracing.contains(".json()"),
+            "node runtime logging must emit structured JSON"
+        );
     }
 
     #[test]
