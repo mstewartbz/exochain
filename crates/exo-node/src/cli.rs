@@ -4,6 +4,22 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub const DEFAULT_ROUND_TIMEOUT_MS: u64 = 5_000;
+pub const MIN_ROUND_TIMEOUT_MS: u64 = 250;
+pub const MAX_ROUND_TIMEOUT_MS: u64 = 300_000;
+
+fn parse_round_timeout_ms(value: &str) -> Result<u64, String> {
+    let timeout_ms = value
+        .parse::<u64>()
+        .map_err(|error| format!("round timeout must be a millisecond integer: {error}"))?;
+    if !(MIN_ROUND_TIMEOUT_MS..=MAX_ROUND_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(format!(
+            "round timeout must be between {MIN_ROUND_TIMEOUT_MS} and {MAX_ROUND_TIMEOUT_MS} milliseconds"
+        ));
+    }
+    Ok(timeout_ms)
+}
+
 #[derive(Parser)]
 #[command(
     name = "exochain",
@@ -39,6 +55,14 @@ pub enum Command {
         /// P2P listen port.
         #[arg(long, default_value = None)]
         p2p_port: Option<u16>,
+
+        /// Consensus round timeout in milliseconds.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_ROUND_TIMEOUT_MS,
+            value_parser = parse_round_timeout_ms
+        )]
+        round_timeout_ms: u64,
 
         /// Data directory (default: ~/.exochain).
         #[arg(long)]
@@ -78,6 +102,14 @@ pub enum Command {
         /// P2P listen port.
         #[arg(long, default_value = None)]
         p2p_port: Option<u16>,
+
+        /// Consensus round timeout in milliseconds.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_ROUND_TIMEOUT_MS,
+            value_parser = parse_round_timeout_ms
+        )]
+        round_timeout_ms: u64,
 
         /// Data directory (default: ~/.exochain).
         #[arg(long)]

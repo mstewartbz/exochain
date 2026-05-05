@@ -324,17 +324,18 @@ fn spawn_event_fanout(
 
 /// Start all subsystems for a running node.
 #[allow(clippy::too_many_arguments)]
-// 8 args is the minimum for a node bootstrap entry point:
-// data_dir, api_host, api_port, p2p_port, validator, validators,
-// validator_public_keys, seed_addrs, is_join. Each is a distinct bootstrap parameter
-// that came in through CLI parsing; bundling them behind a
-// struct would add a layer of boilerplate with no safety benefit
-// since this is the single call site from `main()`.
+// 10 args is the minimum for a node bootstrap entry point:
+// data_dir, api_host, api_port, p2p_port, round_timeout_ms, validator, validators,
+// validator_public_keys, seed_addrs, is_join. Each is a distinct bootstrap
+// parameter that came in through CLI parsing; bundling them behind a struct would
+// add a layer of boilerplate with no safety benefit since this is the single call
+// site from `main()`.
 async fn start_node(
     data_dir: &std::path::Path,
     api_host: &str,
     api_port: u16,
     p2p_port: u16,
+    round_timeout_ms: u64,
     validator: bool,
     validators: &Option<Vec<String>>,
     validator_public_key_entries: &Option<Vec<String>>,
@@ -377,6 +378,7 @@ async fn start_node(
     tracing::info!(
         api_port,
         p2p_port,
+        round_timeout_ms,
         validator,
         did = %node_identity.did,
         "Starting exochain node"
@@ -429,7 +431,7 @@ async fn start_node(
         is_validator: validator,
         validators: validator_set.clone(),
         validator_public_keys,
-        round_timeout_ms: 5000,
+        round_timeout_ms,
     };
 
     let sign_fn: Arc<dyn Fn(&[u8]) -> exo_core::types::Signature + Send + Sync> = {
@@ -986,6 +988,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             api_port,
             api_host,
             p2p_port,
+            round_timeout_ms,
             data_dir,
             validator,
             validators,
@@ -1005,6 +1008,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 &api_host,
                 api_port,
                 p2p_port,
+                round_timeout_ms,
                 validator,
                 &validators,
                 &validator_public_keys,
@@ -1019,6 +1023,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             api_port,
             api_host,
             p2p_port,
+            round_timeout_ms,
             data_dir,
             validator,
             validators,
@@ -1040,6 +1045,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 &api_host,
                 api_port,
                 p2p_port,
+                round_timeout_ms,
                 validator,
                 &validators,
                 &validator_public_keys,
@@ -1225,6 +1231,60 @@ mod tests {
             init_tracing.contains(".json()"),
             "node runtime logging must emit structured JSON"
         );
+    }
+
+    #[test]
+    fn cli_accepts_consensus_round_timeout_for_start_and_join() {
+        let start = Cli::try_parse_from([
+            "exochain",
+            "start",
+            "--round-timeout-ms",
+            "7500",
+            "--validator",
+        ]);
+        assert!(
+            start.is_ok(),
+            "start command must accept a bounded consensus round timeout"
+        );
+
+        let join = Cli::try_parse_from([
+            "exochain",
+            "join",
+            "--seed",
+            "seed1.exochain.io:4001",
+            "--round-timeout-ms",
+            "7500",
+        ]);
+        assert!(
+            join.is_ok(),
+            "join command must accept a bounded consensus round timeout"
+        );
+
+        assert!(
+            Cli::try_parse_from(["exochain", "start", "--round-timeout-ms", "0"]).is_err(),
+            "round timeout must reject zero-millisecond busy-loop values"
+        );
+        assert!(
+            Cli::try_parse_from(["exochain", "start", "--round-timeout-ms", "300001"]).is_err(),
+            "round timeout must reject deployment-stalling values above five minutes"
+        );
+    }
+
+    #[test]
+    fn node_bootstrap_uses_configured_round_timeout_not_fixed_literal() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        let reactor_config = production
+            .split("let reactor_config = ReactorConfig")
+            .nth(1)
+            .and_then(|section| section.split("};").next())
+            .expect("reactor config is constructed during node startup");
+
+        assert!(!reactor_config.contains("round_timeout_ms: 5000"));
+        assert!(reactor_config.contains("round_timeout_ms,"));
     }
 
     #[test]
