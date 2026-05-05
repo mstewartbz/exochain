@@ -427,6 +427,34 @@ fn check_authority_chain_valid(ctx: &InvariantContext) -> Result<(), InvariantVi
         }
     }
 
+    for permission in &ctx.requested_permissions.permissions {
+        if !ctx.actor_permissions.contains(permission) {
+            return Err(InvariantViolation {
+                invariant: ConstitutionalInvariant::AuthorityChainValid,
+                description: "Requested permission is absent from actor authority context".into(),
+                evidence: vec![
+                    format!("actor: {}", ctx.actor),
+                    format!("requested_permission: {}", permission.0),
+                ],
+            });
+        }
+
+        for (idx, link) in links.iter().enumerate() {
+            if !link.permissions.contains(permission) {
+                return Err(InvariantViolation {
+                    invariant: ConstitutionalInvariant::AuthorityChainValid,
+                    description: "Requested permission is absent from authority chain scope".into(),
+                    evidence: vec![
+                        format!("link_index: {idx}"),
+                        format!("grantor: {}", link.grantor),
+                        format!("grantee: {}", link.grantee),
+                        format!("requested_permission: {}", permission.0),
+                    ],
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1478,6 +1506,37 @@ mod tests {
         let (link, _pk) = signed_link("did:exo:root", "did:exo:actor1");
         ctx.authority_chain = AuthorityChain { links: vec![link] };
         assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn authority_chain_fails_when_requested_permission_absent_from_actor_permissions() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
+        let mut ctx = passing_context();
+        ctx.requested_permissions = PermissionSet::new(vec![Permission::new("advance_pace")]);
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(
+            err[0].description.contains("Requested permission"),
+            "requested permission missing from actor permissions must fail AuthorityChainValid"
+        );
+    }
+
+    #[test]
+    fn authority_chain_fails_when_requested_permission_absent_from_chain_scope() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
+        let mut ctx = passing_context();
+        ctx.actor_permissions = PermissionSet::new(vec![Permission::new("advance_pace")]);
+        ctx.requested_permissions = PermissionSet::new(vec![Permission::new("advance_pace")]);
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(
+            err[0].description.contains("authority chain scope"),
+            "requested permission missing from signed chain scope must fail AuthorityChainValid"
+        );
     }
 
     #[test]

@@ -583,6 +583,21 @@ mod tests {
             );
         }
 
+        /// F-010: required permissions must be backed by the actor context and
+        /// by the signed authority chain, not merely supplied on the action.
+        #[test]
+        fn missing_required_permission_not_permitted() {
+            let kernel = test_kernel();
+            let actor = did("did:exo:scope-mismatch");
+            let mut action = valid_action(&actor);
+            action.required_permissions = PermissionSet::new(vec![Permission::new("advance_pace")]);
+            let verdict = kernel.adjudicate(&action, &valid_context(&actor));
+            assert!(
+                !verdict.is_permitted(),
+                "F-010: requested permission absent from authority evidence must not be permitted"
+            );
+        }
+
         /// WO-009 §4: An empty authority chain is never permitted, even when all
         /// other context fields are valid.  Per kernel escalation rules, an
         /// isolated AuthorityChainValid violation escalates (not denies) — the
