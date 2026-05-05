@@ -2191,11 +2191,12 @@ async fn handle_audit_trail(
     headers: HeaderMap,
     Path(decision_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
-        return auth_boundary_error_response(e);
-    }
-    let pool = match state.require_db() {
-        Ok(pool) => pool,
+    let actor = match require_authenticated_session_user_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
+    let db = match state.require_db() {
+        Ok(db) => db,
         Err(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2204,7 +2205,7 @@ async fn handle_audit_trail(
                 .into_response();
         }
     };
-    match db::list_audit_entries_for_decision(pool, &decision_id).await {
+    match db::list_audit_entries_for_decision(db, &decision_id, &actor.tenant_id).await {
         Ok(rows) => {
             let entries: Vec<serde_json::Value> = rows
                 .into_iter()
@@ -4650,6 +4651,31 @@ mod tests {
     }
 
     #[test]
+    fn audit_trail_uses_authenticated_actor_tenant_for_lookup() {
+        let source = include_str!("server.rs");
+        let handler = source_between(
+            source,
+            "async fn handle_audit_trail",
+            "/// POST /api/v1/agents/enroll",
+        );
+
+        assert!(
+            handler.contains("require_authenticated_session_user_from_header"),
+            "audit trail must load the authenticated session actor's tenant profile"
+        );
+        assert!(
+            handler.contains(
+                "db::list_audit_entries_for_decision(db, &decision_id, &actor.tenant_id)"
+            ),
+            "audit trail must query audit entries using the authenticated actor tenant"
+        );
+        assert!(
+            !handler.contains("db::list_audit_entries_for_decision(pool, &decision_id)"),
+            "audit trail must not perform an unscoped decision_id lookup"
+        );
+    }
+
+    #[test]
     fn decision_post_route_dispatches_to_create_handler_not_vote_handler() {
         let source = include_str!("server.rs");
         let router = source_between(
@@ -5802,6 +5828,7 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
+        insert_test_user(&pool, "did:exo:reader", "tenant-read").await;
         insert_test_session(&pool, "audit-trail-token", "did:exo:reader").await;
         sqlx::query("DELETE FROM audit_entries WHERE sequence = $1 OR decision_id = $2")
             .bind(901_004_i64)
@@ -5858,6 +5885,104 @@ mod tests {
             .unwrap();
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind("audit-trail-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind("did:exo:reader")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_trail_filters_entries_to_authenticated_actor_tenant() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        insert_test_user(&pool, "did:exo:audit-tenant-b-reader", "tenant-b").await;
+        insert_test_session(
+            &pool,
+            "audit-trail-cross-tenant-token",
+            "did:exo:audit-tenant-b-reader",
+        )
+        .await;
+        sqlx::query("DELETE FROM audit_entries WHERE decision_id = $1")
+            .bind("audit-cross-tenant-decision")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        db::insert_audit_entry(
+            &pool,
+            901_014,
+            "prev-a",
+            "event-a",
+            "VoteCast",
+            "did:exo:tenant-a-reader",
+            "tenant-a",
+            "audit-cross-tenant-decision",
+            10_001,
+            0,
+            "entry-a",
+        )
+        .await
+        .unwrap();
+        db::insert_audit_entry(
+            &pool,
+            901_015,
+            "prev-b",
+            "event-b",
+            "VoteCast",
+            "did:exo:audit-tenant-b-reader",
+            "tenant-b",
+            "audit-cross-tenant-decision",
+            10_002,
+            0,
+            "entry-b",
+        )
+        .await
+        .unwrap();
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/audit-cross-tenant-decision")
+                    .header("authorization", "Bearer audit-trail-cross-tenant-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = val["audit_entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["tenant_id"], "tenant-b");
+        assert_eq!(entries[0]["actor"], "did:exo:audit-tenant-b-reader");
+
+        sqlx::query("DELETE FROM audit_entries WHERE decision_id = $1")
+            .bind("audit-cross-tenant-decision")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("audit-trail-cross-tenant-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind("did:exo:audit-tenant-b-reader")
             .execute(&pool)
             .await
             .unwrap();

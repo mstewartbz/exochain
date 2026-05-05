@@ -925,12 +925,14 @@ pub async fn list_audit_entries(pool: &PgPool) -> Result<Vec<AuditRow>, sqlx::Er
 pub async fn list_audit_entries_for_decision(
     pool: &PgPool,
     decision_id: &str,
+    tenant_id: &str,
 ) -> Result<Vec<AuditRow>, sqlx::Error> {
     sqlx::query_as::<_, AuditRow>(
         "SELECT sequence, prev_hash, event_hash, event_type, actor, tenant_id, decision_id, timestamp_physical_ms, timestamp_logical, entry_hash
-         FROM audit_entries WHERE decision_id = $1 ORDER BY sequence LIMIT $2",
+         FROM audit_entries WHERE decision_id = $1 AND tenant_id = $2 ORDER BY sequence LIMIT $3",
     )
     .bind(decision_id)
+    .bind(tenant_id)
     .bind(MAX_DB_LIST_ROWS)
     .fetch_all(pool)
     .await
@@ -2356,6 +2358,28 @@ mod tests {
         assert!(
             contains_in_order(lookup, ".bind(id_hash)", ".bind(tenant_id)"),
             "find_decision must bind id_hash and tenant_id together"
+        );
+    }
+
+    #[test]
+    fn audit_entry_lookup_requires_decision_and_tenant_scope() {
+        let source = production_source();
+        let lookup = function_source(source, "list_audit_entries_for_decision");
+
+        assert!(
+            lookup.contains("tenant_id: &str"),
+            "list_audit_entries_for_decision must require an explicit tenant scope"
+        );
+        assert!(
+            compact_sql(lookup).contains(
+                "FROM audit_entries WHERE decision_id = $1 AND tenant_id = $2 ORDER BY sequence LIMIT $3"
+            ),
+            "list_audit_entries_for_decision must constrain audit rows by decision_id and tenant_id"
+        );
+        assert!(
+            contains_in_order(lookup, ".bind(decision_id)", ".bind(tenant_id)")
+                && contains_in_order(lookup, ".bind(tenant_id)", ".bind(MAX_DB_LIST_ROWS)"),
+            "list_audit_entries_for_decision must bind decision_id, tenant_id, then row limit"
         );
     }
 
