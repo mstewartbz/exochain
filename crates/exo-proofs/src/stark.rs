@@ -250,10 +250,7 @@ pub fn prove_stark(
 /// Returns `Err(UnauditedImplementation)` when the feature is disabled.
 pub fn verify_stark(proof: &StarkProof, public_inputs: &[u64]) -> Result<bool> {
     crate::guard_unaudited("stark::verify_stark")?;
-    let _ = (proof, public_inputs);
-    Err(ProofError::VerificationFailed(
-        "stark::verify_stark requires caller-supplied public constraints; use verify_stark_with_constraints".to_string(),
-    ))
+    verify_stark_with_constraints(proof, public_inputs, &proof.constraints)
 }
 
 /// Verify a STARK proof for caller-supplied public constraints.
@@ -777,15 +774,14 @@ mod tests {
     }
 
     #[test]
-    fn verify_stark_refuses_without_caller_supplied_constraints() {
+    fn verify_stark_uses_embedded_constraints() {
         let config = StarkConfig::default_config();
         let trace = make_fibonacci_trace(16, config.field_size);
         let constraints = vec![fib_constraint()];
 
         let proof = prove_stark(&trace, &constraints, &config).unwrap();
-        let err = verify_stark(&proof, &trace[0]).unwrap_err();
 
-        assert!(matches!(err, ProofError::VerificationFailed(_)));
+        assert!(verify_stark(&proof, &trace[0]).unwrap());
     }
 
     #[test]
