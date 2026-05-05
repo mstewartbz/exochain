@@ -13,11 +13,24 @@
 //! The `/ready` probe will return 503 until a pool is configured.
 
 use exo_gateway::server::{GatewayConfig, serve};
+use tracing_subscriber::EnvFilter;
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .json()
+        .flatten_event(true)
+        .with_current_span(true)
+        .with_span_list(true)
+        .init();
+}
 
 #[tokio::main]
 async fn main() {
     // Initialise structured logging.
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     // Build config from environment, falling back to defaults.
     let bind_address = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8443".into());
@@ -56,5 +69,48 @@ async fn main() {
     if let Err(e) = serve(config, pool).await {
         tracing::error!("Gateway terminated with error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const SOURCE: &str = include_str!("main.rs");
+
+    fn init_tracing_source() -> &'static str {
+        match SOURCE
+            .split("fn init_tracing()")
+            .nth(1)
+            .and_then(|section| section.split("#[tokio::main]").next())
+        {
+            Some(source) => source,
+            None => panic!("init_tracing must appear before main"),
+        }
+    }
+
+    #[test]
+    fn gateway_tracing_uses_env_filter_and_json_output() {
+        let production = match SOURCE.split("#[cfg(test)]").next() {
+            Some(source) => source,
+            None => panic!("production source precedes tests"),
+        };
+        let init_tracing = init_tracing_source();
+        let bare_fmt_init = concat!("tracing_subscriber::fmt", "::init()");
+
+        assert!(
+            !production.contains(bare_fmt_init),
+            "gateway runtime must not use bare tracing_subscriber::fmt::init()"
+        );
+        assert!(
+            init_tracing.contains("EnvFilter::try_from_default_env"),
+            "gateway runtime logging must honor RUST_LOG via EnvFilter"
+        );
+        assert!(
+            init_tracing.contains(".with_env_filter("),
+            "gateway runtime logging must attach the EnvFilter to the subscriber"
+        );
+        assert!(
+            init_tracing.contains(".json()"),
+            "gateway runtime logging must emit structured JSON"
+        );
     }
 }
