@@ -1,12 +1,24 @@
 name: exochain-self-improvement-cycle
 description: |
-  Perpetual self-improvement cycle for ExoChain. This DAG workflow
+  Bounded self-improvement cycle for ExoChain. This DAG workflow
   implements the full feedback → triage → council review → implement →
   validate → deploy pipeline, governed by the AI-IRB council of five
   panels across five disciplines.
 
   Trigger: Widget AI feedback from the ExoChain configurator UI
   Output: Council-reviewed, constitutionally-validated PR ready for merge
+
+loop:
+  enabled: true
+  max_iterations: 3
+  exit_condition: "pr_created_or_escalated"
+  stop_conditions:
+    - "$create_pr.output contains a pull request URL"
+    - "$validate_constitution.output.governance_disposition == 'BLOCK'"
+    - "$remediate.output repeats the same validation failure"
+    - "max_iterations reached"
+  escalation_path: "escalate_blocked"
+  fresh_context: true
 
 nodes:
   # ── Stage 1: Feedback Ingestion & Triage ──────────────────

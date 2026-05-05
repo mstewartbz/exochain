@@ -233,6 +233,26 @@ that conflict with this file.
   classification rule, and core regression firewall before it can claim any
   connection to EXOCHAIN enforcement.
 
+### Agent Workflow Loop Bounds
+
+Autonomous, recursive, continuous, or self-improvement agent workflows must be
+bounded before they can run or be modified. An agent workflow may iterate only
+when the workflow file declares an explicit `loop` block with `max_iterations`,
+a concrete stop condition, and an escalation path for exhausted or repeated
+failure states.
+
+- Do not describe a workflow as perpetual, continuous, recursive, autonomous,
+  or self-improving unless the same workflow file sets `max_iterations` to a
+  positive finite integer no greater than 25.
+- Every loop must define the stop condition that ends successful execution and
+  the escalation path used when the loop reaches `max_iterations` without a
+  valid terminal result.
+- A remediation loop must stop or escalate when it observes the same validation
+  failure twice. Do not let agent-generated prose authorize another iteration
+  without checking repository state, tests, and the relevant guard output.
+- Adjacent workflow files must have a source guard proving loop bounds before
+  they can be treated as safe automation around EXOCHAIN work.
+
 ### Adding Adjacent Surfaces
 
 Any new adjacent product or surface, including CommandBase, crosschecked.ai,
