@@ -314,11 +314,11 @@ fn cross_branch_roles_denies() {
 mod db_roundtrip {
     use std::sync::{Arc, RwLock};
 
-    use exo_core::Did;
+    use exo_core::{Did, ExoError, hlc::HybridClock};
     use exo_gatekeeper::{
         ActionRequest, Kernel, authority_link_signature_message,
         invariants::{ConstitutionalInvariant, InvariantSet},
-        types::{AuthorityChain, AuthorityLink, Permission, PermissionSet},
+        types::{AuthorityChain, AuthorityLink, BailmentState, Permission, PermissionSet},
     };
     use exo_gateway::server::AppState;
     use exo_identity::registry::LocalDidRegistry;
@@ -454,8 +454,82 @@ mod db_roundtrip {
         );
     }
 
+    /// If the HLC is unavailable, the gateway must not query adjudication rows
+    /// at a fabricated fallback timestamp. Even with DB rows that would permit
+    /// at epoch zero, the context must be the WO-009 deny-all scaffold.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn db_roundtrip_hlc_failure_uses_scaffold_even_when_rows_would_permit() {
+        let pool = match connect_and_migrate().await {
+            Some(p) => p,
+            None => return, // DATABASE_URL not set — skip
+        };
+
+        let actor_did = "did:exo:db-roundtrip-clock-failure-010";
+        let grantor_did = "did:exo:db-roundtrip-clock-grantor-010";
+
+        let _ = sqlx::query("DELETE FROM consent_records WHERE actor_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM authority_chains WHERE actor_did = $1")
+            .bind(actor_did)
+            .execute(&pool)
+            .await;
+
+        sqlx::query(
+            "INSERT INTO consent_records \
+             (subject_did, actor_did, scope, bailment_type, status, created_at) \
+             VALUES ($1, $2, $3, 'standard', 'active', 0)",
+        )
+        .bind(grantor_did)
+        .bind(actor_did)
+        .bind("data:vote")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let actor = did(actor_did);
+        let grantor = did(grantor_did);
+        let chain = AuthorityChain {
+            links: vec![signed_authority_link(&grantor, &actor)],
+        };
+        let chain_json = serde_json::to_value(&chain).unwrap();
+        sqlx::query(
+            "INSERT INTO authority_chains (actor_did, chain_json, valid_from) \
+             VALUES ($1, $2, 0)",
+        )
+        .bind(actor_did)
+        .bind(&chain_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let failing_clock = HybridClock::with_fallible_wall_clock(|| {
+            Err(ExoError::ClockUnavailable {
+                reason: "injected adjudication clock failure".to_owned(),
+            })
+        });
+        let state = AppState::new_with_clock(
+            Some(pool),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+            failing_clock,
+        );
+        let ctx = state.build_adjudication_context(&actor).await;
+
+        assert_eq!(ctx.bailment_state, BailmentState::None);
+        assert!(ctx.actor_roles.is_empty());
+        assert!(ctx.authority_chain.is_empty());
+        assert!(
+            adjudication_kernel()
+                .adjudicate(&vote_action(&actor), &ctx)
+                .is_denied(),
+            "HLC failure must deny even when DB rows would permit at a fabricated fallback timestamp"
+        );
+    }
+
     // -----------------------------------------------------------------------
-    // Test 9: DB round-trip — no rows for actor → Denied (ConsentRequired)
+    // Test 10: DB round-trip — no rows for actor → Denied (ConsentRequired)
     // -----------------------------------------------------------------------
 
     /// Ensures that an actor with no rows in any adjudication table results in
