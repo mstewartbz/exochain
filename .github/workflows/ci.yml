@@ -233,6 +233,8 @@ jobs:
           echo "✓ No GAP stubs remaining in code"
       - name: GitHub Actions pinned to immutable SHAs
         run: bash tools/test_github_actions_pinned.sh
+      - name: CI tool installer supply-chain hardening
+        run: bash tools/test_ci_supply_chain_hardening.sh
       - name: Repo truth and public claims
         run: bash tools/test_repo_truth.sh
       - name: CR-001 status consistency
@@ -507,7 +509,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM
         run: wasm-pack build crates/exochain-wasm --target nodejs --out-dir ../../packages/exochain-wasm/wasm
       - name: Verify WASM exports
