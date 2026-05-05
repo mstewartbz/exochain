@@ -441,7 +441,24 @@ impl AppState {
         // Production path — compiled only when the feature flag is set.
         #[cfg(feature = "production-db")]
         if let Some(pool) = &self.pool {
-            let now = i64::try_from(self.now_ms()).unwrap_or(i64::MAX);
+            let now = match self.try_now_ms() {
+                Ok(now_ms) => match i64::try_from(now_ms) {
+                    Ok(now) => now,
+                    Err(_) => {
+                        tracing::warn!(
+                            "Gateway adjudication timestamp exceeds database range; falling back to WO-009 scaffold"
+                        );
+                        return deny_all_adjudication_context();
+                    }
+                },
+                Err(message) => {
+                    tracing::warn!(
+                        message,
+                        "Gateway adjudication timestamp unavailable; falling back to WO-009 scaffold"
+                    );
+                    return deny_all_adjudication_context();
+                }
+            };
             match build_adjudication_context_from_db(pool, actor, now).await {
                 Ok(ctx) => return ctx,
                 Err(e) => {
@@ -454,17 +471,21 @@ impl AppState {
         }
 
         // WO-009 deny-all scaffold (dev/test default and production fallback).
-        AdjudicationContext {
-            actor_roles: vec![],
-            authority_chain: AuthorityChain::default(),
-            consent_records: vec![],
-            bailment_state: BailmentState::None,
-            human_override_preserved: true,
-            actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
-            provenance: None,
-            quorum_evidence: None,
-            active_challenge_reason: None,
-        }
+        deny_all_adjudication_context()
+    }
+}
+
+fn deny_all_adjudication_context() -> AdjudicationContext {
+    AdjudicationContext {
+        actor_roles: vec![],
+        authority_chain: AuthorityChain::default(),
+        consent_records: vec![],
+        bailment_state: BailmentState::None,
+        human_override_preserved: true,
+        actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+        provenance: None,
+        quorum_evidence: None,
+        active_challenge_reason: None,
     }
 }
 
@@ -3545,6 +3566,25 @@ mod tests {
         assert!(!production.contains(&timestamp_now));
         assert!(!production.contains(&system_time_now));
         assert!(!production.contains(&instant_now));
+    }
+
+    #[test]
+    fn adjudication_db_context_does_not_use_zero_timestamp_fallback() {
+        let source = include_str!("server.rs");
+        let adjudication_block = source
+            .split("pub async fn build_adjudication_context")
+            .nth(1)
+            .and_then(|section| section.split("// WO-009 deny-all scaffold").next())
+            .expect("adjudication context builder present");
+
+        assert!(
+            adjudication_block.contains("self.try_now_ms()"),
+            "DB adjudication must use the fallible HLC path before querying state"
+        );
+        assert!(
+            !adjudication_block.contains("self.now_ms()"),
+            "DB adjudication must not query consent/authority state with the zero timestamp fallback"
+        );
     }
 
     #[test]
