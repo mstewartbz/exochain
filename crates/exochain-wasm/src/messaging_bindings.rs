@@ -15,14 +15,15 @@ struct WasmAuthorizedTrustee {
     public_key_hex: String,
 }
 
-/// Generate a new X25519 public key for Diffie-Hellman key exchange.
-/// Returns `{ public_key_hex }`.
+/// Legacy X25519 key generation entrypoint.
+///
+/// This fails closed because the WASM bridge must not fabricate X25519 key
+/// material internally.
 #[wasm_bindgen]
 pub fn wasm_generate_x25519_keypair() -> Result<JsValue, JsValue> {
-    let kp = exo_messaging::kex::X25519KeyPair::generate();
-    to_js_value(&serde_json::json!({
-        "public_key_hex": kp.public.to_hex(),
-    }))
+    Err(JsValue::from_str(
+        "X25519 key generation is disabled at the WASM boundary; use external key management and pass caller-supplied ephemeral material to wasm_prepare_encrypted_message",
+    ))
 }
 
 /// Derive an X25519 public key from a secret key hex string.
@@ -82,7 +83,7 @@ pub fn wasm_encrypt_message(
         release_delay_hours,
     );
     Err(JsValue::from_str(
-        "raw Ed25519 sender signing is disabled at the WASM boundary; call wasm_prepare_encrypted_message, sign externally, then call wasm_attach_message_signature",
+        "raw Ed25519 sender signing is disabled at the WASM boundary; call wasm_prepare_encrypted_message with caller-supplied ephemeral X25519 material, sign externally, then call wasm_attach_message_signature",
     ))
 }
 
@@ -95,6 +96,7 @@ pub fn wasm_prepare_encrypted_message(
     sender_did: &str,
     recipient_did: &str,
     recipient_x25519_public_hex: &str,
+    ephemeral_x25519_secret_hex: &str,
     message_id: &str,
     created_physical_ms: u64,
     created_logical: u32,
@@ -110,6 +112,8 @@ pub fn wasm_prepare_encrypted_message(
 
     let recipient_pub = exo_messaging::X25519PublicKey::from_hex(recipient_x25519_public_hex)
         .map_err(|e| JsValue::from_str(&format!("invalid recipient X25519 key: {e}")))?;
+    let ephemeral_keypair =
+        parse_x25519_keypair_hex("ephemeral X25519 secret", ephemeral_x25519_secret_hex)?;
     let message_uuid = uuid::Uuid::parse_str(message_id)
         .map_err(|e| JsValue::from_str(&format!("invalid message id: {e}")))?;
     let metadata = exo_messaging::ComposeMetadata::new(
@@ -118,12 +122,13 @@ pub fn wasm_prepare_encrypted_message(
     )
     .map_err(|e| JsValue::from_str(&format!("invalid envelope metadata: {e}")))?;
 
-    let envelope = exo_messaging::prepare_envelope_for_signing(
+    let envelope = exo_messaging::prepare_envelope_for_signing_with_ephemeral(
         plaintext.as_bytes(),
         content_type,
         &sender,
         &recipient,
         &recipient_pub,
+        &ephemeral_keypair,
         metadata,
         release_on_death,
         release_delay_hours,
@@ -137,6 +142,21 @@ pub fn wasm_prepare_encrypted_message(
         "envelope": envelope,
         "signing_payload_hex": hex::encode(signing_payload),
     }))
+}
+
+fn parse_x25519_keypair_hex(
+    label: &str,
+    secret_hex: &str,
+) -> Result<exo_messaging::X25519KeyPair, JsValue> {
+    let bytes = hex::decode(secret_hex)
+        .map_err(|e| JsValue::from_str(&format!("{label} must be hex: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(JsValue::from_str(&format!("{label} must be 32 bytes")));
+    }
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&bytes);
+    exo_messaging::X25519KeyPair::from_secret_bytes(secret)
+        .map_err(|e| JsValue::from_str(&format!("invalid {label}: {e}")))
 }
 
 /// Attach a caller-produced Ed25519 signature to a prepared encrypted envelope.

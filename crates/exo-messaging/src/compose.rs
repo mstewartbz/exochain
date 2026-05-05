@@ -1,8 +1,9 @@
 //! Compose & Lock — sender-side message encryption.
 //!
-//! Generates an ephemeral X25519 keypair, performs ECDH with the recipient's
-//! public key, derives a symmetric key via HKDF, encrypts the plaintext with
-//! XChaCha20-Poly1305, and signs the envelope with the sender's Ed25519 key.
+//! Requires caller-supplied ephemeral X25519 key material, performs ECDH with
+//! the recipient's public key, derives a symmetric key via HKDF, encrypts the
+//! plaintext with XChaCha20-Poly1305, and signs the envelope with the sender's
+//! Ed25519 key.
 
 use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp};
 use exo_identity::vault::{VAULT_NONCE_SIZE, VaultEncryptor};
@@ -11,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     envelope::{ContentType, EncryptedEnvelope},
     error::MessagingError,
-    kex::{self, X25519PublicKey},
+    kex::{self, X25519KeyPair, X25519PublicKey},
 };
 
 /// The HKDF context string for message encryption key derivation.
@@ -44,7 +45,11 @@ impl ComposeMetadata {
     }
 }
 
-/// Lock & Send: encrypt a message for a specific recipient.
+/// Legacy Lock & Send entrypoint.
+///
+/// This fails closed because EXOCHAIN message composition must not fabricate
+/// X25519 key material internally. Use [`lock_and_send_with_ephemeral`] with a
+/// caller-supplied one-time X25519 keypair.
 ///
 /// # Arguments
 ///
@@ -60,7 +65,7 @@ impl ComposeMetadata {
 ///
 /// # Returns
 ///
-/// An `EncryptedEnvelope` ready for transmission/storage.
+/// A fail-closed error directing callers to the explicit ephemeral-key API.
 #[allow(clippy::too_many_arguments)]
 // 8 args is the minimum for a sender→recipient envelope with
 // death-trigger semantics: plaintext + content_type + sender DID +
@@ -79,12 +84,41 @@ pub fn lock_and_send(
     release_on_death: bool,
     release_delay_hours: u32,
 ) -> Result<EncryptedEnvelope, MessagingError> {
-    let envelope = prepare_envelope_for_signing(
+    let _ = (
+        plaintext,
+        content_type,
+        sender_did,
+        recipient_did,
+        sender_signing_key,
+        recipient_x25519_public,
+        metadata,
+        release_on_death,
+        release_delay_hours,
+    );
+    Err(caller_supplied_ephemeral_required())
+}
+
+/// Lock & Send with caller-supplied X25519 ephemeral key material.
+#[allow(clippy::too_many_arguments)]
+pub fn lock_and_send_with_ephemeral(
+    plaintext: &[u8],
+    content_type: ContentType,
+    sender_did: &Did,
+    recipient_did: &Did,
+    sender_signing_key: &SecretKey,
+    recipient_x25519_public: &X25519PublicKey,
+    ephemeral_x25519_keypair: &X25519KeyPair,
+    metadata: ComposeMetadata,
+    release_on_death: bool,
+    release_delay_hours: u32,
+) -> Result<EncryptedEnvelope, MessagingError> {
+    let envelope = prepare_envelope_for_signing_with_ephemeral(
         plaintext,
         content_type,
         sender_did,
         recipient_did,
         recipient_x25519_public,
+        ephemeral_x25519_keypair,
         metadata,
         release_on_death,
         release_delay_hours,
@@ -92,8 +126,12 @@ pub fn lock_and_send(
     sign_prepared_envelope(envelope, sender_signing_key)
 }
 
-/// Encrypt a message and return the unsigned envelope whose signing payload
-/// can be signed outside this crate.
+/// Legacy unsigned-envelope entrypoint.
+///
+/// This fails closed because EXOCHAIN message composition must not fabricate
+/// X25519 key material internally. Use
+/// [`prepare_envelope_for_signing_with_ephemeral`] with a caller-supplied
+/// one-time X25519 keypair.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_envelope_for_signing(
     plaintext: &[u8],
@@ -105,12 +143,36 @@ pub fn prepare_envelope_for_signing(
     release_on_death: bool,
     release_delay_hours: u32,
 ) -> Result<EncryptedEnvelope, MessagingError> {
-    // 1. Generate ephemeral X25519 keypair
-    let ephemeral = kex::generate_ephemeral();
+    let _ = (
+        plaintext,
+        content_type,
+        sender_did,
+        recipient_did,
+        recipient_x25519_public,
+        metadata,
+        release_on_death,
+        release_delay_hours,
+    );
+    Err(caller_supplied_ephemeral_required())
+}
 
-    // 2. ECDH: derive shared symmetric key
+/// Encrypt a message with caller-supplied X25519 ephemeral key material and
+/// return the unsigned envelope whose signing payload can be signed externally.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_envelope_for_signing_with_ephemeral(
+    plaintext: &[u8],
+    content_type: ContentType,
+    sender_did: &Did,
+    recipient_did: &Did,
+    recipient_x25519_public: &X25519PublicKey,
+    ephemeral_x25519_keypair: &X25519KeyPair,
+    metadata: ComposeMetadata,
+    release_on_death: bool,
+    release_delay_hours: u32,
+) -> Result<EncryptedEnvelope, MessagingError> {
+    // 1. ECDH: derive shared symmetric key using caller-supplied ephemeral key.
     let shared_key = kex::derive_shared_key(
-        &ephemeral.secret,
+        &ephemeral_x25519_keypair.secret,
         recipient_x25519_public,
         MESSAGE_KEX_CONTEXT,
     )?;
@@ -121,7 +183,7 @@ pub fn prepare_envelope_for_signing(
         content_type,
         sender_did,
         recipient_did,
-        ephemeral.public.as_bytes(),
+        ephemeral_x25519_keypair.public.as_bytes(),
         &plaintext_hash,
         release_on_death,
         release_delay_hours,
@@ -140,7 +202,7 @@ pub fn prepare_envelope_for_signing(
         id: metadata.id.to_string(),
         sender_did: sender_did.clone(),
         recipient_did: recipient_did.clone(),
-        ephemeral_public_key: *ephemeral.public.as_bytes(),
+        ephemeral_public_key: *ephemeral_x25519_keypair.public.as_bytes(),
         ciphertext,
         content_type,
         signature: exo_core::Signature::empty(),
@@ -151,6 +213,12 @@ pub fn prepare_envelope_for_signing(
     };
 
     Ok(envelope)
+}
+
+fn caller_supplied_ephemeral_required() -> MessagingError {
+    MessagingError::KeyExchangeFailed(
+        "message composition requires caller-supplied ephemeral X25519 keypair".to_owned(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,21 +321,28 @@ mod tests {
         .expect("valid compose metadata")
     }
 
+    fn x25519_keypair(seed: u8) -> kex::X25519KeyPair {
+        kex::X25519KeyPair::from_secret_bytes([seed; 32])
+            .expect("valid deterministic X25519 keypair")
+    }
+
     #[test]
     fn lock_and_send_produces_valid_envelope() {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (_, sender_sk) = generate_keypair();
-        let recipient_kp = kex::X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x21);
+        let ephemeral_kp = x25519_keypair(0x31);
         let metadata = metadata();
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             b"my secret password: hunter2",
             ContentType::Password,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata,
             false,
             0,
@@ -291,14 +366,16 @@ mod tests {
     fn prepare_envelope_for_signing_returns_canonical_payload_without_signature() {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
-        let recipient_kp = kex::X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x22);
+        let ephemeral_kp = x25519_keypair(0x32);
 
-        let envelope = prepare_envelope_for_signing(
+        let envelope = prepare_envelope_for_signing_with_ephemeral(
             b"external signer",
             ContentType::Secret,
             &sender_did,
             &recipient_did,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(),
             false,
             0,
@@ -320,14 +397,16 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (sender_pk, sender_sk) = generate_keypair();
-        let recipient_kp = kex::X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x23);
+        let ephemeral_kp = x25519_keypair(0x33);
 
-        let envelope = prepare_envelope_for_signing(
+        let envelope = prepare_envelope_for_signing_with_ephemeral(
             b"external signer",
             ContentType::Secret,
             &sender_did,
             &recipient_did,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(),
             false,
             0,
@@ -350,14 +429,16 @@ mod tests {
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (_, sender_sk) = generate_keypair();
         let (wrong_pk, _) = generate_keypair();
-        let recipient_kp = kex::X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x24);
+        let ephemeral_kp = x25519_keypair(0x34);
 
-        let envelope = prepare_envelope_for_signing(
+        let envelope = prepare_envelope_for_signing_with_ephemeral(
             b"external signer",
             ContentType::Secret,
             &sender_did,
             &recipient_did,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata(),
             false,
             0,
@@ -381,16 +462,18 @@ mod tests {
         let sender_did = Did::new("did:exo:alice").unwrap();
         let recipient_did = Did::new("did:exo:bob").unwrap();
         let (_, sender_sk) = generate_keypair();
-        let recipient_kp = kex::X25519KeyPair::generate();
+        let recipient_kp = x25519_keypair(0x25);
+        let ephemeral_kp = x25519_keypair(0x35);
         let metadata = metadata();
 
-        let envelope = lock_and_send(
+        let envelope = lock_and_send_with_ephemeral(
             b"Read this after I'm gone",
             ContentType::AfterlifeMessage,
             &sender_did,
             &recipient_did,
             &sender_sk,
             &recipient_kp.public,
+            &ephemeral_kp,
             metadata,
             true,
             72,
@@ -458,5 +541,48 @@ mod tests {
             !production.contains(".encrypt("),
             "compose must not call the implicit vault encryption entrypoint"
         );
+    }
+
+    #[test]
+    fn prepare_envelope_for_signing_requires_caller_supplied_ephemeral_key() {
+        let sender_did = Did::new("did:exo:alice").unwrap();
+        let recipient_did = Did::new("did:exo:bob").unwrap();
+        let recipient_kp = x25519_keypair(0x26);
+
+        let result = prepare_envelope_for_signing(
+            b"external signer",
+            ContentType::Secret,
+            &sender_did,
+            &recipient_did,
+            &recipient_kp.public,
+            metadata(),
+            false,
+            0,
+        );
+
+        assert!(
+            matches!(result, Err(MessagingError::KeyExchangeFailed(reason)) if reason.contains("caller-supplied ephemeral")),
+            "message composition must fail closed unless the caller supplies the ephemeral X25519 keypair"
+        );
+    }
+
+    #[test]
+    fn compose_path_requires_caller_supplied_ephemeral_key() {
+        let source = include_str!("compose.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("prepare_envelope_for_signing_with_ephemeral"),
+            "compose must expose an explicit ephemeral-key entrypoint"
+        );
+        for pattern in ["generate_ephemeral", "X25519KeyPair::generate"] {
+            assert!(
+                !production.contains(pattern),
+                "compose production path must not fabricate X25519 ephemeral key material via {pattern}"
+            );
+        }
     }
 }
