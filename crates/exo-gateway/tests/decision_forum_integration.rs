@@ -1,8 +1,9 @@
 //! Integration tests for APE-58 — decision-forum gateway wiring.
 //!
 //! These tests exercise the `DecisionObject` + quorum domain logic that backs
-//! `POST /api/v1/decisions` without requiring a live database.  They verify the
-//! three acceptance criteria that must hold regardless of network/DB state:
+//! the gateway decision lifecycle without requiring a live database.
+//! They verify the three acceptance criteria that must hold regardless of
+//! network/DB state:
 //!
 //!   1. A valid vote is accepted and the quorum check result is included in the response.
 //!   2. A duplicate voter is rejected (TNC-07 voter independence).
