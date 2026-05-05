@@ -17,6 +17,17 @@
 //! rejects proposals, votes, and commit certificates that cannot be verified
 //! against that resolver. Local proposal and self-vote signatures are produced
 //! over the canonical CBOR payloads defined by `exo-dag::consensus`.
+//!
+//! ## Locking model
+//!
+//! The reactor has two shared synchronous mutexes: `SharedReactorState` for
+//! consensus state and `Arc<Mutex<SqliteDagStore>>` for local DAG persistence.
+//! Async paths must enter these mutexes only through `with_reactor_state_blocking`
+//! or `with_store_blocking`, which move the synchronous critical section onto
+//! `tokio::task::spawn_blocking`. Never hold both mutexes at the same time.
+//! Workflows that need data from both sides must snapshot, release, then acquire
+//! the other mutex in a separate blocking section before performing any async
+//! send, broadcast, or timer operation.
 
 #![allow(clippy::type_complexity, clippy::single_match)]
 
@@ -1385,6 +1396,28 @@ mod tests {
                 "async reactor path still directly locks reactor state: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn reactor_documents_locking_model_and_single_mutex_sections() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("## Locking model"),
+            "reactor docs must spell out the store/state locking model"
+        );
+        assert!(
+            production.contains("Never hold both mutexes at the same time"),
+            "reactor docs must require single-mutex critical sections"
+        );
+        assert!(
+            production.contains("snapshot, release, then acquire"),
+            "reactor docs must define the safe order for workflows needing store and state"
+        );
     }
 
     #[test]
