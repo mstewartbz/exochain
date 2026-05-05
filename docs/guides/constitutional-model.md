@@ -341,9 +341,11 @@ violation never escalates, always denies.
 
 **Rule.** The `AuthorityChain` must (a) be non-empty, (b) be
 topologically valid — each link's `grantee` is the next link's
-`grantor` — (c) terminate at the actor, and (d) every link that
-carries a `grantor_public_key` must have an Ed25519 signature that
-verifies against the canonical payload.
+`grantor` — (c) terminate at the actor, (d) every link that carries a
+`grantor_public_key` must have an Ed25519 signature that verifies
+against the canonical payload, and (e) every requested permission must
+appear in the actor authority context and in every signed chain link's
+permission scope.
 
 **Why.** Delegation is how authority flows through a multi-actor
 system. If the chain is broken or unsigned, there is no chain — just a
@@ -370,6 +372,8 @@ with a valid Ed25519 signature verifying under the supplied public key.
 - Broken topology — `link[0].grantee != link[1].grantor`.
 - Wrong terminal — last link's grantee is not the actor.
 - Tampered signature, wrong public key, malformed key.
+- Requested permission absent from actor permissions or from any link's
+  signed permission scope.
 
 **Escalation special case.** When the *only* invariant that fails is
 `AuthorityChainValid`, the kernel returns `Verdict::Escalated` rather
@@ -379,10 +383,11 @@ temporary problem with a legitimate fix path (contest, re-issue), not
 a malicious attack.
 
 **Violation evidence.** Includes the broken link indices and, for
-signature failures, the grantor/grantee DIDs.
+signature or permission-scope failures, the grantor/grantee DIDs and
+requested permission.
 
 **Code reference.**
-[`crates/exo-gatekeeper/src/invariants.rs:246–357`][invariants-rs]
+[`crates/exo-gatekeeper/src/invariants.rs:331–458`][invariants-rs]
 
 ---
 

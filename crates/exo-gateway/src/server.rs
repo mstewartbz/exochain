@@ -483,7 +483,7 @@ fn deny_all_adjudication_context() -> AdjudicationContext {
         consent_records: vec![],
         bailment_state: BailmentState::None,
         human_override_preserved: true,
-        actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+        actor_permissions: PermissionSet::default(),
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,
@@ -1553,6 +1553,7 @@ fn build_adjudication_context_from_rows(
         })?,
         None => GkChain::default(),
     };
+    let actor_permissions = effective_authority_permissions(&authority_chain);
 
     Ok(AdjudicationContext {
         actor_roles,
@@ -1560,13 +1561,38 @@ fn build_adjudication_context_from_rows(
         consent_records,
         bailment_state,
         human_override_preserved: true,
-        actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+        actor_permissions,
         // Provenance is per-action, not per-actor; callers that need full
         // ProvenanceVerifiable enforcement must attach it before adjudication.
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,
     })
+}
+
+#[cfg(any(test, feature = "production-db"))]
+fn effective_authority_permissions(
+    authority_chain: &exo_gatekeeper::types::AuthorityChain,
+) -> PermissionSet {
+    let Some(first_link) = authority_chain.links.first() else {
+        return PermissionSet::default();
+    };
+
+    let mut effective_permissions = Vec::new();
+    for permission in &first_link.permissions.permissions {
+        if effective_permissions.contains(permission) {
+            continue;
+        }
+        if authority_chain
+            .links
+            .iter()
+            .all(|link| link.permissions.contains(permission))
+        {
+            effective_permissions.push(permission.clone());
+        }
+    }
+
+    PermissionSet::new(effective_permissions)
 }
 
 /// Build an `AdjudicationContext` by loading the actor's roles, consent
@@ -7291,6 +7317,16 @@ mod tests {
         }
     }
 
+    fn action_for_permission(actor: &Did, permission: &str) -> GkActionRequest {
+        GkActionRequest {
+            actor: actor.clone(),
+            action: permission.to_string(),
+            required_permissions: PermissionSet::new(vec![Permission::new(permission)]),
+            is_self_grant: false,
+            modifies_kernel: false,
+        }
+    }
+
     fn db_role_row(actor: &Did, branch: &str) -> crate::db::AgentRoleRow {
         crate::db::AgentRoleRow {
             agent_did: actor.as_str().to_string(),
@@ -7399,6 +7435,46 @@ mod tests {
         assert_eq!(ctx.consent_records.len(), 1);
         assert!(matches!(ctx.bailment_state, BailmentState::Active { .. }));
         assert!(verdict.is_permitted(), "valid DB rows must be permitted");
+    }
+
+    #[test]
+    fn adjudication_context_rows_derive_actor_permissions_from_authority_chain_scope() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:pace-agent").unwrap();
+        let root = Did::new("did:exo:root-grantor").unwrap();
+        let authority_chain = AuthorityChain {
+            links: vec![signed_authority_link_for_permissions(
+                &root,
+                &actor,
+                PermissionSet::new(vec![Permission::new("advance_pace")]),
+            )],
+        };
+        let role_rows = vec![db_role_row(&actor, "executive")];
+        let consent_rows = vec![db_consent_row(&actor, root.as_str())];
+        let chain_row =
+            db_authority_chain_row(&actor, serde_json::to_value(&authority_chain).unwrap());
+
+        let ctx = build_adjudication_context_from_rows(
+            &actor,
+            &role_rows,
+            &consent_rows,
+            Some(&chain_row),
+        )
+        .unwrap();
+        let verdict = kernel.adjudicate(&action_for_permission(&actor, "advance_pace"), &ctx);
+
+        assert!(
+            ctx.actor_permissions
+                .contains(&Permission::new("advance_pace"))
+        );
+        assert!(
+            !ctx.actor_permissions.contains(&Permission::new("vote")),
+            "F-010: DB adjudication context must not synthesize vote permission"
+        );
+        assert!(
+            verdict.is_permitted(),
+            "F-010: action permission backed by DB authority-chain scope must be permitted"
+        );
     }
 
     /// [APE-53 test 1] Scaffold remains deny-all regardless of feature flag.
