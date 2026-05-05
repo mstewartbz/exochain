@@ -1,9 +1,9 @@
 //! Checkpoint finality aggregation for the EXOCHAIN DAG.
 //!
-//! Aggregates MMR event root, SMT state root, finalized height, frontier
-//! tip set, and multi-validator signatures into a single checkpoint payload.
-//! Provides the canonical signing preimage (Spec 9.4) with domain separation
-//! tag `EXOCHAIN-CHECKPOINT-v1`.
+//! Aggregates MMR event root, SMT state root, finalized height, frontier tip
+//! set, and multi-validator signatures into a single checkpoint payload.
+//! Provides the canonical CBOR signing preimage (Spec 9.4) with domain
+//! separation tag `EXOCHAIN-CHECKPOINT-v1`.
 
 use exo_core::{Did, Hash256, Signature};
 use serde::{Deserialize, Serialize};
@@ -70,36 +70,49 @@ impl std::fmt::Debug for ValidatorSignature {
 }
 
 /// Domain separation tag for checkpoint signing (EXOCHAIN Specification v2.2 §9.4).
-pub const CHECKPOINT_DOMAIN_SEP: &[u8] = b"EXOCHAIN-CHECKPOINT-v1";
+pub const CHECKPOINT_SIGNING_DOMAIN: &str = "EXOCHAIN-CHECKPOINT-v1";
+
+/// Legacy byte view of the checkpoint signing domain tag.
+pub const CHECKPOINT_DOMAIN_SEP: &[u8] = CHECKPOINT_SIGNING_DOMAIN.as_bytes();
+
+const CHECKPOINT_SIGNING_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Serialize)]
+struct CheckpointSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    event_root: &'a Hash256,
+    state_root: &'a Hash256,
+    height: u64,
+    finalized_events: u64,
+    frontier: &'a [Hash256],
+}
 
 /// Compute the normative checkpoint signing preimage (EXOCHAIN Specification v2.2 §9.4).
 ///
-/// The preimage layout is:
-/// `[domain_sep | event_root | state_root | height_le | finalized_events_le | frontier_len_le | frontier...]`
-///
-/// Validators sign this preimage to attest to the checkpoint.
+/// Validators sign this domain-separated, versioned canonical CBOR payload to
+/// attest to the checkpoint.
 ///
 /// # Errors
 ///
-/// Returns [`DagError::Serialization`] if a checkpoint field cannot be
-/// represented exactly in the canonical signing frame.
+/// Returns [`DagError::Serialization`] if the canonical signing payload cannot
+/// be serialized.
 pub fn checkpoint_signing_preimage(cp: &CheckpointPayload) -> Result<Vec<u8>> {
+    let payload = CheckpointSigningPayload {
+        domain: CHECKPOINT_SIGNING_DOMAIN,
+        schema_version: CHECKPOINT_SIGNING_SCHEMA_VERSION,
+        event_root: &cp.event_root,
+        state_root: &cp.state_root,
+        height: cp.height,
+        finalized_events: cp.finalized_events,
+        frontier: &cp.frontier,
+    };
     let mut preimage = Vec::new();
-    preimage.extend_from_slice(CHECKPOINT_DOMAIN_SEP);
-    preimage.extend_from_slice(cp.event_root.as_bytes());
-    preimage.extend_from_slice(cp.state_root.as_bytes());
-    preimage.extend_from_slice(&cp.height.to_le_bytes());
-    preimage.extend_from_slice(&cp.finalized_events.to_le_bytes());
-    let frontier_len = u64::try_from(cp.frontier.len()).map_err(|_| {
+    ciborium::ser::into_writer(&payload, &mut preimage).map_err(|e| {
         DagError::Serialization(format!(
-            "checkpoint frontier length {} cannot be represented in canonical signing frame",
-            cp.frontier.len()
+            "checkpoint signing payload canonical CBOR serialization failed: {e}"
         ))
     })?;
-    preimage.extend_from_slice(&frontier_len.to_le_bytes());
-    for frontier_hash in &cp.frontier {
-        preimage.extend_from_slice(frontier_hash.as_bytes());
-    }
     Ok(preimage)
 }
 
@@ -111,8 +124,20 @@ pub fn checkpoint_signing_preimage(cp: &CheckpointPayload) -> Result<Vec<u8>> {
 #[allow(clippy::expect_used)]
 mod proptests {
     use proptest::prelude::*;
+    use serde::Deserialize;
 
     use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct CheckpointSigningPayloadForTest {
+        domain: String,
+        schema_version: u16,
+        event_root: Hash256,
+        state_root: Hash256,
+        height: u64,
+        finalized_events: u64,
+        frontier: Vec<Hash256>,
+    }
 
     fn arb_hash256() -> impl Strategy<Value = Hash256> {
         any::<[u8; 32]>().prop_map(Hash256::from_bytes)
@@ -142,6 +167,11 @@ mod proptests {
         checkpoint_signing_preimage(cp).expect("test checkpoint preimage must encode")
     }
 
+    fn decoded_preimage(cp: &CheckpointPayload) -> CheckpointSigningPayloadForTest {
+        ciborium::from_reader(&preimage(cp)[..])
+            .expect("checkpoint signing preimage must decode as CBOR")
+    }
+
     proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(100))]
 
@@ -153,25 +183,23 @@ mod proptests {
             prop_assert_eq!(p1, p2);
         }
 
-        /// Domain separation tag must always lead the preimage.
+        /// Domain separation tag must always be carried inside the CBOR payload.
         #[test]
-        fn preimage_starts_with_domain_sep(cp in arb_checkpoint()) {
-            let preimage = preimage(&cp);
-            prop_assert!(preimage.starts_with(CHECKPOINT_DOMAIN_SEP));
+        fn preimage_carries_domain_sep(cp in arb_checkpoint()) {
+            let decoded = decoded_preimage(&cp);
+            prop_assert_eq!(decoded.domain.as_bytes(), CHECKPOINT_DOMAIN_SEP);
+            prop_assert_eq!(decoded.schema_version, CHECKPOINT_SIGNING_SCHEMA_VERSION);
         }
 
-        /// Preimage length must equal the sum of all fixed and variable fields.
+        /// The CBOR envelope must preserve every checkpoint field exactly.
         #[test]
-        fn preimage_length_accounts_for_all_fields(cp in arb_checkpoint()) {
-            let expected = CHECKPOINT_DOMAIN_SEP.len() // 22
-                + 32  // event_root
-                + 32  // state_root
-                + 8   // height (le64)
-                + 8   // finalized_events (le64)
-                + 8   // frontier length (le64)
-                + 32 * cp.frontier.len();
-            let preimage = preimage(&cp);
-            prop_assert_eq!(preimage.len(), expected);
+        fn preimage_cbor_envelope_preserves_all_fields(cp in arb_checkpoint()) {
+            let decoded = decoded_preimage(&cp);
+            prop_assert_eq!(decoded.event_root, cp.event_root);
+            prop_assert_eq!(decoded.state_root, cp.state_root);
+            prop_assert_eq!(decoded.height, cp.height);
+            prop_assert_eq!(decoded.finalized_events, cp.finalized_events);
+            prop_assert_eq!(decoded.frontier, cp.frontier);
         }
 
         /// Any change to `height` must change the preimage.
@@ -231,7 +259,20 @@ mod proptests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct CheckpointSigningPayloadForTest {
+        domain: String,
+        schema_version: u16,
+        event_root: Hash256,
+        state_root: Hash256,
+        height: u64,
+        finalized_events: u64,
+        frontier: Vec<Hash256>,
+    }
 
     fn test_did() -> Did {
         Did::new("did:exo:validator1").expect("valid")
@@ -239,6 +280,11 @@ mod tests {
 
     fn preimage(cp: &CheckpointPayload) -> Vec<u8> {
         checkpoint_signing_preimage(cp).expect("test checkpoint preimage must encode")
+    }
+
+    fn decode_signing_payload(preimage: &[u8]) -> CheckpointSigningPayloadForTest {
+        ciborium::from_reader(preimage)
+            .expect("checkpoint signing preimage must be a canonical CBOR payload")
     }
 
     #[test]
@@ -258,7 +304,39 @@ mod tests {
     }
 
     #[test]
-    fn preimage_starts_with_domain_sep() {
+    fn preimage_is_domain_separated_versioned_cbor() {
+        let event_root = Hash256::digest(b"events");
+        let state_root = Hash256::digest(b"state");
+        let frontier = vec![Hash256::digest(b"tip1"), Hash256::digest(b"tip2")];
+        let cp = CheckpointPayload {
+            event_root,
+            state_root,
+            height: 42,
+            finalized_events: 100,
+            frontier: frontier.clone(),
+            validator_sigs: vec![],
+        };
+
+        let decoded = decode_signing_payload(&preimage(&cp));
+
+        assert_eq!(
+            decoded.domain.as_bytes(),
+            CHECKPOINT_DOMAIN_SEP,
+            "checkpoint signing payload must carry the checkpoint domain tag"
+        );
+        assert_eq!(
+            decoded.schema_version, 1,
+            "checkpoint signing payload must carry an explicit schema version"
+        );
+        assert_eq!(decoded.event_root, event_root);
+        assert_eq!(decoded.state_root, state_root);
+        assert_eq!(decoded.height, 42);
+        assert_eq!(decoded.finalized_events, 100);
+        assert_eq!(decoded.frontier, frontier);
+    }
+
+    #[test]
+    fn preimage_carries_domain_sep() {
         let cp = CheckpointPayload {
             event_root: Hash256::ZERO,
             state_root: Hash256::ZERO,
@@ -268,8 +346,9 @@ mod tests {
             validator_sigs: vec![],
         };
 
-        let preimage = preimage(&cp);
-        assert!(preimage.starts_with(CHECKPOINT_DOMAIN_SEP));
+        let decoded = decode_signing_payload(&preimage(&cp));
+        assert_eq!(decoded.domain.as_bytes(), CHECKPOINT_DOMAIN_SEP);
+        assert_eq!(decoded.schema_version, CHECKPOINT_SIGNING_SCHEMA_VERSION);
     }
 
     #[test]
@@ -300,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn preimage_encodes_frontier_length_before_frontier_hashes() {
+    fn preimage_decodes_frontier_hashes_in_order() {
         let tip1 = Hash256::digest(b"frontier-tip-1");
         let tip2 = Hash256::digest(b"frontier-tip-2");
         let cp = CheckpointPayload {
@@ -312,16 +391,13 @@ mod tests {
             validator_sigs: vec![],
         };
 
-        let preimage = preimage(&cp);
-        let offset = CHECKPOINT_DOMAIN_SEP.len() + 32 + 32 + 8 + 8;
+        let decoded = decode_signing_payload(&preimage(&cp));
 
-        assert_eq!(&preimage[offset..offset + 8], &2u64.to_le_bytes());
-        assert_eq!(&preimage[offset + 8..offset + 40], tip1.as_bytes());
-        assert_eq!(&preimage[offset + 40..offset + 72], tip2.as_bytes());
+        assert_eq!(decoded.frontier, vec![tip1, tip2]);
     }
 
     #[test]
-    fn checkpoint_preimage_does_not_saturate_frontier_length() {
+    fn checkpoint_preimage_uses_cbor_instead_of_raw_concatenation() {
         let production = include_str!("checkpoint.rs");
         let preimage_section = production
             .split("pub fn checkpoint_signing_preimage")
@@ -334,6 +410,18 @@ mod tests {
         assert!(
             !preimage_section.contains("unwrap_or(u64::MAX)"),
             "checkpoint signing preimage must fail closed instead of saturating frontier length"
+        );
+        assert!(
+            preimage_section.contains("ciborium::ser::into_writer"),
+            "checkpoint signing preimage must use canonical CBOR serialization"
+        );
+        assert!(
+            !preimage_section.contains("extend_from_slice"),
+            "checkpoint signing preimage must not use ad hoc byte concatenation"
+        );
+        assert!(
+            !preimage_section.contains("to_le_bytes"),
+            "checkpoint signing preimage must not hand-roll integer byte layouts"
         );
     }
 
