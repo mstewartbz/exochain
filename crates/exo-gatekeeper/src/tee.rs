@@ -31,8 +31,7 @@ pub enum TeePlatform {
 /// The deployment environment for TEE policy enforcement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TeeEnvironment {
-    /// Production — simulated TEE is rejected unless the
-    /// `allow-simulated-tee` feature flag is enabled.
+    /// Production — simulated TEE fixtures are rejected.
     Production,
     /// Testing — all platforms including Simulated are permitted.
     Testing,
@@ -130,13 +129,8 @@ impl TeePolicy {
 /// Check whether a platform is allowed by policy, enforcing the production
 /// gate against simulated TEEs.
 fn is_platform_allowed(platform: &TeePlatform, policy: &TeePolicy) -> bool {
-    if *platform == TeePlatform::Simulated {
-        #[cfg(not(feature = "allow-simulated-tee"))]
-        {
-            if policy.environment == TeeEnvironment::Production {
-                return false;
-            }
-        }
+    if *platform == TeePlatform::Simulated && policy.environment != TeeEnvironment::Testing {
+        return false;
     }
     policy.accepted_platforms.contains(platform)
 }
@@ -193,19 +187,7 @@ fn synthetic_signature_allowed(attestation: &TeeAttestation, policy: &TeePolicy)
         return false;
     }
 
-    if policy.environment == TeeEnvironment::Testing {
-        return true;
-    }
-
-    #[cfg(feature = "allow-simulated-tee")]
-    {
-        policy.environment == TeeEnvironment::Production
-    }
-
-    #[cfg(not(feature = "allow-simulated-tee"))]
-    {
-        false
-    }
+    policy.environment == TeeEnvironment::Testing
 }
 
 fn measurement_hash_eq_ct(left: &[u8; 32], right: &[u8; 32]) -> bool {
