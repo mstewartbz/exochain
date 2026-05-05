@@ -1788,15 +1788,17 @@ async fn handle_agents_list(
 
 /// GET /api/v1/agents/:did — resolve a single DID document by its identifier.
 ///
-/// Requires a DB-backed bearer session before reading registry state.
+/// Requires a DB-backed bearer session and proves tenant membership before
+/// reading registry state.
 async fn handle_agent_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(did_str): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_authenticated_session_actor_from_header(&state, &headers).await {
-        return auth_boundary_error_response(e);
-    }
+    let actor = match require_authenticated_session_user_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
     let did = match Did::new(&did_str) {
         Ok(d) => d,
         Err(_) => {
@@ -1807,6 +1809,27 @@ async fn handle_agent_get(
                 .into_response();
         }
     };
+    let db = match state.require_db() {
+        Ok(db) => db,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "database unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    match db::find_agent_by_did(db, did.as_str(), actor.tenant_id.as_str()).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "DID not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error_response(e, "agent lookup query", "agent lookup failed"),
+    }
     match resolve_did_document(&state, did).await {
         Ok(Some(doc)) => Json(doc).into_response(),
         Ok(None) => (
@@ -4817,6 +4840,39 @@ mod tests {
     }
 
     #[test]
+    fn agent_get_uses_authenticated_actor_tenant_for_lookup() {
+        let source = include_str!("server.rs");
+        let handler = source_between(
+            source,
+            "async fn handle_agent_get",
+            "/// GET /api/v1/identity/:did/score",
+        );
+
+        assert!(
+            handler.contains("require_authenticated_session_user_from_header"),
+            "agent get must load the authenticated session actor's tenant profile"
+        );
+        assert!(
+            handler.contains("state.require_db()"),
+            "agent get must fail closed without the DB-backed tenant directory"
+        );
+        assert!(
+            handler.contains("db::find_agent_by_did(db, did.as_str(), actor.tenant_id.as_str())"),
+            "agent get must query agents using the authenticated actor tenant"
+        );
+        let agent_lookup = handler
+            .find("db::find_agent_by_did(db, did.as_str(), actor.tenant_id.as_str())")
+            .expect("agent lookup must exist");
+        let did_resolution = handler
+            .find("resolve_did_document(&state, did).await")
+            .expect("tenant-proven agent lookup must resolve the persisted DID document");
+        assert!(
+            agent_lookup < did_resolution,
+            "agent get must prove tenant membership before resolving any DID document"
+        );
+    }
+
+    #[test]
     fn decision_post_route_dispatches_to_create_handler_not_vote_handler() {
         let source = include_str!("server.rs");
         let router = source_between(
@@ -7326,6 +7382,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_get_rejects_cross_tenant_registered_did() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let reader = "did:exo:agent-get-tenant-b-reader";
+        let agent = "did:exo:agent-get-tenant-a-agent";
+        let token = "agent-get-cross-tenant-token";
+        insert_test_user(&pool, reader, "tenant-agent-get-b").await;
+        insert_test_session(&pool, token, reader).await;
+        insert_test_agent(
+            &pool,
+            agent,
+            "did:exo:agent-get-tenant-a-owner",
+            "tenant-agent-get-a",
+        )
+        .await;
+
+        let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
+        registry
+            .write()
+            .unwrap()
+            .register(minimal_doc(agent))
+            .unwrap();
+        let app = build_router(AppState::new(Some(pool.clone()), registry));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/agents/{agent}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "agent get must not disclose a DID document for an agent outside the authenticated actor tenant"
+        );
+
+        sqlx::query("DELETE FROM agents WHERE did = $1 OR owner_did = $2")
+            .bind(agent)
+            .bind("did:exo:agent-get-tenant-a-owner")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn advance_pace_without_authority_returns_403() {
         let pool = match gateway_test_pool().await {
             Some(pool) => pool,
@@ -7445,7 +7562,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let persisted = db::find_agent_by_did(&pool, did).await.unwrap().unwrap();
+        let persisted = db::find_agent_by_did(&pool, did, "tenant-pace-agent")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(persisted.pace_status, "Advanced");
 
         cleanup_pace_route_fixture(&pool, did, token).await;
