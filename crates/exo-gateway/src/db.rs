@@ -1600,6 +1600,9 @@ mod tests {
             include_str!("../migrations/20260504000002_add_gateway_tenant_scope_indexes.sql"),
             include_str!("../migrations/20260504000003_create_did_documents.sql"),
             include_str!("../migrations/20260504000004_add_gateway_identity_erasure.sql"),
+            include_str!(
+                "../migrations/20260505000001_add_audit_decision_tenant_sequence_index.sql"
+            ),
         ]
         .join("\n")
     }
@@ -1820,6 +1823,7 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS idx_delegations_active_delegatee ON delegations(delegatee) WHERE revoked_at IS NULL;",
             "CREATE INDEX IF NOT EXISTS idx_delegations_active_delegator ON delegations(delegator) WHERE revoked_at IS NULL;",
             "CREATE INDEX IF NOT EXISTS idx_audit_entries_actor_event_type ON audit_entries(actor, event_type);",
+            "CREATE INDEX IF NOT EXISTS idx_audit_entries_decision_tenant_sequence ON audit_entries(decision_id, tenant_id, sequence);",
         ] {
             assert!(
                 migrations.contains(index_sql),
