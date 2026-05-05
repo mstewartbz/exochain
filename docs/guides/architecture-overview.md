@@ -355,17 +355,27 @@ EXOCHAIN uses libp2p for networking. The protocol set:
 | `mdns`     | Local-network peer discovery (dev environments)            |
 | `tcp`/`quic` | Transport                                                |
 
-### 5.2 BFT-HotStuff derivative
+### 5.2 BFT commit-certificate consensus
 
-The consensus crate is `exo-consensus`. The protocol is a
-HotStuff-derivative with three-phase commit (Prepare → PreCommit →
-Commit → Decide), view-change on timeout, and checkpoint finality on
-decide. Safety: `f < n/3`, i.e. the system tolerates up to one-third
-Byzantine validators.
+The DAG finality path is implemented in `exo-dag::consensus` and driven by
+the node reactor. It is a deterministic commit-certificate protocol over an
+explicit `BTreeSet` validator set: validators sign votes for a DAG node hash,
+the node commits only when it can verify a certificate containing distinct
+valid validator votes above the >2/3 threshold, and the certificate is then
+stored and broadcast.
 
-A checkpoint is deterministically final once committed. No
-probabilistic "longest chain" ambiguity, no reorganisations, no
-rollbacks.
+Current liveness boundary: this implementation does not use a leader, leader
+election, or HotStuff view-change. The reactor advances rounds on the
+configured `round_timeout_ms`, and sentinels report stalled rounds, but
+progress still depends on eventual message delivery, valid validator public
+keys, and at least quorum validators being online and voting. Under a
+permanent partition, insufficient online validators, or missing validator key
+material, the system preserves safety by refusing commitment instead of
+claiming liveness.
+
+A checkpoint is deterministically final once committed by a verified commit
+certificate. No probabilistic "longest chain" ambiguity, no reorganisations,
+no rollbacks.
 
 ### 5.3 Validator rotation and PACE
 
