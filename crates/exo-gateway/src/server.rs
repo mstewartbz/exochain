@@ -1,6 +1,6 @@
 //! HTTP server skeleton — gateway configuration, lifecycle, and axum routing.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     net::SocketAddr,
     sync::{Arc, Mutex, RwLock},
@@ -64,6 +64,13 @@ const STRICT_TRANSPORT_SECURITY_VALUE: &str = "max-age=63072000; includeSubDomai
 const CONTENT_SECURITY_POLICY_VALUE: &str =
     "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const PERMISSIONS_POLICY_VALUE: &str = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
+const LAYOUT_TEMPLATE_MAX_ID_BYTES: usize = 128;
+const LAYOUT_TEMPLATE_MAX_NAME_BYTES: usize = 256;
+const LAYOUT_TEMPLATE_MAX_ITEMS: usize = 128;
+const LAYOUT_TEMPLATE_MAX_HIDDEN_PANELS: usize = 128;
+const LAYOUT_TEMPLATE_GRID_COLS: u64 = 24;
+const LAYOUT_TEMPLATE_MAX_ROWS: u64 = 1024;
+const LAYOUT_TEMPLATE_MAX_HEIGHT: u64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayRateLimitOutcome {
@@ -845,6 +852,36 @@ impl LayoutTemplateMetadata {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct LayoutTemplateUpsert {
+    id: String,
+    name: String,
+    layout_json: serde_json::Value,
+    hidden_panels: serde_json::Value,
+}
+
+impl LayoutTemplateUpsert {
+    fn from_body(body: &serde_json::Value) -> Result<Self> {
+        let object = body
+            .as_object()
+            .ok_or_else(|| metadata_error("layout template request body must be a JSON object"))?;
+        validate_layout_template_top_level_fields(object)?;
+        validate_layout_template_builtin_claim(object)?;
+
+        let id = required_layout_template_identifier(body, "id")?;
+        let name = required_layout_template_name(body)?;
+        validate_layout_template_layout(body)?;
+        validate_layout_template_hidden_panels(body)?;
+
+        Ok(Self {
+            id,
+            name,
+            layout_json: body["layout"].clone(),
+            hidden_panels: body["hiddenPanels"].clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FeedbackIssueCreateMetadata {
     id: String,
@@ -903,6 +940,338 @@ impl IdentityErasureMetadata {
             erased_at: required_nonzero_i64(body, "erasedAt")?,
         })
     }
+}
+
+fn validate_layout_template_top_level_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "id" | "name" | "layout" | "hiddenPanels" | "isBuiltIn" | "createdAt" | "updatedAt"
+        ) {
+            return Err(metadata_error(format!(
+                "layout template field {field} is not part of the accepted request schema"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_layout_template_builtin_claim(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let Some(value) = object.get("isBuiltIn") else {
+        return Ok(());
+    };
+    match value.as_bool() {
+        Some(false) => Ok(()),
+        Some(true) => Err(metadata_error(
+            "built-in layout templates are code-owned and cannot be persisted by callers",
+        )),
+        None => Err(metadata_error(
+            "isBuiltIn must be false when supplied by a layout template caller",
+        )),
+    }
+}
+
+fn required_layout_template_identifier(body: &serde_json::Value, field: &str) -> Result<String> {
+    let value = required_nonempty_string(body, field)?;
+    validate_layout_template_identifier(&value, field)
+}
+
+fn validate_layout_template_identifier(raw: &str, field: &str) -> Result<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(metadata_error(format!("{field} must not be empty")));
+    }
+    if value.len() > LAYOUT_TEMPLATE_MAX_ID_BYTES {
+        return Err(metadata_error(format!(
+            "{field} must be no more than {LAYOUT_TEMPLATE_MAX_ID_BYTES} ASCII bytes"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(metadata_error(format!(
+            "{field} must contain only ASCII letters, digits, '-', '_', '.', or ':'"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn required_layout_template_name(body: &serde_json::Value) -> Result<String> {
+    let value = required_nonempty_string(body, "name")?;
+    let trimmed = value.trim();
+    if trimmed.len() > LAYOUT_TEMPLATE_MAX_NAME_BYTES {
+        return Err(metadata_error(format!(
+            "name must be no more than {LAYOUT_TEMPLATE_MAX_NAME_BYTES} UTF-8 bytes"
+        )));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(metadata_error("name must not contain control characters"));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn validate_layout_template_layout(body: &serde_json::Value) -> Result<()> {
+    let layout = body
+        .get("layout")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| metadata_error("layout must be a caller-supplied JSON array"))?;
+    if layout.len() > LAYOUT_TEMPLATE_MAX_ITEMS {
+        return Err(metadata_error(format!(
+            "layout must contain no more than {LAYOUT_TEMPLATE_MAX_ITEMS} grid items"
+        )));
+    }
+
+    let mut seen_ids = BTreeSet::new();
+    for (index, item) in layout.iter().enumerate() {
+        validate_layout_template_item(item, index, &mut seen_ids)?;
+    }
+    Ok(())
+}
+
+fn validate_layout_template_item(
+    item: &serde_json::Value,
+    index: usize,
+    seen_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| metadata_error(format!("layout[{index}] must be a JSON object")))?;
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "i" | "x"
+                | "y"
+                | "w"
+                | "h"
+                | "minW"
+                | "minH"
+                | "maxW"
+                | "maxH"
+                | "static"
+                | "isDraggable"
+                | "isResizable"
+        ) {
+            return Err(metadata_error(format!(
+                "layout[{index}].{field} is not part of the accepted layout item schema"
+            )));
+        }
+    }
+
+    let id = object
+        .get("i")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| metadata_error(format!("layout[{index}].i must be a string")))?;
+    let id = validate_layout_template_identifier(id, &format!("layout[{index}].i"))?;
+    if !seen_ids.insert(id) {
+        return Err(metadata_error(format!(
+            "layout[{index}].i duplicates another layout item"
+        )));
+    }
+
+    let x = required_layout_template_u64(object, "x", index)?;
+    let y = required_layout_template_u64(object, "y", index)?;
+    let w = required_layout_template_u64(object, "w", index)?;
+    let h = required_layout_template_u64(object, "h", index)?;
+    validate_layout_template_item_geometry(index, x, y, w, h)?;
+
+    let min_w = optional_layout_template_u64(object, "minW", index)?;
+    let min_h = optional_layout_template_u64(object, "minH", index)?;
+    let max_w = optional_layout_template_u64(object, "maxW", index)?;
+    let max_h = optional_layout_template_u64(object, "maxH", index)?;
+    validate_layout_template_optional_dimension(
+        index,
+        "minW",
+        min_w,
+        1,
+        LAYOUT_TEMPLATE_GRID_COLS,
+    )?;
+    validate_layout_template_optional_dimension(
+        index,
+        "minH",
+        min_h,
+        1,
+        LAYOUT_TEMPLATE_MAX_HEIGHT,
+    )?;
+    validate_layout_template_optional_dimension(
+        index,
+        "maxW",
+        max_w,
+        1,
+        LAYOUT_TEMPLATE_GRID_COLS,
+    )?;
+    validate_layout_template_optional_dimension(
+        index,
+        "maxH",
+        max_h,
+        1,
+        LAYOUT_TEMPLATE_MAX_HEIGHT,
+    )?;
+    if let Some(min_w) = min_w
+        && min_w > w
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}].minW must not exceed layout[{index}].w"
+        )));
+    }
+    if let Some(min_h) = min_h
+        && min_h > h
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}].minH must not exceed layout[{index}].h"
+        )));
+    }
+    if let Some(max_w) = max_w
+        && max_w < w
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}].maxW must not be less than layout[{index}].w"
+        )));
+    }
+    if let Some(max_h) = max_h
+        && max_h < h
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}].maxH must not be less than layout[{index}].h"
+        )));
+    }
+
+    validate_layout_template_optional_bool(object, "static", index)?;
+    validate_layout_template_optional_bool(object, "isDraggable", index)?;
+    validate_layout_template_optional_bool(object, "isResizable", index)?;
+    Ok(())
+}
+
+fn required_layout_template_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    index: usize,
+) -> Result<u64> {
+    object
+        .get(field)
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| {
+            metadata_error(format!(
+                "layout[{index}].{field} must be an unsigned integer"
+            ))
+        })
+}
+
+fn optional_layout_template_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<u64>> {
+    object
+        .get(field)
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                metadata_error(format!(
+                    "layout[{index}].{field} must be an unsigned integer"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn validate_layout_template_item_geometry(
+    index: usize,
+    x: u64,
+    y: u64,
+    w: u64,
+    h: u64,
+) -> Result<()> {
+    if w == 0 || w > LAYOUT_TEMPLATE_GRID_COLS {
+        return Err(metadata_error(format!(
+            "layout[{index}].w must be between 1 and {LAYOUT_TEMPLATE_GRID_COLS}"
+        )));
+    }
+    if h == 0 || h > LAYOUT_TEMPLATE_MAX_HEIGHT {
+        return Err(metadata_error(format!(
+            "layout[{index}].h must be between 1 and {LAYOUT_TEMPLATE_MAX_HEIGHT}"
+        )));
+    }
+    if x >= LAYOUT_TEMPLATE_GRID_COLS {
+        return Err(metadata_error(format!(
+            "layout[{index}].x must be less than {LAYOUT_TEMPLATE_GRID_COLS}"
+        )));
+    }
+    if x.checked_add(w)
+        .is_none_or(|end| end > LAYOUT_TEMPLATE_GRID_COLS)
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}] must fit within the {LAYOUT_TEMPLATE_GRID_COLS}-column grid"
+        )));
+    }
+    if y > LAYOUT_TEMPLATE_MAX_ROWS {
+        return Err(metadata_error(format!(
+            "layout[{index}].y must be no more than {LAYOUT_TEMPLATE_MAX_ROWS}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_layout_template_optional_dimension(
+    index: usize,
+    field: &str,
+    value: Option<u64>,
+    min: u64,
+    max: u64,
+) -> Result<()> {
+    if let Some(value) = value
+        && (value < min || value > max)
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}].{field} must be between {min} and {max}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_layout_template_optional_bool(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    index: usize,
+) -> Result<()> {
+    if object
+        .get(field)
+        .is_some_and(|value| value.as_bool().is_none())
+    {
+        return Err(metadata_error(format!(
+            "layout[{index}].{field} must be a boolean"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_layout_template_hidden_panels(body: &serde_json::Value) -> Result<()> {
+    let hidden_panels = body
+        .get("hiddenPanels")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| metadata_error("hiddenPanels must be a caller-supplied JSON array"))?;
+    if hidden_panels.len() > LAYOUT_TEMPLATE_MAX_HIDDEN_PANELS {
+        return Err(metadata_error(format!(
+            "hiddenPanels must contain no more than {LAYOUT_TEMPLATE_MAX_HIDDEN_PANELS} entries"
+        )));
+    }
+
+    let mut seen_ids = BTreeSet::new();
+    for (index, value) in hidden_panels.iter().enumerate() {
+        let id = value
+            .as_str()
+            .ok_or_else(|| metadata_error(format!("hiddenPanels[{index}] must be a string")))?;
+        let id = validate_layout_template_identifier(id, &format!("hiddenPanels[{index}]"))?;
+        if !seen_ids.insert(id) {
+            return Err(metadata_error(format!(
+                "hiddenPanels[{index}] duplicates another hidden panel"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn required_nonempty_string(body: &serde_json::Value, field: &str) -> Result<String> {
@@ -2467,6 +2836,10 @@ async fn handle_layout_template_put(
     if let Err(e) = reject_caller_supplied_builtin_layout(&body) {
         return metadata_error_response(e);
     }
+    let template = match LayoutTemplateUpsert::from_body(&body) {
+        Ok(template) => template,
+        Err(e) => return metadata_error_response(e),
+    };
     let db = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
@@ -2477,33 +2850,14 @@ async fn handle_layout_template_put(
                 .into_response();
         }
     };
-    let id = match body.get("id").and_then(|v| v.as_str()) {
-        Some(s) => s.to_owned(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "missing 'id' field" })),
-            )
-                .into_response();
-        }
-    };
-    let name = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Untitled");
-    let layout_json = body.get("layout").cloned().unwrap_or(serde_json::json!([]));
-    let hidden_panels = body
-        .get("hiddenPanels")
-        .cloned()
-        .unwrap_or(serde_json::json!([]));
 
     match crate::db::upsert_layout_template(
         db,
-        &id,
+        &template.id,
         Some(actor.as_str()),
-        name,
-        &layout_json,
-        &hidden_panels,
+        &template.name,
+        &template.layout_json,
+        &template.hidden_panels,
         false,
         metadata.created_at,
         metadata.updated_at,
@@ -2512,7 +2866,7 @@ async fn handle_layout_template_put(
     {
         Ok(true) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "id": id, "status": "saved" })),
+            Json(serde_json::json!({ "id": template.id, "status": "saved" })),
         )
             .into_response(),
         Ok(false) => (
@@ -3119,6 +3473,7 @@ mod tests {
         hlc::HybridClock,
     };
     use exo_identity::did::{DidDocument, VerificationMethod};
+    use sqlx::Row;
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
@@ -5823,6 +6178,286 @@ mod tests {
             LayoutTemplateMetadata::from_body(&missing_updated_at),
             Err(GatewayError::BadRequest(reason)) if reason.contains("updatedAt")
         ));
+    }
+
+    fn valid_layout_template_body() -> serde_json::Value {
+        serde_json::json!({
+            "id": "layout-1",
+            "name": "Layout One",
+            "layout": [
+                {
+                    "i": "panel-1",
+                    "x": 0,
+                    "y": 0,
+                    "w": 6,
+                    "h": 4,
+                    "minW": 4,
+                    "minH": 2,
+                    "isResizable": true
+                }
+            ],
+            "hiddenPanels": ["panel-2"],
+            "isBuiltIn": false,
+            "createdAt": 10_000,
+            "updatedAt": 10_001
+        })
+    }
+
+    #[test]
+    fn layout_template_upsert_accepts_canonical_array_payload() {
+        let body = valid_layout_template_body();
+
+        let template = LayoutTemplateUpsert::from_body(&body).unwrap();
+
+        assert_eq!(template.id, "layout-1");
+        assert_eq!(template.name, "Layout One");
+        assert!(template.layout_json.as_array().is_some());
+        assert!(template.hidden_panels.as_array().is_some());
+    }
+
+    #[test]
+    fn layout_template_upsert_rejects_defaulted_or_unvalidated_shapes() {
+        let cases = [
+            (
+                "missing name",
+                serde_json::json!({
+                    "id": "layout-1",
+                    "layout": [],
+                    "hiddenPanels": [],
+                    "createdAt": 10_000,
+                    "updatedAt": 10_001
+                }),
+                "name",
+            ),
+            (
+                "string layout",
+                serde_json::json!({
+                    "id": "layout-1",
+                    "name": "Layout One",
+                    "layout": "[{\"i\":\"panel-1\",\"x\":0,\"y\":0,\"w\":6,\"h\":4}]",
+                    "hiddenPanels": [],
+                    "createdAt": 10_000,
+                    "updatedAt": 10_001
+                }),
+                "layout",
+            ),
+            (
+                "object hidden panels",
+                serde_json::json!({
+                    "id": "layout-1",
+                    "name": "Layout One",
+                    "layout": [],
+                    "hiddenPanels": {"panel-1": true},
+                    "createdAt": 10_000,
+                    "updatedAt": 10_001
+                }),
+                "hiddenPanels",
+            ),
+        ];
+
+        for (case, body, expected_reason) in cases {
+            let err = LayoutTemplateUpsert::from_body(&body).unwrap_err();
+            assert!(
+                matches!(&err, GatewayError::BadRequest(reason) if reason.contains(expected_reason)),
+                "{case} should reject with {expected_reason}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_template_upsert_rejects_malformed_layout_items() {
+        let cases = [
+            (
+                "unknown item field",
+                serde_json::json!([
+                    {"i": "panel-1", "x": 0, "y": 0, "w": 6, "h": 4, "html": "<script>"}
+                ]),
+                "not part of the accepted layout item schema",
+            ),
+            (
+                "duplicate item id",
+                serde_json::json!([
+                    {"i": "panel-1", "x": 0, "y": 0, "w": 6, "h": 4},
+                    {"i": "panel-1", "x": 6, "y": 0, "w": 6, "h": 4}
+                ]),
+                "duplicates",
+            ),
+            (
+                "grid overflow",
+                serde_json::json!([
+                    {"i": "panel-1", "x": 20, "y": 0, "w": 6, "h": 4}
+                ]),
+                "24-column grid",
+            ),
+            (
+                "fractional coordinate",
+                serde_json::json!([
+                    {"i": "panel-1", "x": 0.5, "y": 0, "w": 6, "h": 4}
+                ]),
+                "unsigned integer",
+            ),
+        ];
+
+        for (case, layout, expected_reason) in cases {
+            let mut body = valid_layout_template_body();
+            body["layout"] = layout;
+            let err = LayoutTemplateUpsert::from_body(&body).unwrap_err();
+            assert!(
+                matches!(&err, GatewayError::BadRequest(reason) if reason.contains(expected_reason)),
+                "{case} should reject with {expected_reason}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_template_upsert_rejects_top_level_extras_builtin_and_hidden_duplicates() {
+        let mut extra_field = valid_layout_template_body();
+        extra_field["rawHtml"] = serde_json::json!("<script>");
+        let extra_err = LayoutTemplateUpsert::from_body(&extra_field).unwrap_err();
+        assert!(
+            matches!(&extra_err, GatewayError::BadRequest(reason) if reason.contains("not part of the accepted request schema")),
+            "unexpected extra field error: {extra_err}"
+        );
+
+        let mut builtin_claim = valid_layout_template_body();
+        builtin_claim["isBuiltIn"] = serde_json::json!(true);
+        let builtin_err = LayoutTemplateUpsert::from_body(&builtin_claim).unwrap_err();
+        assert!(
+            matches!(&builtin_err, GatewayError::BadRequest(reason) if reason.contains("code-owned")),
+            "unexpected built-in claim error: {builtin_err}"
+        );
+
+        let mut duplicate_hidden = valid_layout_template_body();
+        duplicate_hidden["hiddenPanels"] = serde_json::json!(["panel-1", "panel-1"]);
+        let duplicate_err = LayoutTemplateUpsert::from_body(&duplicate_hidden).unwrap_err();
+        assert!(
+            matches!(&duplicate_err, GatewayError::BadRequest(reason) if reason.contains("duplicates")),
+            "unexpected hidden-panel duplicate error: {duplicate_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn layout_template_put_rejects_stringified_layout_and_persists_canonical_array() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let did = "did:exo:layout-shape";
+        let token = "layout-shape-token";
+        let id = "layout-shape-regression";
+        insert_test_session(&pool, token, did).await;
+        sqlx::query("DELETE FROM layout_templates WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let stringified_body = serde_json::to_string(&serde_json::json!({
+            "id": id,
+            "name": "Layout Shape Regression",
+            "layout": "[{\"i\":\"panel-1\",\"x\":0,\"y\":0,\"w\":6,\"h\":4}]",
+            "hiddenPanels": [],
+            "createdAt": 10_000,
+            "updatedAt": 10_001
+        }))
+        .unwrap();
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/layout-templates")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(stringified_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let count_after_reject: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM layout_templates WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count_after_reject, 0);
+
+        let mut canonical = valid_layout_template_body();
+        canonical["id"] = serde_json::json!(id);
+        let accepted = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/layout-templates")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(canonical.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+
+        let row = sqlx::query(
+            "SELECT user_did, layout_json, hidden_panels FROM layout_templates WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("user_did"),
+            Some(did.to_owned())
+        );
+        assert!(
+            row.get::<serde_json::Value, _>("layout_json")
+                .as_array()
+                .is_some()
+        );
+        assert!(
+            row.get::<serde_json::Value, _>("hidden_panels")
+                .as_array()
+                .is_some()
+        );
+
+        sqlx::query("DELETE FROM layout_templates WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn layout_template_put_must_not_default_or_persist_unvalidated_json() {
+        let source = include_str!("server.rs");
+        let layout_put = source_between(
+            source,
+            "async fn handle_layout_template_put",
+            "/// DELETE /api/v1/layout-templates/:id",
+        );
+
+        assert!(
+            layout_put.contains("LayoutTemplateUpsert::from_body(&body)"),
+            "layout template PUT must validate the full request schema before persistence"
+        );
+        assert!(
+            !layout_put.contains("unwrap_or(\"Untitled\")"),
+            "layout template PUT must reject a missing name instead of fabricating one"
+        );
+        assert!(
+            !layout_put.contains("unwrap_or(serde_json::json!([]))"),
+            "layout template PUT must reject missing layout arrays instead of fabricating them"
+        );
     }
 
     #[test]
