@@ -507,7 +507,7 @@ impl ConstitutionalKernel {
 
         let context = AdjudicationContext {
             actor_roles: vec![Role {
-                name: "sdk-default".into(),
+                name: "judge".into(),
                 branch: GovernmentBranch::Judicial,
             }],
             authority_chain: AuthorityChain {

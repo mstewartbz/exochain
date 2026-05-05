@@ -97,7 +97,7 @@ fn full_db_context(actor: &Did) -> AdjudicationContext {
     AdjudicationContext {
         actor_roles: vec![Role {
             name: "voter".into(),
-            branch: GovernmentBranch::Executive,
+            branch: GovernmentBranch::Legislative,
         }],
         authority_chain: AuthorityChain {
             links: vec![signed_authority_link(&grantor, actor)],
@@ -249,7 +249,7 @@ fn revoked_consent_denies() {
     let ctx = AdjudicationContext {
         actor_roles: vec![Role {
             name: "voter".into(),
-            branch: GovernmentBranch::Executive,
+            branch: GovernmentBranch::Legislative,
         }],
         authority_chain: AuthorityChain {
             links: vec![signed_authority_link(&grantor, &actor)],
@@ -287,7 +287,7 @@ fn cross_branch_roles_denies() {
     let mut ctx = full_db_context(&actor);
     ctx.actor_roles = vec![
         Role {
-            name: "voter".into(),
+            name: "worker".into(),
             branch: GovernmentBranch::Executive,
         },
         Role {

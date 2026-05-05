@@ -271,7 +271,9 @@ fn parse_roles(value: &Value) -> Result<Vec<Role>, String> {
             .map_err(|err| format!("actor_roles[{idx}]: {err}"))?;
         let branch =
             parse_branch(branch_raw).map_err(|err| format!("actor_roles[{idx}]: {err}"))?;
-        roles.push(Role { name, branch });
+        let role =
+            Role::try_new(name, branch).map_err(|err| format!("actor_roles[{idx}]: {err}"))?;
+        roles.push(role);
     }
     Ok(roles)
 }
@@ -1457,6 +1459,31 @@ mod tests {
         let text = result.content[0].text();
         assert_text_omits_raw_input(text, attacker_marker);
         assert!(text.contains("actor_roles[0]"));
+    }
+
+    #[test]
+    fn execute_adjudicate_action_context_role_name_error_omits_raw_input() {
+        let action = "read medical record";
+        let attacker_marker = "<script>alert(1)</script>";
+        let attacker_input = format!("operator-{attacker_marker}");
+        let mut context = adjudication_context_json("did:exo:alice", action);
+        context["actor_roles"][0]["name"] = json!(attacker_input);
+
+        let result = execute_adjudicate_action(
+            &json!({
+                "actor_did": "did:exo:alice",
+                "action": action,
+                "required_permissions": ["execute"],
+                "context": context,
+            }),
+            &NodeContext::empty(),
+        );
+
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert_text_omits_raw_input(text, attacker_marker);
+        assert!(text.contains("actor_roles[0]"));
+        assert!(text.contains("unknown governed role name"));
     }
 
     #[test]

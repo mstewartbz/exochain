@@ -48,11 +48,100 @@ impl PermissionSet {
 // ---------------------------------------------------------------------------
 
 /// Branch of government.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GovernmentBranch {
     Legislative,
     Executive,
     Judicial,
+}
+
+impl GovernmentBranch {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legislative => "legislative",
+            Self::Executive => "executive",
+            Self::Judicial => "judicial",
+        }
+    }
+}
+
+/// Governed role names recognized by the constitutional fabric.
+///
+/// The names are intentionally finite.  Adjudication may carry zero roles, but
+/// any supplied role must be one of these governed names and must match the
+/// branch assigned below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GovernedRoleName {
+    Senator,
+    Legislator,
+    Voter,
+    Executive,
+    ExecutiveAdmin,
+    Operator,
+    Worker,
+    Judge,
+    TransitionJudge,
+}
+
+impl GovernedRoleName {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Senator => "senator",
+            Self::Legislator => "legislator",
+            Self::Voter => "voter",
+            Self::Executive => "executive",
+            Self::ExecutiveAdmin => "executive-admin",
+            Self::Operator => "operator",
+            Self::Worker => "worker",
+            Self::Judge => "judge",
+            Self::TransitionJudge => "transition-judge",
+        }
+    }
+
+    #[must_use]
+    pub const fn branch(self) -> GovernmentBranch {
+        match self {
+            Self::Senator | Self::Legislator | Self::Voter => GovernmentBranch::Legislative,
+            Self::Executive | Self::ExecutiveAdmin | Self::Operator | Self::Worker => {
+                GovernmentBranch::Executive
+            }
+            Self::Judge | Self::TransitionJudge => GovernmentBranch::Judicial,
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "senator" => Some(Self::Senator),
+            "legislator" => Some(Self::Legislator),
+            "voter" => Some(Self::Voter),
+            "executive" => Some(Self::Executive),
+            "executive-admin" => Some(Self::ExecutiveAdmin),
+            "operator" => Some(Self::Operator),
+            "worker" => Some(Self::Worker),
+            "judge" => Some(Self::Judge),
+            "transition-judge" => Some(Self::TransitionJudge),
+            _ => None,
+        }
+    }
+}
+
+/// Role validation failure with enough structured context for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RoleValidationError {
+    #[error("unknown governed role name")]
+    UnknownName { name: String },
+    #[error(
+        "role name does not match governed branch: expected {expected_branch}, actual {actual_branch}"
+    )]
+    BranchMismatch {
+        name: String,
+        expected_branch: &'static str,
+        actual_branch: &'static str,
+    },
 }
 
 /// Role held by an actor in the constitutional fabric.
@@ -60,6 +149,58 @@ pub enum GovernmentBranch {
 pub struct Role {
     pub name: String,
     pub branch: GovernmentBranch,
+}
+
+impl Role {
+    #[must_use]
+    pub fn governed(name: GovernedRoleName) -> Self {
+        Self {
+            name: name.as_str().to_owned(),
+            branch: name.branch(),
+        }
+    }
+
+    /// Validate a role supplied from storage, API, MCP, or WASM context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RoleValidationError::UnknownName`] when `self.name` is not a
+    /// governed role name, or [`RoleValidationError::BranchMismatch`] when the
+    /// governed role belongs to a different branch than `self.branch`.
+    pub fn validate_governed(&self) -> Result<GovernedRoleName, RoleValidationError> {
+        let Some(governed_name) = GovernedRoleName::parse(&self.name) else {
+            return Err(RoleValidationError::UnknownName {
+                name: self.name.clone(),
+            });
+        };
+        let expected_branch = governed_name.branch();
+        if expected_branch != self.branch {
+            return Err(RoleValidationError::BranchMismatch {
+                name: self.name.clone(),
+                expected_branch: expected_branch.as_str(),
+                actual_branch: self.branch.as_str(),
+            });
+        }
+        Ok(governed_name)
+    }
+
+    /// Construct and validate a governed role from external string input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RoleValidationError`] if `name` is not governed or if it is
+    /// paired with the wrong branch.
+    pub fn try_new(
+        name: impl Into<String>,
+        branch: GovernmentBranch,
+    ) -> Result<Self, RoleValidationError> {
+        let role = Self {
+            name: name.into(),
+            branch,
+        };
+        role.validate_governed()?;
+        Ok(role)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1505,10 +1505,8 @@ fn build_adjudication_context_from_rows(
                     )));
                 }
             };
-            Ok(Role {
-                name: r.role.clone(),
-                branch,
-            })
+            Role::try_new(r.role.clone(), branch)
+                .map_err(|e| GatewayError::Internal(format!("adjudication role row invalid: {e}")))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -7283,7 +7281,7 @@ mod tests {
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "voter".to_string(),
-                branch: GovernmentBranch::Executive,
+                branch: GovernmentBranch::Legislative,
             }],
             authority_chain: AuthorityChain {
                 links: vec![signed_authority_link(&root, actor)],
@@ -7327,10 +7325,10 @@ mod tests {
         }
     }
 
-    fn db_role_row(actor: &Did, branch: &str) -> crate::db::AgentRoleRow {
+    fn db_role_row(actor: &Did, role: &str, branch: &str) -> crate::db::AgentRoleRow {
         crate::db::AgentRoleRow {
             agent_did: actor.as_str().to_string(),
-            role: "voter".to_string(),
+            role: role.to_string(),
             branch: branch.to_string(),
             granted_by: "did:exo:root-grantor".to_string(),
             valid_from: 1,
@@ -7378,11 +7376,31 @@ mod tests {
     #[test]
     fn adjudication_context_rows_reject_unknown_role_branch() {
         let actor = Did::new("did:exo:alice").unwrap();
-        let role_rows = vec![db_role_row(&actor, "tribunal")];
+        let role_rows = vec![db_role_row(&actor, "voter", "tribunal")];
 
         let result = build_adjudication_context_from_rows(&actor, &role_rows, &[], None);
 
         assert_internal_error_contains(result, "unknown role branch");
+    }
+
+    #[test]
+    fn adjudication_context_rows_reject_unknown_role_name() {
+        let actor = Did::new("did:exo:alice").unwrap();
+        let role_rows = vec![db_role_row(&actor, "root", "judicial")];
+
+        let result = build_adjudication_context_from_rows(&actor, &role_rows, &[], None);
+
+        assert_internal_error_contains(result, "unknown governed role name");
+    }
+
+    #[test]
+    fn adjudication_context_rows_reject_role_name_branch_mismatch() {
+        let actor = Did::new("did:exo:alice").unwrap();
+        let role_rows = vec![db_role_row(&actor, "judge", "executive")];
+
+        let result = build_adjudication_context_from_rows(&actor, &role_rows, &[], None);
+
+        assert_internal_error_contains(result, "does not match governed branch");
     }
 
     #[test]
@@ -7415,7 +7433,7 @@ mod tests {
         let kernel = adjudication_kernel();
         let actor = Did::new("did:exo:alice").unwrap();
         let valid_context = valid_db_context(&actor);
-        let role_rows = vec![db_role_row(&actor, "executive")];
+        let role_rows = vec![db_role_row(&actor, "voter", "legislative")];
         let consent_rows = vec![db_consent_row(&actor, "did:exo:root-grantor")];
         let chain_row = db_authority_chain_row(
             &actor,
@@ -7449,7 +7467,7 @@ mod tests {
                 PermissionSet::new(vec![Permission::new("advance_pace")]),
             )],
         };
-        let role_rows = vec![db_role_row(&actor, "executive")];
+        let role_rows = vec![db_role_row(&actor, "worker", "executive")];
         let consent_rows = vec![db_consent_row(&actor, root.as_str())];
         let chain_row =
             db_authority_chain_row(&actor, serde_json::to_value(&authority_chain).unwrap());
@@ -7586,7 +7604,7 @@ mod tests {
         let mut ctx = valid_db_context(&actor);
         ctx.actor_roles = vec![
             Role {
-                name: "voter".to_string(),
+                name: "worker".to_string(),
                 branch: GovernmentBranch::Executive,
             },
             Role {

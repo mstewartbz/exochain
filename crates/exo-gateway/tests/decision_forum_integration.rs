@@ -118,7 +118,7 @@ fn transition_context(actor: &Did, from: BctsState, to: BctsState) -> Adjudicati
     let permission = bcts_transition_permission(from, to);
     AdjudicationContext {
         actor_roles: vec![Role {
-            name: "gateway-transition-judge".into(),
+            name: "transition-judge".into(),
             branch: GovernmentBranch::Judicial,
         }],
         authority_chain: AuthorityChain {

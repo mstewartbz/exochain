@@ -193,11 +193,7 @@ fn check_invariant(
 }
 
 fn government_branch_label(branch: GovernmentBranch) -> &'static str {
-    match branch {
-        GovernmentBranch::Legislative => "legislative",
-        GovernmentBranch::Executive => "executive",
-        GovernmentBranch::Judicial => "judicial",
-    }
+    branch.as_str()
 }
 
 fn role_evidence_label(roles: &[Role]) -> String {
@@ -241,7 +237,18 @@ fn bailment_state_evidence(state: &BailmentState) -> Vec<String> {
 
 fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
     let mut branches = std::collections::BTreeSet::new();
-    for role in &ctx.actor_roles {
+    for (index, role) in ctx.actor_roles.iter().enumerate() {
+        if let Err(err) = role.validate_governed() {
+            return Err(InvariantViolation {
+                invariant: ConstitutionalInvariant::SeparationOfPowers,
+                description: err.to_string(),
+                evidence: vec![
+                    format!("actor: {}", ctx.actor),
+                    format!("role_index: {index}"),
+                    format!("actual_branch: {}", government_branch_label(role.branch)),
+                ],
+            });
+        }
         branches.insert(role.branch);
     }
     if branches.contains(&GovernmentBranch::Legislative)
@@ -726,15 +733,15 @@ mod tests {
         let mut ctx = passing_context();
         ctx.actor_roles = vec![
             Role {
-                name: "s".into(),
+                name: "senator".into(),
                 branch: GovernmentBranch::Legislative,
             },
             Role {
-                name: "g".into(),
+                name: "worker".into(),
                 branch: GovernmentBranch::Executive,
             },
             Role {
-                name: "j".into(),
+                name: "judge".into(),
                 branch: GovernmentBranch::Judicial,
             },
         ];
@@ -747,6 +754,56 @@ mod tests {
             ConstitutionalInvariant::SeparationOfPowers,
         ]));
         assert!(enforce_all(&engine, &passing_context()).is_ok());
+    }
+
+    #[test]
+    fn separation_rejects_unknown_role_name() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::SeparationOfPowers,
+        ]));
+        let mut ctx = passing_context();
+        ctx.actor_roles = vec![Role {
+            name: "root".into(),
+            branch: GovernmentBranch::Judicial,
+        }];
+
+        let err = enforce_all(&engine, &ctx).expect_err("unknown role name must fail closed");
+
+        assert_eq!(
+            err[0].invariant,
+            ConstitutionalInvariant::SeparationOfPowers
+        );
+        assert!(
+            err[0].description.contains("unknown governed role name"),
+            "unexpected description: {}",
+            err[0].description
+        );
+    }
+
+    #[test]
+    fn separation_rejects_role_name_branch_mismatch() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::SeparationOfPowers,
+        ]));
+        let mut ctx = passing_context();
+        ctx.actor_roles = vec![Role {
+            name: "judge".into(),
+            branch: GovernmentBranch::Executive,
+        }];
+
+        let err = enforce_all(&engine, &ctx).expect_err("role name branch mismatch must fail");
+
+        assert_eq!(
+            err[0].invariant,
+            ConstitutionalInvariant::SeparationOfPowers
+        );
+        assert!(
+            err[0]
+                .description
+                .contains("does not match governed branch"),
+            "unexpected description: {}",
+            err[0].description
+        );
     }
 
     #[test]
