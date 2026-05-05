@@ -208,16 +208,26 @@ impl DeliberationSession {
         false
     }
 
-    pub fn finalize(&self, timing: FinalizationTiming) -> Result<DeliberationResult> {
+    /// Finalize the session, consuming it so the full round history moves into
+    /// the result without duplicating consensus evidence in memory.
+    pub fn finalize(self, timing: FinalizationTiming) -> Result<DeliberationResult> {
         timing.validate()?;
 
-        if self.rounds.is_empty() {
+        let DeliberationSession {
+            session_id,
+            panel,
+            question,
+            rounds,
+            ..
+        } = self;
+
+        if rounds.is_empty() {
             return Err(ConsensusError::StateError(
                 "Cannot finalize without any rounds".into(),
             ));
         }
 
-        let Some(last_round) = self.rounds.last() else {
+        let Some(last_round) = rounds.last() else {
             return Err(ConsensusError::StateError(
                 "Rounds exist but last() failed".into(),
             ));
@@ -237,10 +247,10 @@ impl DeliberationSession {
 
         let claim_sets = position_claim_sets(&last_round.positions);
         let consensus_claims =
-            consensus_claims_at_threshold(&claim_sets, self.panel.convergence_threshold_bps);
+            consensus_claims_at_threshold(&claim_sets, panel.convergence_threshold_bps);
 
         for pos in last_round.positions.values() {
-            if is_minority_report(pos, &consensus_claims, self.panel.convergence_threshold_bps) {
+            if is_minority_report(pos, &consensus_claims, panel.convergence_threshold_bps) {
                 let missing_claims = missing_consensus_claims(pos, &consensus_claims);
                 minority_reports.push(MinorityReport {
                     model_id: pos.model_id.clone(),
@@ -265,7 +275,7 @@ impl DeliberationSession {
 
         let panelists_count = usize_to_u32(
             "panelists_count",
-            self.panel
+            panel
                 .models
                 .iter()
                 .filter(|m| m.role == ModelRole::Panelist)
@@ -273,13 +283,13 @@ impl DeliberationSession {
         )?;
         let minority_reports_count =
             usize_to_u32("minority_reports_count", minority_reports.len())?;
-        let rounds_to_convergence = usize_to_u32("rounds_to_convergence", self.rounds.len())?;
+        let rounds_to_convergence = usize_to_u32("rounds_to_convergence", rounds.len())?;
 
         let inputs = PanelConfidenceInputs {
             models_agreeing: panelists_count.saturating_sub(minority_reports_count),
             total_models: panelists_count,
             rounds_to_convergence,
-            max_rounds: self.panel.max_rounds,
+            max_rounds: panel.max_rounds,
             devil_found_serious_objection: serious_objection,
             minority_reports_count,
         };
@@ -287,9 +297,9 @@ impl DeliberationSession {
         let pci = calculate_panel_confidence(&inputs);
 
         let mut result = DeliberationResult {
-            session_id: self.session_id.clone(),
-            question: self.question.clone(),
-            rounds: self.rounds.clone(),
+            session_id,
+            question,
+            rounds,
             final_consensus,
             minority_reports,
             panel_confidence_index_bps: pci,
@@ -761,6 +771,29 @@ mod tests {
         assert!(
             production.contains("usize_to_u32(\"minority_reports_count\""),
             "minority report count conversion must use the typed finalization count helper"
+        );
+    }
+
+    #[test]
+    fn production_finalization_moves_rounds_without_cloning_full_history() {
+        let source = include_str!("session.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let finalize = production
+            .split("pub fn finalize(")
+            .nth(1)
+            .and_then(|section| section.split("\nfn validate_model_response").next())
+            .expect("finalize implementation");
+
+        assert!(
+            !finalize.contains("self.rounds.clone()"),
+            "DeliberationSession::finalize must not clone the full round history"
+        );
+        assert!(
+            production.contains("pub fn finalize(self,"),
+            "DeliberationSession::finalize must consume the session so rounds can move into the result"
         );
     }
 
