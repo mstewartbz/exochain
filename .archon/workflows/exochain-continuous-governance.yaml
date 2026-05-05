@@ -6,8 +6,14 @@ description: |
   council backlog.
 
 loop:
+  enabled: true
   until: COMPLETE
   max_iterations: 25
+  exit_condition: "COMPLETE"
+  stop_conditions:
+    - "monitor output contains <promise>COMPLETE</promise>"
+    - "max_iterations reached"
+  escalation_path: "file backlog items and stop when max_iterations is reached"
   fresh_context: true
 
 prompt: |
