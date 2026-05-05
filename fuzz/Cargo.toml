@@ -1,0 +1,50 @@
+[package]
+name = "exo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[package.metadata.cargo-machete]
+# These are direct transitive pins for the standalone fuzz workspace. Without
+# them, cargo-fuzz resolves newer final prerelease-family dependencies than the
+# root workspace lock currently uses, breaking ML-DSA compile compatibility.
+ignored = ["ml-dsa", "pkcs8", "sha3", "signature", "spki"]
+
+[dependencies]
+ciborium = "0.2"
+exo-core = { path = "../crates/exo-core" }
+exo-governance = { path = "../crates/exo-governance" }
+libfuzzer-sys = "0.4"
+ml-dsa = { version = "=0.1.0-rc.7", features = ["zeroize"] }
+pkcs8 = "=0.11.0-rc.11"
+serde_json = "1"
+sha3 = "=0.11.0-rc.9"
+signature = "=3.0.0-rc.10"
+spki = "=0.8.0-rc.4"
+
+[[bin]]
+name = "did_parse"
+path = "fuzz_targets/did_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signature_cbor"
+path = "fuzz_targets/signature_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clearance_policy_json"
+path = "fuzz_targets/clearance_policy_json.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
