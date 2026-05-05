@@ -7,7 +7,7 @@
 //! Key derivation uses HKDF-SHA256 from an Ed25519 secret key with a
 //! protocol-domain salt.
 //!
-//! Ciphertext format: `[24-byte nonce][encrypted payload][16-byte Poly1305 tag]`
+//! Ciphertext format: `[24-byte nonce][encrypted payload][16-byte Poly1305 tag]`.
 
 use chacha20poly1305::{
     XChaCha20Poly1305,
@@ -21,7 +21,10 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::IdentityError;
 
 /// Size of the XChaCha20-Poly1305 nonce in bytes.
-const NONCE_SIZE: usize = 24;
+pub const VAULT_NONCE_SIZE: usize = 24;
+
+/// Size of the XChaCha20-Poly1305 nonce in bytes.
+const NONCE_SIZE: usize = VAULT_NONCE_SIZE;
 
 /// Size of the Poly1305 authentication tag in bytes.
 const TAG_SIZE: usize = 16;
@@ -66,27 +69,25 @@ impl VaultEncryptor {
         Ok(Self { key: *okm })
     }
 
-    /// Encrypt `plaintext` with XChaCha20-Poly1305.
+    /// Legacy encryption entrypoint retained for API compatibility.
     ///
-    /// `associated_data` should be the DID bytes so the ciphertext is bound
-    /// to the identity.  A random 24-byte nonce is generated for each
+    /// Vault encryption must receive an explicit nonce from the caller so the
+    /// runtime path remains deterministic and the nonce provenance is auditable.
+    /// Use [`encrypt_with_nonce`](Self::encrypt_with_nonce) for supported
     /// encryption.
-    ///
-    /// Returns `[24-byte nonce][ciphertext][16-byte tag]`.
     ///
     /// # Errors
     ///
-    /// Returns `IdentityError::VaultEncryptionFailed` on cipher failure.
+    /// Always returns `IdentityError::VaultNonceRequired`.
     pub fn encrypt(
         &self,
-        plaintext: &[u8],
-        associated_data: &[u8],
+        _plaintext: &[u8],
+        _associated_data: &[u8],
     ) -> Result<Vec<u8>, IdentityError> {
-        let nonce = self.random_nonce();
-        self.encrypt_with_nonce(plaintext, associated_data, &nonce)
+        Err(IdentityError::VaultNonceRequired)
     }
 
-    /// Decrypt a ciphertext produced by [`encrypt`](Self::encrypt).
+    /// Decrypt a ciphertext produced by [`encrypt_with_nonce`](Self::encrypt_with_nonce).
     ///
     /// `associated_data` must match the value used during encryption.
     ///
@@ -128,22 +129,28 @@ impl VaultEncryptor {
         &self.key
     }
 
-    // ---- internal helpers ----
-
-    /// Generate a random 24-byte nonce using the OS CSPRNG.
-    fn random_nonce(&self) -> [u8; NONCE_SIZE] {
-        let mut nonce = [0u8; NONCE_SIZE];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-        nonce
-    }
-
-    /// Encrypt with an explicit nonce (used for deterministic tests).
-    fn encrypt_with_nonce(
+    /// Encrypt with an explicit caller-supplied nonce.
+    ///
+    /// `associated_data` should be the DID bytes so the ciphertext is bound
+    /// to the identity. The nonce must be unique for the derived key and must
+    /// be supplied by the caller from an auditable deterministic runtime input.
+    ///
+    /// Returns `[24-byte nonce][ciphertext][16-byte tag]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IdentityError::InvalidVaultNonce` when the nonce fails local
+    /// validation.
+    ///
+    /// Returns `IdentityError::VaultEncryptionFailed` on cipher failure.
+    pub fn encrypt_with_nonce(
         &self,
         plaintext: &[u8],
         associated_data: &[u8],
-        nonce: &[u8; NONCE_SIZE],
+        nonce: &[u8; VAULT_NONCE_SIZE],
     ) -> Result<Vec<u8>, IdentityError> {
+        Self::validate_nonce(nonce)?;
+
         let cipher = XChaCha20Poly1305::new(self.cipher_key());
         let xcnonce = chacha20poly1305::XNonce::from_slice(nonce);
 
@@ -162,6 +169,18 @@ impl VaultEncryptor {
         out.extend_from_slice(nonce);
         out.extend_from_slice(&encrypted);
         Ok(out)
+    }
+
+    // ---- internal helpers ----
+
+    fn validate_nonce(nonce: &[u8; VAULT_NONCE_SIZE]) -> Result<(), IdentityError> {
+        if nonce.iter().all(|byte| *byte == 0) {
+            return Err(IdentityError::InvalidVaultNonce {
+                reason: "nonce must not be all zero".into(),
+            });
+        }
+
+        Ok(())
     }
 
     /// Build the `chacha20poly1305` key type from our raw bytes.
@@ -194,31 +213,87 @@ mod tests {
 
     use super::*;
 
-    /// Helper: create a VaultEncryptor from a fresh random key.
-    fn random_encryptor() -> VaultEncryptor {
-        let mut key = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
-        VaultEncryptor::from_key(key)
+    /// Helper: create a VaultEncryptor from deterministic test key material.
+    fn test_encryptor() -> VaultEncryptor {
+        VaultEncryptor::from_key([0x42; 32])
+    }
+
+    fn test_nonce(tag: u8) -> [u8; NONCE_SIZE] {
+        [tag; NONCE_SIZE]
+    }
+
+    fn encrypt_for_test(
+        enc: &VaultEncryptor,
+        plaintext: &[u8],
+        associated_data: &[u8],
+        nonce_tag: u8,
+    ) -> Vec<u8> {
+        enc.encrypt_with_nonce(plaintext, associated_data, &test_nonce(nonce_tag))
+            .expect("encrypt_with_nonce")
     }
 
     #[test]
     fn encrypt_decrypt_round_trip() {
-        let enc = random_encryptor();
+        let enc = test_encryptor();
         let plaintext = b"secret identity data";
         let ad = b"did:exo:alice";
 
-        let ct = enc.encrypt(plaintext, ad).expect("encrypt");
+        let ct = encrypt_for_test(&enc, plaintext, ad, 1);
         let pt = enc.decrypt(&ct, ad).expect("decrypt");
         assert_eq!(pt, plaintext);
     }
 
     #[test]
+    fn encrypt_requires_caller_supplied_nonce() {
+        let enc = test_encryptor();
+        let result = enc.encrypt(b"secret identity data", b"did:exo:alice");
+
+        assert!(
+            matches!(result, Err(IdentityError::VaultNonceRequired)),
+            "implicit nonce generation must fail closed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn encrypt_source_does_not_generate_internal_nonce() {
+        let source = include_str!("vault.rs");
+        let production = match source.split("#[cfg(test)]").next() {
+            Some(production) => production,
+            None => panic!("test boundary marker must be present"),
+        };
+
+        assert!(
+            !production.contains("random_nonce"),
+            "vault encryption must not hide nonce generation inside production logic"
+        );
+        assert!(
+            !production.contains("OsRng"),
+            "vault encryption must not use OS randomness in production logic"
+        );
+        assert!(
+            !production.contains("fill_bytes"),
+            "vault encryption must not fill nonce bytes from hidden randomness"
+        );
+    }
+
+    #[test]
+    fn encrypt_with_nonce_rejects_all_zero_nonce() {
+        let enc = test_encryptor();
+        let result = enc.encrypt_with_nonce(b"secret identity data", b"did:exo:alice", &[0u8; 24]);
+
+        assert!(
+            matches!(result, Err(IdentityError::InvalidVaultNonce { .. })),
+            "zero nonce must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
     fn tampered_ciphertext_fails() {
-        let enc = random_encryptor();
+        let enc = test_encryptor();
         let plaintext = b"do not tamper";
         let ad = b"did:exo:bob";
 
-        let mut ct = enc.encrypt(plaintext, ad).expect("encrypt");
+        let mut ct = encrypt_for_test(&enc, plaintext, ad, 2);
         // Flip a byte in the encrypted payload (after nonce)
         let idx = NONCE_SIZE + 1;
         ct[idx] ^= 0xff;
@@ -232,12 +307,12 @@ mod tests {
 
     #[test]
     fn wrong_key_fails() {
-        let enc1 = random_encryptor();
-        let enc2 = random_encryptor();
+        let enc1 = VaultEncryptor::from_key([0x11; 32]);
+        let enc2 = VaultEncryptor::from_key([0x22; 32]);
         let plaintext = b"key mismatch";
         let ad = b"did:exo:carol";
 
-        let ct = enc1.encrypt(plaintext, ad).expect("encrypt");
+        let ct = encrypt_for_test(&enc1, plaintext, ad, 3);
         let result = enc2.decrypt(&ct, ad);
         assert!(
             matches!(result, Err(IdentityError::VaultDecryptionFailed)),
@@ -247,12 +322,12 @@ mod tests {
 
     #[test]
     fn wrong_associated_data_fails() {
-        let enc = random_encryptor();
+        let enc = test_encryptor();
         let plaintext = b"bound to identity";
         let ad_a = b"did:exo:alice";
         let ad_b = b"did:exo:eve";
 
-        let ct = enc.encrypt(plaintext, ad_a).expect("encrypt");
+        let ct = encrypt_for_test(&enc, plaintext, ad_a, 4);
         let result = enc.decrypt(&ct, ad_b);
         assert!(
             matches!(result, Err(IdentityError::VaultDecryptionFailed)),
@@ -262,10 +337,10 @@ mod tests {
 
     #[test]
     fn empty_plaintext() {
-        let enc = random_encryptor();
+        let enc = test_encryptor();
         let ad = b"did:exo:empty";
 
-        let ct = enc.encrypt(b"", ad).expect("encrypt");
+        let ct = encrypt_for_test(&enc, b"", ad, 5);
         assert_eq!(
             ct.len(),
             NONCE_SIZE + TAG_SIZE,
@@ -278,11 +353,11 @@ mod tests {
 
     #[test]
     fn large_plaintext() {
-        let enc = random_encryptor();
+        let enc = test_encryptor();
         let plaintext = vec![0xab_u8; 1_000_000]; // 1 MB
         let ad = b"did:exo:large";
 
-        let ct = enc.encrypt(&plaintext, ad).expect("encrypt");
+        let ct = encrypt_for_test(&enc, &plaintext, ad, 6);
         let pt = enc.decrypt(&ct, ad).expect("decrypt");
         assert_eq!(pt, plaintext);
     }
@@ -369,7 +444,7 @@ mod tests {
         assert_zeroize_impl::<[u8; 32]>(); // underlying storage implements Zeroize
 
         // Functional check: create an encryptor, do work, drop it.
-        let enc = random_encryptor();
+        let enc = test_encryptor();
         let key_copy = *enc.key_bytes();
         // Key was non-zero before drop
         assert_ne!(key_copy, [0u8; 32]);

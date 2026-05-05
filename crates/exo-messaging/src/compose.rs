@@ -5,7 +5,7 @@
 //! XChaCha20-Poly1305, and signs the envelope with the sender's Ed25519 key.
 
 use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp};
-use exo_identity::vault::VaultEncryptor;
+use exo_identity::vault::{VAULT_NONCE_SIZE, VaultEncryptor};
 use uuid::Uuid;
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
 
 /// The HKDF context string for message encryption key derivation.
 const MESSAGE_KEX_CONTEXT: &[u8] = b"vitallock-message-v1";
+const MESSAGE_VAULT_NONCE_DOMAIN: &[u8] = b"exo.messaging.vault-nonce.v1";
 
 /// Caller-supplied provenance metadata for an encrypted envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,16 +115,26 @@ pub fn prepare_envelope_for_signing(
         MESSAGE_KEX_CONTEXT,
     )?;
 
+    let plaintext_hash = Hash256::digest(plaintext);
+    let nonce = derive_vault_nonce(
+        &metadata,
+        content_type,
+        sender_did,
+        recipient_did,
+        ephemeral.public.as_bytes(),
+        &plaintext_hash,
+        release_on_death,
+        release_delay_hours,
+    )?;
+
     // 3. Encrypt plaintext with XChaCha20-Poly1305
     //    Associated data = recipient DID (binds ciphertext to intended recipient)
     let encryptor = VaultEncryptor::from_key(shared_key);
     let ciphertext = encryptor
-        .encrypt(plaintext, recipient_did.as_str().as_bytes())
+        .encrypt_with_nonce(plaintext, recipient_did.as_str().as_bytes(), &nonce)
         .map_err(|e| MessagingError::EncryptionFailed(e.to_string()))?;
 
     // 4. Hash plaintext for post-decrypt integrity check
-    let plaintext_hash = Hash256::digest(plaintext);
-
     // 5. Build envelope (without signature first)
     let envelope = EncryptedEnvelope {
         id: metadata.id.to_string(),
@@ -140,6 +151,57 @@ pub fn prepare_envelope_for_signing(
     };
 
     Ok(envelope)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_vault_nonce(
+    metadata: &ComposeMetadata,
+    content_type: ContentType,
+    sender_did: &Did,
+    recipient_did: &Did,
+    ephemeral_public_key: &[u8; 32],
+    plaintext_hash: &Hash256,
+    release_on_death: bool,
+    release_delay_hours: u32,
+) -> Result<[u8; VAULT_NONCE_SIZE], MessagingError> {
+    let mut transcript = Vec::new();
+    transcript.extend_from_slice(MESSAGE_VAULT_NONCE_DOMAIN);
+    append_len_prefixed(&mut transcript, "id", metadata.id.as_bytes())?;
+    transcript.extend_from_slice(&metadata.created.physical_ms.to_le_bytes());
+    transcript.extend_from_slice(&metadata.created.logical.to_le_bytes());
+    append_len_prefixed(
+        &mut transcript,
+        "sender_did",
+        sender_did.as_str().as_bytes(),
+    )?;
+    append_len_prefixed(
+        &mut transcript,
+        "recipient_did",
+        recipient_did.as_str().as_bytes(),
+    )?;
+    transcript.extend_from_slice(ephemeral_public_key);
+    transcript.extend_from_slice(plaintext_hash.as_bytes());
+    transcript.push(u8::from(content_type));
+    transcript.push(u8::from(release_on_death));
+    transcript.extend_from_slice(&release_delay_hours.to_le_bytes());
+
+    let digest = Hash256::digest(&transcript);
+    let mut nonce = [0u8; VAULT_NONCE_SIZE];
+    nonce.copy_from_slice(&digest.as_bytes()[..VAULT_NONCE_SIZE]);
+    Ok(nonce)
+}
+
+fn append_len_prefixed(
+    transcript: &mut Vec<u8>,
+    label: &'static str,
+    value: &[u8],
+) -> Result<(), MessagingError> {
+    transcript.extend_from_slice(label.as_bytes());
+    let len = u64::try_from(value.len())
+        .map_err(|_| MessagingError::InvalidEnvelope(format!("{label} length exceeds u64::MAX")))?;
+    transcript.extend_from_slice(&len.to_le_bytes());
+    transcript.extend_from_slice(value);
+    Ok(())
 }
 
 /// Sign a prepared envelope with an in-process Ed25519 secret key.
@@ -377,6 +439,24 @@ mod tests {
         assert!(
             !production.contains(&forbidden_clock),
             "compose production path must not fabricate HLC timestamps"
+        );
+    }
+
+    #[test]
+    fn compose_path_supplies_explicit_vault_nonce() {
+        let source = include_str!("compose.rs");
+        let production = source
+            .split("// ===========================================================================")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("encrypt_with_nonce"),
+            "compose must pass an explicit deterministic nonce into vault encryption"
+        );
+        assert!(
+            !production.contains(".encrypt("),
+            "compose must not call the implicit vault encryption entrypoint"
         );
     }
 }

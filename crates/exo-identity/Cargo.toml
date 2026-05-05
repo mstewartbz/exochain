@@ -20,7 +20,6 @@ bs58 = { workspace = true }
 sha2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 hkdf = { workspace = true }
-rand = { workspace = true }
 getrandom = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }
