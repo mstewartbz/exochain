@@ -16,8 +16,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev clang && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-# Build the distributed node binary and the legacy HTTP gateway.
-RUN cargo build --release --bin exochain --bin exo-gateway
+# Build the distributed node binary and standalone gateway with DB-backed
+# adjudication enabled for production container deployments.
+RUN cargo build --release --bin exochain --bin exo-gateway --features exo-gateway/production-db
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
