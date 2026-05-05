@@ -203,9 +203,9 @@ const NODE_REGISTRY = {
 
   'proof-generate': {
     category: 'Proof & Ledger',
-    description: 'Generates cryptographic proofs of execution',
+    description: 'Generates deterministic Syntaxis proof records of execution',
     requiredInputs: ['dataHash', 'prover', 'proofType'],
-    outputs: ['proofId', 'proofHash', 'proofType', 'prover'],
+    outputs: ['proofId', 'proofHash', 'proofType', 'prover', 'dataHash', 'generatedAtHlc'],
     bctsTransition: 'EXECUTING -> EXECUTING',
     requiredPanels: ['Kernel Panel'],
     timeoutMs: 20000,
@@ -214,9 +214,9 @@ const NODE_REGISTRY = {
 
   'proof-verify': {
     category: 'Proof & Ledger',
-    description: 'Verifies cryptographic proofs',
-    requiredInputs: ['proofId', 'proofHash', 'verifier'],
-    outputs: ['proofId', 'verified', 'verifier', 'integrity'],
+    description: 'Verifies deterministic Syntaxis proof records against their generated statement',
+    requiredInputs: ['proofId', 'proofHash', 'dataHash', 'proofType', 'prover', 'generatedAtHlc', 'verifier'],
+    outputs: ['proofId', 'proofHash', 'dataHash', 'proofType', 'prover', 'verified', 'verifier', 'integrity'],
     bctsTransition: 'EXECUTING -> COMPLETED',
     requiredPanels: ['Kernel Panel'],
     timeoutMs: 20000,

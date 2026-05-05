@@ -8,10 +8,15 @@ const {
   deterministicId,
   hashCanonical,
   hlcToString,
+  normalizeHlc,
   normalizeBasisPoints,
   ratioBasisPoints,
   timestampFromContext
 } = require('./determinism');
+
+function isObjectRecord(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
 
 /**
  * Base Node class - all node types extend this
@@ -721,25 +726,71 @@ class ProofVerifyNode extends SyntaxisNode {
 
   validate(inputs) {
     const errors = [];
-    if (!inputs.proofId) {
+    if (typeof inputs.proofId !== 'string' || inputs.proofId.length === 0) {
       errors.push('proofId is required');
+    } else if (!/^proof_[0-9a-f]{16}$/.test(inputs.proofId)) {
+      errors.push('proofId must be a deterministic proof identifier');
     }
-    if (!inputs.proofHash) {
+    if (typeof inputs.proofHash !== 'string' || inputs.proofHash.length === 0) {
       errors.push('proofHash is required');
+    } else if (!/^proof_hash_[0-9a-f]{32}$/.test(inputs.proofHash)) {
+      errors.push('proofHash must be a deterministic proof hash');
     }
-    if (!inputs.verifier) {
+    if (typeof inputs.dataHash !== 'string' || inputs.dataHash.length === 0) {
+      errors.push('dataHash is required');
+    }
+    if (typeof inputs.proofType !== 'string' || inputs.proofType.length === 0) {
+      errors.push('proofType is required');
+    }
+    if (typeof inputs.prover !== 'string' || inputs.prover.length === 0) {
+      errors.push('prover is required');
+    }
+    if (!inputs.generatedAtHlc) {
+      errors.push('generatedAtHlc is required');
+    } else {
+      try {
+        normalizeHlc(inputs.generatedAtHlc, 'generatedAtHlc');
+      } catch (error) {
+        errors.push(error.message);
+      }
+    }
+    if (inputs.proofData !== undefined && !isObjectRecord(inputs.proofData)) {
+      errors.push('proofData must be an object when provided');
+    }
+    if (typeof inputs.verifier !== 'string' || inputs.verifier.length === 0) {
       errors.push('verifier is required');
     }
     return { valid: errors.length === 0, errors };
   }
 
   execute(context) {
-    const { proofId, proofHash, verifier } = context.inputs;
+    const {
+      proofId,
+      proofHash,
+      dataHash,
+      proofType,
+      prover,
+      proofData,
+      generatedAtHlc,
+      verifier
+    } = context.inputs;
     const timestampHlc = timestampFromContext(context);
-    const verified = this._verifyProof(proofId, proofHash);
+    const verified = this._verifyProof({
+      proofId,
+      proofHash,
+      dataHash,
+      proofType,
+      prover,
+      proofData,
+      generatedAtHlc
+    });
     return {
       outputs: {
         proofId,
+        proofHash,
+        dataHash,
+        proofType,
+        prover,
         verified,
         verifier,
         verifiedAt: hlcToString(timestampHlc),
@@ -755,9 +806,49 @@ class ProofVerifyNode extends SyntaxisNode {
     return ['Kernel Panel'];
   }
 
-  _verifyProof(proofId, proofHash) {
-    // In production, would verify cryptographic proof integrity
-    return !!(proofId && proofHash && proofHash.length > 0);
+  _verifyProof(proof) {
+    if (
+      typeof proof.proofId !== 'string'
+      || !/^proof_[0-9a-f]{16}$/.test(proof.proofId)
+      || typeof proof.proofHash !== 'string'
+      || !/^proof_hash_[0-9a-f]{32}$/.test(proof.proofHash)
+      || typeof proof.dataHash !== 'string'
+      || proof.dataHash.length === 0
+      || typeof proof.proofType !== 'string'
+      || proof.proofType.length === 0
+      || typeof proof.prover !== 'string'
+      || proof.prover.length === 0
+    ) {
+      return false;
+    }
+
+    const proofData = proof.proofData || {};
+    if (!isObjectRecord(proofData)) {
+      return false;
+    }
+
+    let generatedAtHlc;
+    try {
+      generatedAtHlc = normalizeHlc(proof.generatedAtHlc, 'generatedAtHlc');
+    } catch (_error) {
+      return false;
+    }
+
+    const expectedProofId = deterministicId('proof', {
+      dataHash: proof.dataHash,
+      proofData,
+      proofType: proof.proofType,
+      prover: proof.prover,
+      timestampHlc: generatedAtHlc
+    });
+    const expectedProofHash = `proof_hash_${hashCanonical({
+      dataHash: proof.dataHash,
+      proofData,
+      proofType: proof.proofType,
+      prover: proof.prover
+    }).slice(0, 32)}`;
+
+    return proof.proofId === expectedProofId && proof.proofHash === expectedProofHash;
   }
 }
 

@@ -214,25 +214,25 @@
     },
     "proof-generate": {
       "label": "Proof Generate",
-      "description": "Generate a cryptographic proof for a constitutional claim.",
+      "description": "Generate a deterministic Syntaxis proof record for a constitutional claim.",
       "crate": "exo-proofs",
       "rust_trait": "ProofEngine::generate",
       "rust_module": "exo_proofs::engine",
       "combinator": "Transform(Identity, { output_key: 'proof' })",
       "invariants": ["ProvenanceVerifiable"],
-      "inputs": ["claim", "evidence"],
-      "outputs": ["proof"]
+      "inputs": ["claim", "evidence", "generated_at_hlc"],
+      "outputs": ["proof_id", "proof_hash", "proof_statement"]
     },
     "proof-verify": {
       "label": "Proof Verify",
-      "description": "Verify a cryptographic proof against its claim.",
+      "description": "Verify a deterministic Syntaxis proof record against its generated proof statement.",
       "crate": "exo-proofs",
       "rust_trait": "ProofEngine::verify",
       "rust_module": "exo_proofs::engine",
       "combinator": "Guard(Identity, Predicate { required_key: 'proof_valid' })",
       "invariants": ["ProvenanceVerifiable"],
-      "inputs": ["proof", "claim"],
-      "outputs": ["verification_result"]
+      "inputs": ["proof_id", "proof_hash", "proof_statement", "generated_at_hlc"],
+      "outputs": ["verification_result", "integrity"]
     },
     "tenant-isolate": {
       "label": "Tenant Isolate",

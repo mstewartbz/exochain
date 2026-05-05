@@ -29,8 +29,8 @@ The Syntaxis Protocol Engine is an intermediary protocol that translates council
   - `invariant-check`: Validates system invariants
 
 #### Proof & Ledger Nodes (3 nodes)
-- `proof-generate`: Generates cryptographic proofs
-- `proof-verify`: Verifies cryptographic proofs
+- `proof-generate`: Generates deterministic Syntaxis proof records
+- `proof-verify`: Verifies deterministic proof records against generated statements
 - `dag-append`: Appends execution record to governance DAG
 
 #### Escalation & Enforcement (2 nodes)
@@ -86,7 +86,7 @@ Implements new features with tenant isolation
 - **Default Duration**: 1 hour
 
 ### 3. Bug Fix Deployment
-Deploys bug fixes with proof verification
+Deploys bug fixes with deterministic proof-record verification
 - **Nodes**: 7
 - **Required Panels**: Governance, Kernel
 - **Consent Required**: No
@@ -141,7 +141,7 @@ A directed acyclic graph of nodes compiled from a council verdict and proposal. 
 - Map to BCTS state transitions
 - Validate constitutional invariants
 - Execute with fault tolerance policies
-- Generate cryptographic proofs
+- Generate deterministic proof records
 - Record execution in the governance DAG
 
 ### Council Verdict
