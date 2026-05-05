@@ -508,11 +508,14 @@ pub async fn update_user_pace(
     did: &str,
     pace_status: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET pace_status = $1 WHERE did = $2")
+    let result = sqlx::query("UPDATE users SET pace_status = $1 WHERE did = $2")
         .bind(pace_status)
         .bind(did)
         .execute(pool)
         .await?;
+    if result.rows_affected() == 0 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     Ok(())
 }
 
@@ -610,11 +613,14 @@ pub async fn update_agent_pace(
     did: &str,
     pace_status: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE agents SET pace_status = $1 WHERE did = $2")
+    let result = sqlx::query("UPDATE agents SET pace_status = $1 WHERE did = $2")
         .bind(pace_status)
         .bind(did)
         .execute(pool)
         .await?;
+    if result.rows_affected() == 0 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     Ok(())
 }
 
@@ -2390,6 +2396,27 @@ mod tests {
             !update.contains(".execute(pool).await?;\n    Ok(())"),
             "update_decision must not discard PgQueryResult and report success"
         );
+    }
+
+    #[test]
+    fn pace_update_helpers_report_missing_rows() {
+        let source = production_source();
+
+        for name in ["update_user_pace", "update_agent_pace"] {
+            let update = function_source(source, name);
+            assert!(
+                update.contains("rows_affected()"),
+                "{name} must inspect PgQueryResult row count"
+            );
+            assert!(
+                update.contains("sqlx::Error::RowNotFound"),
+                "{name} must report a missing subject row instead of returning success"
+            );
+            assert!(
+                !update.contains(".execute(pool)\n        .await?;\n    Ok(())"),
+                "{name} must not discard PgQueryResult and report success"
+            );
+        }
     }
 
     #[test]

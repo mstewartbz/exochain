@@ -71,6 +71,7 @@ const LAYOUT_TEMPLATE_MAX_HIDDEN_PANELS: usize = 128;
 const LAYOUT_TEMPLATE_GRID_COLS: u64 = 24;
 const LAYOUT_TEMPLATE_MAX_ROWS: u64 = 1024;
 const LAYOUT_TEMPLATE_MAX_HEIGHT: u64 = 128;
+const ADVANCED_PACE_STATUS: &str = "Advanced";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayRateLimitOutcome {
@@ -2480,18 +2481,47 @@ async fn handle_auth_saml_callback() -> (StatusCode, Json<serde_json::Value>) {
 // Constitutional action handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaceSubjectKind {
+    Agent,
+    User,
+}
+
 /// POST /api/v1/agents/:did/advance-pace — advance a constitutional pacing token.
-/// POST /api/v1/users/:did/advance-pace  — same for user DIDs.
 ///
 /// Adjudicated by the Kernel before any DB write.  Without a valid authority
 /// chain the Kernel returns 403.  Without a DB pool the handler returns 503.
 /// On success returns 202 Accepted.
+async fn handle_agent_advance_pace(
+    state: State<AppState>,
+    path: Path<String>,
+    headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    handle_advance_pace(state, path, headers, body, PaceSubjectKind::Agent).await
+}
+
+/// POST /api/v1/users/:did/advance-pace — advance a constitutional pacing token.
+///
+/// Adjudicated by the Kernel before any DB write.  Without a valid authority
+/// chain the Kernel returns 403.  Without a DB pool the handler returns 503.
+/// On success returns 202 Accepted.
+async fn handle_user_advance_pace(
+    state: State<AppState>,
+    path: Path<String>,
+    headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    handle_advance_pace(state, path, headers, body, PaceSubjectKind::User).await
+}
+
 async fn handle_advance_pace(
     State(state): State<AppState>,
     Path(did_str): Path<String>,
     headers: HeaderMap,
     body: Option<Json<serde_json::Value>>,
-) -> impl IntoResponse {
+    subject_kind: PaceSubjectKind,
+) -> Response {
     let did = match Did::new(&did_str) {
         Ok(d) => d,
         Err(_) => {
@@ -2543,7 +2573,7 @@ async fn handle_advance_pace(
         }
     }
     // Require DB for the pace record.
-    let _db = match state.require_db() {
+    let db = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
             return (
@@ -2558,6 +2588,23 @@ async fn handle_advance_pace(
         Ok(metadata) => metadata,
         Err(e) => return metadata_error_response(e),
     };
+    let pace_update = match subject_kind {
+        PaceSubjectKind::Agent => db::update_agent_pace(db, &did_str, ADVANCED_PACE_STATUS).await,
+        PaceSubjectKind::User => db::update_user_pace(db, &did_str, ADVANCED_PACE_STATUS).await,
+    };
+    if let Err(error) = pace_update {
+        return match error {
+            sqlx::Error::RowNotFound => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "pace target not found",
+                    "actor_did": did_str
+                })),
+            )
+                .into_response(),
+            other => internal_error_response(other, "pace update", "advance pace failed"),
+        };
+    }
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
@@ -3244,7 +3291,7 @@ fn build_unlayered_router(state: AppState) -> Router {
         .route("/api/v1/agents/:did", get(handle_agent_get))
         .route(
             "/api/v1/agents/:did/advance-pace",
-            post(handle_advance_pace),
+            post(handle_agent_advance_pace),
         )
         // Identity
         .route("/api/v1/identity/:did/score", get(handle_identity_score))
@@ -3263,7 +3310,10 @@ fn build_unlayered_router(state: AppState) -> Router {
         .route("/api/v1/audit/:decision_id", get(handle_audit_trail))
         // Users
         .route("/api/v1/users", get(handle_users_list))
-        .route("/api/v1/users/:did/advance-pace", post(handle_advance_pace))
+        .route(
+            "/api/v1/users/:did/advance-pace",
+            post(handle_user_advance_pace),
+        )
         // Dashboard layout templates
         .route(
             "/api/v1/layout-templates",
@@ -6693,11 +6743,132 @@ mod tests {
         );
     }
 
+    #[test]
+    fn advance_pace_handler_persists_authorized_result_to_matched_subject_table() {
+        let source = include_str!("server.rs");
+        let handler = source_between(
+            source,
+            "async fn handle_advance_pace",
+            "// ---------------------------------------------------------------------------\n// Legal / eDiscovery handlers",
+        );
+        let router = source_between(
+            source,
+            "pub fn build_router",
+            "// ---------------------------------------------------------------------------\n// Tests",
+        );
+
+        assert!(
+            source.contains("enum PaceSubjectKind"),
+            "advance-pace routes must classify agent and user targets before persistence"
+        );
+        assert!(
+            handler.contains("db::update_agent_pace") && handler.contains("db::update_user_pace"),
+            "advance_pace must persist successful adjudication through the matched PACE table"
+        );
+        assert!(
+            handler.contains("sqlx::Error::RowNotFound"),
+            "advance_pace must fail closed when the authenticated DID has no matching subject row"
+        );
+        assert!(
+            router.contains("post(handle_agent_advance_pace)")
+                && router.contains("post(handle_user_advance_pace)"),
+            "agent and user advance-pace routes must not share an indistinguishable persistence path"
+        );
+    }
+
     fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let start_index = source.find(start).expect("source start marker");
         let after_start = &source[start_index..];
         let end_index = after_start.find(end).expect("source end marker");
         &after_start[..end_index]
+    }
+
+    async fn cleanup_pace_route_fixture(pool: &sqlx::PgPool, did: &str, token: &str) {
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        for statement in [
+            "DELETE FROM agents WHERE did = $1 OR owner_did = $1",
+            "DELETE FROM users WHERE did = $1",
+            "DELETE FROM consent_records WHERE subject_did = $1 OR actor_did = $1",
+            "DELETE FROM authority_chains WHERE actor_did = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(did)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn insert_advance_pace_authorization(pool: &sqlx::PgPool, did: &str, token: &str) {
+        cleanup_pace_route_fixture(pool, did, token).await;
+        insert_test_session(pool, token, did).await;
+
+        let actor = Did::new(did).unwrap();
+        let root = Did::new("did:exo:advance-pace-root").unwrap();
+        sqlx::query(
+            "INSERT INTO consent_records \
+             (subject_did, actor_did, scope, bailment_type, status, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NULL)",
+        )
+        .bind(root.to_string())
+        .bind(did)
+        .bind("pace:advance")
+        .bind("constitutional_pace")
+        .bind("active")
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let chain = AuthorityChain {
+            links: vec![signed_authority_link_for_permissions(
+                &root,
+                &actor,
+                PermissionSet::new(vec![Permission::new("advance_pace")]),
+            )],
+        };
+        sqlx::query(
+            "INSERT INTO authority_chains (actor_did, chain_json, valid_from, expires_at) \
+             VALUES ($1, $2, $3, NULL)",
+        )
+        .bind(did)
+        .bind(serde_json::to_value(chain).unwrap())
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_test_agent(pool: &sqlx::PgPool, did: &str, owner_did: &str, tenant_id: &str) {
+        sqlx::query("DELETE FROM agents WHERE did = $1 OR owner_did = $2")
+            .bind(did)
+            .bind(owner_did)
+            .execute(pool)
+            .await
+            .unwrap();
+        db::insert_agent(
+            pool,
+            did,
+            "Pace Agent",
+            "governance",
+            owner_did,
+            tenant_id,
+            &serde_json::json!(["pace"]),
+            "standard",
+            10_000,
+            None,
+            "Unenrolled",
+            10_000_i64,
+            "Active",
+            "routine",
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -6781,6 +6952,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn agent_advance_pace_persists_agent_pace_status_after_kernel_permit() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let did = "did:exo:advance-pace-agent";
+        let token = "advance-pace-agent-token";
+
+        insert_advance_pace_authorization(&pool, did, token).await;
+        insert_test_agent(
+            &pool,
+            did,
+            "did:exo:advance-pace-owner",
+            "tenant-pace-agent",
+        )
+        .await;
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{did}/advance-pace"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "10000")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"queuedAt":10000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let persisted = db::find_agent_by_did(&pool, did).await.unwrap().unwrap();
+        assert_eq!(persisted.pace_status, "Advanced");
+
+        cleanup_pace_route_fixture(&pool, did, token).await;
+        sqlx::query("DELETE FROM agents WHERE owner_did = $1")
+            .bind("did:exo:advance-pace-owner")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_advance_pace_persists_user_pace_status_after_kernel_permit() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let did = "did:exo:advance-pace-user";
+        let token = "advance-pace-user-token";
+
+        insert_advance_pace_authorization(&pool, did, token).await;
+        insert_test_user(&pool, did, "tenant-pace-user").await;
+
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/users/{did}/advance-pace"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "10000")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"queuedAt":10000}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let persisted = db::find_user_by_did(&pool, did).await.unwrap().unwrap();
+        assert_eq!(persisted.pace_status, "Advanced");
+
+        cleanup_pace_route_fixture(&pool, did, token).await;
     }
 
     #[tokio::test]
@@ -6968,9 +7224,12 @@ mod tests {
     /// all non-provenance invariants.  Mirrors the context that
     /// `build_adjudication_context_from_db` would produce for an actor with
     /// a single role, one active consent record, and a one-link authority chain.
-    fn signed_authority_link(grantor: &Did, grantee: &Did) -> AuthorityLink {
+    fn signed_authority_link_for_permissions(
+        grantor: &Did,
+        grantee: &Did,
+        permissions: PermissionSet,
+    ) -> AuthorityLink {
         let (public_key, secret_key) = generate_keypair();
-        let permissions = PermissionSet::new(vec![Permission::new("vote")]);
 
         let mut link = AuthorityLink {
             grantor: grantor.clone(),
@@ -6983,6 +7242,14 @@ mod tests {
         let signature = sign(message.as_bytes(), &secret_key);
         link.signature = signature.to_bytes().to_vec();
         link
+    }
+
+    fn signed_authority_link(grantor: &Did, grantee: &Did) -> AuthorityLink {
+        signed_authority_link_for_permissions(
+            grantor,
+            grantee,
+            PermissionSet::new(vec![Permission::new("vote")]),
+        )
     }
 
     fn valid_db_context(actor: &Did) -> AdjudicationContext {
