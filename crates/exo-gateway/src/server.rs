@@ -64,6 +64,7 @@ const STRICT_TRANSPORT_SECURITY_VALUE: &str = "max-age=63072000; includeSubDomai
 const CONTENT_SECURITY_POLICY_VALUE: &str =
     "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const PERMISSIONS_POLICY_VALUE: &str = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
+const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const LAYOUT_TEMPLATE_MAX_ID_BYTES: usize = 128;
 const LAYOUT_TEMPLATE_MAX_NAME_BYTES: usize = 256;
 const LAYOUT_TEMPLATE_MAX_ITEMS: usize = 128;
@@ -1653,6 +1654,61 @@ async fn handle_ready(State(state): State<AppState>) -> (StatusCode, Json<Health
         uptime_seconds: state.uptime_seconds(),
     };
     (http_status, Json(body))
+}
+
+fn render_gateway_metrics(state: &AppState) -> std::result::Result<String, &'static str> {
+    let did_registry_documents = state
+        .registry
+        .read()
+        .map_err(|_| "gateway DID registry lock poisoned while rendering metrics")?
+        .len();
+    let rate_limit_tracked_clients = state
+        .rate_limiter
+        .lock()
+        .map_err(|_| "gateway rate limiter lock poisoned while rendering metrics")?
+        .clients
+        .len();
+    let db_configured = usize::from(state.pool.is_some());
+    let uptime_seconds = state.uptime_seconds();
+
+    Ok(format!(
+        concat!(
+            "# HELP exo_gateway_up Whether the EXOCHAIN gateway is serving requests.\n",
+            "# TYPE exo_gateway_up gauge\n",
+            "exo_gateway_up 1\n",
+            "# HELP exo_gateway_uptime_seconds HLC-derived gateway uptime in seconds.\n",
+            "# TYPE exo_gateway_uptime_seconds gauge\n",
+            "exo_gateway_uptime_seconds {uptime_seconds}\n",
+            "# HELP exo_gateway_db_configured Whether durable storage is configured.\n",
+            "# TYPE exo_gateway_db_configured gauge\n",
+            "exo_gateway_db_configured {db_configured}\n",
+            "# HELP exo_gateway_did_registry_documents Local DID documents cached in memory.\n",
+            "# TYPE exo_gateway_did_registry_documents gauge\n",
+            "exo_gateway_did_registry_documents {did_registry_documents}\n",
+            "# HELP exo_gateway_rate_limit_tracked_clients Clients currently tracked by the rate limiter.\n",
+            "# TYPE exo_gateway_rate_limit_tracked_clients gauge\n",
+            "exo_gateway_rate_limit_tracked_clients {rate_limit_tracked_clients}\n",
+        ),
+        uptime_seconds = uptime_seconds,
+        db_configured = db_configured,
+        did_registry_documents = did_registry_documents,
+        rate_limit_tracked_clients = rate_limit_tracked_clients,
+    ))
+}
+
+async fn handle_metrics(State(state): State<AppState>) -> Response {
+    match render_gateway_metrics(&state) {
+        Ok(body) => ([(header::CONTENT_TYPE, PROMETHEUS_TEXT_CONTENT_TYPE)], body).into_response(),
+        Err(message) => {
+            tracing::error!(message, "Gateway metrics unavailable");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, PROMETHEUS_TEXT_CONTENT_TYPE)],
+                "gateway metrics unavailable\n",
+            )
+                .into_response()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3288,6 +3344,7 @@ fn build_unlayered_router(state: AppState) -> Router {
         // Probes
         .route("/health", get(handle_health))
         .route("/ready", get(handle_ready))
+        .route("/metrics", get(handle_metrics))
         // DB health deep probe (requires pool to be configured)
         .route("/health/db", get(db_health_handler))
         // Decisions — create and read tenant-scoped governance records.
@@ -3486,7 +3543,7 @@ pub async fn serve(config: GatewayConfig, pool: Option<sqlx::PgPool>) -> Result<
 /// Like [`serve`] but merges an additional [`Router`] into the app.
 ///
 /// The `extra` router is merged before gateway-wide layers are applied so
-/// injected endpoints (e.g. `/metrics`) share the same admission controls.
+/// injected endpoints share the same admission controls.
 pub async fn serve_with_extra_routes(
     config: GatewayConfig,
     pool: Option<sqlx::PgPool>,
@@ -3932,14 +3989,14 @@ mod tests {
         let state = rate_limited_state(1, 60_000, wall);
         let app = build_router_with_extra_routes(
             state,
-            Some(Router::new().route("/metrics", get(probe))),
+            Some(Router::new().route("/internal/probe", get(probe))),
         );
 
         let first = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/metrics")
+                    .uri("/internal/probe")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3950,7 +4007,7 @@ mod tests {
         let second = app
             .oneshot(
                 Request::builder()
-                    .uri("/metrics")
+                    .uri("/internal/probe")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4308,6 +4365,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gateway_metrics_endpoint_returns_prometheus_text_without_secrets() {
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("metrics response must declare a content type");
+        assert!(
+            content_type.starts_with("text/plain"),
+            "Prometheus metrics should be text/plain, got {content_type}"
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(body.contains("# HELP exo_gateway_up"));
+        assert!(body.contains("exo_gateway_up 1"));
+        assert!(body.contains("exo_gateway_db_configured 0"));
+        assert!(body.contains("exo_gateway_uptime_seconds"));
+        for forbidden in ["DATABASE_URL", "POSTGRES", "password", "secret", "token"] {
+            assert!(
+                !body
+                    .to_ascii_lowercase()
+                    .contains(&forbidden.to_ascii_lowercase()),
+                "gateway metrics must not expose secret-bearing labels or values: {forbidden}"
+            );
+        }
     }
 
     #[tokio::test]
