@@ -1295,7 +1295,7 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.templates.length).toBeGreaterThan(2)
     })
 
-    it('should serialize layout to JSON string for server', () => {
+    it('should send canonical layout arrays for server validation', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
@@ -1306,8 +1306,9 @@ describe('useLayoutTemplateStore', () => {
 
       const callArgs = (global.fetch as any).mock.calls[0][1]
       const body = JSON.parse(callArgs.body)
-      expect(typeof body.layout).toBe('string')
-      expect(JSON.parse(body.layout)).toEqual(expect.any(Array))
+      expect(Array.isArray(body.layout)).toBe(true)
+      expect(body.layout).toEqual([{ i: 'panel-1', x: 0, y: 0, w: 6, h: 4 }])
+      expect(body.hiddenPanels).toEqual([])
     })
   })
 })
