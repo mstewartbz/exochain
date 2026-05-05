@@ -3,15 +3,26 @@
 //! Ensures AI systems operating within the EXOCHAIN fabric respect
 //! constitutional boundaries on autonomy, identity, and consent.
 //!
-//! **Key design**: The `SignerType` enum is part of the signed payload,
-//! not a caller-set flag. An AI key uses prefix `0x02` in all signed
-//! payloads, so even if an AI has valid key material, it cannot produce
-//! a signature that could be mistaken for a human (`0x01`) signature.
+//! **Key design**: The `SignerType` enum is part of a domain-separated
+//! canonical CBOR signed payload, not a caller-set flag. Even if an AI has
+//! valid key material, it cannot produce a signature that could be mistaken
+//! for a human signature.
 
 use exo_core::{Did, SignerType};
 use serde::{Deserialize, Serialize};
 
-use crate::types::PermissionSet;
+use crate::{error::GatekeeperError, types::PermissionSet};
+
+const MCP_TYPED_SIGNATURE_DOMAIN: &str = "exo.gatekeeper.mcp.typed-signature.v1";
+const MCP_TYPED_SIGNATURE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Serialize)]
+struct McpTypedSignaturePayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    signer_type: &'a SignerType,
+    message: &'a [u8],
+}
 
 // ---------------------------------------------------------------------------
 // MCP rules
@@ -199,16 +210,30 @@ fn check_rule(rule: McpRule, ctx: &McpContext) -> Result<(), McpViolation> {
 }
 
 /// Build a signable message that embeds the signer type.
-/// This ensures the signer type is cryptographically bound to the signature.
-#[must_use]
-pub fn build_signed_payload(signer_type: &SignerType, message: &[u8]) -> Vec<u8> {
-    let mut payload = signer_type.to_payload_prefix();
-    payload.extend_from_slice(message);
-    payload
+///
+/// The payload is a versioned, domain-separated canonical CBOR envelope so
+/// signer identity is cryptographically bound without raw byte concatenation.
+pub fn build_signed_payload(
+    signer_type: &SignerType,
+    message: &[u8],
+) -> Result<Vec<u8>, GatekeeperError> {
+    let payload = McpTypedSignaturePayload {
+        domain: MCP_TYPED_SIGNATURE_DOMAIN,
+        schema_version: MCP_TYPED_SIGNATURE_SCHEMA_VERSION,
+        signer_type,
+        message,
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut encoded).map_err(|error| {
+        GatekeeperError::McpTypedSignatureEncodingFailed {
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(encoded)
 }
 
 /// Verify that a signature was produced with the claimed signer type.
-/// The signer type prefix is prepended to the message before verification.
+/// The signer type is embedded in the canonical signed payload before verification.
 #[must_use]
 pub fn verify_typed_signature(
     signer_type: &SignerType,
@@ -216,8 +241,10 @@ pub fn verify_typed_signature(
     signature: &exo_core::Signature,
     public_key: &exo_core::PublicKey,
 ) -> bool {
-    let payload = build_signed_payload(signer_type, message);
-    exo_core::crypto::verify(&payload, signature, public_key)
+    match build_signed_payload(signer_type, message) {
+        Ok(payload) => exo_core::crypto::verify(&payload, signature, public_key),
+        Err(_) => false,
+    }
 }
 
 // ===========================================================================
@@ -227,9 +254,18 @@ pub fn verify_typed_signature(
 #[cfg(test)]
 mod tests {
     use exo_core::{Hash256, crypto::KeyPair};
+    use serde::Deserialize;
 
     use super::*;
     use crate::types::Permission;
+
+    fn production_source() -> &'static str {
+        let source = include_str!("mcp.rs");
+        let end = source
+            .find("// ===========================================================================")
+            .expect("tests section marker must exist");
+        &source[..end]
+    }
 
     fn did(s: &str) -> Did {
         Did::new(s).expect("valid DID")
@@ -417,7 +453,7 @@ mod tests {
         let ai_type = SignerType::Ai {
             delegation_id: Hash256::digest(b"session-1"),
         };
-        let ai_payload = build_signed_payload(&ai_type, message);
+        let ai_payload = build_signed_payload(&ai_type, message).expect("AI payload encodes");
         let ai_sig = kp.sign(&ai_payload);
 
         // Verify as AI — should succeed
@@ -443,7 +479,8 @@ mod tests {
         let message = b"budget approval";
 
         // Human signs
-        let human_payload = build_signed_payload(&SignerType::Human, message);
+        let human_payload =
+            build_signed_payload(&SignerType::Human, message).expect("human payload encodes");
         let human_sig = kp.sign(&human_payload);
 
         // Verify as human — should succeed
@@ -478,8 +515,8 @@ mod tests {
             delegation_id: Hash256::digest(b"delegation-B"),
         };
 
-        let payload1 = build_signed_payload(&ai1, message);
-        let payload2 = build_signed_payload(&ai2, message);
+        let payload1 = build_signed_payload(&ai1, message).expect("AI payload encodes");
+        let payload2 = build_signed_payload(&ai2, message).expect("AI payload encodes");
         assert_ne!(payload1, payload2);
 
         let sig1 = kp.sign(&payload1);
@@ -496,6 +533,60 @@ mod tests {
             &sig1,
             kp.public_key()
         ));
+    }
+
+    #[test]
+    fn typed_signature_payload_is_domain_separated_versioned_cbor() {
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        struct TypedSignaturePayload {
+            domain: String,
+            schema_version: u16,
+            signer_type: SignerType,
+            message: Vec<u8>,
+        }
+
+        let signer_type = SignerType::Ai {
+            delegation_id: Hash256::digest(b"typed-signature-session"),
+        };
+        let message = b"constitutional MCP action";
+
+        let payload = build_signed_payload(&signer_type, message).expect("payload encodes");
+        let decoded: TypedSignaturePayload =
+            ciborium::from_reader(payload.as_slice()).expect("typed signature payload is CBOR");
+
+        assert_eq!(decoded.domain, "exo.gatekeeper.mcp.typed-signature.v1");
+        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(decoded.signer_type, signer_type);
+        assert_eq!(decoded.message, message);
+    }
+
+    #[test]
+    fn typed_signature_payload_source_uses_cbor_not_raw_concatenation() {
+        let production = production_source();
+        let start = production
+            .find("pub fn build_signed_payload")
+            .expect("build_signed_payload exists");
+        let end = production
+            .find("/// Verify that a signature was produced with the claimed signer type.")
+            .expect("verify_typed_signature marker exists");
+        let body = &production[start..end];
+
+        assert!(
+            body.contains("ciborium::"),
+            "typed signature payloads must use canonical CBOR"
+        );
+        assert!(
+            !body.contains("extend_from_slice"),
+            "typed signature payloads must not be raw byte concatenations"
+        );
+        assert!(
+            !body.contains("to_payload_prefix"),
+            "typed signature payloads must bind the structured signer type, not an ad hoc prefix"
+        );
+        assert!(
+            !body.contains("return Vec::new()"),
+            "typed signature serialization must not silently fall back to an empty payload"
+        );
     }
 
     #[test]

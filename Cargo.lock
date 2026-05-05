@@ -1474,6 +1474,7 @@ name = "exo-gatekeeper"
 version = "0.1.0-beta"
 dependencies = [
  "blake3",
+ "ciborium",
  "ed25519-dalek",
  "exo-core",
  "serde",
