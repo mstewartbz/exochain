@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_server::tls_rustls::RustlsConfig;
+use decision_forum::decision_object::{DecisionClass, DecisionObject, DecisionObjectInput};
 use exo_core::{Did, Hash256, Signature, Timestamp, hlc::HybridClock};
 use exo_gatekeeper::{
     invariants::InvariantSet,
@@ -48,7 +49,7 @@ use crate::{
     db,
     error::{GatewayError, Result},
     graphql,
-    handlers::{health_handler as db_health_handler, vote_handler},
+    handlers::health_handler as db_health_handler,
     rest::HealthResponse,
 };
 
@@ -275,6 +276,18 @@ pub struct AppState {
 pub struct AuthenticatedSessionUser {
     pub did: Did,
     pub tenant_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionCreateRequest {
+    id: String,
+    title: String,
+    decision_class: String,
+    constitutional_hash: String,
+    created_at_physical_ms: u64,
+    created_at_logical: u32,
+    constitution_version: String,
 }
 
 impl AppState {
@@ -953,6 +966,47 @@ fn required_ed25519_signature_hex(body: &serde_json::Value, field: &str) -> Resu
     Ok(signature)
 }
 
+fn parse_decision_uuid(raw: &str, field: &str) -> Result<uuid::Uuid> {
+    let uuid = uuid::Uuid::parse_str(raw.trim())
+        .map_err(|e| metadata_error(format!("{field} must be a valid UUID: {e}")))?;
+    if uuid.is_nil() {
+        return Err(metadata_error(format!("{field} must not be the nil UUID")));
+    }
+    Ok(uuid)
+}
+
+fn parse_decision_class(raw: &str) -> Result<DecisionClass> {
+    match raw.trim() {
+        "Routine" => Ok(DecisionClass::Routine),
+        "Operational" => Ok(DecisionClass::Operational),
+        "Strategic" => Ok(DecisionClass::Strategic),
+        "Constitutional" => Ok(DecisionClass::Constitutional),
+        other => Err(metadata_error(format!(
+            "decision_class must be one of Routine, Operational, Strategic, Constitutional; got {other}"
+        ))),
+    }
+}
+
+fn parse_hash256_hex(raw: &str, field: &str) -> Result<Hash256> {
+    let encoded = raw.trim();
+    let mut bytes = [0u8; 32];
+    hex::decode_to_slice(encoded, &mut bytes)
+        .map_err(|e| metadata_error(format!("{field} must be 32 bytes of hex: {e}")))?;
+    let hash = Hash256::from_bytes(bytes);
+    if hash == Hash256::ZERO {
+        return Err(metadata_error(format!("{field} must not be all-zero")));
+    }
+    Ok(hash)
+}
+
+fn required_nonempty_trimmed(raw: &str, field: &str) -> Result<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(metadata_error(format!("{field} must not be empty")));
+    }
+    Ok(value.to_owned())
+}
+
 fn session_login_payload_hash(
     did: &str,
     metadata: &SessionIssueMetadata,
@@ -1538,6 +1592,142 @@ async fn handle_users_list(State(state): State<AppState>, headers: HeaderMap) ->
                 Json(serde_json::json!({ "error": "DID registry unavailable" })),
             )
                 .into_response()
+        }
+    }
+}
+
+/// POST /api/v1/decisions — create a new tenant-scoped decision record.
+///
+/// Requires a DB-backed bearer session. The tenant and author are derived from
+/// that session, while the decision id, constitutional hash, and HLC timestamp
+/// are caller-supplied to keep the runtime adapter deterministic.
+async fn handle_decision_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let actor = match require_authenticated_session_user_from_header(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
+    let request = match serde_json::from_slice::<DecisionCreateRequest>(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            return metadata_error_response(metadata_error(format!(
+                "decision create request must be valid JSON: {e}"
+            )));
+        }
+    };
+    let id = match parse_decision_uuid(&request.id, "id") {
+        Ok(id) => id,
+        Err(e) => return metadata_error_response(e),
+    };
+    let title = match required_nonempty_trimmed(&request.title, "title") {
+        Ok(title) => title,
+        Err(e) => return metadata_error_response(e),
+    };
+    let class = match parse_decision_class(&request.decision_class) {
+        Ok(class) => class,
+        Err(e) => return metadata_error_response(e),
+    };
+    let constitutional_hash =
+        match parse_hash256_hex(&request.constitutional_hash, "constitutional_hash") {
+            Ok(hash) => hash,
+            Err(e) => return metadata_error_response(e),
+        };
+    let created_at = Timestamp::new(request.created_at_physical_ms, request.created_at_logical);
+    if request.created_at_physical_ms == 0 {
+        return metadata_error_response(metadata_error(
+            "created_at_physical_ms must be caller-supplied and non-zero",
+        ));
+    }
+    let created_at_ms = match i64::try_from(created_at.physical_ms) {
+        Ok(value) => value,
+        Err(_) => {
+            return metadata_error_response(metadata_error(
+                "created_at_physical_ms must fit in PostgreSQL BIGINT",
+            ));
+        }
+    };
+    let constitution_version =
+        match required_nonempty_trimmed(&request.constitution_version, "constitution_version") {
+            Ok(version) => version,
+            Err(e) => return metadata_error_response(e),
+        };
+
+    let decision = match DecisionObject::new(DecisionObjectInput {
+        id,
+        title,
+        class,
+        constitutional_hash,
+        created_at,
+    }) {
+        Ok(decision) => decision,
+        Err(e) => {
+            return metadata_error_response(metadata_error(format!(
+                "invalid decision object: {e}"
+            )));
+        }
+    };
+    let content_hash = match decision.content_hash() {
+        Ok(hash) => hash,
+        Err(e) => {
+            return internal_error_response(e, "decision content hash", "decision creation failed");
+        }
+    };
+    let id_hash = content_hash.to_string();
+    let decision_class = decision.class.quorum_policy_key();
+    let status = decision.state.as_str();
+    let author = actor.did.as_str();
+    let payload = serde_json::json!({
+        "schema": "exo.gateway.decision_create.v1",
+        "id_hash": id_hash.as_str(),
+        "id": decision.id.to_string(),
+        "tenant_id": actor.tenant_id.as_str(),
+        "status": status,
+        "title": decision.title.as_str(),
+        "decision_class": decision_class,
+        "author": author,
+        "created_at": {
+            "physical_ms": decision.created_at.physical_ms,
+            "logical": decision.created_at.logical
+        },
+        "constitutional_hash": constitutional_hash.to_string(),
+        "constitution_version": constitution_version.as_str(),
+        "content_hash": id_hash.as_str()
+    });
+    let db = match state.require_db() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "database unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    match db::create_decision(
+        db,
+        &id_hash,
+        &actor.tenant_id,
+        status,
+        &decision.title,
+        decision_class,
+        author,
+        created_at_ms,
+        &constitution_version,
+        &payload,
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::CREATED, Json(payload)).into_response(),
+        Err(db::DecisionCreateError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "decision already exists" })),
+        )
+            .into_response(),
+        Err(db::DecisionCreateError::Query { source }) => {
+            internal_error_response(source, "decision create query", "decision creation failed")
         }
     }
 }
@@ -2653,9 +2843,9 @@ fn build_unlayered_router(state: AppState) -> Router {
         .route("/ready", get(handle_ready))
         // DB health deep probe (requires pool to be configured)
         .route("/health/db", get(db_health_handler))
-        // Decisions — vote handler enforces ConflictAdjudication + TNC-01
+        // Decisions — create and read tenant-scoped governance records.
         .route("/api/v1/decisions/:id", get(handle_decision_get))
-        .route("/api/v1/decisions", post(vote_handler))
+        .route("/api/v1/decisions", post(handle_decision_create))
         // Auth
         .route("/api/v1/auth/token", post(handle_auth_token))
         .route(
@@ -3927,6 +4117,11 @@ mod tests {
         let users_list = source_between(
             source,
             "async fn handle_users_list",
+            "/// POST /api/v1/decisions",
+        );
+        let decision_create = source_between(
+            source,
+            "async fn handle_decision_create",
             "/// GET /api/v1/decisions/:id",
         );
         let decision_get = source_between(
@@ -3944,6 +4139,7 @@ mod tests {
             ("agents list", agents_list, "list_dids"),
             ("agent get", agent_get, "resolve_did_document"),
             ("users list", users_list, "list_dids"),
+            ("decision create", decision_create, "state.require_db"),
             ("decision get", decision_get, "state.require_db"),
             ("audit trail", audit_trail, "state.require_db"),
         ] {
@@ -3981,6 +4177,26 @@ mod tests {
         assert!(
             !handler.contains("SELECT payload FROM decisions WHERE id_hash = $1"),
             "decision get must not perform an unscoped id_hash lookup"
+        );
+    }
+
+    #[test]
+    fn decision_post_route_dispatches_to_create_handler_not_vote_handler() {
+        let source = include_str!("server.rs");
+        let router = source_between(
+            source,
+            "fn build_unlayered_router",
+            "fn gateway_rate_limit_key",
+        );
+        let compact_router: String = router.chars().filter(|ch| !ch.is_whitespace()).collect();
+
+        assert!(
+            compact_router.contains(".route(\"/api/v1/decisions\",post(handle_decision_create))"),
+            "POST /api/v1/decisions must create a decision, matching RestRoute::CreateDecision"
+        );
+        assert!(
+            !compact_router.contains(".route(\"/api/v1/decisions\",post(vote_handler))"),
+            "POST /api/v1/decisions must not dispatch create requests to the vote handler"
         );
     }
 
@@ -4130,7 +4346,7 @@ mod tests {
         let users_list = source_between(
             source,
             "async fn handle_users_list",
-            "/// GET /api/v1/decisions/:id",
+            "/// POST /api/v1/decisions",
         );
         assert!(
             users_list.contains("list_dids(&state).await"),
@@ -4640,16 +4856,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vote_route_missing_session_returns_401_before_conflict_register_lookup() {
+    async fn decision_create_shape_missing_session_returns_401_not_vote_schema_error() {
         let body = serde_json::to_string(&serde_json::json!({
-            "decision_id": "d1",
-            "voter_did": "did:exo:alice",
-            "affected_dids": ["did:exo:tenant-a"],
-            "choice": "Approve",
-            "actor_kind": "Human",
-            "rationale": null,
-            "timestamp_physical_ms": 7000,
-            "timestamp_logical": 0,
+            "id": "00000000-0000-0000-0000-000000000060",
+            "title": "F-060 route contract regression",
+            "decision_class": "Routine",
+            "constitutional_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "created_at_physical_ms": 7000,
+            "created_at_logical": 0,
+            "constitution_version": "exochain-constitution-v1"
         }))
         .unwrap();
         let app = build_router(state());
@@ -4666,6 +4881,89 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn decision_create_authenticated_session_persists_tenant_scoped_record() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let did = "did:exo:decision-creator";
+        let tenant_id = "tenant-create";
+        let title = "F-060 authenticated create";
+        insert_test_user(&pool, did, tenant_id).await;
+        insert_test_session(&pool, "decision-create-token", did).await;
+        sqlx::query("DELETE FROM decisions WHERE author = $1 AND title = $2")
+            .bind(did)
+            .bind(title)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let body = serde_json::to_string(&serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000601",
+            "title": title,
+            "decision_class": "Routine",
+            "constitutional_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "created_at_physical_ms": 8000,
+            "created_at_logical": 1,
+            "constitution_version": "exochain-constitution-v1"
+        }))
+        .unwrap();
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/decisions")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer decision-create-token")
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id_hash = val["content_hash"].as_str().unwrap();
+        assert_eq!(val["tenant_id"], tenant_id);
+        assert_eq!(val["author"], did);
+        assert_eq!(val["status"], "Draft");
+        assert_eq!(val["title"], title);
+        assert_eq!(val["decision_class"], "Routine");
+
+        let row = db::find_decision(&pool, id_hash, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.tenant_id, tenant_id);
+        assert_eq!(row.author, did);
+        assert_eq!(row.status, "Draft");
+        assert_eq!(row.payload, val);
+
+        sqlx::query("DELETE FROM decisions WHERE id_hash = $1")
+            .bind(id_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind("decision-create-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     // --- Identity score endpoint tests ---

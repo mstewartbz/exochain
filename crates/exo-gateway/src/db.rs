@@ -44,6 +44,17 @@ pub enum DecisionUpdateError {
 }
 
 #[derive(Debug, Error)]
+pub enum DecisionCreateError {
+    #[error("decision already exists for id_hash {id_hash}")]
+    AlreadyExists { id_hash: String },
+    #[error("failed to create decision row")]
+    Query {
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+#[derive(Debug, Error)]
 pub enum DidDocumentPersistenceError {
     #[error("DID document timestamp is out of database range for field {field}: {value}")]
     TimestampOutOfRange {
@@ -651,6 +662,45 @@ pub async fn insert_decision(
     .bind(id_hash).bind(tenant_id).bind(status).bind(title).bind(decision_class)
     .bind(author).bind(created_at_ms).bind(constitution_version).bind(payload)
     .execute(pool).await?;
+    Ok(())
+}
+
+/// Create a new decision row without mutating an existing id.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_decision(
+    pool: &PgPool,
+    id_hash: &str,
+    tenant_id: &str,
+    status: &str,
+    title: &str,
+    decision_class: &str,
+    author: &str,
+    created_at_ms: i64,
+    constitution_version: &str,
+    payload: &JsonValue,
+) -> Result<(), DecisionCreateError> {
+    let result = sqlx::query(
+        "INSERT INTO decisions (id_hash, tenant_id, status, title, decision_class, author, created_at_ms, constitution_version, payload)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id_hash) DO NOTHING"
+    )
+    .bind(id_hash)
+    .bind(tenant_id)
+    .bind(status)
+    .bind(title)
+    .bind(decision_class)
+    .bind(author)
+    .bind(created_at_ms)
+    .bind(constitution_version)
+    .bind(payload)
+    .execute(pool)
+    .await
+    .map_err(|source| DecisionCreateError::Query { source })?;
+    if result.rows_affected() == 0 {
+        return Err(DecisionCreateError::AlreadyExists {
+            id_hash: id_hash.to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -2281,6 +2331,37 @@ mod tests {
         assert!(
             contains_in_order(lookup, ".bind(id_hash)", ".bind(tenant_id)"),
             "find_decision must bind id_hash and tenant_id together"
+        );
+    }
+
+    #[test]
+    fn create_decision_inserts_once_without_upsert_overwrite() {
+        let source = production_source();
+        let create = function_source(source, "create_decision");
+
+        assert!(
+            source.contains("pub enum DecisionCreateError"),
+            "create_decision must return typed duplicate-decision errors"
+        );
+        assert!(
+            create.contains("-> Result<(), DecisionCreateError>"),
+            "create_decision must distinguish duplicate ids from SQL failures"
+        );
+        assert!(
+            compact_sql(create).contains("ON CONFLICT (id_hash) DO NOTHING"),
+            "decision creation must not overwrite an existing decision row"
+        );
+        assert!(
+            create.contains("rows_affected()"),
+            "decision creation must inspect PgQueryResult row count"
+        );
+        assert!(
+            create.contains("DecisionCreateError::AlreadyExists"),
+            "decision creation must report a conflict when the id already exists"
+        );
+        assert!(
+            !create.contains("DO UPDATE"),
+            "decision creation must not silently mutate a pre-existing decision"
         );
     }
 
