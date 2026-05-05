@@ -73,12 +73,12 @@ primary_region = "iad"
     hard_limit = 500
     soft_limit = 250
 
-# Health check — gateway /health route.
+# Health check — dependency-validating gateway /ready route.
 [[services.http_checks]]
   interval = 10000
   grace_period = "10s"
   method = "GET"
-  path = "/health"
+  path = "/ready"
   protocol = "http"
   timeout = 5000
 
