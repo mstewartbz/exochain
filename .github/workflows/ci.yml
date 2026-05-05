@@ -505,7 +505,7 @@ jobs:
       - name: Build WASM
         run: wasm-pack build crates/exochain-wasm --target nodejs --out-dir ../../packages/exochain-wasm/wasm
       - name: Verify WASM exports
-        # Expected export count = 148. Baseline was 110 before
+        # Expected export count = 149. Baseline was 110 before
         # decision-forum, messaging, death-trigger, and franchise/NewCo
         # scaffold were added; the adjudicated decision transition bridge
         # adds the current security boundary. Remaining bridge coverage debt is tracked in
@@ -513,7 +513,7 @@ jobs:
         run: |
           COUNT=$(grep -c "module.exports.wasm_" packages/exochain-wasm/wasm/exochain_wasm.js)
           echo "Found $COUNT WASM exports"
-          [ "$COUNT" -eq 148 ] || (echo "Expected 148 exports, got $COUNT" && exit 1)
+          [ "$COUNT" -eq 149 ] || (echo "Expected 149 exports, got $COUNT" && exit 1)
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
@@ -548,7 +548,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify Rust exports match JS expectations
-        # Expected #[wasm_bindgen] count = 148. Baseline was 110 before the
+        # Expected #[wasm_bindgen] count = 149. Baseline was 110 before the
         # Sprint-4 additions (decision-forum, messaging, death-trigger,
         # franchise/NewCo scaffold); the adjudicated decision transition bridge
         # adds the current security boundary. Remaining bridge coverage debt is
@@ -556,7 +556,7 @@ jobs:
         run: |
           RUST_COUNT=$(grep -r '#\[wasm_bindgen\]' crates/exochain-wasm/src/ | wc -l | tr -d ' ')
           echo "Rust #[wasm_bindgen] exports: $RUST_COUNT"
-          [ "$RUST_COUNT" -eq 148 ] || (echo "WASM export count changed from 148 to $RUST_COUNT — update bridge tests" && exit 1)
+          [ "$RUST_COUNT" -eq 149 ] || (echo "WASM export count changed from 149 to $RUST_COUNT — update bridge tests" && exit 1)
 
   # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
