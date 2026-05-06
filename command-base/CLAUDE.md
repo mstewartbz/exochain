@@ -656,4 +656,18 @@ Every function that assigns work to a team member automatically spawns a Claude 
 
 **Settings:** `auto_spawn_enabled` in system_settings (default: on). `claude_cli_path` for CLI binary location.
 
+**Per-dispatch identity assertion:** Every auto-spawned terminal MUST receive a per-dispatch identity assertion before it can start work. The assertion is an immutable envelope, persisted with the spawn record and repeated in the terminal's initial instructions, containing:
+
+- `dispatch_id` — unique spawn/terminal dispatch identifier for this single run.
+- `team_member_id` — the assigned CommandBase team member.
+- `task_assignment_id` — the task assignment row or equivalent assignment record.
+- `agent_passport_id` — the adjacent CommandBase agent passport governing allowed tools, limits, and review path.
+- `actor_did` — the EXOCHAIN DID only when a verified adapter has bound this adjacent agent to a real EXOCHAIN actor; otherwise `null`.
+- `authority_scope` — the CommandBase task/tool scope for this dispatch.
+- `issued_by` — the human, Board, or executive actor that approved the dispatch.
+
+The spawn must fail closed if the identity envelope is missing, malformed, references a disabled team member, references a revoked or absent `agent_passport_id`, or attempts to reuse another terminal's `dispatch_id`. A spawned agent must never inherit a shared Board, executive, or team identity, and it must not claim another member's tools, authority, memory, or output as its own.
+
+This adjacent identity envelope is attribution, not constitutional authority. It does not make the adjacent CommandBase agent an EXOCHAIN core actor, and it does not authorize constitutional trust claims unless the runtime path calls a verified EXOCHAIN adapter that adjudicates the action and binds the `actor_did`, provenance, consent, and authority chain.
+
 **Rule:** If a team member is assigned work, they get a terminal. No exceptions.
