@@ -40,11 +40,25 @@ const crypto = require('crypto');
 /** Default token TTL in seconds (1 hour). */
 const DEFAULT_TTL_SECONDS = 3600;
 
-/** HMAC fallback secret from runtime environment when WASM signing is unavailable. */
-function getHmacSecret() {
+const HISTORICAL_DEV_HMAC_SECRET_SHA256 =
+  '2a6a7feaafe6c9ea59361651e2bd3cf9c7b8e537670d37fd9d7b796ed4b161d6';
+const MIN_HMAC_SECRET_BYTES = 32;
+
+/** Return the explicitly configured HMAC fallback secret after policy validation. */
+function configuredHmacSecret() {
   const secret = process.env.EXOCHAIN_AUTH_SECRET;
   if (!secret) {
-    throw new Error('EXOCHAIN_AUTH_SECRET must be configured when wasm auth backend is unavailable');
+    throw new Error('EXOCHAIN_AUTH_SECRET is required when the WASM Ed25519 backend is unavailable');
+  }
+  const byteLength = Buffer.byteLength(secret, 'utf8');
+  if (byteLength < MIN_HMAC_SECRET_BYTES) {
+    throw new Error(
+      `EXOCHAIN_AUTH_SECRET must be at least ${MIN_HMAC_SECRET_BYTES} bytes, got ${byteLength}`,
+    );
+  }
+  const secretHash = crypto.createHash('sha256').update(secret, 'utf8').digest('hex');
+  if (secretHash === HISTORICAL_DEV_HMAC_SECRET_SHA256) {
+    throw new Error('Refusing to use the historical development HMAC secret for session tokens');
   }
   return secret;
 }
@@ -108,8 +122,7 @@ function sign(message) {
     const sigBytes = wasm.wasm_ed25519_sign(Buffer.from(message, 'utf8'));
     return base64urlEncode(sigBytes);
   }
-  // HMAC-SHA256 fallback
-  const hmac = crypto.createHmac('sha256', getHmacSecret());
+  const hmac = crypto.createHmac('sha256', configuredHmacSecret());
   hmac.update(message);
   return base64urlEncode(hmac.digest());
 }
@@ -128,15 +141,11 @@ function verify(message, signature) {
     return wasm.wasm_ed25519_verify(Buffer.from(message, 'utf8'), sigBytes);
   }
   // HMAC-SHA256 fallback: recompute and compare
-  try {
-    const expected = sign(message);
-    return crypto.timingSafeEqual(
-      Buffer.from(expected, 'utf8'),
-      Buffer.from(signature, 'utf8'),
-    );
-  } catch (_) {
-    return false;
-  }
+  const expected = sign(message);
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  const signatureBytes = Buffer.from(signature, 'utf8');
+  if (expectedBytes.length !== signatureBytes.length) return false;
+  return crypto.timingSafeEqual(expectedBytes, signatureBytes);
 }
 
 // ---------------------------------------------------------------------------
