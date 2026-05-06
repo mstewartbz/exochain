@@ -17,10 +17,10 @@ use decision_forum::{
     decision_object::{ActorKind, DecisionObject, Vote, VoteChoice},
     quorum::{QuorumCheckResult, QuorumRegistry, check_quorum, verify_quorum_precondition},
 };
-use exo_core::{Did, Timestamp, types::Hash256};
+use exo_core::{Did, Signature, Timestamp, hash::hash_structured, types::Hash256};
 use exo_gatekeeper::{
     kernel::{ActionRequest as GatekeeperActionRequest, Verdict},
-    types::{Permission, PermissionSet},
+    types::{Permission, PermissionSet, Provenance},
 };
 use exo_governance::conflict::{
     ActionRequest as ConflictActionRequest, check_and_block, check_conflicts,
@@ -36,6 +36,8 @@ use crate::server::{AppState, auth_boundary_error_response};
 const MAX_CANONICAL_CBOR_HASH_BYTES: usize = 64 * 1024;
 const VOTE_SIGNATURE_HASH_DOMAIN: &str = "exo.gateway.vote_signature_hash.v1";
 const VOTE_SIGNATURE_HASH_SCHEMA_VERSION: u16 = 1;
+const VOTE_ACTION_PROVENANCE_HASH_DOMAIN: &str = "exo.gateway.vote_action_provenance.v1";
+const VOTE_ACTION_PROVENANCE_HASH_SCHEMA_VERSION: u16 = 1;
 
 struct CanonicalHashWriter {
     hasher: blake3::Hasher,
@@ -105,6 +107,22 @@ struct VoteSignatureHashInput<'a> {
     choice: &'static str,
 }
 
+#[derive(Serialize)]
+struct VoteActionHashInput<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    voter_did: &'a Did,
+    decision_id: &'a str,
+    affected_dids: Vec<&'a str>,
+    choice: &'static str,
+    actor_kind: &'a ActorKind,
+    rationale: Option<&'a str>,
+    timestamp_physical_ms: u64,
+    timestamp_logical: u32,
+    action: &'static str,
+    required_permissions: Vec<&'static str>,
+}
+
 fn vote_choice_label(choice: VoteChoice) -> &'static str {
     match choice {
         VoteChoice::Approve => "Approve",
@@ -128,6 +146,63 @@ fn vote_signature_hash(
     Ok(Hash256::from_bytes(
         *canonical_cbor_hash(&payload)?.as_bytes(),
     ))
+}
+
+fn decode_fixed_hex<const N: usize>(encoded: &str, field: &str) -> Result<[u8; N], String> {
+    let bytes =
+        hex::decode(encoded.trim()).map_err(|e| format!("{field} must be hex-encoded: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("{field} must be {N} bytes, got {}", bytes.len()))
+}
+
+fn hlc_timestamp_string(timestamp: Timestamp) -> String {
+    format!("hlc:{}:{}", timestamp.physical_ms, timestamp.logical)
+}
+
+fn vote_action_hash(
+    request: &VoteRequest,
+    voter_did: &Did,
+    affected_dids: &[Did],
+) -> Result<Hash256, String> {
+    let mut affected_dids = affected_dids.iter().map(Did::as_str).collect::<Vec<&str>>();
+    affected_dids.sort_unstable();
+
+    hash_structured(&VoteActionHashInput {
+        domain: VOTE_ACTION_PROVENANCE_HASH_DOMAIN,
+        schema_version: VOTE_ACTION_PROVENANCE_HASH_SCHEMA_VERSION,
+        voter_did,
+        decision_id: request.decision_id.as_str(),
+        affected_dids,
+        choice: vote_choice_label(request.choice),
+        actor_kind: &request.actor_kind,
+        rationale: request.rationale.as_deref(),
+        timestamp_physical_ms: request.timestamp_physical_ms,
+        timestamp_logical: request.timestamp_logical,
+        action: "Vote",
+        required_permissions: vec!["vote"],
+    })
+    .map_err(|e| format!("vote action hash failed: {e}"))
+}
+
+fn vote_action_provenance(
+    request: &VoteRequest,
+    voter_did: &Did,
+    affected_dids: &[Did],
+) -> Result<Provenance, String> {
+    let timestamp = request.caller_supplied_provenance_timestamp()?;
+    let action_hash = vote_action_hash(request, voter_did, affected_dids)?;
+    let signature = request.provenance_signature()?;
+    Ok(Provenance {
+        actor: voter_did.clone(),
+        timestamp: hlc_timestamp_string(timestamp),
+        action_hash: action_hash.as_bytes().to_vec(),
+        signature: signature.to_bytes(),
+        public_key: Some(request.provenance_public_key()?.to_vec()),
+        voice_kind: None,
+        independence: None,
+        review_order: None,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +357,10 @@ pub struct VoteRequest {
     pub rationale: Option<String>,
     pub timestamp_physical_ms: u64,
     pub timestamp_logical: u32,
+    pub provenance_timestamp_physical_ms: u64,
+    pub provenance_timestamp_logical: u32,
+    pub provenance_public_key: String,
+    pub provenance_signature: String,
 }
 
 impl VoteRequest {
@@ -302,6 +381,30 @@ impl VoteRequest {
             .iter()
             .map(|raw| Did::new(raw).map_err(|e| format!("invalid affected DID `{raw}`: {e}")))
             .collect()
+    }
+
+    fn caller_supplied_provenance_timestamp(&self) -> Result<Timestamp, String> {
+        let timestamp = Timestamp::new(
+            self.provenance_timestamp_physical_ms,
+            self.provenance_timestamp_logical,
+        );
+        if timestamp == Timestamp::ZERO {
+            return Err(
+                "vote provenance timestamp must be caller-supplied and non-zero".to_owned(),
+            );
+        }
+        Ok(timestamp)
+    }
+
+    fn provenance_public_key(&self) -> Result<[u8; 32], String> {
+        decode_fixed_hex(&self.provenance_public_key, "provenance_public_key")
+    }
+
+    fn provenance_signature(&self) -> Result<Signature, String> {
+        Ok(Signature::from_bytes(decode_fixed_hex(
+            &self.provenance_signature,
+            "provenance_signature",
+        )?))
     }
 }
 
@@ -365,7 +468,7 @@ pub async fn vote_handler(
     let conflict_action = ConflictActionRequest {
         action_id: body.decision_id.clone(),
         actor_did: voter_did.clone(),
-        affected_dids,
+        affected_dids: affected_dids.clone(),
         description: format!("Vote on {}", body.decision_id),
     };
     let conflicts = check_conflicts(&voter_did, &conflict_action, &declarations);
@@ -380,6 +483,17 @@ pub async fn vote_handler(
             .into_response();
     }
 
+    let provenance = match vote_action_provenance(&body, &voter_did, &affected_dids) {
+        Ok(provenance) => provenance,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
     // ── VIOLATION 2 FIX: TNC-01 Authority Chain / Governor Clearance ────
     let gk_action = GatekeeperActionRequest {
         actor: voter_did.clone(),
@@ -388,7 +502,8 @@ pub async fn vote_handler(
         is_self_grant: false,
         modifies_kernel: false,
     };
-    let ctx = state.build_adjudication_context(&voter_did).await;
+    let mut ctx = state.build_adjudication_context(&voter_did).await;
+    ctx.provenance = Some(provenance);
     match state.kernel.adjudicate(&gk_action, &ctx) {
         Verdict::Permitted => { /* proceed */ }
         Verdict::Denied { violations } => {
@@ -742,6 +857,68 @@ pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse 
 mod tests {
     use super::*;
 
+    fn signed_vote_request_json(
+        voter: &str,
+        decision_id: &str,
+        affected_dids: &[&str],
+        choice: VoteChoice,
+        actor_kind: ActorKind,
+        timestamp: Timestamp,
+    ) -> serde_json::Value {
+        let voter_did = Did::new(voter).expect("valid voter DID");
+        let affected = affected_dids
+            .iter()
+            .map(|did| Did::new(did).expect("valid affected DID"))
+            .collect::<Vec<_>>();
+        let (public_key, secret_key) = exo_core::crypto::generate_keypair();
+        let provenance_timestamp = Timestamp::new(timestamp.physical_ms, timestamp.logical);
+        let request = VoteRequest {
+            decision_id: decision_id.to_owned(),
+            voter_did: voter.to_owned(),
+            affected_dids: affected_dids.iter().map(|did| (*did).to_owned()).collect(),
+            choice,
+            actor_kind: actor_kind.clone(),
+            rationale: None,
+            timestamp_physical_ms: timestamp.physical_ms,
+            timestamp_logical: timestamp.logical,
+            provenance_timestamp_physical_ms: provenance_timestamp.physical_ms,
+            provenance_timestamp_logical: provenance_timestamp.logical,
+            provenance_public_key: hex::encode(public_key.as_bytes()),
+            provenance_signature: String::new(),
+        };
+        let action_hash =
+            vote_action_hash(&request, &voter_did, &affected).expect("vote action hash");
+        let mut provenance = Provenance {
+            actor: voter_did,
+            timestamp: hlc_timestamp_string(provenance_timestamp),
+            action_hash: action_hash.as_bytes().to_vec(),
+            signature: Vec::new(),
+            public_key: Some(public_key.as_bytes().to_vec()),
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        };
+        let message = exo_gatekeeper::provenance_signature_message(&provenance)
+            .expect("canonical provenance payload");
+        let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
+        provenance.signature = signature.to_bytes();
+
+        serde_json::json!({
+            "decision_id": decision_id,
+            "voter_did": voter,
+            "affected_dids": affected_dids,
+            "choice": choice,
+            "actor_kind": actor_kind,
+            "rationale": null,
+            "timestamp_physical_ms": timestamp.physical_ms,
+            "timestamp_logical": timestamp.logical,
+            "provenance_timestamp_physical_ms": provenance_timestamp.physical_ms,
+            "provenance_timestamp_logical": provenance_timestamp.logical,
+            "provenance_public_key": hex::encode(public_key.as_bytes()),
+            "provenance_signature": hex::encode(provenance.signature),
+        })
+    }
+
     // Violation 3: canonical_hash must be deterministic
     #[test]
     fn canonical_hash_is_deterministic() {
@@ -802,6 +979,86 @@ mod tests {
         assert_ne!(
             first, legacy_debug_concat,
             "vote signature_hash must not match the legacy raw concat/Debug preimage"
+        );
+    }
+
+    #[test]
+    fn vote_action_hash_binds_decision_choice_and_affected_dids() {
+        let voter = Did::new("did:exo:alice").expect("valid DID");
+        let affected = vec![
+            Did::new("did:exo:tenant-b").expect("valid DID"),
+            Did::new("did:exo:tenant-a").expect("valid DID"),
+        ];
+        let request: VoteRequest = serde_json::from_value(signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-b", "did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        ))
+        .expect("signed vote request");
+
+        let baseline = vote_action_hash(&request, &voter, &affected).expect("vote action hash");
+
+        let mut changed_decision = request;
+        changed_decision.decision_id = "decision-2".to_owned();
+        let changed_decision_hash =
+            vote_action_hash(&changed_decision, &voter, &affected).expect("vote action hash");
+        assert_ne!(baseline, changed_decision_hash);
+
+        let mut changed_choice = changed_decision;
+        changed_choice.decision_id = "decision-1".to_owned();
+        changed_choice.choice = VoteChoice::Reject;
+        let changed_choice_hash =
+            vote_action_hash(&changed_choice, &voter, &affected).expect("vote action hash");
+        assert_ne!(baseline, changed_choice_hash);
+
+        let changed_affected = vec![Did::new("did:exo:tenant-c").expect("valid DID")];
+        let changed_affected_hash =
+            vote_action_hash(&changed_choice, &voter, &changed_affected).expect("vote action hash");
+        assert_ne!(baseline, changed_affected_hash);
+
+        let reordered_affected = vec![
+            Did::new("did:exo:tenant-a").expect("valid DID"),
+            Did::new("did:exo:tenant-b").expect("valid DID"),
+        ];
+        let reordered_hash = vote_action_hash(&changed_choice, &voter, &reordered_affected)
+            .expect("vote action hash");
+        assert_ne!(baseline, reordered_hash);
+        assert_eq!(
+            changed_choice_hash, reordered_hash,
+            "affected DID ordering must not alter the canonical vote action hash"
+        );
+    }
+
+    #[test]
+    fn vote_action_provenance_verifies_with_declared_public_key() {
+        let voter = Did::new("did:exo:alice").expect("valid DID");
+        let affected = vec![Did::new("did:exo:tenant-a").expect("valid DID")];
+        let request: VoteRequest = serde_json::from_value(signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        ))
+        .expect("signed vote request");
+        let provenance =
+            vote_action_provenance(&request, &voter, &affected).expect("vote provenance");
+        let message = exo_gatekeeper::provenance_signature_message(&provenance)
+            .expect("canonical provenance payload");
+        let public_key = exo_core::PublicKey::from_bytes(
+            request
+                .provenance_public_key()
+                .expect("provenance public key"),
+        );
+        let signature = request.provenance_signature().expect("signature");
+
+        assert!(
+            exo_core::crypto::verify(message.as_bytes(), &signature, &public_key),
+            "vote provenance signature must verify against its declared public key"
         );
     }
 
@@ -996,28 +1253,30 @@ mod tests {
 
     #[test]
     fn vote_request_requires_caller_supplied_timestamp() {
-        let without_timestamp = serde_json::json!({
-            "decision_id": "decision-1",
-            "voter_did": "did:exo:alice",
-            "choice": "Approve",
-            "actor_kind": "Human",
-            "rationale": null
-        });
+        let mut without_timestamp = signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        );
+        let without_timestamp_obj = without_timestamp.as_object_mut().expect("object");
+        without_timestamp_obj.remove("timestamp_physical_ms");
+        without_timestamp_obj.remove("timestamp_logical");
         assert!(
             serde_json::from_value::<VoteRequest>(without_timestamp).is_err(),
             "vote requests must not deserialize without explicit HLC timestamp metadata"
         );
 
-        let with_timestamp = serde_json::json!({
-            "decision_id": "decision-1",
-            "voter_did": "did:exo:alice",
-            "affected_dids": ["did:exo:tenant-a"],
-            "choice": "Approve",
-            "actor_kind": "Human",
-            "rationale": null,
-            "timestamp_physical_ms": 7000,
-            "timestamp_logical": 2
-        });
+        let with_timestamp = signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        );
         let request: VoteRequest =
             serde_json::from_value(with_timestamp).expect("timestamped vote request");
 
@@ -1030,18 +1289,39 @@ mod tests {
     }
 
     #[test]
-    fn vote_request_rejects_zero_timestamp() {
-        let request: VoteRequest = serde_json::from_value(serde_json::json!({
+    fn vote_request_requires_signed_action_provenance_for_kernel_adjudication() {
+        let without_provenance = serde_json::json!({
             "decision_id": "decision-1",
             "voter_did": "did:exo:alice",
             "affected_dids": ["did:exo:tenant-a"],
             "choice": "Approve",
             "actor_kind": "Human",
             "rationale": null,
-            "timestamp_physical_ms": 0,
-            "timestamp_logical": 0
-        }))
-        .expect("request shape is valid");
+            "timestamp_physical_ms": 7000,
+            "timestamp_logical": 2
+        });
+
+        assert!(
+            serde_json::from_value::<VoteRequest>(without_provenance).is_err(),
+            "vote requests must carry signed action provenance before all-invariant kernel adjudication"
+        );
+    }
+
+    #[test]
+    fn vote_request_rejects_zero_timestamp() {
+        let mut request_json = signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        );
+        let request_obj = request_json.as_object_mut().expect("object");
+        request_obj.insert("timestamp_physical_ms".to_owned(), serde_json::json!(0));
+        request_obj.insert("timestamp_logical".to_owned(), serde_json::json!(0));
+        let request: VoteRequest =
+            serde_json::from_value(request_json).expect("request shape is valid");
 
         assert!(
             request.caller_supplied_timestamp().is_err(),
@@ -1051,30 +1331,31 @@ mod tests {
 
     #[test]
     fn vote_request_requires_affected_dids_for_conflict_adjudication() {
-        let without_affected_dids = serde_json::json!({
-            "decision_id": "decision-1",
-            "voter_did": "did:exo:alice",
-            "choice": "Approve",
-            "actor_kind": "Human",
-            "rationale": null,
-            "timestamp_physical_ms": 7000,
-            "timestamp_logical": 2
-        });
+        let mut without_affected_dids = signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        );
+        without_affected_dids
+            .as_object_mut()
+            .expect("object")
+            .remove("affected_dids");
         assert!(
             serde_json::from_value::<VoteRequest>(without_affected_dids).is_err(),
             "vote requests must provide affected DIDs so conflict checks are not vacuous"
         );
 
-        let empty_affected_dids: VoteRequest = serde_json::from_value(serde_json::json!({
-            "decision_id": "decision-1",
-            "voter_did": "did:exo:alice",
-            "affected_dids": [],
-            "choice": "Approve",
-            "actor_kind": "Human",
-            "rationale": null,
-            "timestamp_physical_ms": 7000,
-            "timestamp_logical": 2
-        }))
+        let empty_affected_dids: VoteRequest = serde_json::from_value(signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &[],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        ))
         .expect("request shape is valid");
         assert!(
             empty_affected_dids.caller_supplied_affected_dids().is_err(),
@@ -1128,10 +1409,17 @@ mod tests {
         let kernel_index = vote_handler
             .find("state.kernel.adjudicate")
             .expect("vote handler must retain kernel adjudication");
+        let provenance_index = vote_handler
+            .find("ctx.provenance = Some(provenance)")
+            .expect("vote handler must attach action provenance before adjudication");
 
         assert!(
             auth_index < conflict_index && conflict_index < kernel_index,
             "vote handler must authenticate before conflict and kernel checks"
+        );
+        assert!(
+            conflict_index < provenance_index && provenance_index < kernel_index,
+            "vote handler must attach signed action provenance before kernel adjudication"
         );
         assert!(
             vote_handler.contains("if actor.did != voter_did"),
