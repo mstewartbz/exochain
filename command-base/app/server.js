@@ -26,6 +26,10 @@ const {
 } = require('./lib/commandbase-db-factory');
 const { mountCommandBaseUiStateRoutes } = require('./lib/commandbase-ui-state');
 const { mountPresidentialRoutes } = require('./lib/presidential-desk');
+const {
+  commandBaseUploadFileFilter,
+  sanitizeCommandBaseUploadFilename,
+} = require('./lib/upload-policy');
 
 // ── Structured logger — must come before any console.* calls ──
 const logger = require('./logger');
@@ -3685,12 +3689,15 @@ const storage = multer.diskStorage({
     cb(null, INBOX_PATH);
   },
   filename: (req, file, cb) => {
-    // Preserve original filename, prefix with timestamp to avoid collisions
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    cb(null, `${timestamp}_${file.originalname}`);
+    cb(null, `${timestamp}_${sanitizeCommandBaseUploadFilename(file.originalname)}`);
   }
 });
-const upload = multer({ storage, limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB limit for project imports
+const upload = multer({
+  storage,
+  fileFilter: commandBaseUploadFileFilter,
+  limits: { fileSize: 200 * 1024 * 1024 }
+}); // 200MB limit for project imports
 
 // ── Context Management System Functions ──────────────────────
 
@@ -5521,11 +5528,12 @@ const taskAttachmentStorage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    cb(null, `${timestamp}_${file.originalname}`);
+    cb(null, `${timestamp}_${sanitizeCommandBaseUploadFilename(file.originalname)}`);
   }
 });
 const uploadTaskAttachment = multer({
   storage: taskAttachmentStorage,
+  fileFilter: commandBaseUploadFileFilter,
   limits: { fileSize: 50 * 1024 * 1024 }
 });
 
@@ -6052,12 +6060,12 @@ const commandUploadStorage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${timestamp}_${safeName}`);
+    cb(null, `${timestamp}_${sanitizeCommandBaseUploadFilename(file.originalname)}`);
   }
 });
 const uploadCommandFiles = multer({
   storage: commandUploadStorage,
+  fileFilter: commandBaseUploadFileFilter,
   limits: { fileSize: 50 * 1024 * 1024, files: 10 }
 });
 

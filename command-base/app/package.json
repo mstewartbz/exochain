@@ -7,6 +7,7 @@
     "test": "node --test",
     "test:coverage": "node --experimental-test-coverage --test-coverage-include=lib/commandbase-dagdb-adapter.js --test-coverage-include=lib/commandbase-db-factory.js --test-coverage-lines=90 --test commandbase-dagdb-adapter.test.js",
     "start": "node server.js",
+    "test:upload-policy": "node lib/upload-policy.test.js",
     "audit:check": "npm audit --audit-level=high",
     "audit:fix": "npm audit fix --force --audit-level=high",
     "audit:report": "npm audit --json > audit-report.json && echo 'Audit report written to audit-report.json'",
