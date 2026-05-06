@@ -3359,7 +3359,7 @@ fn build_unlayered_router(state: AppState) -> Router {
         // Probes
         .route("/health", get(handle_health))
         .route("/ready", get(handle_ready))
-        .route("/metrics", get(handle_metrics))
+        .route("/gateway/metrics", get(handle_metrics))
         // DB health deep probe (requires pool to be configured)
         .route("/health/db", get(db_health_handler))
         // Decisions — create and read tenant-scoped governance records.
@@ -4388,7 +4388,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/metrics")
+                    .uri("/gateway/metrics")
                     .body(Body::empty())
                     .unwrap(),
             )
