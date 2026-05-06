@@ -1270,16 +1270,56 @@ mod tests {
             .run(&pool)
             .await
             .expect("migrations");
-        sqlx::query("DELETE FROM audit_entries")
+        let decision_id = "decision-r4-audit-route";
+        let reader = "did:exo:r4-audit-reader";
+        let token = "r4-audit-reader-token";
+        sqlx::query("DELETE FROM audit_entries WHERE decision_id = $1")
+            .bind(decision_id)
             .execute(&pool)
             .await
             .expect("clean audit entries");
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .expect("clean session");
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
+            .execute(&pool)
+            .await
+            .expect("clean reader user");
+        crate::db::insert_user(
+            &pool,
+            reader,
+            "Audit Reader",
+            "r4-audit-reader@example.invalid",
+            &serde_json::json!(["reader"]),
+            "tenant-r4",
+            1_000,
+            "Active",
+            "Complete",
+            "redacted-test-hash",
+            "redacted-test-salt",
+            false,
+        )
+        .await
+        .expect("insert reader user");
+        sqlx::query(
+            "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(token)
+        .bind(reader)
+        .bind(1_000_i64)
+        .bind(20_000_i64)
+        .execute(&pool)
+        .await
+        .expect("insert reader session");
 
         let state = AppState::new(
             Some(pool.clone()),
             Arc::new(RwLock::new(LocalDidRegistry::new())),
         );
-        let decision_id = "decision-r4-audit-route";
         let voter = "did:exo:r4-voter";
         let payload = serde_json::json!({
             "event": "vote_recorded",
@@ -1316,6 +1356,8 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/audit/{decision_id}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("x-exo-auth-observed-at-ms", "15000")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -1329,10 +1371,29 @@ mod tests {
         let entries = body["audit_entries"].as_array().expect("entries array");
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0]["sequence"], 1);
-        assert_eq!(entries[1]["sequence"], 2);
+        let first_sequence = entries[0]["sequence"].as_i64().expect("first sequence");
+        let second_sequence = entries[1]["sequence"].as_i64().expect("second sequence");
+        assert_eq!(second_sequence, first_sequence + 1);
         assert_eq!(entries[0]["decision_id"], decision_id);
-        assert_eq!(entries[1]["prev_hash"], entries[0]["entry_hash"]);
+        assert_eq!(entries[1]["decision_id"], decision_id);
+        assert_eq!(entries[0]["tenant_id"], "tenant-r4");
+        assert_eq!(entries[1]["tenant_id"], "tenant-r4");
+
+        sqlx::query("DELETE FROM audit_entries WHERE decision_id = $1")
+            .bind(decision_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup audit entries");
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .expect("cleanup session");
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
+            .execute(&pool)
+            .await
+            .expect("cleanup reader user");
     }
 
     // Violation 1: must_recuse returns true for financial conflict

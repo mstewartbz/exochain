@@ -2135,6 +2135,17 @@ mod tests {
             Some("anchor"),
         )
         .await?;
+        insert_consent_anchor(
+            &pool,
+            "erasure-db-location-consent",
+            did,
+            "did:exo:responder",
+            &serde_json::json!([LOCATION_CONSENT_SCOPE]),
+            999,
+            Some(2_000),
+            "location-consent-audit",
+        )
+        .await?;
         insert_scan_receipt(
             &pool,
             "erasure-db-scan",
@@ -2254,7 +2265,7 @@ mod tests {
         assert_eq!(summary.enrollment_log_deleted, 1);
         assert_eq!(summary.livesafe_identities_deleted, 1);
         assert_eq!(summary.scan_receipts_deleted, 1);
-        assert_eq!(summary.consent_anchors_deleted, 1);
+        assert_eq!(summary.consent_anchors_deleted, 2);
         assert_eq!(summary.trustee_shards_deleted, 1);
         assert_eq!(summary.agent_roles_deleted, 1);
         assert_eq!(summary.consent_records_deleted, 1);
