@@ -6,7 +6,7 @@
 # Constitutional requirements enforced:
 #   - Determinism: no floats, no HashMap, canonical serialization
 #   - Clippy float_arithmetic = deny (workspace lint)
-#   - 90%+ line coverage
+#   - Scoped 90%+ line coverage with explicit runtime-adapter exclusions
 #   - Dependency audit gates with documented advisory exceptions
 #   - License compliance (Apache-2.0; no copyleft contamination)
 
@@ -52,14 +52,16 @@ jobs:
         run: cargo test --workspace --release
 
   # -----------------------------------------------------------------------
-  # Gate 3: Coverage (90%+ line coverage required)
+  # Gate 3: Coverage (scoped 90%+ line coverage required)
   # -----------------------------------------------------------------------
   coverage:
-    name: "Gate 3 — Coverage (>= 90%)"
+    name: "Gate 3 — Coverage (scoped >= 90%)"
     runs-on: ubuntu-latest
     needs: build
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Coverage policy guard
+        run: bash tools/test_coverage_policy.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: Install cargo-tarpaulin

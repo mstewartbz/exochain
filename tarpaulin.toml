@@ -1,11 +1,15 @@
 # Tarpaulin coverage configuration
 #
-# Excludes files that are structurally untestable by cargo-tarpaulin:
+# This is a scoped coverage gate, not a whole-workspace coverage claim.
+#
+# Excludes files that are structurally untestable by the default cargo-tarpaulin
+# unit-test gate without credentials, filesystem fixtures, a live database,
+# a live P2P network, or feature-gated bridge/runtime coverage:
 #   - Binary entry points (main.rs) — bootstrapping code with no logic to unit-test
 #   - External-service integrations requiring credentials at runtime (Telegram)
-#   - PostgreSQL/DB layers requiring a running database (exo-gateway db.rs)
-#   - HTTP server initialisation code requiring a running server to reach
-#     (server.rs, handlers.rs, graphql.rs in exo-gateway)
+#   - Gateway runtime adapters whose DB-backed branches require DATABASE_URL
+#     and production runtime fixtures (exo-gateway db.rs, server.rs, handlers.rs,
+#     graphql.rs)
 #   - Configuration loading from disk/env (structurally requires the filesystem)
 #   - Node identity key loading from disk (requires filesystem)
 #   - Consensus reactor and event-loop orchestration surfaces (requires live P2P
@@ -15,9 +19,8 @@
 #   - Pedagogical proof modules (default-off feature; covered by dedicated
 #     `unaudited-pedagogical-proofs` test passes)
 #
-# All of these are exercised by the dedicated integration-test gates (Gate 12,
-# Gate 14, Gate 15) which run against a live environment; they are not meant
-# to be instrumented by tarpaulin's unit-test harness.
+# These runtime-adapter exclusions are intentionally explicit so the CI and
+# README cannot present the scoped 90% gate as whole-workspace line coverage.
 #
 # Note: the correct TOML key is "exclude-files" (with hyphens), not
 # "exclude_files" (with underscores) — tarpaulin follows CLI flag naming.

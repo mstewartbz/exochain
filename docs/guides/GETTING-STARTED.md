@@ -78,7 +78,7 @@ That's it — you have a constitutional node running with 40 MCP tools, 6 resour
 | Tool | Minimum | Purpose |
 |---|---|---|
 | **Rust** | 1.85+ (edition 2024) | Core workspace |
-| **cargo-tarpaulin** | latest | Coverage (CI requires >=90%) |
+| **cargo-tarpaulin** | latest | Coverage (CI requires scoped >=90%) |
 | **cargo-deny** | latest | License + advisory + source governance |
 | **cargo-audit** | latest | Known-vulnerability scanning |
 | **Node 20+** *(optional)* | | TypeScript SDK |
@@ -118,7 +118,7 @@ cargo test -p exo-gatekeeper
 # Lint (zero warnings — CI denies)
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Coverage (HTML report)
+# Coverage (HTML report; local default uses tarpaulin.toml exclusions)
 cargo tarpaulin --workspace --out html
 open tarpaulin-report.html
 ```

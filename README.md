@@ -40,7 +40,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is supported by design but not yet production-hardened
 
-- **90% coverage threshold** — configured in CI via cargo-tarpaulin; not independently verified outside CI
+- **Scoped 90% coverage threshold** — configured in CI via cargo-tarpaulin and `tarpaulin.toml`; not independently verified outside CI
 - **exo-gateway binary** — operational HTTP server with 28 endpoints (REST, GraphQL, health probes); production hardening ongoing
 - **GraphQL API** — types and schema stubs exist in `exo-api`; async runtime integration pending
 - **exo-dag benchmark** — disabled; needs rewrite against current API
