@@ -1,11 +1,30 @@
 import { test } from 'node:test';
 import { strictEqual, ok, rejects, throws } from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { Identity, deriveDid } from '../src/identity/keypair.js';
 import { validateDid, isDid } from '../src/identity/did.js';
 import { bytesToHex, hexToBytes } from '../src/crypto/hash.js';
 import { IdentityError } from '../src/errors.js';
 
 const ED25519: EcKeyImportParams = { name: 'Ed25519' } as unknown as EcKeyImportParams;
+
+interface DidDerivationFixtures {
+  readonly vectors: readonly DidDerivationVector[];
+}
+
+interface DidDerivationVector {
+  readonly name: string;
+  readonly public_key_hex: string;
+  readonly expected_did: string;
+}
+
+function loadDidDerivationFixtures(): DidDerivationFixtures {
+  const fixtureUrl = new URL(
+    '../../../../tests/fixtures/did-derivation.json',
+    import.meta.url,
+  );
+  return JSON.parse(readFileSync(fixtureUrl, 'utf8')) as DidDerivationFixtures;
+}
 
 async function keypairMaterial(): Promise<{
   publicKeyHex: string;
@@ -28,8 +47,19 @@ async function keypairMaterial(): Promise<{
 test('Identity.generate produces a well-formed did:exo: DID', async () => {
   const id = await Identity.generate('alice');
   ok(id.did.startsWith('did:exo:'));
-  // 16 hex chars of SHA-256 prefix.
+  // 16 hex chars of the canonical BLAKE3 prefix.
   strictEqual(id.did.length, 'did:exo:'.length + 16);
+});
+
+test('deriveDid matches canonical cross-language BLAKE3 vectors', async () => {
+  for (const vector of loadDidDerivationFixtures().vectors) {
+    const did = await deriveDid(hexToBytes(vector.public_key_hex));
+    strictEqual(
+      did,
+      vector.expected_did,
+      `${vector.name} must match canonical BLAKE3 derivation`,
+    );
+  }
 });
 
 test('Identity.generate exposes a 64-char (32-byte) public key hex', async () => {

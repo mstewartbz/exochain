@@ -9,7 +9,7 @@ tags: [exochain, sdk, typescript, javascript, nodejs, quickstart, guide]
 
 **Get productive with `@exochain/sdk` on Node 20+ or a modern browser in ten minutes.**
 
-The TypeScript SDK is a dependency-free pure-JS port of the canonical Rust SDK. It mirrors the same five domain APIs (identity, consent, governance, authority, crypto) plus an `HttpTransport` for talking to an `exo-gateway`.
+The TypeScript SDK is a pure-JS port of the canonical Rust SDK. It mirrors the same five domain APIs (identity, consent, governance, authority, crypto) plus an `HttpTransport` for talking to an `exo-gateway`.
 
 ---
 
@@ -90,14 +90,14 @@ DID: did:exo:a1b2c3d4e5f60789
 
 ## Hashing difference you must know
 
-**The pure-JS SDK hashes with SHA-256. The Rust SDK hashes with BLAKE3.**
+**DID derivation uses BLAKE3 across Rust, TypeScript, and Python. Client-side proposal and decision IDs remain SHA-256 in the TypeScript SDK.**
 
-Why: BLAKE3 is not part of Web Crypto, so shipping a BLAKE3 implementation would require a ~150 kB WASM blob or a third-party pure-JS BLAKE3 package. The pure-JS SDK keeps zero runtime dependencies, so content-addressed IDs produced client-side (proposal IDs, decision IDs) do **not** match Rust-produced IDs byte-for-byte.
+Why: a DID is actor identity and must be stable for the same Ed25519 public key in every first-party SDK. The SDK ships a small BLAKE3 implementation for that path. Existing content-addressed IDs produced client-side (proposal IDs, decision IDs) remain SHA-256 and do **not** match Rust-produced IDs byte-for-byte.
 
 For cross-language interop in production:
 
 - **Prefer** producing canonical hashes server-side (Rust) and trusting the returned `Hash256` from the gateway.
-- **If you must hash identically in JS**, build with a BLAKE3 WASM shim that matches the Rust output. This is a deliberate non-default.
+- **For local DID derivation**, use `Identity.generate`, `Identity.fromKeypair`, or `deriveDid`; all use BLAKE3.
 - **For a TS-only app**, SHA-256 is fine — the SDK is internally consistent.
 
 The branded `Hash256` type is the same shape either way: a 64-character lowercase hex string.
@@ -120,11 +120,12 @@ const d2: boolean = isDid('did:exo:bob');  // true
 // validateDid('bad-did');
 ```
 
-`Hash256` is produced by `sha256Hash` (branded) or `sha256Hex` (plain string):
+`Hash256` is produced by `sha256Hash` or `blake3Hash` (branded), with matching plain-string hex helpers:
 
 ```ts
-import { sha256Hash, sha256Hex } from '@exochain/sdk';
+import { blake3Hash, sha256Hex } from '@exochain/sdk';
 
+const didHash = blake3Hash(new Uint8Array([1, 2, 3]));
 const hash: string = await sha256Hex(new Uint8Array([1, 2, 3]));
 // -> 64-char lowercase hex
 ```
@@ -172,7 +173,7 @@ Identity.verify = true
 
 ### DID derivation
 
-The pure-JS SDK derives a DID as `did:exo:<first 16 hex chars of SHA-256(public_key_bytes)>`. This is stable within the TS SDK but does not match the Rust derivation (which uses BLAKE3). If you need the Rust-canonical DID, receive it from the server after submitting the public key, or use a BLAKE3 WASM shim.
+The pure-JS SDK derives a DID as `did:exo:<first 16 hex chars of BLAKE3(public_key_bytes)>`. This matches the Rust and Python SDK fixture vectors for the same 32-byte Ed25519 public key.
 
 ### Rebuild from stored material
 

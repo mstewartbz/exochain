@@ -360,8 +360,32 @@ fn fallback_did() -> Did {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
     use crate::error::ExoError;
+
+    #[derive(Debug, Deserialize)]
+    struct DidDerivationFixtures {
+        vectors: Vec<DidDerivationVector>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct DidDerivationVector {
+        name: String,
+        public_key_hex: String,
+        expected_did: String,
+    }
+
+    fn decode_public_key_hex(hex: &str) -> [u8; 32] {
+        assert_eq!(hex.len(), 64, "fixture public key must be 32 bytes");
+        let mut bytes = [0u8; 32];
+        for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+            let hex_byte = core::str::from_utf8(chunk).expect("fixture hex is UTF-8");
+            bytes[index] = u8::from_str_radix(hex_byte, 16).expect("fixture hex is valid");
+        }
+        bytes
+    }
 
     #[test]
     fn generate_produces_valid_did() {
@@ -411,6 +435,24 @@ mod tests {
         .expect("ok");
         assert_eq!(id.did(), rebuilt.did());
         assert_eq!(rebuilt.label(), "rebuilt");
+    }
+
+    #[test]
+    fn did_derivation_matches_cross_language_vectors() {
+        let fixtures: DidDerivationFixtures =
+            serde_json::from_str(include_str!("../../../tests/fixtures/did-derivation.json"))
+                .expect("DID derivation fixtures parse");
+
+        for vector in fixtures.vectors {
+            let public = PublicKey::from_bytes(decode_public_key_hex(&vector.public_key_hex));
+            let did = derive_did(&public).expect("fixture DID derives");
+            assert_eq!(
+                did.as_str(),
+                vector.expected_did,
+                "fixture {} must match canonical BLAKE3 derivation",
+                vector.name
+            );
+        }
     }
 
     #[test]

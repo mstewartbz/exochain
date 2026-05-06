@@ -8,8 +8,8 @@ static :meth:`Identity.verify` method.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from hashlib import sha256
 
+from blake3 import blake3
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -21,12 +21,24 @@ from ..errors import IdentityError
 from ..types import Did
 
 
+def derive_did(public_key: bytes) -> Did:
+    """Derive ``did:exo:<hex(blake3(pubkey_raw)[:8])>`` from a 32-byte public key."""
+    if not isinstance(public_key, (bytes, bytearray)):
+        raise IdentityError("public key must be bytes")
+    public_bytes = bytes(public_key)
+    if len(public_bytes) != 32:
+        raise IdentityError(f"public key must be 32 bytes, got {len(public_bytes)}")
+    digest = blake3(public_bytes).digest()
+    did: Did = f"did:exo:{digest[:8].hex()}"
+    return did
+
+
 @dataclass
 class Identity:
     """An Ed25519 keypair with a content-addressed DID.
 
     The DID is derived deterministically from the public key:
-    ``did:exo:<hex(sha256(pubkey_raw)[:8])>``.
+    ``did:exo:<hex(blake3(pubkey_raw)[:8])>``.
     """
 
     did: Did
@@ -45,8 +57,7 @@ class Identity:
         public_bytes = public_key.public_bytes(
             encoding=Encoding.Raw, format=PublicFormat.Raw
         )
-        digest = sha256(public_bytes).digest()
-        did: Did = f"did:exo:{digest[:8].hex()}"
+        did = derive_did(public_bytes)
         return cls(
             did=did,
             public_key_hex=public_bytes.hex(),
@@ -76,4 +87,4 @@ class Identity:
             return False
 
 
-__all__ = ["Identity"]
+__all__ = ["Identity", "derive_did"]

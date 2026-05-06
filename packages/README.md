@@ -11,7 +11,7 @@ environments.
 | Package                                   | Language                 | Distribution                              | Purpose                                                                 |
 | ----------------------------------------- | ------------------------ | ----------------------------------------- | ----------------------------------------------------------------------- |
 | [`exochain-sdk`](./exochain-sdk/)         | TypeScript / JavaScript  | `npm install @exochain/sdk`               | Pure-JS client SDK for browsers and Node 20+; HTTP transport to gateway. |
-| [`exochain-py`](./exochain-py/)           | Python 3.11+             | `pip install exochain`                    | Pure-Python client SDK with `httpx` async transport and pydantic v2 models. |
+| [`exochain-py`](./exochain-py/)           | Python 3.11+             | `pip install exochain`                    | Python client SDK with `httpx` async transport and pydantic v2 models. |
 | [`exochain-wasm`](./exochain-wasm/)       | WebAssembly + TS shim    | `npm install exochain-wasm`               | Precompiled WASM build of the Rust governance engine for embedding.     |
 
 The canonical Rust SDK lives at
@@ -30,10 +30,11 @@ Pick by deployment target first, then by language preference:
 - **Node.js service or CLI** — `@exochain/sdk` on Node 20 or newer. Same
   package, same APIs as the browser SDK.
 - **Python async service or notebook** — `exochain`. Ships with `httpx` for
-  async HTTP and `cryptography` for Ed25519/SHA-256. Python 3.11+.
+  async HTTP, `cryptography` for Ed25519, and `blake3` for DID derivation.
+  Python 3.11+.
 - **Native Rust service or embedded kernel** — reach for
   [`../crates/exochain-sdk`](../crates/exochain-sdk/) directly. It is the
-  reference implementation and the only SDK that uses BLAKE3 natively.
+  reference implementation.
 - **Browser or Node app that wants the full kernel in-process** —
   `exochain-wasm`. Runs the Rust governance engine as WebAssembly.
 
@@ -42,15 +43,16 @@ Pick by deployment target first, then by language preference:
 All SDKs agree on the wire format. JSON objects produced by one SDK
 deserialize cleanly in the others.
 
-They **do not** agree on locally derived hash digests:
+They agree on local DID derivation and wire format:
 
-- The Rust SDK derives DIDs, bailment IDs, and decision IDs using **BLAKE3**.
-- The TypeScript and Python SDKs use **SHA-256** because Web Crypto does not
-  ship BLAKE3.
+- Rust, TypeScript, and Python derive DIDs as the first 8 bytes of
+  **BLAKE3(public_key_bytes)**.
+- JSON objects produced by one SDK deserialize cleanly in the others.
 
-For canonical DIDs across all three SDKs, resolve the DID from the fabric
-(via `exo-gateway`) rather than deriving it locally, and construct the
-identity with the language's `fromKeypair` / `from_keypair` constructor.
+They do not agree on every locally derived content ID: Rust uses BLAKE3 for
+bailment and decision IDs, while TypeScript and Python keep SHA-256 for those
+client-side IDs. Trust the gateway-returned IDs when a canonical Rust fabric
+identifier is required.
 
 ## Versioning
 

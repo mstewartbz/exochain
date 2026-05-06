@@ -37,7 +37,7 @@ from .errors import (
 from .governance.decision import Decision, DecisionBuilder, DecisionStatus
 from .governance.vote import Vote, VoteChoice
 from .identity.did import is_did, validate_did
-from .identity.keypair import Identity
+from .identity.keypair import Identity, derive_did
 from .transport.http import HttpTransport
 from .types import Did, Hash256Hex, QuorumResult, TrustReceipt
 
@@ -77,6 +77,7 @@ __all__ = [
     "Vote",
     "VoteChoice",
     "__version__",
+    "derive_did",
     "is_did",
     "sha256",
     "sha256_hex",

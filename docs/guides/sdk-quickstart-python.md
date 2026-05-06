@@ -60,6 +60,7 @@ The package depends on:
 
 | Package | Minimum | Why |
 |---|---|---|
+| `blake3` | 0.4.1 | Canonical DID derivation |
 | `cryptography` | 42.0.0 | Ed25519 primitives |
 | `pydantic` | 2.5.0 | Frozen data models |
 | `httpx` | 0.25.0 | Async HTTP transport |
@@ -92,10 +93,10 @@ DID: did:exo:a1b2c3d4e5f60789
 
 ## Hashing difference you must know
 
-Like the TypeScript SDK, the Python SDK uses **SHA-256** for client-side content-addressed IDs (proposal IDs, decision IDs). The Rust SDK uses **BLAKE3**. Client-derived IDs in Python therefore will not match Rust-derived IDs byte-for-byte. For cross-language interop:
+Python DID derivation uses **BLAKE3** and matches the Rust and TypeScript SDK fixture vectors for the same Ed25519 public key. The Python SDK still uses **SHA-256** for client-side content-addressed proposal IDs and decision IDs, while Rust uses **BLAKE3** for those IDs. For cross-language interop:
 
-- Trust IDs returned by the gateway (the gateway is Rust).
-- Or use the full 64-character SHA-256 hex on the Python side, 16-hex prefix of BLAKE3 on the Rust side — they are canonically different namespaces, not lossy round-trips.
+- Use `Identity.generate` or `derive_did` for local DIDs.
+- Trust proposal, decision, and receipt IDs returned by the gateway when a canonical Rust fabric ID is required.
 
 See [`packages/exochain-py/exochain/crypto/hash.py`](../../packages/exochain-py/exochain/crypto/hash.py) and [`packages/exochain-py/exochain/consent/bailment.py`](../../packages/exochain-py/exochain/consent/bailment.py) for the exact canonicalization.
 
@@ -131,6 +132,9 @@ alice.label           = alice
 ```
 
 ### DID validation
+
+Generated identities derive DIDs as
+`did:exo:<first 16 hex chars of BLAKE3(public_key_bytes)>`.
 
 ```python
 from exochain import validate_did, is_did
