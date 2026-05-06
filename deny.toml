@@ -15,10 +15,12 @@ targets = [
 all-features = true
 
 # ---------------------------------------------------------------------------
-# Advisories — reject any crate with a known security advisory
+# Advisories - documented exceptions for dependency advisories
 # ---------------------------------------------------------------------------
-# Gate 13 strict mode: CI runs `cargo audit --deny warnings` (APE-54).
-# Any new advisory must be patched or explicitly justified here with:
+# Gate 6 currently runs cargo-audit with vulnerabilities by default plus unsound and unmaintained warnings denied explicitly:
+# `cargo audit --deny unsound --deny unmaintained`.
+# Gate 7 runs cargo-deny against this file. Any new ignored advisory must be
+# patched or explicitly justified here with:
 #   - Advisory ID (RUSTSEC-YYYY-NNNN)
 #   - Crate and version range affected
 #   - Why it does not apply to this workspace

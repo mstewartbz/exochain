@@ -6,7 +6,12 @@
 # sync with reachability analysis — see deny.toml for the full
 # prose rationale per advisory.
 #
-# Gate 6 (cargo audit --deny warnings) reads this file.
+# Gate 6 reads this file while running:
+# cargo audit --deny unsound --deny unmaintained
+#
+# Yanked advisories are warning-only under Gate 6 today. The current exception
+# is core2 via multihash/libp2p-core, where no safe upstream upgrade path is
+# available yet; keep that reachability analysis synchronized with deny.toml.
 
 [advisories]
 ignore = [
