@@ -759,17 +759,15 @@ async fn start_node(
 
     // Generate admin token for privileged API authentication.
     //
-    // Security note: we do NOT log the full token — a log aggregator
-    // that captures node stdout would otherwise end up with a copy of
-    // the governance-write credential. Instead we log a short prefix
-    // for identification and write the full token to a file with
-    // restrictive permissions (owner read/write only, 0600) under the
+    // Security note: we do not log any token material. A log aggregator that
+    // captures node stdout must not receive even a prefix of the
+    // governance-write credential. The full token is written only to a file
+    // with restrictive permissions (owner read/write only, 0600) under the
     // node's data directory.
     let admin_token = auth::generate_admin_token().map_err(|e| {
         tracing::error!(err = %e, "Failed to generate admin token — aborting startup");
         anyhow::anyhow!("admin token entropy failed: {e}")
     })?;
-    let token_prefix = admin_token.chars().take(8).collect::<String>();
     let token_path = data_dir.join("admin_token");
     if let Err(e) = auth::write_admin_token_file(&token_path, admin_token.as_str()) {
         tracing::error!(
@@ -780,9 +778,8 @@ async fn start_node(
         return Err(anyhow::anyhow!("admin token persistence failed: {e}"));
     }
     tracing::info!(
-        token_prefix = %token_prefix,
         token_path = %token_path.display(),
-        "Admin bearer token generated — full token written to file, required for privileged endpoints"
+        "Admin bearer token generated and written to restrictive file; token material omitted from logs"
     );
     let bearer_auth = auth::BearerAuth {
         token: Arc::new(admin_token),

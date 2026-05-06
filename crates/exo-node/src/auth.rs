@@ -1,8 +1,9 @@
 //! Node API authentication — bearer-token guard for write operations.
 //!
-//! On startup the node generates a random 256-bit admin token (displayed once
-//! in the logs).  Every mutating endpoint (`POST`) requires this token in the
-//! `Authorization: Bearer <token>` header.  Read-only endpoints (`GET`) are
+//! On startup the node generates a random 256-bit admin token, persists it to
+//! a restrictive local file, and never writes token material to logs. Every
+//! mutating endpoint (`POST`) requires this token in the
+//! `Authorization: Bearer <token>` header. Read-only endpoints (`GET`) are
 //! public — the data on a constitutional network is transparent by design.
 //!
 //! When the node identity module gains a full DID-document registry, this
@@ -438,6 +439,33 @@ mod tests {
         assert!(
             !production.contains("std::fs::write(&token_path, &admin_token)"),
             "startup must not write the admin token before restrictive permissions are set"
+        );
+    }
+
+    #[test]
+    fn startup_does_not_log_admin_token_material() {
+        let main_source = include_str!("main.rs");
+        let main_production = main_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("tests marker present");
+        let auth_source = include_str!("auth.rs");
+        let auth_production = auth_source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            !main_production.contains("token_prefix"),
+            "startup logs must not include even partial admin bearer token material"
+        );
+        assert!(
+            !main_production.contains("admin_token.chars().take"),
+            "startup must not derive loggable substrings from the admin bearer token"
+        );
+        assert!(
+            !auth_production.contains("displayed once"),
+            "auth documentation must not normalize logging bearer-token material"
         );
     }
 }
