@@ -82,6 +82,7 @@ pub struct HistoryQuery {
 
 const DEFAULT_PAGE_LIMIT: u64 = 50;
 const MAX_PAGE_LIMIT: u64 = 100;
+const MAX_PAGE_OFFSET: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy)]
 struct PageBounds {
@@ -357,6 +358,12 @@ fn parse_page_bounds(limit: Option<u64>, offset: Option<u64>) -> ApiResult<PageB
     }
 
     let offset_u64 = offset.unwrap_or(0);
+    if offset_u64 > MAX_PAGE_OFFSET {
+        return Err(bad_request(&format!(
+            "offset must be between 0 and {MAX_PAGE_OFFSET}"
+        )));
+    }
+
     let limit = usize::try_from(limit_u64)
         .map_err(|_| bad_request("limit exceeds this platform's addressable range"))?;
     let offset = usize::try_from(offset_u64)
@@ -1544,6 +1551,26 @@ mod tests {
         assert!(result["error"].as_str().unwrap().contains("limit"));
     }
 
+    #[tokio::test]
+    async fn score_history_rejects_offset_above_maximum() {
+        let state = make_state_with_score_history("did:exo:history", &[1000]);
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Ahistory/score/history?offset=10001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(result["error"].as_str().unwrap().contains("offset"));
+    }
+
     // --- create_peer_attestation ---
 
     #[tokio::test]
@@ -1740,6 +1767,27 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(result["error"].as_str().unwrap().contains("limit"));
+    }
+
+    #[tokio::test]
+    async fn list_claims_rejects_offset_above_maximum() {
+        let state = make_state_with_session_and_claims("tok-alice", "did:exo:alice", 2);
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice/claims?offset=10001")
+                    .header("authorization", "Bearer tok-alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(result["error"].as_str().unwrap().contains("offset"));
     }
 
     #[test]
