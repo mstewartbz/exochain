@@ -763,26 +763,25 @@ module.exports = function(db, broadcast, helpers) {
     // Find an appropriate adjudicator — must not be the challenger
     let adjudicator = null;
     const challengerId = challenge.challenger_id;
+    function selectAdjudicatorForTier(tier) {
+      return db.prepare(`
+        SELECT id, name, tier FROM team_members
+        WHERE tier = ? AND status = 'active' AND id != ?
+        ORDER BY (
+          SELECT COUNT(*) FROM challenge_adjudication_stages
+          WHERE adjudicator_id = team_members.id AND verdict IS NULL
+        ) ASC, team_members.id ASC
+        LIMIT 1
+      `).get(tier, challengerId || 0);
+    }
 
     if (stageDef.tier === 'specialist') {
       // Pick a specialist from same department, ranked higher if possible, excluding challenger
-      adjudicator = db.prepare(`
-        SELECT id, name, tier FROM team_members
-        WHERE tier = 'IC' AND status = 'active' AND id != ?
-        ORDER BY RANDOM() LIMIT 1
-      `).get(challengerId || 0);
+      adjudicator = selectAdjudicatorForTier('IC');
     } else if (stageDef.tier === 'executive') {
-      adjudicator = db.prepare(`
-        SELECT id, name, tier FROM team_members
-        WHERE tier = 'C-Suite' AND status = 'active' AND id != ?
-        ORDER BY RANDOM() LIMIT 1
-      `).get(challengerId || 0);
+      adjudicator = selectAdjudicatorForTier('C-Suite');
     } else if (stageDef.tier === 'board') {
-      adjudicator = db.prepare(`
-        SELECT id, name, tier FROM team_members
-        WHERE tier = 'Board' AND status = 'active' AND id != ?
-        ORDER BY RANDOM() LIMIT 1
-      `).get(challengerId || 0);
+      adjudicator = selectAdjudicatorForTier('Board');
     }
 
     if (!adjudicator) {
