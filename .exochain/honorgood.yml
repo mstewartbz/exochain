@@ -1,0 +1,16 @@
+honorgood:
+  canonical_compact: docs/honorgood/HONOR_GOOD_COMPACT.md
+  core_crate: crates/exo-economy
+  core_modules:
+    - value_contribution
+    - contribution_offer
+    - contribution_acceptance
+    - bailment
+    - adoption
+    - legacy
+    - ruleset
+    - settlement
+  settlement_authority: exochain_core
+  adjacent_surfaces:
+    commandbase: cockpit_only
+    exoforge: factory_only

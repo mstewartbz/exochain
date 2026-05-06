@@ -176,6 +176,13 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | **ECO-010** | SDK re-exports for Rust consumers | `exochain-sdk::economy` | `crates/exochain-sdk/src/economy.rs` | 🟢 |
 | **ECO-011** | Every active charge resolves to zero across all input combinations | `exo-economy::quote` | `crates/exo-economy/src/quote.rs::every_actor_event_assurance_combination_quotes_zero_under_zero_launch` | 🟢 |
 | **ECO-012** | No floats, no `HashMap`/`HashSet`, no system clock in production paths | `exo-economy::lib` (hygiene) | `crates/exo-economy/src/lib.rs::hygiene_tests` | 🟢 |
+| **ECO-HG-001** | HonorGood value contribution nodes with deterministic IDs and content hashes | `exo-economy::value_contribution` | `crates/exo-economy/src/value_contribution.rs` (mod tests) | 🟢 |
+| **ECO-HG-002** | Contribution offers, acceptances, bailment terms, and wrappers bind accepted terms and authority | `exo-economy::{contribution_offer, contribution_acceptance, bailment}` | module unit tests | 🟢 |
+| **ECO-HG-003** | Adoption, use, and value events require hash-linked predecessors and measurement policy | `exo-economy::adoption` | `crates/exo-economy/src/adoption.rs` (mod tests) | 🟢 |
+| **ECO-HG-004** | LegacyReceipt state machine blocks unratified upstream settlement claims | `exo-economy::legacy`, `exo-economy::honorgood` | module unit tests | 🟢 |
+| **ECO-HG-005** | HonorGood rulesets validate per-basis basis-point totals | `exo-economy::ruleset` | `crates/exo-economy/src/ruleset.rs` (mod tests) | 🟢 |
+| **ECO-HG-006** | MissionSettlement and AutomatedSettlementEvent use checked settlement arithmetic and fail-closed preconditions | `exo-economy::settlement` | `crates/exo-economy/src/settlement.rs` (mod tests) | 🟢 |
+| **ECO-HG-007** | Apex Velocity Catalyst mission examples use explicit naming and do not redefine Autonomous Volition Credential | `exo-economy::honorgood`, `docs/economy/*` | module unit tests + docs | 🟢 |
 
 ## Summary
 

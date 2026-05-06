@@ -1,0 +1,28 @@
+mission:
+  name: Apex Velocity Catalyst client services mission
+  mission_type: ApexVelocityCatalystClientServices
+  status: Active
+  purpose:
+    problem: Client requires governed implementation of useful EXOCHAIN-aligned systems.
+    served_party: client principal
+    promised_outcome: Implemented outcome with contribution receipts and settlement lines.
+    expected_value: Mission-specific value recorded in micro EXO units when known.
+    risk_surface: Delivery, governance, provenance, and adoption risk.
+    proof_required: Mission, contribution receipts, ruleset, and settlement objects.
+    success_condition: Accepted client outcome and auditable settlement record.
+  ruleset_template:
+    basis: NetRevenue
+    lines:
+      - recipient: Apex Velocity Catalyst / EXOCHAIN protocol fee
+        share_bp: 1500
+      - recipient: originator
+        share_bp: 1000
+      - recipient: closer or deal architect
+        share_bp: 500
+      - recipient: delivery budget
+        share_bp: 6000
+      - recipient: mission surplus or outcome pool
+        share_bp: 1000
+  zero_launch:
+    settlement_amounts_may_be_zero: true
+    zero_fee_reason_required: true

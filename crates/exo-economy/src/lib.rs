@@ -11,7 +11,7 @@
 //!
 //! - Integer-only (`MicroExo = u128`, `BasisPoints = u32`).
 //! - All hashing is BLAKE3 over canonical CBOR.
-//! - Saturating arithmetic prevents overflow under adversarial inputs.
+//! - Checked arithmetic fails closed on overflow or underflow.
 //! - Only deterministic ordered collections (`BTreeMap`, `BTreeSet`),
 //!   never the unordered standard-library variants. No floating-point
 //!   arithmetic anywhere in the price path.
@@ -70,17 +70,57 @@
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+pub mod adoption;
+pub mod bailment;
+pub mod contribution_acceptance;
+pub mod contribution_offer;
+pub mod contribution_receipt;
 pub mod error;
+pub mod honorgood;
+pub mod legacy;
+pub mod mission;
 pub mod policy;
 pub mod price;
 pub mod quote;
 pub mod receipt;
 pub mod revenue_share;
+pub mod ruleset;
 pub mod settlement;
 pub mod store;
 pub mod types;
+pub mod value_contribution;
 
+pub use adoption::{
+    ADOPTION_EVENT_HASH_DOMAIN, AdoptionEvent, USE_EVENT_HASH_DOMAIN, UseEvent, UseType,
+    VALUE_EVENT_HASH_DOMAIN, ValueBasis, ValueEvent,
+};
+pub use bailment::{
+    BAILMENT_TERMS_HASH_DOMAIN, BAILMENT_WRAPPER_HASH_DOMAIN, BailmentTerms, BailmentWrapper,
+    BailmentWrapperStatus,
+};
+pub use contribution_acceptance::{
+    AdopterType, CONTRIBUTION_ACCEPTANCE_HASH_DOMAIN, ContributionAcceptance,
+};
+pub use contribution_offer::{
+    CONTRIBUTION_OFFER_HASH_DOMAIN, ContributionOffer, ContributionOfferStatus, ExpirationOrReview,
+    RequiredAuthorityLevel,
+};
+pub use contribution_receipt::{
+    ApprovalStatus, CONTRIBUTION_RECEIPT_HASH_DOMAIN, ContributionCategory,
+    ContributionContributorType, ContributionReceipt,
+};
 pub use error::EconomyError;
+pub use honorgood::{
+    apex_velocity_catalyst_client_services_mission, apex_velocity_catalyst_client_services_ruleset,
+    apex_velocity_catalyst_software_channel_ruleset, archon_exoforge_legacy_receipt,
+    archon_exoforge_ruleset, paperclip_commandbase_legacy_receipt, paperclip_commandbase_ruleset,
+    zero_launch_mission_settlement_reason,
+};
+pub use legacy::{
+    BeneficiaryRef, BeneficiaryType, LEGACY_RECEIPT_HASH_DOMAIN, LegacyReceipt,
+    LegacyReceiptStatus, LegalEffect, MaterialityReview, MaterialityReviewStatus, MaterialityTier,
+};
+pub use mission::{MISSION_HASH_DOMAIN, Mission, MissionPurpose, MissionStatus, MissionType};
 pub use policy::{
     ActorMultiplier, AssuranceMultiplier, ECONOMY_POLICY_HASH_DOMAIN, EventMultiplier,
     PricingPolicy,
@@ -91,20 +131,48 @@ pub use receipt::{SETTLEMENT_RECEIPT_HASH_DOMAIN, SettlementReceipt};
 pub use revenue_share::{
     RevenueShareLine, RevenueShareTemplate, TemplateAllocation, distribute_revenue,
 };
-pub use settlement::{SettlementContext, settle};
+pub use ruleset::{
+    DurationPolicy, HONOR_GOOD_RULESET_HASH_DOMAIN, HonorGoodRuleset, ReviewFrequency,
+    RulesetRecipientType, RulesetScope, RulesetShareLine, RulesetStatus, SettlementBasis,
+    validate_basis_allocations,
+};
+pub use settlement::{
+    AUTOMATED_SETTLEMENT_EVENT_HASH_DOMAIN, AutomatedSettlementEvent, AutomatedSettlementInputs,
+    AutomatedSettlementPreconditions, MISSION_SETTLEMENT_HASH_DOMAIN, MissionSettlement,
+    SettlementContext, SettlementLine, checked_basis_point_amount, settle,
+    settlement_lines_from_ruleset,
+};
 pub use store::{EconomyStore, InMemoryEconomyStore};
 pub use types::{
     ActorClass, AssuranceClass, BasisPoints, DEFAULT_QUOTE_TTL_MS, EventClass, MAX_BASIS_POINTS,
     MAX_MULTIPLIER_BP, MicroExo, NEUTRAL_MULTIPLIER_BP, PricingMode, RevenueRecipient,
     ZeroFeeReason,
 };
+pub use value_contribution::{
+    AuthorityEnvelopeRef, ContributionType, ContributorType, ParticipantRef,
+    VALUE_CONTRIBUTION_NODE_HASH_DOMAIN, ValueContributionNode, ValueContributionStatus,
+};
 
 /// All economy hashing/signing domains. Used by hygiene tests and
 /// external auditors.
 pub const ECONOMY_DOMAINS: &[&str] = &[
+    ADOPTION_EVENT_HASH_DOMAIN,
+    AUTOMATED_SETTLEMENT_EVENT_HASH_DOMAIN,
+    BAILMENT_TERMS_HASH_DOMAIN,
+    BAILMENT_WRAPPER_HASH_DOMAIN,
+    CONTRIBUTION_ACCEPTANCE_HASH_DOMAIN,
+    CONTRIBUTION_OFFER_HASH_DOMAIN,
+    CONTRIBUTION_RECEIPT_HASH_DOMAIN,
     ECONOMY_QUOTE_HASH_DOMAIN,
-    SETTLEMENT_RECEIPT_HASH_DOMAIN,
     ECONOMY_POLICY_HASH_DOMAIN,
+    HONOR_GOOD_RULESET_HASH_DOMAIN,
+    LEGACY_RECEIPT_HASH_DOMAIN,
+    MISSION_HASH_DOMAIN,
+    MISSION_SETTLEMENT_HASH_DOMAIN,
+    SETTLEMENT_RECEIPT_HASH_DOMAIN,
+    USE_EVENT_HASH_DOMAIN,
+    VALUE_CONTRIBUTION_NODE_HASH_DOMAIN,
+    VALUE_EVENT_HASH_DOMAIN,
 ];
 
 #[cfg(test)]
@@ -129,16 +197,26 @@ mod hygiene_tests {
     #[test]
     fn no_hashmap_or_hashset_in_production_sources() {
         let sources = [
+            include_str!("adoption.rs"),
+            include_str!("bailment.rs"),
+            include_str!("contribution_acceptance.rs"),
+            include_str!("contribution_offer.rs"),
+            include_str!("contribution_receipt.rs"),
             include_str!("error.rs"),
+            include_str!("honorgood.rs"),
+            include_str!("legacy.rs"),
             include_str!("lib.rs"),
+            include_str!("mission.rs"),
             include_str!("policy.rs"),
             include_str!("price.rs"),
             include_str!("quote.rs"),
             include_str!("receipt.rs"),
             include_str!("revenue_share.rs"),
+            include_str!("ruleset.rs"),
             include_str!("settlement.rs"),
             include_str!("store.rs"),
             include_str!("types.rs"),
+            include_str!("value_contribution.rs"),
         ];
         let banned_map = ["Hash", "Map"].concat();
         let banned_set = ["Hash", "Set"].concat();
@@ -158,16 +236,26 @@ mod hygiene_tests {
     #[test]
     fn no_floating_point_in_production_sources() {
         let sources = [
+            include_str!("adoption.rs"),
+            include_str!("bailment.rs"),
+            include_str!("contribution_acceptance.rs"),
+            include_str!("contribution_offer.rs"),
+            include_str!("contribution_receipt.rs"),
             include_str!("error.rs"),
+            include_str!("honorgood.rs"),
+            include_str!("legacy.rs"),
             include_str!("lib.rs"),
+            include_str!("mission.rs"),
             include_str!("policy.rs"),
             include_str!("price.rs"),
             include_str!("quote.rs"),
             include_str!("receipt.rs"),
             include_str!("revenue_share.rs"),
+            include_str!("ruleset.rs"),
             include_str!("settlement.rs"),
             include_str!("store.rs"),
             include_str!("types.rs"),
+            include_str!("value_contribution.rs"),
         ];
         for src in sources {
             let production = src.split("#[cfg(test)]").next().unwrap();

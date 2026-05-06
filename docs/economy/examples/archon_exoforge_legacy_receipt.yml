@@ -1,0 +1,27 @@
+legacy_receipt:
+  upstream_project: Archon
+  receiving_system: ExoForge
+  status: Proposed
+  legal_effect: VoluntaryRecognitionOnly
+  license: MIT
+  materiality_tier: Genesis
+  materiality_review:
+    status: EvidenceBacked
+    evidence_hash: "0xa1..."
+    rationale_ref: docs/economy/examples/archon_exoforge_legacy_receipt.yml
+  treatment:
+    attribution: evergreen while materially used
+    settlement: conditional if accepted and ratified
+  proposed_terms:
+    - basis: NetRevenue
+      share_bp: 100
+      description: 1.0% of relevant net software revenue
+    - basis: ProtocolFee
+      share_bp: 500
+      description: 5.0% of relevant protocol fee
+  beneficiary_ref:
+    type: ProjectTreasury
+    ref: public-project-treasury:Archon
+  claims:
+    current_legal_obligation: false
+    ratified: false

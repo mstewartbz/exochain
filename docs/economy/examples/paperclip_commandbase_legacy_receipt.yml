@@ -1,0 +1,27 @@
+legacy_receipt:
+  upstream_project: Paperclip
+  receiving_system: CommandBase
+  status: Proposed
+  legal_effect: VoluntaryRecognitionOnly
+  license: MIT
+  materiality_tier: Foundational
+  materiality_review:
+    status: EvidenceBacked
+    evidence_hash: "0xb1..."
+    rationale_ref: docs/economy/examples/paperclip_commandbase_legacy_receipt.yml
+  treatment:
+    attribution: evergreen while materially used
+    settlement: conditional if accepted and ratified
+  proposed_terms:
+    - basis: SoftwareArr
+      share_bp: 150
+      description: 1.5% of relevant CommandBase ARR
+    - basis: ImplementationFee
+      share_bp: 500
+      description: 5.0% of relevant implementation protocol fee
+  beneficiary_ref:
+    type: ProjectTreasury
+    ref: public-project-treasury:Paperclip
+  claims:
+    current_legal_obligation: false
+    ratified: false

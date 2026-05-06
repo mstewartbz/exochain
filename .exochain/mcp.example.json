@@ -1,0 +1,20 @@
+{
+  "honorgood": {
+    "compact": "docs/honorgood/HONOR_GOOD_COMPACT.md",
+    "resources": [
+      "value_contribution_nodes",
+      "contribution_offers",
+      "legacy_receipts",
+      "mission_rulesets",
+      "settlement_status"
+    ],
+    "tools_not_implemented_here": [
+      "list_open_missions",
+      "accept_contribution_terms",
+      "submit_contribution_receipt",
+      "propose_legacy_receipt",
+      "check_settlement_status"
+    ],
+    "authority": "EXOCHAIN core remains settlement authority"
+  }
+}

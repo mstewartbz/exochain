@@ -40,6 +40,25 @@ flowchart TD
     QuoteFn --> ZeroFeeReason["ZeroFeeReason"]
 ```
 
+## HonorGood and Mission Economics
+
+`exo-economy` also carries the first EXOCHAIN-native HonorGood and
+Apex Velocity Catalyst Mission Economics primitives:
+
+- `Mission` and `MissionPurpose` for purpose-bound economic context.
+- `ContributionReceipt` for evidenced contribution proof.
+- `LegacyReceipt` for upstream provenance and conditional participation.
+- `ValueContributionNode`, `ContributionOffer`, `ContributionAcceptance`,
+  `BailmentTerms`, and `BailmentWrapper` for generalized contribution
+  offers and accepted use.
+- `AdoptionEvent`, `UseEvent`, and `ValueEvent` for adoption, use, and
+  measurable value.
+- `HonorGoodRuleset`, `SettlementLine`, `MissionSettlement`, and
+  `AutomatedSettlementEvent` for deterministic settlement accounting.
+
+CommandBase and ExoForge remain adjacent consuming surfaces. EXOCHAIN core
+is the settlement authority.
+
 ## Routes
 
 | Method | Path | Purpose |
@@ -172,10 +191,10 @@ authority, and governance behavior are unchanged.
 ## Determinism contract
 
 - Integer-only (`MicroExo = u128`, `BasisPoints = u32`).
-- Saturating arithmetic prevents overflow under adversarial inputs.
+- Checked settlement arithmetic fails closed on overflow or underflow.
 - All hashing is BLAKE3 over canonical CBOR with versioned domain tags
   (`exo.economy.quote.v1`, `exo.economy.settlement_receipt.v1`,
-  `exo.economy.policy.v1`).
+  `exo.economy.policy.v1`, and HonorGood/Mission domains).
 - Settlement receipts form a per-store hash chain via
   `prev_settlement_receipt`.
 - No floats. No unordered collections. No system clock.
@@ -184,7 +203,7 @@ authority, and governance behavior are unchanged.
 
 - This MVP does not implement a token launch, fiat rails, external
   exchanges, or ML-driven pricing.
-- The store is in-memory; persistence is a follow-up PR.
+- The current economy store remains in-memory.
 - Adaptive multipliers and revenue-share templates are present
   structurally but resolve to neutral / zero values during the launch
   phase.

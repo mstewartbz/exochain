@@ -52,6 +52,34 @@ pub enum EconomyError {
     #[error("economy settlement amount {amount} exceeds charged amount {charged}")]
     SettlementOverAllocated { amount: u128, charged: u128 },
 
+    /// Checked settlement arithmetic overflowed.
+    #[error("economy checked arithmetic overflowed in `{operation}`")]
+    ArithmeticOverflow { operation: &'static str },
+
+    /// Checked settlement arithmetic underflowed.
+    #[error("economy checked arithmetic underflowed in `{operation}`")]
+    ArithmeticUnderflow { operation: &'static str },
+
+    /// Settlement basis is not supported by the ruleset or event.
+    #[error("economy unsupported settlement basis: {basis}")]
+    UnsupportedSettlementBasis { basis: String },
+
+    /// A state transition was not allowed by the object's state machine.
+    #[error("economy status transition from {from} to {to} is not allowed: {reason}")]
+    UnsupportedStatusTransition {
+        from: &'static str,
+        to: &'static str,
+        reason: String,
+    },
+
+    /// Automated settlement precondition failed closed.
+    #[error("economy automated settlement precondition failed: {reason}")]
+    AutomatedSettlementRejected { reason: String },
+
+    /// A hash-linked object did not match the expected hash.
+    #[error("economy hash mismatch for `{field}`")]
+    HashMismatch { field: &'static str },
+
     /// Settlement signer returned an empty placeholder signature.
     #[error("economy settlement receipt `{receipt_id}` signer returned an empty signature")]
     EmptySettlementSignature { receipt_id: String },
@@ -124,6 +152,20 @@ mod tests {
                 amount: 10,
                 charged: 5,
             },
+            EconomyError::ArithmeticOverflow { operation: "mul" },
+            EconomyError::ArithmeticUnderflow { operation: "sub" },
+            EconomyError::UnsupportedSettlementBasis {
+                basis: "unsupported".into(),
+            },
+            EconomyError::UnsupportedStatusTransition {
+                from: "Proposed",
+                to: "Ratified",
+                reason: "missing acceptance".into(),
+            },
+            EconomyError::AutomatedSettlementRejected {
+                reason: "human approval required".into(),
+            },
+            EconomyError::HashMismatch { field: "terms" },
             EconomyError::EmptySettlementSignature {
                 receipt_id: "rec".into(),
             },

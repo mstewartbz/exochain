@@ -1,0 +1,16 @@
+provenance:
+  compact: docs/honorgood/OPEN_PROVENANCE_COMPACT.md
+  legacy_receipts:
+    archon_exoforge: docs/economy/examples/archon_exoforge_legacy_receipt.yml
+    paperclip_commandbase: docs/economy/examples/paperclip_commandbase_legacy_receipt.yml
+  ratification_required_for:
+    - RatifiedAgreement
+    - upstream economic settlement
+  beneficiary_policy: opaque_references_only
+  no_sensitive_on_ledger:
+    - personal
+    - banking
+    - tax
+    - family
+    - estate
+    - payment
