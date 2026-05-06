@@ -133,6 +133,7 @@ fn map_economy_error(err: EconomyError) -> ApiError {
         EconomyError::EmptyField { .. }
         | EconomyError::BasisPointOutOfRange { .. }
         | EconomyError::FloorAboveCeiling { .. }
+        | EconomyError::UnsupportedSettlementBasis { .. }
         | EconomyError::InvalidInput { .. } => (StatusCode::BAD_REQUEST, err.to_string()),
         EconomyError::QuoteExpired => (StatusCode::CONFLICT, err.to_string()),
         EconomyError::QuoteNotFound | EconomyError::UnknownPolicy { .. } => {
@@ -140,8 +141,13 @@ fn map_economy_error(err: EconomyError) -> ApiError {
         }
         EconomyError::QuoteHashMismatch
         | EconomyError::ReceiptHashMismatch
+        | EconomyError::HashMismatch { .. }
         | EconomyError::RevenueShareOverAllocated { .. }
-        | EconomyError::SettlementOverAllocated { .. } => {
+        | EconomyError::SettlementOverAllocated { .. }
+        | EconomyError::ArithmeticOverflow { .. }
+        | EconomyError::ArithmeticUnderflow { .. }
+        | EconomyError::UnsupportedStatusTransition { .. }
+        | EconomyError::AutomatedSettlementRejected { .. } => {
             (StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
         }
         EconomyError::Serialization { .. }

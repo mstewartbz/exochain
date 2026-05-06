@@ -77,6 +77,17 @@ pricing or settlement state, and the economy layer never gates trust on
 payment availability. Future governance amendments can switch nonzero
 pricing on by policy without modifying AVC validation.
 
+HonorGood and Apex Velocity Catalyst Mission Economics now live in
+`exo-economy` as core provenance and settlement primitives: Missions,
+Contribution Receipts, Legacy Receipts, Value Contribution Nodes,
+Offers, Acceptances, Bailment Wrappers, Rulesets, and Mission
+Settlements. Canonical docs are under
+[`docs/honorgood/HONOR_GOOD_COMPACT.md`](docs/honorgood/HONOR_GOOD_COMPACT.md)
+and
+[`docs/economy/AVC_MISSION_ECONOMICS_COMPACT.md`](docs/economy/AVC_MISSION_ECONOMICS_COMPACT.md).
+Here `exo-avc` remains Autonomous Volition Credential; Apex Velocity
+Catalyst is named explicitly.
+
 ## Architecture
 
 ```
@@ -137,7 +148,7 @@ Layer 5: ExoForge           (exoforge/)
 | `exo-consensus` | Multi-model consensus session, scoring, commitment, and report primitives |
 | `exochain-sdk` | Rust SDK facade for identity, consent, authority, governance, and kernel calls |
 | `exo-avc` | Autonomous Volition Credentials: signed scope, delegation, revocation, and validation |
-| `exo-economy` | Custody-native zero-priced quote, settlement, receipt, revenue-share, and store primitives |
+| `exo-economy` | Custody-native zero-priced quote, settlement, HonorGood provenance, Mission economics, receipts, rulesets, and store primitives |
 
 ### Governance & Infrastructure
 

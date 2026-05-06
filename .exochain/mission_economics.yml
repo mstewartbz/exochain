@@ -1,0 +1,12 @@
+mission_economics:
+  compact: docs/economy/AVC_MISSION_ECONOMICS_COMPACT.md
+  explicit_name: ApexVelocityCatalyst
+  autonomous_volition_credential_crate: crates/exo-avc
+  examples:
+    client_services: docs/economy/examples/avc_client_services_mission.yml
+  accounting:
+    currency_unit: MicroExo
+    fractional_unit: basis_points
+    max_basis_points_per_basis: 10000
+    arithmetic: checked
+    zero_fee_reason_required: true

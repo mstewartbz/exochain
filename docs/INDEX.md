@@ -46,6 +46,8 @@ tags: [exochain, documentation, index]
 ## Reference
 
 - [[CRATE-REFERENCE]] — API reference for the workspace crates (types, traits, functions, invariants).
+- [HonorGood Compact](honorgood/HONOR_GOOD_COMPACT.md) — EXOCHAIN-native provenance and conditional participation primitives.
+- [Mission Economics](economy/MISSION_ECONOMICS.md) — Mission, receipt, ruleset, and settlement accounting model.
 
 ## Proofs
 
@@ -99,6 +101,7 @@ tags: [exochain, documentation, index]
 ### AI agents
 
 - [MCP Integration Guide](guides/mcp-integration.md) — Canonical integration guide.
+- [HonorGood intention files](../.exochain/honorgood.yml) — Machine-readable pointers for contribution nodes, receipts, and rulesets.
 - Read at session start: `exochain://invariants`, `exochain://mcp-rules`, `exochain://tools`.
 - Workflow templates: `governance_review`, `compliance_check`, `evidence_analysis`, `constitutional_audit`.
 
