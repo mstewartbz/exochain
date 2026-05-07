@@ -242,7 +242,7 @@ for first-week work:
 | `web/`            | Decision Forum React UI                                                |
 | `demo/`           | Standalone demo stack (Node microservices + React + Postgres)          |
 | `tla/`            | TLA+ specifications for core protocols                                 |
-| `deploy/`         | Deployment manifests (Docker Compose, Fly.io, Railway)                 |
+| `deploy/`         | Railway deployment manifests and node runtime entrypoint                |
 
 ---
 

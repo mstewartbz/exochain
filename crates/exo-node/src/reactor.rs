@@ -38,6 +38,7 @@ use std::{
 };
 
 use exo_core::{
+    crypto,
     hash::hash_structured,
     types::{Did, Hash256, PublicKey, ReceiptOutcome, Signature, Timestamp, TrustReceipt},
 };
@@ -63,12 +64,42 @@ struct CommitReceiptAuthorityPayload<'a> {
     certificate: &'a CommitCertificate,
 }
 
+#[derive(serde::Serialize)]
+struct GovernanceEventAuthorityPayload<'a> {
+    domain: &'static str,
+    sender: &'a Did,
+    event_type: &'a GovernanceEventType,
+    payload_hash: &'a Hash256,
+    timestamp: &'a Timestamp,
+    signature: &'a Signature,
+}
+
+#[derive(serde::Deserialize)]
+struct AuditEntryPayload {
+    actor_did: String,
+    action_type: String,
+    outcome: String,
+}
+
 fn commit_receipt_authority_hash(cert: &CommitCertificate) -> Result<Hash256, String> {
     hash_structured(&CommitReceiptAuthorityPayload {
         domain: "exo.reactor.commit_certificate_authority.v1",
         certificate: cert,
     })
     .map_err(|e| format!("commit certificate authority hash: {e}"))
+}
+
+fn governance_event_authority_hash(event: &GovernanceEventMsg) -> Result<Hash256, String> {
+    let payload_hash = Hash256::digest(&event.payload);
+    hash_structured(&GovernanceEventAuthorityPayload {
+        domain: "exo.reactor.governance_event_authority.v1",
+        sender: &event.sender,
+        event_type: &event.event_type,
+        payload_hash: &payload_hash,
+        timestamp: &event.timestamp,
+        signature: &event.signature,
+    })
+    .map_err(|e| format!("governance event authority hash: {e}"))
 }
 
 fn checked_committed_height(committed_len: usize) -> Result<u64, String> {
@@ -171,6 +202,98 @@ fn sign_proposal(
         .signing_payload()
         .map_err(|e| format!("proposal signing payload: {e}"))?;
     Ok(sign_fn(&payload))
+}
+
+fn parse_audit_receipt_outcome(value: &str) -> Result<ReceiptOutcome, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "executed" | "success" | "succeeded" | "ok" => Ok(ReceiptOutcome::Executed),
+        "denied" | "rejected" | "failed" | "failure" => Ok(ReceiptOutcome::Denied),
+        "escalated" => Ok(ReceiptOutcome::Escalated),
+        "pending" => Ok(ReceiptOutcome::Pending),
+        other => Err(format!("unsupported audit receipt outcome: {other}")),
+    }
+}
+
+async fn verify_governance_event_signature(
+    state: &SharedReactorState,
+    event: &GovernanceEventMsg,
+) -> Result<(), String> {
+    let sender = event.sender.clone();
+    let payload = event.payload.clone();
+    let signature = event.signature.clone();
+    with_reactor_state_blocking(
+        Arc::clone(state),
+        "governance_event_signature_verify",
+        move |s| {
+            let public_key = s
+                .validator_public_keys
+                .as_map()
+                .get(&sender)
+                .copied()
+                .ok_or_else(|| format!("governance event sender {sender} is not a validator"))?;
+            if !crypto::verify(&payload, &signature, &public_key) {
+                return Err(format!(
+                    "governance event signature failed verification for sender {sender}"
+                ));
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn receipt_from_audit_event(
+    state: &SharedReactorState,
+    event: &GovernanceEventMsg,
+) -> Result<TrustReceipt, String> {
+    verify_governance_event_signature(state, event).await?;
+    let payload: AuditEntryPayload = serde_json::from_slice(&event.payload)
+        .map_err(|e| format!("audit entry payload must be JSON: {e}"))?;
+    let actor_did =
+        Did::new(payload.actor_did.trim()).map_err(|e| format!("audit actor DID: {e}"))?;
+    if payload.action_type.trim().is_empty() {
+        return Err("audit action_type must not be empty".into());
+    }
+    let outcome = parse_audit_receipt_outcome(&payload.outcome)?;
+    let authority_hash = governance_event_authority_hash(event)?;
+    let action_hash = Hash256::digest(&event.payload);
+    let timestamp = event.timestamp;
+    let action_type = payload.action_type;
+    with_reactor_state_blocking(Arc::clone(state), "governance_audit_receipt", move |s| {
+        TrustReceipt::new(
+            actor_did,
+            authority_hash,
+            None,
+            action_type,
+            action_hash,
+            outcome,
+            timestamp,
+            &*s.sign_fn,
+        )
+        .map_err(|e| format!("build governance audit receipt: {e}"))
+    })
+    .await
+}
+
+async fn apply_governance_event_locally(
+    state: &SharedReactorState,
+    store: &Arc<Mutex<SqliteDagStore>>,
+    event: &GovernanceEventMsg,
+) -> Result<(), String> {
+    if !matches!(event.event_type, GovernanceEventType::AuditEntry) {
+        return Ok(());
+    }
+
+    let receipt = receipt_from_audit_event(state, event).await?;
+    with_store_blocking(Arc::clone(store), "governance_audit_receipt_save", {
+        let receipt = receipt.clone();
+        move |store| {
+            store
+                .save_receipt(&receipt)
+                .map_err(|e| format!("save governance audit receipt: {e}"))
+        }
+    })
+    .await
 }
 
 fn signed_vote(
@@ -672,6 +795,10 @@ async fn handle_wire_message(
             handle_commit(state, store, reactor_tx, msg).await;
         }
         WireMessage::GovernanceEvent(msg) => {
+            if let Err(e) = apply_governance_event_locally(state, store, &msg).await {
+                tracing::warn!(err = %e, "Rejected governance event from network");
+                return;
+            }
             // Collapsed to satisfy clippy::collapsible_if. Cheaper to
             // read than the nested `if` form.
             if let Err(_send_err) = reactor_tx
@@ -1205,6 +1332,7 @@ pub async fn submit_proposal(
 /// Broadcast a governance event to the network.
 pub async fn broadcast_governance_event(
     state: &SharedReactorState,
+    store: &Arc<Mutex<SqliteDagStore>>,
     net_handle: &NetworkHandle,
     event_type: GovernanceEventType,
     payload: Vec<u8>,
@@ -1222,18 +1350,42 @@ pub async fn broadcast_governance_event(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let msg = WireMessage::GovernanceEvent(GovernanceEventMsg {
+    let event = GovernanceEventMsg {
         sender,
         event_type,
         payload,
         timestamp,
         signature,
-    });
+    };
+    let msg = WireMessage::GovernanceEvent(event.clone());
 
-    net_handle
-        .publish(topics::GOVERNANCE, msg)
-        .await
-        .map_err(|e| anyhow::anyhow!("broadcast governance: {e}"))
+    match net_handle.publish(topics::GOVERNANCE, msg.clone()).await {
+        Ok(()) => Ok(()),
+        Err(e) if is_single_validator(state).await? && is_no_peers_subscribed(&e.to_string()) => {
+            tracing::warn!(
+                event_type = ?event.event_type,
+                "single-validator governance broadcast has no peers; applying event locally"
+            );
+            apply_governance_event_locally(state, store, &event)
+                .await
+                .map_err(|e| anyhow::anyhow!("apply governance event locally: {e}"))
+        }
+        Err(e) => Err(anyhow::anyhow!("broadcast governance: {e}")),
+    }
+}
+
+async fn is_single_validator(state: &SharedReactorState) -> anyhow::Result<bool> {
+    with_reactor_state_blocking(
+        Arc::clone(state),
+        "governance_broadcast_single_validator_check",
+        |s| Ok(s.is_validator && s.consensus.config.validators.len() == 1),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn is_no_peers_subscribed(error: &str) -> bool {
+    error.contains("NoPeersSubscribedToTopic")
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,6 +1432,10 @@ mod tests {
         let keypair = validator_keypair(index);
         let payload = proposal.signing_payload().expect("proposal payload");
         keypair.sign(&payload)
+    }
+
+    fn sign_governance_payload_for_index(payload: &[u8], index: usize) -> Signature {
+        validator_keypair(index).sign(payload)
     }
 
     fn config_for(node_did: Did, is_validator: bool, validators: BTreeSet<Did>) -> ReactorConfig {
@@ -1346,6 +1502,45 @@ mod tests {
         (0..n)
             .map(|i| Did::new(&format!("did:exo:v{i}")).expect("valid"))
             .collect()
+    }
+
+    fn make_single_validator() -> BTreeSet<Did> {
+        let mut validators = BTreeSet::new();
+        validators.insert(Did::new("did:exo:v0").unwrap());
+        validators
+    }
+
+    fn temp_store() -> (tempfile::TempDir, Arc<Mutex<SqliteDagStore>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
+        (dir, store)
+    }
+
+    fn audit_payload(actor: &str, action_type: &str, outcome: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "avc.trust_receipt.v1",
+            "actor_did": actor,
+            "action_type": action_type,
+            "outcome": outcome,
+            "timestamp_ms": 1_700_000_000_000_u64
+        }))
+        .unwrap()
+    }
+
+    async fn reply_no_peers_to_publish_retries(
+        cmd_rx: &mut mpsc::Receiver<crate::network::NetworkCommand>,
+    ) {
+        for _ in 0..crate::network::NETWORK_PUBLISH_MAX_ATTEMPTS {
+            let command = cmd_rx.recv().await.expect("published network command");
+            let crate::network::NetworkCommand::Publish { reply, .. } = command else {
+                panic!("expected publish command");
+            };
+            reply
+                .send(Err(
+                    "gossipsub publish failed: NoPeersSubscribedToTopic".into()
+                ))
+                .expect("publish ack receiver active");
+        }
     }
 
     #[test]
@@ -1596,15 +1791,18 @@ mod tests {
         let validators = make_validators(4);
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
         let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
         let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
         let net_handle = NetworkHandle::new(cmd_tx);
 
         let broadcast_task = {
             let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
             let net_handle = net_handle.clone();
             tokio::spawn(async move {
                 broadcast_governance_event(
                     &state,
+                    &store,
                     &net_handle,
                     GovernanceEventType::AuditEntry,
                     b"audit".to_vec(),
@@ -1637,6 +1835,170 @@ mod tests {
             event.timestamp,
             Timestamp::ZERO,
             "governance broadcasts must carry a non-placeholder monotonic timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_validator_no_peers_applies_audit_event_locally() {
+        let validators = make_single_validator();
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let payload = audit_payload("did:exo:archon", "archon.workflow.success", "success");
+
+        let broadcast_task = {
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            let net_handle = net_handle.clone();
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                broadcast_governance_event(
+                    &state,
+                    &store,
+                    &net_handle,
+                    GovernanceEventType::AuditEntry,
+                    payload,
+                )
+                .await
+            })
+        };
+
+        reply_no_peers_to_publish_retries(&mut cmd_rx).await;
+        broadcast_task
+            .await
+            .expect("broadcast task joins")
+            .expect("single-validator local apply succeeds");
+
+        let receipts = store
+            .lock()
+            .unwrap()
+            .load_receipts_by_actor("did:exo:archon", 10)
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].action_type, "archon.workflow.success");
+        assert_eq!(receipts[0].outcome, ReceiptOutcome::Executed);
+        assert_eq!(receipts[0].action_hash, Hash256::digest(&payload));
+    }
+
+    #[tokio::test]
+    async fn multi_validator_no_peers_still_fails_closed() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let broadcast_task = {
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            let net_handle = net_handle.clone();
+            tokio::spawn(async move {
+                broadcast_governance_event(
+                    &state,
+                    &store,
+                    &net_handle,
+                    GovernanceEventType::AuditEntry,
+                    audit_payload("did:exo:archon", "archon.workflow.success", "success"),
+                )
+                .await
+            })
+        };
+
+        reply_no_peers_to_publish_retries(&mut cmd_rx).await;
+        let err = broadcast_task
+            .await
+            .expect("broadcast task joins")
+            .unwrap_err();
+        assert!(err.to_string().contains("NoPeersSubscribedToTopic"));
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .load_receipts_by_actor("did:exo:archon", 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_audit_event_uses_same_local_apply_path() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::AuditEntry,
+            payload: audit_payload("did:exo:archon", "archon.workflow.success", "success"),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::empty(),
+        };
+        let mut event = event;
+        event.signature = sign_governance_payload_for_index(&event.payload, 1);
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        let ReactorEvent::GovernanceEventReceived { event } =
+            reactor_rx.recv().await.expect("reactor event emitted")
+        else {
+            panic!("expected governance event");
+        };
+        assert!(matches!(event.event_type, GovernanceEventType::AuditEntry));
+        let receipts = store
+            .lock()
+            .unwrap()
+            .load_receipts_by_actor("did:exo:archon", 10)
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_audit_event_rejects_bad_signature() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::AuditEntry,
+            payload: audit_payload("did:exo:archon", "archon.workflow.success", "success"),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::from_bytes([4u8; 64]),
+        };
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        assert!(reactor_rx.try_recv().is_err());
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .load_receipts_by_actor("did:exo:archon", 10)
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -947,6 +947,27 @@ async fn start_node(
         bind_address: bind_address.clone(),
         ..exo_gateway::server::GatewayConfig::default()
     };
+    let gateway_pool = match std::env::var("DATABASE_URL") {
+        Ok(database_url) => {
+            tracing::info!("DATABASE_URL configured - initializing gateway readiness pool");
+            Some(
+                exo_gateway::db::init_pool(&database_url)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("gateway database initialization failed: {error}")
+                    })?,
+            )
+        }
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "DATABASE_URL not configured - /ready will remain unavailable until a database is configured"
+            );
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("DATABASE_URL is not valid Unicode");
+        }
+    };
 
     if is_join {
         tracing::info!(
@@ -960,8 +981,11 @@ async fn start_node(
         );
     }
 
-    let serve_fut =
-        exo_gateway::server::serve_with_extra_routes(gateway_config, None, Some(extra_router));
+    let serve_fut = exo_gateway::server::serve_with_extra_routes(
+        gateway_config,
+        gateway_pool,
+        Some(extra_router),
+    );
 
     tracing::info!(
         %bind_address,
@@ -1386,5 +1410,49 @@ mod tests {
             !production.contains("tokio::spawn("),
             "startup must not discard JoinHandles from raw tokio::spawn"
         );
+    }
+
+    #[test]
+    fn node_gateway_passes_database_pool_to_readiness_router() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let gateway_section = production
+            .split("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .nth(1)
+            .and_then(|section| section.split("let run_result = tokio::select!").next())
+            .unwrap();
+
+        assert!(
+            gateway_section.contains("exo_gateway::db::init_pool(&database_url)"),
+            "node startup must initialize the gateway DB pool when DATABASE_URL is configured"
+        );
+        assert!(
+            gateway_section.contains(
+                "serve_with_extra_routes(\n        gateway_config,\n        gateway_pool,"
+            ),
+            "node startup must pass the initialized DB pool to gateway readiness routes"
+        );
+        assert!(
+            !gateway_section.contains("serve_with_extra_routes(gateway_config, None"),
+            "node startup must not force /ready into no_db_configured state"
+        );
+    }
+
+    #[test]
+    fn node_gateway_database_pool_logging_does_not_expose_connection_string() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let gateway_section = production
+            .split("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .nth(1)
+            .and_then(|section| section.split("if is_join").next())
+            .unwrap();
+
+        for forbidden in ["%database_url", "{database_url}", "database_url ="] {
+            assert!(
+                !gateway_section.contains(forbidden),
+                "gateway DB initialization logs must not expose the database URL"
+            );
+        }
     }
 }

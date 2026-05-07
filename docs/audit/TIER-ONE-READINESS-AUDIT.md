@@ -475,7 +475,7 @@ However, tier-one status requires that a **neutral third party can independently
 | CI quality gates | 16 | `.github/workflows/ci.yml` |
 | Published releases | None (pre-release) | `git tag -l` |
 | License | AGPL-3.0-or-later | `Cargo.toml` |
-| Live node | https://exochain.io | Fly.io deployment |
+| Live node | https://exochain-production.up.railway.app | Railway deployment |
 ```
 
 ### README.md Line 30 (replace)
