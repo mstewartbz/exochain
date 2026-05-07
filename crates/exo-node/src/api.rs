@@ -334,12 +334,18 @@ async fn handle_broadcast(
         }
     };
 
-    reactor::broadcast_governance_event(&api.reactor_state, &api.net_handle, event_type, payload)
-        .await
-        .map_err(|e| {
-            tracing::error!(err = %e, "Governance event broadcast failed");
-            internal_error_response("Governance event broadcast failed")
-        })?;
+    reactor::broadcast_governance_event(
+        &api.reactor_state,
+        &api.store,
+        &api.net_handle,
+        event_type,
+        payload,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "Governance event broadcast failed");
+        internal_error_response("Governance event broadcast failed")
+    })?;
 
     Ok(StatusCode::ACCEPTED)
 }

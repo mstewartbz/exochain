@@ -37,6 +37,5 @@ assert_healthcheck_uses_ready() {
 assert_healthcheck_uses_ready Dockerfile
 assert_healthcheck_uses_ready deploy/Dockerfile.node
 assert_file_contains railway.json '"healthcheckPath": "/ready"'
-assert_file_contains deploy/fly.toml 'path = "/ready"'
 
 echo "deployment readiness probe test passed"

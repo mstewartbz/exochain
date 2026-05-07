@@ -7,8 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use exo_core::hash::hash_structured;
-use exo_core::{Hash256, Signature, Timestamp};
+use exo_core::{Hash256, Signature, Timestamp, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -1060,6 +1059,356 @@ mod tests {
         assert!(matches!(
             err,
             EconomyError::AutomatedSettlementRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn mission_settlement_validate_rejects_mutated_totals_and_empty_lines() {
+        let ruleset = sample_ruleset().anchor().unwrap();
+        let settlement = MissionSettlement::from_ruleset(
+            h(0xC0),
+            &ruleset,
+            1_000_000,
+            100_000,
+            None,
+            None,
+            ts(3_000),
+        )
+        .unwrap();
+
+        let mut wrong_net = settlement.clone();
+        wrong_net.net_revenue_micro_exo = 1;
+        assert!(matches!(
+            wrong_net.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        let mut empty_lines = settlement.clone();
+        empty_lines.settlement_lines.clear();
+        assert!(matches!(
+            empty_lines.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        let mut wrong_total = settlement;
+        wrong_total.charged_amount_micro_exo += 1;
+        assert!(matches!(
+            wrong_total.validate().unwrap_err(),
+            EconomyError::SettlementOverAllocated { .. }
+        ));
+    }
+
+    #[test]
+    fn mission_settlement_validate_rejects_zero_previous_hash_and_empty_signature() {
+        let ruleset = sample_ruleset().anchor().unwrap();
+        let settlement = MissionSettlement::from_ruleset(
+            h(0xC0),
+            &ruleset,
+            1_000_000,
+            100_000,
+            None,
+            Some(h(0xA0)),
+            ts(3_000),
+        )
+        .unwrap();
+
+        let mut zero_previous = settlement.clone();
+        zero_previous.prev_settlement_hash = Some(Hash256::ZERO);
+        assert!(matches!(
+            zero_previous.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        let mut empty_signature = settlement;
+        empty_signature.signature = Some(Signature::empty());
+        assert!(matches!(
+            empty_signature.validate().unwrap_err(),
+            EconomyError::EmptySettlementSignature { .. }
+        ));
+    }
+
+    #[test]
+    fn settlement_line_validate_rejects_zero_amount_without_reason_and_zero_links() {
+        let mut line = settlement_lines_from_ruleset(
+            &sample_ruleset().anchor().unwrap(),
+            &basis_amounts(),
+            Some(ZeroFeeReason::PolicyConfiguredZero),
+        )
+        .unwrap()
+        .remove(0);
+
+        line.zero_fee_reason = None;
+        assert!(matches!(
+            line.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        line.zero_fee_reason = Some(ZeroFeeReason::PolicyConfiguredZero);
+        line.source_receipt_id = Some(Hash256::ZERO);
+        assert!(matches!(
+            line.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        line.source_receipt_id = None;
+        line.legacy_receipt_id = Some(Hash256::ZERO);
+        assert!(matches!(
+            line.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+    }
+
+    #[test]
+    fn settlement_lines_from_ruleset_rejects_missing_basis_and_zero_without_reason() {
+        let ruleset = sample_ruleset().anchor().unwrap();
+        let empty_amounts = BTreeMap::new();
+        assert!(matches!(
+            settlement_lines_from_ruleset(
+                &ruleset,
+                &empty_amounts,
+                Some(ZeroFeeReason::PolicyConfiguredZero),
+            )
+            .unwrap_err(),
+            EconomyError::UnsupportedSettlementBasis { .. }
+        ));
+
+        assert!(matches!(
+            settlement_lines_from_ruleset(&ruleset, &basis_amounts(), None).unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+    }
+
+    #[test]
+    fn automated_preconditions_fail_closed_for_missing_authority_and_active_dispute() {
+        let mut missing_authority = settlement_preconditions();
+        missing_authority.authority_valid = false;
+        assert!(matches!(
+            missing_authority.validate().unwrap_err(),
+            EconomyError::AutomatedSettlementRejected { .. }
+        ));
+
+        let mut disputed = settlement_preconditions();
+        disputed.materiality_disputed = true;
+        assert!(matches!(
+            disputed.validate().unwrap_err(),
+            EconomyError::AutomatedSettlementRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn automated_settlement_fails_when_value_event_does_not_trigger() {
+        let (ruleset, node, adoption, use_event, wrapper, mut value_event) =
+            coherent_settlement_objects();
+        value_event.settlement_triggered = false;
+        let value_event = value_event.anchor().unwrap();
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EconomyError::AutomatedSettlementRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn automated_settlement_fails_for_inactive_ruleset_or_wrapper() {
+        let (mut ruleset, node, adoption, use_event, wrapper, value_event) =
+            coherent_settlement_objects();
+        ruleset.status = RulesetStatus::Suspended;
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EconomyError::AutomatedSettlementRejected { .. }
+        ));
+
+        let (ruleset, node, adoption, use_event, mut wrapper, value_event) =
+            coherent_settlement_objects();
+        wrapper.status = BailmentWrapperStatus::Suspended;
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EconomyError::AutomatedSettlementRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn automated_settlement_fails_for_hash_mismatches_and_unsupported_basis() {
+        let (ruleset, node, adoption, use_event, mut wrapper, value_event) =
+            coherent_settlement_objects();
+        wrapper.settlement_ruleset_id = h(0x99);
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconomyError::HashMismatch { .. }));
+
+        let (ruleset, node, adoption, use_event, mut wrapper, value_event) =
+            coherent_settlement_objects();
+        wrapper.wrapper_id = h(0x98);
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconomyError::HashMismatch { .. }));
+
+        let (ruleset, node, adoption, use_event, wrapper, value_event) =
+            coherent_settlement_objects();
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: h(0x97),
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(err, EconomyError::HashMismatch { .. }));
+
+        let (ruleset, node, adoption, use_event, wrapper, mut value_event) =
+            coherent_settlement_objects();
+        value_event.value_basis = ValueBasis::Other("unsupported".into());
+        let err = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            EconomyError::UnsupportedSettlementBasis { .. }
+        ));
+    }
+
+    #[test]
+    fn automated_settlement_validate_rejects_mutated_event_shape() {
+        let (ruleset, node, adoption, use_event, wrapper, value_event) =
+            coherent_settlement_objects();
+        let event = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+            value_event: &value_event,
+            use_event: &use_event,
+            contribution_node: &node,
+            adoption: &adoption,
+            ruleset: &ruleset,
+            wrapper: &wrapper,
+            automation_authority_ref: authority("adopter-principal"),
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts: &basis_amounts(),
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: settlement_preconditions(),
+            created_at_hlc: ts(3_100),
+        })
+        .unwrap();
+
+        let mut empty_lines = event.clone();
+        empty_lines.settlement_lines.clear();
+        assert!(matches!(
+            empty_lines.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        let mut invalid_authority = event.clone();
+        invalid_authority.automation_authority_ref.envelope_id = Hash256::ZERO;
+        assert!(matches!(
+            invalid_authority.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        let mut human_approval = event.clone();
+        human_approval.human_approval_required = true;
+        assert!(matches!(
+            human_approval.validate().unwrap_err(),
+            EconomyError::AutomatedSettlementRejected { .. }
+        ));
+
+        let mut empty_checks = event.clone();
+        empty_checks.fail_closed_checks.clear();
+        assert!(matches!(
+            empty_checks.validate().unwrap_err(),
+            EconomyError::InvalidInput { .. }
+        ));
+
+        let mut blank_check = event;
+        blank_check.fail_closed_checks.push("   ".into());
+        assert!(matches!(
+            blank_check.validate().unwrap_err(),
+            EconomyError::EmptyField { .. }
         ));
     }
 }

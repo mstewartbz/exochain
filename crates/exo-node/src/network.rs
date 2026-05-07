@@ -35,7 +35,7 @@ use crate::wire::{self, WireMessage, topics};
 
 const GOSSIPSUB_MESSAGE_ID_DOMAIN: &str = "exo.node.gossipsub.message-id.v1";
 const IDENTIFY_AGENT_VERSION: &str = "exochain/1.0";
-const NETWORK_PUBLISH_MAX_ATTEMPTS: usize = 3;
+pub(crate) const NETWORK_PUBLISH_MAX_ATTEMPTS: usize = 3;
 const NETWORK_PUBLISH_RETRY_BACKOFF_MS: u64 = 50;
 const NETWORK_PUBLISH_ACK_TIMEOUT_MS: u64 = 5_000;
 

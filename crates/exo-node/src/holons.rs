@@ -545,7 +545,8 @@ async fn execute_governance_action(
     reactor::submit_proposal(state, store, net_handle, payload).await?;
 
     // Broadcast the governance event.
-    reactor::broadcast_governance_event(state, net_handle, action_type, payload.to_vec()).await
+    reactor::broadcast_governance_event(state, store, net_handle, action_type, payload.to_vec())
+        .await
 }
 
 fn encode_validator_change(change: &ValidatorChange) -> Result<Vec<u8>, String> {
