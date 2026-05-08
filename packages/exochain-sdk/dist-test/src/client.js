@@ -71,6 +71,61 @@ export class AuthorityApi {
         return this.#http.get(`/authority/chain/${encodeURIComponent(chainId)}`);
     }
 }
+/** HonorGood and mission-economics calls. EXOCHAIN remains settlement authority. */
+export class EconomyApi {
+    #http;
+    constructor(http) {
+        this.#http = http;
+    }
+    async createMission(body) {
+        return this.#http.post('/api/v1/economy/missions', body);
+    }
+    async getMission(id) {
+        return this.#http.get(`/api/v1/economy/missions/${encodeURIComponent(id)}`);
+    }
+    async createContributionReceipt(body) {
+        return this.#http.post('/api/v1/economy/contribution-receipts', body);
+    }
+    async createLegacyReceipt(body) {
+        return this.#http.post('/api/v1/economy/legacy-receipts', body);
+    }
+    async getLegacyReceipt(id) {
+        return this.#http.get(`/api/v1/economy/legacy-receipts/${encodeURIComponent(id)}`);
+    }
+    async createRuleset(body) {
+        return this.#http.post('/api/v1/economy/rulesets', body);
+    }
+    async createContributionNode(body) {
+        return this.#http.post('/api/v1/economy/contribution-nodes', body);
+    }
+    async createContributionOffer(body) {
+        return this.#http.post('/api/v1/economy/contribution-offers', body);
+    }
+    async createContributionAcceptance(body) {
+        return this.#http.post('/api/v1/economy/contribution-acceptances', body);
+    }
+    async createBailmentTerms(body) {
+        return this.#http.post('/api/v1/economy/bailment-terms', body);
+    }
+    async createBailmentWrapper(body) {
+        return this.#http.post('/api/v1/economy/bailment-wrappers', body);
+    }
+    async createAdoptionEvent(body) {
+        return this.#http.post('/api/v1/economy/adoption-events', body);
+    }
+    async createUseEvent(body) {
+        return this.#http.post('/api/v1/economy/use-events', body);
+    }
+    async createValueEvent(body) {
+        return this.#http.post('/api/v1/economy/value-events', body);
+    }
+    async createMissionSettlement(body) {
+        return this.#http.post('/api/v1/economy/mission-settlements', body);
+    }
+    async createAutomatedSettlement(body) {
+        return this.#http.post('/api/v1/economy/automated-settlements', body);
+    }
+}
 // -----------------------------------------------------------------------------
 // Client
 // -----------------------------------------------------------------------------
@@ -80,6 +135,7 @@ export class ExochainClient {
     consent;
     governance;
     authority;
+    economy;
     #http;
     constructor(opts) {
         const transportOpts = {};
@@ -94,6 +150,7 @@ export class ExochainClient {
         this.consent = new ConsentApi(this.#http);
         this.governance = new GovernanceApi(this.#http);
         this.authority = new AuthorityApi(this.#http);
+        this.economy = new EconomyApi(this.#http);
     }
     /** Gateway health probe. */
     async health() {

@@ -12,3 +12,16 @@ Use is the trigger.
 Settlement is the harvest.
 
 Agents and holons may create, adopt, use, and settle only within delegated authority envelopes. Their action does not create unlimited legal authority by proximity or automation.
+
+## Recording Path
+
+EXOCHAIN core records value contribution nodes through
+`POST /api/v1/economy/contribution-nodes`. Offers, acceptances, bailment
+wrappers, adoption events, use events, value events, and automated settlement
+events must be recorded through the corresponding EXOCHAIN economy routes so
+predecessor hashes, accepted terms, authority envelopes, status, and ruleset
+requirements are validated by core.
+
+CommandBase may present the cockpit view. ExoForge may generate proposals and
+submit complete payloads. Neither surface can mint settlement truth outside
+EXOCHAIN.

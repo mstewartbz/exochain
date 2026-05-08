@@ -882,10 +882,13 @@ async fn start_node(
         let identity = identity::load_or_create(data_dir)?;
         Arc::new(move |payload: &[u8]| identity.sign(payload))
     };
-    let economy_state = Arc::new(economy::EconomyApiState::new(economy_settlement_signer));
+    let economy_state = Arc::new(economy::EconomyApiState::with_durable_store(
+        economy_settlement_signer,
+        Arc::clone(&shared_store),
+    ));
     let economy_router = economy::economy_router(Arc::clone(&economy_state));
     tracing::info!(
-        "Economy router ready — /api/v1/economy/{{quote,settle,receipts/:id,policy/active}} (zero-priced launch policy active)"
+        "Economy router ready — /api/v1/economy/* with durable HonorGood mission economics anchors (zero-priced launch policy active)"
     );
 
     // Build 0dentity routers.

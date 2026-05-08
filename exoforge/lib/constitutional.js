@@ -260,6 +260,11 @@ export function buildValidationTncFlags() {
  * Build a deterministic invariant request matching `WasmInvariantRequest`.
  */
 export function buildValidationInvariantRequest() {
+  const kernel = loadKernel();
+  if (typeof kernel.wasm_validation_invariant_request === 'function') {
+    return kernel.wasm_validation_invariant_request();
+  }
+
   return {
     actor: 'did:exo:alice',
     actor_roles: [],

@@ -18,7 +18,7 @@ tags: [exochain, documentation, index]
 
 | You are a... | Start with |
 |---|---|
-| **Developer** building on EXOCHAIN | [[GETTING-STARTED]] -> pick an SDK below |
+| **Developer** building on EXOCHAIN | [Developer Onboarding](developer-onboarding.md) -> [[GETTING-STARTED]] -> pick an SDK below |
 | **Operator** running a node | [[GETTING-STARTED]] -> [[DEPLOYMENT]] |
 | **Auditor** evaluating the fabric | [[ARCHITECTURE]] -> [[CONSTITUTIONAL-PROOFS]] -> [[THREAT-MODEL]] |
 | **AI agent** acting via MCP | [MCP Integration](guides/mcp-integration.md) |
@@ -28,6 +28,7 @@ tags: [exochain, documentation, index]
 
 ## Guides
 
+- [Developer Onboarding](developer-onboarding.md) — First-hour setup, local node, MCP, workspace map, and quality gates.
 - [[GETTING-STARTED]] — Build, run, contribute. The 5-minute entrypoint.
 - [Rust SDK Quickstart](guides/sdk-quickstart-rust.md) — `exochain-sdk` crate, all 6 domains, end-to-end example.
 - [TypeScript SDK Quickstart](guides/sdk-quickstart-typescript.md) — `@exochain/sdk`, Web Crypto Ed25519, browser + Node.
@@ -76,6 +77,7 @@ tags: [exochain, documentation, index]
 
 ### Developers
 
+- [Developer Onboarding](developer-onboarding.md) — First-hour setup and workspace map.
 - [[GETTING-STARTED]] — Build + test the workspace.
 - [Rust SDK Quickstart](guides/sdk-quickstart-rust.md) — Canonical SDK.
 - [TypeScript SDK Quickstart](guides/sdk-quickstart-typescript.md) — Web + Node.

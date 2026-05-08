@@ -610,4 +610,78 @@ mod tests {
         };
         assert!(receipt.validate().is_err());
     }
+
+    #[test]
+    fn unaccepted_legacy_receipts_cannot_claim_accepted_effects() {
+        let mut proposed = sample_legacy_receipt();
+        proposed.status = LegacyReceiptStatus::Recognized;
+        proposed.legal_effect = LegalEffect::AcceptedTerms;
+        assert!(proposed.validate().is_err());
+
+        proposed.legal_effect = LegalEffect::RatifiedAgreement;
+        assert!(proposed.validate().is_err());
+    }
+
+    #[test]
+    fn rejected_legacy_receipts_cannot_permit_settlement() {
+        let mut receipt = sample_legacy_receipt();
+        receipt.status = LegacyReceiptStatus::Rejected;
+        receipt.legal_effect = LegalEffect::ContributorAccepted;
+        receipt.signed_contributor_acceptance_hash = Some(h(0xAB));
+        assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_materiality_tier_must_match_review() {
+        let mut receipt = sample_legacy_receipt();
+        receipt.materiality_tier = MaterialityTier::Genesis;
+        receipt.materiality_review = materiality(MaterialityTier::Foundational);
+        assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn settlement_eligible_legacy_receipt_requires_ruleset_id() {
+        let mut receipt = sample_legacy_receipt();
+        receipt.economic_ruleset_id = None;
+        assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn terminal_legacy_status_cannot_transition() {
+        let mut receipt = sample_legacy_receipt();
+        receipt.status = LegacyReceiptStatus::Rejected;
+        receipt.legal_effect = LegalEffect::VoluntaryRecognitionOnly;
+        let receipt = receipt.anchor().unwrap();
+        assert!(matches!(
+            receipt.can_transition_to(
+                LegacyReceiptStatus::Recognized,
+                LegalEffect::VoluntaryRecognitionOnly,
+                None,
+                None,
+            ),
+            Err(EconomyError::UnsupportedStatusTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn contributor_acceptance_transition_requires_matching_legal_effect() {
+        let receipt = sample_legacy_receipt().anchor().unwrap();
+        assert!(matches!(
+            receipt.can_transition_to(
+                LegacyReceiptStatus::ContributorAccepted,
+                LegalEffect::AcceptedTerms,
+                Some(h(0xAC)),
+                None,
+            ),
+            Err(EconomyError::UnsupportedStatusTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn ratified_legacy_receipt_validation_requires_acceptance_and_ratifier() {
+        let mut receipt = sample_legacy_receipt();
+        receipt.status = LegacyReceiptStatus::Ratified;
+        receipt.legal_effect = LegalEffect::RatifiedAgreement;
+        assert!(receipt.validate().is_err());
+    }
 }

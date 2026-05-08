@@ -18,7 +18,10 @@
 //! | `GET`  | `/api/v1/economy/receipts/:id` | Fetch a settlement receipt. |
 //! | `GET`  | `/api/v1/economy/policy/active` | Inspect the active pricing policy. |
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -26,13 +29,20 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use exo_core::{Hash256, Signature};
+use exo_core::{Hash256, Signature, Timestamp};
 use exo_economy::{
-    EconomyError, EconomyStore, InMemoryEconomyStore, PricingInputs, PricingPolicy,
-    SettlementContext, SettlementQuote, SettlementReceipt, quote, settle,
+    AdoptionEvent, AutomatedSettlementEvent, AutomatedSettlementInputs,
+    AutomatedSettlementPreconditions, BailmentTerms, BailmentWrapper, ContributionAcceptance,
+    ContributionOffer, ContributionReceipt, EconomyError, EconomyObjectKind, EconomyRecordAnchor,
+    EconomyStore, HonorGoodRuleset, InMemoryEconomyStore, LegacyReceipt, MicroExo, Mission,
+    MissionSettlement, PricingInputs, PricingPolicy, SettlementBasis, SettlementContext,
+    SettlementQuote, SettlementReceipt, UseEvent, ValueContributionNode, ValueEvent, ZeroFeeReason,
+    quote, settle,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tower::limit::ConcurrencyLimitLayer;
+
+use crate::store::SqliteDagStore;
 
 const MAX_ECONOMY_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_ECONOMY_API_CONCURRENT_REQUESTS: usize = 64;
@@ -43,15 +53,32 @@ pub type SettlementSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
 #[derive(Clone)]
 pub struct EconomyApiState {
     pub store: Arc<Mutex<InMemoryEconomyStore>>,
+    pub durable_store: Option<Arc<Mutex<SqliteDagStore>>>,
     settlement_signer: SettlementSigner,
 }
 
 impl EconomyApiState {
     /// Construct a fresh state seeded with the zero-launch policy.
     #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(settlement_signer: SettlementSigner) -> Self {
         Self {
             store: Arc::new(Mutex::new(InMemoryEconomyStore::new())),
+            durable_store: None,
+            settlement_signer,
+        }
+    }
+
+    /// Construct a state that persists HonorGood and mission-economics
+    /// objects to the node's SQLite DAG database.
+    #[must_use]
+    pub fn with_durable_store(
+        settlement_signer: SettlementSigner,
+        durable_store: Arc<Mutex<SqliteDagStore>>,
+    ) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(InMemoryEconomyStore::new())),
+            durable_store: Some(durable_store),
             settlement_signer,
         }
     }
@@ -78,6 +105,34 @@ pub struct PolicyResponse {
     pub policy: PricingPolicy,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EconomyObjectResponse<T> {
+    pub object: T,
+    pub anchor: EconomyRecordAnchor,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MissionSettlementRequest {
+    pub mission_id: Hash256,
+    pub ruleset_id: Hash256,
+    pub gross_revenue_micro_exo: MicroExo,
+    pub pass_through_expenses_micro_exo: MicroExo,
+    pub zero_fee_reason: Option<ZeroFeeReason>,
+    pub prev_settlement_hash: Option<Hash256>,
+    pub created_at: Timestamp,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AutomatedSettlementRequest {
+    pub value_event_id: Hash256,
+    pub automation_authority_ref: exo_economy::AuthorityEnvelopeRef,
+    pub preapproved_terms_hash: Hash256,
+    pub basis_amounts: BTreeMap<SettlementBasis, MicroExo>,
+    pub zero_fee_reason: Option<ZeroFeeReason>,
+    pub preconditions: AutomatedSettlementPreconditions,
+    pub created_at_hlc: Timestamp,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -85,22 +140,26 @@ pub struct PolicyResponse {
 type ApiError = (StatusCode, String);
 type ApiResult<T> = Result<T, ApiError>;
 
-fn parse_hash(raw: &str) -> ApiResult<Hash256> {
+fn parse_hash_field(raw: &str, field: &'static str) -> ApiResult<Hash256> {
     let bytes = hex::decode(raw).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
-            "quote_hash_hex must be lowercase hex".into(),
+            format!("{field} must be lowercase hex"),
         )
     })?;
     if bytes.len() != 32 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "quote_hash_hex must be 32 bytes (64 hex chars)".into(),
+            format!("{field} must be 32 bytes (64 hex chars)"),
         ));
     }
     let mut buf = [0u8; 32];
     buf.copy_from_slice(&bytes);
     Ok(Hash256::from_bytes(buf))
+}
+
+fn parse_hash(raw: &str) -> ApiResult<Hash256> {
+    parse_hash_field(raw, "quote_hash_hex")
 }
 
 async fn with_store_blocking<T, F>(state: Arc<EconomyApiState>, op: F) -> ApiResult<T>
@@ -123,6 +182,192 @@ where
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "economy store task failed".into(),
+        )
+    })?
+}
+
+async fn persist_economy_object<T, F>(
+    state: Arc<EconomyApiState>,
+    object_kind: EconomyObjectKind,
+    object_id: Hash256,
+    content_hash: Hash256,
+    created_at: Timestamp,
+    object: T,
+    put_memory: F,
+) -> ApiResult<EconomyRecordAnchor>
+where
+    T: Clone + Serialize + Send + 'static,
+    F: FnOnce(&mut InMemoryEconomyStore, T) -> Result<EconomyRecordAnchor, EconomyError>
+        + Send
+        + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        if let Some(durable_store) = &state.durable_store {
+            let mut guard = durable_store.lock().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "economy durable store unavailable".into(),
+                )
+            })?;
+            return guard
+                .put_economy_object_sync(object_kind, &object_id, &content_hash, created_at, &object)
+                .map_err(|err| {
+                    tracing::warn!(err = %err, kind = object_kind.label(), "economy durable object rejected");
+                    (StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
+                });
+        }
+
+        let mut guard = state.store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "economy store unavailable".into(),
+            )
+        })?;
+        put_memory(&mut guard, object).map_err(map_economy_error)
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(err = %err, "economy object persistence task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "economy object persistence task failed".into(),
+        )
+    })?
+}
+
+async fn read_economy_object<T, F>(
+    state: Arc<EconomyApiState>,
+    object_kind: EconomyObjectKind,
+    object_id: Hash256,
+    get_memory: F,
+) -> ApiResult<Option<T>>
+where
+    T: Clone + DeserializeOwned + Send + 'static,
+    F: FnOnce(&InMemoryEconomyStore, &Hash256) -> Result<Option<T>, EconomyError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        if let Some(durable_store) = &state.durable_store {
+            let guard = durable_store.lock().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "economy durable store unavailable".into(),
+                )
+            })?;
+            return guard
+                .get_economy_object_sync(object_kind, &object_id)
+                .map_err(|err| {
+                    tracing::warn!(err = %err, kind = object_kind.label(), "economy durable object read failed");
+                    (StatusCode::INTERNAL_SERVER_ERROR, "economy durable read failed".into())
+                });
+        }
+
+        let guard = state.store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "economy store unavailable".into(),
+            )
+        })?;
+        get_memory(&guard, &object_id).map_err(map_economy_error)
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(err = %err, "economy object read task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "economy object read task failed".into(),
+        )
+    })?
+}
+
+async fn require_economy_object<T, F>(
+    state: Arc<EconomyApiState>,
+    object_kind: EconomyObjectKind,
+    object_id: Hash256,
+    get_memory: F,
+    label: &'static str,
+) -> ApiResult<T>
+where
+    T: Clone + DeserializeOwned + Send + 'static,
+    F: FnOnce(&InMemoryEconomyStore, &Hash256) -> Result<Option<T>, EconomyError> + Send + 'static,
+{
+    read_economy_object(state, object_kind, object_id, get_memory)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, format!("{label} not found")))
+}
+
+async fn latest_economy_anchor_hash(state: Arc<EconomyApiState>) -> ApiResult<Hash256> {
+    tokio::task::spawn_blocking(move || {
+        if let Some(durable_store) = &state.durable_store {
+            let guard = durable_store.lock().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "economy durable store unavailable".into(),
+                )
+            })?;
+            return guard.latest_economy_anchor_hash_sync().map_err(|err| {
+                tracing::warn!(err = %err, "economy durable latest anchor read failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "economy durable latest anchor read failed".into(),
+                )
+            });
+        }
+
+        let guard = state.store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "economy store unavailable".into(),
+            )
+        })?;
+        Ok(guard.latest_economy_anchor_hash())
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(err = %err, "economy latest anchor task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "economy latest anchor task failed".into(),
+        )
+    })?
+}
+
+async fn read_economy_anchor(
+    state: Arc<EconomyApiState>,
+    anchor_hash: Hash256,
+) -> ApiResult<Option<EconomyRecordAnchor>> {
+    tokio::task::spawn_blocking(move || {
+        if let Some(durable_store) = &state.durable_store {
+            let guard = durable_store.lock().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "economy durable store unavailable".into(),
+                )
+            })?;
+            return guard.get_economy_anchor_sync(&anchor_hash).map_err(|err| {
+                tracing::warn!(err = %err, "economy durable anchor read failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "economy durable anchor read failed".into(),
+                )
+            });
+        }
+
+        let guard = state.store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "economy store unavailable".into(),
+            )
+        })?;
+        guard
+            .get_economy_anchor(&anchor_hash)
+            .map_err(map_economy_error)
+    })
+    .await
+    .map_err(|err| {
+        tracing::error!(err = %err, "economy anchor read task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "economy anchor read task failed".into(),
         )
     })?
 }
@@ -228,6 +473,638 @@ async fn handle_active_policy(
     Ok(Json(PolicyResponse { policy }))
 }
 
+async fn handle_get_latest_economy_anchor(
+    State(state): State<Arc<EconomyApiState>>,
+) -> ApiResult<Json<EconomyRecordAnchor>> {
+    let anchor_hash = latest_economy_anchor_hash(Arc::clone(&state)).await?;
+    if anchor_hash == Hash256::ZERO {
+        return Err((StatusCode::NOT_FOUND, "economy anchor not found".into()));
+    }
+    let anchor = read_economy_anchor(state, anchor_hash)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "economy anchor not found".into()))?;
+    Ok(Json(anchor))
+}
+
+async fn handle_get_economy_anchor(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<EconomyRecordAnchor>> {
+    let anchor_hash = parse_hash_field(&id, "economy_anchor_hash")?;
+    let anchor = read_economy_anchor(state, anchor_hash)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "economy anchor not found".into()))?;
+    Ok(Json(anchor))
+}
+
+macro_rules! simple_post_get_handlers {
+    (
+        $post_fn:ident,
+        $get_fn:ident,
+        $ty:ty,
+        $kind:ident,
+        $id_field:ident,
+        $created_field:ident,
+        $put_method:ident,
+        $get_method:ident,
+        $label:literal
+    ) => {
+        async fn $post_fn(
+            State(state): State<Arc<EconomyApiState>>,
+            Json(payload): Json<$ty>,
+        ) -> ApiResult<Json<EconomyObjectResponse<$ty>>> {
+            let object = payload.anchor().map_err(map_economy_error)?;
+            let anchor = persist_economy_object(
+                state,
+                EconomyObjectKind::$kind,
+                object.$id_field,
+                object.content_hash,
+                object.$created_field,
+                object.clone(),
+                |store, value| store.$put_method(value),
+            )
+            .await?;
+            Ok(Json(EconomyObjectResponse { object, anchor }))
+        }
+
+        async fn $get_fn(
+            State(state): State<Arc<EconomyApiState>>,
+            Path(id): Path<String>,
+        ) -> ApiResult<Json<$ty>> {
+            let id = parse_hash_field(&id, concat!($label, "_id"))?;
+            let object = require_economy_object(
+                state,
+                EconomyObjectKind::$kind,
+                id,
+                |store, value| store.$get_method(value),
+                $label,
+            )
+            .await?;
+            Ok(Json(object))
+        }
+    };
+}
+
+simple_post_get_handlers!(
+    handle_post_mission,
+    handle_get_mission,
+    Mission,
+    Mission,
+    mission_id,
+    created_at,
+    put_mission,
+    get_mission,
+    "mission"
+);
+
+simple_post_get_handlers!(
+    handle_post_legacy_receipt,
+    handle_get_legacy_receipt,
+    LegacyReceipt,
+    LegacyReceipt,
+    legacy_receipt_id,
+    created_at,
+    put_legacy_receipt,
+    get_legacy_receipt,
+    "legacy_receipt"
+);
+
+simple_post_get_handlers!(
+    handle_post_ruleset,
+    handle_get_ruleset,
+    HonorGoodRuleset,
+    HonorGoodRuleset,
+    ruleset_id,
+    created_at,
+    put_ruleset,
+    get_ruleset,
+    "ruleset"
+);
+
+simple_post_get_handlers!(
+    handle_post_value_contribution_node,
+    handle_get_value_contribution_node,
+    ValueContributionNode,
+    ValueContributionNode,
+    contribution_node_id,
+    created_at_hlc,
+    put_value_contribution_node,
+    get_value_contribution_node,
+    "contribution_node"
+);
+
+simple_post_get_handlers!(
+    handle_post_bailment_terms,
+    handle_get_bailment_terms,
+    BailmentTerms,
+    BailmentTerms,
+    terms_id,
+    created_at_hlc,
+    put_bailment_terms,
+    get_bailment_terms,
+    "bailment_terms"
+);
+
+async fn handle_post_contribution_receipt(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<ContributionReceipt>,
+) -> ApiResult<Json<EconomyObjectResponse<ContributionReceipt>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    if let Some(mission_id) = object.mission_id {
+        let _mission: Mission = require_economy_object(
+            Arc::clone(&state),
+            EconomyObjectKind::Mission,
+            mission_id,
+            |store, value| store.get_mission(value),
+            "mission",
+        )
+        .await?;
+    }
+    if let Some(contribution_node_id) = object.contribution_node_id {
+        let _node: ValueContributionNode = require_economy_object(
+            Arc::clone(&state),
+            EconomyObjectKind::ValueContributionNode,
+            contribution_node_id,
+            |store, value| store.get_value_contribution_node(value),
+            "value contribution node",
+        )
+        .await?;
+    }
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::ContributionReceipt,
+        object.receipt_id,
+        object.content_hash,
+        object.created_at,
+        object.clone(),
+        |store, value| store.put_contribution_receipt(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_contribution_receipt(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ContributionReceipt>> {
+    let id = parse_hash_field(&id, "contribution_receipt_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::ContributionReceipt,
+        id,
+        |store, value| store.get_contribution_receipt(value),
+        "contribution receipt",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_contribution_offer(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<ContributionOffer>,
+) -> ApiResult<Json<EconomyObjectResponse<ContributionOffer>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::ContributionOffer,
+        object.offer_id,
+        object.content_hash,
+        object.created_at_hlc,
+        object.clone(),
+        |store, value| store.put_contribution_offer(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_contribution_offer(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ContributionOffer>> {
+    let id = parse_hash_field(&id, "contribution_offer_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::ContributionOffer,
+        id,
+        |store, value| store.get_contribution_offer(value),
+        "contribution offer",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_contribution_acceptance(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<ContributionAcceptance>,
+) -> ApiResult<Json<EconomyObjectResponse<ContributionAcceptance>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    let offer: ContributionOffer = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ContributionOffer,
+        object.offer_id,
+        |store, value| store.get_contribution_offer(value),
+        "contribution offer",
+    )
+    .await?;
+    object
+        .validate_against_offer(&offer)
+        .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::ContributionAcceptance,
+        object.acceptance_id,
+        object.content_hash,
+        object.accepted_at_hlc,
+        object.clone(),
+        |store, value| store.put_contribution_acceptance(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_contribution_acceptance(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ContributionAcceptance>> {
+    let id = parse_hash_field(&id, "contribution_acceptance_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::ContributionAcceptance,
+        id,
+        |store, value| store.get_contribution_acceptance(value),
+        "contribution acceptance",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_bailment_wrapper(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<BailmentWrapper>,
+) -> ApiResult<Json<EconomyObjectResponse<BailmentWrapper>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    let offer: ContributionOffer = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ContributionOffer,
+        object.offer_id,
+        |store, value| store.get_contribution_offer(value),
+        "contribution offer",
+    )
+    .await?;
+    let acceptance: ContributionAcceptance = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ContributionAcceptance,
+        object.acceptance_id,
+        |store, value| store.get_contribution_acceptance(value),
+        "contribution acceptance",
+    )
+    .await?;
+    let terms: BailmentTerms = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::BailmentTerms,
+        object.accepted_bailment_terms_hash,
+        |store, value| store.get_bailment_terms(value),
+        "bailment terms",
+    )
+    .await?;
+    object
+        .validate_against(&offer, &acceptance, &terms)
+        .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::BailmentWrapper,
+        object.wrapper_id,
+        object.content_hash,
+        object.created_at_hlc,
+        object.clone(),
+        |store, value| store.put_bailment_wrapper(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_bailment_wrapper(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<BailmentWrapper>> {
+    let id = parse_hash_field(&id, "bailment_wrapper_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::BailmentWrapper,
+        id,
+        |store, value| store.get_bailment_wrapper(value),
+        "bailment wrapper",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_adoption_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<AdoptionEvent>,
+) -> ApiResult<Json<EconomyObjectResponse<AdoptionEvent>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    let offer: ContributionOffer = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ContributionOffer,
+        object.offer_id,
+        |store, value| store.get_contribution_offer(value),
+        "contribution offer",
+    )
+    .await?;
+    let acceptance: ContributionAcceptance = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ContributionAcceptance,
+        object.acceptance_id,
+        |store, value| store.get_contribution_acceptance(value),
+        "contribution acceptance",
+    )
+    .await?;
+    let wrapper: BailmentWrapper = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::BailmentWrapper,
+        object.bailment_wrapper_id,
+        |store, value| store.get_bailment_wrapper(value),
+        "bailment wrapper",
+    )
+    .await?;
+    object
+        .validate_against(&offer, &acceptance, &wrapper)
+        .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::AdoptionEvent,
+        object.adoption_id,
+        object.content_hash,
+        object.created_at_hlc,
+        object.clone(),
+        |store, value| store.put_adoption_event(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_adoption_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AdoptionEvent>> {
+    let id = parse_hash_field(&id, "adoption_event_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::AdoptionEvent,
+        id,
+        |store, value| store.get_adoption_event(value),
+        "adoption event",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_use_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<UseEvent>,
+) -> ApiResult<Json<EconomyObjectResponse<UseEvent>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    let adoption: AdoptionEvent = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::AdoptionEvent,
+        object.adoption_id,
+        |store, value| store.get_adoption_event(value),
+        "adoption event",
+    )
+    .await?;
+    object
+        .validate_against_adoption(&adoption)
+        .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::UseEvent,
+        object.use_event_id,
+        object.content_hash,
+        object.created_at_hlc,
+        object.clone(),
+        |store, value| store.put_use_event(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_use_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<UseEvent>> {
+    let id = parse_hash_field(&id, "use_event_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::UseEvent,
+        id,
+        |store, value| store.get_use_event(value),
+        "use event",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_value_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<ValueEvent>,
+) -> ApiResult<Json<EconomyObjectResponse<ValueEvent>>> {
+    let object = payload.anchor().map_err(map_economy_error)?;
+    let use_event: UseEvent = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::UseEvent,
+        object.use_event_id,
+        |store, value| store.get_use_event(value),
+        "use event",
+    )
+    .await?;
+    object
+        .validate_against_use_event(&use_event)
+        .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::ValueEvent,
+        object.value_event_id,
+        object.content_hash,
+        object.created_at_hlc,
+        object.clone(),
+        |store, value| store.put_value_event(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_value_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ValueEvent>> {
+    let id = parse_hash_field(&id, "value_event_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::ValueEvent,
+        id,
+        |store, value| store.get_value_event(value),
+        "value event",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_mission_settlement(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<MissionSettlementRequest>,
+) -> ApiResult<Json<EconomyObjectResponse<MissionSettlement>>> {
+    let _mission: Mission = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::Mission,
+        payload.mission_id,
+        |store, value| store.get_mission(value),
+        "mission",
+    )
+    .await?;
+    let ruleset: HonorGoodRuleset = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::HonorGoodRuleset,
+        payload.ruleset_id,
+        |store, value| store.get_ruleset(value),
+        "ruleset",
+    )
+    .await?;
+    let object = MissionSettlement::from_ruleset(
+        payload.mission_id,
+        &ruleset,
+        payload.gross_revenue_micro_exo,
+        payload.pass_through_expenses_micro_exo,
+        payload.zero_fee_reason,
+        payload.prev_settlement_hash,
+        payload.created_at,
+    )
+    .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::MissionSettlement,
+        object.settlement_id,
+        object.content_hash,
+        object.created_at,
+        object.clone(),
+        |store, value| store.put_mission_settlement(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_mission_settlement(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<MissionSettlement>> {
+    let id = parse_hash_field(&id, "mission_settlement_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::MissionSettlement,
+        id,
+        |store, value| store.get_mission_settlement(value),
+        "mission settlement",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
+async fn handle_post_automated_settlement_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Json(payload): Json<AutomatedSettlementRequest>,
+) -> ApiResult<Json<EconomyObjectResponse<AutomatedSettlementEvent>>> {
+    let value_event: ValueEvent = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ValueEvent,
+        payload.value_event_id,
+        |store, value| store.get_value_event(value),
+        "value event",
+    )
+    .await?;
+    let use_event: UseEvent = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::UseEvent,
+        value_event.use_event_id,
+        |store, value| store.get_use_event(value),
+        "use event",
+    )
+    .await?;
+    let adoption: AdoptionEvent = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::AdoptionEvent,
+        use_event.adoption_id,
+        |store, value| store.get_adoption_event(value),
+        "adoption event",
+    )
+    .await?;
+    let contribution_node: ValueContributionNode = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ValueContributionNode,
+        value_event.contribution_node_id,
+        |store, value| store.get_value_contribution_node(value),
+        "value contribution node",
+    )
+    .await?;
+    let ruleset: HonorGoodRuleset = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::HonorGoodRuleset,
+        contribution_node.settlement_ruleset_id,
+        |store, value| store.get_ruleset(value),
+        "ruleset",
+    )
+    .await?;
+    let wrapper: BailmentWrapper = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::BailmentWrapper,
+        adoption.bailment_wrapper_id,
+        |store, value| store.get_bailment_wrapper(value),
+        "bailment wrapper",
+    )
+    .await?;
+    let object = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
+        value_event: &value_event,
+        use_event: &use_event,
+        contribution_node: &contribution_node,
+        adoption: &adoption,
+        ruleset: &ruleset,
+        wrapper: &wrapper,
+        automation_authority_ref: payload.automation_authority_ref,
+        preapproved_terms_hash: payload.preapproved_terms_hash,
+        basis_amounts: &payload.basis_amounts,
+        zero_fee_reason: payload.zero_fee_reason,
+        preconditions: payload.preconditions,
+        created_at_hlc: payload.created_at_hlc,
+    })
+    .map_err(map_economy_error)?;
+    let anchor = persist_economy_object(
+        state,
+        EconomyObjectKind::AutomatedSettlementEvent,
+        object.automated_settlement_id,
+        object.content_hash,
+        object.created_at_hlc,
+        object.clone(),
+        |store, value| store.put_automated_settlement_event(value),
+    )
+    .await?;
+    Ok(Json(EconomyObjectResponse { object, anchor }))
+}
+
+async fn handle_get_automated_settlement_event(
+    State(state): State<Arc<EconomyApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AutomatedSettlementEvent>> {
+    let id = parse_hash_field(&id, "automated_settlement_id")?;
+    let object = require_economy_object(
+        state,
+        EconomyObjectKind::AutomatedSettlementEvent,
+        id,
+        |store, value| store.get_automated_settlement_event(value),
+        "automated settlement event",
+    )
+    .await?;
+    Ok(Json(object))
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -238,6 +1115,108 @@ pub fn economy_router(state: Arc<EconomyApiState>) -> Router {
         .route("/api/v1/economy/settle", post(handle_settle))
         .route("/api/v1/economy/receipts/:id", get(handle_get_receipt))
         .route("/api/v1/economy/policy/active", get(handle_active_policy))
+        .route(
+            "/api/v1/economy/anchors/latest",
+            get(handle_get_latest_economy_anchor),
+        )
+        .route(
+            "/api/v1/economy/anchors/:id",
+            get(handle_get_economy_anchor),
+        )
+        .route("/api/v1/economy/missions", post(handle_post_mission))
+        .route("/api/v1/economy/missions/:id", get(handle_get_mission))
+        .route(
+            "/api/v1/economy/contribution-receipts",
+            post(handle_post_contribution_receipt),
+        )
+        .route(
+            "/api/v1/economy/contribution-receipts/:id",
+            get(handle_get_contribution_receipt),
+        )
+        .route(
+            "/api/v1/economy/legacy-receipts",
+            post(handle_post_legacy_receipt),
+        )
+        .route(
+            "/api/v1/economy/legacy-receipts/:id",
+            get(handle_get_legacy_receipt),
+        )
+        .route("/api/v1/economy/rulesets", post(handle_post_ruleset))
+        .route("/api/v1/economy/rulesets/:id", get(handle_get_ruleset))
+        .route(
+            "/api/v1/economy/contribution-nodes",
+            post(handle_post_value_contribution_node),
+        )
+        .route(
+            "/api/v1/economy/contribution-nodes/:id",
+            get(handle_get_value_contribution_node),
+        )
+        .route(
+            "/api/v1/economy/contribution-offers",
+            post(handle_post_contribution_offer),
+        )
+        .route(
+            "/api/v1/economy/contribution-offers/:id",
+            get(handle_get_contribution_offer),
+        )
+        .route(
+            "/api/v1/economy/contribution-acceptances",
+            post(handle_post_contribution_acceptance),
+        )
+        .route(
+            "/api/v1/economy/contribution-acceptances/:id",
+            get(handle_get_contribution_acceptance),
+        )
+        .route(
+            "/api/v1/economy/bailment-terms",
+            post(handle_post_bailment_terms),
+        )
+        .route(
+            "/api/v1/economy/bailment-terms/:id",
+            get(handle_get_bailment_terms),
+        )
+        .route(
+            "/api/v1/economy/bailment-wrappers",
+            post(handle_post_bailment_wrapper),
+        )
+        .route(
+            "/api/v1/economy/bailment-wrappers/:id",
+            get(handle_get_bailment_wrapper),
+        )
+        .route(
+            "/api/v1/economy/adoption-events",
+            post(handle_post_adoption_event),
+        )
+        .route(
+            "/api/v1/economy/adoption-events/:id",
+            get(handle_get_adoption_event),
+        )
+        .route("/api/v1/economy/use-events", post(handle_post_use_event))
+        .route("/api/v1/economy/use-events/:id", get(handle_get_use_event))
+        .route(
+            "/api/v1/economy/value-events",
+            post(handle_post_value_event),
+        )
+        .route(
+            "/api/v1/economy/value-events/:id",
+            get(handle_get_value_event),
+        )
+        .route(
+            "/api/v1/economy/mission-settlements",
+            post(handle_post_mission_settlement),
+        )
+        .route(
+            "/api/v1/economy/mission-settlements/:id",
+            get(handle_get_mission_settlement),
+        )
+        .route(
+            "/api/v1/economy/automated-settlements",
+            post(handle_post_automated_settlement_event),
+        )
+        .route(
+            "/api/v1/economy/automated-settlements/:id",
+            get(handle_get_automated_settlement_event),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_ECONOMY_API_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(
@@ -251,16 +1230,30 @@ pub fn economy_router(state: Arc<EconomyApiState>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use axum::{
         body::{self, Body},
         http::{Method, Request},
+        response::Response,
     };
     use exo_core::{
-        Did, Timestamp,
+        Did, Hash256, Timestamp,
         crypto::{self, KeyPair},
         types::PublicKey,
     };
-    use exo_economy::{ActorClass, AssuranceClass, EventClass, ZeroFeeReason};
+    use exo_economy::{
+        ActorClass, AdopterType, AdoptionEvent, ApprovalStatus, AssuranceClass,
+        AuthorityEnvelopeRef, BailmentTerms, BailmentWrapper, BailmentWrapperStatus,
+        ContributionAcceptance, ContributionCategory, ContributionContributorType,
+        ContributionOffer, ContributionOfferStatus, ContributionReceipt, ContributionType,
+        ContributorType, EventClass, ExpirationOrReview, HonorGoodRuleset, LegalEffect,
+        MaterialityTier, Mission, MissionSettlement, ParticipantRef, RequiredAuthorityLevel,
+        UseEvent, UseType, ValueBasis, ValueContributionNode, ValueContributionStatus, ValueEvent,
+        ZeroFeeReason, apex_velocity_catalyst_client_services_mission,
+        apex_velocity_catalyst_client_services_ruleset, archon_exoforge_legacy_receipt,
+    };
+    use serde::{Serialize, de::DeserializeOwned};
     use tower::ServiceExt;
 
     use super::*;
@@ -298,11 +1291,274 @@ mod tests {
         }
     }
 
+    fn h(byte: u8) -> Hash256 {
+        Hash256::from_bytes([byte; 32])
+    }
+
+    fn participant(label: &str) -> ParticipantRef {
+        ParticipantRef::Did(Did::new(&format!("did:exo:{label}")).unwrap())
+    }
+
+    fn authority(label: &str) -> AuthorityEnvelopeRef {
+        AuthorityEnvelopeRef {
+            envelope_id: h(0xA1),
+            authority_proof_hash: h(0xA2),
+            principal_ref: participant(label),
+        }
+    }
+
     async fn read_body(response: axum::response::Response) -> Vec<u8> {
         body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap()
             .to_vec()
+    }
+
+    async fn post_json<T: Serialize>(app: &Router, uri: &str, payload: &T) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_response(app: &Router, uri: String) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn decode_body<T: DeserializeOwned>(response: Response) -> T {
+        serde_json::from_slice(&read_body(response).await).unwrap()
+    }
+
+    async fn post_object<T>(app: &Router, uri: &str, payload: &T) -> EconomyObjectResponse<T>
+    where
+        T: Clone + Serialize + DeserializeOwned,
+    {
+        let response = post_json(app, uri, payload).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        decode_body(response).await
+    }
+
+    async fn get_object<T>(app: &Router, uri: String) -> T
+    where
+        T: DeserializeOwned,
+    {
+        let response = get_response(app, uri).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        decode_body(response).await
+    }
+
+    fn value_contribution_node(ruleset: &HonorGoodRuleset) -> ValueContributionNode {
+        ValueContributionNode {
+            contribution_node_id: Hash256::ZERO,
+            contributor_ref: participant("contributor"),
+            contributor_type: ContributorType::Human,
+            contribution_name: "governed implementation workflow".into(),
+            contribution_type: ContributionType::Workflow,
+            source_uri: Some("https://example.test/workflow".into()),
+            evidence_hash: h(0x31),
+            provenance_hash: h(0x32),
+            license_or_compact_ref: "docs/honorgood/HONOR_GOOD_COMPACT.md".into(),
+            honor_good_terms_hash: h(0x33),
+            bailment_terms_hash: h(0x34),
+            settlement_ruleset_id: ruleset.ruleset_id,
+            beneficiary_ref: ParticipantRef::HashedReference(h(0x35)),
+            materiality_policy_id: h(0x36),
+            adoption_policy_id: h(0x37),
+            revocation_policy_id: h(0x38),
+            dispute_policy_id: h(0x39),
+            status: ValueContributionStatus::Active,
+            created_at_hlc: Timestamp::new(30_000, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn bailment_terms(node: &ValueContributionNode) -> BailmentTerms {
+        BailmentTerms {
+            terms_id: Hash256::ZERO,
+            terms_version: "honorgood-bailment-v1".into(),
+            bailor_ref: node.contributor_ref.clone(),
+            bailee_ref_policy: h(0x41),
+            contribution_node_id: node.contribution_node_id,
+            permitted_use: "governed adoption, execution, audit, and settlement".into(),
+            prohibited_use: "off-policy custody or resale".into(),
+            custody_scope: "limited delegated workflow use".into(),
+            attribution_required: true,
+            settlement_required: true,
+            beneficiary_ref: node.beneficiary_ref.clone(),
+            revocation_policy_id: node.revocation_policy_id,
+            dispute_policy_id: node.dispute_policy_id,
+            audit_policy_id: h(0x42),
+            jurisdiction_ref: "off-ledger:jurisdiction-policy".into(),
+            human_approval_required_for: vec![
+                "new legal template".into(),
+                "dispute".into(),
+                "revocation".into(),
+            ],
+            agent_execution_allowed: true,
+            created_at_hlc: Timestamp::new(30_100, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn contribution_offer(
+        node: &ValueContributionNode,
+        terms: &BailmentTerms,
+        ruleset: &HonorGoodRuleset,
+    ) -> ContributionOffer {
+        ContributionOffer {
+            offer_id: Hash256::ZERO,
+            contribution_node_id: node.contribution_node_id,
+            offeror_ref: node.contributor_ref.clone(),
+            terms_hash: node.honor_good_terms_hash,
+            bailment_terms_hash: terms.terms_id,
+            permitted_use_policy: h(0x43),
+            prohibited_use_policy: h(0x44),
+            adoption_policy_id: node.adoption_policy_id,
+            settlement_ruleset_id: ruleset.ruleset_id,
+            required_authority_level: RequiredAuthorityLevel::DelegatedAgent,
+            expiration_or_review: ExpirationOrReview::ReviewAt(Timestamp::new(40_000, 0)),
+            legal_effect: LegalEffect::AcceptedTerms,
+            status: ContributionOfferStatus::Accepted,
+            created_at_hlc: Timestamp::new(30_200, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn contribution_acceptance(
+        offer: &ContributionOffer,
+        proof: AuthorityEnvelopeRef,
+    ) -> ContributionAcceptance {
+        ContributionAcceptance {
+            acceptance_id: Hash256::ZERO,
+            offer_id: offer.offer_id,
+            contribution_node_id: offer.contribution_node_id,
+            adopter_ref: participant("adopter"),
+            adopter_type: AdopterType::Agent,
+            accepted_terms_hash: offer.terms_hash,
+            accepted_bailment_terms_hash: offer.bailment_terms_hash,
+            authority_proof_hash: proof.authority_proof_hash,
+            authority_envelope: proof,
+            intended_use: "adopt into a governed EXOCHAIN workflow".into(),
+            custody_scope: "limited execution and audit custody".into(),
+            signature_ref: h(0x45),
+            accepted_at_hlc: Timestamp::new(30_300, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn bailment_wrapper(
+        node: &ValueContributionNode,
+        offer: &ContributionOffer,
+        acceptance: &ContributionAcceptance,
+        terms: &BailmentTerms,
+        ruleset: &HonorGoodRuleset,
+    ) -> BailmentWrapper {
+        BailmentWrapper {
+            wrapper_id: Hash256::ZERO,
+            contribution_node_id: node.contribution_node_id,
+            offer_id: offer.offer_id,
+            acceptance_id: acceptance.acceptance_id,
+            accepted_terms_hash: offer.terms_hash,
+            accepted_bailment_terms_hash: terms.terms_id,
+            bailor_ref: node.contributor_ref.clone(),
+            bailee_ref: acceptance.adopter_ref.clone(),
+            custody_scope: "limited execution and audit custody".into(),
+            settlement_ruleset_id: ruleset.ruleset_id,
+            signatures_or_authority_refs: vec![acceptance.signature_ref],
+            status: BailmentWrapperStatus::Active,
+            created_at_hlc: Timestamp::new(30_400, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn adoption_event(
+        node: &ValueContributionNode,
+        offer: &ContributionOffer,
+        acceptance: &ContributionAcceptance,
+        wrapper: &BailmentWrapper,
+        mission: &Mission,
+    ) -> AdoptionEvent {
+        AdoptionEvent {
+            adoption_id: Hash256::ZERO,
+            contribution_node_id: node.contribution_node_id,
+            offer_id: offer.offer_id,
+            acceptance_id: acceptance.acceptance_id,
+            adopter_ref: acceptance.adopter_ref.clone(),
+            adopting_system: "CommandBase".into(),
+            mission_id: Some(mission.mission_id),
+            accepted_terms_hash: offer.terms_hash,
+            bailment_wrapper_id: wrapper.wrapper_id,
+            intended_use: "operational cockpit workflow".into(),
+            materiality_at_adoption: MaterialityTier::Foundational,
+            authority_proof_hash: acceptance.authority_proof_hash,
+            created_at_hlc: Timestamp::new(30_500, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn use_event(node: &ValueContributionNode, adoption: &AdoptionEvent) -> UseEvent {
+        UseEvent {
+            use_event_id: Hash256::ZERO,
+            adoption_id: adoption.adoption_id,
+            contribution_node_id: node.contribution_node_id,
+            using_system: "CommandBase".into(),
+            mission_id: adoption.mission_id,
+            use_type: UseType::AgentWorkflow,
+            materiality_observed: MaterialityTier::Foundational,
+            evidence_hash: h(0x46),
+            bailment_wrapper_id: adoption.bailment_wrapper_id,
+            created_at_hlc: Timestamp::new(30_600, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    fn value_event(node: &ValueContributionNode, use_event: &UseEvent) -> ValueEvent {
+        ValueEvent {
+            value_event_id: Hash256::ZERO,
+            use_event_id: use_event.use_event_id,
+            contribution_node_id: node.contribution_node_id,
+            mission_id: use_event.mission_id,
+            value_basis: ValueBasis::Revenue,
+            measured_value_micro_exo: 0,
+            measurement_evidence_hash: h(0x47),
+            measurement_policy_id: h(0x48),
+            settlement_triggered: true,
+            zero_fee_reason_required: true,
+            created_at_hlc: Timestamp::new(30_700, 0),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
     }
 
     #[tokio::test]
@@ -488,6 +1744,415 @@ mod tests {
         let parsed: PolicyResponse = serde_json::from_slice(&read_body(response).await).unwrap();
         assert_eq!(parsed.policy.id, "exo.economy.zero-launch");
         assert_eq!(parsed.policy.compute_unit_price_micro_exo, 0);
+    }
+
+    #[tokio::test]
+    async fn mission_ruleset_and_settlement_routes_record_core_objects() {
+        let state = fresh_state();
+        let app = economy_router(Arc::clone(&state));
+
+        let ruleset = apex_velocity_catalyst_client_services_ruleset().unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/economy/rulesets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ruleset).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ruleset_response: EconomyObjectResponse<HonorGoodRuleset> =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(ruleset_response.anchor.object_hash, ruleset.content_hash);
+
+        let mission = apex_velocity_catalyst_client_services_mission(Some(5_000_000)).unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/economy/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&mission).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mission_response: EconomyObjectResponse<Mission> =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(
+            mission_response.anchor.previous_anchor_hash,
+            ruleset_response.anchor.anchor_hash
+        );
+
+        let settlement_request = MissionSettlementRequest {
+            mission_id: mission.mission_id,
+            ruleset_id: ruleset.ruleset_id,
+            gross_revenue_micro_exo: 0,
+            pass_through_expenses_micro_exo: 0,
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            prev_settlement_hash: None,
+            created_at: Timestamp::new(20_000, 0),
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/economy/mission-settlements")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&settlement_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let settlement_response: EconomyObjectResponse<MissionSettlement> =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(
+            settlement_response.anchor.previous_anchor_hash,
+            mission_response.anchor.anchor_hash
+        );
+        assert_eq!(settlement_response.object.charged_amount_micro_exo, 0);
+        assert!(settlement_response.object.zero_fee_reason.is_some());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/v1/economy/mission-settlements/{}",
+                        settlement_response.object.settlement_id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/economy/anchors/latest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let latest_anchor: EconomyRecordAnchor =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(
+            latest_anchor.anchor_hash,
+            settlement_response.anchor.anchor_hash
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/v1/economy/anchors/{}",
+                        settlement_response.anchor.anchor_hash
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn honorgood_value_contribution_routes_record_full_lifecycle() {
+        let state = fresh_state();
+        let app = economy_router(Arc::clone(&state));
+
+        let ruleset = apex_velocity_catalyst_client_services_ruleset().unwrap();
+        let ruleset_response: EconomyObjectResponse<HonorGoodRuleset> =
+            post_object(&app, "/api/v1/economy/rulesets", &ruleset).await;
+        assert_eq!(
+            ruleset_response.object.status,
+            exo_economy::RulesetStatus::Active
+        );
+
+        let mission = apex_velocity_catalyst_client_services_mission(Some(1_000_000)).unwrap();
+        let mission_response: EconomyObjectResponse<Mission> =
+            post_object(&app, "/api/v1/economy/missions", &mission).await;
+        assert_eq!(
+            mission_response.anchor.previous_anchor_hash,
+            ruleset_response.anchor.anchor_hash
+        );
+
+        let node = value_contribution_node(&ruleset);
+        let node_response: EconomyObjectResponse<ValueContributionNode> =
+            post_object(&app, "/api/v1/economy/contribution-nodes", &node).await;
+        assert_eq!(node_response.object.status, ValueContributionStatus::Active);
+
+        let receipt = ContributionReceipt {
+            receipt_id: Hash256::ZERO,
+            mission_id: Some(mission.mission_id),
+            contribution_node_id: Some(node.contribution_node_id),
+            contributor: participant("contributor"),
+            contributor_type: ContributionContributorType::Human,
+            action_type: "prepared governed implementation workflow".into(),
+            contribution_category: ContributionCategory::Governance,
+            evidence_hash: h(0x49),
+            evidence_uri: Some("ipfs://honorgood-evidence".into()),
+            claimed_value_micro_exo: Some(1_000),
+            accepted_value_micro_exo: Some(1_000),
+            approval_status: ApprovalStatus::Accepted,
+            approver_did: Some(Did::new("did:exo:approver").unwrap()),
+            created_at: Timestamp::new(30_050, 0),
+            content_hash: Hash256::ZERO,
+        };
+        let receipt_response: EconomyObjectResponse<ContributionReceipt> =
+            post_object(&app, "/api/v1/economy/contribution-receipts", &receipt).await;
+        assert_eq!(receipt_response.object.mission_id, Some(mission.mission_id));
+
+        let terms = bailment_terms(&node);
+        let terms_response: EconomyObjectResponse<BailmentTerms> =
+            post_object(&app, "/api/v1/economy/bailment-terms", &terms).await;
+        assert!(terms_response.object.agent_execution_allowed);
+
+        let offer = contribution_offer(&node, &terms, &ruleset);
+        let offer_response: EconomyObjectResponse<ContributionOffer> =
+            post_object(&app, "/api/v1/economy/contribution-offers", &offer).await;
+        assert_eq!(
+            offer_response.object.legal_effect,
+            LegalEffect::AcceptedTerms
+        );
+
+        let authority_ref = authority("principal");
+        let acceptance = contribution_acceptance(&offer, authority_ref.clone());
+        let acceptance_response: EconomyObjectResponse<ContributionAcceptance> = post_object(
+            &app,
+            "/api/v1/economy/contribution-acceptances",
+            &acceptance,
+        )
+        .await;
+        assert_eq!(
+            acceptance_response.object.authority_proof_hash,
+            authority_ref.authority_proof_hash
+        );
+
+        let wrapper = bailment_wrapper(&node, &offer, &acceptance, &terms, &ruleset);
+        let wrapper_response: EconomyObjectResponse<BailmentWrapper> =
+            post_object(&app, "/api/v1/economy/bailment-wrappers", &wrapper).await;
+        assert_eq!(
+            wrapper_response.object.status,
+            BailmentWrapperStatus::Active
+        );
+
+        let adoption = adoption_event(&node, &offer, &acceptance, &wrapper, &mission);
+        let adoption_response: EconomyObjectResponse<AdoptionEvent> =
+            post_object(&app, "/api/v1/economy/adoption-events", &adoption).await;
+        assert_eq!(
+            adoption_response.object.mission_id,
+            Some(mission.mission_id)
+        );
+
+        let use_event = use_event(&node, &adoption);
+        let use_response: EconomyObjectResponse<UseEvent> =
+            post_object(&app, "/api/v1/economy/use-events", &use_event).await;
+        assert_eq!(use_response.object.adoption_id, adoption.adoption_id);
+
+        let value_event = value_event(&node, &use_event);
+        let value_response: EconomyObjectResponse<ValueEvent> =
+            post_object(&app, "/api/v1/economy/value-events", &value_event).await;
+        assert!(value_response.object.settlement_triggered);
+
+        let mut basis_amounts = BTreeMap::new();
+        basis_amounts.insert(SettlementBasis::NetRevenue, 0);
+        let automated_request = AutomatedSettlementRequest {
+            value_event_id: value_event.value_event_id,
+            automation_authority_ref: authority_ref,
+            preapproved_terms_hash: node.honor_good_terms_hash,
+            basis_amounts,
+            zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
+            preconditions: AutomatedSettlementPreconditions {
+                accepted_offer_exists: true,
+                valid_acceptance_exists: true,
+                valid_bailment_wrapper_exists: true,
+                authority_valid: true,
+                ruleset_hash_matches: true,
+                value_event_valid: true,
+                dispute_active: false,
+                revocation_active: false,
+                materiality_disputed: false,
+                legal_effect: LegalEffect::AcceptedTerms,
+            },
+            created_at_hlc: Timestamp::new(30_800, 0),
+        };
+        let response = post_json(
+            &app,
+            "/api/v1/economy/automated-settlements",
+            &automated_request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let automated_response: EconomyObjectResponse<AutomatedSettlementEvent> =
+            decode_body(response).await;
+        assert!(!automated_response.object.human_approval_required);
+        assert_eq!(
+            automated_response.object.bailment_wrapper_id,
+            wrapper.wrapper_id
+        );
+        assert!(
+            automated_response
+                .object
+                .settlement_lines
+                .iter()
+                .all(|line| line.zero_fee_reason == Some(ZeroFeeReason::PolicyConfiguredZero))
+        );
+
+        let legacy = archon_exoforge_legacy_receipt().unwrap();
+        let legacy_response: EconomyObjectResponse<LegacyReceipt> =
+            post_object(&app, "/api/v1/economy/legacy-receipts", &legacy).await;
+        assert_eq!(
+            legacy_response.object.legal_effect,
+            LegalEffect::VoluntaryRecognitionOnly
+        );
+
+        let _: HonorGoodRuleset = get_object(
+            &app,
+            format!("/api/v1/economy/rulesets/{}", ruleset.ruleset_id),
+        )
+        .await;
+        let _: Mission = get_object(
+            &app,
+            format!("/api/v1/economy/missions/{}", mission.mission_id),
+        )
+        .await;
+        let _: ValueContributionNode = get_object(
+            &app,
+            format!(
+                "/api/v1/economy/contribution-nodes/{}",
+                node.contribution_node_id
+            ),
+        )
+        .await;
+        let _: ContributionReceipt = get_object(
+            &app,
+            format!(
+                "/api/v1/economy/contribution-receipts/{}",
+                receipt_response.object.receipt_id
+            ),
+        )
+        .await;
+        let _: BailmentTerms = get_object(
+            &app,
+            format!("/api/v1/economy/bailment-terms/{}", terms.terms_id),
+        )
+        .await;
+        let _: ContributionOffer = get_object(
+            &app,
+            format!("/api/v1/economy/contribution-offers/{}", offer.offer_id),
+        )
+        .await;
+        let _: ContributionAcceptance = get_object(
+            &app,
+            format!(
+                "/api/v1/economy/contribution-acceptances/{}",
+                acceptance.acceptance_id
+            ),
+        )
+        .await;
+        let _: BailmentWrapper = get_object(
+            &app,
+            format!("/api/v1/economy/bailment-wrappers/{}", wrapper.wrapper_id),
+        )
+        .await;
+        let _: AdoptionEvent = get_object(
+            &app,
+            format!("/api/v1/economy/adoption-events/{}", adoption.adoption_id),
+        )
+        .await;
+        let _: UseEvent = get_object(
+            &app,
+            format!("/api/v1/economy/use-events/{}", use_event.use_event_id),
+        )
+        .await;
+        let _: ValueEvent = get_object(
+            &app,
+            format!(
+                "/api/v1/economy/value-events/{}",
+                value_event.value_event_id
+            ),
+        )
+        .await;
+        let _: AutomatedSettlementEvent = get_object(
+            &app,
+            format!(
+                "/api/v1/economy/automated-settlements/{}",
+                automated_response.object.automated_settlement_id
+            ),
+        )
+        .await;
+        let _: LegacyReceipt = get_object(
+            &app,
+            format!(
+                "/api/v1/economy/legacy-receipts/{}",
+                legacy.legacy_receipt_id
+            ),
+        )
+        .await;
+
+        let latest_anchor: EconomyRecordAnchor =
+            get_object(&app, "/api/v1/economy/anchors/latest".to_string()).await;
+        assert_eq!(
+            latest_anchor.anchor_hash, legacy_response.anchor.anchor_hash,
+            "latest economy anchor should track the last core object recorded through the adapter"
+        );
+        let direct_anchor: EconomyRecordAnchor = get_object(
+            &app,
+            format!("/api/v1/economy/anchors/{}", latest_anchor.anchor_hash),
+        )
+        .await;
+        assert_eq!(direct_anchor, latest_anchor);
+    }
+
+    #[tokio::test]
+    async fn contribution_acceptance_route_requires_stored_offer() {
+        let state = fresh_state();
+        let app = economy_router(state);
+        let acceptance = ContributionAcceptance {
+            acceptance_id: Hash256::ZERO,
+            offer_id: h(0x21),
+            contribution_node_id: h(0x22),
+            adopter_ref: participant("adopter"),
+            adopter_type: AdopterType::Agent,
+            accepted_terms_hash: h(0x23),
+            accepted_bailment_terms_hash: h(0x24),
+            authority_proof_hash: h(0xA2),
+            authority_envelope: authority("principal"),
+            intended_use: "governed workflow adoption".into(),
+            custody_scope: "limited execution".into(),
+            signature_ref: h(0x25),
+            accepted_at_hlc: Timestamp::new(21_000, 0),
+            content_hash: Hash256::ZERO,
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/economy/contribution-acceptances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&acceptance).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -22386,6 +22386,7 @@ app.get('/system-map', (req, res) => {
 
 // ── Modularized route groups ──
 require('./routes/governance.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
+require('./routes/honorgood-economy.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/companies.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/research.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });
 require('./routes/projects.js')(app, db, { broadcast, localNow, createNotification, stmt, getCachedSetting, authRateLimiter, apiRateLimiter, spawnMemberTerminal });

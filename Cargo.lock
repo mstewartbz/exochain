@@ -1702,6 +1702,7 @@ dependencies = [
  "exo-consent",
  "exo-core",
  "exo-dag",
+ "exo-economy",
  "exo-escalation",
  "exo-gatekeeper",
  "exo-governance",

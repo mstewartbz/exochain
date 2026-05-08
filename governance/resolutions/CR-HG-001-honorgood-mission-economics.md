@@ -1,6 +1,6 @@
 # CR-HG-001: HonorGood And Mission Economics
 
-Status: draft resolution for core economy extension.
+Status: draft resolution for core economy extension and runtime adapters.
 
 ## Resolution
 
@@ -30,6 +30,21 @@ This resolution does not add a kernel invariant. `ProvenanceHonoring` is documen
 ## Core Objects
 
 The core object set includes Mission, MissionPurpose, ContributionReceipt, LegacyReceipt, ValueContributionNode, ContributionOffer, ContributionAcceptance, BailmentTerms, BailmentWrapper, AdoptionEvent, UseEvent, ValueEvent, HonorGoodRuleset, SettlementLine, MissionSettlement, and AutomatedSettlementEvent.
+
+## Runtime Path
+
+`exo-node` records HonorGood and Mission Economics objects through
+`/api/v1/economy/*` routes. The route layer requires stored predecessor objects
+for accepted terms, bailment wrappers, adoption, use, value, mission settlement,
+and automated settlement. Accepted objects are stored as canonical CBOR in the
+node database and hash-linked with `EconomyRecordAnchor`.
+
+CommandBase is the cockpit adapter. ExoForge is the factory adapter. Both are
+adjacent surfaces with intake records. They can submit to or display EXOCHAIN
+core responses, but they do not become sources of settlement truth.
+
+The WASM bridge exposes stable validation and anchor helpers for Mission,
+LegacyReceipt, HonorGoodRuleset, and ValueContributionNode payloads only.
 
 ## Threats Addressed
 

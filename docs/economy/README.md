@@ -67,8 +67,43 @@ is the settlement authority.
 | `POST` | `/api/v1/economy/settle` | Settle a quote into a `SettlementReceipt`. |
 | `GET`  | `/api/v1/economy/receipts/:id` | Fetch a stored settlement receipt. |
 | `GET`  | `/api/v1/economy/policy/active` | Inspect the active `PricingPolicy`. |
+| `GET` | `/api/v1/economy/anchors/latest` | Fetch the latest `EconomyRecordAnchor`. |
+| `GET` | `/api/v1/economy/anchors/:id` | Fetch a specific `EconomyRecordAnchor`. |
+| `POST` | `/api/v1/economy/missions` | Record a canonical `Mission`. |
+| `GET` | `/api/v1/economy/missions/:id` | Fetch a recorded `Mission`. |
+| `POST` | `/api/v1/economy/contribution-receipts` | Record an evidenced `ContributionReceipt`. |
+| `GET` | `/api/v1/economy/contribution-receipts/:id` | Fetch a recorded `ContributionReceipt`. |
+| `POST` | `/api/v1/economy/legacy-receipts` | Record a `LegacyReceipt` after state/effect validation. |
+| `GET` | `/api/v1/economy/legacy-receipts/:id` | Fetch a recorded `LegacyReceipt`. |
+| `POST` | `/api/v1/economy/rulesets` | Record a validated `HonorGoodRuleset`. |
+| `GET` | `/api/v1/economy/rulesets/:id` | Fetch a recorded `HonorGoodRuleset`. |
+| `POST` | `/api/v1/economy/contribution-nodes` | Record a `ValueContributionNode`. |
+| `GET` | `/api/v1/economy/contribution-nodes/:id` | Fetch a recorded `ValueContributionNode`. |
+| `POST` | `/api/v1/economy/contribution-offers` | Record a `ContributionOffer`. |
+| `GET` | `/api/v1/economy/contribution-offers/:id` | Fetch a recorded `ContributionOffer`. |
+| `POST` | `/api/v1/economy/contribution-acceptances` | Record a `ContributionAcceptance` bound to a stored offer. |
+| `GET` | `/api/v1/economy/contribution-acceptances/:id` | Fetch a recorded `ContributionAcceptance`. |
+| `POST` | `/api/v1/economy/bailment-terms` | Record `BailmentTerms`. |
+| `GET` | `/api/v1/economy/bailment-terms/:id` | Fetch recorded `BailmentTerms`. |
+| `POST` | `/api/v1/economy/bailment-wrappers` | Record a `BailmentWrapper` bound to stored terms, offer, and acceptance. |
+| `GET` | `/api/v1/economy/bailment-wrappers/:id` | Fetch a recorded `BailmentWrapper`. |
+| `POST` | `/api/v1/economy/adoption-events` | Record an `AdoptionEvent` bound to stored offer, acceptance, and wrapper. |
+| `GET` | `/api/v1/economy/adoption-events/:id` | Fetch a recorded `AdoptionEvent`. |
+| `POST` | `/api/v1/economy/use-events` | Record a `UseEvent` bound to a stored adoption. |
+| `GET` | `/api/v1/economy/use-events/:id` | Fetch a recorded `UseEvent`. |
+| `POST` | `/api/v1/economy/value-events` | Record a `ValueEvent` bound to a stored use event. |
+| `GET` | `/api/v1/economy/value-events/:id` | Fetch a recorded `ValueEvent`. |
+| `POST` | `/api/v1/economy/mission-settlements` | Compute and record a `MissionSettlement` from a stored mission and ruleset. |
+| `GET` | `/api/v1/economy/mission-settlements/:id` | Fetch a recorded `MissionSettlement`. |
+| `POST` | `/api/v1/economy/automated-settlements` | Compute and record an `AutomatedSettlementEvent` from stored adoption/use/value context. |
+| `GET` | `/api/v1/economy/automated-settlements/:id` | Fetch a recorded `AutomatedSettlementEvent`. |
 
 POSTs inherit the node's bearer-auth write guard; reads are public.
+
+Node persistence stores HonorGood and Mission Economics objects in SQLite
+as canonical CBOR blobs and appends each accepted object to a deterministic
+economy anchor chain. The in-memory `exo-economy` store remains the core
+reference implementation for deterministic tests.
 
 ## Field reference
 
@@ -197,13 +232,15 @@ authority, and governance behavior are unchanged.
   `exo.economy.policy.v1`, and HonorGood/Mission domains).
 - Settlement receipts form a per-store hash chain via
   `prev_settlement_receipt`.
+- HonorGood and Mission Economics records form a node-level economy anchor
+  chain via `EconomyRecordAnchor.previous_anchor_hash`.
 - No floats. No unordered collections. No system clock.
 
 ## Non-claims
 
-- This MVP does not implement a token launch, fiat rails, external
+- This implementation does not add a token launch, fiat rails, external
   exchanges, or ML-driven pricing.
-- The current economy store remains in-memory.
+- CommandBase and ExoForge adapters do not become settlement authorities.
 - Adaptive multipliers and revenue-share templates are present
   structurally but resolve to neutral / zero values during the launch
   phase.

@@ -11,6 +11,7 @@ pub mod catapult_bindings;
 pub mod consent_bindings;
 pub mod core_bindings;
 pub mod decision_forum_bindings;
+pub mod economy_bindings;
 pub mod escalation_bindings;
 pub mod gatekeeper_bindings;
 pub mod governance_bindings;
@@ -26,6 +27,7 @@ pub use catapult_bindings::*;
 pub use consent_bindings::*;
 pub use core_bindings::*;
 pub use decision_forum_bindings::*;
+pub use economy_bindings::*;
 pub use escalation_bindings::*;
 pub use gatekeeper_bindings::*;
 pub use governance_bindings::*;
@@ -46,6 +48,7 @@ mod source_guard_tests {
                 "governance_bindings.rs",
                 include_str!("governance_bindings.rs"),
             ),
+            ("economy_bindings.rs", include_str!("economy_bindings.rs")),
         ];
 
         for (path, source) in binding_sources {

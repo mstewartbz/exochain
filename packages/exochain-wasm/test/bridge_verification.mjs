@@ -129,6 +129,10 @@ function assertNonZeroHash(hashValue, label) {
   }
 }
 
+function hashHex(hashValue) {
+  return Buffer.from(hashBytes(hashValue)).toString('hex');
+}
+
 // =========================================================================
 // Module 1 — BCTS (Bounded-Context Transition System)
 // =========================================================================
@@ -2118,7 +2122,185 @@ test('wasm_needs_governance_review', () =>
   ));
 
 // =========================================================================
-// Module 26 — Bridge Coverage Guard
+// Module 26 — Economy / HonorGood
+// =========================================================================
+
+console.log('\n--- Economy / HonorGood ---');
+
+const economyMission = {
+  mission_id: ZERO_32_BYTES,
+  name: 'HonorGood bridge mission',
+  mission_type: 'UpstreamRecognition',
+  owner_did: TEST_DID,
+  principal_did: TEST_DID_2,
+  purpose: {
+    problem: 'WASM validation',
+    served_party: 'EXOCHAIN',
+    promised_outcome: 'deterministic economy anchor',
+    expected_value: 'stable bridge output',
+    risk_surface: 'WASM boundary',
+    proof_required: 'canonical content hash',
+    success_condition: 'nonzero anchor hash'
+  },
+  related_platforms: ['EXOCHAIN'],
+  expected_value_micro_exo: null,
+  ruleset_id: Array.from(Buffer.from('31'.repeat(32), 'hex')),
+  status: 'Active',
+  created_at: NOW_TS,
+  content_hash: ZERO_32_BYTES
+};
+
+const missionAnchor = setup(() =>
+  wasm.wasm_anchor_economy_mission(JSON.stringify(economyMission), ''));
+
+test('wasm_anchor_economy_mission', () => {
+  if (!missionAnchor) throw new Error('skipped -- no mission anchor from setup');
+  assertNonZeroHash(missionAnchor.object.mission_id, 'mission id');
+  assertNonZeroHash(missionAnchor.anchor.anchor_hash, 'mission economy anchor');
+  if (missionAnchor.anchor.object_kind !== 'mission') {
+    throw new Error('mission anchor object kind must be stable snake_case');
+  }
+  if (missionAnchor.local_settlement_authority !== false) {
+    throw new Error('WASM bridge must not claim local settlement authority');
+  }
+  return missionAnchor;
+});
+
+const participantRef = {
+  ProjectTreasury: {
+    project: 'Archon',
+    treasury_ref: 'public-project-treasury:Archon'
+  }
+};
+
+const economyRuleset = {
+  ruleset_id: ZERO_32_BYTES,
+  applies_to: [{ ReceivingSystem: 'ExoForge' }],
+  share_lines: [{
+    recipient: participantRef,
+    recipient_type: 'ProjectTreasury',
+    basis: 'RecognitionOnly',
+    share_bp: 0,
+    source_receipt_id: null,
+    legacy_receipt_id: null
+  }],
+  duration_policy: 'RecognitionOnly',
+  review_frequency: 'None',
+  requires_human_approval: true,
+  allows_overlapping_bases: false,
+  legal_effect_required: 'RatifiedAgreement',
+  status: 'Offered',
+  created_at: NOW_TS,
+  content_hash: ZERO_32_BYTES
+};
+
+const rulesetAnchor = setup(() =>
+  wasm.wasm_anchor_economy_ruleset(
+    JSON.stringify(economyRuleset),
+    missionAnchor ? hashHex(missionAnchor.anchor.anchor_hash) : ''
+  ));
+
+test('wasm_anchor_economy_ruleset', () => {
+  if (!rulesetAnchor) throw new Error('skipped -- no ruleset anchor from setup');
+  assertNonZeroHash(rulesetAnchor.object.ruleset_id, 'ruleset id');
+  if (rulesetAnchor.anchor.object_kind !== 'honorgood_ruleset') {
+    throw new Error('ruleset anchor object kind must be stable snake_case');
+  }
+  return rulesetAnchor;
+});
+
+const economyLegacyReceipt = {
+  legacy_receipt_id: ZERO_32_BYTES,
+  contributor: participantRef,
+  contribution_name: 'Archon',
+  contribution_type: 'open-source implementation automation',
+  source_uri: 'https://github.com/coleam00/Archon',
+  license: 'MIT',
+  receiving_system: 'ExoForge',
+  materiality_tier: 'Genesis',
+  materiality_review: {
+    tier: 'Genesis',
+    reviewer_did: TEST_DID,
+    evidence_hash: EVIDENCE_32_BYTES,
+    rationale_hash: Array.from(Buffer.from('aa'.repeat(32), 'hex')),
+    rationale_ref: 'docs/economy/examples/archon_exoforge_legacy_receipt.yml',
+    reviewed_at: NOW_TS,
+    status: 'EvidenceBacked'
+  },
+  attribution_required: true,
+  settlement_eligible: false,
+  economic_ruleset_id: null,
+  beneficiary: {
+    beneficiary_type: 'ProjectTreasury',
+    reference: participantRef
+  },
+  active_while_materially_used: true,
+  legal_effect: 'VoluntaryRecognitionOnly',
+  status: 'Proposed',
+  signed_contributor_acceptance_hash: null,
+  human_ratifier_did: null,
+  created_at: NOW_TS,
+  content_hash: ZERO_32_BYTES
+};
+
+test('wasm_anchor_economy_legacy_receipt', () => {
+  const receiptAnchor = wasm.wasm_anchor_economy_legacy_receipt(
+    JSON.stringify(economyLegacyReceipt),
+    rulesetAnchor ? hashHex(rulesetAnchor.anchor.anchor_hash) : ''
+  );
+  assertNonZeroHash(receiptAnchor.object.legacy_receipt_id, 'legacy receipt id');
+  if (receiptAnchor.object.status !== 'Proposed') {
+    throw new Error('legacy receipt bridge fixture must remain unratified');
+  }
+  return receiptAnchor;
+});
+
+const economyContributionNode = {
+  contribution_node_id: ZERO_32_BYTES,
+  contributor_ref: participantRef,
+  contributor_type: 'Project',
+  contribution_name: 'Archon',
+  contribution_type: 'Code',
+  source_uri: 'https://github.com/coleam00/Archon',
+  evidence_hash: EVIDENCE_32_BYTES,
+  provenance_hash: Array.from(Buffer.from('bb'.repeat(32), 'hex')),
+  license_or_compact_ref: 'MIT',
+  honor_good_terms_hash: Array.from(Buffer.from('bc'.repeat(32), 'hex')),
+  bailment_terms_hash: Array.from(Buffer.from('bd'.repeat(32), 'hex')),
+  settlement_ruleset_id: rulesetAnchor ? hashBytes(rulesetAnchor.object.ruleset_id) : Array.from(Buffer.from('be'.repeat(32), 'hex')),
+  beneficiary_ref: participantRef,
+  materiality_policy_id: Array.from(Buffer.from('bf'.repeat(32), 'hex')),
+  adoption_policy_id: Array.from(Buffer.from('c0'.repeat(32), 'hex')),
+  revocation_policy_id: Array.from(Buffer.from('c1'.repeat(32), 'hex')),
+  dispute_policy_id: Array.from(Buffer.from('c2'.repeat(32), 'hex')),
+  status: 'Active',
+  created_at_hlc: NOW_TS,
+  content_hash: ZERO_32_BYTES
+};
+
+test('wasm_anchor_economy_value_contribution_node', () => {
+  const nodeAnchor = wasm.wasm_anchor_economy_value_contribution_node(
+    JSON.stringify(economyContributionNode),
+    rulesetAnchor ? hashHex(rulesetAnchor.anchor.anchor_hash) : ''
+  );
+  assertNonZeroHash(nodeAnchor.object.contribution_node_id, 'value contribution node id');
+  if (nodeAnchor.anchor.object_kind !== 'value_contribution_node') {
+    throw new Error('value contribution node anchor object kind must be stable snake_case');
+  }
+  return nodeAnchor;
+});
+
+test('wasm_validation_invariant_request', () => {
+  const request = wasm.wasm_validation_invariant_request();
+  const result = wasm.wasm_enforce_invariants(JSON.stringify(request));
+  if (!result.passed || result.violations.length !== 0) {
+    throw new Error('validation invariant request must satisfy all invariants');
+  }
+  return request;
+});
+
+// =========================================================================
+// Module 27 — Bridge Coverage Guard
 // =========================================================================
 
 console.log('\n--- Bridge Coverage Guard ---');

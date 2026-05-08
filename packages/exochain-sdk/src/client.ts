@@ -5,7 +5,15 @@
  */
 
 import { HttpTransport } from './transport/http.js';
-import type { HealthResponse, Did, Hash256, QuorumResult } from './types.js';
+import type {
+  AutomatedSettlementRequest,
+  EconomyObjectResponse,
+  HealthResponse,
+  Did,
+  Hash256,
+  MissionSettlementRequest,
+  QuorumResult,
+} from './types.js';
 
 /** Options for constructing an {@link ExochainClient}. */
 export interface ExochainClientOptions {
@@ -101,6 +109,92 @@ export class AuthorityApi {
   }
 }
 
+/** HonorGood and mission-economics calls. EXOCHAIN remains settlement authority. */
+export class EconomyApi {
+  readonly #http: HttpTransport;
+  constructor(http: HttpTransport) {
+    this.#http = http;
+  }
+
+  public async createMission<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/missions', body);
+  }
+
+  public async getMission<T = unknown>(id: Hash256): Promise<T> {
+    return this.#http.get<T>(`/api/v1/economy/missions/${encodeURIComponent(id)}`);
+  }
+
+  public async createContributionReceipt<T = unknown>(
+    body: T,
+  ): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>(
+      '/api/v1/economy/contribution-receipts',
+      body,
+    );
+  }
+
+  public async createLegacyReceipt<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/legacy-receipts', body);
+  }
+
+  public async getLegacyReceipt<T = unknown>(id: Hash256): Promise<T> {
+    return this.#http.get<T>(`/api/v1/economy/legacy-receipts/${encodeURIComponent(id)}`);
+  }
+
+  public async createRuleset<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/rulesets', body);
+  }
+
+  public async createContributionNode<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/contribution-nodes', body);
+  }
+
+  public async createContributionOffer<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/contribution-offers', body);
+  }
+
+  public async createContributionAcceptance<T = unknown>(
+    body: T,
+  ): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>(
+      '/api/v1/economy/contribution-acceptances',
+      body,
+    );
+  }
+
+  public async createBailmentTerms<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/bailment-terms', body);
+  }
+
+  public async createBailmentWrapper<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/bailment-wrappers', body);
+  }
+
+  public async createAdoptionEvent<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/adoption-events', body);
+  }
+
+  public async createUseEvent<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/use-events', body);
+  }
+
+  public async createValueEvent<T = unknown>(body: T): Promise<EconomyObjectResponse<T>> {
+    return this.#http.post<EconomyObjectResponse<T>>('/api/v1/economy/value-events', body);
+  }
+
+  public async createMissionSettlement(
+    body: MissionSettlementRequest,
+  ): Promise<EconomyObjectResponse> {
+    return this.#http.post<EconomyObjectResponse>('/api/v1/economy/mission-settlements', body);
+  }
+
+  public async createAutomatedSettlement(
+    body: AutomatedSettlementRequest,
+  ): Promise<EconomyObjectResponse> {
+    return this.#http.post<EconomyObjectResponse>('/api/v1/economy/automated-settlements', body);
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Client
 // -----------------------------------------------------------------------------
@@ -111,6 +205,7 @@ export class ExochainClient {
   public readonly consent: ConsentApi;
   public readonly governance: GovernanceApi;
   public readonly authority: AuthorityApi;
+  public readonly economy: EconomyApi;
   readonly #http: HttpTransport;
 
   constructor(opts: ExochainClientOptions) {
@@ -127,6 +222,7 @@ export class ExochainClient {
     this.consent = new ConsentApi(this.#http);
     this.governance = new GovernanceApi(this.#http);
     this.authority = new AuthorityApi(this.#http);
+    this.economy = new EconomyApi(this.#http);
   }
 
   /** Gateway health probe. */

@@ -426,7 +426,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::*;
+    use super::{ValueBasis, test_support::*};
     use crate::{
         bailment::test_support::{coherent_offer_acceptance_terms, sample_wrapper},
         value_contribution::test_support::h,
@@ -477,5 +477,84 @@ mod tests {
         value_event.use_event_id = h(0xEF);
         let value_event = value_event.anchor().unwrap();
         assert!(value_event.validate_against_use_event(&use_event).is_err());
+    }
+
+    #[test]
+    fn adoption_rejects_mismatched_offer_acceptance_wrapper_and_authority() {
+        let (offer, acceptance, _) = coherent_offer_acceptance_terms();
+        let wrapper = sample_wrapper().anchor().unwrap();
+        let adoption = sample_adoption().anchor().unwrap();
+
+        let mut wrong_offer = adoption.clone();
+        wrong_offer.offer_id = h(0xA0);
+        assert!(
+            wrong_offer
+                .validate_against(&offer, &acceptance, &wrapper)
+                .is_err()
+        );
+
+        let mut wrong_acceptance = adoption.clone();
+        wrong_acceptance.acceptance_id = h(0xA1);
+        assert!(
+            wrong_acceptance
+                .validate_against(&offer, &acceptance, &wrapper)
+                .is_err()
+        );
+
+        let mut wrong_terms = adoption.clone();
+        wrong_terms.accepted_terms_hash = h(0xA2);
+        assert!(
+            wrong_terms
+                .validate_against(&offer, &acceptance, &wrapper)
+                .is_err()
+        );
+
+        let mut wrong_wrapper = adoption.clone();
+        wrong_wrapper.bailment_wrapper_id = h(0xA3);
+        assert!(
+            wrong_wrapper
+                .validate_against(&offer, &acceptance, &wrapper)
+                .is_err()
+        );
+
+        let mut wrong_authority = adoption;
+        wrong_authority.authority_proof_hash = h(0xA4);
+        assert!(
+            wrong_authority
+                .validate_against(&offer, &acceptance, &wrapper)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn use_event_rejects_mismatched_adoption_fields() {
+        let adoption = sample_adoption().anchor().unwrap();
+        let use_event = sample_use_event().anchor().unwrap();
+
+        let mut wrong_adoption = use_event.clone();
+        wrong_adoption.adoption_id = h(0xB0);
+        assert!(wrong_adoption.validate_against_adoption(&adoption).is_err());
+
+        let mut wrong_node = use_event.clone();
+        wrong_node.contribution_node_id = h(0xB1);
+        assert!(wrong_node.validate_against_adoption(&adoption).is_err());
+
+        let mut wrong_wrapper = use_event;
+        wrong_wrapper.bailment_wrapper_id = h(0xB2);
+        assert!(wrong_wrapper.validate_against_adoption(&adoption).is_err());
+    }
+
+    #[test]
+    fn value_event_rejects_unsupported_basis_and_zero_mission_id() {
+        let mut value_event = sample_value_event();
+        value_event.value_basis = ValueBasis::Other("custom".into());
+        assert!(matches!(
+            value_event.validate(),
+            Err(crate::error::EconomyError::UnsupportedSettlementBasis { .. })
+        ));
+
+        value_event.value_basis = ValueBasis::UsageMetric;
+        value_event.mission_id = Some(exo_core::Hash256::ZERO);
+        assert!(value_event.validate().is_err());
     }
 }

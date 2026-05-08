@@ -10,3 +10,8 @@ mission_economics:
     max_basis_points_per_basis: 10000
     arithmetic: checked
     zero_fee_reason_required: true
+  runtime:
+    api_prefix: /api/v1/economy
+    persistent_object_store: sqlite_canonical_cbor
+    anchor_chain: EconomyRecordAnchor
+    local_settlement_authority_allowed: false

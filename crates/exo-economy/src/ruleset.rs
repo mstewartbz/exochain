@@ -326,6 +326,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{test_support::*, *};
+    use crate::value_contribution::test_support::{h, participant, ts};
 
     #[test]
     fn ruleset_hash_stable() {
@@ -360,5 +361,73 @@ mod tests {
             ruleset.validate(),
             Err(EconomyError::UnsupportedSettlementBasis { .. })
         ));
+    }
+
+    #[test]
+    fn fixed_term_duration_must_have_ordered_nonzero_timestamps() {
+        let mut ruleset = sample_ruleset();
+        ruleset.duration_policy = DurationPolicy::FixedTerm {
+            starts_at: ts(10),
+            ends_at: ts(20),
+        };
+        assert!(ruleset.validate().is_ok());
+
+        ruleset.duration_policy = DurationPolicy::FixedTerm {
+            starts_at: ts(20),
+            ends_at: ts(10),
+        };
+        assert!(ruleset.validate().is_err());
+
+        ruleset.duration_policy = DurationPolicy::FixedTerm {
+            starts_at: Timestamp::new(0, 0),
+            ends_at: ts(10),
+        };
+        assert!(ruleset.validate().is_err());
+    }
+
+    #[test]
+    fn ruleset_scopes_fail_closed_for_empty_or_zero_identifiers() {
+        let mut ruleset = sample_ruleset();
+        ruleset.applies_to = vec![RulesetScope::ReceivingSystem(String::new())];
+        assert!(ruleset.validate().is_err());
+
+        ruleset.applies_to = vec![RulesetScope::ContributionNode(Hash256::ZERO)];
+        assert!(ruleset.validate().is_err());
+
+        ruleset.applies_to = vec![RulesetScope::Other("custom-scope".into())];
+        assert!(ruleset.validate().is_ok());
+    }
+
+    #[test]
+    fn share_line_rejects_invalid_basis_points_and_zero_link_ids() {
+        let mut line = sample_ruleset().share_lines.remove(0);
+        line.share_bp = MAX_BASIS_POINTS + 1;
+        assert!(matches!(
+            line.validate(),
+            Err(EconomyError::BasisPointOutOfRange { .. })
+        ));
+
+        line.share_bp = 100;
+        line.source_receipt_id = Some(Hash256::ZERO);
+        assert!(line.validate().is_err());
+
+        line.source_receipt_id = Some(h(0xA0));
+        line.legacy_receipt_id = Some(Hash256::ZERO);
+        assert!(line.validate().is_err());
+
+        line.legacy_receipt_id = Some(h(0xA1));
+        line.recipient = participant("linked-recipient");
+        assert!(line.validate().is_ok());
+    }
+
+    #[test]
+    fn ruleset_requires_scope_and_share_lines() {
+        let mut ruleset = sample_ruleset();
+        ruleset.applies_to.clear();
+        assert!(ruleset.validate().is_err());
+
+        let mut ruleset = sample_ruleset();
+        ruleset.share_lines.clear();
+        assert!(ruleset.validate().is_err());
     }
 }

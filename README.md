@@ -17,9 +17,9 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Metric | Value | Source |
 |--------|-------|--------|
 | Rust crates | 22 | `ls -d crates/*/` |
-| Rust source files | 299 | `find crates -name '*.rs'` |
-| Rust LOC | 170139 | `wc -l` |
-| Workspace tests | 4,036 listed | `cargo test --workspace -- --list` |
+| Rust source files | 300 | `find crates -name '*.rs'` |
+| Rust LOC | 173395 | `wc -l` |
+| Workspace tests | 4,120 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 20 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | None (pre-release) | `git tag -l` |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -32,8 +32,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
 - **20 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
-- **Traceability matrix** maps 86 requirements — see `governance/traceability_matrix.md`
-- **Threat model** covers 14 threats tracked: 14 mitigated, 0 partial, 0 planned — see `governance/threat_matrix.md`
+- **Traceability matrix** maps 118 requirements — see `governance/traceability_matrix.md`
+- **Threat model** covers 16 threats tracked: 16 mitigated, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** enforced via the CGR kernel in all governance paths
 - **No floating-point arithmetic** — denied workspace-wide via `#[deny(clippy::float_arithmetic)]`
 - **Post-Quantum signatures** — NIST FIPS 204 ML-DSA-65 (CRYSTALS-Dilithium) via `ml-dsa` 0.1.0-rc.7, fully wired in `Signature::PostQuantum` and `Signature::Hybrid` with deterministic signing, tamper-rejection tests, proptest roundtrip coverage, and RUSTSEC-2025-0144 patch
@@ -81,7 +81,12 @@ HonorGood and Apex Velocity Catalyst Mission Economics now live in
 `exo-economy` as core provenance and settlement primitives: Missions,
 Contribution Receipts, Legacy Receipts, Value Contribution Nodes,
 Offers, Acceptances, Bailment Wrappers, Rulesets, and Mission
-Settlements. Canonical docs are under
+Settlements. `exo-node` records these objects through `/api/v1/economy/*`
+with durable canonical-CBOR storage and `EconomyRecordAnchor` hash links.
+The Rust SDK, TypeScript SDK, and WASM bridge expose stable core economy
+types/routes/anchor helpers. CommandBase is the cockpit adapter; ExoForge
+is the factory adapter; EXOCHAIN core remains the settlement authority.
+Canonical docs are under
 [`docs/honorgood/HONOR_GOOD_COMPACT.md`](docs/honorgood/HONOR_GOOD_COMPACT.md)
 and
 [`docs/economy/AVC_MISSION_ECONOMICS_COMPACT.md`](docs/economy/AVC_MISSION_ECONOMICS_COMPACT.md).
