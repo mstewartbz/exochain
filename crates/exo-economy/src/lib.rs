@@ -142,7 +142,10 @@ pub use settlement::{
     SettlementContext, SettlementLine, checked_basis_point_amount, settle,
     settlement_lines_from_ruleset,
 };
-pub use store::{EconomyStore, InMemoryEconomyStore};
+pub use store::{
+    ECONOMY_RECORD_ANCHOR_HASH_DOMAIN, EconomyObjectKind, EconomyRecordAnchor, EconomyStore,
+    InMemoryEconomyStore,
+};
 pub use types::{
     ActorClass, AssuranceClass, BasisPoints, DEFAULT_QUOTE_TTL_MS, EventClass, MAX_BASIS_POINTS,
     MAX_MULTIPLIER_BP, MicroExo, NEUTRAL_MULTIPLIER_BP, PricingMode, RevenueRecipient,
@@ -164,6 +167,7 @@ pub const ECONOMY_DOMAINS: &[&str] = &[
     CONTRIBUTION_OFFER_HASH_DOMAIN,
     CONTRIBUTION_RECEIPT_HASH_DOMAIN,
     ECONOMY_QUOTE_HASH_DOMAIN,
+    ECONOMY_RECORD_ANCHOR_HASH_DOMAIN,
     ECONOMY_POLICY_HASH_DOMAIN,
     HONOR_GOOD_RULESET_HASH_DOMAIN,
     LEGACY_RECEIPT_HASH_DOMAIN,

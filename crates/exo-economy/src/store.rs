@@ -1,22 +1,212 @@
-//! Deterministic in-memory store for quotes, receipts, and the active
-//! pricing policy.
+//! Deterministic store for quotes, receipts, mission economics, and
+//! HonorGood value-contribution records.
 //!
-//! This MVP store is designed to support the node API and unit tests.
-//! Persistence is deferred to a follow-up PR.
+//! The in-memory implementation is the reference core store used by tests
+//! and node adapters. Every HonorGood object is validated, canonical-hash
+//! checked, and appended to a deterministic hash-linked economy anchor chain
+//! before it is accepted.
 
 use std::collections::BTreeMap;
 
 use exo_core::Hash256;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::EconomyError, policy::PricingPolicy, quote::SettlementQuote, receipt::SettlementReceipt,
+    adoption::{AdoptionEvent, UseEvent, ValueEvent},
+    bailment::{BailmentTerms, BailmentWrapper},
+    contribution_acceptance::ContributionAcceptance,
+    contribution_offer::ContributionOffer,
+    contribution_receipt::ContributionReceipt,
+    error::EconomyError,
+    legacy::LegacyReceipt,
+    mission::Mission,
+    policy::PricingPolicy,
+    quote::SettlementQuote,
+    receipt::SettlementReceipt,
+    ruleset::HonorGoodRuleset,
+    settlement::{AutomatedSettlementEvent, MissionSettlement},
+    value_contribution::{ValueContributionNode, require_nonzero_hash, require_nonzero_timestamp},
 };
+
+pub const ECONOMY_RECORD_ANCHOR_HASH_DOMAIN: &str = "exo.economy.record_anchor.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomyObjectKind {
+    Mission,
+    ContributionReceipt,
+    LegacyReceipt,
+    #[serde(rename = "honorgood_ruleset")]
+    HonorGoodRuleset,
+    ValueContributionNode,
+    ContributionOffer,
+    ContributionAcceptance,
+    BailmentTerms,
+    BailmentWrapper,
+    AdoptionEvent,
+    UseEvent,
+    ValueEvent,
+    MissionSettlement,
+    AutomatedSettlementEvent,
+}
+
+impl EconomyObjectKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mission => "mission",
+            Self::ContributionReceipt => "contribution_receipt",
+            Self::LegacyReceipt => "legacy_receipt",
+            Self::HonorGoodRuleset => "honorgood_ruleset",
+            Self::ValueContributionNode => "value_contribution_node",
+            Self::ContributionOffer => "contribution_offer",
+            Self::ContributionAcceptance => "contribution_acceptance",
+            Self::BailmentTerms => "bailment_terms",
+            Self::BailmentWrapper => "bailment_wrapper",
+            Self::AdoptionEvent => "adoption_event",
+            Self::UseEvent => "use_event",
+            Self::ValueEvent => "value_event",
+            Self::MissionSettlement => "mission_settlement",
+            Self::AutomatedSettlementEvent => "automated_settlement_event",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EconomyRecordAnchor {
+    pub anchor_hash: Hash256,
+    pub previous_anchor_hash: Hash256,
+    pub object_kind: EconomyObjectKind,
+    pub object_id: Hash256,
+    pub object_hash: Hash256,
+    pub created_at: exo_core::Timestamp,
+}
+
+#[derive(Serialize)]
+struct EconomyRecordAnchorHashPayload<'a> {
+    domain: &'static str,
+    previous_anchor_hash: &'a Hash256,
+    object_kind: EconomyObjectKind,
+    object_id: &'a Hash256,
+    object_hash: &'a Hash256,
+    created_at: &'a exo_core::Timestamp,
+}
+
+impl EconomyRecordAnchor {
+    pub fn validate(&self) -> Result<(), EconomyError> {
+        require_nonzero_hash(self.object_id, "economy_anchor.object_id")?;
+        require_nonzero_hash(self.object_hash, "economy_anchor.object_hash")?;
+        require_nonzero_timestamp(self.created_at, "economy_anchor.created_at")
+    }
+
+    pub fn recompute_anchor_hash(&self) -> Result<Hash256, EconomyError> {
+        exo_core::hash::hash_structured(&EconomyRecordAnchorHashPayload {
+            domain: ECONOMY_RECORD_ANCHOR_HASH_DOMAIN,
+            previous_anchor_hash: &self.previous_anchor_hash,
+            object_kind: self.object_kind,
+            object_id: &self.object_id,
+            object_hash: &self.object_hash,
+            created_at: &self.created_at,
+        })
+        .map_err(EconomyError::from)
+    }
+
+    pub fn anchor(mut self) -> Result<Self, EconomyError> {
+        self.validate()?;
+        self.anchor_hash = self.recompute_anchor_hash()?;
+        Ok(self)
+    }
+}
 
 pub trait EconomyStore {
     fn put_quote(&mut self, quote: SettlementQuote) -> Result<(), EconomyError>;
     fn get_quote(&self, quote_hash: &Hash256) -> Result<Option<SettlementQuote>, EconomyError>;
     fn put_receipt(&mut self, receipt: SettlementReceipt) -> Result<(), EconomyError>;
     fn get_receipt(&self, id: &str) -> Result<Option<SettlementReceipt>, EconomyError>;
+    fn put_mission(&mut self, mission: Mission) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_mission(&self, id: &Hash256) -> Result<Option<Mission>, EconomyError>;
+    fn put_contribution_receipt(
+        &mut self,
+        receipt: ContributionReceipt,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_contribution_receipt(
+        &self,
+        id: &Hash256,
+    ) -> Result<Option<ContributionReceipt>, EconomyError>;
+    fn put_legacy_receipt(
+        &mut self,
+        receipt: LegacyReceipt,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_legacy_receipt(&self, id: &Hash256) -> Result<Option<LegacyReceipt>, EconomyError>;
+    fn put_ruleset(
+        &mut self,
+        ruleset: HonorGoodRuleset,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_ruleset(&self, id: &Hash256) -> Result<Option<HonorGoodRuleset>, EconomyError>;
+    fn put_value_contribution_node(
+        &mut self,
+        node: ValueContributionNode,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_value_contribution_node(
+        &self,
+        id: &Hash256,
+    ) -> Result<Option<ValueContributionNode>, EconomyError>;
+    fn put_contribution_offer(
+        &mut self,
+        offer: ContributionOffer,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_contribution_offer(
+        &self,
+        id: &Hash256,
+    ) -> Result<Option<ContributionOffer>, EconomyError>;
+    fn put_contribution_acceptance(
+        &mut self,
+        acceptance: ContributionAcceptance,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_contribution_acceptance(
+        &self,
+        id: &Hash256,
+    ) -> Result<Option<ContributionAcceptance>, EconomyError>;
+    fn put_bailment_terms(
+        &mut self,
+        terms: BailmentTerms,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_bailment_terms(&self, id: &Hash256) -> Result<Option<BailmentTerms>, EconomyError>;
+    fn put_bailment_wrapper(
+        &mut self,
+        wrapper: BailmentWrapper,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_bailment_wrapper(&self, id: &Hash256) -> Result<Option<BailmentWrapper>, EconomyError>;
+    fn put_adoption_event(
+        &mut self,
+        event: AdoptionEvent,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_adoption_event(&self, id: &Hash256) -> Result<Option<AdoptionEvent>, EconomyError>;
+    fn put_use_event(&mut self, event: UseEvent) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_use_event(&self, id: &Hash256) -> Result<Option<UseEvent>, EconomyError>;
+    fn put_value_event(&mut self, event: ValueEvent) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_value_event(&self, id: &Hash256) -> Result<Option<ValueEvent>, EconomyError>;
+    fn put_mission_settlement(
+        &mut self,
+        settlement: MissionSettlement,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_mission_settlement(
+        &self,
+        id: &Hash256,
+    ) -> Result<Option<MissionSettlement>, EconomyError>;
+    fn put_automated_settlement_event(
+        &mut self,
+        event: AutomatedSettlementEvent,
+    ) -> Result<EconomyRecordAnchor, EconomyError>;
+    fn get_automated_settlement_event(
+        &self,
+        id: &Hash256,
+    ) -> Result<Option<AutomatedSettlementEvent>, EconomyError>;
+    fn get_economy_anchor(
+        &self,
+        anchor_hash: &Hash256,
+    ) -> Result<Option<EconomyRecordAnchor>, EconomyError>;
+    fn latest_economy_anchor_hash(&self) -> Hash256;
     fn get_active_policy(&self) -> Result<PricingPolicy, EconomyError>;
     fn set_active_policy(&mut self, policy: PricingPolicy) -> Result<(), EconomyError>;
     /// Returns the latest receipt's content hash, or `Hash256::ZERO`
@@ -29,8 +219,24 @@ pub struct InMemoryEconomyStore {
     quotes: BTreeMap<Hash256, SettlementQuote>,
     receipts: BTreeMap<String, SettlementReceipt>,
     receipt_by_hash: BTreeMap<Hash256, String>,
+    missions: BTreeMap<Hash256, Mission>,
+    contribution_receipts: BTreeMap<Hash256, ContributionReceipt>,
+    legacy_receipts: BTreeMap<Hash256, LegacyReceipt>,
+    rulesets: BTreeMap<Hash256, HonorGoodRuleset>,
+    value_contribution_nodes: BTreeMap<Hash256, ValueContributionNode>,
+    contribution_offers: BTreeMap<Hash256, ContributionOffer>,
+    contribution_acceptances: BTreeMap<Hash256, ContributionAcceptance>,
+    bailment_terms: BTreeMap<Hash256, BailmentTerms>,
+    bailment_wrappers: BTreeMap<Hash256, BailmentWrapper>,
+    adoption_events: BTreeMap<Hash256, AdoptionEvent>,
+    use_events: BTreeMap<Hash256, UseEvent>,
+    value_events: BTreeMap<Hash256, ValueEvent>,
+    mission_settlements: BTreeMap<Hash256, MissionSettlement>,
+    automated_settlement_events: BTreeMap<Hash256, AutomatedSettlementEvent>,
+    economy_anchors: BTreeMap<Hash256, EconomyRecordAnchor>,
     active_policy: PricingPolicy,
     latest_receipt_hash: Hash256,
+    latest_economy_anchor_hash: Hash256,
 }
 
 impl InMemoryEconomyStore {
@@ -41,8 +247,24 @@ impl InMemoryEconomyStore {
             quotes: BTreeMap::new(),
             receipts: BTreeMap::new(),
             receipt_by_hash: BTreeMap::new(),
+            missions: BTreeMap::new(),
+            contribution_receipts: BTreeMap::new(),
+            legacy_receipts: BTreeMap::new(),
+            rulesets: BTreeMap::new(),
+            value_contribution_nodes: BTreeMap::new(),
+            contribution_offers: BTreeMap::new(),
+            contribution_acceptances: BTreeMap::new(),
+            bailment_terms: BTreeMap::new(),
+            bailment_wrappers: BTreeMap::new(),
+            adoption_events: BTreeMap::new(),
+            use_events: BTreeMap::new(),
+            value_events: BTreeMap::new(),
+            mission_settlements: BTreeMap::new(),
+            automated_settlement_events: BTreeMap::new(),
+            economy_anchors: BTreeMap::new(),
             active_policy: PricingPolicy::zero_launch_default(),
             latest_receipt_hash: Hash256::ZERO,
+            latest_economy_anchor_hash: Hash256::ZERO,
         }
     }
 
@@ -57,6 +279,80 @@ impl InMemoryEconomyStore {
     pub fn receipt_count(&self) -> usize {
         self.receipts.len()
     }
+
+    /// Number of hash-linked HonorGood/economy object anchors.
+    #[must_use]
+    pub fn economy_anchor_count(&self) -> usize {
+        self.economy_anchors.len()
+    }
+
+    fn append_economy_anchor(
+        &mut self,
+        object_kind: EconomyObjectKind,
+        object_id: Hash256,
+        object_hash: Hash256,
+        created_at: exo_core::Timestamp,
+    ) -> Result<EconomyRecordAnchor, EconomyError> {
+        let anchor = EconomyRecordAnchor {
+            anchor_hash: Hash256::ZERO,
+            previous_anchor_hash: self.latest_economy_anchor_hash,
+            object_kind,
+            object_id,
+            object_hash,
+            created_at,
+        }
+        .anchor()?;
+        if self.economy_anchors.contains_key(&anchor.anchor_hash) {
+            return Err(EconomyError::InvalidInput {
+                reason: format!("duplicate economy anchor {}", anchor.anchor_hash),
+            });
+        }
+        self.latest_economy_anchor_hash = anchor.anchor_hash;
+        self.economy_anchors
+            .insert(anchor.anchor_hash, anchor.clone());
+        Ok(anchor)
+    }
+}
+
+macro_rules! impl_economy_object_store {
+    (
+        $put:ident,
+        $get:ident,
+        $field:ident,
+        $ty:ty,
+        $kind:ident,
+        $id_field:ident,
+        $created_field:ident,
+        $duplicate_label:literal,
+        $hash_field_label:literal
+    ) => {
+        fn $put(&mut self, object: $ty) -> Result<EconomyRecordAnchor, EconomyError> {
+            object.validate()?;
+            let recomputed = object.recompute_content_hash()?;
+            if object.$id_field != recomputed || object.content_hash != recomputed {
+                return Err(EconomyError::HashMismatch {
+                    field: $hash_field_label,
+                });
+            }
+            if self.$field.contains_key(&object.$id_field) {
+                return Err(EconomyError::InvalidInput {
+                    reason: format!("duplicate {} {}", $duplicate_label, object.$id_field),
+                });
+            }
+            let anchor = self.append_economy_anchor(
+                EconomyObjectKind::$kind,
+                object.$id_field,
+                object.content_hash,
+                object.$created_field,
+            )?;
+            self.$field.insert(object.$id_field, object);
+            Ok(anchor)
+        }
+
+        fn $get(&self, id: &Hash256) -> Result<Option<$ty>, EconomyError> {
+            Ok(self.$field.get(id).cloned())
+        }
+    };
 }
 
 impl Default for InMemoryEconomyStore {
@@ -97,6 +393,185 @@ impl EconomyStore for InMemoryEconomyStore {
         Ok(self.receipts.get(id).cloned())
     }
 
+    impl_economy_object_store!(
+        put_mission,
+        get_mission,
+        missions,
+        Mission,
+        Mission,
+        mission_id,
+        created_at,
+        "mission",
+        "mission.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_contribution_receipt,
+        get_contribution_receipt,
+        contribution_receipts,
+        ContributionReceipt,
+        ContributionReceipt,
+        receipt_id,
+        created_at,
+        "contribution receipt",
+        "contribution_receipt.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_legacy_receipt,
+        get_legacy_receipt,
+        legacy_receipts,
+        LegacyReceipt,
+        LegacyReceipt,
+        legacy_receipt_id,
+        created_at,
+        "legacy receipt",
+        "legacy_receipt.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_ruleset,
+        get_ruleset,
+        rulesets,
+        HonorGoodRuleset,
+        HonorGoodRuleset,
+        ruleset_id,
+        created_at,
+        "HonorGood ruleset",
+        "ruleset.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_value_contribution_node,
+        get_value_contribution_node,
+        value_contribution_nodes,
+        ValueContributionNode,
+        ValueContributionNode,
+        contribution_node_id,
+        created_at_hlc,
+        "value contribution node",
+        "value_contribution.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_contribution_offer,
+        get_contribution_offer,
+        contribution_offers,
+        ContributionOffer,
+        ContributionOffer,
+        offer_id,
+        created_at_hlc,
+        "contribution offer",
+        "contribution_offer.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_contribution_acceptance,
+        get_contribution_acceptance,
+        contribution_acceptances,
+        ContributionAcceptance,
+        ContributionAcceptance,
+        acceptance_id,
+        accepted_at_hlc,
+        "contribution acceptance",
+        "contribution_acceptance.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_bailment_terms,
+        get_bailment_terms,
+        bailment_terms,
+        BailmentTerms,
+        BailmentTerms,
+        terms_id,
+        created_at_hlc,
+        "bailment terms",
+        "bailment_terms.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_bailment_wrapper,
+        get_bailment_wrapper,
+        bailment_wrappers,
+        BailmentWrapper,
+        BailmentWrapper,
+        wrapper_id,
+        created_at_hlc,
+        "bailment wrapper",
+        "bailment_wrapper.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_adoption_event,
+        get_adoption_event,
+        adoption_events,
+        AdoptionEvent,
+        AdoptionEvent,
+        adoption_id,
+        created_at_hlc,
+        "adoption event",
+        "adoption_event.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_use_event,
+        get_use_event,
+        use_events,
+        UseEvent,
+        UseEvent,
+        use_event_id,
+        created_at_hlc,
+        "use event",
+        "use_event.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_value_event,
+        get_value_event,
+        value_events,
+        ValueEvent,
+        ValueEvent,
+        value_event_id,
+        created_at_hlc,
+        "value event",
+        "value_event.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_mission_settlement,
+        get_mission_settlement,
+        mission_settlements,
+        MissionSettlement,
+        MissionSettlement,
+        settlement_id,
+        created_at,
+        "mission settlement",
+        "mission_settlement.content_hash"
+    );
+
+    impl_economy_object_store!(
+        put_automated_settlement_event,
+        get_automated_settlement_event,
+        automated_settlement_events,
+        AutomatedSettlementEvent,
+        AutomatedSettlementEvent,
+        automated_settlement_id,
+        created_at_hlc,
+        "automated settlement event",
+        "automated_settlement.content_hash"
+    );
+
+    fn get_economy_anchor(
+        &self,
+        anchor_hash: &Hash256,
+    ) -> Result<Option<EconomyRecordAnchor>, EconomyError> {
+        Ok(self.economy_anchors.get(anchor_hash).cloned())
+    }
+
+    fn latest_economy_anchor_hash(&self) -> Hash256 {
+        self.latest_economy_anchor_hash
+    }
+
     fn get_active_policy(&self) -> Result<PricingPolicy, EconomyError> {
         Ok(self.active_policy.clone())
     }
@@ -118,11 +593,21 @@ mod tests {
 
     use super::*;
     use crate::{
+        adoption::test_support::{sample_adoption, sample_use_event, sample_value_event},
+        bailment::test_support::{sample_terms, sample_wrapper},
+        contribution_acceptance::test_support::sample_acceptance,
+        contribution_offer::test_support::sample_offer,
+        contribution_receipt::test_support::sample_contribution_receipt,
+        honorgood::{archon_exoforge_legacy_receipt, archon_exoforge_ruleset},
+        legacy::test_support::sample_legacy_receipt,
+        mission::test_support::sample_mission,
         policy::PricingPolicy,
         price::PricingInputs,
         quote::quote,
+        ruleset::test_support::sample_ruleset,
         settlement::{SettlementContext, settle},
-        types::{ActorClass, AssuranceClass, EventClass},
+        types::{ActorClass, AssuranceClass, EventClass, ZeroFeeReason},
+        value_contribution::test_support::{authority, h, sample_node, ts},
     };
 
     fn fixed_signature() -> Signature {
@@ -269,6 +754,241 @@ mod tests {
         let b = InMemoryEconomyStore::default();
         assert_eq!(a.quote_count(), b.quote_count());
         assert_eq!(a.receipt_count(), b.receipt_count());
+    }
+
+    fn sample_automated_settlement_event() -> AutomatedSettlementEvent {
+        let ruleset = sample_ruleset().anchor().unwrap();
+        let lines = vec![crate::settlement::SettlementLine {
+            recipient: ruleset.share_lines[0].recipient.clone(),
+            recipient_type: ruleset.share_lines[0].recipient_type,
+            basis: ruleset.share_lines[0].basis.clone(),
+            share_bp: 100,
+            amount_micro_exo: 0,
+            zero_fee_reason: Some(ZeroFeeReason::PublicGood),
+            source_receipt_id: None,
+            legacy_receipt_id: None,
+        }];
+        AutomatedSettlementEvent {
+            automated_settlement_id: Hash256::ZERO,
+            value_event_id: h(0xB1),
+            contribution_node_id: h(0xB2),
+            adoption_id: h(0xB3),
+            ruleset_id: ruleset.ruleset_id,
+            settlement_lines: lines,
+            automation_authority_ref: authority("settlement-agent"),
+            preapproved_terms_hash: h(0xB4),
+            bailment_wrapper_id: h(0xB5),
+            human_approval_required: false,
+            fail_closed_checks: vec!["accepted_offer".into(), "delegated_authority".into()],
+            created_at_hlc: ts(9_000),
+            content_hash: Hash256::ZERO,
+        }
+        .anchor()
+        .unwrap()
+    }
+
+    #[test]
+    fn put_mission_records_hash_linked_anchor_and_gets_by_id() {
+        let mut store = InMemoryEconomyStore::new();
+        let mission = sample_mission().anchor().unwrap();
+        let anchor = store.put_mission(mission.clone()).unwrap();
+
+        assert_eq!(anchor.object_kind, EconomyObjectKind::Mission);
+        assert_eq!(anchor.object_id, mission.mission_id);
+        assert_eq!(anchor.object_hash, mission.content_hash);
+        assert_eq!(anchor.previous_anchor_hash, Hash256::ZERO);
+        assert_eq!(store.latest_economy_anchor_hash(), anchor.anchor_hash);
+        assert_eq!(store.economy_anchor_count(), 1);
+        assert_eq!(
+            store.get_mission(&mission.mission_id).unwrap(),
+            Some(mission)
+        );
+        assert_eq!(
+            store.get_economy_anchor(&anchor.anchor_hash).unwrap(),
+            Some(anchor)
+        );
+    }
+
+    #[test]
+    fn economy_store_rejects_duplicate_and_tampered_hashes() {
+        let mut store = InMemoryEconomyStore::new();
+        let mission = sample_mission().anchor().unwrap();
+        store.put_mission(mission.clone()).unwrap();
+        assert!(store.put_mission(mission.clone()).is_err());
+
+        let mut tampered = mission;
+        tampered.name = "tampered after hash".into();
+        assert!(matches!(
+            store.put_mission(tampered),
+            Err(EconomyError::HashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn put_core_honorgood_objects_appends_deterministic_anchor_chain() {
+        let mut store = InMemoryEconomyStore::new();
+
+        let mission_anchor = store
+            .put_mission(sample_mission().anchor().unwrap())
+            .unwrap();
+        let receipt_anchor = store
+            .put_contribution_receipt(sample_contribution_receipt().anchor().unwrap())
+            .unwrap();
+        let legacy_anchor = store
+            .put_legacy_receipt(sample_legacy_receipt().anchor().unwrap())
+            .unwrap();
+        let ruleset_anchor = store
+            .put_ruleset(sample_ruleset().anchor().unwrap())
+            .unwrap();
+        let node_anchor = store
+            .put_value_contribution_node(sample_node().anchor().unwrap())
+            .unwrap();
+        let terms_anchor = store
+            .put_bailment_terms(sample_terms().anchor().unwrap())
+            .unwrap();
+        let offer_anchor = store
+            .put_contribution_offer(sample_offer().anchor().unwrap())
+            .unwrap();
+        let acceptance_anchor = store
+            .put_contribution_acceptance(sample_acceptance().anchor().unwrap())
+            .unwrap();
+        let wrapper_anchor = store
+            .put_bailment_wrapper(sample_wrapper().anchor().unwrap())
+            .unwrap();
+        let adoption_anchor = store
+            .put_adoption_event(sample_adoption().anchor().unwrap())
+            .unwrap();
+        let use_anchor = store
+            .put_use_event(sample_use_event().anchor().unwrap())
+            .unwrap();
+        let value_anchor = store
+            .put_value_event(sample_value_event().anchor().unwrap())
+            .unwrap();
+        let mission_settlement = MissionSettlement::from_ruleset(
+            h(0xC1),
+            &archon_exoforge_ruleset().unwrap(),
+            0,
+            0,
+            Some(ZeroFeeReason::PublicGood),
+            None,
+            ts(9_100),
+        )
+        .unwrap();
+        let mission_settlement_anchor = store
+            .put_mission_settlement(mission_settlement.clone())
+            .unwrap();
+        let automated_anchor = store
+            .put_automated_settlement_event(sample_automated_settlement_event())
+            .unwrap();
+
+        assert_eq!(
+            receipt_anchor.previous_anchor_hash,
+            mission_anchor.anchor_hash
+        );
+        assert_eq!(
+            legacy_anchor.previous_anchor_hash,
+            receipt_anchor.anchor_hash
+        );
+        assert_eq!(
+            ruleset_anchor.previous_anchor_hash,
+            legacy_anchor.anchor_hash
+        );
+        assert_eq!(node_anchor.previous_anchor_hash, ruleset_anchor.anchor_hash);
+        assert_eq!(terms_anchor.previous_anchor_hash, node_anchor.anchor_hash);
+        assert_eq!(offer_anchor.previous_anchor_hash, terms_anchor.anchor_hash);
+        assert_eq!(
+            acceptance_anchor.previous_anchor_hash,
+            offer_anchor.anchor_hash
+        );
+        assert_eq!(
+            wrapper_anchor.previous_anchor_hash,
+            acceptance_anchor.anchor_hash
+        );
+        assert_eq!(
+            adoption_anchor.previous_anchor_hash,
+            wrapper_anchor.anchor_hash
+        );
+        assert_eq!(use_anchor.previous_anchor_hash, adoption_anchor.anchor_hash);
+        assert_eq!(value_anchor.previous_anchor_hash, use_anchor.anchor_hash);
+        assert_eq!(
+            mission_settlement_anchor.previous_anchor_hash,
+            value_anchor.anchor_hash
+        );
+        assert_eq!(
+            automated_anchor.previous_anchor_hash,
+            mission_settlement_anchor.anchor_hash
+        );
+        assert_eq!(store.economy_anchor_count(), 14);
+        assert_eq!(
+            store
+                .get_mission_settlement(&mission_settlement.settlement_id)
+                .unwrap(),
+            Some(mission_settlement)
+        );
+    }
+
+    #[test]
+    fn seed_legacy_receipt_can_be_stored_but_remains_non_ratified() {
+        let mut store = InMemoryEconomyStore::new();
+        let seed = archon_exoforge_legacy_receipt().unwrap();
+        let anchor = store.put_legacy_receipt(seed.clone()).unwrap();
+        assert_eq!(anchor.object_kind, EconomyObjectKind::LegacyReceipt);
+        assert_ne!(
+            seed.status,
+            crate::legacy::LegacyReceiptStatus::Ratified,
+            "seed upstream recognition must not enter the store as ratified"
+        );
+        assert_eq!(
+            store.get_legacy_receipt(&seed.legacy_receipt_id).unwrap(),
+            Some(seed)
+        );
+    }
+
+    #[test]
+    fn economy_object_kind_serializes_as_stable_snake_case() {
+        let mut serialized = Vec::new();
+        ciborium::into_writer(&EconomyObjectKind::Mission, &mut serialized).unwrap();
+        assert_eq!(serialized, b"\x67mission");
+
+        let mut ruleset = Vec::new();
+        ciborium::into_writer(&EconomyObjectKind::HonorGoodRuleset, &mut ruleset).unwrap();
+        assert_eq!(ruleset, b"\x71honorgood_ruleset");
+    }
+
+    #[test]
+    fn economy_object_kind_labels_cover_all_variants() {
+        let cases = [
+            (EconomyObjectKind::Mission, "mission"),
+            (
+                EconomyObjectKind::ContributionReceipt,
+                "contribution_receipt",
+            ),
+            (EconomyObjectKind::LegacyReceipt, "legacy_receipt"),
+            (EconomyObjectKind::HonorGoodRuleset, "honorgood_ruleset"),
+            (
+                EconomyObjectKind::ValueContributionNode,
+                "value_contribution_node",
+            ),
+            (EconomyObjectKind::ContributionOffer, "contribution_offer"),
+            (
+                EconomyObjectKind::ContributionAcceptance,
+                "contribution_acceptance",
+            ),
+            (EconomyObjectKind::BailmentTerms, "bailment_terms"),
+            (EconomyObjectKind::BailmentWrapper, "bailment_wrapper"),
+            (EconomyObjectKind::AdoptionEvent, "adoption_event"),
+            (EconomyObjectKind::UseEvent, "use_event"),
+            (EconomyObjectKind::ValueEvent, "value_event"),
+            (EconomyObjectKind::MissionSettlement, "mission_settlement"),
+            (
+                EconomyObjectKind::AutomatedSettlementEvent,
+                "automated_settlement_event",
+            ),
+        ];
+
+        for (kind, label) in cases {
+            assert_eq!(kind.label(), label);
+        }
     }
 
     #[test]

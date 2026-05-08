@@ -6,12 +6,14 @@
 
 use std::{collections::BTreeSet, path::Path};
 
-use exo_core::types::{Did, Hash256, Signature};
+use exo_core::types::{Did, Hash256, Signature, Timestamp};
 use exo_dag::{
     consensus::{CommitCertificate, Vote},
     dag::DagNode,
     error::{DagError, Result as DagResult},
 };
+use exo_economy::{EconomyObjectKind, EconomyRecordAnchor};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Map a SQLite / CBOR error into `DagError::StoreError`.
 fn store_err(e: impl std::fmt::Display) -> DagError {
@@ -49,6 +51,17 @@ fn validate_signature(signature: &Signature, field: &str) -> DagResult<()> {
         return Err(store_err(format!("{field} must not be empty or all-zero")));
     }
     Ok(())
+}
+
+fn encode_cbor<T: Serialize>(value: &T, field: &str) -> DagResult<Vec<u8>> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf)
+        .map_err(|e| store_err(format!("{field} CBOR encode: {e}")))?;
+    Ok(buf)
+}
+
+fn decode_cbor<T: DeserializeOwned>(bytes: &[u8], field: &str) -> DagResult<T> {
+    ciborium::from_reader(bytes).map_err(|e| store_err(format!("{field} CBOR decode: {e}")))
 }
 
 fn validate_ed25519_signature<'a>(
@@ -171,7 +184,36 @@ impl SqliteDagStore {
             CREATE INDEX IF NOT EXISTS idx_receipts_actor
                 ON trust_receipts(actor_did);
             CREATE INDEX IF NOT EXISTS idx_receipts_ts
-                ON trust_receipts(timestamp_ms);",
+                ON trust_receipts(timestamp_ms);
+
+            CREATE TABLE IF NOT EXISTS economy_objects (
+                object_kind          TEXT    NOT NULL,
+                object_id            BLOB    NOT NULL,
+                content_hash         BLOB    NOT NULL,
+                created_physical_ms  INTEGER NOT NULL,
+                created_logical      INTEGER NOT NULL,
+                cbor_data            BLOB    NOT NULL,
+                PRIMARY KEY (object_kind, object_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_economy_objects_hash
+                ON economy_objects(content_hash);
+
+            CREATE TABLE IF NOT EXISTS economy_anchors (
+                anchor_hash          BLOB PRIMARY KEY NOT NULL,
+                previous_anchor_hash BLOB NOT NULL,
+                object_kind          TEXT NOT NULL,
+                object_id            BLOB NOT NULL,
+                object_hash          BLOB NOT NULL,
+                created_physical_ms  INTEGER NOT NULL,
+                created_logical      INTEGER NOT NULL,
+                cbor_data            BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS economy_meta (
+                key   TEXT PRIMARY KEY NOT NULL,
+                value BLOB NOT NULL
+            );",
         )?;
 
         Ok(Self { conn })
@@ -738,6 +780,151 @@ impl SqliteDagStore {
 
         Ok(())
     }
+
+    fn latest_economy_anchor_hash_tx(tx: &rusqlite::Transaction<'_>) -> DagResult<Hash256> {
+        let result: Result<Vec<u8>, rusqlite::Error> = tx.query_row(
+            "SELECT value FROM economy_meta WHERE key = 'latest_anchor_hash'",
+            [],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(bytes) => decode_hash_bytes(&bytes, "economy_meta.latest_anchor_hash"),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Hash256::ZERO),
+            Err(e) => Err(store_err(format!("economy_meta.latest_anchor_hash: {e}"))),
+        }
+    }
+
+    /// Return the latest deterministic HonorGood/economy object anchor hash.
+    pub fn latest_economy_anchor_hash_sync(&self) -> DagResult<Hash256> {
+        let result: Result<Vec<u8>, rusqlite::Error> = self.conn.query_row(
+            "SELECT value FROM economy_meta WHERE key = 'latest_anchor_hash'",
+            [],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(bytes) => decode_hash_bytes(&bytes, "economy_meta.latest_anchor_hash"),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Hash256::ZERO),
+            Err(e) => Err(store_err(format!("economy_meta.latest_anchor_hash: {e}"))),
+        }
+    }
+
+    /// Persist one canonical economy object and append its hash-linked anchor.
+    pub fn put_economy_object_sync<T: Serialize>(
+        &mut self,
+        object_kind: EconomyObjectKind,
+        object_id: &Hash256,
+        content_hash: &Hash256,
+        created_at: Timestamp,
+        object: &T,
+    ) -> DagResult<EconomyRecordAnchor> {
+        if *object_id == Hash256::ZERO {
+            return Err(store_err("economy object_id must not be Hash256::ZERO"));
+        }
+        if *content_hash == Hash256::ZERO {
+            return Err(store_err("economy content_hash must not be Hash256::ZERO"));
+        }
+        if created_at == Timestamp::ZERO {
+            return Err(store_err("economy created_at must not be Timestamp::ZERO"));
+        }
+
+        let object_cbor = encode_cbor(object, "economy_objects.cbor_data")?;
+        let tx = self.conn.transaction().map_err(store_err)?;
+        let previous_anchor_hash = Self::latest_economy_anchor_hash_tx(&tx)?;
+        let anchor = EconomyRecordAnchor {
+            anchor_hash: Hash256::ZERO,
+            previous_anchor_hash,
+            object_kind,
+            object_id: *object_id,
+            object_hash: *content_hash,
+            created_at,
+        }
+        .anchor()
+        .map_err(store_err)?;
+        let anchor_cbor = encode_cbor(&anchor, "economy_anchors.cbor_data")?;
+        let created_physical_ms =
+            sqlite_u64_to_i64(created_at.physical_ms, "economy.created_physical_ms")?;
+        let created_logical =
+            sqlite_u64_to_i64(u64::from(created_at.logical), "economy.created_logical")?;
+
+        tx.execute(
+            "INSERT INTO economy_objects (
+                object_kind, object_id, content_hash, created_physical_ms,
+                created_logical, cbor_data
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                object_kind.label(),
+                object_id.0.as_slice(),
+                content_hash.0.as_slice(),
+                created_physical_ms,
+                created_logical,
+                object_cbor
+            ],
+        )
+        .map_err(|e| store_err(format!("insert economy object: {e}")))?;
+
+        tx.execute(
+            "INSERT INTO economy_anchors (
+                anchor_hash, previous_anchor_hash, object_kind, object_id,
+                object_hash, created_physical_ms, created_logical, cbor_data
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                anchor.anchor_hash.0.as_slice(),
+                anchor.previous_anchor_hash.0.as_slice(),
+                object_kind.label(),
+                object_id.0.as_slice(),
+                content_hash.0.as_slice(),
+                created_physical_ms,
+                created_logical,
+                anchor_cbor
+            ],
+        )
+        .map_err(|e| store_err(format!("insert economy anchor: {e}")))?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO economy_meta (key, value)
+             VALUES ('latest_anchor_hash', ?1)",
+            params![anchor.anchor_hash.0.as_slice()],
+        )
+        .map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(anchor)
+    }
+
+    /// Load one persisted economy object by kind and canonical object id.
+    pub fn get_economy_object_sync<T: DeserializeOwned>(
+        &self,
+        object_kind: EconomyObjectKind,
+        object_id: &Hash256,
+    ) -> DagResult<Option<T>> {
+        let result: Result<Vec<u8>, rusqlite::Error> = self.conn.query_row(
+            "SELECT cbor_data FROM economy_objects
+             WHERE object_kind = ?1 AND object_id = ?2",
+            params![object_kind.label(), object_id.0.as_slice()],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(bytes) => Ok(Some(decode_cbor(&bytes, "economy_objects.cbor_data")?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(store_err(format!("economy_objects.cbor_data: {e}"))),
+        }
+    }
+
+    /// Load a persisted economy anchor by its hash.
+    pub fn get_economy_anchor_sync(
+        &self,
+        anchor_hash: &Hash256,
+    ) -> DagResult<Option<EconomyRecordAnchor>> {
+        let result: Result<Vec<u8>, rusqlite::Error> = self.conn.query_row(
+            "SELECT cbor_data FROM economy_anchors WHERE anchor_hash = ?1",
+            params![anchor_hash.0.as_slice()],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(bytes) => Ok(Some(decode_cbor(&bytes, "economy_anchors.cbor_data")?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(store_err(format!("economy_anchors.cbor_data: {e}"))),
+        }
+    }
 }
 
 // NOTE: SqliteDagStore does NOT implement the async DagStore trait because
@@ -752,6 +939,10 @@ mod tests {
 
     use exo_core::types::{Did, Signature};
     use exo_dag::dag::{Dag, DeterministicDagClock, append};
+    use exo_economy::{
+        EconomyObjectKind, LegacyReceipt, Mission, apex_velocity_catalyst_client_services_mission,
+        archon_exoforge_legacy_receipt,
+    };
 
     use super::*;
 
@@ -833,6 +1024,97 @@ mod tests {
         let retrieved = store.get_sync(&node.hash).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().hash, node.hash);
+    }
+
+    #[test]
+    fn economy_object_persistence_round_trips_and_hash_links_anchors() {
+        let mut store = temp_store();
+        let mission = apex_velocity_catalyst_client_services_mission(Some(1_000_000)).unwrap();
+        let mission_anchor = store
+            .put_economy_object_sync(
+                EconomyObjectKind::Mission,
+                &mission.mission_id,
+                &mission.content_hash,
+                mission.created_at,
+                &mission,
+            )
+            .unwrap();
+
+        let legacy = archon_exoforge_legacy_receipt().unwrap();
+        let legacy_anchor = store
+            .put_economy_object_sync(
+                EconomyObjectKind::LegacyReceipt,
+                &legacy.legacy_receipt_id,
+                &legacy.content_hash,
+                legacy.created_at,
+                &legacy,
+            )
+            .unwrap();
+
+        let loaded_mission: Mission = store
+            .get_economy_object_sync(EconomyObjectKind::Mission, &mission.mission_id)
+            .unwrap()
+            .unwrap();
+        let loaded_legacy: LegacyReceipt = store
+            .get_economy_object_sync(EconomyObjectKind::LegacyReceipt, &legacy.legacy_receipt_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded_mission, mission);
+        assert_eq!(loaded_legacy, legacy);
+        assert_eq!(mission_anchor.previous_anchor_hash, Hash256::ZERO);
+        assert_eq!(
+            legacy_anchor.previous_anchor_hash,
+            mission_anchor.anchor_hash
+        );
+        assert_eq!(
+            store.latest_economy_anchor_hash_sync().unwrap(),
+            legacy_anchor.anchor_hash
+        );
+        assert_eq!(
+            store
+                .get_economy_anchor_sync(&legacy_anchor.anchor_hash)
+                .unwrap(),
+            Some(legacy_anchor)
+        );
+    }
+
+    #[test]
+    fn economy_object_persistence_rejects_duplicate_or_zero_ids() {
+        let mut store = temp_store();
+        let mission = apex_velocity_catalyst_client_services_mission(None).unwrap();
+        store
+            .put_economy_object_sync(
+                EconomyObjectKind::Mission,
+                &mission.mission_id,
+                &mission.content_hash,
+                mission.created_at,
+                &mission,
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .put_economy_object_sync(
+                    EconomyObjectKind::Mission,
+                    &mission.mission_id,
+                    &mission.content_hash,
+                    mission.created_at,
+                    &mission,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .put_economy_object_sync(
+                    EconomyObjectKind::Mission,
+                    &Hash256::ZERO,
+                    &mission.content_hash,
+                    mission.created_at,
+                    &mission,
+                )
+                .is_err()
+        );
     }
 
     #[test]

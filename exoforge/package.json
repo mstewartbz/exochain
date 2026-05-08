@@ -11,7 +11,8 @@
     "exoforge-council-review": "./bin/exoforge-council-review.js",
     "exoforge-implement": "./bin/exoforge-implement.js",
     "exoforge-validate": "./bin/exoforge-validate.js",
-    "exoforge-monitor": "./bin/exoforge-monitor.js"
+    "exoforge-monitor": "./bin/exoforge-monitor.js",
+    "exoforge-honorgood": "./bin/exoforge-honorgood.js"
   },
   "dependencies": {
     "@exochain/exochain-wasm": "file:../packages/exochain-wasm/wasm"

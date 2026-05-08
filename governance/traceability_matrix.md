@@ -183,6 +183,9 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | **ECO-HG-005** | HonorGood rulesets validate per-basis basis-point totals | `exo-economy::ruleset` | `crates/exo-economy/src/ruleset.rs` (mod tests) | 🟢 |
 | **ECO-HG-006** | MissionSettlement and AutomatedSettlementEvent use checked settlement arithmetic and fail-closed preconditions | `exo-economy::settlement` | `crates/exo-economy/src/settlement.rs` (mod tests) | 🟢 |
 | **ECO-HG-007** | Apex Velocity Catalyst mission examples use explicit naming and do not redefine Autonomous Volition Credential | `exo-economy::honorgood`, `docs/economy/*` | module unit tests + docs | 🟢 |
+| **ECO-HG-008** | HonorGood and Mission Economics objects persist through node API routes with canonical CBOR and `EconomyRecordAnchor` hash links | `exo-node::{economy,store}`, `exo-economy::store` | `crates/exo-node/src/economy.rs`, `crates/exo-node/src/store.rs`, `crates/exo-economy/src/store.rs` (mod tests) | 🟢 |
+| **ECO-HG-009** | Rust SDK, TypeScript SDK, and WASM bridge expose stable core economy object/anchor surfaces without local settlement authority | `crates/exochain-sdk/src/economy.rs`, `packages/exochain-sdk/src/*`, `crates/exochain-wasm/src/economy_bindings.rs` | SDK tests + WASM unit tests | 🟢 |
+| **ECO-HG-010** | CommandBase cockpit and ExoForge factory adapters submit/display EXOCHAIN core economy records without simulating settlement authority | `command-base/app/routes/honorgood-economy.js`, `command-base/app/services/honorgood-economy.js`, `exoforge/lib/honorgood.js`, `exoforge/bin/exoforge-honorgood.js` | adapter unit tests + surface intake records | 🟢 |
 
 ## Summary
 
@@ -200,8 +203,8 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | Decision Forum (GOV/TNC/M) | 15 | 15 | 0 | 0 |
 | Governance Monitoring (MON) | 12 | 9 | 1 | 2 |
 | AVC (Autonomous Volition Credential) | 10 | 10 | 0 | 0 |
-| Custody-Native Economy (zero-launch) | 12 | 12 | 0 | 0 |
-| **TOTAL** | **108** | **105** | **1** | **2** |
+| Custody-Native Economy (zero-launch) | 22 | 22 | 0 | 0 |
+| **TOTAL** | **118** | **115** | **1** | **2** |
 
-**Coverage: 105/108 requirements traced to code (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial (T-14 Rust attestation verification).**
+**Coverage: 115/118 requirements traced to code (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial (T-14 Rust attestation verification).**
 **Workspace inventory: 3,638+ listed tests across 22 packages and 266+ Rust files (AVC and economy crates added).**

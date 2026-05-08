@@ -94,6 +94,93 @@ pub fn wasm_enforce_invariants(request_json: &str) -> Result<JsValue, JsValue> {
     }
 }
 
+/// Build a deterministic valid invariant request fixture for external
+/// health checks. The fixture signs only its own canonical validation
+/// payloads and never accepts caller-supplied secret material.
+#[wasm_bindgen]
+pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
+    use exo_gatekeeper::{
+        authority_link_signature_message, provenance_signature_message,
+        types::{
+            AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, PermissionSet, Provenance,
+        },
+    };
+
+    let authority_keypair =
+        exo_core::crypto::KeyPair::from_secret_bytes([0x31; 32]).map_err(|_| {
+            gatekeeper_boundary_error("validation invariant authority key construction failed")
+        })?;
+    let provenance_keypair =
+        exo_core::crypto::KeyPair::from_secret_bytes([0x32; 32]).map_err(|_| {
+            gatekeeper_boundary_error("validation invariant provenance key construction failed")
+        })?;
+
+    let actor = exo_core::Did::new("did:exo:validation-actor")
+        .map_err(|_| gatekeeper_boundary_error("validation invariant actor DID failed"))?;
+    let grantor = exo_core::Did::new("did:exo:validation-root")
+        .map_err(|_| gatekeeper_boundary_error("validation invariant grantor DID failed"))?;
+    let permissions = PermissionSet::default();
+    let mut authority_link = AuthorityLink {
+        grantor,
+        grantee: actor.clone(),
+        permissions: permissions.clone(),
+        signature: Vec::new(),
+        grantor_public_key: Some(authority_keypair.public_key().as_bytes().to_vec()),
+    };
+    let authority_message = authority_link_signature_message(&authority_link)
+        .map_err(|_| gatekeeper_boundary_error("validation authority signature payload failed"))?;
+    authority_link.signature = authority_keypair
+        .sign(authority_message.as_bytes())
+        .to_bytes()
+        .to_vec();
+
+    let mut provenance = Provenance {
+        actor: actor.clone(),
+        timestamp: "2026-05-07T00:00:00.000Z".to_string(),
+        action_hash: vec![0x41; 32],
+        signature: Vec::new(),
+        public_key: Some(provenance_keypair.public_key().as_bytes().to_vec()),
+        voice_kind: None,
+        independence: None,
+        review_order: None,
+    };
+    let provenance_message = provenance_signature_message(&provenance)
+        .map_err(|_| gatekeeper_boundary_error("validation provenance signature payload failed"))?;
+    provenance.signature = provenance_keypair
+        .sign(provenance_message.as_bytes())
+        .to_bytes()
+        .to_vec();
+
+    to_js_value(&serde_json::json!({
+        "actor": actor,
+        "actor_roles": [],
+        "bailment_state": BailmentState::Active {
+            bailor: exo_core::Did::new("did:exo:validation-bailor")
+                .map_err(|_| gatekeeper_boundary_error("validation bailor DID failed"))?,
+            bailee: exo_core::Did::new("did:exo:validation-bailee")
+                .map_err(|_| gatekeeper_boundary_error("validation bailee DID failed"))?,
+            scope: "validation-scope".to_string(),
+        },
+        "consent_records": [ConsentRecord {
+            subject: exo_core::Did::new("did:exo:validation-subject")
+                .map_err(|_| gatekeeper_boundary_error("validation subject DID failed"))?,
+            granted_to: actor.clone(),
+            scope: "validation-scope".to_string(),
+            active: true,
+        }],
+        "authority_chain": AuthorityChain {
+            links: vec![authority_link],
+        },
+        "is_self_grant": false,
+        "human_override_preserved": true,
+        "kernel_modification_attempted": false,
+        "quorum_evidence": null,
+        "provenance": provenance,
+        "actor_permissions": permissions,
+        "requested_permissions": PermissionSet::default(),
+    }))
+}
+
 /// Spawn a Holon (governed agent runtime)
 #[wasm_bindgen]
 pub fn wasm_spawn_holon(did: &str, program_json: &str) -> Result<JsValue, JsValue> {

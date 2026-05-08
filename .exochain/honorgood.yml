@@ -11,6 +11,12 @@ honorgood:
     - ruleset
     - settlement
   settlement_authority: exochain_core
+  api_prefix: /api/v1/economy
+  anchor_chain: EconomyRecordAnchor
   adjacent_surfaces:
-    commandbase: cockpit_only
-    exoforge: factory_only
+    commandbase:
+      role: cockpit_only
+      intake: command-base/EXOCHAIN_SURFACE_INTAKE.md
+    exoforge:
+      role: factory_only
+      intake: exoforge/EXOCHAIN_SURFACE_INTAKE.md

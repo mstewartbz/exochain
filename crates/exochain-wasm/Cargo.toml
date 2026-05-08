@@ -27,6 +27,7 @@ exo-tenant     = { path = "../exo-tenant" }
 decision-forum = { path = "../decision-forum" }
 exo-catapult   = { path = "../exo-catapult" }
 exo-messaging  = { path = "../exo-messaging" }
+exo-economy    = { path = "../exo-economy" }
 
 # WASM bindings
 wasm-bindgen = "=0.2.100"
