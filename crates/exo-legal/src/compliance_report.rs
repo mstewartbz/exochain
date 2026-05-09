@@ -125,6 +125,8 @@ pub fn build_report(
     mode: &ComplianceReportMode,
     generated_at: Timestamp,
 ) -> Result<ComplianceReport> {
+    validate_transparency_report_evidence(transparency_report)?;
+
     let mapping = NistMapping::canonical();
     let all_invariants = InvariantSet::all();
 
@@ -231,15 +233,28 @@ fn derive_status_and_evidence(
         ConstitutionalInvariant::ProvenanceVerifiable => {
             let (_, _, _, mcp_count) = mcp_enforcement_totals(report);
             if mcp_count == 0 {
-                (
-                    AttestationStatus::NotApplicable,
-                    format!(
-                        "No MCP enforcement events recorded this period; no action provenance \
-                         is attested for this invariant. MCP audit log was structurally verified \
-                         before report generation with head hash {}.",
-                        hex_encode(&report.mcp_audit_head_hash)
-                    ),
-                )
+                if report.ai_agent_action_count == 0 {
+                    (
+                        AttestationStatus::NotApplicable,
+                        format!(
+                            "No MCP enforcement events recorded this period; no action provenance \
+                             is attested for this invariant. MCP audit log was structurally verified \
+                             before report generation with head hash {}.",
+                            hex_encode(&report.mcp_audit_head_hash)
+                        ),
+                    )
+                } else {
+                    (
+                        AttestationStatus::Gap,
+                        format!(
+                            "ProvenanceVerifiable cannot be attested: {} AI actions were recorded, \
+                             but no MCP enforcement outcomes are present. Head hash {} is not \
+                             sufficient provenance evidence for those actions.",
+                            report.ai_agent_action_count,
+                            hex_encode(&report.mcp_audit_head_hash)
+                        ),
+                    )
+                }
             } else {
                 (
                     AttestationStatus::Compliant,
@@ -291,6 +306,124 @@ fn derive_status_and_evidence(
 
         ConstitutionalInvariant::QuorumLegitimate => derive_quorum_attestation(report),
     }
+}
+
+fn validate_transparency_report_evidence(report: &AiTransparencyReport) -> Result<()> {
+    if report.period_start > report.period_end {
+        return Err(LegalError::InvalidStateTransition {
+            reason: format!(
+                "compliance report period is invalid: start {} is after end {}",
+                report.period_start, report.period_end
+            ),
+        });
+    }
+
+    if report.legal_jurisdiction.trim().is_empty() {
+        return Err(LegalError::InvalidStateTransition {
+            reason: "compliance report legal jurisdiction must not be empty".into(),
+        });
+    }
+
+    validate_authority_clearance_evidence(report)?;
+    validate_ai_delegation_evidence(report)?;
+
+    Ok(())
+}
+
+fn validate_authority_clearance_evidence(report: &AiTransparencyReport) -> Result<()> {
+    let clearance = &report.authority_clearance;
+    if clearance.verified_at == Timestamp::ZERO {
+        return Err(LegalError::InvalidStateTransition {
+            reason: "authority clearance evidence must have a non-zero verification timestamp"
+                .into(),
+        });
+    }
+    if clearance.chain_depth == 0 {
+        return Err(LegalError::InvalidStateTransition {
+            reason: "authority clearance evidence must have non-empty chain depth".into(),
+        });
+    }
+    if clearance.chain_leaf != clearance.requester {
+        return Err(LegalError::InvalidStateTransition {
+            reason: format!(
+                "authority clearance requester {} does not match chain leaf {}",
+                clearance.requester.as_str(),
+                clearance.chain_leaf.as_str()
+            ),
+        });
+    }
+    if hash_is_zero(&clearance.chain_hash) {
+        return Err(LegalError::InvalidStateTransition {
+            reason: "authority clearance evidence must include a non-zero chain hash".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_ai_delegation_evidence(report: &AiTransparencyReport) -> Result<()> {
+    for grant in &report.ai_delegation_grants {
+        if grant.authority_chain_depth == 0 {
+            return Err(LegalError::InvalidStateTransition {
+                reason: format!(
+                    "AI delegation grant for {} has empty authority chain evidence",
+                    grant.delegatee.as_str()
+                ),
+            });
+        }
+        if grant.authority_chain_leaf != grant.delegatee {
+            return Err(LegalError::InvalidStateTransition {
+                reason: format!(
+                    "AI delegation grant for {} does not bind chain leaf to delegatee {}",
+                    grant.delegatee.as_str(),
+                    grant.authority_chain_leaf.as_str()
+                ),
+            });
+        }
+        if hash_is_zero(&grant.authority_chain_hash) || hash_is_zero(&grant.authority_link_hash) {
+            return Err(LegalError::InvalidStateTransition {
+                reason: format!(
+                    "AI delegation grant for {} has zero authority evidence hash",
+                    grant.delegatee.as_str()
+                ),
+            });
+        }
+    }
+
+    for revocation in &report.ai_delegation_revocations {
+        if revocation.authority_chain_depth == 0 {
+            return Err(LegalError::InvalidStateTransition {
+                reason: format!(
+                    "AI delegation revocation for {} has empty authority chain evidence",
+                    revocation.delegatee.as_str()
+                ),
+            });
+        }
+        if revocation.revoked_at < revocation.granted_at {
+            return Err(LegalError::InvalidStateTransition {
+                reason: format!(
+                    "AI delegation revocation for {} predates the grant",
+                    revocation.delegatee.as_str()
+                ),
+            });
+        }
+        if hash_is_zero(&revocation.authority_chain_hash)
+            || hash_is_zero(&revocation.authority_link_hash)
+            || hash_is_zero(&revocation.revocation_hash)
+        {
+            return Err(LegalError::InvalidStateTransition {
+                reason: format!(
+                    "AI delegation revocation for {} has zero authority evidence hash",
+                    revocation.delegatee.as_str()
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn hash_is_zero(hash: &[u8; 32]) -> bool {
+    hash.iter().all(|byte| *byte == 0)
 }
 
 fn derive_action_dependent_kernel_attestation(
@@ -866,6 +999,52 @@ mod tests {
             AttestationStatus::NotApplicable,
             "MCP action counts alone must not attest quorum legitimacy"
         );
+    }
+
+    #[test]
+    fn nonzero_action_period_without_mcp_outcomes_marks_provenance_gap() {
+        let tenant = did("tenant");
+        let mut tr = empty_report(&tenant);
+        tr.ai_agent_action_count = 1;
+        tr.mcp_rule_outcomes.clear();
+
+        let report = build_report(&tr, &ComplianceReportMode::Full, ts(10000)).expect("ok");
+        let provenance = report
+            .attestations
+            .iter()
+            .find(|a| a.invariant == ConstitutionalInvariant::ProvenanceVerifiable.id())
+            .expect("ProvenanceVerifiable must appear in compliance report");
+
+        assert_eq!(
+            provenance.status,
+            AttestationStatus::Gap,
+            "a report with AI actions but no MCP enforcement outcomes must not treat provenance as inapplicable"
+        );
+        assert!(
+            provenance.evidence_summary.contains("cannot be attested"),
+            "gap summary must explain the contradictory evidence"
+        );
+    }
+
+    #[test]
+    fn build_report_rejects_fabricated_authority_clearance_evidence() {
+        let tenant = did("tenant");
+        let mut tr = empty_report(&tenant);
+        tr.authority_clearance.verified_at = Timestamp::ZERO;
+        tr.authority_clearance.chain_leaf = did("different-leaf");
+        tr.authority_clearance.chain_depth = 0;
+        tr.authority_clearance.chain_hash = [0u8; 32];
+
+        let err = build_report(&tr, &ComplianceReportMode::Full, ts(10000))
+            .expect_err("fabricated authority clearance evidence must fail closed");
+
+        match err {
+            LegalError::InvalidStateTransition { reason } => assert!(
+                reason.contains("authority clearance"),
+                "error must name the invalid evidence boundary: {reason}"
+            ),
+            other => panic!("expected invalid authority clearance evidence error, got {other:?}"),
+        }
     }
 
     #[test]
