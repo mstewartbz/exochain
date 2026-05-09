@@ -333,14 +333,17 @@ fn cross_branch_roles_denies() {
 mod db_roundtrip {
     use std::sync::{Arc, RwLock};
 
-    use exo_core::{Did, ExoError, hlc::HybridClock};
+    use exo_core::{Did, ExoError, PublicKey, Timestamp, hlc::HybridClock};
     use exo_gatekeeper::{
         ActionRequest, Kernel, authority_link_signature_message,
         invariants::{ConstitutionalInvariant, InvariantSet},
         types::{AuthorityChain, AuthorityLink, BailmentState, Permission, PermissionSet},
     };
-    use exo_gateway::server::AppState;
-    use exo_identity::registry::LocalDidRegistry;
+    use exo_gateway::{db, server::AppState};
+    use exo_identity::{
+        did::{DidDocument, VerificationMethod},
+        registry::LocalDidRegistry,
+    };
     use sqlx::postgres::PgPoolOptions;
 
     fn did(s: &str) -> Did {
@@ -389,6 +392,34 @@ mod db_roundtrip {
         link
     }
 
+    fn did_document_with_ed25519_key(did: &Did, public_key: &[u8]) -> DidDocument {
+        let key_bytes: [u8; 32] = public_key
+            .try_into()
+            .expect("test authority link includes a 32-byte Ed25519 grantor key");
+        let public_key = PublicKey::from_bytes(key_bytes);
+        let multibase = format!("z{}", bs58::encode(public_key.as_bytes()).into_string());
+        DidDocument {
+            id: did.clone(),
+            public_keys: vec![public_key],
+            authentication: vec![],
+            verification_methods: vec![VerificationMethod {
+                id: format!("{}#key-1", did.as_str()),
+                key_type: "Ed25519VerificationKey2020".into(),
+                controller: did.clone(),
+                public_key_multibase: multibase,
+                version: 1,
+                active: true,
+                valid_from: 0,
+                revoked_at: None,
+            }],
+            hybrid_verification_methods: vec![],
+            service_endpoints: vec![],
+            created: Timestamp::ZERO,
+            updated: Timestamp::ZERO,
+            revoked: false,
+        }
+    }
+
     /// Connect to the real Postgres instance and run migrations.
     /// Returns `None` (causing the calling test to skip) when `DATABASE_URL`
     /// is unset or the connection fails.
@@ -430,6 +461,10 @@ mod db_roundtrip {
             .bind(actor_did)
             .execute(&pool)
             .await;
+        let _ = sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind(grantor_did)
+            .execute(&pool)
+            .await;
 
         // Insert an active consent record (bailor = grantor, bailee = actor).
         sqlx::query(
@@ -450,6 +485,15 @@ mod db_roundtrip {
         let chain = AuthorityChain {
             links: vec![signed_authority_link(&grantor, &actor)],
         };
+        let grantor_public_key = chain.links[0]
+            .grantor_public_key
+            .as_ref()
+            .expect("test authority link includes grantor key");
+        let grantor_doc = did_document_with_ed25519_key(&grantor, grantor_public_key);
+        assert!(
+            db::insert_did_document(&pool, &grantor_doc).await.unwrap(),
+            "DB round-trip fixture must register the trusted authority grantor key"
+        );
         let chain_json = serde_json::to_value(&chain).unwrap();
         sqlx::query(
             "INSERT INTO authority_chains (actor_did, chain_json, valid_from) \
