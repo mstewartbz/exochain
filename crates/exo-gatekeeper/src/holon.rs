@@ -444,6 +444,30 @@ mod tests {
         assert!(step(&mut h, &CombinatorInput::new(), &kernel, &ctx).is_err());
     }
 
+    #[test]
+    fn step_enforces_combinator_timeout_budget() {
+        let kernel = test_kernel();
+        let mut h = spawn(
+            did("did:exo:timeout-holon"),
+            PermissionSet::new(vec![Permission::new("read")]),
+            Combinator::Timeout(
+                Box::new(Combinator::Sequence(vec![
+                    Combinator::Identity,
+                    Combinator::Identity,
+                ])),
+                crate::combinator::Duration(2),
+            ),
+        );
+        let ctx = valid_adj(&h.id);
+
+        let err = step(&mut h, &CombinatorInput::new(), &kernel, &ctx)
+            .expect_err("over-budget holon combinator must fail closed");
+        assert!(
+            err.to_string().contains("timeout budget exhausted"),
+            "unexpected holon timeout error: {err}"
+        );
+    }
+
     // ── SPR2-04: Holon isolation + lifecycle ──────────────────────────────────
 
     /// Terminating Holon A must not change the state of Holon B.  Each Holon
