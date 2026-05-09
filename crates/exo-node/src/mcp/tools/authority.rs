@@ -235,6 +235,7 @@ fn validate_authority_chain(chain: &AuthorityChain, terminal_actor: &Did) -> Vec
         provenance: None,
         actor_permissions: PermissionSet::default(),
         requested_permissions: PermissionSet::default(),
+        trusted_authority_keys: Default::default(),
     };
     match enforce_all(&engine, &context) {
         Ok(()) => Vec::new(),
@@ -367,6 +368,7 @@ pub(crate) fn parse_verified_adjudication_context(
         bailment_state: parse_bailment_state(context_value)?,
         human_override_preserved,
         actor_permissions: parse_permission_set(context_value, "actor_permissions")?,
+        trusted_authority_keys: Default::default(),
         provenance: Some(parse_provenance(context_value)?),
         quorum_evidence: None,
         active_challenge_reason: None,

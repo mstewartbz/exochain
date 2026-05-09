@@ -2,7 +2,7 @@
 //!
 //! Types specific to the judicial branch that are not part of exo-core.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
@@ -278,6 +278,13 @@ pub struct AuthorityLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grantor_public_key: Option<Vec<u8>>,
 }
+
+/// DID-resolved Ed25519 public keys trusted by the runtime context.
+///
+/// Authority links still carry the key used for signature verification, but
+/// the invariant engine only accepts that key when it matches independently
+/// resolved key material for the claimed grantor DID.
+pub type TrustedAuthorityKeys = BTreeMap<Did, Vec<Vec<u8>>>;
 
 // ---------------------------------------------------------------------------
 // Quorum evidence

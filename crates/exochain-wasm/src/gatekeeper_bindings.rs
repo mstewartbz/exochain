@@ -27,6 +27,8 @@ struct WasmInvariantRequest {
     actor_permissions: exo_gatekeeper::types::PermissionSet,
     #[serde(default)]
     requested_permissions: exo_gatekeeper::types::PermissionSet,
+    #[serde(default)]
+    trusted_authority_keys: exo_gatekeeper::types::TrustedAuthorityKeys,
 }
 
 fn default_true() -> bool {
@@ -78,6 +80,7 @@ pub fn wasm_enforce_invariants(request_json: &str) -> Result<JsValue, JsValue> {
         provenance: req.provenance,
         actor_permissions: req.actor_permissions,
         requested_permissions: req.requested_permissions,
+        trusted_authority_keys: req.trusted_authority_keys,
     };
 
     let engine = exo_gatekeeper::InvariantEngine::all();
@@ -280,6 +283,12 @@ mod tests {
         let authority_chain = AuthorityChain {
             links: vec![authority_link],
         };
+        let mut trusted_authority_keys = exo_gatekeeper::types::TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            if let Some(public_key) = &link.grantor_public_key {
+                trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+            }
+        }
 
         let (provenance_pk, provenance_sk) = exo_core::crypto::generate_keypair();
         let provenance_actor = actor();
@@ -319,6 +328,7 @@ mod tests {
             provenance,
             actor_permissions: PermissionSet::default(),
             requested_permissions: PermissionSet::default(),
+            trusted_authority_keys,
         }
     }
 

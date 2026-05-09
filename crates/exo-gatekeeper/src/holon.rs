@@ -221,14 +221,21 @@ mod tests {
     }
 
     fn valid_adj(actor: &Did) -> AdjudicationContext {
+        let authority_chain = AuthorityChain {
+            links: vec![signed_link("did:exo:root", actor)],
+        };
+        let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            if let Some(public_key) = &link.grantor_public_key {
+                trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+            }
+        }
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "worker".into(),
                 branch: GovernmentBranch::Executive,
             }],
-            authority_chain: AuthorityChain {
-                links: vec![signed_link("did:exo:root", actor)],
-            },
+            authority_chain,
             consent_records: vec![ConsentRecord {
                 subject: did("did:exo:owner"),
                 granted_to: actor.clone(),
@@ -242,6 +249,7 @@ mod tests {
             },
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
+            trusted_authority_keys,
             provenance: Some(signed_provenance(actor)),
             quorum_evidence: None,
             active_challenge_reason: None,

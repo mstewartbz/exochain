@@ -26,7 +26,7 @@ use exo_gatekeeper::{
     invariants::{ConstitutionalInvariant, InvariantSet},
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Role,
+        PermissionSet, Role, TrustedAuthorityKeys,
     },
 };
 use exo_gateway::server::AppState;
@@ -89,19 +89,34 @@ fn signed_authority_link(grantor: &Did, grantee: &Did) -> AuthorityLink {
     link
 }
 
+fn trusted_authority_keys_for_chain(authority_chain: &AuthorityChain) -> TrustedAuthorityKeys {
+    let mut trusted_keys = TrustedAuthorityKeys::default();
+    for link in &authority_chain.links {
+        if let Some(public_key) = &link.grantor_public_key {
+            trusted_keys
+                .entry(link.grantor.clone())
+                .or_default()
+                .push(public_key.clone());
+        }
+    }
+    trusted_keys
+}
+
 /// Construct a fully-valid `AdjudicationContext` that mirrors what
 /// `build_adjudication_context_from_db` would produce when the actor has a
 /// role, active consent, and a one-link authority chain.
 fn full_db_context(actor: &Did) -> AdjudicationContext {
     let grantor = did("did:exo:root-grantor");
+    let authority_chain = AuthorityChain {
+        links: vec![signed_authority_link(&grantor, actor)],
+    };
+    let trusted_authority_keys = trusted_authority_keys_for_chain(&authority_chain);
     AdjudicationContext {
         actor_roles: vec![Role {
             name: "voter".into(),
             branch: GovernmentBranch::Legislative,
         }],
-        authority_chain: AuthorityChain {
-            links: vec![signed_authority_link(&grantor, actor)],
-        },
+        authority_chain,
         consent_records: vec![ConsentRecord {
             subject: grantor.clone(),
             granted_to: actor.clone(),
@@ -115,6 +130,7 @@ fn full_db_context(actor: &Did) -> AdjudicationContext {
         },
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+        trusted_authority_keys,
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,
@@ -246,14 +262,16 @@ fn revoked_consent_denies() {
     let kernel = adjudication_kernel();
     let actor = did("did:exo:actor006");
     let grantor = did("did:exo:root-grantor");
+    let authority_chain = AuthorityChain {
+        links: vec![signed_authority_link(&grantor, &actor)],
+    };
+    let trusted_authority_keys = trusted_authority_keys_for_chain(&authority_chain);
     let ctx = AdjudicationContext {
         actor_roles: vec![Role {
             name: "voter".into(),
             branch: GovernmentBranch::Legislative,
         }],
-        authority_chain: AuthorityChain {
-            links: vec![signed_authority_link(&grantor, &actor)],
-        },
+        authority_chain,
         consent_records: vec![ConsentRecord {
             subject: grantor.clone(),
             granted_to: actor.clone(),
@@ -263,6 +281,7 @@ fn revoked_consent_denies() {
         bailment_state: BailmentState::None, // safe default when no active consent
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+        trusted_authority_keys,
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,

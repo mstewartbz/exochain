@@ -21,7 +21,9 @@ use exo_core::{Did, Hash256, Signature, Timestamp, hash::hash_structured, hlc::H
 use exo_gatekeeper::{
     invariants::InvariantSet,
     kernel::{ActionRequest as GkActionRequest, AdjudicationContext, Kernel, Verdict},
-    types::{AuthorityChain, BailmentState, Permission, PermissionSet, Provenance},
+    types::{
+        AuthorityChain, BailmentState, Permission, PermissionSet, Provenance, TrustedAuthorityKeys,
+    },
 };
 use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::{
@@ -485,6 +487,7 @@ fn deny_all_adjudication_context() -> AdjudicationContext {
         bailment_state: BailmentState::None,
         human_override_preserved: true,
         actor_permissions: PermissionSet::default(),
+        trusted_authority_keys: TrustedAuthorityKeys::default(),
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,
@@ -1506,6 +1509,7 @@ fn build_adjudication_context_from_rows(
     role_rows: &[crate::db::AgentRoleRow],
     consent_rows: &[crate::db::ConsentRecordRow],
     chain_row: Option<&crate::db::AuthorityChainRow>,
+    trusted_authority_keys: TrustedAuthorityKeys,
 ) -> Result<AdjudicationContext> {
     use exo_gatekeeper::types::{
         AuthorityChain as GkChain, BailmentState as GkBailment, ConsentRecord, GovernmentBranch,
@@ -1581,6 +1585,7 @@ fn build_adjudication_context_from_rows(
         bailment_state,
         human_override_preserved: true,
         actor_permissions,
+        trusted_authority_keys,
         // Provenance is per-action, not per-actor; callers that need full
         // ProvenanceVerifiable enforcement must attach it before adjudication.
         provenance: None,
@@ -1614,6 +1619,74 @@ fn effective_authority_permissions(
     PermissionSet::new(effective_permissions)
 }
 
+#[cfg(feature = "production-db")]
+fn active_did_document_ed25519_keys(doc: &DidDocument) -> Result<Vec<Vec<u8>>> {
+    let mut keys = Vec::new();
+    for method in &doc.verification_methods {
+        if !method.active
+            || method.controller != doc.id
+            || method.key_type != "Ed25519VerificationKey2020"
+        {
+            continue;
+        }
+        let encoded = method
+            .public_key_multibase
+            .strip_prefix('z')
+            .ok_or_else(|| {
+                GatewayError::Internal(format!(
+                    "authority grantor DID document key '{}' uses unsupported multibase prefix",
+                    method.id
+                ))
+            })?;
+        let key = bs58::decode(encoded).into_vec().map_err(|e| {
+            GatewayError::Internal(format!(
+                "authority grantor DID document key '{}' is not valid base58btc: {e}",
+                method.id
+            ))
+        })?;
+        if key.len() != 32 {
+            return Err(GatewayError::Internal(format!(
+                "authority grantor DID document key '{}' is {} bytes, expected 32",
+                method.id,
+                key.len()
+            )));
+        }
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+#[cfg(feature = "production-db")]
+async fn load_trusted_authority_keys(
+    pool: &sqlx::PgPool,
+    authority_chain: &AuthorityChain,
+) -> Result<TrustedAuthorityKeys> {
+    let mut trusted_keys = TrustedAuthorityKeys::default();
+    for link in &authority_chain.links {
+        if trusted_keys.contains_key(&link.grantor) {
+            continue;
+        }
+        let Some(doc) = db::find_did_document(pool, link.grantor.as_str())
+            .await
+            .map_err(|e| {
+                GatewayError::Internal(format!(
+                    "authority grantor DID document lookup failed for '{}': {e}",
+                    link.grantor
+                ))
+            })?
+        else {
+            continue;
+        };
+        let keys = active_did_document_ed25519_keys(&doc)?;
+        if !keys.is_empty() {
+            trusted_keys.insert(link.grantor.clone(), keys);
+        }
+    }
+    Ok(trusted_keys)
+}
+
 /// Build an `AdjudicationContext` by loading the actor's roles, consent
 /// records, and authority chain from the live database.
 ///
@@ -1643,7 +1716,26 @@ async fn build_adjudication_context_from_db(
         .await
         .map_err(|e| GatewayError::Internal(format!("adjudication chain query: {e}")))?;
 
-    build_adjudication_context_from_rows(actor, &role_rows, &consent_rows, chain_row.as_ref())
+    let trusted_authority_keys = match &chain_row {
+        Some(row) => {
+            let authority_chain = serde_json::from_value::<AuthorityChain>(row.chain_json.clone())
+                .map_err(|e| {
+                    GatewayError::Internal(format!(
+                        "adjudication authority chain JSON invalid: {e}"
+                    ))
+                })?;
+            load_trusted_authority_keys(pool, &authority_chain).await?
+        }
+        None => TrustedAuthorityKeys::default(),
+    };
+
+    build_adjudication_context_from_rows(
+        actor,
+        &role_rows,
+        &consent_rows,
+        chain_row.as_ref(),
+        trusted_authority_keys,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -3830,6 +3922,37 @@ mod tests {
     }
 
     #[test]
+    fn adjudication_db_context_resolves_authority_grantor_keys() {
+        let source = include_str!("server.rs");
+        let db_resolver = source
+            .split("async fn build_adjudication_context_from_db")
+            .nth(1)
+            .and_then(|section| section.split("// ---------------------------------------------------------------------------").next())
+            .expect("DB adjudication resolver source present");
+        let row_builder = source
+            .split("fn build_adjudication_context_from_rows")
+            .nth(1)
+            .and_then(|section| section.split("fn effective_authority_permissions").next())
+            .expect("DB row builder source present");
+
+        assert!(
+            db_resolver.contains("load_trusted_authority_keys(pool, &authority_chain).await"),
+            "production DB adjudication must resolve trusted grantor keys from DID documents"
+        );
+        assert!(
+            row_builder.contains("trusted_authority_keys"),
+            "DB row builder must carry resolved grantor keys into AdjudicationContext"
+        );
+        assert!(
+            db_resolver.find("load_trusted_authority_keys").unwrap()
+                < db_resolver
+                    .find("build_adjudication_context_from_rows")
+                    .unwrap(),
+            "trusted grantor keys must be resolved before returning the adjudication context"
+        );
+    }
+
+    #[test]
     fn shutdown_signal_setup_failures_are_not_silent_or_panicking() {
         let source = include_str!("server.rs");
         let shutdown_signal = source_between(
@@ -5311,9 +5434,15 @@ mod tests {
             valid_from: 1,
             expires_at: None,
         }];
-        let role_error = build_adjudication_context_from_rows(&actor, &role_rows, &[], None)
-            .expect_err("unknown role branch must be rejected")
-            .to_string();
+        let role_error = build_adjudication_context_from_rows(
+            &actor,
+            &role_rows,
+            &[],
+            None,
+            TrustedAuthorityKeys::default(),
+        )
+        .expect_err("unknown role branch must be rejected")
+        .to_string();
         assert!(
             !role_error.contains(actor.as_str()) && !role_error.contains(related.as_str()),
             "adjudication role errors must not expose raw DID identifiers: {role_error}"
@@ -5334,10 +5463,15 @@ mod tests {
             valid_from: 1,
             expires_at: None,
         };
-        let chain_error =
-            build_adjudication_context_from_rows(&actor, &[], &consent_rows, Some(&chain_row))
-                .expect_err("malformed authority chain JSON must be rejected")
-                .to_string();
+        let chain_error = build_adjudication_context_from_rows(
+            &actor,
+            &[],
+            &consent_rows,
+            Some(&chain_row),
+            TrustedAuthorityKeys::default(),
+        )
+        .expect_err("malformed authority chain JSON must be rejected")
+        .to_string();
         assert!(
             !chain_error.contains(actor.as_str()) && !chain_error.contains(related.as_str()),
             "adjudication chain errors must not expose raw DID identifiers: {chain_error}"
@@ -8098,16 +8232,34 @@ mod tests {
         )
     }
 
+    fn trusted_authority_keys_for_test_chain(
+        authority_chain: &AuthorityChain,
+    ) -> TrustedAuthorityKeys {
+        let mut trusted_keys = TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            let Some(public_key) = link.grantor_public_key.clone() else {
+                continue;
+            };
+            trusted_keys
+                .entry(link.grantor.clone())
+                .or_default()
+                .push(public_key);
+        }
+        trusted_keys
+    }
+
     fn valid_db_context(actor: &Did) -> AdjudicationContext {
         let root = Did::new("did:exo:root-grantor").unwrap();
+        let authority_chain = AuthorityChain {
+            links: vec![signed_authority_link(&root, actor)],
+        };
+        let trusted_authority_keys = trusted_authority_keys_for_test_chain(&authority_chain);
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "voter".to_string(),
                 branch: GovernmentBranch::Legislative,
             }],
-            authority_chain: AuthorityChain {
-                links: vec![signed_authority_link(&root, actor)],
-            },
+            authority_chain,
             consent_records: vec![ConsentRecord {
                 subject: root.clone(),
                 granted_to: actor.clone(),
@@ -8121,6 +8273,7 @@ mod tests {
             },
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+            trusted_authority_keys,
             provenance: None,
             quorum_evidence: None,
             active_challenge_reason: None,
@@ -8200,7 +8353,13 @@ mod tests {
         let actor = Did::new("did:exo:alice").unwrap();
         let role_rows = vec![db_role_row(&actor, "voter", "tribunal")];
 
-        let result = build_adjudication_context_from_rows(&actor, &role_rows, &[], None);
+        let result = build_adjudication_context_from_rows(
+            &actor,
+            &role_rows,
+            &[],
+            None,
+            TrustedAuthorityKeys::default(),
+        );
 
         assert_internal_error_contains(result, "unknown role branch");
     }
@@ -8210,7 +8369,13 @@ mod tests {
         let actor = Did::new("did:exo:alice").unwrap();
         let role_rows = vec![db_role_row(&actor, "root", "judicial")];
 
-        let result = build_adjudication_context_from_rows(&actor, &role_rows, &[], None);
+        let result = build_adjudication_context_from_rows(
+            &actor,
+            &role_rows,
+            &[],
+            None,
+            TrustedAuthorityKeys::default(),
+        );
 
         assert_internal_error_contains(result, "unknown governed role name");
     }
@@ -8220,7 +8385,13 @@ mod tests {
         let actor = Did::new("did:exo:alice").unwrap();
         let role_rows = vec![db_role_row(&actor, "judge", "executive")];
 
-        let result = build_adjudication_context_from_rows(&actor, &role_rows, &[], None);
+        let result = build_adjudication_context_from_rows(
+            &actor,
+            &role_rows,
+            &[],
+            None,
+            TrustedAuthorityKeys::default(),
+        );
 
         assert_internal_error_contains(result, "does not match governed branch");
     }
@@ -8230,7 +8401,13 @@ mod tests {
         let actor = Did::new("did:exo:alice").unwrap();
         let consent_rows = vec![db_consent_row(&actor, "not-a-did")];
 
-        let result = build_adjudication_context_from_rows(&actor, &[], &consent_rows, None);
+        let result = build_adjudication_context_from_rows(
+            &actor,
+            &[],
+            &consent_rows,
+            None,
+            TrustedAuthorityKeys::default(),
+        );
 
         assert_internal_error_contains(result, "consent subject DID");
     }
@@ -8245,7 +8422,13 @@ mod tests {
             }),
         );
 
-        let result = build_adjudication_context_from_rows(&actor, &[], &[], Some(&chain_row));
+        let result = build_adjudication_context_from_rows(
+            &actor,
+            &[],
+            &[],
+            Some(&chain_row),
+            TrustedAuthorityKeys::default(),
+        );
 
         assert_internal_error_contains(result, "authority chain JSON");
     }
@@ -8267,6 +8450,7 @@ mod tests {
             &role_rows,
             &consent_rows,
             Some(&chain_row),
+            valid_context.trusted_authority_keys.clone(),
         )
         .unwrap();
         let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
@@ -8293,12 +8477,14 @@ mod tests {
         let consent_rows = vec![db_consent_row(&actor, root.as_str())];
         let chain_row =
             db_authority_chain_row(&actor, serde_json::to_value(&authority_chain).unwrap());
+        let trusted_authority_keys = trusted_authority_keys_for_test_chain(&authority_chain);
 
         let ctx = build_adjudication_context_from_rows(
             &actor,
             &role_rows,
             &consent_rows,
             Some(&chain_row),
+            trusted_authority_keys,
         )
         .unwrap();
         let verdict = kernel.adjudicate(&action_for_permission(&actor, "advance_pace"), &ctx);
@@ -8314,6 +8500,39 @@ mod tests {
         assert!(
             verdict.is_permitted(),
             "F-010: action permission backed by DB authority-chain scope must be permitted"
+        );
+    }
+
+    #[test]
+    fn adjudication_context_rows_reject_unresolved_authority_grantor_public_key() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:pace-agent").unwrap();
+        let unresolved_root = Did::new("did:exo:unresolved-root-grantor").unwrap();
+        let authority_chain = AuthorityChain {
+            links: vec![signed_authority_link_for_permissions(
+                &unresolved_root,
+                &actor,
+                PermissionSet::new(vec![Permission::new("advance_pace")]),
+            )],
+        };
+        let role_rows = vec![db_role_row(&actor, "worker", "executive")];
+        let consent_rows = vec![db_consent_row(&actor, unresolved_root.as_str())];
+        let chain_row =
+            db_authority_chain_row(&actor, serde_json::to_value(&authority_chain).unwrap());
+
+        let ctx = build_adjudication_context_from_rows(
+            &actor,
+            &role_rows,
+            &consent_rows,
+            Some(&chain_row),
+            TrustedAuthorityKeys::default(),
+        )
+        .unwrap();
+        let verdict = kernel.adjudicate(&action_for_permission(&actor, "advance_pace"), &ctx);
+
+        assert!(
+            !verdict.is_permitted(),
+            "DB-loaded authority chains must not trust self-attested unresolved grantor keys"
         );
     }
 
