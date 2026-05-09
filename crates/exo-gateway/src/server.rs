@@ -28,7 +28,7 @@ use exo_gatekeeper::{
 };
 use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::{
-    did::DidDocument,
+    did::{DidDocument, DidRegistrationProof},
     error::IdentityError,
     registry::{DidRegistry, LocalDidRegistry},
 };
@@ -504,12 +504,22 @@ enum RegistryBlockingError {
     Join(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DidRegistrationRequest {
+    document: DidDocument,
+    proof: DidRegistrationProof,
+}
+
 fn identity_registration_log_reason(error: &IdentityError) -> &'static str {
     match error {
         IdentityError::DuplicateDid(_) => "duplicate_did",
         IdentityError::RegistryCapacityExceeded { .. } => "registry_capacity_exceeded",
         IdentityError::InvalidDidDocumentField { .. } => "invalid_did_document_field",
         IdentityError::DidDocumentFieldTooLarge { .. } => "did_document_field_too_large",
+        IdentityError::InvalidRegistrationProof { .. } => "invalid_registration_proof",
+        IdentityError::RegistrationProofPayloadEncoding { .. } => {
+            "registration_proof_payload_encoding_failed"
+        }
         IdentityError::DidRevoked(_) => "did_revoked",
         IdentityError::NonMonotonicTimestamp { .. } => "non_monotonic_timestamp",
         IdentityError::DuplicatePaceDid(_) => "duplicate_pace_did",
@@ -553,6 +563,12 @@ fn did_registration_rejection_response(
             Json(serde_json::json!({ "error": "invalid DID document" })),
         )
             .into_response(),
+        IdentityError::InvalidRegistrationProof { .. }
+        | IdentityError::RegistrationProofPayloadEncoding { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid DID registration proof" })),
+        )
+            .into_response(),
         _ => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "DID registration rejected" })),
@@ -564,10 +580,11 @@ fn did_registration_rejection_response(
 async fn registry_register_document(
     registry: Arc<RwLock<LocalDidRegistry>>,
     doc: DidDocument,
+    proof: DidRegistrationProof,
 ) -> std::result::Result<(), RegistryBlockingError> {
     tokio::task::spawn_blocking(move || {
         let mut reg = registry.write().unwrap_or_else(|e| e.into_inner());
-        reg.register(doc)
+        reg.register_with_proof(doc, &proof)
             .map_err(RegistryBlockingError::Registration)
     })
     .await
@@ -602,19 +619,13 @@ async fn registry_resolve_document(
     .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
 }
 
-fn validate_did_document_for_registration(
-    doc: &DidDocument,
-) -> std::result::Result<(), IdentityError> {
-    let mut registry = LocalDidRegistry::with_max_documents(1);
-    registry.register(doc.clone())
-}
-
 async fn register_did_document(
     state: &AppState,
     doc: DidDocument,
+    proof: DidRegistrationProof,
 ) -> std::result::Result<(), RegistryBlockingError> {
     if let Some(pool) = state.pool.as_ref() {
-        validate_did_document_for_registration(&doc)
+        exo_identity::registry::verify_did_registration_proof(&doc, &proof)
             .map_err(RegistryBlockingError::Registration)?;
         let inserted = db::insert_did_document(pool, &doc)
             .await
@@ -626,7 +637,7 @@ async fn register_did_document(
         }
         registry_cache_document(Arc::clone(&state.registry), doc).await
     } else {
-        registry_register_document(Arc::clone(&state.registry), doc).await
+        registry_register_document(Arc::clone(&state.registry), doc, proof).await
     }
 }
 
@@ -1859,14 +1870,15 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
 
 /// POST /api/v1/auth/register — register a new DID document.
 ///
-/// Body: a `DidDocument` JSON object.  Returns 201 on success, 409 if the
-/// DID is already registered.
+/// Body: a DID document plus proof that the caller controls a declared document
+/// key. Returns 201 on success, 409 if the DID is already registered.
 async fn handle_auth_register(
     State(state): State<AppState>,
-    Json(doc): Json<DidDocument>,
+    Json(request): Json<DidRegistrationRequest>,
 ) -> impl IntoResponse {
+    let doc = request.document;
     let did_str = doc.id.as_str().to_owned();
-    match register_did_document(&state, doc).await {
+    match register_did_document(&state, doc, request.proof).await {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "did": did_str, "status": "registered" })),
@@ -2474,10 +2486,11 @@ async fn handle_audit_trail(
 /// agent-specific enrollment workflow while sharing the underlying DID registry.
 async fn handle_agents_enroll(
     State(state): State<AppState>,
-    Json(doc): Json<DidDocument>,
+    Json(request): Json<DidRegistrationRequest>,
 ) -> impl IntoResponse {
+    let doc = request.document;
     let did_str = doc.id.as_str().to_owned();
-    match register_did_document(&state, doc).await {
+    match register_did_document(&state, doc, request.proof).await {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "did": did_str, "status": "enrolled" })),
@@ -4405,6 +4418,51 @@ mod tests {
         }
     }
 
+    fn keyed_doc(did_str: &str, public_key: exo_core::PublicKey) -> DidDocument {
+        let did = Did::new(did_str).expect("valid DID");
+        DidDocument {
+            id: did,
+            public_keys: vec![public_key],
+            authentication: vec![],
+            verification_methods: vec![],
+            hybrid_verification_methods: vec![],
+            service_endpoints: vec![],
+            created: Timestamp::new(1000, 0),
+            updated: Timestamp::new(1000, 0),
+            revoked: false,
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    struct TestDidRegistrationProofPayload<'a> {
+        domain: &'static str,
+        document: &'a DidDocument,
+        signing_public_key: &'a [u8; 32],
+    }
+
+    fn registration_request_body(
+        doc: &DidDocument,
+        public_key: &exo_core::PublicKey,
+        secret_key: &exo_core::SecretKey,
+    ) -> String {
+        let payload = TestDidRegistrationProofPayload {
+            domain: "exo.identity.did_registry.registration.v1",
+            document: doc,
+            signing_public_key: public_key.as_bytes(),
+        };
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&payload, &mut encoded).expect("registration proof payload");
+        let signature = sign(&encoded, secret_key);
+        serde_json::to_string(&serde_json::json!({
+            "document": doc,
+            "proof": {
+                "public_key": public_key,
+                "signature": signature,
+            }
+        }))
+        .expect("registration request JSON")
+    }
+
     fn signing_registry() -> (Arc<RwLock<LocalDidRegistry>>, exo_core::SecretKey) {
         let did = Did::new("did:exo:login-alice").unwrap();
         let (pk, sk) = generate_keypair();
@@ -4836,8 +4894,28 @@ mod tests {
     // --- New DID / auth / agent endpoint tests ---
 
     #[tokio::test]
-    async fn auth_register_returns_201() {
+    async fn auth_register_rejects_bare_did_document_without_registration_proof() {
         let body = serde_json::to_string(&minimal_doc("did:exo:tester")).unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn auth_register_accepts_valid_registration_proof() {
+        let (public_key, secret_key) = generate_keypair();
+        let doc = keyed_doc("did:exo:tester", public_key);
+        let body = registration_request_body(&doc, &public_key, &secret_key);
         let app = build_router(state());
         let resp = app
             .oneshot(
@@ -4854,12 +4932,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_register_rejects_registration_proof_from_unlisted_key() {
+        let (document_public_key, _) = generate_keypair();
+        let (attacker_public_key, attacker_secret_key) = generate_keypair();
+        let doc = keyed_doc("did:exo:unlisted-registration-key", document_public_key);
+        let body = registration_request_body(&doc, &attacker_public_key, &attacker_secret_key);
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn auth_register_duplicate_returns_409() {
-        let doc = minimal_doc("did:exo:dup");
+        let (public_key, secret_key) = generate_keypair();
+        let doc = keyed_doc("did:exo:dup", public_key);
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc.clone()).unwrap();
         let st = AppState::new(None, registry);
-        let body = serde_json::to_string(&doc).unwrap();
+        let body = registration_request_body(&doc, &public_key, &secret_key);
         let app = build_router(st);
         let resp = app
             .oneshot(
@@ -4877,7 +4978,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_register_returns_503_when_local_did_registry_capacity_is_exhausted() {
-        let (pk, _) = generate_keypair();
+        let (pk, sk) = generate_keypair();
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         {
             let mut guard = registry.write().unwrap();
@@ -4889,7 +4990,8 @@ mod tests {
         }
 
         let st = AppState::new(None, registry);
-        let body = serde_json::to_string(&minimal_doc("did:exo:capacity-overflow")).unwrap();
+        let overflow_doc = keyed_doc("did:exo:capacity-overflow", pk);
+        let body = registration_request_body(&overflow_doc, &pk, &sk);
         let app = build_router(st);
         let resp = app
             .oneshot(
@@ -5320,7 +5422,11 @@ mod tests {
             "/// GET /api/v1/auth/me",
         );
         assert!(
-            auth_register.contains("register_did_document(&state, doc).await"),
+            auth_register.contains("Json(request): Json<DidRegistrationRequest>"),
+            "auth/register must parse a proof-bearing registration envelope, not a bare DID document"
+        );
+        assert!(
+            auth_register.contains("register_did_document(&state, doc, request.proof).await"),
             "auth/register must persist through the AppState DB-backed DID path when a pool is configured"
         );
         assert!(
@@ -5368,7 +5474,11 @@ mod tests {
             "// ---------------------------------------------------------------------------\n// Session auth handlers",
         );
         assert!(
-            agents_enroll.contains("register_did_document(&state, doc).await"),
+            agents_enroll.contains("Json(request): Json<DidRegistrationRequest>"),
+            "agents/enroll must parse a proof-bearing registration envelope, not a bare DID document"
+        );
+        assert!(
+            agents_enroll.contains("register_did_document(&state, doc, request.proof).await"),
             "agents/enroll must share the DB-backed DID persistence path"
         );
 
@@ -5898,7 +6008,9 @@ mod tests {
 
     #[tokio::test]
     async fn agents_enroll_returns_201() {
-        let body = serde_json::to_string(&minimal_doc("did:exo:enrollee")).unwrap();
+        let (public_key, secret_key) = generate_keypair();
+        let doc = keyed_doc("did:exo:enrollee", public_key);
+        let body = registration_request_body(&doc, &public_key, &secret_key);
         let app = build_router(state());
         let resp = app
             .oneshot(
@@ -5912,6 +6024,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn agents_enroll_rejects_bare_did_document_without_registration_proof() {
+        let body = serde_json::to_string(&minimal_doc("did:exo:enrollee-bare")).unwrap();
+        let app = build_router(state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/enroll")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
     }
 
     #[tokio::test]
