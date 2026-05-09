@@ -18,7 +18,7 @@ use exo_gatekeeper::{
     kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
     },
 };
 use serde_json::{Value, json};
@@ -218,7 +218,11 @@ fn parse_authority_chain(value: &Value) -> Result<AuthorityChain, Vec<String>> {
     }
 }
 
-fn validate_authority_chain(chain: &AuthorityChain, terminal_actor: &Did) -> Vec<String> {
+fn validate_authority_chain(
+    chain: &AuthorityChain,
+    terminal_actor: &Did,
+    trusted_authority_keys: &TrustedAuthorityKeys,
+) -> Vec<String> {
     let engine = InvariantEngine::new(InvariantSet::with(vec![
         ConstitutionalInvariant::AuthorityChainValid,
     ]));
@@ -235,7 +239,7 @@ fn validate_authority_chain(chain: &AuthorityChain, terminal_actor: &Did) -> Vec
         provenance: None,
         actor_permissions: PermissionSet::default(),
         requested_permissions: PermissionSet::default(),
-        trusted_authority_keys: Default::default(),
+        trusted_authority_keys: trusted_authority_keys.clone(),
     };
     match enforce_all(&engine, &context) {
         Ok(()) => Vec::new(),
@@ -343,6 +347,18 @@ pub(crate) fn parse_verified_adjudication_context(
     context_value: &Value,
     actor: &Did,
 ) -> Result<AdjudicationContext, String> {
+    parse_verified_adjudication_context_with_trusted_authority_keys(
+        context_value,
+        actor,
+        TrustedAuthorityKeys::default(),
+    )
+}
+
+pub(crate) fn parse_verified_adjudication_context_with_trusted_authority_keys(
+    context_value: &Value,
+    actor: &Did,
+    trusted_authority_keys: TrustedAuthorityKeys,
+) -> Result<AdjudicationContext, String> {
     let actor_roles = parse_roles(context_value)?;
     let consent_records = parse_consent_records(context_value)?;
     let bailment_state = parse_bailment_state(context_value)?;
@@ -358,7 +374,7 @@ pub(crate) fn parse_verified_adjudication_context(
         .ok_or_else(|| "context.authority_chain is required".to_owned())?;
     let authority_chain =
         parse_authority_chain(authority_chain_value).map_err(|issues| issues.join("; "))?;
-    let issues = validate_authority_chain(&authority_chain, actor);
+    let issues = validate_authority_chain(&authority_chain, actor, &trusted_authority_keys);
     if !issues.is_empty() {
         return Err(format!(
             "context.authority_chain is invalid: {}",
@@ -373,7 +389,7 @@ pub(crate) fn parse_verified_adjudication_context(
         bailment_state,
         human_override_preserved,
         actor_permissions,
-        trusted_authority_keys: Default::default(),
+        trusted_authority_keys,
         provenance: Some(provenance),
         quorum_evidence: None,
         active_challenge_reason: None,
@@ -524,7 +540,11 @@ pub fn execute_verify_authority_chain(params: &Value, _context: &NodeContext) ->
         }
     };
     if issues.is_empty() {
-        issues.extend(validate_authority_chain(&authority_chain, &terminal));
+        issues.extend(validate_authority_chain(
+            &authority_chain,
+            &terminal,
+            &TrustedAuthorityKeys::default(),
+        ));
     }
     let valid = issues.is_empty();
 
@@ -625,7 +645,8 @@ pub fn execute_check_permission(params: &Value, _context: &NodeContext) -> ToolR
             );
         }
     };
-    let issues = validate_authority_chain(&authority_chain, &actor);
+    let issues =
+        validate_authority_chain(&authority_chain, &actor, &TrustedAuthorityKeys::default());
     if !issues.is_empty() {
         return ToolResult::success(
             json!({
