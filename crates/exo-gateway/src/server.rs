@@ -17,11 +17,11 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use decision_forum::decision_object::{DecisionClass, DecisionObject, DecisionObjectInput};
-use exo_core::{Did, Hash256, Signature, Timestamp, hlc::HybridClock};
+use exo_core::{Did, Hash256, Signature, Timestamp, hash::hash_structured, hlc::HybridClock};
 use exo_gatekeeper::{
     invariants::InvariantSet,
     kernel::{ActionRequest as GkActionRequest, AdjudicationContext, Kernel, Verdict},
-    types::{AuthorityChain, BailmentState, Permission, PermissionSet},
+    types::{AuthorityChain, BailmentState, Permission, PermissionSet, Provenance},
 };
 use exo_governance::conflict::ConflictDeclaration;
 use exo_identity::{
@@ -912,9 +912,27 @@ impl FeedbackIssueUpdateMetadata {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const ADVANCE_PACE_PROVENANCE_HASH_DOMAIN: &str = "exo.gateway.advance_pace.provenance.v1";
+const ADVANCE_PACE_PROVENANCE_HASH_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Serialize)]
+struct AdvancePaceActionHashInput<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    actor: &'a Did,
+    target: &'a Did,
+    subject_kind: &'static str,
+    action: &'static str,
+    required_permissions: Vec<&'static str>,
+    queued_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AdvancePaceMetadata {
     queued_at: i64,
+    provenance_timestamp: Timestamp,
+    provenance_public_key: Vec<u8>,
+    provenance_signature: Signature,
 }
 
 impl AdvancePaceMetadata {
@@ -924,7 +942,21 @@ impl AdvancePaceMetadata {
         })?;
         Ok(Self {
             queued_at: required_nonzero_i64(body, "queuedAt")?,
+            provenance_timestamp: Timestamp::new(
+                required_nonzero_u64(body, "provenanceTimestampPhysicalMs")?,
+                required_u32(body, "provenanceTimestampLogical")?,
+            ),
+            provenance_public_key: required_ed25519_public_key_hex(body, "provenancePublicKey")?
+                .to_vec(),
+            provenance_signature: required_ed25519_signature_hex(body, "provenanceSignature")?,
         })
+    }
+
+    fn provenance_timestamp_string(&self) -> String {
+        format!(
+            "hlc:{}:{}",
+            self.provenance_timestamp.physical_ms, self.provenance_timestamp.logical
+        )
     }
 }
 
@@ -1335,6 +1367,15 @@ fn required_ed25519_signature_hex(body: &serde_json::Value, field: &str) -> Resu
         )));
     }
     Ok(signature)
+}
+
+fn required_ed25519_public_key_hex(body: &serde_json::Value, field: &str) -> Result<[u8; 32]> {
+    let encoded = required_nonempty_string(body, field)?;
+    let bytes = hex::decode(&encoded)
+        .map_err(|e| metadata_error(format!("{field} must be hex-encoded Ed25519: {e}")))?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        metadata_error(format!("{field} must be 32 bytes, got {}", bytes.len()))
+    })
 }
 
 fn parse_decision_uuid(raw: &str, field: &str) -> Result<uuid::Uuid> {
@@ -2583,6 +2624,53 @@ enum PaceSubjectKind {
     User,
 }
 
+impl PaceSubjectKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::User => "user",
+        }
+    }
+}
+
+fn advance_pace_action_hash(
+    actor: &Did,
+    target: &Did,
+    subject_kind: PaceSubjectKind,
+    metadata: &AdvancePaceMetadata,
+) -> Result<Hash256> {
+    hash_structured(&AdvancePaceActionHashInput {
+        domain: ADVANCE_PACE_PROVENANCE_HASH_DOMAIN,
+        schema_version: ADVANCE_PACE_PROVENANCE_HASH_SCHEMA_VERSION,
+        actor,
+        target,
+        subject_kind: subject_kind.as_str(),
+        action: "advance_pace",
+        required_permissions: vec!["advance_pace"],
+        queued_at: metadata.queued_at,
+    })
+    .map_err(|e| GatewayError::Internal(format!("advance pace action hash failed: {e}")))
+}
+
+fn advance_pace_action_provenance(
+    actor: &Did,
+    target: &Did,
+    subject_kind: PaceSubjectKind,
+    metadata: &AdvancePaceMetadata,
+) -> Result<Provenance> {
+    let action_hash = advance_pace_action_hash(actor, target, subject_kind, metadata)?;
+    Ok(Provenance {
+        actor: actor.clone(),
+        timestamp: metadata.provenance_timestamp_string(),
+        action_hash: action_hash.as_bytes().to_vec(),
+        signature: metadata.provenance_signature.to_bytes(),
+        public_key: Some(metadata.provenance_public_key.clone()),
+        voice_kind: None,
+        independence: None,
+        review_order: None,
+    })
+}
+
 /// POST /api/v1/agents/:did/advance-pace — advance a constitutional pacing token.
 ///
 /// Adjudicated by the Kernel before any DB write.  Without a valid authority
@@ -2645,8 +2733,20 @@ async fn handle_advance_pace(
         )
             .into_response();
     }
+    let body_ref = body.as_ref().map(|Json(value)| value);
+    let metadata = match AdvancePaceMetadata::from_optional_body(body_ref) {
+        Ok(metadata) => metadata,
+        Err(e) => return metadata_error_response(e),
+    };
     // Build an adjudication context for this actor.
-    let ctx = state.build_adjudication_context(&actor).await;
+    let mut ctx = state.build_adjudication_context(&actor).await;
+    let provenance = match advance_pace_action_provenance(&actor, &did, subject_kind, &metadata) {
+        Ok(provenance) => provenance,
+        Err(e) => {
+            return internal_error_response(e, "advance pace provenance", "advance pace failed");
+        }
+    };
+    ctx.provenance = Some(provenance);
     let action = GkActionRequest {
         actor: actor.clone(),
         action: "advance_pace".into(),
@@ -2661,8 +2761,8 @@ async fn handle_advance_pace(
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
                     "error": "forbidden",
-                    "message": "Kernel rejected advance-pace: authority chain invalid or \
-                                consent not established."
+                    "message": "Kernel rejected advance-pace: provenance, authority, or \
+                                consent validation failed."
                 })),
             )
                 .into_response();
@@ -2678,11 +2778,6 @@ async fn handle_advance_pace(
             )
                 .into_response();
         }
-    };
-    let body_ref = body.as_ref().map(|Json(value)| value);
-    let metadata = match AdvancePaceMetadata::from_optional_body(body_ref) {
-        Ok(metadata) => metadata,
-        Err(e) => return metadata_error_response(e),
     };
     let pace_update = match subject_kind {
         PaceSubjectKind::Agent => db::update_agent_pace(db, &did_str, ADVANCED_PACE_STATUS).await,
@@ -4166,6 +4261,18 @@ mod tests {
         Some(pool)
     }
 
+    fn db_state_at(
+        pool: sqlx::PgPool,
+        registry: Arc<RwLock<LocalDidRegistry>>,
+        now_ms: u64,
+    ) -> AppState {
+        AppState::new_with_clock(
+            Some(pool),
+            registry,
+            HybridClock::with_wall_clock(move || now_ms),
+        )
+    }
+
     async fn insert_test_session(pool: &sqlx::PgPool, token: &str, actor_did: &str) {
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -4183,6 +4290,62 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn insert_test_did_document(pool: &sqlx::PgPool, did: &str) -> DidDocument {
+        sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind(did)
+            .execute(pool)
+            .await
+            .unwrap();
+        let doc = minimal_doc(did);
+        assert!(
+            db::insert_did_document(pool, &doc).await.unwrap(),
+            "test DID document should insert into the live DB fixture"
+        );
+        doc
+    }
+
+    fn signed_advance_pace_body(
+        actor_did: &str,
+        target_did: &str,
+        subject_kind: PaceSubjectKind,
+        queued_at: i64,
+    ) -> serde_json::Value {
+        let actor = Did::new(actor_did).unwrap();
+        let target = Did::new(target_did).unwrap();
+        let (public_key, secret_key) = generate_keypair();
+        let timestamp = Timestamp::new(u64::try_from(queued_at).unwrap(), 0);
+        let metadata = AdvancePaceMetadata {
+            queued_at,
+            provenance_timestamp: timestamp,
+            provenance_public_key: public_key.as_bytes().to_vec(),
+            provenance_signature: Signature::empty(),
+        };
+        let action_hash =
+            advance_pace_action_hash(&actor, &target, subject_kind, &metadata).unwrap();
+        let mut provenance = Provenance {
+            actor,
+            timestamp: metadata.provenance_timestamp_string(),
+            action_hash: action_hash.as_bytes().to_vec(),
+            signature: Vec::new(),
+            public_key: Some(public_key.as_bytes().to_vec()),
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        };
+        let message = exo_gatekeeper::provenance_signature_message(&provenance)
+            .expect("canonical provenance payload");
+        let signature = sign(message.as_bytes(), &secret_key);
+        provenance.signature = signature.to_bytes();
+
+        serde_json::json!({
+            "queuedAt": queued_at,
+            "provenanceTimestampPhysicalMs": timestamp.physical_ms,
+            "provenanceTimestampLogical": timestamp.logical,
+            "provenancePublicKey": hex::encode(public_key.as_bytes()),
+            "provenanceSignature": hex::encode(provenance.signature),
+        })
     }
 
     async fn insert_test_user(pool: &sqlx::PgPool, did: &str, tenant_id: &str) {
@@ -4623,8 +4786,8 @@ mod tests {
             .await
             .unwrap();
 
-        let alice_doc = minimal_doc("did:exo:auth-me-alice");
-        let bob_doc = minimal_doc("did:exo:auth-me-bob");
+        let alice_doc = insert_test_did_document(&pool, "did:exo:auth-me-alice").await;
+        let bob_doc = insert_test_did_document(&pool, "did:exo:auth-me-bob").await;
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         {
             let mut guard = registry.write().unwrap();
@@ -4666,6 +4829,12 @@ mod tests {
 
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind("auth-me-alice-token")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM did_documents WHERE did IN ($1, $2)")
+            .bind("did:exo:auth-me-alice")
+            .bind("did:exo:auth-me-bob")
             .execute(&pool)
             .await
             .unwrap();
@@ -5392,9 +5561,10 @@ mod tests {
             "tenant-agent-directory-b",
         )
         .await;
-        let app = build_router(AppState::new(
-            Some(pool.clone()),
+        let app = build_router(db_state_at(
+            pool.clone(),
             Arc::new(RwLock::new(LocalDidRegistry::new())),
+            10_000,
         ));
         let resp = app
             .oneshot(
@@ -5443,8 +5613,14 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        insert_test_session(&pool, "agent-get-token", "did:exo:reader").await;
-        let doc = minimal_doc("did:exo:agent-get");
+        let reader = "did:exo:agent-get-reader";
+        let agent = "did:exo:agent-get";
+        let token = "agent-get-token";
+        let tenant = "tenant-agent-get";
+        insert_test_user(&pool, reader, tenant).await;
+        insert_test_session(&pool, token, reader).await;
+        insert_test_agent(&pool, agent, "did:exo:agent-get-owner", tenant).await;
+        let doc = insert_test_did_document(&pool, agent).await;
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
         let st = AppState::new(Some(pool.clone()), registry);
@@ -5452,8 +5628,8 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/agents/did:exo:agent-get")
-                    .header("authorization", "Bearer agent-get-token")
+                    .uri(format!("/api/v1/agents/{agent}"))
+                    .header("authorization", format!("Bearer {token}"))
                     .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
                     .body(Body::empty())
                     .unwrap(),
@@ -5462,7 +5638,23 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         sqlx::query("DELETE FROM sessions WHERE token = $1")
-            .bind("agent-get-token")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM agents WHERE did = $1 OR owner_did = $2")
+            .bind(agent)
+            .bind("did:exo:agent-get-owner")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind(agent)
             .execute(&pool)
             .await
             .unwrap();
@@ -5474,10 +5666,14 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        insert_test_session(&pool, "agent-get-unknown-token", "did:exo:reader").await;
-        let app = build_router(AppState::new(
-            Some(pool.clone()),
+        let reader = "did:exo:agent-get-unknown-reader";
+        let token = "agent-get-unknown-token";
+        insert_test_user(&pool, reader, "tenant-agent-get-unknown").await;
+        insert_test_session(&pool, token, reader).await;
+        let app = build_router(db_state_at(
+            pool.clone(),
             Arc::new(RwLock::new(LocalDidRegistry::new())),
+            10_000,
         ));
         let resp = app
             .oneshot(
@@ -5492,7 +5688,12 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         sqlx::query("DELETE FROM sessions WHERE token = $1")
-            .bind("agent-get-unknown-token")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE did = $1")
+            .bind(reader)
             .execute(&pool)
             .await
             .unwrap();
@@ -7174,6 +7375,41 @@ mod tests {
     }
 
     #[test]
+    fn advance_pace_metadata_requires_signed_action_provenance() {
+        let body = serde_json::json!({"queuedAt": 10_000});
+        let err = AdvancePaceMetadata::from_optional_body(Some(&body)).unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::BadRequest(reason) if reason.contains("provenanceTimestampPhysicalMs")),
+            "expected provenance timestamp refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn advance_pace_action_hash_binds_target_and_subject_kind() {
+        let actor = Did::new("did:exo:pace-actor").unwrap();
+        let target = Did::new("did:exo:pace-target").unwrap();
+        let other_target = Did::new("did:exo:pace-other").unwrap();
+        let body = signed_advance_pace_body(
+            actor.as_str(),
+            target.as_str(),
+            PaceSubjectKind::Agent,
+            10_000,
+        );
+        let metadata = AdvancePaceMetadata::from_optional_body(Some(&body)).unwrap();
+
+        let agent_hash =
+            advance_pace_action_hash(&actor, &target, PaceSubjectKind::Agent, &metadata).unwrap();
+        let user_hash =
+            advance_pace_action_hash(&actor, &target, PaceSubjectKind::User, &metadata).unwrap();
+        let other_target_hash =
+            advance_pace_action_hash(&actor, &other_target, PaceSubjectKind::Agent, &metadata)
+                .unwrap();
+
+        assert_ne!(agent_hash, user_hash);
+        assert_ne!(agent_hash, other_target_hash);
+    }
+
+    #[test]
     fn gateway_server_durable_handlers_do_not_fabricate_metadata() {
         let source = include_str!("server.rs");
         let durable_handlers = [
@@ -7238,10 +7474,17 @@ mod tests {
         let kernel_index = handler
             .find("state.kernel.adjudicate")
             .expect("advance_pace must retain kernel adjudication");
+        let provenance_index = handler
+            .find("ctx.provenance = Some(provenance)")
+            .expect("advance_pace must attach action provenance before adjudication");
 
         assert!(
             auth_index < context_index && context_index < kernel_index,
             "advance_pace must authenticate before building the adjudication context"
+        );
+        assert!(
+            context_index < provenance_index && provenance_index < kernel_index,
+            "advance_pace must attach signed action provenance before kernel adjudication"
         );
         assert!(
             handler.contains("if actor != did"),
@@ -7303,6 +7546,7 @@ mod tests {
         for statement in [
             "DELETE FROM agents WHERE did = $1 OR owner_did = $1",
             "DELETE FROM users WHERE did = $1",
+            "DELETE FROM agent_roles WHERE agent_did = $1 OR granted_by = $1",
             "DELETE FROM consent_records WHERE subject_did = $1 OR actor_did = $1",
             "DELETE FROM authority_chains WHERE actor_did = $1",
         ] {
@@ -7320,6 +7564,18 @@ mod tests {
 
         let actor = Did::new(did).unwrap();
         let root = Did::new("did:exo:advance-pace-root").unwrap();
+        sqlx::query(
+            "INSERT INTO agent_roles (agent_did, role, branch, granted_by, valid_from, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, NULL)",
+        )
+        .bind(did)
+        .bind("worker")
+        .bind("executive")
+        .bind(root.to_string())
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO consent_records \
              (subject_did, actor_did, scope, bailment_type, status, created_at, expires_at) \
@@ -7465,9 +7721,10 @@ mod tests {
         .await
         .unwrap();
 
-        let app = build_router(AppState::new(
-            Some(pool.clone()),
+        let app = build_router(db_state_at(
+            pool.clone(),
             Arc::new(RwLock::new(LocalDidRegistry::new())),
+            10_000,
         ));
         let resp = app
             .oneshot(
@@ -7476,7 +7733,16 @@ mod tests {
                     .uri("/api/v1/agents/did:exo:alice/advance-pace")
                     .header("authorization", "Bearer advance-no-authority-token")
                     .header(AUTH_OBSERVED_AT_MS_HEADER, "10000")
-                    .body(Body::empty())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        signed_advance_pace_body(
+                            "did:exo:alice",
+                            "did:exo:alice",
+                            PaceSubjectKind::Agent,
+                            10_000,
+                        )
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7555,7 +7821,10 @@ mod tests {
                     .header("authorization", format!("Bearer {token}"))
                     .header(AUTH_OBSERVED_AT_MS_HEADER, "10000")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"queuedAt":10000}"#))
+                    .body(Body::from(
+                        signed_advance_pace_body(did, did, PaceSubjectKind::Agent, 10_000)
+                            .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7600,7 +7869,10 @@ mod tests {
                     .header("authorization", format!("Bearer {token}"))
                     .header(AUTH_OBSERVED_AT_MS_HEADER, "10000")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"queuedAt":10000}"#))
+                    .body(Body::from(
+                        signed_advance_pace_body(did, did, PaceSubjectKind::User, 10_000)
+                            .to_string(),
+                    ))
                     .unwrap(),
             )
             .await

@@ -354,6 +354,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: DB-backed gateway CI guard
+        run: bash tools/test_gateway_db_ci.sh
       - name: Start Postgres via docker compose
         run: docker compose -f docker-compose.ci.yml up -d
       - name: Wait for Postgres to be healthy
@@ -368,6 +370,8 @@ jobs:
         run: cargo install sqlx-cli --no-default-features --features postgres,rustls
       - name: Run migrations
         run: sqlx migrate run --source crates/exo-gateway/migrations
+      - name: Run DB-backed gateway library tests
+        run: cargo test -p exo-gateway --lib --features production-db -- --test-threads=1
       - name: Run DB-backed integration tests
         run: cargo test --workspace --test '*' --features exo-gateway/production-db
       - name: Stop Postgres
