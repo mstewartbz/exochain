@@ -219,7 +219,11 @@ impl ReceiptChain {
         self.receipts.is_empty()
     }
 
-    /// Verify the hash chain integrity.
+    /// Verify hash-linkage integrity only.
+    ///
+    /// This does not authenticate receipt signatures. Use
+    /// [`Self::verify_signed_chain`] when the chain comes from storage,
+    /// transport, WASM, or any other untrusted boundary.
     ///
     /// # Errors
     /// Returns [`CatapultError`] if canonical CBOR hashing fails.
@@ -227,6 +231,41 @@ impl ReceiptChain {
         let mut expected_prev = Hash256::ZERO;
         for receipt in &self.receipts {
             if receipt.prev_receipt != expected_prev {
+                return Ok(false);
+            }
+            expected_prev = receipt.content_hash()?;
+        }
+        Ok(true)
+    }
+
+    /// Verify hash-linkage integrity and every receipt actor signature.
+    ///
+    /// The resolver must return the trusted Ed25519 public key for each
+    /// `actor_did` appearing in the chain. A missing key is an error because
+    /// unauthenticated provenance must fail closed at trust boundaries.
+    ///
+    /// # Errors
+    /// Returns [`CatapultError`] if a receipt cannot be serialized for hashing
+    /// or signing, or if an actor key cannot be resolved.
+    pub fn verify_signed_chain<F>(&self, mut resolve_actor_public_key: F) -> Result<bool>
+    where
+        F: FnMut(&Did) -> Option<PublicKey>,
+    {
+        let mut expected_prev = Hash256::ZERO;
+        for (index, receipt) in self.receipts.iter().enumerate() {
+            if receipt.prev_receipt != expected_prev {
+                return Ok(false);
+            }
+            let actor_public_key =
+                resolve_actor_public_key(&receipt.actor_did).ok_or_else(|| {
+                    CatapultError::InvalidReceipt {
+                        reason: format!(
+                            "receipt {} at index {index} actor {} missing public key",
+                            receipt.id, receipt.actor_did
+                        ),
+                    }
+                })?;
+            if !receipt.verify_signature(&actor_public_key)? {
                 return Ok(false);
             }
             expected_prev = receipt.content_hash()?;
@@ -632,6 +671,81 @@ mod tests {
 
         assert!(!receipt.is_signed());
         assert!(!receipt.verify_signature(signer.public_key()).unwrap());
+    }
+
+    #[test]
+    fn signed_chain_verification_rejects_signature_tamper_after_deserialize() {
+        let signer = keypair(11);
+        let newco_id = uuid(10);
+        let mut chain = ReceiptChain::new();
+        let r1 = FranchiseReceipt::signed(
+            receipt_input(
+                uuid(91),
+                newco_id,
+                FranchiseOperation::NewcoCreated {
+                    franchise_id: uuid(20),
+                },
+                Hash256::ZERO,
+            ),
+            signer.secret_key(),
+        )
+        .unwrap();
+        let r1_hash = r1.content_hash().unwrap();
+        let mut r2 = FranchiseReceipt::signed(
+            receipt_input(
+                uuid(92),
+                newco_id,
+                FranchiseOperation::GoalCreated { goal_id: uuid(30) },
+                r1_hash,
+            ),
+            signer.secret_key(),
+        )
+        .unwrap();
+        r2.signature = Signature::Empty;
+        chain.receipts.push(r1);
+        chain.receipts.push(r2);
+
+        assert!(
+            chain.verify_chain().unwrap(),
+            "hash-only verification must not be treated as signature authentication"
+        );
+        assert!(
+            !chain
+                .verify_signed_chain(|did| {
+                    if did == &test_did() {
+                        Some(*signer.public_key())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap(),
+            "signed chain verification must reject tampered signatures"
+        );
+    }
+
+    #[test]
+    fn signed_chain_verification_rejects_missing_actor_key() {
+        let signer = keypair(12);
+        let receipt = FranchiseReceipt::signed(
+            receipt_input(
+                uuid(93),
+                uuid(10),
+                FranchiseOperation::HeartbeatRecorded {
+                    agent_did: test_did(),
+                },
+                Hash256::ZERO,
+            ),
+            signer.secret_key(),
+        )
+        .unwrap();
+        let mut chain = ReceiptChain::new();
+        chain.receipts.push(receipt);
+
+        let err = chain.verify_signed_chain(|_| None).unwrap_err();
+        assert!(matches!(
+            err,
+            CatapultError::InvalidReceipt { reason } if reason.contains("missing public key")
+        ));
     }
 
     #[test]
