@@ -10,6 +10,8 @@ pub enum ApiError {
     VerificationFailed { reason: String },
     #[error("rate limited: {peer_id}")]
     RateLimited { peer_id: String },
+    #[error("replayed message from {peer_id} with nonce {nonce}")]
+    ReplayDetected { peer_id: String, nonce: u64 },
     #[error("invalid schema: {reason}")]
     InvalidSchema { reason: String },
     #[error("serialization error: {0}")]
@@ -28,6 +30,10 @@ mod tests {
             ApiError::VerificationFailed { reason: "x".into() },
             ApiError::RateLimited {
                 peer_id: "x".into(),
+            },
+            ApiError::ReplayDetected {
+                peer_id: "x".into(),
+                nonce: 1,
             },
             ApiError::InvalidSchema { reason: "x".into() },
             ApiError::SerializationError("x".into()),

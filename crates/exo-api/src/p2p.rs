@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ApiError, Result};
 
 const P2P_MESSAGE_SIGNING_DOMAIN: &str = "exo.p2p.message.v1";
+pub const MAX_P2P_MESSAGE_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_BOOTSTRAP_DISCOVERY_PEERS: usize = 4_096;
 const MAX_DIVERSE_SELECTION_PEERS: usize = 4_096;
 
@@ -82,6 +83,81 @@ pub struct Message {
     pub nonce: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MessageReplayKey {
+    from: PeerId,
+    nonce: u64,
+}
+
+impl MessageReplayKey {
+    fn from_message(msg: &Message) -> Self {
+        Self {
+            from: msg.from.clone(),
+            nonce: msg.nonce,
+        }
+    }
+}
+
+/// Stateful acceptance guard for signed peer-to-peer messages.
+#[derive(Debug, Default)]
+pub struct MessageReplayGuard {
+    seen: BTreeSet<MessageReplayKey>,
+}
+
+impl MessageReplayGuard {
+    /// Maximum accepted messages tracked in a replay window.
+    pub const MAX_TRACKED_MESSAGES: usize = 4096;
+
+    /// Create an empty replay guard.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            seen: BTreeSet::new(),
+        }
+    }
+
+    /// Return the number of messages currently tracked in the replay window.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Return `true` when no message keys are tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Reset the replay window.
+    pub fn reset(&mut self) {
+        self.seen.clear();
+    }
+
+    /// Verify a message signature and record its replay key after success.
+    pub fn verify_and_record(
+        &mut self,
+        msg: &Message,
+        sender_public_key: &PublicKey,
+    ) -> Result<()> {
+        validate_message_structure(msg)?;
+        let key = MessageReplayKey::from_message(msg);
+        if self.seen.contains(&key) {
+            return Err(ApiError::ReplayDetected {
+                peer_id: msg.from.to_string(),
+                nonce: msg.nonce,
+            });
+        }
+        if self.seen.len() >= Self::MAX_TRACKED_MESSAGES {
+            return Err(ApiError::RateLimited {
+                peer_id: msg.from.to_string(),
+            });
+        }
+        verify_message_signature(msg, sender_public_key)?;
+        self.seen.insert(key);
+        Ok(())
+    }
+}
+
 /// Rate-limit tracking per peer.
 #[derive(Debug, Default)]
 pub struct RateLimiter {
@@ -145,12 +221,26 @@ struct MessageSigningPayload<'a> {
     nonce: u64,
 }
 
+fn validate_message_payload_size(msg: &Message) -> Result<()> {
+    if msg.payload.len() > MAX_P2P_MESSAGE_PAYLOAD_BYTES {
+        return Err(ApiError::InvalidSchema {
+            reason: format!(
+                "P2P message payload length {} exceeds maximum {}",
+                msg.payload.len(),
+                MAX_P2P_MESSAGE_PAYLOAD_BYTES
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Canonical CBOR payload signed by a peer-to-peer message sender.
 ///
 /// The domain tag prevents cross-protocol replay, and the payload binds sender,
 /// optional recipient, body bytes, and nonce. The signature field is excluded
 /// so callers can use this function before and after signing.
 pub fn message_signing_payload(msg: &Message) -> Result<Vec<u8>> {
+    validate_message_payload_size(msg)?;
     let payload = MessageSigningPayload {
         domain: P2P_MESSAGE_SIGNING_DOMAIN,
         from: msg.from.0.as_str(),
@@ -173,6 +263,7 @@ pub fn message_signing_payload(msg: &Message) -> Result<Vec<u8>> {
 /// This helper is intentionally not named `verify`: it does not authenticate
 /// the signature. Use [`verify_message`] for Ed25519 verification.
 pub fn validate_message_structure(msg: &Message) -> Result<()> {
+    validate_message_payload_size(msg)?;
     // Reject empty / all-zero signatures.
     if msg.signature.is_empty() {
         return Err(ApiError::VerificationFailed {
@@ -188,9 +279,7 @@ pub fn validate_message_structure(msg: &Message) -> Result<()> {
     Ok(())
 }
 
-/// Verify a peer-to-peer message Ed25519 signature against the sender public key.
-pub fn verify_message(msg: &Message, sender_public_key: &PublicKey) -> Result<()> {
-    validate_message_structure(msg)?;
+fn verify_message_signature(msg: &Message, sender_public_key: &PublicKey) -> Result<()> {
     let payload = message_signing_payload(msg)?;
     if exo_core::crypto::verify(&payload, &msg.signature, sender_public_key) {
         Ok(())
@@ -199,6 +288,12 @@ pub fn verify_message(msg: &Message, sender_public_key: &PublicKey) -> Result<()
             reason: "invalid Ed25519 signature".into(),
         })
     }
+}
+
+/// Verify a peer-to-peer message Ed25519 signature against the sender public key.
+pub fn verify_message(msg: &Message, sender_public_key: &PublicKey) -> Result<()> {
+    validate_message_structure(msg)?;
+    verify_message_signature(msg, sender_public_key)
 }
 
 /// Discover new peers from bootstrap addresses and register them.
@@ -450,9 +545,12 @@ mod tests {
             signature: Signature::Empty,
             nonce: 1,
         };
-        let payload = message_signing_payload(&message).expect("signing payload");
-        message.signature = exo_core::crypto::sign(&payload, &secret_key);
+        sign_message(&mut message, &secret_key);
         (message, public_key)
+    }
+    fn sign_message(message: &mut Message, secret_key: &exo_core::SecretKey) {
+        let payload = message_signing_payload(message).expect("signing payload");
+        message.signature = exo_core::crypto::sign(&payload, secret_key);
     }
 
     #[test]
@@ -510,6 +608,115 @@ mod tests {
     fn verify_message_accepts_correct_signature() {
         let (message, public_key) = signed_msg("a", None, 7);
         assert!(verify_message(&message, &public_key).is_ok());
+    }
+    #[test]
+    fn verify_message_rejects_oversized_payload_before_signature_work() {
+        let (public_key, _) = keypair(7);
+        let oversized = Message {
+            from: pid("a"),
+            to: None,
+            payload: vec![0xA5; MAX_P2P_MESSAGE_PAYLOAD_BYTES + 1],
+            signature: Signature::from_bytes([1u8; 64]),
+            nonce: 42,
+        };
+
+        let err = verify_message(&oversized, &public_key).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::InvalidSchema { reason } if reason.contains("payload")
+                && reason.contains(&MAX_P2P_MESSAGE_PAYLOAD_BYTES.to_string())
+        ));
+    }
+    #[test]
+    fn message_signing_payload_rejects_oversized_payload_before_cbor_serialization() {
+        let mut message = msg("a", None);
+        message.payload = vec![0xA5; MAX_P2P_MESSAGE_PAYLOAD_BYTES + 1];
+
+        let err = message_signing_payload(&message).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::InvalidSchema { reason } if reason.contains("payload")
+                && reason.contains(&MAX_P2P_MESSAGE_PAYLOAD_BYTES.to_string())
+        ));
+    }
+    #[test]
+    fn message_replay_guard_rejects_duplicate_signed_message_without_recording_tamper() {
+        let (message, public_key) = signed_msg("a", Some("b"), 7);
+        let mut guard = MessageReplayGuard::new();
+
+        assert!(guard.verify_and_record(&message, &public_key).is_ok());
+        let replay = guard.verify_and_record(&message, &public_key).unwrap_err();
+
+        assert!(matches!(
+            replay,
+            ApiError::ReplayDetected { peer_id, nonce }
+                if peer_id == "did:exo:a" && nonce == message.nonce
+        ));
+
+        let mut tampered = message.clone();
+        tampered.nonce += 1;
+        tampered.payload = b"tampered".to_vec();
+        let tamper_err = guard.verify_and_record(&tampered, &public_key).unwrap_err();
+        assert!(matches!(
+            tamper_err,
+            ApiError::VerificationFailed { reason } if reason == "invalid Ed25519 signature"
+        ));
+        assert_eq!(
+            guard.len(),
+            1,
+            "failed verifications must not grow replay state"
+        );
+    }
+    #[test]
+    fn message_replay_guard_rejects_reused_sender_nonce_with_new_valid_payload() {
+        let (public_key, secret_key) = keypair(7);
+        let mut first = Message {
+            from: pid("a"),
+            to: Some(pid("b")),
+            payload: b"hello".to_vec(),
+            signature: Signature::Empty,
+            nonce: 7,
+        };
+        sign_message(&mut first, &secret_key);
+        let mut second = first.clone();
+        second.payload = b"new signed payload".to_vec();
+        second.signature = Signature::Empty;
+        sign_message(&mut second, &secret_key);
+        let mut guard = MessageReplayGuard::new();
+
+        assert!(guard.verify_and_record(&first, &public_key).is_ok());
+        let replay = guard.verify_and_record(&second, &public_key).unwrap_err();
+
+        assert!(matches!(
+            replay,
+            ApiError::ReplayDetected { peer_id, nonce } if peer_id == "did:exo:a" && nonce == 7
+        ));
+        assert_eq!(guard.len(), 1);
+    }
+    #[test]
+    fn message_replay_guard_bounds_tracked_state_and_can_reset() {
+        let (message, public_key) = signed_msg("a", Some("b"), 7);
+        let mut guard = MessageReplayGuard::new();
+        for nonce in 0..MessageReplayGuard::MAX_TRACKED_MESSAGES {
+            guard.seen.insert(MessageReplayKey {
+                from: pid("filled"),
+                nonce: u64::try_from(nonce).unwrap(),
+            });
+        }
+
+        let err = guard.verify_and_record(&message, &public_key).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::RateLimited { peer_id } if peer_id == "did:exo:a"
+        ));
+        assert_eq!(guard.len(), MessageReplayGuard::MAX_TRACKED_MESSAGES);
+
+        guard.reset();
+        assert!(guard.is_empty());
+        assert!(guard.verify_and_record(&message, &public_key).is_ok());
     }
     #[test]
     fn verify_message_rejects_empty_and_zero_signatures() {
