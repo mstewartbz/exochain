@@ -4252,6 +4252,8 @@ mod tests {
         )
     }
 
+    const TEST_ACTIVE_SESSION_EXPIRES_AT_MS: i64 = 4_102_444_800_000;
+
     async fn insert_test_session(pool: &sqlx::PgPool, token: &str, actor_did: &str) {
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -4265,7 +4267,7 @@ mod tests {
         .bind(token)
         .bind(actor_did)
         .bind(10_000_i64)
-        .bind(20_000_i64)
+        .bind(TEST_ACTIVE_SESSION_EXPIRES_AT_MS)
         .execute(pool)
         .await
         .unwrap();
