@@ -4344,18 +4344,16 @@ mod tests {
         }
     }
 
-    fn signing_registry() -> (Arc<RwLock<LocalDidRegistry>>, exo_core::SecretKey) {
-        let did = Did::new("did:exo:login-alice").unwrap();
-        let (pk, sk) = generate_keypair();
-        let multibase = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
-        let doc = DidDocument {
+    fn did_document_with_ed25519_key(did: &Did, public_key: &exo_core::PublicKey) -> DidDocument {
+        let multibase = format!("z{}", bs58::encode(public_key.as_bytes()).into_string());
+        DidDocument {
             id: did.clone(),
-            public_keys: vec![pk],
+            public_keys: vec![*public_key],
             authentication: vec![],
             verification_methods: vec![VerificationMethod {
-                id: "did:exo:login-alice#key-1".into(),
+                id: format!("{}#key-1", did.as_str()),
                 key_type: "Ed25519VerificationKey2020".into(),
-                controller: did,
+                controller: did.clone(),
                 public_key_multibase: multibase,
                 version: 1,
                 active: true,
@@ -4367,7 +4365,13 @@ mod tests {
             created: Timestamp::ZERO,
             updated: Timestamp::ZERO,
             revoked: false,
-        };
+        }
+    }
+
+    fn signing_registry() -> (Arc<RwLock<LocalDidRegistry>>, exo_core::SecretKey) {
+        let did = Did::new("did:exo:login-alice").unwrap();
+        let (pk, sk) = generate_keypair();
+        let doc = did_document_with_ed25519_key(&did, &pk);
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         registry.write().unwrap().register(doc).unwrap();
         (registry, sk)
@@ -7663,6 +7667,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn advance_pace_authorization_fixture_registers_trusted_grantor_document() {
+        let source = include_str!("server.rs");
+        let start_index = source
+            .rfind("async fn insert_advance_pace_authorization")
+            .expect("fixture function marker present");
+        let after_start = &source[start_index..];
+        let end_index = after_start
+            .find("    async fn insert_test_agent")
+            .expect("fixture end marker present");
+        let fixture = &after_start[..end_index];
+
+        assert!(
+            fixture.contains("db::insert_did_document(pool, &grantor_doc)"),
+            "DB-backed advance-pace fixture must register the authority grantor DID document so trusted grantor keys are resolved from durable state"
+        );
+    }
+
     fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let start_index = source.find(start).expect("source start marker");
         let after_start = &source[start_index..];
@@ -7683,6 +7705,7 @@ mod tests {
             "DELETE FROM agent_roles WHERE agent_did = $1 OR granted_by = $1",
             "DELETE FROM consent_records WHERE subject_did = $1 OR actor_did = $1",
             "DELETE FROM authority_chains WHERE actor_did = $1",
+            "DELETE FROM did_documents WHERE did = $1",
         ] {
             sqlx::query(statement)
                 .bind(did)
@@ -7690,6 +7713,11 @@ mod tests {
                 .await
                 .unwrap();
         }
+        sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind("did:exo:advance-pace-root")
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     async fn insert_advance_pace_authorization(pool: &sqlx::PgPool, did: &str, token: &str) {
@@ -7732,6 +7760,17 @@ mod tests {
                 PermissionSet::new(vec![Permission::new("advance_pace")]),
             )],
         };
+        let grantor_public_key = chain.links[0]
+            .grantor_public_key
+            .as_ref()
+            .and_then(|key| <[u8; 32]>::try_from(key.as_slice()).ok())
+            .map(exo_core::PublicKey::from_bytes)
+            .expect("test authority link includes a 32-byte Ed25519 grantor key");
+        let grantor_doc = did_document_with_ed25519_key(&root, &grantor_public_key);
+        assert!(
+            db::insert_did_document(pool, &grantor_doc).await.unwrap(),
+            "advance-pace root DID document should insert into the live DB fixture"
+        );
         sqlx::query(
             "INSERT INTO authority_chains (actor_did, chain_json, valid_from, expires_at) \
              VALUES ($1, $2, $3, NULL)",
