@@ -5,9 +5,10 @@ fabric** — a substrate for AI agents and data sovereignty built around
 DIDs, scoped consent (bailments), authority-chain delegation, and
 quorum-based governance decisions.
 
-This is the pure-Python SDK (no native extensions). It uses:
+This is the Python SDK. It uses:
 
-- `cryptography` for Ed25519 signing and SHA-256
+- `blake3` for canonical DID derivation
+- `cryptography` for Ed25519 signing
 - `pydantic` v2 for typed, frozen wire models
 - `httpx` for an async HTTP client
 
@@ -103,7 +104,7 @@ asyncio.run(main())
 
 | Domain       | Symbol(s)                                               |
 |--------------|---------------------------------------------------------|
-| Identity     | `Identity`, `validate_did`, `is_did`                    |
+| Identity     | `Identity`, `derive_did`, `validate_did`, `is_did`      |
 | Consent      | `BailmentBuilder`, `BailmentProposal`, `HlcTimestamp`   |
 | Governance   | `DecisionBuilder`, `Decision`, `Vote`, `VoteChoice`     |
 | Authority    | `AuthorityChainBuilder`, `ValidatedChain`, `ChainLink`  |

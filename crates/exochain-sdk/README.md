@@ -297,16 +297,22 @@ EXOCHAIN ships three first-party SDKs that share the same model and wire
 format:
 
 - **Rust** (this crate) — `crates/exochain-sdk`. The reference
-  implementation; uses BLAKE3 for hashing.
+  implementation; uses BLAKE3 for hashing and local DID derivation.
 - **TypeScript** — `packages/exochain-sdk`, published as `@exochain/sdk`.
-  Uses SHA-256 because Web Crypto does not ship BLAKE3.
-- **Python** — `packages/exochain-py`, published as `exochain` on PyPI. Also
-  uses SHA-256 for parity with the browser SDK.
+  Uses BLAKE3 for local DID derivation via `@noble/hashes`.
+- **Python** — `packages/exochain-py`, published as `exochain` on PyPI.
+  Uses BLAKE3 for local DID derivation via the `blake3` package.
 
-DIDs derived locally by the Rust SDK will **not** match DIDs derived by the
-TypeScript or Python SDKs for the same keypair. Applications that need
-canonical DIDs across all three SDKs should resolve the DID from the fabric
-rather than deriving it locally.
+DIDs derived locally by the Rust, TypeScript, and Python SDKs match the shared
+canonical fixture vectors:
+
+```text
+did:exo: + first 16 hex chars of BLAKE3(public_key_bytes)
+```
+
+Applications that need externally resolved fabric DIDs should still use the
+`from_resolved_keypair` / `fromResolvedKeypair` constructors rather than
+re-deriving a local SDK DID.
 
 ## MCP server integration
 

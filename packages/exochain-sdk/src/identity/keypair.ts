@@ -6,17 +6,17 @@
  * public-key bytes as a local SDK DID:
  *
  * ```text
- * did:exo: + first 16 hex chars of SHA-256(public_key_bytes)
+ * did:exo: + first 16 hex chars of BLAKE3(public_key_bytes)
  * ```
  *
- * This local DID is deterministic inside the TypeScript SDK, but it is not a
- * canonical fabric DID. For applications that need cross-SDK DIDs, obtain the
- * DID from the fabric and pass it into {@link Identity.fromResolvedKeypair}.
+ * This matches the Rust and Python SDK derivation vectors. Use
+ * {@link Identity.fromResolvedKeypair} when a gateway or resolver has already
+ * bound the supplied public key to an externally resolved fabric DID.
  */
 
 import { IdentityError } from '../errors.js';
 import type { Did } from '../types.js';
-import { bytesToHex, hexToBytes, sha256 } from '../crypto/hash.js';
+import { blake3, bytesToHex, hexToBytes } from '../crypto/hash.js';
 import { validateDid } from './did.js';
 
 const ED25519: EcKeyImportParams = { name: 'Ed25519' } as unknown as EcKeyImportParams;
@@ -33,12 +33,12 @@ const subtle: SubtleCrypto = (() => {
 })();
 
 /**
- * Derive `did:exo:<first 16 hex chars of SHA-256(publicKey)>`.
+ * Derive `did:exo:<first 16 hex chars of BLAKE3(publicKey)>`.
  * Exported for advanced callers who need the same derivation without an
  * `Identity` instance.
  */
 export async function deriveDid(publicKey: Uint8Array): Promise<Did> {
-  const digest = await sha256(publicKey);
+  const digest = blake3(publicKey);
   const first8 = digest.slice(0, 8);
   const hex = bytesToHex(first8);
   return validateDid(`did:exo:${hex}`);

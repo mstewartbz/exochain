@@ -2,9 +2,48 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from exochain import Identity, IdentityError, is_did, validate_did
+from exochain.identity import keypair as identity_keypair
+
+
+def did_derivation_vectors() -> list[dict[str, str]]:
+    """Load the shared Rust/TypeScript/Python DID derivation vectors."""
+    fixture_path = (
+        Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "did-derivation.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    if not isinstance(fixture, dict):
+        raise AssertionError("DID derivation fixture must be a JSON object")
+    vectors = fixture.get("vectors")
+    if not isinstance(vectors, list):
+        raise AssertionError("DID derivation fixture must contain a vectors array")
+
+    parsed: list[dict[str, str]] = []
+    for vector in vectors:
+        if not isinstance(vector, dict):
+            raise AssertionError("DID derivation vector must be a JSON object")
+        name = vector.get("name")
+        public_key_hex = vector.get("public_key_hex")
+        expected_did = vector.get("expected_did")
+        if (
+            not isinstance(name, str)
+            or not isinstance(public_key_hex, str)
+            or not isinstance(expected_did, str)
+        ):
+            raise AssertionError("DID derivation vector fields must be strings")
+        parsed.append(
+            {
+                "name": name,
+                "public_key_hex": public_key_hex,
+                "expected_did": expected_did,
+            }
+        )
+    return parsed
 
 
 def test_generate_creates_valid_did() -> None:
@@ -15,8 +54,15 @@ def test_generate_creates_valid_did() -> None:
     assert identity.label == "alice"
     # Public key is 32 bytes Ed25519, hex-encoded = 64 chars.
     assert len(identity.public_key_hex) == 64
-    # Suffix after the "did:exo:" prefix is 16 hex chars (first 8 bytes of sha256).
+    # Suffix after the "did:exo:" prefix is 16 hex chars (first 8 bytes of BLAKE3).
     assert len(identity.did.removeprefix("did:exo:")) == 16
+
+
+def test_derive_did_matches_canonical_cross_language_vectors() -> None:
+    """Python DID derivation matches the canonical BLAKE3 fixture vectors."""
+    for vector in did_derivation_vectors():
+        did = identity_keypair.derive_did(bytes.fromhex(vector["public_key_hex"]))
+        assert did == vector["expected_did"], vector["name"]
 
 
 def test_sign_and_verify_roundtrip() -> None:

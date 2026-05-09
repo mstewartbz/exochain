@@ -6,7 +6,7 @@ verifiable identity (DID), consent (bailments), authority delegation, and
 governance primitives that enforce policy *before* action rather than auditing
 it after.
 
-This package is the pure-TypeScript, zero-runtime-dependency client. It exposes
+This package is the pure-TypeScript client. It exposes
 the same ergonomic builder surface as the Rust `exochain-sdk` crate and adds an
 HTTP client for talking to a running `exo-gateway`.
 
@@ -136,7 +136,7 @@ export:
 | `@exochain/sdk/consent`    | `BailmentBuilder`, `BailmentProposal`, `HlcTimestamp`  |
 | `@exochain/sdk/governance` | `Decision`, `DecisionBuilder`, `Vote`, `VoteChoice`    |
 | `@exochain/sdk/authority`  | `AuthorityChainBuilder`, `ChainLink`, `ValidatedChain` |
-| `@exochain/sdk/crypto`     | `sha256`, `sha256Hex`, `sha256Hash`, hex helpers       |
+| `@exochain/sdk/crypto`     | `blake3`, `blake3Hex`, `blake3Hash`, `sha256`, `sha256Hex`, `sha256Hash`, hex helpers |
 
 ## Branded types
 
@@ -218,19 +218,17 @@ format:
 - **TypeScript** (this package).
 - **Python** — `packages/exochain-py`, published as `exochain` on PyPI.
 
-Local TypeScript SDK identities derive DIDs as:
+Local TypeScript SDK identities derive DIDs the same way as Rust and Python:
 
 ```
-did:exo: + first 16 hex chars of SHA-256(raw public key bytes)
+did:exo: + first 16 hex chars of BLAKE3(raw public key bytes)
 ```
 
-because Web Crypto does not ship BLAKE3. **DIDs produced by local TypeScript
-derivation will not match local DIDs produced by the Rust SDK for the same
-keypair.** Applications that need canonical DIDs across SDKs should obtain the
-canonical DID from the fabric (via `exo-gateway` or another DID-document
-resolver) and construct the signing handle with `Identity.fromResolvedKeypair`.
-That constructor preserves the fabric DID and verifies that the private key
-matches the supplied public key before returning an identity.
+Applications that need to preserve a DID resolved by the fabric (via
+`exo-gateway` or another DID-document resolver) should construct the signing
+handle with `Identity.fromResolvedKeypair`. That constructor preserves the
+fabric DID and verifies that the private key matches the supplied public key
+before returning an identity.
 
 ```ts
 const identity = await Identity.fromResolvedKeypair({
@@ -241,10 +239,11 @@ const identity = await Identity.fromResolvedKeypair({
 });
 ```
 
-Bailment IDs, decision IDs, and chain identifiers are also hashed with
-SHA-256 in this SDK and BLAKE3 in Rust, for the same reason. All three SDKs
-agree on the *field layout* — so JSON round-trips work seamlessly — but not
-on the hash digest of the serialized fields.
+Bailment IDs, decision IDs, and chain identifiers are still hashed with
+SHA-256 in this SDK while Rust uses BLAKE3. All three SDKs agree on the
+*field layout* so JSON round-trips work seamlessly, but client-derived
+content IDs should be treated as language-local unless returned by the
+gateway.
 
 ## Errors
 
