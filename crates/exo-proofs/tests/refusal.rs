@@ -38,3 +38,32 @@ fn snark_verify_refuses_by_default() {
         Err(ProofError::UnauditedImplementation { .. })
     ));
 }
+
+#[test]
+fn zkml_daubert_admissibility_refuses_by_default() {
+    use exo_core::types::Hash256;
+    use exo_proofs::zkml::{DaubertAdmissibility, InferenceProof, ModelCommitment};
+
+    let proof = InferenceProof {
+        model_commitment: ModelCommitment::new(b"architecture", b"weights", 1),
+        input_hash: Hash256::digest(b"context"),
+        output_hash: Hash256::digest(b"output"),
+        proof: Hash256::ZERO,
+        verification_tag: Hash256::ZERO,
+        prompt_hash: None,
+        human_attestation: None,
+        ai_delta: None,
+        daubert_checklist: None,
+    };
+
+    let status = proof.daubert_admissibility_status();
+
+    assert!(
+        matches!(
+            status,
+            DaubertAdmissibility::Inadmissible { ref reason }
+                if reason.contains("unaudited-pedagogical-proofs")
+        ),
+        "Daubert status must fail closed when unaudited proof APIs are disabled, got {status:?}"
+    );
+}
