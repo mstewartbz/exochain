@@ -29,6 +29,7 @@ assert_lacks() {
 assert_contains AGENTS.md "### Agent Prompt and Workflow Intake"
 assert_contains AGENTS.md 'raw `\$ARGUMENTS`'
 assert_contains AGENTS.md "BEGIN_UNTRUSTED_USER_ARGUMENTS"
+assert_contains AGENTS.md "BEGIN_UNTRUSTED_WORKFLOW_NODE_OUTPUTS"
 
 argument_files=()
 while IFS= read -r file; do
@@ -51,6 +52,56 @@ for file in "${argument_files[@]}"; do
   fi
 
   assert_lacks "$file" 'in \$ARGUMENTS|from \$ARGUMENTS|described in \$ARGUMENTS|provided in \$ARGUMENTS|requirement in \$ARGUMENTS|request\*\*: \$ARGUMENTS'
+done
+
+assert_workflow_node_outputs_bounded() {
+  local file=$1
+  local in_node_output_boundary=0
+  local line_no=0
+  local line
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_no=$((line_no + 1))
+
+    if [[ "$line" == *BEGIN_UNTRUSTED_WORKFLOW_NODE_OUTPUTS* ]]; then
+      in_node_output_boundary=1
+      continue
+    fi
+    if [[ "$line" == *END_UNTRUSTED_WORKFLOW_NODE_OUTPUTS* ]]; then
+      if ((!in_node_output_boundary)); then
+        fail "$file:$line_no closes an untrusted workflow node output boundary that was not open"
+      fi
+      in_node_output_boundary=0
+      continue
+    fi
+
+    if [[ "$line" =~ \$[A-Za-z_][A-Za-z0-9_]*\.output ]]; then
+      if ((in_node_output_boundary)); then
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*when:[[:space:]]*\"\$[A-Za-z_][A-Za-z0-9_]*\.output ]]; then
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*\"\$[A-Za-z_][A-Za-z0-9_]*\.output ]]; then
+        continue
+      fi
+
+      fail "$file:$line_no interpolates workflow node output outside BEGIN_UNTRUSTED_WORKFLOW_NODE_OUTPUTS/END_UNTRUSTED_WORKFLOW_NODE_OUTPUTS: $line"
+    fi
+  done < "$file"
+
+  if ((in_node_output_boundary)); then
+    fail "$file has an unclosed BEGIN_UNTRUSTED_WORKFLOW_NODE_OUTPUTS boundary"
+  fi
+}
+
+workflow_output_files=()
+while IFS= read -r file; do
+  workflow_output_files+=("$file")
+done < <(git grep -El '\$[A-Za-z_][A-Za-z0-9_]*\.output' -- .archon/workflows || true)
+
+for file in "${workflow_output_files[@]}"; do
+  assert_workflow_node_outputs_bounded "$file"
 done
 
 echo "agent prompt boundary test passed"
