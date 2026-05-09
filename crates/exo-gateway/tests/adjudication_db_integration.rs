@@ -26,7 +26,7 @@ use exo_gatekeeper::{
     invariants::{ConstitutionalInvariant, InvariantSet},
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Role, TrustedAuthorityKeys,
+        PermissionSet, Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
 use exo_gateway::server::AppState;
@@ -131,6 +131,7 @@ fn full_db_context(actor: &Did) -> AdjudicationContext {
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
         trusted_authority_keys,
+        trusted_provenance_keys: TrustedProvenanceKeys::default(),
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,
@@ -282,6 +283,7 @@ fn revoked_consent_denies() {
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
         trusted_authority_keys,
+        trusted_provenance_keys: TrustedProvenanceKeys::default(),
         provenance: None,
         quorum_evidence: None,
         active_challenge_reason: None,

@@ -51,7 +51,7 @@ use exo_gatekeeper::{
     provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
 use serde::Serialize;
@@ -411,6 +411,11 @@ pub fn build_holon_adjudication_context(
             trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
         }
     }
+    let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+    trusted_provenance_keys.insert(
+        holon.id.clone(),
+        vec![config.root_public_key.as_bytes().to_vec()],
+    );
     Ok(AdjudicationContext {
         actor_roles: vec![Role {
             name: "worker".into(),
@@ -431,6 +436,7 @@ pub fn build_holon_adjudication_context(
         human_override_preserved: true,
         actor_permissions: holon.capabilities.clone(),
         trusted_authority_keys,
+        trusted_provenance_keys,
         provenance: Some(signed_provenance(holon, config, provenance_timestamp)?),
         quorum_evidence: None,
         active_challenge_reason: None,

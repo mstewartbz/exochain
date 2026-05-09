@@ -19,6 +19,7 @@ mod nist_compliance {
         types::{
             AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch,
             Permission, PermissionSet, Provenance, Role, TrustedAuthorityKeys,
+            TrustedProvenanceKeys,
         },
     };
     use exo_governance::audit::{self as gov_audit, AuditLog};
@@ -187,7 +188,7 @@ mod nist_compliance {
         link
     }
 
-    fn signed_provenance(actor: &Did) -> Provenance {
+    fn signed_provenance(actor: &Did) -> (Provenance, exo_core::PublicKey) {
         let (public_key, secret_key) = exo_core::crypto::generate_keypair();
         let timestamp = "2026-03-20T00:00:00Z".to_owned();
         let action_hash = vec![1, 2, 3];
@@ -206,7 +207,7 @@ mod nist_compliance {
             provenance_signature_message(&provenance).expect("canonical provenance payload");
         let signature = exo_core::crypto::sign(message.as_bytes(), &secret_key);
         provenance.signature = signature.to_bytes().to_vec();
-        provenance
+        (provenance, public_key)
     }
 
     /// Build a passing InvariantContext matching the pattern in invariants.rs tests.
@@ -221,6 +222,12 @@ mod nist_compliance {
                 trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
             }
         }
+        let (provenance, provenance_public_key) = signed_provenance(actor);
+        let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+        trusted_provenance_keys.insert(
+            actor.clone(),
+            vec![provenance_public_key.as_bytes().to_vec()],
+        );
         InvariantContext {
             actor: actor.clone(),
             actor_roles: vec![Role {
@@ -243,10 +250,11 @@ mod nist_compliance {
             human_override_preserved: true,
             kernel_modification_attempted: false,
             quorum_evidence: None,
-            provenance: Some(signed_provenance(actor)),
+            provenance: Some(provenance),
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             requested_permissions: PermissionSet::default(),
             trusted_authority_keys,
+            trusted_provenance_keys,
         }
     }
 

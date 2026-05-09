@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, PermissionSet,
-    Provenance, QuorumEvidence, Role, TrustedAuthorityKeys,
+    Provenance, QuorumEvidence, Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +101,7 @@ pub struct InvariantContext {
     pub actor_permissions: PermissionSet,
     pub requested_permissions: PermissionSet,
     pub trusted_authority_keys: TrustedAuthorityKeys,
+    pub trusted_provenance_keys: TrustedProvenanceKeys,
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +565,24 @@ fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantVi
                         description: "Provenance public_key is not 32 bytes".into(),
                         evidence: vec![format!("key_len: {}", pk_bytes.len())],
                     })?;
+            let trusted_keys = ctx
+                .trusted_provenance_keys
+                .get(&prov.actor)
+                .ok_or_else(|| InvariantViolation {
+                    invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                    description: "Provenance public_key is unresolved for actor DID".into(),
+                    evidence: vec![format!("actor: {}", prov.actor)],
+                })?;
+            if !trusted_keys
+                .iter()
+                .any(|trusted_key| trusted_key.as_slice() == pk_bytes.as_slice())
+            {
+                return Err(InvariantViolation {
+                    invariant: ConstitutionalInvariant::ProvenanceVerifiable,
+                    description: "Provenance public_key is not bound to actor DID".into(),
+                    evidence: vec![format!("actor: {}", prov.actor)],
+                });
+            }
             let sig_arr: [u8; 64] =
                 prov.signature
                     .as_slice()
@@ -658,11 +677,16 @@ mod tests {
     fn passing_context() -> InvariantContext {
         let actor = did("did:exo:actor1");
         let (authority_link, authority_public_key) = signed_link("did:exo:root", actor.as_str());
-        let (provenance, _, _) = signed_provenance(actor.as_str());
+        let (provenance, provenance_public_key, _) = signed_provenance(actor.as_str());
         let mut trusted_authority_keys = TrustedAuthorityKeys::default();
         trusted_authority_keys.insert(
             authority_link.grantor.clone(),
             vec![authority_public_key.as_bytes().to_vec()],
+        );
+        let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+        trusted_provenance_keys.insert(
+            actor.clone(),
+            vec![provenance_public_key.as_bytes().to_vec()],
         );
         InvariantContext {
             actor: actor.clone(),
@@ -692,6 +716,7 @@ mod tests {
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             requested_permissions: PermissionSet::default(),
             trusted_authority_keys,
+            trusted_provenance_keys,
         }
     }
 
@@ -1461,6 +1486,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provenance_validation_requires_trusted_actor_key_resolution() {
+        let source = production_source();
+        let checker = source
+            .split("fn check_provenance_verifiable")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("pub fn authority_link_signature_message")
+                    .next()
+            })
+            .expect("provenance invariant checker must exist");
+        let compact_checker = checker
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+
+        assert!(
+            compact_checker.contains("ctx.trusted_provenance_keys"),
+            "ProvenanceVerifiable must consult runtime-resolved trusted actor keys"
+        );
+        assert!(
+            checker.contains("public_key is unresolved for actor DID"),
+            "ProvenanceVerifiable must fail closed when the actor DID has no resolved key"
+        );
+        assert!(
+            checker.contains("public_key is not bound to actor DID"),
+            "ProvenanceVerifiable must reject self-attested keys not bound to the actor DID"
+        );
+        assert!(
+            compact_checker.find("ctx.trusted_provenance_keys").unwrap()
+                < compact_checker.find("exo_core::crypto::verify").unwrap(),
+            "actor key binding must be checked before accepting the Ed25519 signature"
+        );
+    }
+
     fn signed_provenance(
         actor_str: &str,
     ) -> (Provenance, exo_core::PublicKey, exo_core::SecretKey) {
@@ -1484,15 +1545,57 @@ mod tests {
         (prov, pk, sk)
     }
 
+    fn trust_provenance_key(
+        ctx: &mut InvariantContext,
+        actor: Did,
+        public_key: &exo_core::PublicKey,
+    ) {
+        ctx.trusted_provenance_keys = TrustedProvenanceKeys::default();
+        ctx.trusted_provenance_keys
+            .insert(actor, vec![public_key.as_bytes().to_vec()]);
+    }
+
     #[test]
     fn provenance_passes_valid_ed25519_signature() {
         let engine = InvariantEngine::new(InvariantSet::with(vec![
             ConstitutionalInvariant::ProvenanceVerifiable,
         ]));
         let mut ctx = passing_context();
-        let (prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        let (prov, pk, _sk) = signed_provenance("did:exo:actor1");
+        trust_provenance_key(&mut ctx, prov.actor.clone(), &pk);
         ctx.provenance = Some(prov);
         assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn provenance_rejects_unresolved_actor_public_key() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        ctx.provenance = Some(prov);
+        ctx.trusted_provenance_keys = TrustedProvenanceKeys::default();
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("unresolved for actor DID"));
+    }
+
+    #[test]
+    fn provenance_rejects_actor_public_key_not_bound_to_actor_did() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ProvenanceVerifiable,
+        ]));
+        let mut ctx = passing_context();
+        let (prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        let (other_pk, _) = exo_core::crypto::generate_keypair();
+        ctx.provenance = Some(prov);
+        ctx.trusted_provenance_keys = TrustedProvenanceKeys::default();
+        ctx.trusted_provenance_keys
+            .insert(ctx.actor.clone(), vec![other_pk.as_bytes().to_vec()]);
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(err[0].description.contains("not bound to actor DID"));
     }
 
     #[test]
@@ -1501,7 +1604,8 @@ mod tests {
             ConstitutionalInvariant::ProvenanceVerifiable,
         ]));
         let mut ctx = passing_context();
-        let (mut prov, _pk, _sk) = signed_provenance("did:exo:actor1");
+        let (mut prov, pk, _sk) = signed_provenance("did:exo:actor1");
+        trust_provenance_key(&mut ctx, prov.actor.clone(), &pk);
         prov.signature[0] ^= 0xFF; // corrupt
         ctx.provenance = Some(prov);
         let err = enforce_all(&engine, &ctx).unwrap_err();
@@ -1517,6 +1621,7 @@ mod tests {
         let (mut prov, _pk, _sk) = signed_provenance("did:exo:actor1");
         let (other_pk, _) = exo_core::crypto::generate_keypair();
         prov.public_key = Some(other_pk.as_bytes().to_vec());
+        trust_provenance_key(&mut ctx, prov.actor.clone(), &other_pk);
         ctx.provenance = Some(prov);
         let err = enforce_all(&engine, &ctx).unwrap_err();
         assert!(err[0].description.contains("cryptographically invalid"));
@@ -1549,6 +1654,8 @@ mod tests {
         ]));
         let mut ctx = passing_context();
         let (pk, _sk) = exo_core::crypto::generate_keypair();
+        let actor = ctx.actor.clone();
+        trust_provenance_key(&mut ctx, actor, &pk);
         ctx.provenance = Some(Provenance {
             actor: ctx.actor.clone(),
             timestamp: "t".into(),
@@ -1571,6 +1678,7 @@ mod tests {
         let mut ctx = passing_context();
         let (pk, sk) = exo_core::crypto::generate_keypair();
         let actor = ctx.actor.clone();
+        trust_provenance_key(&mut ctx, actor.clone(), &pk);
         let action_hash = vec![0xde, 0xad, 0xbe, 0xef];
         let timestamp = "2026-01-01T00:00:00Z".to_string();
         let mut payload = Vec::new();
