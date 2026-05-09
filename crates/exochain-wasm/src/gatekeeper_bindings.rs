@@ -106,6 +106,7 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         authority_link_signature_message, provenance_signature_message,
         types::{
             AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, PermissionSet, Provenance,
+            TrustedAuthorityKeys,
         },
     };
 
@@ -124,7 +125,7 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         .map_err(|_| gatekeeper_boundary_error("validation invariant grantor DID failed"))?;
     let permissions = PermissionSet::default();
     let mut authority_link = AuthorityLink {
-        grantor,
+        grantor: grantor.clone(),
         grantee: actor.clone(),
         permissions: permissions.clone(),
         signature: Vec::new(),
@@ -153,6 +154,11 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         .sign(provenance_message.as_bytes())
         .to_bytes()
         .to_vec();
+    let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+    trusted_authority_keys.insert(
+        grantor,
+        vec![authority_keypair.public_key().as_bytes().to_vec()],
+    );
 
     to_js_value(&serde_json::json!({
         "actor": actor,
@@ -181,6 +187,7 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         "provenance": provenance,
         "actor_permissions": permissions,
         "requested_permissions": PermissionSet::default(),
+        "trusted_authority_keys": trusted_authority_keys,
     }))
 }
 
@@ -460,5 +467,26 @@ mod tests {
 
         assert!(!production.contains("format!(\"{r:?}\")"));
         assert!(production.contains("\"rule\": r.id()"));
+    }
+
+    #[test]
+    fn validation_invariant_request_includes_trusted_authority_keys() {
+        let source = include_str!("gatekeeper_bindings.rs");
+        let validation_fixture = source
+            .split("pub fn wasm_validation_invariant_request")
+            .nth(1)
+            .expect("validation fixture is present")
+            .split("pub fn wasm_spawn_holon")
+            .next()
+            .expect("validation fixture body is bounded");
+
+        assert!(
+            validation_fixture.contains("TrustedAuthorityKeys"),
+            "validation invariant fixture must construct a trusted authority key map"
+        );
+        assert!(
+            validation_fixture.contains("\"trusted_authority_keys\""),
+            "validation invariant fixture must emit trusted authority keys for bridge verification"
+        );
     }
 }

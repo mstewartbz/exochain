@@ -1869,6 +1869,7 @@ test('wasm_transition_decision_adjudicated', () => {
       bailment_state: 'None',
       human_override_preserved: true,
       actor_permissions: { permissions: [transitionPermission] },
+      trusted_authority_keys: {},
       provenance: null,
       quorum_evidence: null,
       active_challenge_reason: null
