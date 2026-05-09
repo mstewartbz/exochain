@@ -2,6 +2,17 @@
 //!
 //! Tolerates f < n/3 Byzantine validators. Nodes are finalized when a
 //! commit certificate gathers >2/3 validator votes.
+//!
+//! ## Liveness assumptions
+//!
+//! This module implements deterministic commit-certificate formation over an
+//! explicit validator set. It does not implement leader election or view-change.
+//! Progress is conditional on eventual delivery of proposals and votes, at
+//! least a quorum of online validators, valid validator public-key resolution,
+//! and an outer reactor advancing rounds on the configured timeout. Under a
+//! permanent partition, insufficient online validators, or missing validator
+//! keys, the protocol preserves safety by refusing commitment rather than
+//! guaranteeing progress.
 
 use std::collections::{BTreeMap, BTreeSet};
 
