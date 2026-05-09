@@ -3,16 +3,27 @@
 //! Computes the Jaccard-like overlap between two signal hash maps and produces
 //! a consistency score in basis points (0–10_000 = 0%–100%).
 //!
-//! The composite hash is BLAKE3 of all signal hashes concatenated in
-//! deterministic (sorted) key order.
+//! The composite hash is a canonical CBOR hash of the signal-kind to signal-hash
+//! map in deterministic (sorted) key order.
 //!
 //! Spec reference: §3.1.
 
 use std::collections::BTreeMap;
 
-use exo_core::types::Hash256;
+use exo_core::{hash::hash_structured, types::Hash256};
+use serde::Serialize;
 
 use super::types::{DeviceFingerprint, FingerprintSignal};
+
+const FINGERPRINT_COMPOSITE_HASH_DOMAIN: &str = "exo.node.zerodentity.fingerprint.v1";
+const FINGERPRINT_COMPOSITE_HASH_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Serialize)]
+struct FingerprintCompositeHashPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    signal_hashes: &'a BTreeMap<FingerprintSignal, Hash256>,
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -20,16 +31,19 @@ use super::types::{DeviceFingerprint, FingerprintSignal};
 
 /// Compute the composite BLAKE3 hash from a set of signal hashes.
 ///
-/// Signal hashes are fed to BLAKE3 in sorted key order (BTreeMap iteration)
-/// to guarantee determinism.
+/// Signal kinds and their hashes are encoded through canonical CBOR in sorted
+/// key order (`BTreeMap` iteration) to guarantee determinism and prevent
+/// rebinding the same values to different signal kinds.
 #[allow(dead_code)]
-pub fn compute_composite_hash(signal_hashes: &BTreeMap<FingerprintSignal, Hash256>) -> Hash256 {
-    let mut hasher = blake3::Hasher::new();
-    // BTreeMap guarantees sorted iteration — deterministic
-    for hash in signal_hashes.values() {
-        hasher.update(hash.as_bytes());
-    }
-    Hash256::from_bytes(*hasher.finalize().as_bytes())
+pub fn compute_composite_hash(
+    signal_hashes: &BTreeMap<FingerprintSignal, Hash256>,
+) -> anyhow::Result<Hash256> {
+    hash_structured(&FingerprintCompositeHashPayload {
+        domain: FINGERPRINT_COMPOSITE_HASH_DOMAIN,
+        schema_version: FINGERPRINT_COMPOSITE_HASH_SCHEMA_VERSION,
+        signal_hashes,
+    })
+    .map_err(|e| anyhow::anyhow!("fingerprint composite hash canonical encoding failed: {e}"))
 }
 
 /// Compute the consistency score between a previous fingerprint and new signal hashes.
@@ -86,16 +100,16 @@ pub fn build_fingerprint(
     signal_hashes: BTreeMap<FingerprintSignal, Hash256>,
     previous: Option<&DeviceFingerprint>,
     captured_ms: u64,
-) -> DeviceFingerprint {
-    let composite_hash = compute_composite_hash(&signal_hashes);
+) -> anyhow::Result<DeviceFingerprint> {
+    let composite_hash = compute_composite_hash(&signal_hashes)?;
     let consistency_score_bp = previous.map(|prev| compute_consistency(prev, &signal_hashes));
 
-    DeviceFingerprint {
+    Ok(DeviceFingerprint {
         composite_hash,
         signal_hashes,
         captured_ms,
         consistency_score_bp,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -121,12 +135,16 @@ mod tests {
         }
     }
 
+    fn composite(signal_hashes: &BTreeMap<FingerprintSignal, Hash256>) -> Hash256 {
+        compute_composite_hash(signal_hashes).expect("canonical fingerprint composite hash")
+    }
+
     fn fp(signals: Vec<(&str, &[u8])>) -> DeviceFingerprint {
         let mut map = BTreeMap::new();
         for (name, data) in signals {
             map.insert(sig(name), hash(data));
         }
-        let composite = compute_composite_hash(&map);
+        let composite = composite(&map);
         DeviceFingerprint {
             composite_hash: composite,
             signal_hashes: map,
@@ -210,7 +228,24 @@ mod tests {
         m2.insert(sig("UserAgent"), hash(b"b"));
         m2.insert(sig("Canvas"), hash(b"a"));
 
-        assert_eq!(compute_composite_hash(&m1), compute_composite_hash(&m2));
+        assert_eq!(composite(&m1), composite(&m2));
+    }
+
+    #[test]
+    fn composite_hash_binds_signal_kind_to_hash_value() {
+        let mut browser_signals = BTreeMap::new();
+        browser_signals.insert(FingerprintSignal::AudioContext, hash(b"first"));
+        browser_signals.insert(FingerprintSignal::BatteryStatus, hash(b"second"));
+
+        let mut environment_signals = BTreeMap::new();
+        environment_signals.insert(FingerprintSignal::CanvasRendering, hash(b"first"));
+        environment_signals.insert(FingerprintSignal::ColorDepthDPR, hash(b"second"));
+
+        assert_ne!(
+            composite(&browser_signals),
+            composite(&environment_signals),
+            "composite hashes must bind the signal kind, not only the ordered signal hashes"
+        );
     }
 
     #[test]
@@ -219,7 +254,7 @@ mod tests {
         m1.insert(sig("Canvas"), hash(b"a"));
         let mut m2 = BTreeMap::new();
         m2.insert(sig("Canvas"), hash(b"b"));
-        assert_ne!(compute_composite_hash(&m1), compute_composite_hash(&m2));
+        assert_ne!(composite(&m1), composite(&m2));
     }
 
     // ---- build_fingerprint ----
@@ -228,7 +263,7 @@ mod tests {
     fn build_fingerprint_first_session_no_consistency() {
         let mut signals = BTreeMap::new();
         signals.insert(sig("Canvas"), hash(b"canvas-data"));
-        let fp = build_fingerprint(signals, None, 1_000_000);
+        let fp = build_fingerprint(signals, None, 1_000_000).expect("canonical fingerprint build");
         assert!(
             fp.consistency_score_bp.is_none(),
             "first session has no consistency"
@@ -242,8 +277,10 @@ mod tests {
             m.insert(sig("Canvas"), hash(b"same"));
             m
         };
-        let first = build_fingerprint(signals.clone(), None, 1_000);
-        let second = build_fingerprint(signals, Some(&first), 2_000);
+        let first =
+            build_fingerprint(signals.clone(), None, 1_000).expect("first canonical fingerprint");
+        let second =
+            build_fingerprint(signals, Some(&first), 2_000).expect("second canonical fingerprint");
         assert_eq!(second.consistency_score_bp, Some(10_000));
     }
 }
