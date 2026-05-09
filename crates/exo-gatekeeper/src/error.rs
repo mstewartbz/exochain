@@ -20,6 +20,9 @@ pub enum GatekeeperError {
     #[error("MCP violation: {0}")]
     McpViolation(String),
 
+    #[error("MCP typed signature payload encoding failed: {reason}")]
+    McpTypedSignatureEncodingFailed { reason: String },
+
     #[error("TEE attestation failed: {0}")]
     TeeError(String),
 
@@ -69,6 +72,12 @@ mod tests {
             (GatekeeperError::CombinatorError("fail".into()), "fail"),
             (GatekeeperError::HolonError("holon".into()), "holon"),
             (GatekeeperError::McpViolation("mcp".into()), "mcp"),
+            (
+                GatekeeperError::McpTypedSignatureEncodingFailed {
+                    reason: "canonical CBOR failed".into(),
+                },
+                "canonical CBOR failed",
+            ),
             (GatekeeperError::TeeError("tee".into()), "tee"),
             (GatekeeperError::CapabilityDenied("cap".into()), "cap"),
             (GatekeeperError::Timeout(500), "500"),
