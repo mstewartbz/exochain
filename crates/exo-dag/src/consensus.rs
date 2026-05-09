@@ -358,6 +358,7 @@ pub fn check_commit(state: &ConsensusState, node_hash: &Hash256) -> Option<Commi
                         && state.config.validators.contains(&vote.voter)
                         && seen_voters.insert(vote.voter.clone())
                 })
+                .take(quorum)
                 .cloned()
                 .collect();
 
@@ -1458,6 +1459,36 @@ mod tests {
         assert_eq!(cert.votes.len(), 3);
         let distinct: BTreeSet<_> = cert.votes.iter().map(|vote| vote.voter.clone()).collect();
         assert_eq!(distinct.len(), 3);
+    }
+
+    #[test]
+    fn check_commit_certificate_clones_only_quorum_votes() {
+        let validators = make_validators(7);
+        let config = ConsensusConfig::new(validators.clone(), 1000);
+        let quorum = config.quorum_size();
+        let mut state = ConsensusState::new(config);
+        let (_dag, node) = setup_dag_with_node();
+        let v: Vec<Did> = validators.iter().cloned().collect();
+
+        state
+            .pending
+            .entry(0)
+            .or_default()
+            .entry(node.hash)
+            .or_default()
+            .extend(
+                v.iter()
+                    .map(|validator| make_vote(validator, 0, &node.hash)),
+            );
+
+        let cert = check_commit(&state, &node.hash).expect("over-quorum votes commit");
+        assert_eq!(
+            cert.votes.len(),
+            quorum,
+            "commit certificates must carry only the quorum required for verification"
+        );
+        let distinct: BTreeSet<_> = cert.votes.iter().map(|vote| vote.voter.clone()).collect();
+        assert_eq!(distinct.len(), quorum);
     }
 
     // Covers propose_verified line 375: proposer not in validator set.
