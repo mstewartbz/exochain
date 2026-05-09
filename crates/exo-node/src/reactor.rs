@@ -1016,14 +1016,16 @@ async fn handle_commit(
                 return Ok(None);
             }
 
-            // Apply the commit certificate after verifying every certificate vote.
+            // Verify on a clone first; durable receipt persistence must succeed
+            // before the live consensus state is advanced.
             let round = cert.round;
             let hash = cert.node_hash;
             let resolver = s.validator_public_keys.clone();
-            consensus::commit_verified(&mut s.consensus, cert.clone(), &resolver)
+            let mut preview = s.consensus.clone();
+            consensus::commit_verified(&mut preview, cert.clone(), &resolver)
                 .map_err(|e| format!("invalid commit certificate: {e}"))?;
 
-            let height = checked_committed_height(s.consensus.committed.len())?;
+            let height = checked_committed_height(preview.committed.len())?;
             Ok(Some((cert, (hash, height, round))))
         })
         .await
@@ -1040,19 +1042,7 @@ async fn handle_commit(
 
     let (hash, height, round) = commit_info;
 
-    // Mark committed in the persistent store.
-    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_commit_mark", move |store| {
-        store
-            .mark_committed_sync(&hash, height)
-            .map_err(|e| format!("mark committed {hash} at height {height}: {e}"))
-    })
-    .await
-    {
-        tracing::warn!(err = %e, "Failed to mark committed in store");
-        return;
-    }
-
-    // Emit a trust receipt for the network-received commit.
+    // Build and persist the trust receipt before advancing live consensus state.
     let receipt = match commit_receipt_from_certificate(state, store, &cert).await {
         Ok(receipt) => receipt,
         Err(e) => {
@@ -1060,17 +1050,46 @@ async fn handle_commit(
             return;
         }
     };
-    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_commit_save_receipt", {
+    if let Err(e) = with_store_blocking(Arc::clone(store), "handle_commit_persist", {
         let receipt = receipt.clone();
         move |store| {
             store
-                .save_receipt(&receipt)
-                .map_err(|e| format!("save network commit receipt: {e}"))
+                .mark_committed_with_receipt_sync(&hash, height, &receipt)
+                .map_err(|e| {
+                    format!(
+                        "persist network commit marker and receipt for {hash} at height {height}: {e}"
+                    )
+                })
         }
     })
     .await
     {
-        tracing::warn!(err = %e, "Failed to persist trust receipt for network commit");
+        tracing::warn!(err = %e, "Failed to persist network commit state");
+        return;
+    }
+
+    let cert_for_commit = cert.clone();
+    if let Err(e) =
+        with_reactor_state_blocking(Arc::clone(state), "handle_commit_apply", move |s| {
+            if !consensus::is_finalized(&s.consensus, &hash) {
+                let resolver = s.validator_public_keys.clone();
+                consensus::commit_verified(&mut s.consensus, cert_for_commit, &resolver)
+                    .map_err(|e| format!("apply persisted network commit certificate: {e}"))?;
+            }
+            checked_committed_height(s.consensus.committed.len()).and_then(|actual_height| {
+                if actual_height == height {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "persisted network commit height {height} does not match consensus height {actual_height}"
+                    ))
+                }
+            })
+        })
+        .await
+    {
+        tracing::warn!(err = %e, "Failed to apply persisted network commit certificate");
+        return;
     }
 
     tracing::info!(
@@ -1122,14 +1141,15 @@ async fn check_and_commit(
         let cert_for_commit = cert.clone();
         let height = match with_reactor_state_blocking(
             Arc::clone(state),
-            "check_and_commit_commit",
+            "check_and_commit_preview",
             move |s| {
-                if !consensus::is_finalized(&s.consensus, &hash) {
+                let mut preview = s.consensus.clone();
+                if !consensus::is_finalized(&preview, &hash) {
                     let resolver = s.validator_public_keys.clone();
-                    consensus::commit_verified(&mut s.consensus, cert_for_commit, &resolver)
+                    consensus::commit_verified(&mut preview, cert_for_commit, &resolver)
                         .map_err(|e| format!("verify local commit certificate: {e}"))?;
                 }
-                checked_committed_height(s.consensus.committed.len())
+                checked_committed_height(preview.committed.len())
             },
         )
         .await
@@ -1141,16 +1161,25 @@ async fn check_and_commit(
             }
         };
 
-        // Persist to store.
+        // Build and persist the trust receipt before advancing live consensus state.
+        let receipt = match commit_receipt_from_certificate(state, store, &cert).await {
+            Ok(receipt) => receipt,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to build trust receipt for commit");
+                return;
+            }
+        };
         if let Err(e) = with_store_blocking(Arc::clone(store), "check_and_commit_persist", {
+            let receipt = receipt.clone();
             let cert = cert.clone();
             move |store| {
                 store
-                    .mark_committed_sync(&hash, height)
-                    .map_err(|e| format!("mark committed {hash} at height {height}: {e}"))?;
-                store
-                    .save_certificate(&cert)
-                    .map_err(|e| format!("persist certificate for {hash}: {e}"))
+                    .persist_commit_certificate_with_receipt_sync(&hash, height, &cert, &receipt)
+                    .map_err(|e| {
+                        format!(
+                            "persist local commit certificate and receipt for {hash} at height {height}: {e}"
+                        )
+                    })
             }
         })
         .await
@@ -1159,25 +1188,28 @@ async fn check_and_commit(
             return;
         }
 
-        // Emit a trust receipt recording the commit action.
-        let receipt = match commit_receipt_from_certificate(state, store, &cert).await {
-            Ok(receipt) => receipt,
-            Err(e) => {
-                tracing::warn!(err = %e, "Failed to build trust receipt for commit");
-                return;
-            }
-        };
-        if let Err(e) = with_store_blocking(Arc::clone(store), "check_and_commit_save_receipt", {
-            let receipt = receipt.clone();
-            move |store| {
-                store
-                    .save_receipt(&receipt)
-                    .map_err(|e| format!("save local commit receipt: {e}"))
-            }
-        })
-        .await
+        let cert_for_commit = cert.clone();
+        if let Err(e) =
+            with_reactor_state_blocking(Arc::clone(state), "check_and_commit_apply", move |s| {
+                if !consensus::is_finalized(&s.consensus, &hash) {
+                    let resolver = s.validator_public_keys.clone();
+                    consensus::commit_verified(&mut s.consensus, cert_for_commit, &resolver)
+                        .map_err(|e| format!("apply persisted local commit certificate: {e}"))?;
+                }
+                checked_committed_height(s.consensus.committed.len()).and_then(|actual_height| {
+                    if actual_height == height {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "persisted local commit height {height} does not match consensus height {actual_height}"
+                        ))
+                    }
+                })
+            })
+            .await
         {
-            tracing::warn!(err = %e, "Failed to persist trust receipt for commit");
+            tracing::warn!(err = %e, "Failed to apply persisted local commit certificate");
+            return;
         }
 
         tracing::info!(%hash, height, round, "Node committed — quorum reached");
@@ -1460,6 +1492,14 @@ mod tests {
         )
     }
 
+    fn single_validator_certificate(node_hash: Hash256, voter: &Did) -> CommitCertificate {
+        CommitCertificate {
+            node_hash,
+            round: 0,
+            votes: vec![vote_for(voter, 0, 0, node_hash)],
+        }
+    }
+
     fn proposal_msg_for(
         proposer: Did,
         proposer_index: usize,
@@ -1635,6 +1675,55 @@ mod tests {
             production.contains("checked_committed_height"),
             "reactor commit paths must route height conversion through the checked helper"
         );
+    }
+
+    #[test]
+    fn reactor_commit_paths_persist_receipts_atomically_with_commit_state() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+        let handle_commit_body = production
+            .split("async fn handle_commit")
+            .nth(1)
+            .expect("handle_commit present")
+            .split("/// Check if a node has reached quorum")
+            .next()
+            .expect("handle_commit body present");
+        let check_and_commit_body = production
+            .split("async fn check_and_commit")
+            .nth(1)
+            .expect("check_and_commit present")
+            .split("// ---------------------------------------------------------------------------\n// Proposal submission")
+            .next()
+            .expect("check_and_commit body present");
+
+        for (name, body, atomic_call) in [
+            (
+                "handle_commit",
+                handle_commit_body,
+                "mark_committed_with_receipt_sync",
+            ),
+            (
+                "check_and_commit",
+                check_and_commit_body,
+                "persist_commit_certificate_with_receipt_sync",
+            ),
+        ] {
+            assert!(
+                body.contains(atomic_call),
+                "{name} must use the atomic commit/receipt persistence helper"
+            );
+            assert!(
+                !body.contains(".mark_committed_sync("),
+                "{name} must not persist a commit marker separately from its receipt"
+            );
+            assert!(
+                !body.contains(".save_receipt(&receipt)"),
+                "{name} must not persist commit receipts separately from commit state"
+            );
+        }
     }
 
     #[test]
@@ -2012,6 +2101,248 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("not found for trust receipt"));
+    }
+
+    #[tokio::test]
+    async fn local_commit_does_not_advance_without_persisted_trust_receipt() {
+        let validators = make_single_validator();
+        let node_did = Did::new("did:exo:v0").unwrap();
+        let config = config_for(node_did.clone(), true, validators);
+        let state = create_reactor_state(&config, Arc::new(|_| Signature::empty()), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let valid_sign_fn = make_sign_fn();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"must-not-commit-without-receipt",
+            &node_did,
+            &*valid_sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        let node_hash = node.hash;
+
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: node_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &node_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .unwrap();
+            consensus::vote_verified(
+                &mut s.consensus,
+                vote_for(&node_did, 0, 0, node.hash),
+                &resolver,
+            )
+            .unwrap();
+            assert!(
+                consensus::check_commit(&s.consensus, &node.hash).is_some(),
+                "test setup must form a valid quorum certificate before exercising the receipt boundary"
+            );
+        }
+
+        check_and_commit(&state, &store, &net_handle, &reactor_tx, &node_hash).await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "commit event must not be emitted when the trust receipt cannot be persisted"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                !consensus::is_finalized(&s.consensus, &node.hash),
+                "consensus state must not finalize a node without a durable trust receipt"
+            );
+            assert!(
+                s.consensus.committed.is_empty(),
+                "commit order must not advance without a durable trust receipt"
+            );
+        }
+        {
+            let st = store.lock().unwrap();
+            assert!(
+                !st.is_committed(&node.hash).unwrap(),
+                "store commit marker must roll back when receipt persistence rejects the signature"
+            );
+            assert!(
+                st.load_receipts_by_actor("did:exo:v0", 10)
+                    .unwrap()
+                    .is_empty(),
+                "failed receipt persistence must not leave a partial receipt row"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn network_commit_does_not_advance_without_persisted_trust_receipt() {
+        let validators = make_single_validator();
+        let node_did = Did::new("did:exo:v0").unwrap();
+        let config = config_for(node_did.clone(), true, validators);
+        let state = create_reactor_state(&config, Arc::new(|_| Signature::empty()), None);
+        let (_dir, store) = temp_store();
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let valid_sign_fn = make_sign_fn();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"network-commit-must-not-outpace-receipt",
+            &node_did,
+            &*valid_sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        let msg = ConsensusCommitMsg {
+            certificate: single_validator_certificate(node.hash, &node_did),
+        };
+
+        handle_commit(&state, &store, &reactor_tx, msg).await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "network commit event must not be emitted when the trust receipt cannot be persisted"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                !consensus::is_finalized(&s.consensus, &node.hash),
+                "network certificate must not finalize consensus without a durable trust receipt"
+            );
+            assert!(
+                s.consensus.committed.is_empty(),
+                "network certificate must not advance commit order without a durable trust receipt"
+            );
+        }
+        {
+            let st = store.lock().unwrap();
+            assert!(
+                !st.is_committed(&node.hash).unwrap(),
+                "network certificate must not persist a commit marker without its receipt"
+            );
+            assert!(
+                st.load_receipts_by_actor("did:exo:v0", 10)
+                    .unwrap()
+                    .is_empty(),
+                "failed network receipt persistence must not leave a partial receipt row"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_commit_persists_certificate_receipt_and_emits_event() {
+        let validators = make_single_validator();
+        let node_did = Did::new("did:exo:v0").unwrap();
+        let config = config_for(node_did.clone(), true, validators);
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"valid-local-commit-with-receipt",
+            &node_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        let node_hash = node.hash;
+
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: node_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &node_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .unwrap();
+            consensus::vote_verified(
+                &mut s.consensus,
+                vote_for(&node_did, 0, 0, node.hash),
+                &resolver,
+            )
+            .unwrap();
+        }
+
+        let commit_task = {
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            let net_handle = net_handle.clone();
+            let reactor_tx = reactor_tx.clone();
+            tokio::spawn(async move {
+                check_and_commit(&state, &store, &net_handle, &reactor_tx, &node_hash).await;
+            })
+        };
+        let command = cmd_rx.recv().await.expect("commit certificate publish");
+        let crate::network::NetworkCommand::Publish {
+            topic,
+            message,
+            reply,
+        } = command
+        else {
+            panic!("expected publish command");
+        };
+        assert_eq!(topic, topics::CONSENSUS);
+        assert!(matches!(message, WireMessage::ConsensusCommit(_)));
+        reply.send(Ok(())).expect("publish ack receiver active");
+        commit_task.await.expect("commit task joins");
+
+        let ReactorEvent::NodeCommitted {
+            hash,
+            height,
+            round,
+        } = reactor_rx.recv().await.expect("commit event emitted")
+        else {
+            panic!("expected commit event");
+        };
+        assert_eq!(hash, node.hash);
+        assert_eq!(height, 1);
+        assert_eq!(round, 0);
+        {
+            let s = state.lock().unwrap();
+            assert!(consensus::is_finalized(&s.consensus, &node.hash));
+        }
+        {
+            let st = store.lock().unwrap();
+            assert!(st.is_committed(&node.hash).unwrap());
+            assert_eq!(st.load_certificates().unwrap().len(), 1);
+            let receipts = st.load_receipts_by_actor("did:exo:v0", 10).unwrap();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].action_hash, node.hash);
+            assert!(!receipts[0].signature.is_empty());
+        }
     }
 
     #[test]
