@@ -343,6 +343,16 @@ pub(crate) fn parse_verified_adjudication_context(
     context_value: &Value,
     actor: &Did,
 ) -> Result<AdjudicationContext, String> {
+    let actor_roles = parse_roles(context_value)?;
+    let consent_records = parse_consent_records(context_value)?;
+    let bailment_state = parse_bailment_state(context_value)?;
+    let human_override_preserved = context_value
+        .get("human_override_preserved")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "context.human_override_preserved must be boolean".to_owned())?;
+    let actor_permissions = parse_permission_set(context_value, "actor_permissions")?;
+    let provenance = parse_provenance(context_value)?;
+
     let authority_chain_value = context_value
         .get("authority_chain")
         .ok_or_else(|| "context.authority_chain is required".to_owned())?;
@@ -356,20 +366,15 @@ pub(crate) fn parse_verified_adjudication_context(
         ));
     }
 
-    let human_override_preserved = context_value
-        .get("human_override_preserved")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "context.human_override_preserved must be boolean".to_owned())?;
-
     Ok(AdjudicationContext {
-        actor_roles: parse_roles(context_value)?,
+        actor_roles,
         authority_chain,
-        consent_records: parse_consent_records(context_value)?,
-        bailment_state: parse_bailment_state(context_value)?,
+        consent_records,
+        bailment_state,
         human_override_preserved,
-        actor_permissions: parse_permission_set(context_value, "actor_permissions")?,
+        actor_permissions,
         trusted_authority_keys: Default::default(),
-        provenance: Some(parse_provenance(context_value)?),
+        provenance: Some(provenance),
         quorum_evidence: None,
         active_challenge_reason: None,
     })
@@ -1029,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_verify_authority_chain_valid() {
+    fn execute_verify_authority_chain_rejects_untrusted_embedded_grantor_key() {
         let (link, _) = signed_link_json("did:exo:root", "did:exo:leaf", &["read"]);
         let result = execute_verify_authority_chain(
             &json!({
@@ -1040,9 +1045,14 @@ mod tests {
         );
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["valid"], true);
+        assert_eq!(v["valid"], false);
         assert_eq!(v["depth"], 1);
-        assert!(v["issues"].as_array().expect("issues").is_empty());
+        let issues = v["issues"].as_array().expect("issues");
+        assert!(issues.iter().any(|issue| {
+            issue.as_str().is_some_and(|text| {
+                text.contains("grantor_public_key is unresolved for grantor DID")
+            })
+        }));
     }
 
     #[test]
@@ -1084,9 +1094,9 @@ mod tests {
         assert_eq!(v["valid"], false);
         let issues = v["issues"].as_array().expect("issues");
         assert!(issues.iter().any(|issue| {
-            issue
-                .as_str()
-                .is_some_and(|text| text.contains("cryptographically invalid"))
+            issue.as_str().is_some_and(|text| {
+                text.contains("grantor_public_key is unresolved for grantor DID")
+            })
         }));
     }
 
@@ -1247,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_check_permission_success() {
+    fn execute_check_permission_rejects_untrusted_embedded_grantor_key() {
         let (link, _) = signed_link_json("did:exo:root", "did:exo:alice", &["read"]);
         let result = execute_check_permission(
             &json!({
@@ -1261,8 +1271,14 @@ mod tests {
         let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
         assert_eq!(v["actor"], "did:exo:alice");
         assert_eq!(v["permission"], "read");
-        assert_eq!(v["granted"], true);
-        assert_eq!(v["source"], "verified_signed_authority_chain");
+        assert_eq!(v["granted"], false);
+        assert_eq!(v["source"], "invalid_authority_chain");
+        let issues = v["issues"].as_array().expect("issues");
+        assert!(issues.iter().any(|issue| {
+            issue.as_str().is_some_and(|text| {
+                text.contains("grantor_public_key is unresolved for grantor DID")
+            })
+        }));
     }
 
     #[test]
@@ -1331,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_adjudicate_action_permitted() {
+    fn execute_adjudicate_action_rejects_context_without_trusted_key_resolver() {
         let action = "read medical record";
         let result = execute_adjudicate_action(
             &json!({
@@ -1342,11 +1358,10 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["verdict"], "Permitted");
-        assert_eq!(v["actor"], "did:exo:alice");
-        assert!(v["violations"].is_null());
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_verified_context_required"));
+        assert!(text.contains("grantor_public_key is unresolved for grantor DID"));
     }
 
     #[test]
@@ -1366,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_adjudicate_action_denied_self_grant() {
+    fn execute_adjudicate_action_rejects_self_grant_context_without_trusted_key_resolver() {
         let action = "elevate permissions";
         let result = execute_adjudicate_action(
             &json!({
@@ -1378,21 +1393,15 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["verdict"], "Denied");
-        let violations = v["violations"].as_array().expect("violations");
-        assert!(!violations.is_empty());
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation["invariant"] == "no-self-grant"),
-            "denied self-grant verdict must expose a stable invariant ID"
-        );
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_verified_context_required"));
+        assert!(text.contains("grantor_public_key is unresolved for grantor DID"));
     }
 
     #[test]
-    fn execute_adjudicate_action_denied_kernel_modification() {
+    fn execute_adjudicate_action_rejects_kernel_modification_context_without_trusted_key_resolver()
+    {
         let action = "patch kernel";
         let result = execute_adjudicate_action(
             &json!({
@@ -1404,9 +1413,10 @@ mod tests {
             }),
             &NodeContext::empty(),
         );
-        assert!(!result.is_error);
-        let v: Value = serde_json::from_str(result.content[0].text()).expect("valid JSON");
-        assert_eq!(v["verdict"], "Denied");
+        assert!(result.is_error);
+        let text = result.content[0].text();
+        assert!(text.contains("mcp_verified_context_required"));
+        assert!(text.contains("grantor_public_key is unresolved for grantor DID"));
     }
 
     #[test]
