@@ -1211,8 +1211,19 @@ test('wasm_generate_franchise_receipt', () => {
 });
 
 test('wasm_verify_franchise_receipt_chain', () => {
-  const ok = wasm.wasm_verify_franchise_receipt_chain(JSON.stringify({ receipts: [] }));
-  if (!ok) throw new Error('empty franchise receipt chain should verify');
+  return expectErrorContains(
+    'wasm_verify_franchise_receipt_chain',
+    () => wasm.wasm_verify_franchise_receipt_chain(JSON.stringify({ receipts: [] })),
+    'requires actor public keys'
+  );
+});
+
+test('wasm_verify_franchise_receipt_chain_with_keys', () => {
+  const ok = wasm.wasm_verify_franchise_receipt_chain_with_keys(
+    JSON.stringify({ receipts: [] }),
+    JSON.stringify([])
+  );
+  if (!ok) throw new Error('empty franchise receipt chain should verify with explicit key registry');
   return ok;
 });
 

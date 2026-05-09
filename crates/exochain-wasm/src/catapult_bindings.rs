@@ -1,5 +1,7 @@
 //! Catapult bindings: franchise incubator, ODA team management, lifecycle
 
+use std::collections::BTreeMap;
+
 use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
@@ -29,6 +31,45 @@ fn parse_hash_hex(value: &str, label: &str) -> Result<exo_core::Hash256, JsValue
         )));
     }
     Ok(hash)
+}
+
+fn parse_public_key_hex(value: &str, label: &str) -> Result<exo_core::PublicKey, JsValue> {
+    let public_key_bytes =
+        hex::decode(value).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?;
+    let public_key_arr: [u8; 32] = public_key_bytes
+        .try_into()
+        .map_err(|_| JsValue::from_str(&format!("{label} public key must be 32 bytes")))?;
+    let public_key = exo_core::PublicKey::from_bytes(public_key_arr);
+    if public_key.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(JsValue::from_str(&format!(
+            "{label} public key must be caller-supplied and nonzero"
+        )));
+    }
+    Ok(public_key)
+}
+
+#[derive(serde::Deserialize)]
+struct WasmActorPublicKey {
+    actor_did: String,
+    public_key_hex: String,
+}
+
+fn parse_actor_public_key_registry(
+    actor_public_keys_json: &str,
+) -> Result<BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
+    let entries: Vec<WasmActorPublicKey> = from_json_str(actor_public_keys_json)?;
+    let mut registry = BTreeMap::new();
+    for entry in entries {
+        let actor_did = exo_core::Did::new(&entry.actor_did)
+            .map_err(|e| JsValue::from_str(&format!("actor DID error: {e}")))?;
+        let public_key = parse_public_key_hex(&entry.public_key_hex, "actor")?;
+        if registry.insert(actor_did.clone(), public_key).is_some() {
+            return Err(JsValue::from_str(&format!(
+                "duplicate actor public key for {actor_did}"
+            )));
+        }
+    }
+    Ok(registry)
 }
 
 fn parse_timestamp(
@@ -442,10 +483,23 @@ pub fn wasm_generate_franchise_receipt(
 
 /// Verify a franchise receipt chain's integrity.
 #[wasm_bindgen]
-pub fn wasm_verify_franchise_receipt_chain(chain_json: &str) -> Result<bool, JsValue> {
+pub fn wasm_verify_franchise_receipt_chain(_chain_json: &str) -> Result<bool, JsValue> {
+    Err(JsValue::from_str(
+        "wasm_verify_franchise_receipt_chain requires actor public keys; \
+         use wasm_verify_franchise_receipt_chain_with_keys",
+    ))
+}
+
+/// Verify a franchise receipt chain's hash linkage and actor signatures.
+#[wasm_bindgen]
+pub fn wasm_verify_franchise_receipt_chain_with_keys(
+    chain_json: &str,
+    actor_public_keys_json: &str,
+) -> Result<bool, JsValue> {
     let chain: exo_catapult::receipt::ReceiptChain = from_json_str(chain_json)?;
+    let actor_public_keys = parse_actor_public_key_registry(actor_public_keys_json)?;
     chain
-        .verify_chain()
+        .verify_signed_chain(|did| actor_public_keys.get(did).copied())
         .map_err(|e| JsValue::from_str(&format!("Receipt chain verification error: {e}")))
 }
 
@@ -500,6 +554,28 @@ mod tests {
         assert!(
             !production.contains("build_pace_config(&newco)"),
             "WASM authority-chain export must not return summary PACE defaults as operational config"
+        );
+    }
+
+    #[test]
+    fn receipt_chain_export_requires_actor_key_verification() {
+        let source = include_str!("catapult_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("requires actor public keys"),
+            "legacy WASM receipt-chain verification must fail closed without actor keys"
+        );
+        assert!(
+            production.contains(".verify_signed_chain("),
+            "WASM receipt-chain verification must use signed-chain verification"
+        );
+        assert!(
+            !production.contains(".verify_chain()"),
+            "WASM receipt-chain verification must not rely on hash-only verification"
         );
     }
 
