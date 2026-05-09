@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeSet, path::Path};
 
-use exo_core::types::{Did, Hash256, Signature, Timestamp};
+use exo_core::types::{Did, Hash256, Signature, Timestamp, TrustReceipt};
 use exo_dag::{
     consensus::{CommitCertificate, Vote},
     dag::DagNode,
@@ -357,6 +357,7 @@ impl SqliteDagStore {
     }
 
     /// Persist a commit certificate.
+    #[allow(dead_code)]
     pub fn save_certificate(&mut self, cert: &CommitCertificate) -> DagResult<()> {
         let round = sqlite_u64_to_i64(cert.round, "commit_certificates.round")?;
         validate_commit_certificate(cert)?;
@@ -375,6 +376,67 @@ impl SqliteDagStore {
                 ],
             )
             .map_err(store_err)?;
+        Ok(())
+    }
+
+    fn ensure_node_exists_tx(tx: &rusqlite::Transaction<'_>, hash: &Hash256) -> DagResult<()> {
+        match tx.query_row(
+            "SELECT 1 FROM dag_nodes WHERE hash = ?1",
+            params![hash.0.as_slice()],
+            |_| Ok(()),
+        ) {
+            Ok(()) => Ok(()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(DagError::NodeNotFound(*hash)),
+            Err(e) => Err(store_err(format!("dag_nodes.hash presence query: {e}"))),
+        }
+    }
+
+    fn insert_committed_tx(
+        tx: &rusqlite::Transaction<'_>,
+        hash: &Hash256,
+        height: u64,
+    ) -> DagResult<()> {
+        let height = sqlite_u64_to_i64(height, "committed.height")?;
+        tx.execute(
+            "INSERT OR REPLACE INTO committed (hash, height) VALUES (?1, ?2)",
+            params![hash.0.as_slice(), height],
+        )
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    fn insert_certificate_tx(
+        tx: &rusqlite::Transaction<'_>,
+        cert: &CommitCertificate,
+    ) -> DagResult<()> {
+        let round = sqlite_u64_to_i64(cert.round, "commit_certificates.round")?;
+        validate_commit_certificate(cert)?;
+        let cbor_buf = encode_cbor(cert, "commit_certificates.cbor_data")?;
+        tx.execute(
+            "INSERT OR IGNORE INTO commit_certificates (node_hash, round, cbor_data) VALUES (?1, ?2, ?3)",
+            params![cert.node_hash.0.as_slice(), round, cbor_buf],
+        )
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    fn insert_receipt_tx(tx: &rusqlite::Transaction<'_>, receipt: &TrustReceipt) -> DagResult<()> {
+        validate_signature(&receipt.signature, "trust_receipts.signature")?;
+        let timestamp_ms =
+            sqlite_u64_to_i64(receipt.timestamp.physical_ms, "trust_receipts.timestamp_ms")?;
+        let buf = encode_cbor(receipt, "trust_receipts.cbor_data")?;
+        tx.execute(
+            "INSERT OR IGNORE INTO trust_receipts (receipt_hash, actor_did, action_type, outcome, timestamp_ms, cbor_data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                receipt.receipt_hash.0.as_slice(),
+                receipt.actor_did.to_string(),
+                receipt.action_type.as_str(),
+                receipt.outcome.to_string(),
+                timestamp_ms,
+                buf,
+            ],
+        )
+        .map_err(store_err)?;
         Ok(())
     }
 
@@ -452,7 +514,7 @@ impl SqliteDagStore {
     }
 
     /// Save a trust receipt to the database.
-    pub fn save_receipt(&mut self, receipt: &exo_core::types::TrustReceipt) -> DagResult<()> {
+    pub fn save_receipt(&mut self, receipt: &TrustReceipt) -> DagResult<()> {
         validate_signature(&receipt.signature, "trust_receipts.signature")?;
         let timestamp_ms =
             sqlite_u64_to_i64(receipt.timestamp.physical_ms, "trust_receipts.timestamp_ms")?;
@@ -474,6 +536,55 @@ impl SqliteDagStore {
                 ],
             )
             .map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Atomically persist a committed marker with the trust receipt that proves it.
+    pub fn mark_committed_with_receipt_sync(
+        &mut self,
+        hash: &Hash256,
+        height: u64,
+        receipt: &TrustReceipt,
+    ) -> DagResult<()> {
+        if receipt.action_hash != *hash {
+            return Err(store_err(
+                "trust_receipts.action_hash must match committed node hash",
+            ));
+        }
+
+        let tx = self.conn.transaction().map_err(store_err)?;
+        Self::ensure_node_exists_tx(&tx, hash)?;
+        Self::insert_committed_tx(&tx, hash, height)?;
+        Self::insert_receipt_tx(&tx, receipt)?;
+        tx.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Atomically persist a committed marker, its certificate, and its trust receipt.
+    pub fn persist_commit_certificate_with_receipt_sync(
+        &mut self,
+        hash: &Hash256,
+        height: u64,
+        cert: &CommitCertificate,
+        receipt: &TrustReceipt,
+    ) -> DagResult<()> {
+        if cert.node_hash != *hash {
+            return Err(store_err(
+                "commit_certificates.node_hash must match committed node hash",
+            ));
+        }
+        if receipt.action_hash != *hash {
+            return Err(store_err(
+                "trust_receipts.action_hash must match committed node hash",
+            ));
+        }
+
+        let tx = self.conn.transaction().map_err(store_err)?;
+        Self::ensure_node_exists_tx(&tx, hash)?;
+        Self::insert_committed_tx(&tx, hash, height)?;
+        Self::insert_certificate_tx(&tx, cert)?;
+        Self::insert_receipt_tx(&tx, receipt)?;
+        tx.commit().map_err(store_err)?;
         Ok(())
     }
 
@@ -713,6 +824,7 @@ impl SqliteDagStore {
     }
 
     /// Sync version of `DagStore::contains`.
+    #[allow(dead_code)]
     pub fn contains_sync(&self, hash: &Hash256) -> DagResult<bool> {
         let mut stmt = self
             .conn
@@ -765,6 +877,7 @@ impl SqliteDagStore {
     }
 
     /// Sync version of `DagStore::mark_committed`.
+    #[allow(dead_code)]
     pub fn mark_committed_sync(&mut self, hash: &Hash256, height: u64) -> DagResult<()> {
         if !self.contains_sync(hash)? {
             return Err(DagError::NodeNotFound(*hash));
@@ -1878,6 +1991,92 @@ mod tests {
         let err = store.mark_committed_sync(&node.hash, u64::MAX).unwrap_err();
 
         assert!(err.to_string().contains("committed.height"));
+    }
+
+    #[test]
+    fn mark_committed_with_receipt_rolls_back_when_receipt_is_rejected() {
+        use exo_core::types::{ReceiptOutcome, Timestamp, TrustReceipt};
+        let mut store = temp_store();
+        let node = make_test_node();
+        store.put_sync(node.clone()).unwrap();
+        let receipt = TrustReceipt::new(
+            Did::new("did:exo:test").unwrap(),
+            Hash256::digest(b"authority"),
+            None,
+            "dag.commit".to_string(),
+            node.hash,
+            ReceiptOutcome::Executed,
+            Timestamp {
+                physical_ms: 1_700_000_000_000,
+                logical: 0,
+            },
+            &|_| Signature::empty(),
+        )
+        .expect("test receipt should encode");
+
+        let err = store
+            .mark_committed_with_receipt_sync(&node.hash, 1, &receipt)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("trust_receipts.signature"));
+        assert!(
+            !store.is_committed(&node.hash).unwrap(),
+            "commit marker must not persist when receipt insert fails"
+        );
+        assert!(
+            store.load_receipt(&receipt.receipt_hash).unwrap().is_none(),
+            "rejected receipt must not persist partial receipt data"
+        );
+    }
+
+    #[test]
+    fn certificate_commit_with_receipt_rolls_back_every_row_when_receipt_is_rejected() {
+        use exo_core::types::{ReceiptOutcome, Timestamp, TrustReceipt};
+        let mut store = temp_store();
+        let node = make_test_node();
+        store.put_sync(node.clone()).unwrap();
+        let cert = CommitCertificate {
+            node_hash: node.hash,
+            round: 0,
+            votes: vec![Vote {
+                voter: Did::new("did:exo:v0").unwrap(),
+                round: 0,
+                node_hash: node.hash,
+                signature: Signature::from_bytes([7u8; 64]),
+            }],
+        };
+        let receipt = TrustReceipt::new(
+            Did::new("did:exo:test").unwrap(),
+            Hash256::digest(b"authority"),
+            None,
+            "dag.commit".to_string(),
+            node.hash,
+            ReceiptOutcome::Executed,
+            Timestamp {
+                physical_ms: 1_700_000_000_000,
+                logical: 0,
+            },
+            &|_| Signature::empty(),
+        )
+        .expect("test receipt should encode");
+
+        let err = store
+            .persist_commit_certificate_with_receipt_sync(&node.hash, 1, &cert, &receipt)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("trust_receipts.signature"));
+        assert!(
+            !store.is_committed(&node.hash).unwrap(),
+            "commit marker must not persist when receipt insert fails"
+        );
+        assert!(
+            store.load_certificates().unwrap().is_empty(),
+            "certificate must not persist without its matching receipt"
+        );
+        assert!(
+            store.load_receipt(&receipt.receipt_hash).unwrap().is_none(),
+            "rejected receipt must not persist partial receipt data"
+        );
     }
 
     #[test]
