@@ -2347,10 +2347,17 @@ test('wasm_anchor_economy_value_contribution_node', () => {
 test('wasm_validation_invariant_request', () => {
   const request = wasm.wasm_validation_invariant_request();
   const result = wasm.wasm_enforce_invariants(JSON.stringify(request));
-  if (!result.passed || result.violations.length !== 0) {
-    throw new Error('validation invariant request must satisfy all invariants');
+  if (result.passed) {
+    throw new Error('public invariant enforcement must reject replayed trusted key maps');
   }
-  return request;
+  const descriptions = (result.violations || []).map((violation) => violation.description || '');
+  if (!descriptions.some((description) => description.includes('trusted_authority_keys'))) {
+    throw new Error('authority trusted-key boundary violation must be explicit');
+  }
+  if (!descriptions.some((description) => description.includes('trusted_provenance_keys'))) {
+    throw new Error('provenance trusted-key boundary violation must be explicit');
+  }
+  return { request, result };
 });
 
 // =========================================================================

@@ -8,6 +8,10 @@ use crate::serde_bridge::*;
 ///
 /// All fields map 1-to-1 onto `exo_gatekeeper::invariants::InvariantContext`.
 /// Booleans default to safe values (false / true for human_override_preserved).
+///
+/// The public WASM boundary cannot prove that caller-provided trusted key maps
+/// came from DID resolution. Non-empty trusted key maps are deserialized only so
+/// `wasm_enforce_invariants` can fail closed with an explicit violation.
 #[derive(serde::Deserialize)]
 struct WasmInvariantRequest {
     actor: exo_core::Did,
@@ -75,6 +79,17 @@ pub fn wasm_reduce_combinator(combinator_json: &str, input_json: &str) -> Result
 #[wasm_bindgen]
 pub fn wasm_enforce_invariants(request_json: &str) -> Result<JsValue, JsValue> {
     let req: WasmInvariantRequest = from_json_str(request_json)?;
+    to_js_value(&enforce_invariants_response(req))
+}
+
+fn enforce_invariants_response(req: WasmInvariantRequest) -> serde_json::Value {
+    let boundary_violations = caller_supplied_trusted_key_violations(&req);
+    if !boundary_violations.is_empty() {
+        return serde_json::json!({
+            "passed": false,
+            "violations": boundary_violations
+        });
+    }
 
     let context = exo_gatekeeper::invariants::InvariantContext {
         actor: req.actor,
@@ -96,15 +111,45 @@ pub fn wasm_enforce_invariants(request_json: &str) -> Result<JsValue, JsValue> {
     let engine = exo_gatekeeper::InvariantEngine::all();
 
     match exo_gatekeeper::invariants::enforce_all(&engine, &context) {
-        Ok(()) => to_js_value(&serde_json::json!({
+        Ok(()) => serde_json::json!({
             "passed": true,
             "violations": []
-        })),
-        Err(violations) => to_js_value(&serde_json::json!({
+        }),
+        Err(violations) => serde_json::json!({
             "passed": false,
             "violations": violations
-        })),
+        }),
     }
+}
+
+fn caller_supplied_trusted_key_violations(
+    req: &WasmInvariantRequest,
+) -> Vec<exo_gatekeeper::invariants::InvariantViolation> {
+    let mut violations = Vec::new();
+
+    if !req.trusted_authority_keys.is_empty() {
+        violations.push(exo_gatekeeper::invariants::InvariantViolation {
+            invariant: exo_gatekeeper::invariants::ConstitutionalInvariant::AuthorityChainValid,
+            description: "WASM invariant boundary cannot trust caller-supplied \
+                trusted_authority_keys; submit authority-bearing requests to a core runtime \
+                adapter with trusted DID resolution"
+                .to_string(),
+            evidence: vec!["field: trusted_authority_keys".to_string()],
+        });
+    }
+
+    if !req.trusted_provenance_keys.is_empty() {
+        violations.push(exo_gatekeeper::invariants::InvariantViolation {
+            invariant: exo_gatekeeper::invariants::ConstitutionalInvariant::ProvenanceVerifiable,
+            description: "WASM invariant boundary cannot trust caller-supplied \
+                trusted_provenance_keys; submit provenance-bearing requests to a core runtime \
+                adapter with trusted DID resolution"
+                .to_string(),
+            evidence: vec!["field: trusted_provenance_keys".to_string()],
+        });
+    }
+
+    violations
 }
 
 /// Compute the canonical BLAKE3/CBOR digest for governance monitor findings.
@@ -512,6 +557,52 @@ mod tests {
         assert!(
             result.is_ok(),
             "WasmInvariantRequest must deserialize from valid JSON"
+        );
+    }
+
+    #[test]
+    fn wasm_enforce_invariants_rejects_caller_supplied_trusted_key_maps() {
+        let ctx = minimal_passing_context();
+        let req = super::WasmInvariantRequest {
+            actor: ctx.actor,
+            actor_roles: ctx.actor_roles,
+            bailment_state: ctx.bailment_state,
+            consent_records: ctx.consent_records,
+            authority_chain: ctx.authority_chain,
+            is_self_grant: ctx.is_self_grant,
+            human_override_preserved: ctx.human_override_preserved,
+            kernel_modification_attempted: ctx.kernel_modification_attempted,
+            quorum_evidence: ctx.quorum_evidence,
+            provenance: ctx.provenance,
+            actor_permissions: ctx.actor_permissions,
+            requested_permissions: ctx.requested_permissions,
+            trusted_authority_keys: ctx.trusted_authority_keys,
+            trusted_provenance_keys: ctx.trusted_provenance_keys,
+        };
+
+        let response = super::enforce_invariants_response(req);
+        assert_eq!(
+            response["passed"], false,
+            "WASM public enforcement must not treat caller-supplied trusted key maps as authoritative"
+        );
+
+        let descriptions = response["violations"]
+            .as_array()
+            .expect("violations must be an array")
+            .iter()
+            .filter_map(|violation| violation["description"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            descriptions
+                .iter()
+                .any(|description| description.contains("trusted_authority_keys")),
+            "authority key map boundary violation must be explicit: {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|description| description.contains("trusted_provenance_keys")),
+            "provenance key map boundary violation must be explicit: {descriptions:?}"
         );
     }
 
