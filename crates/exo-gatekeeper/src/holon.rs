@@ -187,7 +187,7 @@ mod tests {
         link
     }
 
-    fn signed_provenance(actor: &Did) -> Provenance {
+    fn signed_provenance(actor: &Did) -> (Provenance, exo_core::PublicKey) {
         let (pk, sk) = exo_core::crypto::generate_keypair();
         let timestamp = "2025-01-01T00:00:00Z".to_owned();
         let action_hash = vec![1];
@@ -205,7 +205,7 @@ mod tests {
             provenance_signature_message(&provenance).expect("canonical provenance payload");
         let signature = exo_core::crypto::sign(message.as_bytes(), &sk);
         provenance.signature = signature.to_bytes().to_vec();
-        provenance
+        (provenance, pk)
     }
 
     fn test_kernel() -> Kernel {
@@ -230,6 +230,12 @@ mod tests {
                 trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
             }
         }
+        let (provenance, provenance_public_key) = signed_provenance(actor);
+        let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+        trusted_provenance_keys.insert(
+            actor.clone(),
+            vec![provenance_public_key.as_bytes().to_vec()],
+        );
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "worker".into(),
@@ -250,7 +256,8 @@ mod tests {
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             trusted_authority_keys,
-            provenance: Some(signed_provenance(actor)),
+            trusted_provenance_keys,
+            provenance: Some(provenance),
             quorum_evidence: None,
             active_challenge_reason: None,
         }

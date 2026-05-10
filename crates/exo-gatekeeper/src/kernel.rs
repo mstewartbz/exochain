@@ -16,7 +16,7 @@ use crate::{
     },
     types::{
         AuthorityChain, BailmentState, ConsentRecord, PermissionSet, Provenance, QuorumEvidence,
-        Role, TrustedAuthorityKeys,
+        Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
 
@@ -69,6 +69,7 @@ pub struct AdjudicationContext {
     pub human_override_preserved: bool,
     pub actor_permissions: PermissionSet,
     pub trusted_authority_keys: TrustedAuthorityKeys,
+    pub trusted_provenance_keys: TrustedProvenanceKeys,
     pub provenance: Option<Provenance>,
     pub quorum_evidence: Option<QuorumEvidence>,
     /// When set, the action is under an active Sybil challenge hold.
@@ -122,6 +123,7 @@ impl Kernel {
             actor_permissions: context.actor_permissions.clone(),
             requested_permissions: action.required_permissions.clone(),
             trusted_authority_keys: context.trusted_authority_keys.clone(),
+            trusted_provenance_keys: context.trusted_provenance_keys.clone(),
         };
 
         match enforce_all(&self.invariant_engine, &inv_ctx) {
@@ -220,7 +222,10 @@ mod tests {
     use super::*;
     use crate::{
         invariants::{authority_link_signature_message, provenance_signature_message},
-        types::{AuthorityLink, GovernmentBranch, Permission, QuorumVote, TrustedAuthorityKeys},
+        types::{
+            AuthorityLink, GovernmentBranch, Permission, QuorumVote, TrustedAuthorityKeys,
+            TrustedProvenanceKeys,
+        },
     };
 
     const CONSTITUTION: &[u8] = b"We the people of the EXOCHAIN...";
@@ -246,7 +251,7 @@ mod tests {
         link
     }
 
-    fn signed_provenance(actor: &Did) -> Provenance {
+    fn signed_provenance(actor: &Did) -> (Provenance, exo_core::PublicKey) {
         let (pk, sk) = exo_core::crypto::generate_keypair();
         let timestamp = "2025-01-01T00:00:00Z".to_owned();
         let action_hash = vec![1, 2, 3];
@@ -264,7 +269,7 @@ mod tests {
             provenance_signature_message(&provenance).expect("canonical provenance payload");
         let signature = exo_core::crypto::sign(message.as_bytes(), &sk);
         provenance.signature = signature.to_bytes().to_vec();
-        provenance
+        (provenance, pk)
     }
 
     fn test_kernel() -> Kernel {
@@ -291,6 +296,12 @@ mod tests {
                 trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
             }
         }
+        let (provenance, provenance_public_key) = signed_provenance(actor);
+        let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+        trusted_provenance_keys.insert(
+            actor.clone(),
+            vec![provenance_public_key.as_bytes().to_vec()],
+        );
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "judge".into(),
@@ -311,7 +322,8 @@ mod tests {
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             trusted_authority_keys,
-            provenance: Some(signed_provenance(actor)),
+            trusted_provenance_keys,
+            provenance: Some(provenance),
             quorum_evidence: None,
             active_challenge_reason: None,
         }
@@ -532,6 +544,7 @@ mod tests {
                 human_override_preserved: true,
                 actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
                 trusted_authority_keys: TrustedAuthorityKeys::default(),
+                trusted_provenance_keys: TrustedProvenanceKeys::default(),
                 provenance: None,
                 quorum_evidence: None,
                 active_challenge_reason: None,

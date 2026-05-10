@@ -31,7 +31,7 @@ use exo_gatekeeper::{
     provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
 
@@ -125,6 +125,11 @@ fn transition_context(actor: &Did, from: BctsState, to: BctsState) -> Adjudicati
             trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
         }
     }
+    let provenance = signed_provenance(actor);
+    let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+    if let Some(public_key) = &provenance.public_key {
+        trusted_provenance_keys.insert(actor.clone(), vec![public_key.clone()]);
+    }
     AdjudicationContext {
         actor_roles: vec![Role {
             name: "transition-judge".into(),
@@ -145,7 +150,8 @@ fn transition_context(actor: &Did, from: BctsState, to: BctsState) -> Adjudicati
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![permission]),
         trusted_authority_keys,
-        provenance: Some(signed_provenance(actor)),
+        trusted_provenance_keys,
+        provenance: Some(provenance),
         quorum_evidence: None,
         active_challenge_reason: None,
     }

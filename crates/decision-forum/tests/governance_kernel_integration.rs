@@ -44,7 +44,7 @@ use exo_gatekeeper::{
     types::{
         AuthorityChain, AuthorityLink as GkAuthorityLink, BailmentState, ConsentRecord,
         GovernmentBranch, Permission, PermissionSet, Provenance, QuorumEvidence, QuorumVote, Role,
-        TrustedAuthorityKeys,
+        TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
 use uuid::Uuid;
@@ -187,6 +187,11 @@ fn valid_adj_context(actor: &Did) -> AdjudicationContext {
             trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
         }
     }
+    let provenance = signed_provenance(actor);
+    let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+    if let Some(public_key) = &provenance.public_key {
+        trusted_provenance_keys.insert(actor.clone(), vec![public_key.clone()]);
+    }
     AdjudicationContext {
         actor_roles: vec![Role {
             name: "judge".into(),
@@ -207,7 +212,8 @@ fn valid_adj_context(actor: &Did) -> AdjudicationContext {
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("enact:decision")]),
         trusted_authority_keys,
-        provenance: Some(signed_provenance(actor)),
+        trusted_provenance_keys,
+        provenance: Some(provenance),
         quorum_evidence: None,
         active_challenge_reason: None,
     }

@@ -286,6 +286,13 @@ pub struct AuthorityLink {
 /// resolved key material for the claimed grantor DID.
 pub type TrustedAuthorityKeys = BTreeMap<Did, Vec<Vec<u8>>>;
 
+/// DID-resolved Ed25519 public keys trusted for actor provenance.
+///
+/// Provenance objects still carry the key used for signature verification, but
+/// the invariant engine only accepts that key when it matches independently
+/// resolved key material for the claimed actor DID.
+pub type TrustedProvenanceKeys = BTreeMap<Did, Vec<Vec<u8>>>;
+
 // ---------------------------------------------------------------------------
 // Quorum evidence
 // ---------------------------------------------------------------------------

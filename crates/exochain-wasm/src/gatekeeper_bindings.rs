@@ -29,6 +29,8 @@ struct WasmInvariantRequest {
     requested_permissions: exo_gatekeeper::types::PermissionSet,
     #[serde(default)]
     trusted_authority_keys: exo_gatekeeper::types::TrustedAuthorityKeys,
+    #[serde(default)]
+    trusted_provenance_keys: exo_gatekeeper::types::TrustedProvenanceKeys,
 }
 
 fn default_true() -> bool {
@@ -81,6 +83,7 @@ pub fn wasm_enforce_invariants(request_json: &str) -> Result<JsValue, JsValue> {
         actor_permissions: req.actor_permissions,
         requested_permissions: req.requested_permissions,
         trusted_authority_keys: req.trusted_authority_keys,
+        trusted_provenance_keys: req.trusted_provenance_keys,
     };
 
     let engine = exo_gatekeeper::InvariantEngine::all();
@@ -106,7 +109,7 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         authority_link_signature_message, provenance_signature_message,
         types::{
             AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, PermissionSet, Provenance,
-            TrustedAuthorityKeys,
+            TrustedAuthorityKeys, TrustedProvenanceKeys,
         },
     };
 
@@ -159,6 +162,11 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         grantor,
         vec![authority_keypair.public_key().as_bytes().to_vec()],
     );
+    let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
+    trusted_provenance_keys.insert(
+        actor.clone(),
+        vec![provenance_keypair.public_key().as_bytes().to_vec()],
+    );
 
     to_js_value(&serde_json::json!({
         "actor": actor,
@@ -188,6 +196,7 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
         "actor_permissions": permissions,
         "requested_permissions": PermissionSet::default(),
         "trusted_authority_keys": trusted_authority_keys,
+        "trusted_provenance_keys": trusted_provenance_keys,
     }))
 }
 
@@ -315,6 +324,11 @@ mod tests {
             provenance_signature_message(&provenance).expect("canonical provenance payload");
         let provenance_sig = exo_core::crypto::sign(provenance_message.as_bytes(), &provenance_sk);
         provenance.signature = provenance_sig.to_bytes().to_vec();
+        let mut trusted_provenance_keys = exo_gatekeeper::types::TrustedProvenanceKeys::default();
+        trusted_provenance_keys.insert(
+            provenance.actor.clone(),
+            vec![provenance_pk.as_bytes().to_vec()],
+        );
         let provenance = Some(provenance);
 
         InvariantContext {
@@ -336,6 +350,7 @@ mod tests {
             actor_permissions: PermissionSet::default(),
             requested_permissions: PermissionSet::default(),
             trusted_authority_keys,
+            trusted_provenance_keys,
         }
     }
 
@@ -487,6 +502,27 @@ mod tests {
         assert!(
             validation_fixture.contains("\"trusted_authority_keys\""),
             "validation invariant fixture must emit trusted authority keys for bridge verification"
+        );
+    }
+
+    #[test]
+    fn validation_invariant_request_includes_trusted_provenance_keys() {
+        let source = include_str!("gatekeeper_bindings.rs");
+        let validation_fixture = source
+            .split("pub fn wasm_validation_invariant_request")
+            .nth(1)
+            .expect("validation fixture is present")
+            .split("pub fn wasm_spawn_holon")
+            .next()
+            .expect("validation fixture body is bounded");
+
+        assert!(
+            validation_fixture.contains("TrustedProvenanceKeys"),
+            "validation invariant fixture must construct a trusted provenance key map"
+        );
+        assert!(
+            validation_fixture.contains("\"trusted_provenance_keys\""),
+            "validation invariant fixture must emit trusted provenance keys for bridge verification"
         );
     }
 }

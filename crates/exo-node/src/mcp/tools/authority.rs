@@ -18,7 +18,7 @@ use exo_gatekeeper::{
     kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
 use serde_json::{Value, json};
@@ -240,6 +240,7 @@ fn validate_authority_chain(
         actor_permissions: PermissionSet::default(),
         requested_permissions: PermissionSet::default(),
         trusted_authority_keys: trusted_authority_keys.clone(),
+        trusted_provenance_keys: Default::default(),
     };
     match enforce_all(&engine, &context) {
         Ok(()) => Vec::new(),
@@ -347,17 +348,19 @@ pub(crate) fn parse_verified_adjudication_context(
     context_value: &Value,
     actor: &Did,
 ) -> Result<AdjudicationContext, String> {
-    parse_verified_adjudication_context_with_trusted_authority_keys(
+    parse_verified_adjudication_context_with_trusted_keys(
         context_value,
         actor,
         TrustedAuthorityKeys::default(),
+        TrustedProvenanceKeys::default(),
     )
 }
 
-pub(crate) fn parse_verified_adjudication_context_with_trusted_authority_keys(
+pub(crate) fn parse_verified_adjudication_context_with_trusted_keys(
     context_value: &Value,
     actor: &Did,
     trusted_authority_keys: TrustedAuthorityKeys,
+    trusted_provenance_keys: TrustedProvenanceKeys,
 ) -> Result<AdjudicationContext, String> {
     let actor_roles = parse_roles(context_value)?;
     let consent_records = parse_consent_records(context_value)?;
@@ -390,6 +393,7 @@ pub(crate) fn parse_verified_adjudication_context_with_trusted_authority_keys(
         human_override_preserved,
         actor_permissions,
         trusted_authority_keys,
+        trusted_provenance_keys,
         provenance: Some(provenance),
         quorum_evidence: None,
         active_challenge_reason: None,
