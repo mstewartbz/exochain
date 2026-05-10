@@ -35,13 +35,15 @@ mod tests {
         store::{SharedZerodentityStore, ZerodentityStore, new_shared_store},
         types::{
             AttestationType, BehavioralSample, BehavioralSignalType, DeviceFingerprint,
-            FingerprintSignal,
+            FingerprintSignal, IDENTITY_SESSION_TTL_MS,
         },
     };
 
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
+
+    const API_TEST_NOW_MS: u64 = 1_001_000;
 
     fn td(id: &str) -> Did {
         Did::new(&format!("did:exo:{id}")).unwrap()
@@ -292,7 +294,10 @@ mod tests {
 
     fn api_app(store: SharedZerodentityStore) -> Router {
         configure_test_receipt_signer(&store);
-        zerodentity_api_router(ApiState { store })
+        zerodentity_api_router(ApiState::new_with_clock(
+            store,
+            HybridClock::with_wall_clock(|| API_TEST_NOW_MS),
+        ))
     }
 
     fn configure_test_receipt_signer(store: &SharedZerodentityStore) {
@@ -597,15 +602,76 @@ mod tests {
         store
             .insert_session(&make_session(&did, token, 1_000_000))
             .unwrap();
-        assert!(store.get_session(token).unwrap().is_some());
+        assert!(store.get_session(token, 1_000_001).unwrap().is_some());
 
         let mut revoked = make_session(&did, token, 1_000_000);
         revoked.revoked = true;
         store.insert_session(&revoked).unwrap();
 
         assert!(
-            store.get_session(token).unwrap().is_none(),
+            store.get_session(token, 1_000_001).unwrap().is_none(),
             "revoked session must be hidden"
+        );
+    }
+
+    #[test]
+    fn store_session_expiry_hides_session_at_deadline() {
+        let did = td("store-session-expiry");
+        let mut store = ZerodentityStore::new();
+        let token = "expired-test-token";
+        let created_ms = 1_000_000;
+
+        store
+            .insert_session(&make_session(&did, token, created_ms))
+            .unwrap();
+
+        assert!(
+            store
+                .get_session(token, created_ms + IDENTITY_SESSION_TTL_MS - 1)
+                .unwrap()
+                .is_some(),
+            "session must remain active before its absolute expiry deadline"
+        );
+        assert!(
+            store
+                .get_session(token, created_ms + IDENTITY_SESSION_TTL_MS)
+                .unwrap()
+                .is_none(),
+            "session must be hidden at its absolute expiry deadline"
+        );
+    }
+
+    #[test]
+    fn store_session_expiry_fails_closed_on_deadline_overflow() {
+        let did = td("store-session-overflow");
+        let mut store = ZerodentityStore::new();
+        let token = "overflow-test-token";
+        let created_ms = u64::MAX - 1;
+
+        store
+            .insert_session(&make_session(&did, token, created_ms))
+            .unwrap();
+
+        assert!(
+            store.get_session(token, created_ms).unwrap().is_none(),
+            "session expiry arithmetic overflow must not create an immortal session"
+        );
+    }
+
+    #[test]
+    fn store_session_lookup_hides_future_created_sessions() {
+        let did = td("store-session-future");
+        let mut store = ZerodentityStore::new();
+        let token = "future-session-token";
+        let created_ms = 2_000_000;
+
+        store
+            .insert_session(&make_session(&did, token, created_ms))
+            .unwrap();
+
+        assert!(
+            store.get_session(token, created_ms - 1).unwrap().is_none(),
+            "sessions with future creation timestamps must fail closed"
         );
     }
 
@@ -1000,11 +1066,10 @@ mod tests {
     #[tokio::test]
     async fn verify_otp_correct_code_returns_verified_and_session_token() {
         let store = new_shared_store();
-        let app = onboarding_app(store.clone());
+        let app = onboarding_app_with_fixed_clock(store.clone(), 1_001_000);
         let keypair = test_keypair(1);
         let did = derived_did(&keypair);
-        // Far-future dispatched_ms so TTL check won't trigger on wall clock
-        let dispatched_ms = u64::MAX / 2;
+        let dispatched_ms = 1_000_000;
 
         let mut rng = seeded_rng(0xCAFE_0001);
         let (challenge, code) =
@@ -1035,7 +1100,7 @@ mod tests {
         let session = store
             .lock()
             .unwrap()
-            .get_session(session_token)
+            .get_session(session_token, 1_001_000)
             .unwrap()
             .unwrap();
         assert_eq!(session.public_key, keypair.public_key().as_bytes().to_vec());

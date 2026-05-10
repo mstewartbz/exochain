@@ -24,6 +24,7 @@ use axum::{
 };
 use exo_core::{
     crypto,
+    hlc::HybridClock,
     types::{Did, Hash256, PublicKey, Signature, Timestamp},
 };
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,36 @@ use super::{
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Arc<Mutex<ZerodentityStore>>,
+    clock: Arc<Mutex<HybridClock>>,
+}
+
+impl ApiState {
+    #[must_use]
+    pub fn new(store: Arc<Mutex<ZerodentityStore>>) -> Self {
+        Self::new_with_clock(store, HybridClock::new())
+    }
+
+    #[must_use]
+    pub fn new_with_clock(store: Arc<Mutex<ZerodentityStore>>, clock: HybridClock) -> Self {
+        Self {
+            store,
+            clock: Arc::new(Mutex::new(clock)),
+        }
+    }
+
+    fn now_ms(&self) -> ApiResult<u64> {
+        let mut clock = self
+            .clock
+            .lock()
+            .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Clock lock error"))?;
+        clock
+            .now()
+            .map(|timestamp| timestamp.physical_ms)
+            .map_err(|err| {
+                tracing::error!(error = %err, "0dentity API HLC exhausted");
+                json_error(StatusCode::INTERNAL_SERVER_ERROR, "Clock exhausted")
+            })
+    }
 }
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -244,6 +275,15 @@ where
     })?
 }
 
+async fn now_ms_blocking(state: ApiState) -> ApiResult<u64> {
+    tokio::task::spawn_blocking(move || state.now_ms())
+        .await
+        .map_err(|e| {
+            tracing::error!(err = %e, "0dentity API clock task failed");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "Clock task failed")
+        })?
+}
+
 fn path_and_query(uri: &axum::http::Uri) -> String {
     uri.path_and_query()
         .map_or_else(|| uri.path().to_owned(), |value| value.as_str().to_owned())
@@ -287,10 +327,11 @@ async fn verify_signed_write_blocking(
     let token = extract_session_token(headers)
         .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Bearer session token required"))?;
 
+    let now_ms = now_ms_blocking(state.clone()).await?;
     let headers = headers.clone();
     with_store_blocking(state, move |store| {
         let session = store
-            .get_session(&token)
+            .get_session(&token, now_ms)
             .map_err(store_error)?
             .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
@@ -573,10 +614,11 @@ pub async fn list_claims(
         )
     })?;
 
+    let now_ms = now_ms_blocking(state.clone()).await?;
     let response = with_store_blocking(state, move |store| {
         // Verify session belongs to this DID.
         let session = store
-            .get_session(&token)
+            .get_session(&token, now_ms)
             .map_err(store_error)?
             .ok_or_else(|| {
                 (
@@ -694,9 +736,10 @@ pub async fn list_fingerprints(
         )
     })?;
 
+    let now_ms = now_ms_blocking(state.clone()).await?;
     let response = with_store_blocking(state, move |store| {
         let session = store
-            .get_session(&token)
+            .get_session(&token, now_ms)
             .map_err(store_error)?
             .ok_or_else(|| {
                 (
@@ -969,8 +1012,12 @@ mod tests {
     use crate::zerodentity::{
         attestation::attestation_signing_payload,
         store::{ZerodentityReadFailure, ZerodentityStore},
-        types::{ClaimStatus, ClaimType, IdentityClaim, IdentitySession},
+        types::{ClaimStatus, ClaimType, IDENTITY_SESSION_TTL_MS, IdentityClaim, IdentitySession},
     };
+
+    const API_TEST_NOW_MS: u64 = 1_700_000_000_000;
+    const API_TEST_ACTIVE_SESSION_CREATED_MS: u64 = API_TEST_NOW_MS - 1_000;
+    const API_TEST_EXPIRED_SESSION_CREATED_MS: u64 = API_TEST_NOW_MS - IDENTITY_SESSION_TTL_MS - 1;
 
     fn test_store() -> ZerodentityStore {
         let keypair = KeyPair::from_secret_bytes([31u8; 32]).unwrap();
@@ -980,19 +1027,22 @@ mod tests {
         store
     }
 
+    fn test_api_state(store: ZerodentityStore) -> ApiState {
+        ApiState::new_with_clock(
+            Arc::new(Mutex::new(store)),
+            HybridClock::with_wall_clock(|| API_TEST_NOW_MS),
+        )
+    }
+
     fn make_state() -> ApiState {
-        ApiState {
-            store: Arc::new(Mutex::new(test_store())),
-        }
+        test_api_state(test_store())
     }
 
     #[tokio::test]
     async fn get_score_redacts_store_read_errors() {
         let mut store = test_store();
         store.inject_read_failure(ZerodentityReadFailure::Claims);
-        let app = zerodentity_api_router(ApiState {
-            store: Arc::new(Mutex::new(store)),
-        });
+        let app = zerodentity_api_router(test_api_state(store));
 
         let resp = app
             .oneshot(
@@ -1124,31 +1174,41 @@ mod tests {
     }
 
     fn make_state_with_session(token: &str, did_str: &str) -> ApiState {
+        make_state_with_session_at(token, did_str, API_TEST_ACTIVE_SESSION_CREATED_MS)
+    }
+
+    fn make_state_with_session_at(token: &str, did_str: &str, created_ms: u64) -> ApiState {
         let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
             subject_did: did,
             public_key: vec![],
-            created_ms: 0,
-            last_active_ms: 0,
+            created_ms,
+            last_active_ms: created_ms,
             revoked: false,
         };
         store.insert_session(&session).unwrap();
-        ApiState {
-            store: Arc::new(Mutex::new(store)),
-        }
+        test_api_state(store)
     }
 
     fn make_state_with_session_and_claim(token: &str, did_str: &str) -> ApiState {
+        make_state_with_session_and_claim_at(token, did_str, API_TEST_ACTIVE_SESSION_CREATED_MS)
+    }
+
+    fn make_state_with_session_and_claim_at(
+        token: &str,
+        did_str: &str,
+        created_ms: u64,
+    ) -> ApiState {
         let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
             subject_did: did.clone(),
             public_key: vec![],
-            created_ms: 0,
-            last_active_ms: 0,
+            created_ms,
+            last_active_ms: created_ms,
             revoked: false,
         };
         store.insert_session(&session).unwrap();
@@ -1164,9 +1224,7 @@ mod tests {
             dag_node_hash: Hash256::digest(b"dag-node"),
         };
         store.insert_claim("claim-001", &claim).unwrap();
-        ApiState {
-            store: Arc::new(Mutex::new(store)),
-        }
+        test_api_state(store)
     }
 
     fn make_state_with_session_and_claims(
@@ -1180,8 +1238,8 @@ mod tests {
             session_token: token.to_owned(),
             subject_did: did.clone(),
             public_key: vec![],
-            created_ms: 0,
-            last_active_ms: 0,
+            created_ms: API_TEST_ACTIVE_SESSION_CREATED_MS,
+            last_active_ms: API_TEST_ACTIVE_SESSION_CREATED_MS,
             revoked: false,
         };
         store.insert_session(&session).unwrap();
@@ -1203,9 +1261,7 @@ mod tests {
                 .unwrap();
         }
 
-        ApiState {
-            store: Arc::new(Mutex::new(store)),
-        }
+        test_api_state(store)
     }
 
     fn make_state_with_score_history(did_str: &str, timestamps: &[u64]) -> ApiState {
@@ -1215,9 +1271,7 @@ mod tests {
             store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], *timestamp));
         }
 
-        ApiState {
-            store: Arc::new(Mutex::new(store)),
-        }
+        test_api_state(store)
     }
 
     fn make_state_with_signed_session_and_claim(
@@ -1225,14 +1279,28 @@ mod tests {
         did_str: &str,
         keypair: &KeyPair,
     ) -> ApiState {
+        make_state_with_signed_session_and_claim_at(
+            token,
+            did_str,
+            keypair,
+            API_TEST_ACTIVE_SESSION_CREATED_MS,
+        )
+    }
+
+    fn make_state_with_signed_session_and_claim_at(
+        token: &str,
+        did_str: &str,
+        keypair: &KeyPair,
+        created_ms: u64,
+    ) -> ApiState {
         let mut store = test_store();
         let did = Did::new(did_str).unwrap();
         let session = IdentitySession {
             session_token: token.to_owned(),
             subject_did: did.clone(),
             public_key: keypair.public_key().as_bytes().to_vec(),
-            created_ms: 0,
-            last_active_ms: 0,
+            created_ms,
+            last_active_ms: created_ms,
             revoked: false,
         };
         store.insert_session(&session).unwrap();
@@ -1248,9 +1316,7 @@ mod tests {
             dag_node_hash: Hash256::digest(b"dag-node"),
         };
         store.insert_claim("claim-001", &claim).unwrap();
-        ApiState {
-            store: Arc::new(Mutex::new(store)),
-        }
+        test_api_state(store)
     }
 
     fn request_signature_headers(
@@ -1727,6 +1793,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_claims_rejects_expired_session() {
+        let state = make_state_with_session_and_claim_at(
+            "tok-expired",
+            "did:exo:alice",
+            API_TEST_EXPIRED_SESSION_CREATED_MS,
+        );
+        let app = zerodentity_api_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/0dentity/did%3Aexo%3Aalice/claims")
+                    .header("authorization", "Bearer tok-expired")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["error"], "Invalid or expired session");
+    }
+
+    #[tokio::test]
     async fn list_claims_pagination_with_offset() {
         let state = make_state_with_session_and_claim("tok-alice", "did:exo:alice");
         let app = zerodentity_api_router(state);
@@ -1843,6 +1934,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_identity_rejects_expired_session_before_erasure() {
+        let keypair = test_keypair(44);
+        let state = make_state_with_signed_session_and_claim_at(
+            "tok-expired",
+            "did:exo:alice",
+            &keypair,
+            API_TEST_EXPIRED_SESSION_CREATED_MS,
+        );
+        let app = zerodentity_api_router(state);
+        let resp = signed_delete(
+            app,
+            "/api/v1/0dentity/did%3Aexo%3Aalice",
+            "tok-expired",
+            "nonce-api-delete-expired",
+            serde_json::json!({ "erased_ms": 7_777_000 }),
+            &keypair,
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
