@@ -323,7 +323,7 @@ async fn verify_signed_write_blocking(
     method: &'static str,
     path_and_query: String,
     body: Bytes,
-) -> ApiResult<String> {
+) -> ApiResult<PublicKey> {
     let token = extract_session_token(headers)
         .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Bearer session token required"))?;
 
@@ -374,7 +374,7 @@ async fn verify_signed_write_blocking(
             ));
         }
 
-        Ok(token)
+        Ok(public_key)
     })
     .await
 }
@@ -792,7 +792,7 @@ pub async fn create_peer_attestation(
     let target_did = parse_did(&req.target_did)?;
 
     let request_path = path_and_query(&uri);
-    let _token = verify_signed_write_blocking(
+    let authenticated_public_key = verify_signed_write_blocking(
         state.clone(),
         &headers,
         attester_did.clone(),
@@ -814,6 +814,11 @@ pub async fn create_peer_attestation(
         .created_ms
         .ok_or_else(|| bad_request("created_ms is required"))?;
     let attester_public_key = parse_public_key(req.attester_public_key.as_deref())?;
+    if attester_public_key.as_bytes() != authenticated_public_key.as_bytes() {
+        return Err(bad_request(
+            "attester_public_key must match authenticated session key",
+        ));
+    }
     let signature = parse_signature(req.signature.as_deref())?;
 
     let response = with_store_blocking(state, move |store| {
@@ -1388,11 +1393,6 @@ mod tests {
         .unwrap()
     }
 
-    fn keypair(seed: u8) -> (PublicKey, SecretKey) {
-        let pair = crypto::KeyPair::from_secret_bytes([seed; 32]).unwrap();
-        (*pair.public_key(), pair.secret_key().clone())
-    }
-
     fn signed_attest_body(
         attester: &Did,
         target: &Did,
@@ -1697,7 +1697,6 @@ mod tests {
         let attester = Did::new("did:exo:alice").unwrap();
         let target = Did::new("did:exo:carol").unwrap();
         let message_hash = Hash256::from_bytes([0u8; 32]);
-        let (public_key, secret_key) = keypair(51);
         let uri = "/api/v1/0dentity/did%3Aexo%3Aalice/attest";
         let body = signed_attest_body(
             &attester,
@@ -1705,8 +1704,8 @@ mod tests {
             AttestationType::Identity,
             Some(message_hash),
             1_700_000_100_000,
-            &public_key,
-            &secret_key,
+            session_keypair.public_key(),
+            session_keypair.secret_key(),
         );
         let resp = signed_post(
             app,
@@ -1731,7 +1730,6 @@ mod tests {
         let app = zerodentity_api_router(state);
         let attester = Did::new("did:exo:alice").unwrap();
         let target = Did::new("did:exo:dave").unwrap();
-        let (public_key, secret_key) = keypair(53);
         let uri = "/api/v1/0dentity/did%3Aexo%3Aalice/attest";
         let mut body = signed_attest_body(
             &attester,
@@ -1739,8 +1737,8 @@ mod tests {
             AttestationType::Trustworthy,
             None,
             1_700_000_200_000,
-            &public_key,
-            &secret_key,
+            session_keypair.public_key(),
+            session_keypair.secret_key(),
         );
         body["message_hash"] = serde_json::Value::String(hex::encode([0u8; 16]));
         let resp = signed_post(
