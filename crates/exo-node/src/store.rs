@@ -465,6 +465,36 @@ impl SqliteDagStore {
         Ok(certs)
     }
 
+    /// Load the persisted commit certificate for a committed node hash.
+    pub fn load_certificate_for_hash(
+        &self,
+        hash: &Hash256,
+    ) -> DagResult<Option<CommitCertificate>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT cbor_data FROM commit_certificates WHERE node_hash = ?1")
+            .map_err(store_err)?;
+
+        let result: Result<Vec<u8>, rusqlite::Error> =
+            stmt.query_row(params![hash.0.as_slice()], |row| row.get(0));
+
+        match result {
+            Ok(bytes) => {
+                let certificate: CommitCertificate = ciborium::from_reader(bytes.as_slice())
+                    .map_err(|e| store_err(format!("CBOR decode certificate: {e}")))?;
+                if certificate.node_hash != *hash {
+                    return Err(store_err(
+                        "commit_certificates.node_hash does not match CBOR certificate node_hash",
+                    ));
+                }
+                validate_commit_certificate(&certificate)?;
+                Ok(Some(certificate))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(store_err(format!("commit_certificates.cbor_data: {e}"))),
+        }
+    }
+
     // -----------------------------------------------------------------
     // Validator set persistence
     // -----------------------------------------------------------------
@@ -807,17 +837,31 @@ impl SqliteDagStore {
         Ok(())
     }
 
-    /// Persist and mark a batch of DAG nodes as committed atomically.
-    pub fn put_committed_many_sync(&mut self, nodes: &[(DagNode, u64)]) -> DagResult<()> {
+    /// Persist nodes, commit markers, and finality certificates atomically.
+    pub fn put_committed_many_with_certificates_sync(
+        &mut self,
+        nodes: &[(DagNode, u64)],
+        certificates: &[CommitCertificate],
+    ) -> DagResult<()> {
+        if nodes.len() != certificates.len() {
+            return Err(store_err(format!(
+                "committed batch must include one certificate per node: got {} certificates for {} nodes",
+                certificates.len(),
+                nodes.len()
+            )));
+        }
+
         let tx = self.conn.transaction().map_err(store_err)?;
-        for (node, height) in nodes {
+        for ((node, height), certificate) in nodes.iter().zip(certificates) {
+            if certificate.node_hash != node.hash {
+                return Err(store_err(format!(
+                    "commit certificate node_hash {} does not match DAG node hash {}",
+                    certificate.node_hash, node.hash
+                )));
+            }
             Self::insert_node_tx(&tx, node)?;
-            let height = sqlite_u64_to_i64(*height, "committed.height")?;
-            tx.execute(
-                "INSERT OR REPLACE INTO committed (hash, height) VALUES (?1, ?2)",
-                params![node.hash.0.as_slice(), height],
-            )
-            .map_err(store_err)?;
+            Self::insert_committed_tx(&tx, &node.hash, *height)?;
+            Self::insert_certificate_tx(&tx, certificate)?;
         }
         tx.commit().map_err(store_err)?;
         Ok(())
@@ -1076,6 +1120,19 @@ mod tests {
         let creator = Did::new("did:exo:test").expect("valid");
         let sign_fn = make_sign_fn();
         append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock).unwrap()
+    }
+
+    fn commit_certificate_for(hash: Hash256, round: u64) -> CommitCertificate {
+        CommitCertificate {
+            node_hash: hash,
+            round,
+            votes: vec![Vote {
+                voter: Did::new("did:exo:v0").unwrap(),
+                round,
+                node_hash: hash,
+                signature: Signature::from_bytes([7u8; 64]),
+            }],
+        }
     }
 
     fn temp_store() -> SqliteDagStore {
@@ -1490,20 +1547,10 @@ mod tests {
 
     #[test]
     fn certificate_persistence_roundtrip() {
-        use exo_core::types::Signature;
         let mut store = temp_store();
         let mut hash = [0u8; 32];
         hash[0] = 0xCD;
-        let cert = CommitCertificate {
-            node_hash: Hash256::from_bytes(hash),
-            round: 3,
-            votes: vec![Vote {
-                voter: Did::new("did:exo:v0").unwrap(),
-                round: 3,
-                node_hash: Hash256::from_bytes(hash),
-                signature: Signature::from_bytes([1u8; 64]),
-            }],
-        };
+        let cert = commit_certificate_for(Hash256::from_bytes(hash), 3);
         store.save_certificate(&cert).unwrap();
 
         let loaded = store.load_certificates().unwrap();
@@ -1511,6 +1558,104 @@ mod tests {
         assert_eq!(loaded[0].round, 3);
         assert_eq!(loaded[0].node_hash, Hash256::from_bytes(hash));
         assert_eq!(loaded[0].votes.len(), 1);
+    }
+
+    #[test]
+    fn load_certificate_for_hash_returns_matching_certificate_only() {
+        let mut store = temp_store();
+        let hash = Hash256::digest(b"cert-target");
+        let cert = commit_certificate_for(hash, 3);
+        store.save_certificate(&cert).unwrap();
+
+        let loaded = store
+            .load_certificate_for_hash(&hash)
+            .unwrap()
+            .expect("certificate should exist");
+        assert_eq!(loaded, cert);
+        assert!(
+            store
+                .load_certificate_for_hash(&Hash256::digest(b"missing-cert"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn load_certificate_for_hash_rejects_cbor_node_hash_mismatch() {
+        let store = temp_store();
+        let row_hash = Hash256::digest(b"row-node");
+        let cert = commit_certificate_for(Hash256::digest(b"cbor-node"), 3);
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&cert, &mut cbor).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO commit_certificates (node_hash, round, cbor_data)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_hash.0.as_slice(), 3_i64, cbor],
+            )
+            .unwrap();
+
+        let err = store.load_certificate_for_hash(&row_hash).unwrap_err();
+
+        assert!(err.to_string().contains("CBOR certificate node_hash"));
+    }
+
+    #[test]
+    fn put_committed_many_with_certificates_persists_finality_rows() {
+        let mut store = temp_store();
+        let node = make_test_node();
+        let certificate = commit_certificate_for(node.hash, 1);
+
+        store
+            .put_committed_many_with_certificates_sync(
+                &[(node.clone(), 1)],
+                std::slice::from_ref(&certificate),
+            )
+            .unwrap();
+
+        assert!(store.contains_sync(&node.hash).unwrap());
+        assert!(store.is_committed(&node.hash).unwrap());
+        assert_eq!(
+            store.load_certificate_for_hash(&node.hash).unwrap(),
+            Some(certificate)
+        );
+    }
+
+    #[test]
+    fn put_committed_many_with_certificates_rejects_mismatched_certificate_without_partial_rows() {
+        let mut store = temp_store();
+        let node = make_test_node();
+        let certificate = commit_certificate_for(Hash256::digest(b"wrong-node"), 1);
+
+        let err = store
+            .put_committed_many_with_certificates_sync(&[(node.clone(), 1)], &[certificate])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("does not match DAG node hash"));
+        assert!(!store.contains_sync(&node.hash).unwrap());
+        assert!(!store.is_committed(&node.hash).unwrap());
+        assert!(store.load_certificates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn put_committed_many_with_certificates_rolls_back_when_certificate_is_rejected() {
+        let mut store = temp_store();
+        let node = make_test_node();
+        let mut certificate = commit_certificate_for(node.hash, 1);
+        certificate.votes[0].signature = Signature::Empty;
+
+        let err = store
+            .put_committed_many_with_certificates_sync(&[(node.clone(), 1)], &[certificate])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("commit_certificates.votes[0].signature")
+        );
+        assert!(!store.contains_sync(&node.hash).unwrap());
+        assert!(!store.is_committed(&node.hash).unwrap());
+        assert!(store.load_certificates().unwrap().is_empty());
     }
 
     #[test]
