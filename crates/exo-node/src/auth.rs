@@ -5,9 +5,10 @@
 //! mutating endpoint requires this token in the `Authorization:
 //! Bearer <token>` header unless the route has a stricter local verifier.
 //! Public status and dashboard reads remain unauthenticated, while trust-object
-//! reads that disclose receipts, provenance, or credentials also require the
-//! bearer token. Exact 0dentity signed-write routes pass through so their
-//! handlers can verify DID-scoped session tokens and request signatures.
+//! reads that disclose receipts, provenance, economy records, or credentials
+//! also require the bearer token. Exact 0dentity signed-write routes pass
+//! through so their handlers can verify DID-scoped session tokens and request
+//! signatures.
 
 use std::{
     io::{ErrorKind, Write},
@@ -137,6 +138,7 @@ fn is_sensitive_read_path(path: &str) -> bool {
         || path.starts_with("/api/v1/receipts/")
         || path.starts_with("/api/v1/provenance/")
         || path.starts_with("/api/v1/avc/")
+        || (path.starts_with("/api/v1/economy/") && path != "/api/v1/economy/policy/active")
         || (path.starts_with("/api/v1/agents/") && path.ends_with("/avcs"))
 }
 
@@ -169,7 +171,8 @@ fn is_zerodentity_local_signed_write(method: &axum::http::Method, path: &str) ->
 /// trust-object reads.
 ///
 /// Public `GET` and `HEAD` requests pass through without authentication unless
-/// they target receipts, provenance, AVCs, or agent credential listings. All
+/// they target receipts, provenance, AVCs, economy trust objects, or agent
+/// credential listings. The active economy policy remains public. All
 /// other methods (`POST`, `PUT`, `DELETE`, `PATCH`) require
 /// `Authorization: Bearer <token>` unless they are exact 0dentity signed-write
 /// routes whose handlers perform identity-session and request-signature checks.
@@ -247,6 +250,14 @@ mod tests {
             .route("/api/v1/provenance/:hash", get(|| async { "provenance" }))
             .route("/api/v1/avc/:id", get(|| async { "credential" }))
             .route("/api/v1/agents/:did/avcs", get(|| async { "credentials" }))
+            .route(
+                "/api/v1/economy/bailment-terms/:id",
+                get(|| async { "bailment terms" }),
+            )
+            .route(
+                "/api/v1/economy/policy/active",
+                get(|| async { "active policy" }),
+            )
             .route(
                 "/api/v1/0dentity/:did/attest",
                 post(|| async { "signed-attest" }),
@@ -403,6 +414,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn economy_trust_object_get_without_token_rejected() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/economy/bailment-terms/0000000000000000000000000000000000000000000000000000000000000000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn economy_active_policy_get_without_token_passes() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/economy/policy/active")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
