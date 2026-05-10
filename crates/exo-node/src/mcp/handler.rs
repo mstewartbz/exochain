@@ -748,7 +748,7 @@ impl McpServer {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::*;
+    use super::{super::middleware::mcp_tool_action_hash, *};
     use crate::mcp::protocol::{AI_OUTPUT_GENERATOR, AI_OUTPUT_MARKING};
 
     fn test_server() -> McpServer {
@@ -772,7 +772,7 @@ mod tests {
             .clone()
     }
 
-    fn constitutional_context(actor_did: &str, action: &str) -> Value {
+    fn constitutional_context(actor_did: &str, action: &str, arguments: &Value) -> Value {
         let actor = Did::new(actor_did).expect("valid DID");
         let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x4D; 32]).unwrap();
         let public_key = *keypair.public_key();
@@ -798,7 +798,8 @@ mod tests {
         authority_link.signature = authority_signature.to_bytes().to_vec();
 
         let timestamp = exo_core::Timestamp::new(1_777_000_000_000, 7).to_string();
-        let action_hash = exo_core::Hash256::digest(action.as_bytes());
+        let action_hash =
+            mcp_tool_action_hash(action, arguments).expect("canonical tool action payload");
         let mut provenance = exo_gatekeeper::types::Provenance {
             actor: actor.clone(),
             timestamp: timestamp.clone(),
@@ -862,10 +863,12 @@ mod tests {
     }
 
     fn tool_call_params(name: &str, arguments: Value) -> Value {
+        let constitutional_context =
+            constitutional_context("did:exo:test-ai-agent", name, &arguments);
         serde_json::json!({
             "name": name,
             "arguments": arguments,
-            "constitutional_context": constitutional_context("did:exo:test-ai-agent", name),
+            "constitutional_context": constitutional_context,
         })
     }
 

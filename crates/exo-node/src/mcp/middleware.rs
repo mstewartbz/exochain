@@ -38,13 +38,22 @@ use super::{
 
 const CONSTITUTIONAL_CONTEXT_FIELD: &str = "constitutional_context";
 const MCP_DELEGATION_ID_DOMAIN: &str = "exo.node.mcp.middleware.delegation_id.v1";
+const MCP_TOOL_ACTION_HASH_DOMAIN: &str = "exo.node.mcp.middleware.tool_action_hash.v1";
 
 #[derive(Serialize)]
 struct McpDelegationIdPayload<'a> {
     domain: &'static str,
     actor_did: &'a Did,
     action: &'a str,
+    tool_action_hash: &'a Hash256,
     bcts_scope: &'a str,
+}
+
+#[derive(Serialize)]
+struct McpToolActionHashPayload<'a> {
+    domain: &'static str,
+    action: &'a str,
+    arguments: &'a Value,
 }
 
 /// Constitutional enforcement middleware wrapping every MCP tool invocation.
@@ -167,8 +176,8 @@ impl ConstitutionalMiddleware {
         Ok(PermissionSet::new(permissions))
     }
 
-    fn action_hash_matches(context: &AdjudicationContext, action: &str) -> bool {
-        let expected = Hash256::digest(action.as_bytes()).as_bytes().to_vec();
+    fn action_hash_matches(context: &AdjudicationContext, expected_action_hash: &Hash256) -> bool {
+        let expected = expected_action_hash.as_bytes().to_vec();
         context
             .provenance
             .as_ref()
@@ -274,20 +283,31 @@ impl ConstitutionalMiddleware {
             ))
         })?;
         self.verify_authority_binding(actor_did, &adjudication_context)?;
-        if !Self::action_hash_matches(&adjudication_context, action) {
+
+        let empty_arguments = Value::Object(serde_json::Map::new());
+        let arguments = tool_call_params
+            .get("arguments")
+            .unwrap_or(&empty_arguments);
+        let tool_action_hash = mcp_tool_action_hash(action, arguments).map_err(|err| {
+            McpError::ConstitutionalViolation(format!(
+                "verified MCP invocation context action_hash encoding failed: {err}"
+            ))
+        })?;
+        if !Self::action_hash_matches(&adjudication_context, &tool_action_hash) {
             return Err(McpError::ConstitutionalViolation(
-                "verified MCP invocation context provenance action_hash does not match tool action"
+                "verified MCP invocation context provenance action_hash does not match tool action and arguments"
                     .into(),
             ));
         }
 
         let bcts_scope = Self::parse_required_str(context_value, "bcts_scope")?.to_owned();
         let output_marking = Self::parse_required_str(context_value, "output_marking")?;
-        let delegation_id = mcp_delegation_id(actor_did, action, &bcts_scope).map_err(|err| {
-            McpError::ConstitutionalViolation(format!(
-                "verified MCP invocation context delegation_id encoding failed: {err}"
-            ))
-        })?;
+        let delegation_id = mcp_delegation_id(actor_did, action, &tool_action_hash, &bcts_scope)
+            .map_err(|err| {
+                McpError::ConstitutionalViolation(format!(
+                    "verified MCP invocation context delegation_id encoding failed: {err}"
+                ))
+            })?;
         let mcp_context = McpContext {
             actor_did: actor_did.clone(),
             signer_type: SignerType::Ai { delegation_id },
@@ -352,11 +372,25 @@ impl ConstitutionalMiddleware {
     }
 }
 
-fn mcp_delegation_id(actor_did: &Did, action: &str, bcts_scope: &str) -> exo_core::Result<Hash256> {
+pub(super) fn mcp_tool_action_hash(action: &str, arguments: &Value) -> exo_core::Result<Hash256> {
+    hash_structured(&McpToolActionHashPayload {
+        domain: MCP_TOOL_ACTION_HASH_DOMAIN,
+        action,
+        arguments,
+    })
+}
+
+fn mcp_delegation_id(
+    actor_did: &Did,
+    action: &str,
+    tool_action_hash: &Hash256,
+    bcts_scope: &str,
+) -> exo_core::Result<Hash256> {
     hash_structured(&McpDelegationIdPayload {
         domain: MCP_DELEGATION_ID_DOMAIN,
         actor_did,
         action,
+        tool_action_hash,
         bcts_scope,
     })
 }
@@ -392,6 +426,10 @@ mod tests {
     }
 
     fn signed_tool_call_params(action: &str) -> Value {
+        signed_tool_call_params_with_arguments(action, serde_json::json!({}))
+    }
+
+    fn signed_tool_call_params_with_arguments(action: &str, arguments: Value) -> Value {
         let actor = test_did();
         let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x4D; 32]).unwrap();
         let public_key = *keypair.public_key();
@@ -417,7 +455,8 @@ mod tests {
         authority_link.signature = authority_signature.to_bytes().to_vec();
 
         let timestamp = exo_core::Timestamp::new(1_777_000_000_000, 7).to_string();
-        let action_hash = Hash256::digest(action.as_bytes());
+        let action_hash =
+            mcp_tool_action_hash(action, &arguments).expect("canonical tool action payload");
         let mut provenance = exo_gatekeeper::types::Provenance {
             actor: actor.clone(),
             timestamp: timestamp.clone(),
@@ -435,6 +474,7 @@ mod tests {
         provenance.signature = provenance_signature.to_bytes().to_vec();
 
         serde_json::json!({
+            "arguments": arguments,
             CONSTITUTIONAL_CONTEXT_FIELD: {
                 "bcts_scope": action,
                 "capabilities": ["mcp:tool_call"],
@@ -534,6 +574,27 @@ mod tests {
         assert!(
             err.to_string().contains("escalated"),
             "expected escalated verdict refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn middleware_rejects_signed_context_replayed_with_different_arguments() {
+        let mw = signed_middleware();
+        let did = test_did();
+        let action = "exochain_node_status";
+        let mut params = signed_tool_call_params(action);
+        params["arguments"] = serde_json::json!({
+            "target_tenant": "did:exo:other-tenant",
+            "include_sensitive_state": true
+        });
+
+        let err = mw
+            .enforce_tool_call(&did, action, &params)
+            .expect_err("MCP signed context must be bound to the exact tool arguments");
+
+        assert!(
+            err.to_string().contains("action_hash"),
+            "expected argument-bound action_hash refusal, got {err}"
         );
     }
 
@@ -683,6 +744,10 @@ mod tests {
             "MCP delegation IDs must carry an explicit domain separator"
         );
         assert!(
+            production.contains("MCP_TOOL_ACTION_HASH_DOMAIN"),
+            "MCP tool action hashes must carry an explicit domain separator"
+        );
+        assert!(
             production.contains("hash_structured"),
             "MCP delegation IDs must use canonical CBOR structured hashing"
         );
@@ -701,10 +766,13 @@ mod tests {
         let actor = test_did();
         let action = "exochain_node_status";
         let bcts_scope = "mcp:tools";
+        let arguments = serde_json::json!({});
+        let tool_action_hash =
+            mcp_tool_action_hash(action, &arguments).expect("canonical tool action hash");
 
-        let structured =
-            mcp_delegation_id(&actor, action, bcts_scope).expect("canonical delegation id");
-        let repeat = mcp_delegation_id(&actor, action, bcts_scope)
+        let structured = mcp_delegation_id(&actor, action, &tool_action_hash, bcts_scope)
+            .expect("canonical delegation id");
+        let repeat = mcp_delegation_id(&actor, action, &tool_action_hash, bcts_scope)
             .expect("canonical delegation id is deterministic");
         let mut legacy_payload = Vec::new();
         legacy_payload.extend_from_slice(actor.as_str().as_bytes());
@@ -718,11 +786,36 @@ mod tests {
         assert_ne!(structured, legacy);
         assert_ne!(
             structured,
-            mcp_delegation_id(&actor, "other_action", bcts_scope).expect("canonical delegation id")
+            mcp_delegation_id(&actor, "other_action", &tool_action_hash, bcts_scope)
+                .expect("canonical delegation id")
         );
         assert_ne!(
             structured,
-            mcp_delegation_id(&actor, action, "other_scope").expect("canonical delegation id")
+            mcp_delegation_id(&actor, action, &tool_action_hash, "other_scope")
+                .expect("canonical delegation id")
         );
+        let other_arguments = serde_json::json!({"changed": true});
+        let other_tool_action_hash =
+            mcp_tool_action_hash(action, &other_arguments).expect("canonical tool action hash");
+        assert_ne!(
+            structured,
+            mcp_delegation_id(&actor, action, &other_tool_action_hash, bcts_scope)
+                .expect("canonical delegation id")
+        );
+    }
+
+    #[test]
+    fn tool_action_hash_binds_arguments() {
+        let action = "exochain_node_status";
+        let first = mcp_tool_action_hash(action, &serde_json::json!({"tenant": "alpha"}))
+            .expect("canonical tool action hash");
+        let repeat = mcp_tool_action_hash(action, &serde_json::json!({"tenant": "alpha"}))
+            .expect("canonical tool action hash");
+        let changed = mcp_tool_action_hash(action, &serde_json::json!({"tenant": "beta"}))
+            .expect("canonical tool action hash");
+
+        assert_eq!(first, repeat);
+        assert_ne!(first, changed);
+        assert_ne!(first, Hash256::digest(action.as_bytes()));
     }
 }
