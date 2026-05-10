@@ -50,7 +50,10 @@ const MAX_DID_DOCUMENT_BODY_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 use crate::auth::request_signing_payload;
 use crate::{
-    auth::{AuthenticatedActor, AuthenticationMetadata, Request as AuthRequest, authenticate},
+    auth::{
+        AuthenticatedActor, AuthenticationMetadata, FRESHNESS_WINDOW_MS, Request as AuthRequest,
+        authenticate,
+    },
     db,
     error::{GatewayError, Result},
     graphql,
@@ -678,12 +681,19 @@ async fn registry_authenticate_session_login(
     did: String,
     metadata: SessionIssueMetadata,
     proof: SessionLoginProof,
+    trusted_observed_at: Timestamp,
 ) -> std::result::Result<(), RegistryBlockingError> {
     tokio::task::spawn_blocking(move || {
         let reg = registry.read().unwrap_or_else(|e| e.into_inner());
-        authenticate_session_login(&did, &metadata, &proof, &*reg)
-            .map(|_| ())
-            .map_err(|e| RegistryBlockingError::Authentication(e.to_string()))
+        authenticate_session_login_against_trusted_time(
+            &did,
+            &metadata,
+            &proof,
+            &*reg,
+            trusted_observed_at,
+        )
+        .map(|_| ())
+        .map_err(|e| RegistryBlockingError::Authentication(e.to_string()))
     })
     .await
     .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
@@ -695,6 +705,8 @@ async fn authenticate_session_login_with_state(
     metadata: SessionIssueMetadata,
     proof: SessionLoginProof,
 ) -> std::result::Result<(), RegistryBlockingError> {
+    let trusted_observed_at = trusted_session_login_observed_at(state)
+        .map_err(|e| RegistryBlockingError::Persistence(e.to_string()))?;
     if let Some(pool) = state.pool.as_ref() {
         let Some(doc) = db::find_did_document(pool, &did)
             .await
@@ -710,14 +722,27 @@ async fn authenticate_session_login_with_state(
             registry
                 .register(doc)
                 .map_err(RegistryBlockingError::Registration)?;
-            authenticate_session_login(&did, &metadata, &proof, &registry)
-                .map(|_| ())
-                .map_err(|e| RegistryBlockingError::Authentication(e.to_string()))
+            authenticate_session_login_against_trusted_time(
+                &did,
+                &metadata,
+                &proof,
+                &registry,
+                trusted_observed_at,
+            )
+            .map(|_| ())
+            .map_err(|e| RegistryBlockingError::Authentication(e.to_string()))
         })
         .await
         .map_err(|e| RegistryBlockingError::Join(e.to_string()))?
     } else {
-        registry_authenticate_session_login(Arc::clone(&state.registry), did, metadata, proof).await
+        registry_authenticate_session_login(
+            Arc::clone(&state.registry),
+            did,
+            metadata,
+            proof,
+            trusted_observed_at,
+        )
+        .await
     }
 }
 
@@ -1481,6 +1506,35 @@ fn authenticate_session_login(
         session_login_auth_request(did, metadata, proof.timestamp, proof.signature.clone())?;
     let auth_metadata = AuthenticationMetadata::new(proof.observed_at)?;
     authenticate(&request, registry, auth_metadata)
+}
+
+fn authenticate_session_login_against_trusted_time(
+    did: &str,
+    metadata: &SessionIssueMetadata,
+    proof: &SessionLoginProof,
+    registry: &dyn DidRegistry,
+    trusted_observed_at: Timestamp,
+) -> Result<AuthenticatedActor> {
+    let actor = authenticate_session_login(did, metadata, proof, registry)?;
+    validate_session_login_freshness_against_trusted_time(proof, trusted_observed_at)?;
+    Ok(actor)
+}
+
+fn validate_session_login_freshness_against_trusted_time(
+    proof: &SessionLoginProof,
+    trusted_observed_at: Timestamp,
+) -> Result<()> {
+    let skew_ms = trusted_observed_at
+        .physical_ms
+        .abs_diff(proof.timestamp.physical_ms);
+    if skew_ms > FRESHNESS_WINDOW_MS {
+        return Err(GatewayError::AuthenticationFailed {
+            reason: format!(
+                "request timestamp outside freshness window: skew {skew_ms}ms (max {FRESHNESS_WINDOW_MS}ms)"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn metadata_error(reason: impl Into<String>) -> GatewayError {
@@ -3021,6 +3075,18 @@ fn trusted_session_validation_time_ms(state: &AppState) -> Result<i64> {
             "gateway session validation time exceeds database timestamp range".to_owned(),
         )
     })
+}
+
+fn trusted_session_login_observed_at(state: &AppState) -> Result<Timestamp> {
+    let observed_at_ms = state
+        .try_now_ms()
+        .map_err(|message| GatewayError::Internal(message.to_owned()))?;
+    if observed_at_ms == 0 {
+        return Err(GatewayError::Internal(
+            "gateway session login HLC returned zero".to_owned(),
+        ));
+    }
+    Ok(Timestamp::new(observed_at_ms, 0))
 }
 
 async fn require_authenticated_session_actor_from_header(
@@ -7001,9 +7067,10 @@ mod tests {
         });
 
         let response = handle_auth_login(
-            State(AppState::new(
-                Some(pool.clone()),
+            State(db_state_at(
+                pool.clone(),
                 Arc::new(RwLock::new(LocalDidRegistry::new())),
+                observed_at.physical_ms,
             )),
             Json(body),
         )
@@ -7186,6 +7253,45 @@ mod tests {
         assert!(
             err.to_string().contains("freshness window"),
             "expected stale timestamp refusal, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_login_authentication_rejects_stale_timestamp_against_gateway_clock() {
+        let (registry, sk) = signing_registry();
+        let metadata = SessionIssueMetadata {
+            created_at: 10_000,
+            expires_at: 500_000,
+        };
+        let timestamp = Timestamp::new(10_000, 0);
+        let caller_observed_at = Timestamp::new(10_000, 0);
+        let payload = session_login_auth_signing_payload(
+            "did:exo:login-alice",
+            &metadata,
+            timestamp,
+            caller_observed_at,
+        )
+        .unwrap();
+        let proof = SessionLoginProof {
+            timestamp,
+            observed_at: caller_observed_at,
+            signature: sign(&payload, &sk),
+        };
+        let state =
+            AppState::new_with_clock(None, registry, HybridClock::with_wall_clock(|| 400_000));
+
+        let err = authenticate_session_login_with_state(
+            &state,
+            "did:exo:login-alice".to_owned(),
+            metadata,
+            proof,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("freshness window"),
+            "expected stale timestamp refusal against gateway clock, got {err}"
         );
     }
 
