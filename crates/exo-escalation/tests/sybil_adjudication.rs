@@ -37,6 +37,7 @@ use exo_governance::{
     audit::AuditLog,
     clearance::{ClearanceAssignment, ClearanceLevel, ClearanceRegistry},
 };
+use exo_identity::did::did_from_public_key;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -85,7 +86,7 @@ fn signed_challenge(
             action_id,
             ground,
             admitted_at,
-            admitted_by: did("did:exo:reviewer"),
+            admitted_by: did_from_public_key(keypair.public_key()).unwrap(),
             admitter_public_key: *keypair.public_key(),
             evidence_hash: [0xEEu8; 32],
             authority_chain_hash: [0xACu8; 32],

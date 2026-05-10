@@ -9,6 +9,7 @@
 //! rather than `Verdict::Denied`.
 
 use exo_core::{Did, PublicKey, SecretKey, Signature, Timestamp, crypto};
+use exo_identity::did::did_from_public_key;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -259,6 +260,17 @@ fn validate_challenge_admission_metadata(
             reason: "challenge admission requires a non-zero Ed25519 public key".into(),
         });
     }
+    let derived_did = did_from_public_key(&admission.admitter_public_key).map_err(|e| {
+        EscalationError::InvalidProvenance {
+            reason: format!("challenge admission admitter public key did derivation failed: {e}"),
+        }
+    })?;
+    if derived_did != admission.admitted_by {
+        return Err(EscalationError::InvalidProvenance {
+            reason: "challenge admission admitted_by DID is not bound to admitter public key"
+                .into(),
+        });
+    }
     Ok(())
 }
 
@@ -387,7 +399,7 @@ mod tests {
             action_id: action_id(),
             ground,
             admitted_at: ts(1000),
-            admitted_by: did("reviewer"),
+            admitted_by: did_from_public_key(keypair.public_key()).unwrap(),
             admitter_public_key: *keypair.public_key(),
             evidence_hash: [0xEEu8; 32],
             authority_chain_hash: [0xACu8; 32],
@@ -409,11 +421,15 @@ mod tests {
     #[test]
     fn admit_creates_pause_eligible_hold() {
         let hold = admit_challenge(signed_admission()).unwrap();
+        let keypair = keypair(7);
         assert_eq!(hold.status, ContestStatus::PauseEligible);
         assert_eq!(hold.ground, SybilChallengeGround::ConcealedCommonControl);
         assert_eq!(hold.action_id, action_id());
         assert_eq!(hold.id, uuid(1));
-        assert_eq!(hold.admitted_by, did("reviewer"));
+        assert_eq!(
+            hold.admitted_by,
+            did_from_public_key(keypair.public_key()).unwrap()
+        );
         assert_eq!(hold.evidence_hash, [0xEEu8; 32]);
         assert_eq!(hold.authority_chain_hash, [0xACu8; 32]);
         assert!(!hold.admission_signature.is_empty());
@@ -469,6 +485,24 @@ mod tests {
         )
         .unwrap();
         signed.admission.admitter_public_key = *wrong_keypair.public_key();
+        assert!(verify_challenge_admission(&signed).is_err());
+    }
+
+    #[test]
+    fn verify_challenge_admission_rejects_mismatched_admitter_did_key() {
+        let attacker_keypair = keypair(9);
+        let mut admission = admission_with(
+            uuid(9),
+            SybilChallengeGround::QuorumContamination,
+            &attacker_keypair,
+        );
+        admission.admitted_by = did("victim-reviewer");
+        let payload = challenge_admission_payload(&admission).unwrap();
+        let signed = SignedChallengeAdmission {
+            admission,
+            admission_signature: crypto::sign(&payload, attacker_keypair.secret_key()),
+        };
+
         assert!(verify_challenge_admission(&signed).is_err());
     }
 

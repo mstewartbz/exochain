@@ -1723,6 +1723,7 @@ mod tests {
         use exo_escalation::challenge::{
             self, ChallengeAdmission, SybilChallengeGround, sign_challenge_admission,
         };
+        use exo_identity::did::did_from_public_key;
 
         let store: SharedChallengeStore = Arc::new(Mutex::new(ChallengeStore::new()));
         {
@@ -1733,7 +1734,7 @@ mod tests {
                 action_id: [1u8; 32],
                 ground: SybilChallengeGround::QuorumContamination,
                 admitted_at: exo_core::types::Timestamp::new(1000, 0),
-                admitted_by: Did::new("did:exo:reviewer").unwrap(),
+                admitted_by: did_from_public_key(keypair.public_key()).unwrap(),
                 admitter_public_key: *keypair.public_key(),
                 evidence_hash: [0xEEu8; 32],
                 authority_chain_hash: [0xACu8; 32],

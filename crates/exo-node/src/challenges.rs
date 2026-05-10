@@ -580,6 +580,7 @@ mod tests {
     use exo_escalation::challenge::{
         ChallengeAdmission, SybilChallengeGround, sign_challenge_admission,
     };
+    use exo_identity::did::did_from_public_key;
     use tower::ServiceExt;
 
     use super::*;
@@ -596,16 +597,16 @@ mod tests {
         Timestamp::new(ms, 0)
     }
 
-    fn did(s: &str) -> Did {
-        Did::new(s).unwrap()
-    }
-
     fn uuid(byte: u8) -> Uuid {
         Uuid::from_bytes([byte; 16])
     }
 
     fn keypair(seed: u8) -> exo_core::crypto::KeyPair {
         exo_core::crypto::KeyPair::from_secret_bytes([seed; 32]).unwrap()
+    }
+    fn reviewer_did() -> Did {
+        let keypair = keypair(7);
+        did_from_public_key(keypair.public_key()).unwrap()
     }
 
     #[test]
@@ -675,7 +676,7 @@ mod tests {
                 action_id,
                 ground,
                 admitted_at,
-                admitted_by: did("did:exo:reviewer"),
+                admitted_by: reviewer_did(),
                 admitter_public_key: *keypair.public_key(),
                 evidence_hash: [0xEEu8; 32],
                 authority_chain_hash: [0xACu8; 32],
@@ -693,7 +694,7 @@ mod tests {
         detail: &str,
     ) -> serde_json::Value {
         let keypair = keypair(7);
-        let actor = did("did:exo:reviewer");
+        let actor = reviewer_did();
         let payload =
             challenge_transition_signing_payload(hold, transition, &actor, &at, detail).unwrap();
         let signature = exo_core::crypto::sign(&payload, keypair.secret_key());
@@ -758,7 +759,7 @@ mod tests {
         assert_eq!(result.ground, "QuorumContamination");
         assert_eq!(result.status, "PauseEligible");
         assert_eq!(result.id, uuid(1).to_string());
-        assert_eq!(result.admitted_by, "did:exo:reviewer");
+        assert_eq!(result.admitted_by, reviewer_did().to_string());
         assert_eq!(result.admission_signature_algorithm, "Ed25519");
         assert!(!result.audit_log.is_empty());
 
