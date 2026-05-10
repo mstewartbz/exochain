@@ -1,19 +1,19 @@
 # CommandBase.ai
 
-cognitiveplane.ai Hypervisor -- operational command center for AI agents under constitutional governance.
+cognitiveplane.ai Hypervisor -- adjacent operational command center for AI agents.
 
 ## What This Is
 
-- **Not a dashboard.** A command center with real authority delegation, consent enforcement, trust receipts, challenge surfaces, and kill switches.
-- All governance logic executes in Rust via WebAssembly (110 WASM-bridged functions).
-- Every action produces a cryptographically hash-chained governance receipt.
-- Constitutional invariants are enforced at the kernel level -- no overrides, no exceptions.
+- **Not a dashboard.** A command center with authority-delegation, consent, trust-receipt, challenge, and kill-switch control surfaces.
+- EXOCHAIN-governed actions must go through the tested WASM or core API adapter paths; local UI state is not constitutional authority.
+- Governance receipts are local adapter evidence unless backed by a verified EXOCHAIN core response.
+- Constitutional trust claims require a tested core API or verified adapter path, not repository proximity.
 
 ## Architecture
 
 - **Express/Node.js** server with **SQLite** (WAL mode)
 - **18 route modules:** analytics, calendar, companies, context, exoforge, goals, governance, gsd, ideas, members, notes, plugins, projects, refinement, research, settings, system, workspace
-- **3 service layers:** exochain (WASM bridge), governance (receipt chain), heartbeat (agent liveness)
+- **3 service layers:** exochain (WASM bridge adapter), governance (receipt chain), heartbeat (agent liveness)
 - **104 AI agent definitions** (8 board directors + department structure)
 - Background worker for agent execution
 - WebSocket real-time updates
@@ -72,11 +72,11 @@ cd command-base && npm install && npm start
 
 ## Agent Registry
 
-104 agents defined in `Team/` as Markdown profiles. Each profile specifies the agent's role, department, constitutional authority scope, and operational parameters.
+104 agents defined in `Team/` as Markdown profiles. Each profile specifies the agent's role, department, intended operating scope, and operational parameters.
 
 - **8 board directors** -- executive governance oversight
 - **Department structure** -- engineering, legal, security, compliance, research, operations, design, finance
 - Archived agents in `Team/archived/`
 - Research briefs in `Team/research-brief-*.md`
 
-Every agent operates under constitutional authority delegated through the WASM bridge. Agent actions are receipt-chained and auditable.
+Agent actions are receipt-chained and auditable within CommandBase. EXOCHAIN constitutional authority is claimed only for actions that pass through a tested WASM or core API adapter path.

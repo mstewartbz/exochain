@@ -133,6 +133,12 @@ function hashHex(hashValue) {
   return Buffer.from(hashBytes(hashValue)).toString('hex');
 }
 
+function assertHex(value, bytes, label) {
+  if (typeof value !== 'string' || !new RegExp(`^[0-9a-f]{${bytes * 2}}$`).test(value)) {
+    throw new Error(`${label} must be ${bytes} hex bytes`);
+  }
+}
+
 // =========================================================================
 // Module 1 — BCTS (Bounded-Context Transition System)
 // =========================================================================
@@ -1420,6 +1426,41 @@ test('wasm_enforce_invariants', () => {
   };
   return wasm.wasm_enforce_invariants(JSON.stringify(request));
 });
+
+const governanceFindingsJson = JSON.stringify([
+  { id: 'F-001', severity: 'critical', title: 'Unsigned injection' },
+]);
+
+test('wasm_governance_findings_digest is deterministic', () => {
+  const a = wasm.wasm_governance_findings_digest(governanceFindingsJson);
+  const b = wasm.wasm_governance_findings_digest(governanceFindingsJson);
+  if (a !== b) throw new Error('findings digest must be deterministic');
+  assertHex(a, 32, 'findings digest');
+  return a;
+});
+
+test('wasm_verify_governance_attestation accepts valid signatures', () => {
+  const digestHex = wasm.wasm_governance_findings_digest(governanceFindingsJson);
+  const signature = signatureJsonFromHex(signer1.signHex(Buffer.from(digestHex, 'hex')));
+  return wasm.wasm_verify_governance_attestation(
+    'did:exo:monitor',
+    governanceFindingsJson,
+    JSON.stringify(signature),
+    signer1.publicKeyHex,
+  );
+});
+
+test('wasm_verify_governance_attestation rejects invalid signatures', () =>
+  expectErrorContains(
+    'wasm_verify_governance_attestation',
+    () => wasm.wasm_verify_governance_attestation(
+      'did:exo:monitor',
+      governanceFindingsJson,
+      JSON.stringify({ Ed25519: Array.from({ length: 64 }, () => 0) }),
+      signer1.publicKeyHex,
+    ),
+    'governance attestation rejected',
+  ));
 
 // Identity combinator is a unit variant — just a string, no fields
 test('wasm_reduce_combinator', () =>

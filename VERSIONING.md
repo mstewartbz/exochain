@@ -24,21 +24,19 @@ version = "0.1.0"
 
 See `.github/workflows/release.yml` for the automated release workflow:
 
-1. All 9 CI quality gates must pass (ci.yml)
-2. All 6 CR-001 release-specific gates must pass (release-gates job)
-3. DualControl: two independent council-panel reviewers must approve via the GitHub `release` environment
-4. Native artifacts built for `x86_64-linux-gnu` and `aarch64-linux-gnu`
-5. WASM artifact built via `wasm-pack` for the `exochain-wasm` crate
-6. GPG-signed tag created and pushed (secrets: `RELEASE_GPG_PRIVATE_KEY`, `RELEASE_GPG_PASSPHRASE`)
-7. SHA-256 provenance manifest generated covering all release artifacts
-8. GitHub Release created from the signed tag with all artifacts attached
-9. Crates published to crates.io in dependency order (unless dry-run)
-10. Post-publish smoke test verifies `exo-core` is downloadable and buildable
+1. The full CI workflow, including the numbered constitutional gates and required aggregator, must pass.
+2. The GitHub `release` environment must approve the run.
+3. Non-dry-run releases must have an existing, verifiable signed `v<version>` tag before artifacts build or publish.
+4. Native artifacts are built for `x86_64-linux-gnu` and `aarch64-linux-gnu`.
+5. CycloneDX SBOM artifacts are generated for the workspace.
+6. GitHub SLSA build attestations are produced for release archives via OIDC/Sigstore.
+7. GitHub Release artifacts are attached to `v<version>`.
+8. Crates are published to crates.io in dependency order unless the run is a dry run.
 
 ### Dry Run
 
-Trigger via the GitHub Actions UI with `dry_run=true`. This runs all gates and builds
-all artifacts but skips the signed tag push, crates.io publish, and smoke test.
+Trigger via the GitHub Actions UI with `dry_run=true`. This runs CI and builds
+reviewable artifacts, but skips the signed-tag requirement and crates.io publish.
 The GitHub Release is created as a draft for review.
 
 ```bash

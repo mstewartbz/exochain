@@ -67,7 +67,7 @@ ciborium = { workspace = true }
 # HTTP (metrics route, MCP SSE transport)
 axum = { workspace = true }
 async-stream = { workspace = true }
-tower = { version = "0.5", features = ["limit", "util"] }
+tower = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fast regression checks for the repo-truth generator and the README claims that
-# are supposed to be derived from it.
+# Regression checks for the repo-truth generator and the README claims that are
+# supposed to be derived from it.
 
 set -euo pipefail
 
@@ -77,6 +77,12 @@ expected_rs_loc=$(git ls-files 'crates/**/*.rs' | xargs wc -l | tail -1 | awk '{
 actual_rs_loc=$(jq '.rust_loc' "$json_file")
 [ "$actual_rs_loc" = "$expected_rs_loc" ] || fail "Rust LOC $actual_rs_loc != $expected_rs_loc"
 
+if ! test_list_output=$(cargo test --workspace -- --list 2>&1); then
+  printf '%s\n' "$test_list_output" >&2
+  fail "cargo test --workspace -- --list failed while deriving README test count"
+fi
+expected_tests_listed=$(printf '%s\n' "$test_list_output" | grep -c ': test$' | tr -d ' ')
+
 expected_gates=$(grep -E 'name: "Gate [0-9]+' .github/workflows/ci.yml | sed -E 's/.*Gate ([0-9]+).*/\1/' | sort -n | uniq | wc -l | tr -d ' ')
 actual_gates=$(jq '.ci_gates.numbered' "$json_file")
 [ "$actual_gates" = "$expected_gates" ] || fail "CI gate count $actual_gates != $expected_gates"
@@ -113,7 +119,42 @@ test_mode=$(jq -r '.tests.mode' "$json_file")
 grep -F "| Rust crates | $expected_crates |" README.md >/dev/null || fail "README crate count is not repo-truth derived"
 grep -F "| Rust source files | $expected_rs_files |" README.md >/dev/null || fail "README Rust source file count is not repo-truth derived"
 grep -F "| Rust LOC | $expected_rs_loc |" README.md >/dev/null || fail "README Rust LOC is not repo-truth derived"
+readme_tests_listed=$(awk -F'|' '/Workspace tests/ { gsub(/[^0-9]/, "", $3); print $3; exit }' README.md)
+[ "$readme_tests_listed" = "$expected_tests_listed" ] \
+  || fail "README workspace test count $readme_tests_listed != listed test count $expected_tests_listed"
 grep -F "| CI quality gates | $expected_gates |" README.md >/dev/null || fail "README CI gate count is not repo-truth derived"
+
+trace_total=$(jq '.traceability.total' "$json_file")
+trace_implemented=$(jq '.traceability.implemented' "$json_file")
+trace_partial=$(jq '.traceability.partial' "$json_file")
+trace_planned=$(jq '.traceability.planned' "$json_file")
+threat_total=$(jq '.threats.total' "$json_file")
+threat_implemented=$(jq '.threats.mitigated' "$json_file")
+threat_partial=$(jq '.threats.partial' "$json_file")
+threat_planned=$(jq '.threats.planned' "$json_file")
+tag_count=$(jq '.releases.tag_count' "$json_file")
+
+grep -F "**Traceability matrix** maps $trace_total requirements" README.md >/dev/null \
+  || fail "README traceability count is not repo-truth derived"
+
+grep -F "**Threat model** covers $threat_total threats tracked: $threat_implemented implemented, $threat_partial partial, $threat_planned planned" README.md >/dev/null \
+  || fail "README threat count/status is not repo-truth derived"
+
+if [ "$tag_count" -gt 0 ]; then
+  if grep -F "| Published releases | None (pre-release) | \`git tag -l\` |" README.md >/dev/null; then
+    fail "README must not cite git tags as evidence for no published releases when tags exist"
+  fi
+fi
+
+grep -F "tested gatekeeper and decision-forum adjudication paths" README.md >/dev/null \
+  || fail "README must scope constitutional invariant enforcement to tested adjudication paths"
+
+grep -F "Scoped 90% coverage threshold" README.md >/dev/null \
+  || fail "README must present coverage as scoped coverage"
+
+if grep -n "under constitutional authority" README.md; then
+  fail "README must not grant adjacent CommandBase constitutional authority by proximity"
+fi
 
 if grep -nE 'Autonomous implementation engine|Core Crates \(16\)|16 crates|1,846 tests|1,603 workspace tests' README.md; then
   fail "README contains stale Basalt truth claims"

@@ -14,7 +14,7 @@ google = []
 
 [dependencies]
 serde.workspace = true
-thiserror = "1"
+thiserror.workspace = true
 
 # Local
 exo-core = { path = "../exo-core" }

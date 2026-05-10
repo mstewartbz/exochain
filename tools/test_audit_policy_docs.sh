@@ -5,10 +5,16 @@ cd "$(dirname "$0")/.."
 
 current_policy_files=(
   ".github/workflows/ci.yml"
+  ".github/workflows/release.yml"
   "deny.toml"
   ".cargo/audit.toml"
+  "README.md"
+  "SECURITY.md"
+  "VERSIONING.md"
+  "INTEGRATION.md"
   "docs/architecture/THREAT-MODEL.md"
   "docs/audit/REVIEW-2026-04-19.md"
+  "docs/grant/CODEX-CYBERSECURITY-GRANT-CLAIMS.md"
 )
 
 for file in "${current_policy_files[@]}"; do
@@ -34,6 +40,26 @@ for file in "${current_policy_files[@]}"; do
 
   if grep -q "Zero dependency vulnerabilities" "$file"; then
     echo "$file must not claim zero dependency vulnerabilities while advisory ignores exist" >&2
+    exit 1
+  fi
+
+  if grep -q "no advisories exist" "$file"; then
+    echo "$file must say policy-enforced with documented advisory exceptions, not no advisories exist" >&2
+    exit 1
+  fi
+
+  if grep -q "no known vulnerabilities" "$file"; then
+    echo "$file must say policy-enforced with documented advisory exceptions, not no known vulnerabilities" >&2
+    exit 1
+  fi
+
+  if [ "$file" != ".github/workflows/release.yml" ] && grep -q "provenance.json" "$file"; then
+    echo "$file must describe CycloneDX SBOM and SLSA attestations, not provenance.json" >&2
+    exit 1
+  fi
+
+  if grep -q "every release tag is cryptographically signed" "$file"; then
+    echo "$file must distinguish current unsigned pre-release tags from formal signed-release policy" >&2
     exit 1
   fi
 done

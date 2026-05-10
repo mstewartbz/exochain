@@ -62,8 +62,8 @@ tokio = { version = "=1.50.0", features = ["full"] }
 axum = { version = "=0.7.9", features = ["json", "macros"] }
 axum-server = { version = "=0.8.0", default-features = false }
 rustls = { version = "=0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
-tower = { version = "=0.4.13", features = ["util", "limit"] }
-tower-http = { version = "=0.5.2", features = ["trace", "cors"] }
+tower = { version = "=0.5.3", features = ["util", "limit"] }
+tower-http = { version = "=0.6.8", features = ["trace", "cors"] }
 
 # Database
 sqlx = { version = "=0.8.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "json", "macros", "migrate"] }

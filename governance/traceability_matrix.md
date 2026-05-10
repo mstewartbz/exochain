@@ -1,6 +1,6 @@
 # Traceability Matrix
 
-Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring activation. Maps every spec requirement to code, tests, and status.
+Updated 2026-05-09 after EXOCHAIN-REM-009 attestation true-up. Maps every spec requirement to code, tests, and status.
 
 **Status key:** 🟢 Implemented (tests passing) | 🟡 Partial | 🔴 Planned
 
@@ -140,7 +140,7 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | **MON-006** | Circuit breaker: auto-pause trigger when >3 Critical/24h | `demo/services/audit-api/src/index.js` — 24h rolling window query + `circuit_breaker_triggered` flag | 🟢 |
 | **MON-007** | Audit ledger entry for every health snapshot (provenance) | `demo/services/audit-api/src/index.js` — `GovernanceHealthSnapshot` event appended to `audit_entries` | 🟢 |
 | **MON-008** | CR-001 §8 work order status tracked in every snapshot | `003_governance_health.sql` — `cr001_work_orders` JSONB column; surfaced in GET response | 🟢 |
-| **MON-009** | T-14 Governance Monitor Poisoning in threat matrix | `governance/threat_matrix.md` — T-14 entry with 4 sub-threats, mitigations, detection signals | 🟡 Partial (Rust-layer signed attestation verification pending) |
+| **MON-009** | T-14 Governance Monitor Poisoning in threat matrix | `governance/threat_matrix.md`; `exo-gatekeeper::governance_monitor::verify_attestation`; WASM attestation exports; audit API fail-closed ingestion tests | 🟢 |
 | **MON-010** | Continuous-governance workflow DAG definition | `.archon/workflows/exochain-continuous-governance.yaml` | 🟢 (pre-existing) |
 | **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
 | **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
@@ -201,10 +201,10 @@ Updated 2026-03-20 after EXOCHAIN-REM-009 — continuous governance monitoring a
 | ZK Proofs (§12.5) | 5 | 5 | 0 | 0 |
 | P2P/API/Gateway/Tenant (§16–17) | 4 | 4 | 0 | 0 |
 | Decision Forum (GOV/TNC/M) | 15 | 15 | 0 | 0 |
-| Governance Monitoring (MON) | 12 | 9 | 1 | 2 |
+| Governance Monitoring (MON) | 12 | 10 | 0 | 2 |
 | AVC (Autonomous Volition Credential) | 10 | 10 | 0 | 0 |
 | Custody-Native Economy (zero-launch) | 22 | 22 | 0 | 0 |
-| **TOTAL** | **118** | **115** | **1** | **2** |
+| **TOTAL** | **118** | **116** | **0** | **2** |
 
-**Coverage: 115/118 requirements traced to code (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial (T-14 Rust attestation verification).**
+**Coverage: 116/118 requirements traced to code (98%). 2 planned (ExoForge scheduling + React dashboard). 0 partial.**
 **Workspace inventory: 3,638+ listed tests across 22 packages and 266+ Rust files (AVC and economy crates added).**

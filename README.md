@@ -18,31 +18,31 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 22 | `ls -d crates/*/` |
 | Rust source files | 300 | `find crates -name '*.rs'` |
-| Rust LOC | 178681 | `wc -l` |
-| Workspace tests | 4,152 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 178725 | `wc -l` |
+| Workspace tests | 4,208 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 20 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
-| Published releases | None (pre-release) | `git tag -l` |
+| Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
-| Live node | https://exochain-production.up.railway.app | Railway deployment |
+| Live node health | Verified for https://exochain-production.up.railway.app/health on 2026-05-09 | `tools/verify_live_node_claim.sh` |
 
 ### What is verified today
 
-- **4,152 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **4,208 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
 - **20 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
 - **Traceability matrix** maps 118 requirements — see `governance/traceability_matrix.md`
-- **Threat model** covers 16 threats tracked: 16 mitigated, 0 partial, 0 planned — see `governance/threat_matrix.md`
-- **Constitutional invariants** enforced via the CGR kernel in all governance paths
+- **Threat model** covers 16 threats tracked: 16 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
+- **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
 - **No floating-point arithmetic** — denied workspace-wide via `#[deny(clippy::float_arithmetic)]`
 - **Post-Quantum signatures** — NIST FIPS 204 ML-DSA-65 (CRYSTALS-Dilithium) via `ml-dsa` 0.1.0-rc.7, fully wired in `Signature::PostQuantum` and `Signature::Hybrid` with deterministic signing, tamper-rejection tests, proptest roundtrip coverage, and RUSTSEC-2025-0144 patch
 
 ### What is supported by design but not yet production-hardened
 
-- **Scoped 90% coverage threshold** — configured in CI via cargo-tarpaulin and `tarpaulin.toml`; not independently verified outside CI
+- **Scoped 90% coverage threshold** — configured in CI via cargo-tarpaulin and `tarpaulin.toml`; the default coverage gate explicitly excludes runtime adapters, WASM bridge bindings, and proof modules
 - **exo-gateway binary** — operational HTTP server with 28 endpoints (REST, GraphQL, health probes); production hardening ongoing
-- **GraphQL API** — types and schema stubs exist in `exo-api`; async runtime integration pending
+- **GraphQL API** — types and schema definitions exist in `exo-api`; async runtime integration pending
 - **exo-dag benchmark** — disabled; needs rewrite against current API
 
 ### In Progress
@@ -52,7 +52,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 ### Roadmap / Planned
 
 - First versioned release (see `.github/workflows/release.yml` for the dry-run workflow)
-- SBOM generation and supply-chain attestation
+- CycloneDX SBOM generation and SLSA supply-chain attestation are configured in CI/release workflows; published release artifacts are not claimed until a GitHub Release exists
 - Agent passport API and trust receipt endpoints on exo-node
 - National AI Policy Framework compliance extensions
 
@@ -96,17 +96,17 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 22 crates, 178681 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 22 crates, 178725 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 4,152 listed workspace tests
+         cryptographic proofs, 4,208 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
-         147 verified bridge exports — Rust → WebAssembly → JavaScript
+         157 verified bridge exports — Rust -> WebAssembly -> JavaScript
 
 Layer 3: CommandBase.ai     (command-base/)
-         Operational hypervisor for cognitiveplane.ai
-         Real control surfaces, GSD buttons, governance receipts
-         104 AI agents under constitutional authority
+         Adjacent cockpit adapter for cognitiveplane.ai
+         Control surfaces, GSD buttons, and governance receipts
+         EXOCHAIN trust claims require a tested core API or verified adapter path
          Express/Node.js + SQLite + WebSocket
 
 Layer 4: Decision Forum     (web/)
@@ -167,8 +167,8 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 
 ### Key Governance Artifacts
 
-* [Traceability Matrix](governance/traceability_matrix.md) — 86 requirements tracked
-* [Threat Model](governance/threat_matrix.md) — 14 mitigated, 0 partial, 0 planned
+* [Traceability Matrix](governance/traceability_matrix.md) — 118 requirements tracked
+* [Threat Model](governance/threat_matrix.md) — 16 implemented, 0 partial, 0 planned
 * [Quality Gates](governance/quality_gates.md) — 20 numbered CI gates plus required aggregator
 * [Sub-Agent Charters](governance/sub_agents.md) — 11 agent charters documented
 * [Council Resolutions](governance/resolutions/INDEX.md) — CR-001 DRAFT

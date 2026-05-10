@@ -122,12 +122,32 @@ export const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       const {
         run_id, commit_sha, system_health, findings = [],
-        findings_digest, attestation_signature, attestation_signer_did,
+        findings_digest, attestation_signature, attestation_signer_did, attestation_public_key,
         cr001_work_orders = {},
       } = body;
 
       if (!run_id || !commit_sha || !system_health || !findings_digest) {
         return json(res, 400, { error: 'run_id, commit_sha, system_health, and findings_digest are required' });
+      }
+
+      if (!attestation_signature || !attestation_signer_did || !attestation_public_key) {
+        return json(res, 400, { error: 'attestation_signature, attestation_signer_did, and attestation_public_key are required' });
+      }
+
+      try {
+        const computedFindingsDigest = wasm.wasm_governance_findings_digest(JSON.stringify(findings));
+        if (computedFindingsDigest !== findings_digest) {
+          return json(res, 400, { error: 'findings_digest does not match canonical findings payload' });
+        }
+
+        wasm.wasm_verify_governance_attestation(
+          attestation_signer_did,
+          JSON.stringify(findings),
+          JSON.stringify(attestation_signature),
+          attestation_public_key,
+        );
+      } catch (e) {
+        return json(res, 400, { error: `invalid governance attestation: ${e.message || e}` });
       }
 
       const counts = { critical: 0, high: 0, medium: 0, low: 0 };

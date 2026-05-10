@@ -1,7 +1,8 @@
 # EXOCHAIN Release Workflow
 #
-# Requires all CI gates to pass plus manual approval from a maintainer.
-# Produces deterministic release artifacts with provenance attestation.
+# Requires all CI gates to pass plus release-environment approval.
+# Non-dry-run releases must be anchored to an existing signed tag.
+# Produces deterministic release artifacts with CycloneDX SBOMs and SLSA attestations.
 
 name: EXOCHAIN Release
 on:
@@ -42,12 +43,37 @@ jobs:
         run: echo "Release ${{ inputs.version }} approved by maintainer."
 
   # -----------------------------------------------------------------------
+  # Signed tag gate for real releases
+  # -----------------------------------------------------------------------
+  verify-signed-tag:
+    name: "Verify Signed Release Tag"
+    runs-on: ubuntu-latest
+    needs: approve
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Require signed tag for non-dry-run release
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Dry run: signed tag requirement is skipped."
+            exit 0
+          fi
+
+          tag="v${{ inputs.version }}"
+          git fetch --tags --force
+          git rev-parse "refs/tags/${tag}" >/dev/null
+          git tag -v "${tag}"
+
+  # -----------------------------------------------------------------------
   # Build release artifacts
   # -----------------------------------------------------------------------
   release-build:
     name: "Build Release Artifacts"
     runs-on: ubuntu-latest
-    needs: approve
+    needs: [approve, verify-signed-tag]
     strategy:
       matrix:
         target:
@@ -221,11 +247,11 @@ jobs:
             All CR-001 Section 8.8 quality gates passed:
             - Build: release profile with LTO
             - Tests: full workspace (debug + release)
-            - Coverage: >= 90% line coverage
+            - Coverage: scoped 90% line coverage gate
             - Lint: clippy with float_arithmetic deny
             - Format: rustfmt verified
-            - Audit: no known vulnerabilities
-            - Deny: license compliance verified
+            - Audit: policy-enforced with documented advisory exceptions
+            - Deny: license and advisory policy verified
             - Documentation: builds without warnings
             - SBOM: CycloneDX component graph generated
 

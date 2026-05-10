@@ -1,10 +1,22 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import supertest from 'supertest';
 
+vi.hoisted(() => {
+  process.env.GOVERNANCE_API_TOKEN = 'test-token';
+});
+
 const mockWasm = vi.hoisted(() => ({
   wasm_audit_append: vi.fn(() => ({ entries: 1, head_hash: 'f'.repeat(64) })),
   wasm_hash_bytes: vi.fn(() => 'a'.repeat(64)),
+  wasm_governance_findings_digest: vi.fn(() => 'b'.repeat(64)),
+  wasm_verify_governance_attestation: vi.fn(() => true),
 }));
+
+const mockPg = vi.hoisted(() => {
+  const query = vi.fn();
+  const Pool = vi.fn(() => ({ query }));
+  return { Pool, query };
+});
 
 vi.mock('module', async (importOriginal) => {
   const orig = await importOriginal();
@@ -18,13 +30,10 @@ vi.mock('module', async (importOriginal) => {
 });
 
 vi.mock('pg', () => {
-  const mockQuery = vi.fn();
-  const MockPool = vi.fn(() => ({ query: mockQuery }));
-  return { default: { Pool: MockPool } };
+  return { default: { Pool: mockPg.Pool } };
 });
 
 import { server } from './index.js';
-import pg from 'pg';
 
 let request;
 
@@ -35,8 +44,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  const pool = new pg.Pool();
-  pool.query.mockResolvedValue({ rows: [] });
+  mockPg.query.mockReset();
+  mockPg.query.mockResolvedValue({ rows: [] });
 });
 
 afterAll(async () => {
@@ -54,8 +63,7 @@ describe('GET /health', () => {
 
 describe('GET /api/entries', () => {
   it('returns list of audit entries', async () => {
-    const pool = new pg.Pool();
-    pool.query.mockResolvedValueOnce({ rows: [
+    mockPg.query.mockResolvedValueOnce({ rows: [
       { sequence: 1, event_type: 'CreateDecision', actor: 'did:exo:alice', entry_hash: 'a'.repeat(64) },
     ] });
     const res = await request.get('/api/entries');
@@ -64,8 +72,7 @@ describe('GET /api/entries', () => {
   });
 
   it('passes limit param to DB query', async () => {
-    const pool = new pg.Pool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
+    mockPg.query.mockResolvedValueOnce({ rows: [] });
     const res = await request.get('/api/entries?limit=10');
     expect(res.status).toBe(200);
   });
@@ -73,8 +80,7 @@ describe('GET /api/entries', () => {
 
 describe('POST /api/entries', () => {
   it('appends audit entry and returns head_hash', async () => {
-    const pool = new pg.Pool();
-    pool.query
+    mockPg.query
       .mockResolvedValueOnce({ rows: [{ seq: 0, prev: '0'.repeat(64) }] })
       .mockResolvedValueOnce({ rows: [] });
     const res = await request.post('/api/entries').send({
@@ -89,8 +95,7 @@ describe('POST /api/entries', () => {
   });
 
   it('handles missing evidence_hash with default zeros', async () => {
-    const pool = new pg.Pool();
-    pool.query
+    mockPg.query
       .mockResolvedValueOnce({ rows: [{ seq: 0, prev: '0'.repeat(64) }] })
       .mockResolvedValueOnce({ rows: [] });
     const res = await request.post('/api/entries').send({
@@ -102,10 +107,94 @@ describe('POST /api/entries', () => {
   });
 });
 
+describe('POST /governance/health attestation gate', () => {
+  const validSnapshot = {
+    run_id: 'run-1',
+    commit_sha: 'abc123',
+    system_health: {
+      invariant_coverage: 100,
+      tnc_coverage: 100,
+      bcts_integrity: 100,
+      governance_score: 95,
+    },
+    findings_digest: 'b'.repeat(64),
+    findings: [{ id: 'F-001', severity: 'critical', title: 'Unsigned injection' }],
+    attestation_signature: { Ed25519: Array.from({ length: 64 }, () => 1) },
+    attestation_signer_did: 'did:exo:monitor',
+    attestation_public_key: '11'.repeat(32),
+  };
+
+  it('rejects missing attestation before any database write', async () => {
+    mockPg.query.mockResolvedValue({ rows: [] });
+    const { attestation_signature, attestation_signer_did, attestation_public_key, ...unsigned } = validSnapshot;
+
+    const res = await request
+      .post('/governance/health')
+      .set('Authorization', 'Bearer test-token')
+      .send(unsigned);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/attestation_signature/);
+    expect(mockPg.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects mismatched findings digest before persistence', async () => {
+    mockPg.query.mockResolvedValue({ rows: [] });
+
+    const res = await request
+      .post('/governance/health')
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...validSnapshot, findings_digest: 'c'.repeat(64) });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/findings_digest/);
+    expect(mockPg.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid attestation before persistence', async () => {
+    mockWasm.wasm_verify_governance_attestation.mockImplementationOnce(() => {
+      throw new Error('governance attestation rejected');
+    });
+    mockPg.query.mockResolvedValue({ rows: [] });
+
+    const res = await request
+      .post('/governance/health')
+      .set('Authorization', 'Bearer test-token')
+      .send(validSnapshot);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid governance attestation/);
+    expect(mockPg.query).not.toHaveBeenCalled();
+  });
+
+  it('persists valid signed health snapshots after attestation verification', async () => {
+    mockPg.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ total: '1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ seq: 0, prev: '0'.repeat(64) }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request
+      .post('/governance/health')
+      .set('Authorization', 'Bearer test-token')
+      .send(validSnapshot);
+
+    expect(res.status).toBe(201);
+    expect(mockWasm.wasm_verify_governance_attestation).toHaveBeenCalledWith(
+      validSnapshot.attestation_signer_did,
+      JSON.stringify(validSnapshot.findings),
+      JSON.stringify(validSnapshot.attestation_signature),
+      validSnapshot.attestation_public_key,
+    );
+    expect(mockPg.query).toHaveBeenCalled();
+  });
+});
+
 describe('GET /api/verify', () => {
   it('returns intact=true for empty chain', async () => {
-    const pool = new pg.Pool();
-    pool.query.mockResolvedValueOnce({ rows: [] });
+    mockPg.query.mockResolvedValueOnce({ rows: [] });
     const res = await request.get('/api/verify');
     expect(res.status).toBe(200);
     expect(res.body.intact).toBe(true);
@@ -113,8 +202,7 @@ describe('GET /api/verify', () => {
   });
 
   it('returns intact=true for valid single-entry chain', async () => {
-    const pool = new pg.Pool();
-    pool.query.mockResolvedValueOnce({ rows: [
+    mockPg.query.mockResolvedValueOnce({ rows: [
       { sequence: 0, prev_hash: '0'.repeat(64), entry_hash: 'a'.repeat(64) },
     ] });
     const res = await request.get('/api/verify');
@@ -124,8 +212,7 @@ describe('GET /api/verify', () => {
   });
 
   it('returns intact=false when hash chain is broken', async () => {
-    const pool = new pg.Pool();
-    pool.query.mockResolvedValueOnce({ rows: [
+    mockPg.query.mockResolvedValueOnce({ rows: [
       { sequence: 0, prev_hash: '0'.repeat(64), entry_hash: 'a'.repeat(64) },
       { sequence: 1, prev_hash: 'WRONG_HASH', entry_hash: 'b'.repeat(64) },
     ] });

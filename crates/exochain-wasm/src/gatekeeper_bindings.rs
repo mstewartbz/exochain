@@ -41,6 +41,13 @@ fn gatekeeper_boundary_error(operation: &'static str) -> JsValue {
     JsValue::from_str(operation)
 }
 
+fn decode_fixed_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N], JsValue> {
+    let bytes = hex::decode(value).map_err(|e| JsValue::from_str(&format!("{label} hex: {e}")))?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        JsValue::from_str(&format!("{label} must be {N} bytes, got {}", bytes.len()))
+    })
+}
+
 fn holon_state_label(state: exo_gatekeeper::holon::HolonState) -> &'static str {
     match state {
         exo_gatekeeper::holon::HolonState::Idle => "idle",
@@ -98,6 +105,43 @@ pub fn wasm_enforce_invariants(request_json: &str) -> Result<JsValue, JsValue> {
             "violations": violations
         })),
     }
+}
+
+/// Compute the canonical BLAKE3/CBOR digest for governance monitor findings.
+#[wasm_bindgen]
+pub fn wasm_governance_findings_digest(findings_json: &str) -> Result<String, JsValue> {
+    let findings: serde_json::Value = from_json_str(findings_json)?;
+    let digest = exo_core::hash::hash_structured(&findings)
+        .map_err(|_| gatekeeper_boundary_error("governance findings digest failed"))?;
+    Ok(hex::encode(digest.as_bytes()))
+}
+
+/// Verify a governance monitor attestation before persistence.
+#[wasm_bindgen]
+pub fn wasm_verify_governance_attestation(
+    signer_did: &str,
+    findings_json: &str,
+    signature_json: &str,
+    signer_public_key_hex: &str,
+) -> Result<bool, JsValue> {
+    let signer_did = exo_core::Did::new(signer_did)
+        .map_err(|_| gatekeeper_boundary_error("invalid governance attestation signer DID"))?;
+    let digest_hex = wasm_governance_findings_digest(findings_json)?;
+    let digest = exo_core::Hash256::from_bytes(decode_fixed_hex(&digest_hex, "findings digest")?);
+    let signature: exo_core::Signature = from_json_str(signature_json)?;
+    let signer_public_key = exo_core::PublicKey::from_bytes(decode_fixed_hex(
+        signer_public_key_hex,
+        "governance attestation public key",
+    )?);
+    let attestation = exo_gatekeeper::governance_monitor::GovernanceAttestation {
+        signer_did,
+        findings_digest: digest,
+        signature,
+    };
+
+    exo_gatekeeper::governance_monitor::verify_attestation(&attestation, &signer_public_key)
+        .map(|()| true)
+        .map_err(|_| gatekeeper_boundary_error("governance attestation rejected"))
 }
 
 /// Build a deterministic valid invariant request fixture for external
