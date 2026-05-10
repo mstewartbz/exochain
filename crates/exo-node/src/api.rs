@@ -39,13 +39,12 @@ use tower::limit::ConcurrencyLimitLayer;
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
 use crate::identity;
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
+use crate::reactor;
+#[cfg(feature = "unaudited-admin-governance-shortcut")]
+use crate::wire::GovernanceEventType;
+#[cfg(feature = "unaudited-admin-governance-shortcut")]
 use crate::wire::ValidatorChange;
-use crate::{
-    network::NetworkHandle,
-    reactor::{self, SharedReactorState},
-    store::SqliteDagStore,
-    wire::GovernanceEventType,
-};
+use crate::{network::NetworkHandle, reactor::SharedReactorState, store::SqliteDagStore};
 
 const MAX_GOVERNANCE_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_GOVERNANCE_API_CONCURRENT_REQUESTS: usize = 64;
@@ -293,18 +292,43 @@ async fn handle_propose(
     State(api): State<Arc<NodeApiState>>,
     Json(req): Json<ProposeRequest>,
 ) -> Result<Json<ProposeResponse>, (StatusCode, String)> {
-    let payload = hex::decode(&req.payload_hex)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid hex payload: {e}")))?;
-
-    match reactor::submit_proposal(&api.reactor_state, &api.store, &api.net_handle, &payload).await
+    #[cfg(not(feature = "unaudited-admin-governance-shortcut"))]
     {
-        Ok(node) => Ok(Json(ProposeResponse {
-            node_hash: hex::encode(node.hash.0),
-            height: None,
-        })),
-        Err(e) => {
-            tracing::error!(err = %e, "Proposal submission failed");
-            Err(internal_error_response("Proposal submission failed"))
+        let _ = (api, req);
+        tracing::warn!(
+            "refusing POST /api/v1/governance/propose: raw admin governance \
+             proposal shortcut is gated. Build with \
+             --features exo-node/unaudited-admin-governance-shortcut only for \
+             isolated development clusters."
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "admin_governance_proposal_shortcut_disabled",
+                "message": "Raw governance proposal submission via bearer-token shortcut is disabled by default.",
+                "feature_flag": "unaudited-admin-governance-shortcut",
+                "refusal_source": "exo-node/api.rs::handle_propose",
+            })
+            .to_string(),
+        ));
+    }
+
+    #[cfg(feature = "unaudited-admin-governance-shortcut")]
+    {
+        let payload = hex::decode(&req.payload_hex)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid hex payload: {e}")))?;
+
+        match reactor::submit_proposal(&api.reactor_state, &api.store, &api.net_handle, &payload)
+            .await
+        {
+            Ok(node) => Ok(Json(ProposeResponse {
+                node_hash: hex::encode(node.hash.0),
+                height: None,
+            })),
+            Err(e) => {
+                tracing::error!(err = %e, "Proposal submission failed");
+                Err(internal_error_response("Proposal submission failed"))
+            }
         }
     }
 }
@@ -314,40 +338,64 @@ async fn handle_broadcast(
     State(api): State<Arc<NodeApiState>>,
     Json(req): Json<BroadcastRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let payload = hex::decode(&req.payload_hex)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid hex payload: {e}")))?;
+    #[cfg(not(feature = "unaudited-admin-governance-shortcut"))]
+    {
+        let _ = (api, req);
+        tracing::warn!(
+            "refusing POST /api/v1/governance/broadcast: raw admin governance \
+             event broadcast shortcut is gated. Build with \
+             --features exo-node/unaudited-admin-governance-shortcut only for \
+             isolated development clusters."
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "admin_governance_broadcast_shortcut_disabled",
+                "message": "Raw governance event broadcast via bearer-token shortcut is disabled by default.",
+                "feature_flag": "unaudited-admin-governance-shortcut",
+                "refusal_source": "exo-node/api.rs::handle_broadcast",
+            })
+            .to_string(),
+        ));
+    }
 
-    let event_type = match req.event_type.as_str() {
-        "DecisionCreated" => GovernanceEventType::DecisionCreated,
-        "VoteCast" => GovernanceEventType::VoteCast,
-        "DecisionFinalized" => GovernanceEventType::DecisionFinalized,
-        "AuthorityDelegated" => GovernanceEventType::AuthorityDelegated,
-        "ConsentChanged" => GovernanceEventType::ConsentChanged,
-        "EntityEnrolled" => GovernanceEventType::EntityEnrolled,
-        "AuditEntry" => GovernanceEventType::AuditEntry,
-        "ValidatorSetChange" => GovernanceEventType::ValidatorSetChange,
-        other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Unknown event type: {other}"),
-            ));
-        }
-    };
+    #[cfg(feature = "unaudited-admin-governance-shortcut")]
+    {
+        let payload = hex::decode(&req.payload_hex)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid hex payload: {e}")))?;
 
-    reactor::broadcast_governance_event(
-        &api.reactor_state,
-        &api.store,
-        &api.net_handle,
-        event_type,
-        payload,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(err = %e, "Governance event broadcast failed");
-        internal_error_response("Governance event broadcast failed")
-    })?;
+        let event_type = match req.event_type.as_str() {
+            "DecisionCreated" => GovernanceEventType::DecisionCreated,
+            "VoteCast" => GovernanceEventType::VoteCast,
+            "DecisionFinalized" => GovernanceEventType::DecisionFinalized,
+            "AuthorityDelegated" => GovernanceEventType::AuthorityDelegated,
+            "ConsentChanged" => GovernanceEventType::ConsentChanged,
+            "EntityEnrolled" => GovernanceEventType::EntityEnrolled,
+            "AuditEntry" => GovernanceEventType::AuditEntry,
+            "ValidatorSetChange" => GovernanceEventType::ValidatorSetChange,
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Unknown event type: {other}"),
+                ));
+            }
+        };
 
-    Ok(StatusCode::ACCEPTED)
+        reactor::broadcast_governance_event(
+            &api.reactor_state,
+            &api.store,
+            &api.net_handle,
+            event_type,
+            payload,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(err = %e, "Governance event broadcast failed");
+            internal_error_response("Governance event broadcast failed")
+        })?;
+
+        Ok(StatusCode::ACCEPTED)
+    }
 }
 
 /// `GET /api/v1/governance/status` — return current node and consensus state.
@@ -675,6 +723,7 @@ mod tests {
         assert!(status.is_validator);
     }
 
+    #[cfg(feature = "unaudited-admin-governance-shortcut")]
     #[tokio::test]
     async fn propose_endpoint_creates_dag_node() {
         let state = test_api_state();
@@ -702,6 +751,83 @@ mod tests {
         let _status = resp.status();
     }
 
+    #[cfg(not(feature = "unaudited-admin-governance-shortcut"))]
+    #[tokio::test]
+    async fn propose_endpoint_refuses_admin_shortcut_without_feature_flag() {
+        let state = test_api_state();
+        let tips_before = state.store.lock().unwrap().tips_sync().unwrap();
+        let app = governance_router(Arc::clone(&state));
+
+        let body = serde_json::json!({ "payload_hex": hex::encode(b"test governance decision") });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/governance/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "default build must refuse raw admin-token governance proposal shortcuts"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let text = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            text.contains("admin_governance_proposal_shortcut_disabled"),
+            "refusal body must include proposal shortcut error tag, got: {text}"
+        );
+
+        let tips_after = state.store.lock().unwrap().tips_sync().unwrap();
+        assert_eq!(
+            tips_before, tips_after,
+            "refused proposal shortcut must not append or persist a DAG node"
+        );
+    }
+
+    #[cfg(not(feature = "unaudited-admin-governance-shortcut"))]
+    #[tokio::test]
+    async fn broadcast_endpoint_refuses_admin_shortcut_without_feature_flag() {
+        let state = test_api_state();
+        let app = governance_router(state);
+
+        let body = serde_json::json!({
+            "event_type": "DecisionCreated",
+            "payload_hex": hex::encode(b"decision-created"),
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/governance/broadcast")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "default build must refuse raw admin-token governance event broadcast shortcuts"
+        );
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let text = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            text.contains("admin_governance_broadcast_shortcut_disabled"),
+            "refusal body must include broadcast shortcut error tag, got: {text}"
+        );
+    }
+
+    #[cfg(feature = "unaudited-admin-governance-shortcut")]
     #[tokio::test]
     async fn propose_endpoint_redacts_internal_submission_errors() {
         let state = test_api_state_with_validator_flag(false);
@@ -830,6 +956,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "unaudited-admin-governance-shortcut")]
     #[tokio::test]
     async fn broadcast_rejects_unknown_event_type() {
         let state = test_api_state();
