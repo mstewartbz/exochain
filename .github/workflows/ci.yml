@@ -242,6 +242,8 @@ jobs:
         run: bash tools/test_ci_supply_chain_hardening.sh
       - name: Release workflow ref binding
         run: bash tools/test_release_workflow_ref_binding.sh
+      - name: Release version input boundary
+        run: bash tools/test_release_version_input_boundary.sh
       - name: Release dry-run publication boundary
         run: bash tools/test_release_dry_run_boundaries.sh
       - name: Release publish completion boundary
