@@ -512,6 +512,9 @@ pub struct ConsensusProposalMsg {
     /// The full DAG node being proposed (so validators can verify it).
     #[serde(deserialize_with = "deserialize_dag_node")]
     pub node: DagNode,
+    /// Canonical governance proposal payload bytes hashed by the DAG node.
+    #[serde(deserialize_with = "deserialize_governance_payload")]
+    pub payload: Vec<u8>,
     /// Signature over the proposal by the proposer.
     #[serde(deserialize_with = "deserialize_bounded_signature")]
     pub signature: Signature,
@@ -812,6 +815,7 @@ mod tests {
                 node_hash,
             },
             node: test_node(vec![test_hash(b"parent-1"), test_hash(b"parent-2")]),
+            payload: b"validator-change".to_vec(),
             signature: Signature::Hybrid {
                 classical: [4u8; 64],
                 pq: vec![5u8; 96],
@@ -826,6 +830,7 @@ mod tests {
                 assert_eq!(proposal.proposal.round, 9);
                 assert_eq!(proposal.proposal.node_hash, node_hash);
                 assert_eq!(proposal.node.parents.len(), 2);
+                assert_eq!(proposal.payload, b"validator-change");
                 match proposal.signature {
                     Signature::Hybrid { classical, pq } => {
                         assert_eq!(classical, [4u8; 64]);

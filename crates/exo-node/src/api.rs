@@ -700,6 +700,16 @@ mod tests {
         test_api_state_with_validator_flag(true)
     }
 
+    #[cfg(feature = "unaudited-admin-governance-shortcut")]
+    fn validator_change_payload_hex_for_test() -> String {
+        let change = ValidatorChange::AddValidator {
+            did: Did::new("did:exo:v4").unwrap(),
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&change, &mut payload).unwrap();
+        hex::encode(payload)
+    }
+
     #[tokio::test]
     async fn status_endpoint_returns_consensus_state() {
         let state = test_api_state();
@@ -729,7 +739,7 @@ mod tests {
         let state = test_api_state();
         let app = governance_router(state);
 
-        let payload = hex::encode(b"test governance decision");
+        let payload = validator_change_payload_hex_for_test();
         let body = serde_json::json!({ "payload_hex": payload });
 
         let resp = app

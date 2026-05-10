@@ -54,7 +54,7 @@ use crate::{
     store::SqliteDagStore,
     wire::{
         ConsensusCommitMsg, ConsensusProposalMsg, ConsensusVoteMsg, GovernanceEventMsg,
-        GovernanceEventType, WireMessage, topics,
+        GovernanceEventType, ValidatorChange, WireMessage, topics,
     },
 };
 
@@ -124,6 +124,19 @@ fn governance_event_signing_payload(event: &GovernanceEventMsg) -> Result<Vec<u8
     ciborium::ser::into_writer(&payload, &mut bytes)
         .map_err(|e| format!("governance event signing payload: {e}"))?;
     Ok(bytes)
+}
+
+fn validate_governance_proposal_payload(payload: &[u8]) -> Result<ValidatorChange, String> {
+    let change: ValidatorChange = ciborium::from_reader(payload)
+        .map_err(|e| format!("proposal payload must be canonical ValidatorChange CBOR: {e}"))?;
+    match &change {
+        ValidatorChange::AddValidator { did } | ValidatorChange::RemoveValidator { did } => {
+            if did.as_str().trim().is_empty() {
+                return Err("proposal payload validator DID must not be empty".into());
+            }
+        }
+    }
+    Ok(change)
 }
 
 fn checked_committed_height(committed_len: usize) -> Result<u64, String> {
@@ -707,6 +720,14 @@ fn validate_proposal<R: consensus::PublicKeyResolver>(
             msg.proposal.node_hash, msg.node.hash
         ));
     }
+    let payload_hash = Hash256::digest(&msg.payload);
+    if payload_hash != msg.node.payload_hash {
+        return Err(format!(
+            "proposal payload hash {} does not match attached node payload hash {}",
+            payload_hash, msg.node.payload_hash
+        ));
+    }
+    validate_governance_proposal_payload(&msg.payload)?;
     verify_node_creator_signature(&msg.node, resolver)
         .map_err(|e| format!("proposal DAG node creator signature invalid: {e}"))?;
     Ok(())
@@ -1285,6 +1306,8 @@ pub async fn submit_proposal(
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    validate_governance_proposal_payload(payload).map_err(|e| anyhow::anyhow!("{e}"))?;
+
     // Get current tips as parents.
     let tips = with_store_blocking(Arc::clone(store), "submit_proposal_tips", |store| {
         store.tips_sync().map_err(|e| format!("tips: {e}"))
@@ -1377,6 +1400,7 @@ pub async fn submit_proposal(
     let proposal_msg = WireMessage::ConsensusProposal(ConsensusProposalMsg {
         proposal,
         node: node.clone(),
+        payload: payload.to_vec(),
         signature,
     });
 
@@ -1544,11 +1568,45 @@ mod tests {
         }
     }
 
+    fn validator_change_payload_for_test() -> Vec<u8> {
+        let change = crate::wire::ValidatorChange::AddValidator {
+            did: Did::new("did:exo:v4").unwrap(),
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&change, &mut payload).unwrap();
+        payload
+    }
+
+    fn validator_remove_payload_for_test() -> Vec<u8> {
+        let change = crate::wire::ValidatorChange::RemoveValidator {
+            did: Did::new("did:exo:v4").unwrap(),
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&change, &mut payload).unwrap();
+        payload
+    }
+
     fn proposal_msg_for(
         proposer: Did,
         proposer_index: usize,
         round: u64,
         node: DagNode,
+    ) -> ConsensusProposalMsg {
+        proposal_msg_for_payload(
+            proposer,
+            proposer_index,
+            round,
+            node,
+            validator_change_payload_for_test(),
+        )
+    }
+
+    fn proposal_msg_for_payload(
+        proposer: Did,
+        proposer_index: usize,
+        round: u64,
+        node: DagNode,
+        payload: Vec<u8>,
     ) -> ConsensusProposalMsg {
         let proposal = Proposal {
             proposer,
@@ -1559,6 +1617,7 @@ mod tests {
         ConsensusProposalMsg {
             proposal,
             node,
+            payload,
             signature,
         }
     }
@@ -1856,7 +1915,8 @@ mod tests {
         drop(cmd_rx);
         let net_handle = NetworkHandle::new(cmd_tx);
 
-        let _result = submit_proposal(&state, &store, &net_handle, b"test payload").await;
+        let payload = validator_change_payload_for_test();
+        let _result = submit_proposal(&state, &store, &net_handle, &payload).await;
         // The publish will fail because no network loop is running, but the DAG node
         // and proposal should still be created locally.
         // In this test setup, the channel receiver is dropped so publish returns Err.
@@ -1891,6 +1951,32 @@ mod tests {
             result.unwrap_err().to_string().contains("not a validator"),
             "Error should mention validator"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_proposal_rejects_untyped_payload_without_mutating_state() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let result = submit_proposal(
+            &state,
+            &store,
+            &net_handle,
+            b"not a typed governance proposal",
+        )
+        .await;
+
+        assert!(
+            result.unwrap_err().to_string().contains("proposal payload"),
+            "opaque proposal payloads must fail before append/store/vote"
+        );
+        assert_eq!(state.lock().unwrap().dag.len(), 0);
+        assert!(store.lock().unwrap().tips_sync().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2749,12 +2835,16 @@ mod tests {
     // ==== GAP-014 defense-in-depth regression tests ====================
 
     fn make_node_for_test() -> exo_dag::dag::DagNode {
+        make_node_for_payload(&validator_change_payload_for_test())
+    }
+
+    fn make_node_for_payload(payload: &[u8]) -> exo_dag::dag::DagNode {
         use exo_dag::dag::{Dag, append};
         let mut dag = Dag::new();
         let mut clock = DeterministicDagClock::new();
         let did = Did::new("did:exo:v0").unwrap();
         let sf = make_sign_fn();
-        append(&mut dag, &[], b"x", &did, &*sf, &mut clock).unwrap()
+        append(&mut dag, &[], payload, &did, &*sf, &mut clock).unwrap()
     }
 
     #[test]
@@ -2770,6 +2860,7 @@ mod tests {
                 node_hash: node.hash,
             },
             node,
+            payload: validator_change_payload_for_test(),
             signature: Signature::from_bytes([0u8; 64]),
         };
         let err = validate_proposal(&msg, &validators, &resolver).unwrap_err();
@@ -2784,10 +2875,46 @@ mod tests {
         let validators = make_validators(1);
         let proposer = Did::new("did:exo:v0").unwrap();
         let resolver = validator_keys_for_single(&proposer, key_for_validator_index(0));
-        let node = make_node_for_test();
-        let msg = proposal_msg_for(proposer, 0, 0, node);
+        let payload = validator_change_payload_for_test();
+        let node = make_node_for_payload(&payload);
+        let msg = proposal_msg_for_payload(proposer, 0, 0, node, payload);
 
         validate_proposal(&msg, &validators, &resolver).unwrap();
+    }
+
+    #[test]
+    fn validate_proposal_rejects_untyped_governance_payload() {
+        let validators = make_validators(1);
+        let proposer = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&proposer, key_for_validator_index(0));
+        let payload = b"not a typed governance proposal".to_vec();
+        let node = make_node_for_payload(&payload);
+        let msg = proposal_msg_for_payload(proposer, 0, 0, node, payload);
+
+        let err = validate_proposal(&msg, &validators, &resolver).unwrap_err();
+
+        assert!(
+            err.contains("proposal payload"),
+            "network proposals must reject opaque governance payloads before voting, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_proposal_rejects_payload_hash_mismatch() {
+        let validators = make_validators(1);
+        let proposer = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&proposer, key_for_validator_index(0));
+        let node_payload = validator_change_payload_for_test();
+        let node = make_node_for_payload(&node_payload);
+        let msg_payload = validator_remove_payload_for_test();
+        let msg = proposal_msg_for_payload(proposer, 0, 0, node, msg_payload);
+
+        let err = validate_proposal(&msg, &validators, &resolver).unwrap_err();
+
+        assert!(
+            err.contains("proposal payload hash"),
+            "network proposals must bind supplied payload bytes to the DAG node hash, got: {err}"
+        );
     }
 
     #[test]
