@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
 use serde::Serialize;
@@ -21,6 +21,7 @@ const MAX_DID_DOCUMENT_SERVICE_ENDPOINTS: usize = 32;
 const MAX_DID_DOCUMENT_FIELD_BYTES: usize = 1024;
 const MAX_DID_DOCUMENT_PQ_MULTIBASE_BYTES: usize = 4096;
 const MAX_DID_DOCUMENT_ENDPOINT_BYTES: usize = 2048;
+const DID_DOCUMENT_ED25519_VERIFICATION_KEY_TYPE: &str = "Ed25519VerificationKey2020";
 
 #[derive(Serialize)]
 struct RegistrationProofPayload<'a> {
@@ -254,6 +255,71 @@ fn ensure_len_bound(
     Ok(())
 }
 
+fn invalid_did_document_field(did: &str, field: &str, reason: impl Into<String>) -> IdentityError {
+    IdentityError::InvalidDidDocumentField {
+        did: did.to_owned(),
+        field: field.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn ensure_verification_method_key_material(
+    did: &str,
+    field: &str,
+    method_id: &str,
+    public_key_multibase: &str,
+) -> Result<(), IdentityError> {
+    let encoded = public_key_multibase.strip_prefix('z').ok_or_else(|| {
+        invalid_did_document_field(
+            did,
+            field,
+            format!(
+                "verification method '{method_id}' uses unsupported multibase prefix; expected z base58btc"
+            ),
+        )
+    })?;
+    let key = bs58::decode(encoded).into_vec().map_err(|e| {
+        invalid_did_document_field(
+            did,
+            field,
+            format!("verification method '{method_id}' public key is not valid base58btc: {e}"),
+        )
+    })?;
+    if key.len() != 32 {
+        return Err(invalid_did_document_field(
+            did,
+            field,
+            format!(
+                "verification method '{method_id}' public key must be 32 bytes, got {}",
+                key.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_verification_method_lifecycle(
+    did: &str,
+    field: &str,
+    method_id: &str,
+    active: bool,
+    revoked_at: Option<u64>,
+) -> Result<(), IdentityError> {
+    match (active, revoked_at) {
+        (true, Some(_)) => Err(invalid_did_document_field(
+            did,
+            field,
+            format!("active verification method '{method_id}' must not set revoked_at"),
+        )),
+        (false, None) => Err(invalid_did_document_field(
+            did,
+            field,
+            format!("inactive verification method '{method_id}' must set revoked_at"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn validate_registered_did_document(doc: &DidDocument) -> Result<(), IdentityError> {
     let did = doc.id.as_str();
     Did::new(did).map_err(|e| IdentityError::InvalidDidDocumentField {
@@ -307,7 +373,16 @@ fn validate_registered_did_document(doc: &DidDocument) -> Result<(), IdentityErr
             MAX_DID_DOCUMENT_FIELD_BYTES,
         )?;
     }
+    let mut verification_method_ids = BTreeSet::new();
+    let verification_method_id_prefix = format!("{did}#");
     for method in &doc.verification_methods {
+        if !verification_method_ids.insert(method.id.as_str()) {
+            return Err(invalid_did_document_field(
+                did,
+                "verification_methods.id",
+                format!("duplicate verification method id '{}'", method.id),
+            ));
+        }
         ensure_byte_bound(
             did,
             "verification_methods.id",
@@ -331,6 +406,51 @@ fn validate_registered_did_document(doc: &DidDocument) -> Result<(), IdentityErr
             "verification_methods.public_key_multibase",
             &method.public_key_multibase,
             MAX_DID_DOCUMENT_FIELD_BYTES,
+        )?;
+        if !method.id.starts_with(&verification_method_id_prefix)
+            || method.id.len() <= verification_method_id_prefix.len()
+        {
+            return Err(invalid_did_document_field(
+                did,
+                "verification_methods.id",
+                format!(
+                    "verification method id '{}' must be scoped to DID subject '{}'",
+                    method.id, did
+                ),
+            ));
+        }
+        if method.controller != doc.id {
+            return Err(invalid_did_document_field(
+                did,
+                "verification_methods.controller",
+                format!(
+                    "verification method '{}' controller '{}' must equal DID subject '{}'",
+                    method.id, method.controller, did
+                ),
+            ));
+        }
+        if method.key_type != DID_DOCUMENT_ED25519_VERIFICATION_KEY_TYPE {
+            return Err(invalid_did_document_field(
+                did,
+                "verification_methods.key_type",
+                format!(
+                    "verification method '{}' key_type '{}' is unsupported; expected '{}'",
+                    method.id, method.key_type, DID_DOCUMENT_ED25519_VERIFICATION_KEY_TYPE
+                ),
+            ));
+        }
+        ensure_verification_method_key_material(
+            did,
+            "verification_methods.public_key_multibase",
+            &method.id,
+            &method.public_key_multibase,
+        )?;
+        ensure_verification_method_lifecycle(
+            did,
+            "verification_methods.revoked_at",
+            &method.id,
+            method.active,
+            method.revoked_at,
         )?;
     }
     for method in &doc.hybrid_verification_methods {
@@ -478,7 +598,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::did::DidDocument;
+    use crate::did::{DidDocument, VerificationMethod};
 
     fn make_did(label: &str) -> Did {
         Did::new(&format!("did:exo:{label}")).expect("valid did")
@@ -500,6 +620,19 @@ mod tests {
 
     fn make_doc_with_label(label: &str, pk: PublicKey) -> DidDocument {
         make_doc(make_did(label), pk)
+    }
+
+    fn verification_method(did: &Did, pk: PublicKey, version: u64) -> VerificationMethod {
+        VerificationMethod {
+            id: format!("{did}#key-{version}"),
+            key_type: "Ed25519VerificationKey2020".to_owned(),
+            controller: did.clone(),
+            public_key_multibase: format!("z{}", bs58::encode(pk.as_bytes()).into_string()),
+            version,
+            active: true,
+            valid_from: 1000,
+            revoked_at: None,
+        }
     }
 
     fn rotation_signature(
@@ -593,6 +726,171 @@ mod tests {
         assert!(
             err.to_string().contains("id"),
             "invalid DID error should identify the id field: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_accepts_bound_active_verification_method() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("bound-verification-method");
+        let mut doc = make_doc(did.clone(), pk);
+        doc.verification_methods = vec![verification_method(&did, pk, 1)];
+
+        let mut reg = LocalDidRegistry::new();
+        reg.register(doc).unwrap();
+
+        let resolved = reg.resolve(&did).unwrap();
+        assert_eq!(resolved.verification_methods.len(), 1);
+        assert_eq!(resolved.verification_methods[0].controller, did);
+    }
+
+    #[test]
+    fn register_rejects_active_verification_method_with_mismatched_controller() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("method-controller");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut method = verification_method(&did, pk, 1);
+        method.controller = make_did("different-controller");
+        doc.verification_methods = vec![method];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("active verification methods must be controlled by the DID subject");
+
+        assert!(
+            err.to_string().contains("controller"),
+            "error should identify the controller binding: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_rejects_active_verification_method_with_non_subject_method_id() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("method-id");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut method = verification_method(&did, pk, 1);
+        method.id = format!("{}#key-1", make_did("different-subject"));
+        doc.verification_methods = vec![method];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("verification method IDs must be DID-subject scoped");
+
+        assert!(
+            err.to_string().contains("id"),
+            "error should identify the method id binding: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_rejects_duplicate_verification_method_ids() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("duplicate-method-id");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut first = verification_method(&did, pk, 1);
+        let mut second = verification_method(&did, pk, 2);
+        second.id.clone_from(&first.id);
+        first.active = false;
+        first.revoked_at = Some(1001);
+        doc.verification_methods = vec![first, second];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("duplicate verification method IDs must be rejected");
+
+        assert!(
+            err.to_string().contains("duplicate"),
+            "error should identify duplicate method ids: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_rejects_unsupported_verification_method_key_type() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("unsupported-method-type");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut method = verification_method(&did, pk, 1);
+        method.key_type = "JsonWebKey2020".to_owned();
+        doc.verification_methods = vec![method];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("unsupported verification method key types must be rejected");
+
+        assert!(
+            err.to_string().contains("key_type"),
+            "error should identify the unsupported key type: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_rejects_active_verification_method_with_wrong_length_public_key() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("wrong-method-key-length");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut method = verification_method(&did, pk, 1);
+        method.public_key_multibase = format!("z{}", bs58::encode([1_u8, 2, 3]).into_string());
+        doc.verification_methods = vec![method];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("active verification method keys must decode to Ed25519 length");
+
+        assert!(
+            err.to_string().contains("32 bytes"),
+            "error should identify the key length: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_rejects_active_verification_method_with_revoked_at() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("active-with-revoked-at");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut method = verification_method(&did, pk, 1);
+        method.revoked_at = Some(1001);
+        doc.verification_methods = vec![method];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("active verification methods must not carry revocation timestamps");
+
+        assert!(
+            err.to_string().contains("revoked_at"),
+            "error should identify active revoked_at inconsistency: {err}"
+        );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_rejects_inactive_verification_method_without_revoked_at() {
+        let (pk, _) = generate_keypair();
+        let did = make_did("inactive-without-revoked-at");
+        let mut doc = make_doc(did.clone(), pk);
+        let mut method = verification_method(&did, pk, 1);
+        method.active = false;
+        doc.verification_methods = vec![method];
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register(doc)
+            .expect_err("inactive verification methods must carry revocation timestamps");
+
+        assert!(
+            err.to_string().contains("revoked_at"),
+            "error should identify inactive revoked_at inconsistency: {err}"
         );
         assert_eq!(reg.len(), 0);
     }
