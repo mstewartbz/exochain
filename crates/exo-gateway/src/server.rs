@@ -3988,7 +3988,7 @@ mod tests {
     };
     use exo_core::{
         Timestamp,
-        crypto::{generate_keypair, sign},
+        crypto::{KeyPair, generate_keypair, sign},
         hlc::HybridClock,
     };
     use exo_identity::did::{DidDocument, VerificationMethod};
@@ -4673,7 +4673,7 @@ mod tests {
     ) -> serde_json::Value {
         let actor = Did::new(actor_did).unwrap();
         let target = Did::new(target_did).unwrap();
-        let (public_key, secret_key) = generate_keypair();
+        let (public_key, secret_key) = advance_pace_provenance_keypair(actor_did);
         let timestamp = Timestamp::new(u64::try_from(queued_at).unwrap(), 0);
         let metadata = AdvancePaceMetadata {
             queued_at,
@@ -4705,6 +4705,18 @@ mod tests {
             "provenancePublicKey": hex::encode(public_key.as_bytes()),
             "provenanceSignature": hex::encode(provenance.signature),
         })
+    }
+
+    fn advance_pace_provenance_keypair(
+        actor_did: &str,
+    ) -> (exo_core::PublicKey, exo_core::SecretKey) {
+        let seed_hash = Hash256::digest(
+            format!("exo.gateway.advance_pace.test.provenance-key.v1:{actor_did}").as_bytes(),
+        );
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(seed_hash.as_bytes());
+        let keypair = KeyPair::from_secret_bytes(seed).unwrap();
+        (*keypair.public_key(), keypair.secret_key().clone())
     }
 
     async fn insert_test_user(pool: &sqlx::PgPool, did: &str, tenant_id: &str) {
@@ -8396,6 +8408,10 @@ mod tests {
             fixture.contains("db::insert_did_document(pool, &grantor_doc)"),
             "DB-backed advance-pace fixture must register the authority grantor DID document so trusted grantor keys are resolved from durable state"
         );
+        assert!(
+            fixture.contains("db::insert_did_document(pool, &actor_doc)"),
+            "DB-backed advance-pace fixture must register the actor DID document so action provenance keys are resolved from durable state"
+        );
     }
 
     fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -8483,6 +8499,12 @@ mod tests {
         assert!(
             db::insert_did_document(pool, &grantor_doc).await.unwrap(),
             "advance-pace root DID document should insert into the live DB fixture"
+        );
+        let (actor_public_key, _) = advance_pace_provenance_keypair(did);
+        let actor_doc = did_document_with_ed25519_key(&actor, &actor_public_key);
+        assert!(
+            db::insert_did_document(pool, &actor_doc).await.unwrap(),
+            "advance-pace actor DID document should insert into the live DB fixture"
         );
         sqlx::query(
             "INSERT INTO authority_chains (actor_did, chain_json, valid_from, expires_at) \
