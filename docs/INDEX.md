@@ -43,6 +43,7 @@ tags: [exochain, documentation, index]
 
 - [[ARCHITECTURE]] — System overview, dependency graph, data flow, design rationale.
 - [[THREAT-MODEL]] — 12-threat taxonomy with mitigations, detection, and test coverage.
+- [Fork Signal Immune Response](architecture/FORK-SIGNAL-IMMUNE-RESPONSE.md) — Defensive handling model for fork-adjacent security signals.
 
 ## Reference
 
