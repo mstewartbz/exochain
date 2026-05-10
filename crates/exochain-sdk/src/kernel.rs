@@ -44,7 +44,7 @@ use exo_gatekeeper::{
     authority_link_signature_message, provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -505,18 +505,27 @@ impl ConstitutionalKernel {
             }
         };
 
+        let authority_chain = AuthorityChain {
+            links: vec![authority_link],
+        };
+        let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            if let Some(public_key) = &link.grantor_public_key {
+                trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+            }
+        }
+
         let context = AdjudicationContext {
             actor_roles: vec![Role {
                 name: "judge".into(),
                 branch: GovernmentBranch::Judicial,
             }],
-            authority_chain: AuthorityChain {
-                links: vec![authority_link],
-            },
+            authority_chain,
             consent_records,
             bailment_state,
             human_override_preserved,
             actor_permissions: permissions,
+            trusted_authority_keys,
             provenance: Some(provenance),
             quorum_evidence: None,
             active_challenge_reason: None,

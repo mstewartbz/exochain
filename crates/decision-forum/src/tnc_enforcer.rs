@@ -232,7 +232,7 @@ mod tests {
         provenance_signature_message,
         types::{
             AuthorityChain, AuthorityLink as GatekeeperAuthorityLink, BailmentState, ConsentRecord,
-            GovernmentBranch, PermissionSet, Provenance, Role,
+            GovernmentBranch, PermissionSet, Provenance, Role, TrustedAuthorityKeys,
         },
     };
     use uuid::Uuid;
@@ -336,14 +336,21 @@ mod tests {
 
     fn transition_context(actor: &Did, from: BctsState, to: BctsState) -> AdjudicationContext {
         let permission = bcts_transition_permission(from, to);
+        let authority_chain = AuthorityChain {
+            links: vec![signed_authority_link(actor, permission.clone())],
+        };
+        let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            if let Some(public_key) = &link.grantor_public_key {
+                trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+            }
+        }
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "transition-judge".into(),
                 branch: GovernmentBranch::Judicial,
             }],
-            authority_chain: AuthorityChain {
-                links: vec![signed_authority_link(actor, permission.clone())],
-            },
+            authority_chain,
             consent_records: vec![ConsentRecord {
                 subject: Did::new("did:exo:bailor").expect("valid DID"),
                 granted_to: actor.clone(),
@@ -357,6 +364,7 @@ mod tests {
             },
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![permission]),
+            trusted_authority_keys,
             provenance: Some(signed_provenance(actor)),
             quorum_evidence: None,
             active_challenge_reason: None,

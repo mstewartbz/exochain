@@ -16,7 +16,7 @@ use crate::{
     },
     types::{
         AuthorityChain, BailmentState, ConsentRecord, PermissionSet, Provenance, QuorumEvidence,
-        Role,
+        Role, TrustedAuthorityKeys,
     },
 };
 
@@ -68,6 +68,7 @@ pub struct AdjudicationContext {
     pub bailment_state: BailmentState,
     pub human_override_preserved: bool,
     pub actor_permissions: PermissionSet,
+    pub trusted_authority_keys: TrustedAuthorityKeys,
     pub provenance: Option<Provenance>,
     pub quorum_evidence: Option<QuorumEvidence>,
     /// When set, the action is under an active Sybil challenge hold.
@@ -120,6 +121,7 @@ impl Kernel {
             provenance: context.provenance.clone(),
             actor_permissions: context.actor_permissions.clone(),
             requested_permissions: action.required_permissions.clone(),
+            trusted_authority_keys: context.trusted_authority_keys.clone(),
         };
 
         match enforce_all(&self.invariant_engine, &inv_ctx) {
@@ -218,7 +220,7 @@ mod tests {
     use super::*;
     use crate::{
         invariants::{authority_link_signature_message, provenance_signature_message},
-        types::{AuthorityLink, GovernmentBranch, Permission, QuorumVote},
+        types::{AuthorityLink, GovernmentBranch, Permission, QuorumVote, TrustedAuthorityKeys},
     };
 
     const CONSTITUTION: &[u8] = b"We the people of the EXOCHAIN...";
@@ -280,14 +282,21 @@ mod tests {
     }
 
     fn valid_context(actor: &Did) -> AdjudicationContext {
+        let authority_chain = AuthorityChain {
+            links: vec![signed_link("did:exo:root", actor)],
+        };
+        let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            if let Some(public_key) = &link.grantor_public_key {
+                trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+            }
+        }
         AdjudicationContext {
             actor_roles: vec![Role {
                 name: "judge".into(),
                 branch: GovernmentBranch::Judicial,
             }],
-            authority_chain: AuthorityChain {
-                links: vec![signed_link("did:exo:root", actor)],
-            },
+            authority_chain,
             consent_records: vec![ConsentRecord {
                 subject: did("did:exo:bailor"),
                 granted_to: actor.clone(),
@@ -301,6 +310,7 @@ mod tests {
             },
             human_override_preserved: true,
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
+            trusted_authority_keys,
             provenance: Some(signed_provenance(actor)),
             quorum_evidence: None,
             active_challenge_reason: None,
@@ -521,6 +531,7 @@ mod tests {
                 bailment_state: BailmentState::None,
                 human_override_preserved: true,
                 actor_permissions: PermissionSet::new(vec![Permission::new("vote")]),
+                trusted_authority_keys: TrustedAuthorityKeys::default(),
                 provenance: None,
                 quorum_evidence: None,
                 active_challenge_reason: None,

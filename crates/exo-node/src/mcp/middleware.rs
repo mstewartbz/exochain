@@ -23,7 +23,7 @@ use exo_gatekeeper::{
     invariants::InvariantSet,
     kernel::{ActionRequest, AdjudicationContext, Kernel, Verdict},
     mcp::{self, McpContext, McpRule},
-    types::{BailmentState, Permission, PermissionSet},
+    types::{BailmentState, Permission, PermissionSet, TrustedAuthorityKeys},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -31,7 +31,7 @@ use serde_json::Value;
 use super::{
     error::{McpError, Result},
     protocol::AI_OUTPUT_MARKING,
-    tools::authority::parse_verified_adjudication_context,
+    tools::authority::parse_verified_adjudication_context_with_trusted_authority_keys,
 };
 
 const CONSTITUTIONAL_CONTEXT_FIELD: &str = "constitutional_context";
@@ -223,6 +223,20 @@ impl ConstitutionalMiddleware {
         Ok(())
     }
 
+    fn trusted_authority_keys(&self) -> Result<TrustedAuthorityKeys> {
+        let authority = self.authority.as_ref().ok_or_else(|| {
+            McpError::ConstitutionalViolation(
+                "MCP authority signer is required for verified MCP invocation context".into(),
+            )
+        })?;
+        let mut keys = TrustedAuthorityKeys::default();
+        keys.insert(
+            authority.did.clone(),
+            vec![authority.public_key.as_bytes().to_vec()],
+        );
+        Ok(keys)
+    }
+
     fn parse_invocation_context(
         &self,
         actor_did: &Did,
@@ -241,12 +255,17 @@ impl ConstitutionalMiddleware {
                 "verified MCP invocation context missing adjudication_context".into(),
             )
         })?;
-        let adjudication_context =
-            parse_verified_adjudication_context(adjudication_value, actor_did).map_err(|err| {
-                McpError::ConstitutionalViolation(format!(
-                    "verified MCP invocation context invalid: {err}"
-                ))
-            })?;
+        let trusted_authority_keys = self.trusted_authority_keys()?;
+        let adjudication_context = parse_verified_adjudication_context_with_trusted_authority_keys(
+            adjudication_value,
+            actor_did,
+            trusted_authority_keys,
+        )
+        .map_err(|err| {
+            McpError::ConstitutionalViolation(format!(
+                "verified MCP invocation context invalid: {err}"
+            ))
+        })?;
         self.verify_authority_binding(actor_did, &adjudication_context)?;
         if !Self::action_hash_matches(&adjudication_context, action) {
             return Err(McpError::ConstitutionalViolation(

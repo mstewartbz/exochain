@@ -18,7 +18,7 @@ mod nist_compliance {
         provenance_signature_message,
         types::{
             AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch,
-            Permission, PermissionSet, Provenance, Role,
+            Permission, PermissionSet, Provenance, Role, TrustedAuthorityKeys,
         },
     };
     use exo_governance::audit::{self as gov_audit, AuditLog};
@@ -212,6 +212,15 @@ mod nist_compliance {
     /// Build a passing InvariantContext matching the pattern in invariants.rs tests.
     fn passing_context(actor: &Did) -> InvariantContext {
         let root = did("root");
+        let authority_chain = AuthorityChain {
+            links: vec![signed_authority_link(&root, actor)],
+        };
+        let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+        for link in &authority_chain.links {
+            if let Some(public_key) = &link.grantor_public_key {
+                trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+            }
+        }
         InvariantContext {
             actor: actor.clone(),
             actor_roles: vec![Role {
@@ -229,9 +238,7 @@ mod nist_compliance {
                 scope: "data:test".into(),
                 active: true,
             }],
-            authority_chain: AuthorityChain {
-                links: vec![signed_authority_link(&root, actor)],
-            },
+            authority_chain,
             is_self_grant: false,
             human_override_preserved: true,
             kernel_modification_attempted: false,
@@ -239,6 +246,7 @@ mod nist_compliance {
             provenance: Some(signed_provenance(actor)),
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             requested_permissions: PermissionSet::default(),
+            trusted_authority_keys,
         }
     }
 

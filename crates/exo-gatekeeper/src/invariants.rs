@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, PermissionSet,
-    Provenance, QuorumEvidence, Role,
+    Provenance, QuorumEvidence, Role, TrustedAuthorityKeys,
 };
 
 // ---------------------------------------------------------------------------
@@ -100,6 +100,7 @@ pub struct InvariantContext {
     pub provenance: Option<Provenance>,
     pub actor_permissions: PermissionSet,
     pub requested_permissions: PermissionSet,
+    pub trusted_authority_keys: TrustedAuthorityKeys,
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +397,28 @@ fn check_authority_chain_valid(ctx: &InvariantContext) -> Result<(), InvariantVi
                 evidence: vec![format!("key_len: {}", pk_bytes.len())],
             })?;
 
+        let trusted_keys = ctx
+            .trusted_authority_keys
+            .get(&link.grantor)
+            .ok_or_else(|| InvariantViolation {
+                invariant: ConstitutionalInvariant::AuthorityChainValid,
+                description: format!(
+                    "link[{idx}] grantor_public_key is unresolved for grantor DID"
+                ),
+                evidence: vec![format!("grantor: {}", link.grantor)],
+            })?;
+
+        if !trusted_keys
+            .iter()
+            .any(|trusted_key| trusted_key.as_slice() == pk_bytes.as_slice())
+        {
+            return Err(InvariantViolation {
+                invariant: ConstitutionalInvariant::AuthorityChainValid,
+                description: format!("link[{idx}] grantor_public_key is not bound to grantor DID"),
+                evidence: vec![format!("grantor: {}", link.grantor)],
+            });
+        }
+
         // Validate signature length.
         let sig_arr: [u8; 64] =
             link.signature
@@ -634,8 +657,13 @@ mod tests {
 
     fn passing_context() -> InvariantContext {
         let actor = did("did:exo:actor1");
-        let (authority_link, _) = signed_link("did:exo:root", actor.as_str());
+        let (authority_link, authority_public_key) = signed_link("did:exo:root", actor.as_str());
         let (provenance, _, _) = signed_provenance(actor.as_str());
+        let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+        trusted_authority_keys.insert(
+            authority_link.grantor.clone(),
+            vec![authority_public_key.as_bytes().to_vec()],
+        );
         InvariantContext {
             actor: actor.clone(),
             actor_roles: vec![Role {
@@ -663,6 +691,7 @@ mod tests {
             provenance: Some(provenance),
             actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
             requested_permissions: PermissionSet::default(),
+            trusted_authority_keys,
         }
     }
 
@@ -1019,8 +1048,12 @@ mod tests {
             ConstitutionalInvariant::AuthorityChainValid,
         ]));
         let mut ctx = passing_context();
-        let (link1, _) = signed_link("did:exo:root", "did:exo:mid");
-        let (link2, _) = signed_link("did:exo:mid", "did:exo:actor1");
+        let (link1, pk1) = signed_link("did:exo:root", "did:exo:mid");
+        let (link2, pk2) = signed_link("did:exo:mid", "did:exo:actor1");
+        ctx.trusted_authority_keys
+            .insert(link1.grantor.clone(), vec![pk1.as_bytes().to_vec()]);
+        ctx.trusted_authority_keys
+            .insert(link2.grantor.clone(), vec![pk2.as_bytes().to_vec()]);
         ctx.authority_chain = AuthorityChain {
             links: vec![link1, link2],
         };
@@ -1396,6 +1429,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn authority_chain_validation_requires_trusted_grantor_key_resolution() {
+        let source = production_source();
+        let checker = source
+            .split("fn check_authority_chain_valid")
+            .nth(1)
+            .and_then(|rest| rest.split("fn check_quorum_legitimate").next())
+            .expect("AuthorityChainValid checker source must be present");
+        let compact_checker = checker
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+
+        assert!(
+            compact_checker.contains("ctx.trusted_authority_keys"),
+            "AuthorityChainValid must consult runtime-resolved trusted grantor keys"
+        );
+        assert!(
+            checker.contains("grantor_public_key is unresolved for grantor DID"),
+            "AuthorityChainValid must fail closed when the grantor DID has no resolved key"
+        );
+        assert!(
+            checker.contains("grantor_public_key is not bound to grantor DID"),
+            "AuthorityChainValid must reject self-attested keys not bound to the grantor DID"
+        );
+        assert!(
+            compact_checker.find("ctx.trusted_authority_keys").unwrap()
+                < compact_checker.find("exo_core::crypto::verify").unwrap(),
+            "grantor key binding must be checked before accepting the Ed25519 signature"
+        );
+    }
+
     fn signed_provenance(
         actor_str: &str,
     ) -> (Provenance, exo_core::PublicKey, exo_core::SecretKey) {
@@ -1560,9 +1625,28 @@ mod tests {
             ConstitutionalInvariant::AuthorityChainValid,
         ]));
         let mut ctx = passing_context();
-        let (link, _pk) = signed_link("did:exo:root", "did:exo:actor1");
+        let (link, pk) = signed_link("did:exo:root", "did:exo:actor1");
+        ctx.trusted_authority_keys
+            .insert(link.grantor.clone(), vec![pk.as_bytes().to_vec()]);
         ctx.authority_chain = AuthorityChain { links: vec![link] };
         assert!(enforce_all(&engine, &ctx).is_ok());
+    }
+
+    #[test]
+    fn authority_chain_rejects_unresolved_grantor_public_key() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
+        let mut ctx = passing_context();
+        let (link, _pk) = signed_link("did:exo:unresolved-root", "did:exo:actor1");
+        ctx.authority_chain = AuthorityChain { links: vec![link] };
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+        assert!(
+            err[0].description.contains("grantor_public_key")
+                && err[0].description.contains("unresolved"),
+            "self-attested grantor public keys must not satisfy AuthorityChainValid: {err:?}"
+        );
     }
 
     #[test]
@@ -1602,7 +1686,9 @@ mod tests {
             ConstitutionalInvariant::AuthorityChainValid,
         ]));
         let mut ctx = passing_context();
-        let (mut link, _pk) = signed_link("did:exo:root", "did:exo:actor1");
+        let (mut link, pk) = signed_link("did:exo:root", "did:exo:actor1");
+        ctx.trusted_authority_keys
+            .insert(link.grantor.clone(), vec![pk.as_bytes().to_vec()]);
         // Flip a byte in the signature to corrupt it.
         link.signature[0] ^= 0xFF;
         ctx.authority_chain = AuthorityChain { links: vec![link] };
@@ -1616,13 +1702,15 @@ mod tests {
             ConstitutionalInvariant::AuthorityChainValid,
         ]));
         let mut ctx = passing_context();
-        let (mut link, _pk) = signed_link("did:exo:root", "did:exo:actor1");
+        let (mut link, pk) = signed_link("did:exo:root", "did:exo:actor1");
+        ctx.trusted_authority_keys
+            .insert(link.grantor.clone(), vec![pk.as_bytes().to_vec()]);
         // Replace public key with a different one.
         let (other_pk, _other_sk) = exo_core::crypto::generate_keypair();
         link.grantor_public_key = Some(other_pk.as_bytes().to_vec());
         ctx.authority_chain = AuthorityChain { links: vec![link] };
         let err = enforce_all(&engine, &ctx).unwrap_err();
-        assert!(err[0].description.contains("cryptographically invalid"));
+        assert!(err[0].description.contains("not bound"));
     }
 
     #[test]
@@ -1649,7 +1737,9 @@ mod tests {
             ConstitutionalInvariant::AuthorityChainValid,
         ]));
         let mut ctx = passing_context();
-        let (mut link, _) = signed_link("did:exo:root", "did:exo:actor1");
+        let (mut link, pk) = signed_link("did:exo:root", "did:exo:actor1");
+        ctx.trusted_authority_keys
+            .insert(link.grantor.clone(), vec![pk.as_bytes().to_vec()]);
         link.signature.clear();
         ctx.authority_chain = AuthorityChain { links: vec![link] };
         let err = enforce_all(&engine, &ctx).unwrap_err();
@@ -1697,6 +1787,8 @@ mod tests {
         }
         let message = Hash256::digest(&payload);
         let sig = exo_core::crypto::sign(message.as_bytes(), &sk);
+        ctx.trusted_authority_keys
+            .insert(grantor.clone(), vec![pk.as_bytes().to_vec()]);
 
         ctx.authority_chain = AuthorityChain {
             links: vec![AuthorityLink {
@@ -1718,8 +1810,12 @@ mod tests {
             ConstitutionalInvariant::AuthorityChainValid,
         ]));
         let mut ctx = passing_context();
-        let (link1, _) = signed_link("did:exo:root", "did:exo:mid");
-        let (link2, _) = signed_link("did:exo:mid", "did:exo:actor1");
+        let (link1, pk1) = signed_link("did:exo:root", "did:exo:mid");
+        let (link2, pk2) = signed_link("did:exo:mid", "did:exo:actor1");
+        ctx.trusted_authority_keys
+            .insert(link1.grantor.clone(), vec![pk1.as_bytes().to_vec()]);
+        ctx.trusted_authority_keys
+            .insert(link2.grantor.clone(), vec![pk2.as_bytes().to_vec()]);
         ctx.authority_chain = AuthorityChain {
             links: vec![link1, link2],
         };

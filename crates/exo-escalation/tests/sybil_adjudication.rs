@@ -30,7 +30,7 @@ use exo_gatekeeper::{
     provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
     },
 };
 use exo_governance::{
@@ -137,14 +137,21 @@ fn signed_provenance(actor: &Did) -> Provenance {
 /// Build a fully valid `AdjudicationContext`.  Pass `Some(reason)` to inject
 /// an active Sybil challenge hold so the kernel returns `Verdict::Escalated`.
 fn valid_kernel_context(actor: &Did, challenge_reason: Option<String>) -> AdjudicationContext {
+    let authority_chain = AuthorityChain {
+        links: vec![signed_authority_link(actor)],
+    };
+    let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+    for link in &authority_chain.links {
+        if let Some(public_key) = &link.grantor_public_key {
+            trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+        }
+    }
     AdjudicationContext {
         actor_roles: vec![Role {
             name: "judge".into(),
             branch: GovernmentBranch::Judicial,
         }],
-        authority_chain: AuthorityChain {
-            links: vec![signed_authority_link(actor)],
-        },
+        authority_chain,
         consent_records: vec![ConsentRecord {
             subject: did("did:exo:bailor"),
             granted_to: actor.clone(),
@@ -158,6 +165,7 @@ fn valid_kernel_context(actor: &Did, challenge_reason: Option<String>) -> Adjudi
         },
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
+        trusted_authority_keys,
         provenance: Some(signed_provenance(actor)),
         quorum_evidence: None,
         active_challenge_reason: challenge_reason,

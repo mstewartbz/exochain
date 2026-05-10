@@ -51,7 +51,7 @@ use exo_gatekeeper::{
     provenance_signature_message,
     types::{
         AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, Permission,
-        PermissionSet, Provenance, Role,
+        PermissionSet, Provenance, Role, TrustedAuthorityKeys,
     },
 };
 use serde::Serialize;
@@ -402,14 +402,21 @@ pub fn build_holon_adjudication_context(
     config: &HolonManagerConfig,
 ) -> Result<AdjudicationContext, String> {
     let provenance_timestamp = next_provenance_timestamp(config)?;
+    let authority_chain = AuthorityChain {
+        links: vec![signed_authority_link(holon, config)?],
+    };
+    let mut trusted_authority_keys = TrustedAuthorityKeys::default();
+    for link in &authority_chain.links {
+        if let Some(public_key) = &link.grantor_public_key {
+            trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+        }
+    }
     Ok(AdjudicationContext {
         actor_roles: vec![Role {
             name: "worker".into(),
             branch: GovernmentBranch::Executive,
         }],
-        authority_chain: AuthorityChain {
-            links: vec![signed_authority_link(holon, config)?],
-        },
+        authority_chain,
         consent_records: vec![ConsentRecord {
             subject: config.root_did.clone(),
             granted_to: holon.id.clone(),
@@ -423,6 +430,7 @@ pub fn build_holon_adjudication_context(
         },
         human_override_preserved: true,
         actor_permissions: holon.capabilities.clone(),
+        trusted_authority_keys,
         provenance: Some(signed_provenance(holon, config, provenance_timestamp)?),
         quorum_evidence: None,
         active_challenge_reason: None,
