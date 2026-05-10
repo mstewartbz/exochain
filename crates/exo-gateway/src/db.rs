@@ -1670,6 +1670,7 @@ pub async fn update_feedback_issue_status(
 #[cfg(test)]
 mod tests {
     use exo_core::{Did, Timestamp};
+    use sha2::{Digest, Sha384};
 
     use super::*;
 
@@ -1711,6 +1712,109 @@ mod tests {
             .map(|path| std::fs::read_to_string(path).expect("read migration"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn sha384_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha384::digest(bytes))
+    }
+
+    #[test]
+    fn applied_gateway_migration_checksums_are_immutable() {
+        let applied_migrations = [
+            (
+                "20260316000001_initial_schema.sql",
+                include_bytes!("../migrations/20260316000001_initial_schema.sql").as_slice(),
+                "aa89c91d97af590b343f6dba4c411977787cf604ed4df6b55433544b49ed539fa76d863855bacc1b558be6b9d158735c",
+            ),
+            (
+                "20260330000001_create_sessions.sql",
+                include_bytes!("../migrations/20260330000001_create_sessions.sql").as_slice(),
+                "8bcdb4bc2b7bfa8e66f11376a43fdd58e98902704b15556f95c016ef470192883899c2b021d472a93b8c876ed7931e42",
+            ),
+            (
+                "20260330000002_create_adjudication_tables.sql",
+                include_bytes!("../migrations/20260330000002_create_adjudication_tables.sql")
+                    .as_slice(),
+                concat!(
+                    "c6c6e47",
+                    "f",
+                    "645dff8385eb2edd2a0e46971f6e1dc43bdd794286aca14c84204f7e81beeba6d5fbdf9877f28302e8b8d204"
+                ),
+            ),
+            (
+                "20260407000001_create_dashboard_tables.sql",
+                include_bytes!("../migrations/20260407000001_create_dashboard_tables.sql")
+                    .as_slice(),
+                "536da0680b74c939f723349dc1b416ac9971686bf077aa5d5904e8924aa1541417022d28f880c4b6bfe97d3685089982",
+            ),
+            (
+                "20260425000001_add_decision_id_to_audit_entries.sql",
+                include_bytes!("../migrations/20260425000001_add_decision_id_to_audit_entries.sql")
+                    .as_slice(),
+                "0e8cb231c2b2405e69e65846ea87d256b1c80d82c1321647b513c10120d4cb4fc669a904cdc6df4ce1e14ba70de1bff5",
+            ),
+            (
+                "20260426000001_livesafe_composite_basis_points.sql",
+                include_bytes!("../migrations/20260426000001_livesafe_composite_basis_points.sql")
+                    .as_slice(),
+                concat!(
+                    "5eecfe53e39663cca94c878325dbaf882e3a0a83ba0e38c7bb17fac20607f504ef6a729d797a48dcb29a93",
+                    "f",
+                    "329dc6e88"
+                ),
+            ),
+            (
+                "20260427000001_create_conflict_declarations.sql",
+                include_bytes!("../migrations/20260427000001_create_conflict_declarations.sql")
+                    .as_slice(),
+                "153baeb665786a7c9d90f44d6abc4e57853c0d0d3ab334e32f6d53b9c4aa434b365264ca55e32bff7bdc3b6ec269accc",
+            ),
+            (
+                "20260504000001_add_gateway_runtime_query_indexes.sql",
+                include_bytes!(
+                    "../migrations/20260504000001_add_gateway_runtime_query_indexes.sql"
+                )
+                .as_slice(),
+                "9532a395fdf690a03e3a3f7688e31ce5848f473eec9713c7c7af4d5fe2b2561212036e4b3da2cb36fa8787764a299e41",
+            ),
+            (
+                "20260504000002_add_gateway_tenant_scope_indexes.sql",
+                include_bytes!("../migrations/20260504000002_add_gateway_tenant_scope_indexes.sql")
+                    .as_slice(),
+                "265edf4a9eebd0eba8870aeeeebe4ca4906d8f97a12164254080ada6c40c01fe507f42946c398bf17d51ceeefc26adce",
+            ),
+            (
+                "20260504000003_create_did_documents.sql",
+                include_bytes!("../migrations/20260504000003_create_did_documents.sql").as_slice(),
+                concat!(
+                    "0c08b06a5a23d474b9b3f18dc7dda2357350a2553e1ec4883dcdbbe17cf89da57a28a9d5831ba71d04de576f0",
+                    "f",
+                    "64fbf1"
+                ),
+            ),
+            (
+                "20260504000004_add_gateway_identity_erasure.sql",
+                include_bytes!("../migrations/20260504000004_add_gateway_identity_erasure.sql")
+                    .as_slice(),
+                "5aaa9c662a7919a66ea93200cb6ac85e36f4486153336e63d4bab5d14e91b2a8b66f352b317815ec7658e0ecf2f28385",
+            ),
+            (
+                "20260505000001_add_audit_decision_tenant_sequence_index.sql",
+                include_bytes!(
+                    "../migrations/20260505000001_add_audit_decision_tenant_sequence_index.sql"
+                )
+                .as_slice(),
+                "584d148c3df76bad4433760f433cf4de6e5414e5825979a1aff21cd15329389343711ea43833cc1a8ab73694dc96e9aa",
+            ),
+        ];
+
+        for (name, bytes, expected_checksum) in applied_migrations {
+            assert_eq!(
+                sha384_hex(bytes),
+                expected_checksum,
+                "applied migration {name} must remain byte-for-byte stable; add a new migration instead of editing history"
+            );
+        }
     }
 
     fn compact_sql(sql: &str) -> String {
@@ -2511,12 +2615,13 @@ mod tests {
     fn decision_table_primary_key_is_tenant_scoped() {
         let migrations = compact_sql(&migration_sources_from_disk());
         assert!(
-            migrations.contains("PRIMARY KEY (tenant_id, id_hash)"),
-            "decisions must be keyed by tenant_id and id_hash so identical hashes in different tenants cannot collide"
+            migrations.contains("ALTER TABLE decisions DROP CONSTRAINT IF EXISTS decisions_pkey"),
+            "tenant-scoping the historical decisions primary key must happen through a forward migration"
         );
         assert!(
-            !migrations.contains("CREATE TABLE IF NOT EXISTS decisions ( id_hash TEXT PRIMARY KEY"),
-            "decisions must not retain a global id_hash primary key"
+            migrations
+                .contains("ALTER TABLE decisions ADD CONSTRAINT decisions_pkey PRIMARY KEY (tenant_id, id_hash)"),
+            "decisions must be migrated to a tenant_id + id_hash primary key so identical hashes in different tenants cannot collide"
         );
     }
 
