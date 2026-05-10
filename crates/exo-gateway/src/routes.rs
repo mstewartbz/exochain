@@ -113,6 +113,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::auth::request_signing_payload;
 
     /// Create a registry with `did:exo:alice` and return the registry +
     /// a signed request using alice's key.
@@ -144,14 +145,15 @@ mod tests {
         reg.register(doc).unwrap();
 
         let body_hash = Hash256::digest(b"route-test");
-        let signature = sign(body_hash.as_bytes(), &sk);
-        let req = Request {
+        let mut req = Request {
             actor_did: "did:exo:alice".into(),
             action: "create".into(),
             body_hash,
-            signature,
+            signature: exo_core::Signature::Empty,
             timestamp: Timestamp::new(7_000, 1),
         };
+        let auth_metadata = AuthenticationMetadata::new(Timestamp::new(7_000, 1)).unwrap();
+        req.signature = sign(&request_signing_payload(&req, auth_metadata).unwrap(), &sk);
         (reg, req)
     }
 
