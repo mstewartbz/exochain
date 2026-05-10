@@ -26,7 +26,7 @@ use crate::error::{GatewayError, Result};
 
 /// Maximum age (or future skew) of a request timestamp in milliseconds.
 /// Requests outside this window are rejected to prevent replay attacks.
-const FRESHNESS_WINDOW_MS: u64 = 300_000; // 5 minutes
+pub(crate) const FRESHNESS_WINDOW_MS: u64 = 300_000; // 5 minutes
 const GATEWAY_AUTH_SIGNING_DOMAIN: &str = "exo.gateway.auth.request.v1";
 
 // ---------------------------------------------------------------------------
