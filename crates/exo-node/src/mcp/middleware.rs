@@ -5,7 +5,7 @@
 //! 2. Enforces all 6 MCP rules (via exo-gatekeeper)
 //! 3. Adjudicates the supplied `AdjudicationContext` in the CGR Kernel
 //! 4. Adjudicates the action against all 8 constitutional invariants
-//! 5. Returns Permitted/Denied/Escalated verdict
+//! 5. Permits only `Permitted` verdicts for tool execution
 //!
 //! # Verified Context Requirement
 //!
@@ -331,6 +331,9 @@ impl ConstitutionalMiddleware {
                     violations.iter().map(|v| v.description.clone()).collect();
                 Err(McpError::ConstitutionalViolation(descriptions.join("; ")))
             }
+            Verdict::Escalated { reason } => Err(McpError::ConstitutionalViolation(format!(
+                "kernel verdict escalated; tool execution requires review: {reason}"
+            ))),
             _ => Ok(verdict),
         }
     }
@@ -513,6 +516,25 @@ mod tests {
             .adjudicate(&did, action, &invocation.adjudication_context)
             .unwrap();
         assert!(verdict.is_permitted());
+    }
+
+    #[test]
+    fn middleware_enforce_tool_call_rejects_escalated_kernel_verdict() {
+        let mw = signed_middleware();
+        let did = test_did();
+        let action = "exochain_node_status";
+        let mut params = signed_tool_call_params(action);
+        params[CONSTITUTIONAL_CONTEXT_FIELD]["adjudication_context"]["actor_permissions"] =
+            serde_json::json!(["unrelated:permission"]);
+
+        let err = mw
+            .enforce_tool_call(&did, action, &params)
+            .expect_err("MCP middleware must not execute tools after an escalated kernel verdict");
+
+        assert!(
+            err.to_string().contains("escalated"),
+            "expected escalated verdict refusal, got {err}"
+        );
     }
 
     #[test]
