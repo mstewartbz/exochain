@@ -280,23 +280,43 @@ fn check_separation_of_powers(ctx: &InvariantContext) -> Result<(), InvariantVio
 }
 
 fn check_consent_required(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
-    if !ctx.bailment_state.is_active() {
+    let (bailor, bailee, scope) = match &ctx.bailment_state {
+        BailmentState::Active {
+            bailor,
+            bailee,
+            scope,
+        } => (bailor, bailee, scope),
+        _ => {
+            return Err(InvariantViolation {
+                invariant: ConstitutionalInvariant::ConsentRequired,
+                description: "No active bailment for this action".into(),
+                evidence: bailment_state_evidence(&ctx.bailment_state),
+            });
+        }
+    };
+
+    if bailee != &ctx.actor {
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::ConsentRequired,
-            description: "No active bailment for this action".into(),
-            evidence: bailment_state_evidence(&ctx.bailment_state),
+            description: "Active bailment is not granted to actor".into(),
+            evidence: vec![
+                format!("actor: {}", ctx.actor),
+                format!("bailment_bailee: {bailee}"),
+            ],
         });
     }
-    let has_active = ctx
-        .consent_records
-        .iter()
-        .any(|c| c.granted_to == ctx.actor && c.active);
+
+    let has_active = ctx.consent_records.iter().any(|c| {
+        c.subject == *bailor && c.granted_to == ctx.actor && c.scope == *scope && c.active
+    });
     if !has_active {
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::ConsentRequired,
-            description: "No active consent record for actor".into(),
+            description: "No active consent record matching actor, bailor, and scope".into(),
             evidence: vec![
                 format!("actor: {}", ctx.actor),
+                format!("bailor: {bailor}"),
+                format!("scope: {scope}"),
                 format!("records: {}", ctx.consent_records.len()),
             ],
         });
@@ -916,6 +936,52 @@ mod tests {
         let mut ctx = passing_context();
         ctx.consent_records[0].granted_to = did("did:exo:other");
         assert!(enforce_all(&engine, &ctx).is_err());
+    }
+
+    #[test]
+    fn consent_fails_when_bailment_bailee_is_not_actor() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: did("did:exo:other-bailee"),
+            scope: "data:medical".into(),
+        };
+
+        assert!(
+            enforce_all(&engine, &ctx).is_err(),
+            "ConsentRequired must bind the active bailment bailee to the actor"
+        );
+    }
+
+    #[test]
+    fn consent_fails_when_record_subject_does_not_match_bailor() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.consent_records[0].subject = did("did:exo:unrelated-subject");
+
+        assert!(
+            enforce_all(&engine, &ctx).is_err(),
+            "ConsentRequired must bind the consent subject to the active bailment bailor"
+        );
+    }
+
+    #[test]
+    fn consent_fails_when_record_scope_does_not_match_bailment_scope() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.consent_records[0].scope = "data:genomics".into();
+
+        assert!(
+            enforce_all(&engine, &ctx).is_err(),
+            "ConsentRequired must bind the consent record scope to the active bailment scope"
+        );
     }
 
     #[test]

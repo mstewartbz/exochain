@@ -213,17 +213,16 @@ pub fn wasm_validation_invariant_request() -> Result<JsValue, JsValue> {
     );
 
     to_js_value(&serde_json::json!({
-        "actor": actor,
+        "actor": actor.clone(),
         "actor_roles": [],
         "bailment_state": BailmentState::Active {
             bailor: exo_core::Did::new("did:exo:validation-bailor")
                 .map_err(|_| gatekeeper_boundary_error("validation bailor DID failed"))?,
-            bailee: exo_core::Did::new("did:exo:validation-bailee")
-                .map_err(|_| gatekeeper_boundary_error("validation bailee DID failed"))?,
+            bailee: actor.clone(),
             scope: "validation-scope".to_string(),
         },
         "consent_records": [ConsentRecord {
-            subject: exo_core::Did::new("did:exo:validation-subject")
+            subject: exo_core::Did::new("did:exo:validation-bailor")
                 .map_err(|_| gatekeeper_boundary_error("validation subject DID failed"))?,
             granted_to: actor.clone(),
             scope: "validation-scope".to_string(),
@@ -309,7 +308,7 @@ mod tests {
     fn active_bailment() -> BailmentState {
         BailmentState::Active {
             bailor: Did::new("did:exo:bailor").expect("valid"),
-            bailee: Did::new("did:exo:bailee").expect("valid"),
+            bailee: actor(),
             scope: "test-scope".to_string(),
         }
     }
@@ -380,7 +379,7 @@ mod tests {
             actor_roles: vec![],
             bailment_state: active_bailment(),
             consent_records: vec![ConsentRecord {
-                subject: Did::new("did:exo:subject").expect("valid"),
+                subject: Did::new("did:exo:bailor").expect("valid"),
                 granted_to: actor(),
                 scope: "test-scope".to_string(),
                 active: true,
