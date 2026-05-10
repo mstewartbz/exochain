@@ -20,42 +20,70 @@ jobs:
     steps:
       - name: Prepare feedback payload
         id: payload
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_LABELS_JSON: ${{ toJSON(github.event.issue.labels.*.name) }}
         run: |
-          # Extract structured data from the issue
-          ISSUE_NUMBER="${{ github.event.issue.number }}"
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          ISSUE_URL="${{ github.event.issue.html_url }}"
-          ISSUE_AUTHOR="${{ github.event.issue.user.login }}"
+          # Keep issue fields in environment variables. Public issue content is
+          # untrusted and must not be interpolated into shell source.
+          printf '%s\n' "$ISSUE_TITLE" >/dev/null
+          printf '%s\n' "$ISSUE_URL" >/dev/null
+          printf '%s\n' "$ISSUE_AUTHOR" >/dev/null
 
           # Determine type from labels
           TYPE="suggestion"
-          if echo '${{ toJSON(github.event.issue.labels.*.name) }}' | grep -q "bug"; then
+          if printf '%s' "$ISSUE_LABELS_JSON" | jq -e 'index("bug") != null' >/dev/null; then
             TYPE="bug"
-          elif echo '${{ toJSON(github.event.issue.labels.*.name) }}' | grep -q "enhancement"; then
+          elif printf '%s' "$ISSUE_LABELS_JSON" | jq -e 'index("enhancement") != null' >/dev/null; then
             TYPE="enhancement"
           fi
 
-          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
-          echo "type=$TYPE" >> $GITHUB_OUTPUT
+          {
+            printf 'issue_number=%s\n' "$ISSUE_NUMBER"
+            printf 'type=%s\n' "$TYPE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Post to ExoForge ingestion
         if: ${{ vars.EXOFORGE_GATEWAY_URL != '' }}
+        env:
+          EXOFORGE_GATEWAY_URL: ${{ vars.EXOFORGE_GATEWAY_URL }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_LABELS_JSON: ${{ toJSON(github.event.issue.labels.*.name) }}
+          ISSUE_TYPE: ${{ steps.payload.outputs.type }}
         run: |
-          curl -sf -X POST "${{ vars.EXOFORGE_GATEWAY_URL }}/api/feedback" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "widget": "github-issue",
-              "page": "github",
-              "type": "${{ steps.payload.outputs.type }}",
-              "message": "${{ github.event.issue.title }}",
-              "context": {
-                "issue_number": ${{ github.event.issue.number }},
-                "issue_url": "${{ github.event.issue.html_url }}",
-                "author": "${{ github.event.issue.user.login }}",
-                "labels": ${{ toJSON(github.event.issue.labels.*.name) }},
-                "body_preview": ""
+          payload="$(jq -n \
+            --arg widget "github-issue" \
+            --arg page "github" \
+            --arg type "$ISSUE_TYPE" \
+            --arg message "$ISSUE_TITLE" \
+            --arg issue_url "$ISSUE_URL" \
+            --arg author "$ISSUE_AUTHOR" \
+            --argjson issue_number "$ISSUE_NUMBER" \
+            --argjson labels "$ISSUE_LABELS_JSON" \
+            '{
+              widget: $widget,
+              page: $page,
+              type: $type,
+              message: $message,
+              context: {
+                issue_number: $issue_number,
+                issue_url: $issue_url,
+                author: $author,
+                labels: $labels,
+                body_preview: ""
               }
-            }' || echo "ExoForge gateway not reachable — issue queued for manual triage"
+            }')"
+
+          curl -sf -X POST "${EXOFORGE_GATEWAY_URL}/api/feedback" \
+            -H "Content-Type: application/json" \
+            --data-binary "$payload" \
+            || echo "ExoForge gateway not reachable — issue queued for manual triage"
 
       - name: Add triage acknowledgment
         uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043

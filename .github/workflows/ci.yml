@@ -236,6 +236,8 @@ jobs:
           echo "✓ No GAP stubs remaining in code"
       - name: GitHub Actions pinned to immutable SHAs
         run: bash tools/test_github_actions_pinned.sh
+      - name: GitHub issue workflow trust boundary
+        run: bash tools/test_github_issue_workflow_boundaries.sh
       - name: CI tool installer supply-chain hardening
         run: bash tools/test_ci_supply_chain_hardening.sh
       - name: Repo truth and public claims
