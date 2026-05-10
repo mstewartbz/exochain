@@ -57,6 +57,7 @@ use crate::{
 
 const XSRF_COOKIE_PREFIX: &str = "XSRF-TOKEN=";
 const CSRF_HEADER_NAME: &str = "x-csrf-token";
+#[cfg(test)]
 const AUTH_OBSERVED_AT_MS_HEADER: &str = "x-exo-auth-observed-at-ms";
 const GLOBAL_CONCURRENCY_LIMIT: usize = 1024;
 const GATEWAY_RATE_LIMIT_REQUESTS_PER_WINDOW: u32 = 120;
@@ -371,8 +372,7 @@ impl AppState {
         headers: &HeaderMap,
     ) -> Result<Did> {
         let token = require_bearer_token(headers)?;
-        let observed_at = required_observed_at_ms_header(headers)?;
-        require_authenticated_session_actor_for_token(self, &token, observed_at).await
+        require_authenticated_session_actor_for_token(self, &token).await
     }
 
     /// Resolve the authenticated actor and its tenant scope from DB-backed
@@ -806,31 +806,18 @@ struct SessionLoginPayload<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SessionRefreshMetadata {
-    observed_at: i64,
     expires_at: i64,
 }
 
 impl SessionRefreshMetadata {
     fn from_body(body: &serde_json::Value) -> Result<Self> {
-        let observed_at = required_nonzero_i64(body, "observedAt")?;
         let expires_at = required_nonzero_i64(body, "expiresAt")?;
-        if expires_at <= observed_at {
-            return Err(metadata_error(
-                "session refresh expiresAt must be greater than caller-supplied observedAt",
-            ));
-        }
-        Ok(Self {
-            observed_at,
-            expires_at,
-        })
+        Ok(Self { expires_at })
     }
 
     fn from_optional_body(body: Option<&serde_json::Value>) -> Result<Self> {
-        let body = body.ok_or_else(|| {
-            metadata_error(
-                "session refresh requires caller-supplied observedAt and expiresAt metadata",
-            )
-        })?;
+        let body =
+            body.ok_or_else(|| metadata_error("session refresh requires expiresAt metadata"))?;
         Self::from_body(body)
     }
 }
@@ -1862,9 +1849,9 @@ async fn handle_auth_register(
 
 /// GET /api/v1/auth/me — resolve the caller's DID document.
 ///
-/// Requires `Authorization: Bearer <token>` and
-/// `x-exo-auth-observed-at-ms`. The actor DID is resolved from the session
-/// token; caller-supplied DID headers are ignored.
+/// Requires `Authorization: Bearer <token>`. The actor DID is resolved from the
+/// session token using the gateway HLC; caller-supplied DID and time headers are
+/// ignored.
 async fn handle_auth_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let did = match require_authenticated_session_actor_from_header(&state, &headers).await {
         Ok(actor) => actor,
@@ -2591,8 +2578,9 @@ async fn handle_auth_token(
 
 /// POST /api/v1/auth/refresh — extend an existing session.
 ///
-/// Requires `Authorization: Bearer <token>` plus a JSON body with caller-supplied
-/// `observedAt` and replacement `expiresAt` metadata.
+/// Requires `Authorization: Bearer <token>` plus a JSON body with replacement
+/// `expiresAt` metadata. The existing token expiry is checked against the
+/// gateway HLC, not caller-supplied body time.
 /// Returns 401 when the token is missing, expired, or revoked; 503 without DB.
 async fn handle_auth_refresh(
     State(state): State<AppState>,
@@ -2624,13 +2612,28 @@ async fn handle_auth_refresh(
         Ok(metadata) => metadata,
         Err(e) => return metadata_error_response(e),
     };
+    let validation_at_ms = match trusted_session_validation_time_ms(&state) {
+        Ok(validation_at_ms) => validation_at_ms,
+        Err(e) => {
+            return internal_error_response(
+                e,
+                "session refresh validation time",
+                "session refresh failed",
+            );
+        }
+    };
+    if metadata.expires_at <= validation_at_ms {
+        return metadata_error_response(metadata_error(
+            "session refresh expiresAt must be greater than trusted gateway validation time",
+        ));
+    }
     match sqlx::query(
         "UPDATE sessions SET expires_at = $1 \
          WHERE token = $2 AND expires_at > $3 AND revoked = false",
     )
     .bind(metadata.expires_at)
     .bind(&token)
-    .bind(metadata.observed_at)
+    .bind(validation_at_ms)
     .execute(db)
     .await
     {
@@ -2937,31 +2940,20 @@ fn require_bearer_token(headers: &HeaderMap) -> Result<String> {
     })
 }
 
-fn required_observed_at_ms_header(headers: &HeaderMap) -> Result<i64> {
-    let raw = headers
-        .get(AUTH_OBSERVED_AT_MS_HEADER)
-        .ok_or_else(|| {
-            GatewayError::BadRequest(format!(
-                "missing required '{AUTH_OBSERVED_AT_MS_HEADER}' header"
-            ))
-        })?
-        .to_str()
-        .map_err(|_| {
-            GatewayError::BadRequest(format!(
-                "'{AUTH_OBSERVED_AT_MS_HEADER}' header must be valid UTF-8"
-            ))
-        })?;
-    let observed_at = raw.parse::<i64>().map_err(|e| {
-        GatewayError::BadRequest(format!(
-            "'{AUTH_OBSERVED_AT_MS_HEADER}' header must be an integer millisecond timestamp: {e}"
-        ))
-    })?;
-    if observed_at <= 0 {
-        return Err(GatewayError::BadRequest(format!(
-            "'{AUTH_OBSERVED_AT_MS_HEADER}' header must be non-zero"
-        )));
+fn trusted_session_validation_time_ms(state: &AppState) -> Result<i64> {
+    let validation_at_ms = state
+        .try_now_ms()
+        .map_err(|message| GatewayError::Internal(message.to_owned()))?;
+    if validation_at_ms == 0 {
+        return Err(GatewayError::Internal(
+            "gateway session validation HLC returned zero".to_owned(),
+        ));
     }
-    Ok(observed_at)
+    i64::try_from(validation_at_ms).map_err(|_| {
+        GatewayError::Internal(
+            "gateway session validation time exceeds database timestamp range".to_owned(),
+        )
+    })
 }
 
 async fn require_authenticated_session_actor_from_header(
@@ -2969,8 +2961,7 @@ async fn require_authenticated_session_actor_from_header(
     headers: &HeaderMap,
 ) -> Result<Did> {
     let token = require_bearer_token(headers)?;
-    let observed_at = required_observed_at_ms_header(headers)?;
-    require_authenticated_session_actor_for_token(state, &token, observed_at).await
+    require_authenticated_session_actor_for_token(state, &token).await
 }
 
 async fn require_authenticated_session_user_from_header(
@@ -2982,32 +2973,23 @@ async fn require_authenticated_session_user_from_header(
         .await
 }
 
-async fn require_authenticated_session_actor(
-    state: &AppState,
-    headers: &HeaderMap,
-    observed_at_ms: i64,
-) -> Result<Did> {
+async fn require_authenticated_session_actor(state: &AppState, headers: &HeaderMap) -> Result<Did> {
     let token = require_bearer_token(headers)?;
-    require_authenticated_session_actor_for_token(state, &token, observed_at_ms).await
+    require_authenticated_session_actor_for_token(state, &token).await
 }
 
 async fn require_authenticated_session_actor_for_token(
     state: &AppState,
     token: &str,
-    observed_at_ms: i64,
 ) -> Result<Did> {
-    if observed_at_ms <= 0 {
-        return Err(GatewayError::BadRequest(
-            "session authentication observed_at must be caller-supplied and non-zero".into(),
-        ));
-    }
+    let validation_at_ms = trusted_session_validation_time_ms(state)?;
     let db = state.require_db()?;
     let actor_did: Option<String> = sqlx::query_scalar(
         "SELECT actor_did FROM sessions \
          WHERE token = $1 AND revoked = false AND expires_at > $2",
     )
     .bind(token)
-    .bind(observed_at_ms)
+    .bind(validation_at_ms)
     .fetch_optional(db)
     .await
     .map_err(|e| GatewayError::Internal(format!("session actor lookup failed: {e}")))?;
@@ -3176,11 +3158,10 @@ async fn handle_layout_template_put(
         Ok(metadata) => metadata,
         Err(e) => return metadata_error_response(e),
     };
-    let actor =
-        match require_authenticated_session_actor(&state, &headers, metadata.updated_at).await {
-            Ok(actor) => actor,
-            Err(e) => return auth_boundary_error_response(e),
-        };
+    let actor = match require_authenticated_session_actor(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
     if let Err(e) = reject_caller_supplied_identity_field(&body, "userDid") {
         return metadata_error_response(e);
     }
@@ -3317,11 +3298,10 @@ async fn handle_feedback_issue_create(
         Ok(metadata) => metadata,
         Err(e) => return metadata_error_response(e),
     };
-    let actor =
-        match require_authenticated_session_actor(&state, &headers, metadata.created_at).await {
-            Ok(actor) => actor,
-            Err(e) => return auth_boundary_error_response(e),
-        };
+    let actor = match require_authenticated_session_actor(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
     if let Err(e) = reject_caller_supplied_identity_field(&body, "reporterDid") {
         return metadata_error_response(e);
     }
@@ -3458,11 +3438,10 @@ async fn handle_feedback_issue_update(
         Ok(metadata) => metadata,
         Err(e) => return metadata_error_response(e),
     };
-    let actor =
-        match require_authenticated_session_actor(&state, &headers, metadata.updated_at).await {
-            Ok(actor) => actor,
-            Err(e) => return auth_boundary_error_response(e),
-        };
+    let actor = match require_authenticated_session_actor(&state, &headers).await {
+        Ok(actor) => actor,
+        Err(e) => return auth_boundary_error_response(e),
+    };
     let db = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
@@ -4400,6 +4379,8 @@ mod tests {
         )
     }
 
+    const TEST_ACTIVE_SESSION_EXPIRES_AT_MS: i64 = 4_102_444_800_000;
+
     async fn insert_test_session(pool: &sqlx::PgPool, token: &str, actor_did: &str) {
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -4413,7 +4394,7 @@ mod tests {
         .bind(token)
         .bind(actor_did)
         .bind(10_000_i64)
-        .bind(20_000_i64)
+        .bind(TEST_ACTIVE_SESSION_EXPIRES_AT_MS)
         .execute(pool)
         .await
         .unwrap();
@@ -4928,7 +4909,7 @@ mod tests {
         .bind("auth-me-alice-token")
         .bind("did:exo:auth-me-alice")
         .bind(10_000_i64)
-        .bind(20_000_i64)
+        .bind(TEST_ACTIVE_SESSION_EXPIRES_AT_MS)
         .execute(&pool)
         .await
         .unwrap();
@@ -4962,6 +4943,58 @@ mod tests {
         sqlx::query("DELETE FROM did_documents WHERE did IN ($1, $2)")
             .bind("did:exo:auth-me-alice")
             .bind("did:exo:auth-me-bob")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_auth_rejects_expired_token_despite_backdated_header_time() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let token = "auth-me-expired-token";
+        let did = "did:exo:auth-me-expired";
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(token)
+        .bind(did)
+        .bind(10_000_i64)
+        .bind(20_000_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = db_state_at(
+            pool.clone(),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+            30_000,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers.insert(AUTH_OBSERVED_AT_MS_HEADER, "15000".parse().unwrap());
+
+        let err = require_authenticated_session_actor_from_header(&state, &headers)
+            .await
+            .expect_err("expired session token must fail even with a backdated header");
+        assert!(
+            matches!(err, GatewayError::AuthenticationFailed { .. }),
+            "expected authentication failure for expired session, got {err}"
+        );
+
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
             .execute(&pool)
             .await
             .unwrap();
@@ -6998,6 +7031,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_refresh_rejects_expired_session_despite_backdated_body_time() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let token = "auth-refresh-expired-token";
+        let did = "did:exo:auth-refresh-expired";
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(token)
+        .bind(did)
+        .bind(10_000_i64)
+        .bind(20_000_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = build_router(db_state_at(
+            pool.clone(),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+            30_000,
+        ));
+        let body = serde_json::to_string(&serde_json::json!({
+            "observedAt": 15_000,
+            "expiresAt": 40_000
+        }))
+        .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/refresh")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn auth_logout_without_db_returns_503() {
         let app = build_router(state());
         let resp = app
@@ -7072,14 +7162,74 @@ mod tests {
     }
 
     #[test]
-    fn session_refresh_metadata_requires_observed_at() {
+    fn session_refresh_metadata_requires_expires_at() {
         let body = serde_json::json!({
-            "expiresAt": 4_600_000
+            "observedAt": 4_600_000
         });
         let err = SessionRefreshMetadata::from_body(&body).unwrap_err();
         assert!(
-            matches!(&err, GatewayError::BadRequest(reason) if reason.contains("observedAt")),
-            "expected observedAt refusal, got {err}"
+            matches!(&err, GatewayError::BadRequest(reason) if reason.contains("expiresAt")),
+            "expected expiresAt refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn session_validation_uses_gateway_clock_not_caller_header_time() {
+        let source = include_str!("server.rs");
+        let app_state_method = source_between(
+            source,
+            "pub async fn require_authenticated_session_actor_from_header",
+            "/// Resolve the authenticated actor and its tenant scope",
+        );
+        let free_function = source_between(
+            source,
+            "async fn require_authenticated_session_actor_from_header",
+            "async fn require_authenticated_session_user_from_header",
+        );
+        let token_lookup = source_between(
+            source,
+            "async fn require_authenticated_session_actor_for_token",
+            "fn reject_caller_supplied_identity_field",
+        );
+
+        assert!(
+            !app_state_method.contains("required_observed_at_ms_header"),
+            "AppState session auth must not derive expiry validation time from caller headers"
+        );
+        assert!(
+            !free_function.contains("required_observed_at_ms_header"),
+            "session auth helper must not derive expiry validation time from caller headers"
+        );
+        assert!(
+            token_lookup.contains("trusted_session_validation_time_ms(state)"),
+            "session token lookup must use the gateway HLC validation time"
+        );
+        assert!(
+            !token_lookup.contains("observed_at_ms"),
+            "session token lookup must not accept caller-supplied observation time"
+        );
+    }
+
+    #[test]
+    fn auth_refresh_uses_gateway_clock_not_caller_body_time() {
+        let source = include_str!("server.rs");
+        let refresh_handler = source_between(
+            source,
+            "async fn handle_auth_refresh",
+            "/// POST /api/v1/auth/logout",
+        );
+
+        assert!(
+            refresh_handler.contains("trusted_session_validation_time_ms(&state)"),
+            "session refresh must compute expiry validation time from the gateway HLC"
+        );
+        assert!(
+            refresh_handler.contains(".bind(validation_at_ms)"),
+            "session refresh update must compare stored expiry against trusted gateway time"
+        );
+        assert!(
+            !refresh_handler.contains(".bind(metadata.observed_at)"),
+            "session refresh update must not compare expiry against caller body time"
         );
     }
 
