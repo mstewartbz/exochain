@@ -139,6 +139,7 @@ jobs:
     name: "SBOM + SLSA Attestation"
     runs-on: ubuntu-latest
     needs: release-build
+    if: ${{ !inputs.dry_run }}
     permissions:
       attestations: write  # write SLSA attestations to repo
       id-token: write      # GitHub OIDC token for keyless Sigstore signing
@@ -260,6 +261,7 @@ jobs:
     name: "Create GitHub Release"
     runs-on: ubuntu-latest
     needs: [release-build, sbom-and-attest]
+    if: ${{ !inputs.dry_run }}
     permissions:
       contents: write
     steps:
@@ -307,4 +309,4 @@ jobs:
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.cdx.json
-          draft: ${{ inputs.dry_run }}
+          draft: false
