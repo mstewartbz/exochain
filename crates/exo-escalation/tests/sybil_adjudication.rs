@@ -161,13 +161,13 @@ fn valid_kernel_context(actor: &Did, challenge_reason: Option<String>) -> Adjudi
         consent_records: vec![ConsentRecord {
             subject: did("did:exo:bailor"),
             granted_to: actor.clone(),
-            scope: "data:governance".into(),
+            scope: "governance:read".into(),
             active: true,
         }],
         bailment_state: BailmentState::Active {
             bailor: did("did:exo:bailor"),
             bailee: actor.clone(),
-            scope: "data:governance".into(),
+            scope: "governance:read".into(),
         },
         human_override_preserved: true,
         actor_permissions: PermissionSet::new(vec![Permission::new("read")]),
