@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS agents (
 
 -- Decisions (JSONB payload for complex nested governance objects)
 CREATE TABLE IF NOT EXISTS decisions (
-    id_hash TEXT PRIMARY KEY,
+    id_hash TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     status TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     author TEXT NOT NULL,
     created_at_ms BIGINT NOT NULL,
     constitution_version TEXT NOT NULL,
-    payload JSONB NOT NULL
+    payload JSONB NOT NULL,
+    PRIMARY KEY (tenant_id, id_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status);
 

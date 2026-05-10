@@ -34,8 +34,8 @@ pub enum DbInitError {
 
 #[derive(Debug, Error)]
 pub enum DecisionUpdateError {
-    #[error("decision update matched no rows for id_hash {id_hash}")]
-    MissingDecision { id_hash: String },
+    #[error("decision update matched no rows for tenant_id {tenant_id} and id_hash {id_hash}")]
+    MissingDecision { tenant_id: String, id_hash: String },
     #[error("failed to update decision row")]
     Query {
         #[source]
@@ -45,8 +45,8 @@ pub enum DecisionUpdateError {
 
 #[derive(Debug, Error)]
 pub enum DecisionCreateError {
-    #[error("decision already exists for id_hash {id_hash}")]
-    AlreadyExists { id_hash: String },
+    #[error("decision already exists for tenant_id {tenant_id} and id_hash {id_hash}")]
+    AlreadyExists { tenant_id: String, id_hash: String },
     #[error("failed to create decision row")]
     Query {
         #[source]
@@ -658,7 +658,7 @@ pub async fn insert_decision(
     sqlx::query(
         "INSERT INTO decisions (id_hash, tenant_id, status, title, decision_class, author, created_at_ms, constitution_version, payload)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (id_hash) DO UPDATE SET status = $3, payload = $9"
+         ON CONFLICT (tenant_id, id_hash) DO UPDATE SET status = $3, payload = $9"
     )
     .bind(id_hash).bind(tenant_id).bind(status).bind(title).bind(decision_class)
     .bind(author).bind(created_at_ms).bind(constitution_version).bind(payload)
@@ -683,7 +683,7 @@ pub async fn create_decision(
     let result = sqlx::query(
         "INSERT INTO decisions (id_hash, tenant_id, status, title, decision_class, author, created_at_ms, constitution_version, payload)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (id_hash) DO NOTHING"
+         ON CONFLICT (tenant_id, id_hash) DO NOTHING"
     )
     .bind(id_hash)
     .bind(tenant_id)
@@ -699,6 +699,7 @@ pub async fn create_decision(
     .map_err(|source| DecisionCreateError::Query { source })?;
     if result.rows_affected() == 0 {
         return Err(DecisionCreateError::AlreadyExists {
+            tenant_id: tenant_id.to_owned(),
             id_hash: id_hash.to_owned(),
         });
     }
@@ -759,18 +760,23 @@ pub async fn list_decisions_db(
 pub async fn update_decision(
     pool: &PgPool,
     id_hash: &str,
+    tenant_id: &str,
     status: &str,
     payload: &JsonValue,
 ) -> Result<(), DecisionUpdateError> {
-    let result = sqlx::query("UPDATE decisions SET status = $1, payload = $2 WHERE id_hash = $3")
-        .bind(status)
-        .bind(payload)
-        .bind(id_hash)
-        .execute(pool)
-        .await
-        .map_err(|source| DecisionUpdateError::Query { source })?;
+    let result = sqlx::query(
+        "UPDATE decisions SET status = $1, payload = $2 WHERE id_hash = $3 AND tenant_id = $4",
+    )
+    .bind(status)
+    .bind(payload)
+    .bind(id_hash)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .map_err(|source| DecisionUpdateError::Query { source })?;
     if result.rows_affected() == 0 {
         return Err(DecisionUpdateError::MissingDecision {
+            tenant_id: tenant_id.to_owned(),
             id_hash: id_hash.to_owned(),
         });
     }
@@ -1603,6 +1609,7 @@ mod tests {
             include_str!(
                 "../migrations/20260505000001_add_audit_decision_tenant_sequence_index.sql"
             ),
+            include_str!("../migrations/20260510000001_scope_decision_ids_by_tenant.sql"),
         ]
         .join("\n")
     }
@@ -2405,6 +2412,126 @@ mod tests {
     }
 
     #[test]
+    fn decision_table_primary_key_is_tenant_scoped() {
+        let migrations = compact_sql(&migration_sources_from_disk());
+        assert!(
+            migrations.contains("PRIMARY KEY (tenant_id, id_hash)"),
+            "decisions must be keyed by tenant_id and id_hash so identical hashes in different tenants cannot collide"
+        );
+        assert!(
+            !migrations.contains("CREATE TABLE IF NOT EXISTS decisions ( id_hash TEXT PRIMARY KEY"),
+            "decisions must not retain a global id_hash primary key"
+        );
+    }
+
+    #[test]
+    fn decision_write_helpers_require_tenant_scope() {
+        let source = production_source();
+        let insert = function_source(source, "insert_decision");
+        let create = function_source(source, "create_decision");
+        let update = function_source(source, "update_decision");
+
+        assert!(
+            compact_sql(insert).contains("ON CONFLICT (tenant_id, id_hash) DO UPDATE"),
+            "insert_decision upserts must conflict only inside the same tenant"
+        );
+        assert!(
+            !compact_sql(insert).contains("ON CONFLICT (id_hash) DO UPDATE"),
+            "insert_decision must not upsert through a global id_hash conflict target"
+        );
+        assert!(
+            compact_sql(create).contains("ON CONFLICT (tenant_id, id_hash) DO NOTHING"),
+            "create_decision duplicate detection must be tenant-scoped"
+        );
+        assert!(
+            update.contains("tenant_id: &str"),
+            "update_decision must require an explicit tenant scope"
+        );
+        assert!(
+            compact_sql(update).contains(
+                "UPDATE decisions SET status = $1, payload = $2 WHERE id_hash = $3 AND tenant_id = $4"
+            ),
+            "update_decision must constrain mutations by id_hash and tenant_id"
+        );
+        assert!(
+            contains_in_order(update, ".bind(id_hash)", ".bind(tenant_id)"),
+            "update_decision must bind id_hash and tenant_id together"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_writes_allow_same_hash_across_tenants_without_overwrite()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = gateway_test_pool().await else {
+            return Ok(());
+        };
+        let id_hash = "tenant-scoped-decision-write";
+        for tenant_id in ["tenant-a-write", "tenant-b-write"] {
+            sqlx::query("DELETE FROM decisions WHERE id_hash = $1 AND tenant_id = $2")
+                .bind(id_hash)
+                .bind(tenant_id)
+                .execute(&pool)
+                .await?;
+        }
+
+        create_decision(
+            &pool,
+            id_hash,
+            "tenant-a-write",
+            "Open",
+            "Tenant A",
+            "Routine",
+            "did:exo:tenant-a-author",
+            10_000,
+            "exochain-constitution-v1",
+            &serde_json::json!({"tenant": "a", "status": "Open"}),
+        )
+        .await?;
+        create_decision(
+            &pool,
+            id_hash,
+            "tenant-b-write",
+            "Open",
+            "Tenant B",
+            "Routine",
+            "did:exo:tenant-b-author",
+            10_001,
+            "exochain-constitution-v1",
+            &serde_json::json!({"tenant": "b", "status": "Open"}),
+        )
+        .await?;
+
+        update_decision(
+            &pool,
+            id_hash,
+            "tenant-b-write",
+            "Closed",
+            &serde_json::json!({"tenant": "b", "status": "Closed"}),
+        )
+        .await?;
+
+        let tenant_a = find_decision(&pool, id_hash, "tenant-a-write")
+            .await?
+            .expect("tenant-a decision must remain present");
+        let tenant_b = find_decision(&pool, id_hash, "tenant-b-write")
+            .await?
+            .expect("tenant-b decision must remain present");
+        assert_eq!(tenant_a.status, "Open");
+        assert_eq!(tenant_a.payload["tenant"], "a");
+        assert_eq!(tenant_b.status, "Closed");
+        assert_eq!(tenant_b.payload["tenant"], "b");
+
+        for tenant_id in ["tenant-a-write", "tenant-b-write"] {
+            sqlx::query("DELETE FROM decisions WHERE id_hash = $1 AND tenant_id = $2")
+                .bind(id_hash)
+                .bind(tenant_id)
+                .execute(&pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn audit_entry_lookup_requires_decision_and_tenant_scope() {
         let source = production_source();
         let lookup = function_source(source, "list_audit_entries_for_decision");
@@ -2440,8 +2567,8 @@ mod tests {
             "create_decision must distinguish duplicate ids from SQL failures"
         );
         assert!(
-            compact_sql(create).contains("ON CONFLICT (id_hash) DO NOTHING"),
-            "decision creation must not overwrite an existing decision row"
+            compact_sql(create).contains("ON CONFLICT (tenant_id, id_hash) DO NOTHING"),
+            "decision creation must not overwrite an existing decision row and duplicate detection must be tenant-scoped"
         );
         assert!(
             create.contains("rows_affected()"),
@@ -2469,6 +2596,16 @@ mod tests {
         assert!(
             update.contains("-> Result<(), DecisionUpdateError>"),
             "update_decision must distinguish SQL failures from missing decision rows"
+        );
+        assert!(
+            update.contains("tenant_id: &str"),
+            "update_decision must require tenant_id before mutating a decision"
+        );
+        assert!(
+            compact_sql(update).contains(
+                "UPDATE decisions SET status = $1, payload = $2 WHERE id_hash = $3 AND tenant_id = $4"
+            ),
+            "update_decision must update only the authenticated tenant's decision row"
         );
         assert!(
             update.contains("rows_affected()"),
