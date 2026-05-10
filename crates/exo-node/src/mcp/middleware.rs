@@ -498,7 +498,7 @@ mod tests {
                         {
                             "subject": actor.as_str(),
                             "granted_to": actor.as_str(),
-                            "scope": "mcp:tools",
+                            "scope": "mcp:tool_call",
                             "active": true,
                         }
                     ],
@@ -506,7 +506,7 @@ mod tests {
                         "state": "Active",
                         "bailor": actor.as_str(),
                         "bailee": actor.as_str(),
-                        "scope": "mcp:tools",
+                        "scope": "mcp:tool_call",
                     },
                     "human_override_preserved": true,
                     "actor_permissions": ["mcp:tool_call"],

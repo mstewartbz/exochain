@@ -321,7 +321,146 @@ fn check_consent_required(ctx: &InvariantContext) -> Result<(), InvariantViolati
             ],
         });
     }
+    if !consent_scope_covers_requested_permissions(scope, &ctx.requested_permissions) {
+        return Err(InvariantViolation {
+            invariant: ConstitutionalInvariant::ConsentRequired,
+            description: "Active consent scope does not cover requested permission".into(),
+            evidence: vec![
+                format!("actor: {}", ctx.actor),
+                format!("scope: {scope}"),
+                format!(
+                    "requested_permissions: {}",
+                    permission_set_evidence_label(&ctx.requested_permissions)
+                ),
+            ],
+        });
+    }
     Ok(())
+}
+
+fn consent_scope_covers_requested_permissions(
+    scope: &str,
+    requested_permissions: &PermissionSet,
+) -> bool {
+    requested_permissions
+        .permissions
+        .iter()
+        .all(|permission| consent_scope_covers_permission(scope, &permission.0))
+}
+
+fn consent_scope_covers_permission(scope: &str, permission: &str) -> bool {
+    let scope = scope.trim();
+    let permission = permission.trim();
+    if permission.is_empty() || scope.is_empty() {
+        return false;
+    }
+    if scope.eq_ignore_ascii_case(permission) {
+        return true;
+    }
+
+    consent_scope_clauses(scope)
+        .iter()
+        .any(|scope_clause| consent_scope_clause_covers_permission(scope_clause, permission))
+}
+
+fn consent_scope_clauses(scope: &str) -> Vec<&str> {
+    scope
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|scope_clause| !scope_clause.is_empty())
+        .collect()
+}
+
+fn consent_scope_clause_covers_permission(scope_clause: &str, permission: &str) -> bool {
+    if scope_clause.eq_ignore_ascii_case(permission) {
+        return true;
+    }
+
+    let scope_tokens = scope_permission_tokens(scope_clause);
+    let permission_tokens = scope_permission_tokens(permission);
+    if scope_tokens.is_empty() || permission_tokens.is_empty() {
+        return false;
+    }
+    if permission_tokens.len() == 1
+        && scope_tokens
+            .last()
+            .is_some_and(|last| last == &permission_tokens[0])
+    {
+        return true;
+    }
+    if scope_tokens.len() > 1
+        && permission_tokens.len() >= scope_tokens.len()
+        && permission_tokens.starts_with(&scope_tokens)
+    {
+        return true;
+    }
+    if scope_tokens.len() > 1
+        && permission_tokens.len() > 1
+        && scope_tokens.last() == permission_tokens.last()
+        && scope_tokens
+            .last()
+            .is_some_and(|token| !is_generic_permission_action_token(token))
+    {
+        return true;
+    }
+
+    canonical_scope_tokens(scope_tokens) == canonical_scope_tokens(permission_tokens)
+}
+
+fn is_generic_permission_action_token(token: &str) -> bool {
+    matches!(
+        token,
+        "attest"
+            | "create"
+            | "delete"
+            | "execute"
+            | "grant"
+            | "propose"
+            | "publish"
+            | "read"
+            | "recommend"
+            | "revoke"
+            | "sign"
+            | "update"
+            | "validate"
+            | "verify"
+            | "write"
+    )
+}
+
+fn scope_permission_tokens(value: &str) -> Vec<String> {
+    value
+        .split([':', '_', '.', '/', '-', ' '])
+        .filter_map(|token| {
+            let token = token.trim();
+            if token.is_empty() {
+                None
+            } else {
+                Some(token.to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
+fn canonical_scope_tokens(mut tokens: Vec<String>) -> Vec<String> {
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn permission_set_evidence_label(permissions: &PermissionSet) -> String {
+    let mut labels: Vec<&str> = permissions
+        .permissions
+        .iter()
+        .map(|permission| permission.0.as_str())
+        .collect();
+    labels.sort_unstable();
+    labels.dedup();
+    if labels.is_empty() {
+        "none".to_string()
+    } else {
+        labels.join(",")
+    }
 }
 
 fn check_no_self_grant(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
@@ -981,6 +1120,109 @@ mod tests {
         assert!(
             enforce_all(&engine, &ctx).is_err(),
             "ConsentRequired must bind the consent record scope to the active bailment scope"
+        );
+    }
+
+    #[test]
+    fn consent_fails_when_scope_does_not_cover_requested_permission() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: ctx.actor.clone(),
+            scope: "data:profile".into(),
+        };
+        ctx.consent_records[0].scope = "data:profile".into();
+        ctx.requested_permissions = PermissionSet::new(vec![Permission::new("advance_pace")]);
+
+        assert!(
+            enforce_all(&engine, &ctx).is_err(),
+            "ConsentRequired must reject active consent whose scope does not cover the requested permission"
+        );
+    }
+
+    #[test]
+    fn consent_passes_when_scope_covers_requested_permission() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: ctx.actor.clone(),
+            scope: "pace:advance".into(),
+        };
+        ctx.consent_records[0].scope = "pace:advance".into();
+        ctx.requested_permissions = PermissionSet::new(vec![Permission::new("advance_pace")]);
+
+        assert!(
+            enforce_all(&engine, &ctx).is_ok(),
+            "ConsentRequired must accept the established pace:advance scope for advance_pace"
+        );
+    }
+
+    #[test]
+    fn consent_passes_when_resource_scope_covers_requested_permission_object() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: ctx.actor.clone(),
+            scope: "governance:decision".into(),
+        };
+        ctx.consent_records[0].scope = "governance:decision".into();
+        ctx.requested_permissions = PermissionSet::new(vec![Permission::new("enact:decision")]);
+
+        assert!(
+            enforce_all(&engine, &ctx).is_ok(),
+            "ConsentRequired must accept resource consent for a permission on the same object class"
+        );
+    }
+
+    #[test]
+    fn consent_passes_when_explicit_scope_list_covers_all_requested_permissions() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: ctx.actor.clone(),
+            scope: "network.peers.read;network.topology.recommend".into(),
+        };
+        ctx.consent_records[0].scope = "network.peers.read;network.topology.recommend".into();
+        ctx.requested_permissions = PermissionSet::new(vec![
+            Permission::new("network.peers.read"),
+            Permission::new("network.topology.recommend"),
+        ]);
+
+        assert!(
+            enforce_all(&engine, &ctx).is_ok(),
+            "ConsentRequired must accept explicit multi-permission consent scopes"
+        );
+    }
+
+    #[test]
+    fn consent_fails_when_scope_only_shares_non_object_token_with_permission() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::ConsentRequired,
+        ]));
+        let mut ctx = passing_context();
+        ctx.bailment_state = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: ctx.actor.clone(),
+            scope: "data:profile".into(),
+        };
+        ctx.consent_records[0].scope = "data:profile".into();
+        ctx.requested_permissions = PermissionSet::new(vec![Permission::new("profile:delete")]);
+
+        assert!(
+            enforce_all(&engine, &ctx).is_err(),
+            "ConsentRequired must not treat a shared verb or middle token as object consent"
         );
     }
 

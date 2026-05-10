@@ -397,6 +397,17 @@ fn next_provenance_timestamp(config: &HolonManagerConfig) -> Result<Timestamp, S
     Ok(timestamp)
 }
 
+fn capability_scope(capabilities: &PermissionSet) -> String {
+    let mut permissions: Vec<&str> = capabilities
+        .permissions
+        .iter()
+        .map(|permission| permission.0.as_str())
+        .collect();
+    permissions.sort_unstable();
+    permissions.dedup();
+    permissions.join(";")
+}
+
 pub fn build_holon_adjudication_context(
     holon: &Holon,
     config: &HolonManagerConfig,
@@ -416,6 +427,7 @@ pub fn build_holon_adjudication_context(
         holon.id.clone(),
         vec![config.root_public_key.as_bytes().to_vec()],
     );
+    let consent_scope = capability_scope(&holon.capabilities);
     Ok(AdjudicationContext {
         actor_roles: vec![Role {
             name: "worker".into(),
@@ -425,13 +437,13 @@ pub fn build_holon_adjudication_context(
         consent_records: vec![ConsentRecord {
             subject: config.root_did.clone(),
             granted_to: holon.id.clone(),
-            scope: "infrastructure-monitoring".into(),
+            scope: consent_scope.clone(),
             active: true,
         }],
         bailment_state: BailmentState::Active {
             bailor: config.root_did.clone(),
             bailee: holon.id.clone(),
-            scope: "infrastructure-monitoring".into(),
+            scope: consent_scope,
         },
         human_override_preserved: true,
         actor_permissions: holon.capabilities.clone(),

@@ -258,6 +258,17 @@ fn transition_context(actor: &Did, from: BctsState, to: BctsState) -> Adjudicati
                 .insert(link.grantor.clone(), vec![public_key.clone()]);
         }
     }
+    context.consent_records = vec![ConsentRecord {
+        subject: did("did:exo:bailor"),
+        granted_to: actor.clone(),
+        scope: "bcts:transition".into(),
+        active: true,
+    }];
+    context.bailment_state = BailmentState::Active {
+        bailor: did("did:exo:bailor"),
+        bailee: actor.clone(),
+        scope: "bcts:transition".into(),
+    };
     context.actor_permissions = PermissionSet::new(vec![permission]);
     context
 }

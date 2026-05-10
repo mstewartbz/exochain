@@ -265,7 +265,7 @@ impl ConstitutionalKernel {
     /// - A one-link authority chain from the configured authority to `actor`
     ///   granting `read`.
     /// - An active bailment from the configured authority to `actor` scoped to
-    ///   `action`.
+    ///   the requested permission set.
     /// - Full human-override preservation.
     /// - Signed provenance with timestamp `"sdk"`.
     ///
@@ -438,6 +438,17 @@ impl ConstitutionalKernel {
         Ok(provenance)
     }
 
+    fn permission_scope(permissions: &PermissionSet) -> String {
+        let mut labels: Vec<&str> = permissions
+            .permissions
+            .iter()
+            .map(|permission| permission.0.as_str())
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels.join(";")
+    }
+
     fn adjudicate_internal(
         &self,
         actor: &Did,
@@ -464,7 +475,7 @@ impl ConstitutionalKernel {
             modifies_kernel,
         };
 
-        let scope = action.to_owned();
+        let scope = Self::permission_scope(&permissions);
 
         let (bailment_state, consent_records) = if include_bailment {
             (
