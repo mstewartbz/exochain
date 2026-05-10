@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use decision_forum::decision_object::DecisionClass;
 use exo_identity::did::DidDocument;
 use serde_json::Value as JsonValue;
 use sqlx::{
@@ -548,6 +549,73 @@ pub struct PublicUserRow {
     pub status: String,
     pub pace_status: String,
     pub mfa_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuorumEligibilityCounts {
+    pub eligible_voters: usize,
+    pub eligible_human_voters: usize,
+}
+
+fn decision_class_rank(class: DecisionClass) -> i32 {
+    match class {
+        DecisionClass::Routine => 0,
+        DecisionClass::Operational => 1,
+        DecisionClass::Strategic => 2,
+        DecisionClass::Constitutional => 3,
+    }
+}
+
+fn count_result_to_usize(label: &'static str, value: i64) -> Result<usize, sqlx::Error> {
+    usize::try_from(value)
+        .map_err(|_| sqlx::Error::Protocol(format!("{label} returned invalid count {value}")))
+}
+
+/// Count quorum-eligible voters for a tenant and decision class.
+pub async fn count_quorum_eligible_voters(
+    pool: &PgPool,
+    tenant_id: &str,
+    decision_class: DecisionClass,
+) -> Result<QuorumEligibilityCounts, sqlx::Error> {
+    let active_human_users = count_result_to_usize(
+        "active_human_users",
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'Active'",
+        )
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await?,
+    )?;
+    let active_delegated_agents = count_result_to_usize(
+        "active_delegated_agents",
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*) FROM agents
+            WHERE tenant_id = $1
+              AND status = 'Active'
+              AND delegation_id IS NOT NULL
+              AND CASE max_decision_class
+                  WHEN 'Routine' THEN 0
+                  WHEN 'Operational' THEN 1
+                  WHEN 'Strategic' THEN 2
+                  WHEN 'Constitutional' THEN 3
+                  ELSE -1
+              END >= $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(decision_class_rank(decision_class))
+        .fetch_one(pool)
+        .await?,
+    )?;
+    let eligible_voters = active_human_users
+        .checked_add(active_delegated_agents)
+        .ok_or_else(|| sqlx::Error::Protocol("quorum eligible voter count overflowed".into()))?;
+
+    Ok(QuorumEligibilityCounts {
+        eligible_voters,
+        eligible_human_voters: active_human_users,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2459,6 +2527,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quorum_eligibility_counts_are_tenant_scoped_and_human_bounded() {
+        let source = production_source();
+        let count = function_source(source, "count_quorum_eligible_voters");
+
+        assert!(
+            count.contains("tenant_id: &str"),
+            "quorum eligibility counting must require an explicit tenant scope"
+        );
+        assert!(
+            compact_sql(count).contains("FROM users WHERE tenant_id = $1 AND status = 'Active'"),
+            "human quorum eligibility must count only active users inside the authenticated tenant"
+        );
+        assert!(
+            compact_sql(count).contains("FROM agents WHERE tenant_id = $1 AND status = 'Active'"),
+            "agent quorum eligibility must count only active agents inside the authenticated tenant"
+        );
+        assert!(
+            count.contains("delegation_id IS NOT NULL"),
+            "AI agents must not be quorum-eligible without a delegated authority boundary"
+        );
+        assert!(
+            count.contains("max_decision_class"),
+            "AI quorum eligibility must be bounded by the agent's maximum decision class"
+        );
+        assert!(
+            count.contains("eligible_human_voters: active_human_users"),
+            "human quorum eligibility must not include agents or unrelated DIDs"
+        );
+    }
+
     #[tokio::test]
     async fn decision_writes_allow_same_hash_across_tenants_without_overwrite()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -2528,6 +2627,188 @@ mod tests {
                 .execute(&pool)
                 .await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quorum_eligibility_counts_ignore_other_tenants_and_ineligible_agents()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = gateway_test_pool().await else {
+            return Ok(());
+        };
+        let tenant_a = "tenant-quorum-a";
+        let tenant_b = "tenant-quorum-b";
+        let user_dids = [
+            "did:exo:quorum-a-human-1",
+            "did:exo:quorum-a-human-2",
+            "did:exo:quorum-a-human-3",
+            "did:exo:quorum-a-inactive-human",
+            "did:exo:quorum-b-human-1",
+        ];
+        let agent_dids = [
+            "did:exo:quorum-a-agent-routine",
+            "did:exo:quorum-a-agent-operational",
+            "did:exo:quorum-a-agent-strategic",
+            "did:exo:quorum-a-agent-undelegated",
+            "did:exo:quorum-a-agent-inactive",
+            "did:exo:quorum-b-agent-constitutional",
+        ];
+        for did in user_dids {
+            sqlx::query("DELETE FROM users WHERE did = $1")
+                .bind(did)
+                .execute(&pool)
+                .await?;
+        }
+        for did in agent_dids {
+            sqlx::query("DELETE FROM agents WHERE did = $1")
+                .bind(did)
+                .execute(&pool)
+                .await?;
+        }
+
+        for (idx, did) in user_dids.iter().take(3).enumerate() {
+            insert_user(
+                &pool,
+                did,
+                "Quorum Human",
+                &format!("quorum-human-{idx}@example.invalid"),
+                &serde_json::json!(["member"]),
+                tenant_a,
+                i64::try_from(idx + 1)?,
+                "Active",
+                "Verified",
+                "hash",
+                "salt",
+                true,
+            )
+            .await?;
+        }
+        insert_user(
+            &pool,
+            "did:exo:quorum-a-inactive-human",
+            "Inactive Human",
+            "quorum-inactive@example.invalid",
+            &serde_json::json!(["member"]),
+            tenant_a,
+            10,
+            "Suspended",
+            "Verified",
+            "hash",
+            "salt",
+            true,
+        )
+        .await?;
+        insert_user(
+            &pool,
+            "did:exo:quorum-b-human-1",
+            "Other Tenant Human",
+            "quorum-other@example.invalid",
+            &serde_json::json!(["member"]),
+            tenant_b,
+            11,
+            "Active",
+            "Verified",
+            "hash",
+            "salt",
+            true,
+        )
+        .await?;
+
+        for (did, delegation_id, status, max_class) in [
+            (
+                "did:exo:quorum-a-agent-routine",
+                Some("delegation-routine"),
+                "Active",
+                "Routine",
+            ),
+            (
+                "did:exo:quorum-a-agent-operational",
+                Some("delegation-operational"),
+                "Active",
+                "Operational",
+            ),
+            (
+                "did:exo:quorum-a-agent-strategic",
+                Some("delegation-strategic"),
+                "Active",
+                "Strategic",
+            ),
+            (
+                "did:exo:quorum-a-agent-undelegated",
+                None,
+                "Active",
+                "Constitutional",
+            ),
+            (
+                "did:exo:quorum-a-agent-inactive",
+                Some("delegation-inactive"),
+                "Suspended",
+                "Constitutional",
+            ),
+        ] {
+            insert_agent(
+                &pool,
+                did,
+                "Quorum Agent",
+                "delegate",
+                "did:exo:quorum-a-human-1",
+                tenant_a,
+                &serde_json::json!(["vote"]),
+                "Trusted",
+                100,
+                delegation_id,
+                "Verified",
+                20,
+                status,
+                max_class,
+            )
+            .await?;
+        }
+        insert_agent(
+            &pool,
+            "did:exo:quorum-b-agent-constitutional",
+            "Other Tenant Agent",
+            "delegate",
+            "did:exo:quorum-b-human-1",
+            tenant_b,
+            &serde_json::json!(["vote"]),
+            "Trusted",
+            100,
+            Some("delegation-other"),
+            "Verified",
+            21,
+            "Active",
+            "Constitutional",
+        )
+        .await?;
+
+        let routine = count_quorum_eligible_voters(&pool, tenant_a, DecisionClass::Routine).await?;
+        assert_eq!(routine.eligible_human_voters, 3);
+        assert_eq!(routine.eligible_voters, 6);
+
+        let operational =
+            count_quorum_eligible_voters(&pool, tenant_a, DecisionClass::Operational).await?;
+        assert_eq!(operational.eligible_human_voters, 3);
+        assert_eq!(operational.eligible_voters, 5);
+
+        let strategic =
+            count_quorum_eligible_voters(&pool, tenant_a, DecisionClass::Strategic).await?;
+        assert_eq!(strategic.eligible_human_voters, 3);
+        assert_eq!(strategic.eligible_voters, 4);
+
+        for did in user_dids {
+            sqlx::query("DELETE FROM users WHERE did = $1")
+                .bind(did)
+                .execute(&pool)
+                .await?;
+        }
+        for did in agent_dids {
+            sqlx::query("DELETE FROM agents WHERE did = $1")
+                .bind(did)
+                .execute(&pool)
+                .await?;
+        }
+
         Ok(())
     }
 

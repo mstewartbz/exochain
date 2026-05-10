@@ -619,13 +619,14 @@ pub async fn vote_handler(
             .into_response();
     }
 
-    // Verify quorum precondition (TNC-07): enough eligible voters must exist
-    // before accepting the vote. This gateway registry currently stores
-    // voter DIDs, so its cardinality is both the total and human-eligible
-    // count supplied to the decision-forum precondition.
+    // Verify quorum precondition (TNC-07): enough tenant-scoped eligible
+    // voters must exist before accepting the vote.
     let registry = QuorumRegistry::with_defaults();
-    let eligible_voters = match state.registry_len().await {
-        Ok(len) => len,
+    let eligible = match state
+        .quorum_eligible_voter_counts(&actor.tenant_id, decision.class)
+        .await
+    {
+        Ok(counts) => counts,
         Err(e) => {
             tracing::error!(error = %e, "failed to count eligible voters");
             return (
@@ -635,12 +636,11 @@ pub async fn vote_handler(
                 .into_response();
         }
     };
-    let eligible_human_voters = eligible_voters;
     match verify_quorum_precondition(
         &registry,
         decision.class,
-        eligible_voters,
-        eligible_human_voters,
+        eligible.eligible_voters,
+        eligible.eligible_human_voters,
     ) {
         Ok(true) => { /* enough eligible voters — proceed */ }
         Ok(false) => {
@@ -1505,6 +1505,43 @@ mod tests {
                 "UPDATE decisions SET payload = $1 WHERE id_hash = $2 AND tenant_id = $3"
             ),
             "vote handler must update only the decision row in the actor tenant"
+        );
+    }
+
+    #[test]
+    fn vote_handler_quorum_precondition_uses_tenant_scoped_db_eligibility() {
+        let source = include_str!("handlers.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+        let vote_handler = production
+            .split("pub async fn vote_handler")
+            .nth(1)
+            .expect("vote handler source present")
+            .split("// Build the typed Vote")
+            .next()
+            .expect("vote handler quorum block present");
+
+        assert!(
+            vote_handler.contains("quorum_eligible_voter_counts(&actor.tenant_id, decision.class)"),
+            "vote handler must derive quorum eligibility from the authenticated tenant and decision class"
+        );
+        assert!(
+            vote_handler.contains("eligible.eligible_voters"),
+            "vote handler must pass tenant-scoped total eligible voters to the quorum precondition"
+        );
+        assert!(
+            vote_handler.contains("eligible.eligible_human_voters"),
+            "vote handler must pass tenant-scoped human eligible voters to the quorum precondition"
+        );
+        assert!(
+            !vote_handler.contains("state.registry_len().await"),
+            "vote handler must not use the global in-memory DID registry as a quorum eligibility source"
+        );
+        assert!(
+            !vote_handler.contains("let eligible_human_voters = eligible_voters"),
+            "vote handler must not assume every registered DID is a human eligible voter"
         );
     }
 

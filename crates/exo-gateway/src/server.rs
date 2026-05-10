@@ -411,6 +411,21 @@ impl AppState {
             .map_err(|e| GatewayError::Internal(e.to_string()))
     }
 
+    /// Return tenant-scoped quorum eligibility counts from persisted gateway
+    /// identity records.
+    pub async fn quorum_eligible_voter_counts(
+        &self,
+        tenant_id: &str,
+        decision_class: DecisionClass,
+    ) -> Result<db::QuorumEligibilityCounts> {
+        let pool = self.require_db()?;
+        db::count_quorum_eligible_voters(pool, tenant_id, decision_class)
+            .await
+            .map_err(|e| {
+                GatewayError::Internal(format!("failed to count quorum eligible voters: {e}"))
+            })
+    }
+
     /// Load conflict declarations for an actor from the DB-backed standing
     /// conflict register.
     pub async fn load_conflict_declarations(
