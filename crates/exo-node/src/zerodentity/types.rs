@@ -472,6 +472,9 @@ pub struct PeerAttestation {
 // IdentitySession
 // ---------------------------------------------------------------------------
 
+/// Absolute 0dentity bearer-session lifetime: 24 hours.
+pub const IDENTITY_SESSION_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+
 /// An authenticated session for a DID.
 ///
 /// Created after successful OTP verification; carries the session token and
@@ -503,6 +506,22 @@ impl fmt::Debug for IdentitySession {
             .field("last_active_ms", &self.last_active_ms)
             .field("revoked", &self.revoked)
             .finish()
+    }
+}
+
+impl IdentitySession {
+    /// Return the exclusive expiry deadline for this session, or `None` when
+    /// the timestamp arithmetic overflows and the session must fail closed.
+    #[must_use]
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        self.created_ms.checked_add(IDENTITY_SESSION_TTL_MS)
+    }
+
+    /// Returns true when the session is expired at `now_ms`.
+    #[must_use]
+    pub fn is_expired_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms()
+            .is_none_or(|expires_at| now_ms >= expires_at)
     }
 }
 

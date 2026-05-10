@@ -568,12 +568,16 @@ impl ZerodentityStore {
     // Read — sessions
     // -----------------------------------------------------------------------
 
-    /// Retrieve an identity session by token.
+    /// Retrieve an identity session by token at a trusted timestamp.
     ///
     /// Returns `None` if no matching session exists or if the session has been
-    /// revoked.
-    pub fn get_session(&self, token: &str) -> anyhow::Result<Option<IdentitySession>> {
-        Ok(self.sessions.get(token).filter(|s| !s.revoked).cloned())
+    /// revoked or expired.
+    pub fn get_session(&self, token: &str, now_ms: u64) -> anyhow::Result<Option<IdentitySession>> {
+        Ok(self
+            .sessions
+            .get(token)
+            .filter(|s| !s.revoked && now_ms >= s.created_ms && !s.is_expired_at(now_ms))
+            .cloned())
     }
 
     // -----------------------------------------------------------------------
@@ -1285,7 +1289,7 @@ mod tests {
         }
 
         // Session revoked
-        assert!(store.get_session("tok-erase").unwrap().is_none());
+        assert!(store.get_session("tok-erase", 7_000).unwrap().is_none());
 
         // Erasure receipt emitted
         let receipts: Vec<_> = store

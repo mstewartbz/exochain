@@ -891,9 +891,7 @@ async fn start_node(
     // Build 0dentity routers.
     let zd_onboarding_state =
         zerodentity::onboarding::OnboardingState::new(std::sync::Arc::clone(&zerodentity_store));
-    let zd_api_state = zerodentity::api::ApiState {
-        store: std::sync::Arc::clone(&zerodentity_store),
-    };
+    let zd_api_state = zerodentity::api::ApiState::new(std::sync::Arc::clone(&zerodentity_store));
     let zerodentity_onboarding_router =
         zerodentity::onboarding::onboarding_router(zd_onboarding_state);
     let zerodentity_api_router = zerodentity::api::zerodentity_api_router(zd_api_state);
