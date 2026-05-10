@@ -306,6 +306,73 @@ struct DecisionCreateRequest {
     created_at_physical_ms: u64,
     created_at_logical: u32,
     constitution_version: String,
+    provenance_timestamp_physical_ms: Option<u64>,
+    provenance_timestamp_logical: Option<u32>,
+    provenance_public_key: Option<String>,
+    provenance_signature: Option<String>,
+}
+
+const DECISION_CREATE_PROVENANCE_HASH_DOMAIN: &str = "exo.gateway.decision_create.action.v1";
+const DECISION_CREATE_PROVENANCE_HASH_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Serialize)]
+struct DecisionCreateActionHashInput<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    actor: &'a Did,
+    tenant_id: &'a str,
+    id: &'a uuid::Uuid,
+    title: &'a str,
+    decision_class: &'a str,
+    constitutional_hash: &'a Hash256,
+    created_at: &'a Timestamp,
+    constitution_version: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecisionCreateProvenanceMetadata {
+    provenance_timestamp: Timestamp,
+    provenance_public_key: Vec<u8>,
+    provenance_signature: Signature,
+}
+
+impl DecisionCreateProvenanceMetadata {
+    fn from_request(request: &DecisionCreateRequest) -> Result<Self> {
+        let physical_ms = request.provenance_timestamp_physical_ms.ok_or_else(|| {
+            metadata_error("provenance_timestamp_physical_ms must be caller-supplied")
+        })?;
+        if physical_ms == 0 {
+            return Err(metadata_error(
+                "provenance_timestamp_physical_ms must be a positive non-zero HLC physical millisecond",
+            ));
+        }
+        let logical = request.provenance_timestamp_logical.ok_or_else(|| {
+            metadata_error("provenance_timestamp_logical must be caller-supplied")
+        })?;
+        let public_key = request
+            .provenance_public_key
+            .as_deref()
+            .ok_or_else(|| metadata_error("provenance_public_key must be caller-supplied"))
+            .and_then(|value| parse_ed25519_public_key_hex(value, "provenance_public_key"))?;
+        let signature = request
+            .provenance_signature
+            .as_deref()
+            .ok_or_else(|| metadata_error("provenance_signature must be caller-supplied"))
+            .and_then(|value| parse_ed25519_signature_hex(value, "provenance_signature"))?;
+
+        Ok(Self {
+            provenance_timestamp: Timestamp::new(physical_ms, logical),
+            provenance_public_key: public_key.to_vec(),
+            provenance_signature: signature,
+        })
+    }
+
+    fn provenance_timestamp_string(&self) -> String {
+        format!(
+            "hlc:{}:{}",
+            self.provenance_timestamp.physical_ms, self.provenance_timestamp.logical
+        )
+    }
 }
 
 impl AppState {
@@ -1427,9 +1494,8 @@ fn required_u32(body: &serde_json::Value, field: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| metadata_error(format!("{field} must fit in u32")))
 }
 
-fn required_ed25519_signature_hex(body: &serde_json::Value, field: &str) -> Result<Signature> {
-    let encoded = required_nonempty_string(body, field)?;
-    let bytes = hex::decode(&encoded)
+fn parse_ed25519_signature_hex(encoded: &str, field: &str) -> Result<Signature> {
+    let bytes = hex::decode(encoded)
         .map_err(|e| metadata_error(format!("{field} must be hex-encoded Ed25519: {e}")))?;
     let signature_bytes: [u8; 64] = bytes.try_into().map_err(|bytes: Vec<u8>| {
         metadata_error(format!("{field} must be 64 bytes, got {}", bytes.len()))
@@ -1443,13 +1509,22 @@ fn required_ed25519_signature_hex(body: &serde_json::Value, field: &str) -> Resu
     Ok(signature)
 }
 
-fn required_ed25519_public_key_hex(body: &serde_json::Value, field: &str) -> Result<[u8; 32]> {
+fn required_ed25519_signature_hex(body: &serde_json::Value, field: &str) -> Result<Signature> {
     let encoded = required_nonempty_string(body, field)?;
-    let bytes = hex::decode(&encoded)
+    parse_ed25519_signature_hex(&encoded, field)
+}
+
+fn parse_ed25519_public_key_hex(encoded: &str, field: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(encoded)
         .map_err(|e| metadata_error(format!("{field} must be hex-encoded Ed25519: {e}")))?;
     bytes.try_into().map_err(|bytes: Vec<u8>| {
         metadata_error(format!("{field} must be 32 bytes, got {}", bytes.len()))
     })
+}
+
+fn required_ed25519_public_key_hex(body: &serde_json::Value, field: &str) -> Result<[u8; 32]> {
+    let encoded = required_nonempty_string(body, field)?;
+    parse_ed25519_public_key_hex(&encoded, field)
 }
 
 fn parse_decision_uuid(raw: &str, field: &str) -> Result<uuid::Uuid> {
@@ -2366,6 +2441,55 @@ async fn handle_users_list(State(state): State<AppState>, headers: HeaderMap) ->
     }
 }
 
+fn decision_create_action_hash(
+    actor: &Did,
+    tenant_id: &str,
+    decision: &DecisionObject,
+    constitutional_hash: &Hash256,
+    constitution_version: &str,
+) -> Result<Hash256> {
+    hash_structured(&DecisionCreateActionHashInput {
+        domain: DECISION_CREATE_PROVENANCE_HASH_DOMAIN,
+        schema_version: DECISION_CREATE_PROVENANCE_HASH_SCHEMA_VERSION,
+        actor,
+        tenant_id,
+        id: &decision.id,
+        title: &decision.title,
+        decision_class: decision.class.quorum_policy_key(),
+        constitutional_hash,
+        created_at: &decision.created_at,
+        constitution_version,
+    })
+    .map_err(|e| GatewayError::Internal(format!("decision create action hash failed: {e}")))
+}
+
+fn decision_create_action_provenance(
+    actor: &Did,
+    tenant_id: &str,
+    decision: &DecisionObject,
+    constitutional_hash: &Hash256,
+    constitution_version: &str,
+    metadata: &DecisionCreateProvenanceMetadata,
+) -> Result<Provenance> {
+    let action_hash = decision_create_action_hash(
+        actor,
+        tenant_id,
+        decision,
+        constitutional_hash,
+        constitution_version,
+    )?;
+    Ok(Provenance {
+        actor: actor.clone(),
+        timestamp: metadata.provenance_timestamp_string(),
+        action_hash: action_hash.as_bytes().to_vec(),
+        signature: metadata.provenance_signature.to_bytes(),
+        public_key: Some(metadata.provenance_public_key.clone()),
+        voice_kind: None,
+        independence: None,
+        review_order: None,
+    })
+}
+
 /// POST /api/v1/decisions — create a new tenant-scoped decision record.
 ///
 /// Requires a DB-backed bearer session. The tenant and author are derived from
@@ -2424,6 +2548,10 @@ async fn handle_decision_create(
             Ok(version) => version,
             Err(e) => return metadata_error_response(e),
         };
+    let metadata = match DecisionCreateProvenanceMetadata::from_request(&request) {
+        Ok(metadata) => metadata,
+        Err(e) => return metadata_error_response(e),
+    };
 
     let decision = match DecisionObject::new(DecisionObjectInput {
         id,
@@ -2466,6 +2594,45 @@ async fn handle_decision_create(
         "constitution_version": constitution_version.as_str(),
         "content_hash": id_hash.as_str()
     });
+    let mut ctx = state.build_adjudication_context(&actor.did).await;
+    let provenance = match decision_create_action_provenance(
+        &actor.did,
+        &actor.tenant_id,
+        &decision,
+        &constitutional_hash,
+        &constitution_version,
+        &metadata,
+    ) {
+        Ok(provenance) => provenance,
+        Err(e) => {
+            return internal_error_response(
+                e,
+                "decision create provenance",
+                "decision creation failed",
+            );
+        }
+    };
+    ctx.provenance = Some(provenance);
+    let action = GkActionRequest {
+        actor: actor.did.clone(),
+        action: "create_decision".into(),
+        required_permissions: PermissionSet::new(vec![Permission::new("create_decision")]),
+        is_self_grant: false,
+        modifies_kernel: false,
+    };
+    match state.kernel.adjudicate(&action, &ctx) {
+        Verdict::Permitted => {}
+        Verdict::Denied { .. } | Verdict::Escalated { .. } => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "message": "Kernel rejected decision creation: provenance, authority, or consent validation failed."
+                })),
+            )
+                .into_response();
+        }
+    }
     let db = match state.require_db() {
         Ok(pool) => pool,
         Err(_) => {
@@ -4707,6 +4874,87 @@ mod tests {
         })
     }
 
+    struct DecisionCreateBodyFixture<'a> {
+        actor_did: &'a str,
+        tenant_id: &'a str,
+        id: &'a str,
+        title: &'a str,
+        decision_class: &'a str,
+        constitutional_hash: &'a str,
+        created_at_physical_ms: u64,
+        created_at_logical: u32,
+        constitution_version: &'a str,
+    }
+
+    fn signed_decision_create_body(fixture: DecisionCreateBodyFixture<'_>) -> serde_json::Value {
+        let actor = Did::new(fixture.actor_did).unwrap();
+        let class = parse_decision_class(fixture.decision_class).unwrap();
+        let constitutional_hash =
+            parse_hash256_hex(fixture.constitutional_hash, "constitutional_hash").unwrap();
+        let created_at = Timestamp::new(fixture.created_at_physical_ms, fixture.created_at_logical);
+        let decision = DecisionObject::new(DecisionObjectInput {
+            id: parse_decision_uuid(fixture.id, "id").unwrap(),
+            title: fixture.title.to_owned(),
+            class,
+            constitutional_hash,
+            created_at,
+        })
+        .unwrap();
+        let (public_key, secret_key) = decision_create_provenance_keypair(fixture.actor_did);
+        let metadata = DecisionCreateProvenanceMetadata {
+            provenance_timestamp: created_at,
+            provenance_public_key: public_key.as_bytes().to_vec(),
+            provenance_signature: Signature::empty(),
+        };
+        let action_hash = decision_create_action_hash(
+            &actor,
+            fixture.tenant_id,
+            &decision,
+            &constitutional_hash,
+            fixture.constitution_version,
+        )
+        .unwrap();
+        let mut provenance = Provenance {
+            actor,
+            timestamp: metadata.provenance_timestamp_string(),
+            action_hash: action_hash.as_bytes().to_vec(),
+            signature: Vec::new(),
+            public_key: Some(public_key.as_bytes().to_vec()),
+            voice_kind: None,
+            independence: None,
+            review_order: None,
+        };
+        let message = exo_gatekeeper::provenance_signature_message(&provenance)
+            .expect("canonical provenance payload");
+        provenance.signature = sign(message.as_bytes(), &secret_key).to_bytes();
+
+        serde_json::json!({
+            "id": fixture.id,
+            "title": fixture.title,
+            "decision_class": fixture.decision_class,
+            "constitutional_hash": constitutional_hash.to_string(),
+            "created_at_physical_ms": fixture.created_at_physical_ms,
+            "created_at_logical": fixture.created_at_logical,
+            "constitution_version": fixture.constitution_version,
+            "provenance_timestamp_physical_ms": created_at.physical_ms,
+            "provenance_timestamp_logical": created_at.logical,
+            "provenance_public_key": hex::encode(public_key.as_bytes()),
+            "provenance_signature": hex::encode(provenance.signature),
+        })
+    }
+
+    fn decision_create_provenance_keypair(
+        actor_did: &str,
+    ) -> (exo_core::PublicKey, exo_core::SecretKey) {
+        let seed_hash = Hash256::digest(
+            format!("exo.gateway.decision_create.test.provenance-key.v1:{actor_did}").as_bytes(),
+        );
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(seed_hash.as_bytes());
+        let keypair = KeyPair::from_secret_bytes(seed).unwrap();
+        (*keypair.public_key(), keypair.secret_key().clone())
+    }
+
     fn advance_pace_provenance_keypair(
         actor_did: &str,
     ) -> (exo_core::PublicKey, exo_core::SecretKey) {
@@ -5525,6 +5773,41 @@ mod tests {
         assert!(
             !compact_router.contains(".route(\"/api/v1/decisions\",post(vote_handler))"),
             "POST /api/v1/decisions must not dispatch create requests to the vote handler"
+        );
+    }
+
+    #[test]
+    fn decision_create_handler_adjudicates_before_db_write() {
+        let source = include_str!("server.rs");
+        let handler = source_between(
+            source,
+            "async fn handle_decision_create",
+            "/// GET /api/v1/decisions/:id",
+        );
+        let auth = handler
+            .find("require_authenticated_session_user_from_header")
+            .expect("decision create must authenticate the bearer session");
+        let provenance = handler
+            .find("ctx.provenance = Some")
+            .expect("decision create must attach signed action provenance");
+        let adjudicate = handler
+            .find("state.kernel.adjudicate")
+            .expect("decision create must invoke the constitutional kernel");
+        let write = handler
+            .find("db::create_decision")
+            .expect("decision create must persist the decision");
+
+        assert!(
+            auth < provenance,
+            "authentication must precede provenance binding"
+        );
+        assert!(
+            provenance < adjudicate,
+            "signed provenance must be attached before adjudication"
+        );
+        assert!(
+            adjudicate < write,
+            "decision create must adjudicate before writing the decision row"
         );
     }
 
@@ -6391,22 +6674,23 @@ mod tests {
         let did = "did:exo:decision-creator";
         let tenant_id = "tenant-create";
         let title = "F-060 authenticated create";
-        insert_test_user(&pool, did, tenant_id).await;
-        insert_test_session(&pool, "decision-create-token", did).await;
+        insert_decision_create_authorization(&pool, did, tenant_id, "decision-create-token").await;
         sqlx::query("DELETE FROM decisions WHERE author = $1 AND title = $2")
             .bind(did)
             .bind(title)
             .execute(&pool)
             .await
             .unwrap();
-        let body = serde_json::to_string(&serde_json::json!({
-            "id": "00000000-0000-0000-0000-000000000601",
-            "title": title,
-            "decision_class": "Routine",
-            "constitutional_hash": "2222222222222222222222222222222222222222222222222222222222222222",
-            "created_at_physical_ms": 8000,
-            "created_at_logical": 1,
-            "constitution_version": "exochain-constitution-v1"
+        let body = serde_json::to_string(&signed_decision_create_body(DecisionCreateBodyFixture {
+            actor_did: did,
+            tenant_id,
+            id: "00000000-0000-0000-0000-000000000601",
+            title,
+            decision_class: "Routine",
+            constitutional_hash: "2222222222222222222222222222222222222222222222222222222222222222",
+            created_at_physical_ms: 8000,
+            created_at_logical: 1,
+            constitution_version: "exochain-constitution-v1",
         }))
         .unwrap();
         let app = build_router(AppState::new(
@@ -6453,16 +6737,65 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM sessions WHERE token = $1")
-            .bind("decision-create-token")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM users WHERE did = $1")
+        cleanup_decision_create_fixture(&pool, did, "decision-create-token").await;
+    }
+
+    #[tokio::test]
+    async fn decision_create_authenticated_session_without_provenance_rejects_before_persisting() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let did = "did:exo:decision-create-no-provenance";
+        let tenant_id = "tenant-create-no-provenance";
+        let token = "decision-create-no-provenance-token";
+        let title = "F-061 missing provenance create";
+        insert_decision_create_authorization(&pool, did, tenant_id, token).await;
+        sqlx::query("DELETE FROM decisions WHERE author = $1 AND title = $2")
             .bind(did)
+            .bind(title)
             .execute(&pool)
             .await
             .unwrap();
+        let body = serde_json::to_string(&serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000611",
+            "title": title,
+            "decision_class": "Routine",
+            "constitutional_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "created_at_physical_ms": 8100,
+            "created_at_logical": 0,
+            "constitution_version": "exochain-constitution-v1"
+        }))
+        .unwrap();
+        let app = build_router(AppState::new(
+            Some(pool.clone()),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/decisions")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header(AUTH_OBSERVED_AT_MS_HEADER, "15000")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM decisions WHERE author = $1 AND title = $2")
+                .bind(did)
+                .bind(title)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+
+        cleanup_decision_create_fixture(&pool, did, token).await;
     }
 
     // --- Identity score endpoint tests ---
@@ -8273,6 +8606,93 @@ mod tests {
     }
 
     #[test]
+    fn decision_create_metadata_requires_signed_action_provenance() {
+        let request = DecisionCreateRequest {
+            id: "00000000-0000-0000-0000-000000000061".into(),
+            title: "missing provenance".into(),
+            decision_class: "Routine".into(),
+            constitutional_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
+            created_at_physical_ms: 7000,
+            created_at_logical: 0,
+            constitution_version: "exochain-constitution-v1".into(),
+            provenance_timestamp_physical_ms: None,
+            provenance_timestamp_logical: None,
+            provenance_public_key: None,
+            provenance_signature: None,
+        };
+        let err = DecisionCreateProvenanceMetadata::from_request(&request).unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::BadRequest(reason) if reason.contains("provenance_timestamp_physical_ms")),
+            "expected provenance timestamp refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn decision_create_action_hash_binds_tenant_and_decision_id() {
+        let actor = Did::new("did:exo:decision-hash-actor").unwrap();
+        let body = signed_decision_create_body(DecisionCreateBodyFixture {
+            actor_did: actor.as_str(),
+            tenant_id: "tenant-a",
+            id: "00000000-0000-0000-0000-000000000062",
+            title: "hash binding",
+            decision_class: "Routine",
+            constitutional_hash: "4444444444444444444444444444444444444444444444444444444444444444",
+            created_at_physical_ms: 8200,
+            created_at_logical: 0,
+            constitution_version: "exochain-constitution-v1",
+        });
+        let request: DecisionCreateRequest = serde_json::from_value(body).unwrap();
+        let class = parse_decision_class(&request.decision_class).unwrap();
+        let constitutional_hash =
+            parse_hash256_hex(&request.constitutional_hash, "constitutional_hash").unwrap();
+        let created_at = Timestamp::new(request.created_at_physical_ms, request.created_at_logical);
+        let decision = DecisionObject::new(DecisionObjectInput {
+            id: parse_decision_uuid(&request.id, "id").unwrap(),
+            title: request.title.clone(),
+            class,
+            constitutional_hash,
+            created_at,
+        })
+        .unwrap();
+        let tenant_a = decision_create_action_hash(
+            &actor,
+            "tenant-a",
+            &decision,
+            &constitutional_hash,
+            &request.constitution_version,
+        )
+        .unwrap();
+        let tenant_b = decision_create_action_hash(
+            &actor,
+            "tenant-b",
+            &decision,
+            &constitutional_hash,
+            &request.constitution_version,
+        )
+        .unwrap();
+        let other_decision = DecisionObject::new(DecisionObjectInput {
+            id: parse_decision_uuid("00000000-0000-0000-0000-000000000063", "id").unwrap(),
+            title: request.title,
+            class,
+            constitutional_hash,
+            created_at,
+        })
+        .unwrap();
+        let other_id = decision_create_action_hash(
+            &actor,
+            "tenant-a",
+            &other_decision,
+            &constitutional_hash,
+            &request.constitution_version,
+        )
+        .unwrap();
+
+        assert_ne!(tenant_a, tenant_b);
+        assert_ne!(tenant_a, other_id);
+    }
+
+    #[test]
     fn gateway_server_durable_handlers_do_not_fabricate_metadata() {
         let source = include_str!("server.rs");
         let durable_handlers = [
@@ -8505,6 +8925,104 @@ mod tests {
         assert!(
             db::insert_did_document(pool, &actor_doc).await.unwrap(),
             "advance-pace actor DID document should insert into the live DB fixture"
+        );
+        sqlx::query(
+            "INSERT INTO authority_chains (actor_did, chain_json, valid_from, expires_at) \
+             VALUES ($1, $2, $3, NULL)",
+        )
+        .bind(did)
+        .bind(serde_json::to_value(chain).unwrap())
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn cleanup_decision_create_fixture(pool: &sqlx::PgPool, did: &str, token: &str) {
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        for query in [
+            "DELETE FROM users WHERE did = $1",
+            "DELETE FROM agent_roles WHERE agent_did = $1 OR granted_by = $1",
+            "DELETE FROM consent_records WHERE subject_did = $1 OR actor_did = $1",
+            "DELETE FROM authority_chains WHERE actor_did = $1",
+            "DELETE FROM did_documents WHERE did = $1",
+        ] {
+            sqlx::query(query).bind(did).execute(pool).await.unwrap();
+        }
+        sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind("did:exo:decision-create-root")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_decision_create_authorization(
+        pool: &sqlx::PgPool,
+        did: &str,
+        tenant_id: &str,
+        token: &str,
+    ) {
+        cleanup_decision_create_fixture(pool, did, token).await;
+        insert_test_user(pool, did, tenant_id).await;
+        insert_test_session(pool, token, did).await;
+
+        let actor = Did::new(did).unwrap();
+        let root = Did::new("did:exo:decision-create-root").unwrap();
+        sqlx::query(
+            "INSERT INTO agent_roles (agent_did, role, branch, granted_by, valid_from, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, NULL)",
+        )
+        .bind(did)
+        .bind("worker")
+        .bind("executive")
+        .bind(root.to_string())
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO consent_records \
+             (subject_did, actor_did, scope, bailment_type, status, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NULL)",
+        )
+        .bind(root.to_string())
+        .bind(did)
+        .bind("create_decision")
+        .bind("constitutional_decision")
+        .bind("active")
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let chain = AuthorityChain {
+            links: vec![signed_authority_link_for_permissions(
+                &root,
+                &actor,
+                PermissionSet::new(vec![Permission::new("create_decision")]),
+            )],
+        };
+        let grantor_public_key = chain.links[0]
+            .grantor_public_key
+            .as_ref()
+            .and_then(|key| <[u8; 32]>::try_from(key.as_slice()).ok())
+            .map(exo_core::PublicKey::from_bytes)
+            .expect("test authority link includes a 32-byte Ed25519 grantor key");
+        let grantor_doc = did_document_with_ed25519_key(&root, &grantor_public_key);
+        assert!(
+            db::insert_did_document(pool, &grantor_doc).await.unwrap(),
+            "decision-create root DID document should insert into the live DB fixture"
+        );
+        let (actor_public_key, _) = decision_create_provenance_keypair(did);
+        let actor_doc = did_document_with_ed25519_key(&actor, &actor_public_key);
+        assert!(
+            db::insert_did_document(pool, &actor_doc).await.unwrap(),
+            "decision-create actor DID document should insert into the live DB fixture"
         );
         sqlx::query(
             "INSERT INTO authority_chains (actor_did, chain_json, valid_from, expires_at) \
