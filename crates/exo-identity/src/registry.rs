@@ -20,7 +20,7 @@ use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
 use serde::Serialize;
 
 use crate::{
-    did::{DidDocument, DidRegistrationProof, RevocationProof},
+    did::{DidDocument, DidRegistrationProof, RevocationProof, did_from_public_key},
     error::IdentityError,
 };
 
@@ -141,6 +141,22 @@ pub fn verify_did_registration_proof(
     proof: &DidRegistrationProof,
 ) -> Result<(), IdentityError> {
     validate_registered_did_document(doc)?;
+
+    let derived_did = did_from_public_key(&proof.public_key).map_err(|e| {
+        IdentityError::InvalidRegistrationProof {
+            did: doc.id.clone(),
+            reason: format!("proof public key cannot derive a canonical EXOCHAIN DID: {e}"),
+        }
+    })?;
+    if derived_did != doc.id {
+        return Err(IdentityError::InvalidRegistrationProof {
+            did: doc.id.clone(),
+            reason: format!(
+                "DID subject must equal canonical DID derived from proof public key: expected {}",
+                derived_did
+            ),
+        });
+    }
 
     if !doc.public_keys.iter().any(|key| key == &proof.public_key) {
         return Err(IdentityError::InvalidRegistrationProof {
@@ -914,7 +930,7 @@ mod tests {
     #[test]
     fn register_with_proof_accepts_document_signed_by_declared_key() {
         let (pk, sk) = generate_keypair();
-        let did = make_did("proof-registered");
+        let did = did_from_public_key(&pk).expect("canonical DID");
         let doc = make_doc(did.clone(), pk);
         let proof = registration_proof(&doc, pk, &sk);
 
@@ -924,6 +940,25 @@ mod tests {
         let resolved = reg.resolve(&did).unwrap();
         assert_eq!(resolved.id, did);
         assert_eq!(resolved.public_keys, vec![pk]);
+    }
+
+    #[test]
+    fn register_with_proof_rejects_non_self_certifying_did() {
+        let (attacker_pk, attacker_sk) = generate_keypair();
+        let victim_did = make_did("unclaimed-victim");
+        let doc = make_doc(victim_did, attacker_pk);
+        let proof = registration_proof(&doc, attacker_pk, &attacker_sk);
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register_with_proof(doc, &proof)
+            .expect_err("registration proof must bind the DID subject to the proof key");
+
+        assert!(matches!(
+            err,
+            IdentityError::InvalidRegistrationProof { .. }
+        ));
+        assert_eq!(reg.len(), 0);
     }
 
     #[test]
