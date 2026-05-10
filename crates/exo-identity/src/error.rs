@@ -50,6 +50,12 @@ pub enum IdentityError {
     #[error("invalid revocation proof for DID: {0}")]
     InvalidRevocationProof(Did),
 
+    #[error("invalid registration proof for DID {did}: {reason}")]
+    InvalidRegistrationProof { did: Did, reason: String },
+
+    #[error("registration proof payload encoding failed for DID {did}: {reason}")]
+    RegistrationProofPayloadEncoding { did: Did, reason: String },
+
     #[error("revocation proof payload encoding failed for DID {did}: {reason}")]
     RevocationProofPayloadEncoding { did: Did, reason: String },
 

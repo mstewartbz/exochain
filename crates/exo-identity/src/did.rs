@@ -110,6 +110,13 @@ pub struct RevocationProof {
     pub signature: Signature,
 }
 
+/// Proof that a DID holder controls a key declared in a new DID document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DidRegistrationProof {
+    pub public_key: PublicKey,
+    pub signature: Signature,
+}
+
 /// A DID document describing a decentralized identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DidDocument {

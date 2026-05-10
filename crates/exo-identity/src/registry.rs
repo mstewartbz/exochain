@@ -4,10 +4,11 @@ use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
 use serde::Serialize;
 
 use crate::{
-    did::{DidDocument, RevocationProof},
+    did::{DidDocument, DidRegistrationProof, RevocationProof},
     error::IdentityError,
 };
 
+const DID_REGISTRATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.registration.v1";
 const DID_REVOCATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.revocation.v1";
 const DID_KEY_ROTATION_PROOF_DOMAIN: &str = "exo.identity.did_registry.key_rotation.v1";
 pub const MAX_LOCAL_DID_REGISTRY_DOCUMENTS: usize = 16_384;
@@ -22,6 +23,13 @@ const MAX_DID_DOCUMENT_PQ_MULTIBASE_BYTES: usize = 4096;
 const MAX_DID_DOCUMENT_ENDPOINT_BYTES: usize = 2048;
 
 #[derive(Serialize)]
+struct RegistrationProofPayload<'a> {
+    domain: &'static str,
+    document: &'a DidDocument,
+    signing_public_key: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
 struct RevocationProofPayload<'a> {
     domain: &'static str,
     did: &'a Did,
@@ -33,6 +41,30 @@ struct KeyRotationProofPayload<'a> {
     did: &'a Did,
     new_public_key: &'a [u8; 32],
     updated: Timestamp,
+}
+
+/// Build the canonical signable payload for first-time DID registration proofs.
+///
+/// The payload binds the signature to a full DID document and to one declared
+/// Ed25519 key so a key-control proof cannot be replayed across documents,
+/// routes, or later key-management operations.
+pub fn did_registration_proof_payload(
+    doc: &DidDocument,
+    public_key: &PublicKey,
+) -> Result<Vec<u8>, IdentityError> {
+    let payload = RegistrationProofPayload {
+        domain: DID_REGISTRATION_PROOF_DOMAIN,
+        document: doc,
+        signing_public_key: public_key.as_bytes(),
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&payload, &mut encoded).map_err(|e| {
+        IdentityError::RegistrationProofPayloadEncoding {
+            did: doc.id.clone(),
+            reason: e.to_string(),
+        }
+    })?;
+    Ok(encoded)
 }
 
 /// Build the canonical signable payload for DID revocation proofs.
@@ -81,10 +113,50 @@ pub fn key_rotation_proof_payload(
     Ok(encoded)
 }
 
+/// Verify proof-of-possession for first-time DID document registration.
+///
+/// The signer must be one of the public keys declared by the document. The
+/// signature covers the full document and the signing key under a dedicated
+/// domain separator, preventing first-writer claims that do not prove control of
+/// document key material.
+pub fn verify_did_registration_proof(
+    doc: &DidDocument,
+    proof: &DidRegistrationProof,
+) -> Result<(), IdentityError> {
+    validate_registered_did_document(doc)?;
+
+    if !doc.public_keys.iter().any(|key| key == &proof.public_key) {
+        return Err(IdentityError::InvalidRegistrationProof {
+            did: doc.id.clone(),
+            reason: "proof public key is not declared in the DID document".to_owned(),
+        });
+    }
+
+    let msg = did_registration_proof_payload(doc, &proof.public_key)?;
+    if crypto::verify(&msg, &proof.signature, &proof.public_key) {
+        Ok(())
+    } else {
+        Err(IdentityError::InvalidRegistrationProof {
+            did: doc.id.clone(),
+            reason: "signature does not verify for the declared DID document key".to_owned(),
+        })
+    }
+}
+
 /// A decentralized identifier registry trait.
 pub trait DidRegistry {
     /// Register a new DID document.
     fn register(&mut self, doc: DidDocument) -> Result<(), IdentityError>;
+
+    /// Register a new DID document after proof-of-possession verification.
+    fn register_with_proof(
+        &mut self,
+        doc: DidDocument,
+        proof: &DidRegistrationProof,
+    ) -> Result<(), IdentityError> {
+        verify_did_registration_proof(&doc, proof)?;
+        self.register(doc)
+    }
 
     /// Resolve a DID to its document.
     fn resolve(&self, did: &Did) -> Option<&DidDocument>;
@@ -440,6 +512,18 @@ mod tests {
         sign(&payload, secret_key)
     }
 
+    fn registration_proof(
+        doc: &DidDocument,
+        public_key: PublicKey,
+        secret_key: &SecretKey,
+    ) -> DidRegistrationProof {
+        let payload = did_registration_proof_payload(doc, &public_key).unwrap();
+        DidRegistrationProof {
+            public_key,
+            signature: sign(&payload, secret_key),
+        }
+    }
+
     #[test]
     fn test_register_and_resolve() {
         let (pk, _) = generate_keypair();
@@ -510,6 +594,61 @@ mod tests {
             err.to_string().contains("id"),
             "invalid DID error should identify the id field: {err}"
         );
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_with_proof_accepts_document_signed_by_declared_key() {
+        let (pk, sk) = generate_keypair();
+        let did = make_did("proof-registered");
+        let doc = make_doc(did.clone(), pk);
+        let proof = registration_proof(&doc, pk, &sk);
+
+        let mut reg = LocalDidRegistry::new();
+        reg.register_with_proof(doc, &proof).unwrap();
+
+        let resolved = reg.resolve(&did).unwrap();
+        assert_eq!(resolved.id, did);
+        assert_eq!(resolved.public_keys, vec![pk]);
+    }
+
+    #[test]
+    fn register_with_proof_rejects_key_not_declared_by_document() {
+        let (document_pk, _) = generate_keypair();
+        let (attacker_pk, attacker_sk) = generate_keypair();
+        let doc = make_doc_with_label("proof-unlisted-key", document_pk);
+        let proof = registration_proof(&doc, attacker_pk, &attacker_sk);
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register_with_proof(doc, &proof)
+            .expect_err("registration proof must be bound to a document key");
+
+        assert!(matches!(
+            err,
+            IdentityError::InvalidRegistrationProof { .. }
+        ));
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn register_with_proof_rejects_raw_did_signature_replay() {
+        let (pk, sk) = generate_keypair();
+        let doc = make_doc_with_label("proof-domain-separated", pk);
+        let proof = DidRegistrationProof {
+            public_key: pk,
+            signature: sign(doc.id.as_str().as_bytes(), &sk),
+        };
+
+        let mut reg = LocalDidRegistry::new();
+        let err = reg
+            .register_with_proof(doc, &proof)
+            .expect_err("registration must require the domain-separated document payload");
+
+        assert!(matches!(
+            err,
+            IdentityError::InvalidRegistrationProof { .. }
+        ));
         assert_eq!(reg.len(), 0);
     }
 
