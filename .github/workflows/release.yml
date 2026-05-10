@@ -228,6 +228,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          set -euo pipefail
           CRATES=(
             exo-core
             exo-identity
@@ -247,9 +248,7 @@ jobs:
           )
           for crate in "${CRATES[@]}"; do
             echo "Publishing $crate..."
-            cargo publish -p "$crate" --allow-dirty || {
-              echo "Warning: $crate publish failed (may already be published)"
-            }
+            cargo publish -p "$crate" --allow-dirty
             # crates.io index propagation delay
             sleep 30
           done
@@ -260,7 +259,7 @@ jobs:
   github-release:
     name: "Create GitHub Release"
     runs-on: ubuntu-latest
-    needs: [release-build, sbom-and-attest]
+    needs: [release-build, sbom-and-attest, publish]
     if: ${{ !inputs.dry_run }}
     permissions:
       contents: write
