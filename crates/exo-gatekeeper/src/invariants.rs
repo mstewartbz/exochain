@@ -321,7 +321,7 @@ fn check_consent_required(ctx: &InvariantContext) -> Result<(), InvariantViolati
             ],
         });
     }
-    if !consent_scope_covers_requested_permissions(scope, &ctx.requested_permissions) {
+    if !consent_scope_covers_permissions(scope, &ctx.requested_permissions) {
         return Err(InvariantViolation {
             invariant: ConstitutionalInvariant::ConsentRequired,
             description: "Active consent scope does not cover requested permission".into(),
@@ -338,7 +338,8 @@ fn check_consent_required(ctx: &InvariantContext) -> Result<(), InvariantViolati
     Ok(())
 }
 
-fn consent_scope_covers_requested_permissions(
+#[must_use]
+pub fn consent_scope_covers_permissions(
     scope: &str,
     requested_permissions: &PermissionSet,
 ) -> bool {

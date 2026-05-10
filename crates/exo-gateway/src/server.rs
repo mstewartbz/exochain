@@ -529,7 +529,11 @@ impl AppState {
     // `actor` is only consumed inside the #[cfg(feature = "production-db")] block.
     // Suppress the "unused variable" lint when the feature is disabled.
     #[cfg_attr(not(feature = "production-db"), allow(unused_variables))]
-    pub async fn build_adjudication_context(&self, actor: &Did) -> AdjudicationContext {
+    pub async fn build_adjudication_context(
+        &self,
+        actor: &Did,
+        requested_permissions: &PermissionSet,
+    ) -> AdjudicationContext {
         // Production path — compiled only when the feature flag is set.
         #[cfg(feature = "production-db")]
         if let Some(pool) = &self.pool {
@@ -551,7 +555,8 @@ impl AppState {
                     return deny_all_adjudication_context();
                 }
             };
-            match build_adjudication_context_from_db(pool, actor, now).await {
+            match build_adjudication_context_from_db(pool, actor, now, requested_permissions).await
+            {
                 Ok(ctx) => return ctx,
                 Err(e) => {
                     tracing::warn!(
@@ -1705,6 +1710,7 @@ fn build_adjudication_context_from_rows(
     actor: &Did,
     role_rows: &[crate::db::AgentRoleRow],
     consent_rows: &[crate::db::ConsentRecordRow],
+    requested_permissions: &PermissionSet,
     chain_row: Option<&crate::db::AuthorityChainRow>,
     trusted_authority_keys: TrustedAuthorityKeys,
     trusted_provenance_keys: TrustedProvenanceKeys,
@@ -1751,7 +1757,7 @@ fn build_adjudication_context_from_rows(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let bailment_state = match consent_rows.iter().find(|r| r.status == "active") {
+    let bailment_state = match select_active_bailment_row(consent_rows, requested_permissions) {
         Some(r) => {
             let bailor = Did::new(&r.subject_did).map_err(|_| {
                 GatewayError::Internal(format!(
@@ -1791,6 +1797,37 @@ fn build_adjudication_context_from_rows(
         quorum_evidence: None,
         active_challenge_reason: None,
     })
+}
+
+#[cfg(any(test, feature = "production-db"))]
+fn select_active_bailment_row<'a>(
+    consent_rows: &'a [crate::db::ConsentRecordRow],
+    requested_permissions: &PermissionSet,
+) -> Option<&'a crate::db::ConsentRecordRow> {
+    consent_rows
+        .iter()
+        .filter(|row| row.status == "active")
+        .filter(|row| {
+            exo_gatekeeper::invariants::consent_scope_covers_permissions(
+                &row.scope,
+                requested_permissions,
+            )
+        })
+        .min_by(|left, right| compare_consent_rows_for_bailment_selection(left, right))
+}
+
+#[cfg(any(test, feature = "production-db"))]
+fn compare_consent_rows_for_bailment_selection(
+    left: &crate::db::ConsentRecordRow,
+    right: &crate::db::ConsentRecordRow,
+) -> std::cmp::Ordering {
+    right
+        .created_at
+        .cmp(&left.created_at)
+        .then_with(|| left.subject_did.cmp(&right.subject_did))
+        .then_with(|| left.scope.cmp(&right.scope))
+        .then_with(|| left.bailment_type.cmp(&right.bailment_type))
+        .then_with(|| left.expires_at.cmp(&right.expires_at))
 }
 
 #[cfg(any(test, feature = "production-db"))]
@@ -1924,6 +1961,7 @@ async fn build_adjudication_context_from_db(
     pool: &sqlx::PgPool,
     actor: &Did,
     now: i64,
+    requested_permissions: &PermissionSet,
 ) -> Result<AdjudicationContext> {
     let actor_str = actor.as_str();
 
@@ -1957,6 +1995,7 @@ async fn build_adjudication_context_from_db(
         actor,
         &role_rows,
         &consent_rows,
+        requested_permissions,
         chain_row.as_ref(),
         trusted_authority_keys,
         trusted_provenance_keys,
@@ -2630,7 +2669,16 @@ async fn handle_decision_create(
         "constitution_version": constitution_version.as_str(),
         "content_hash": id_hash.as_str()
     });
-    let mut ctx = state.build_adjudication_context(&actor.did).await;
+    let action = GkActionRequest {
+        actor: actor.did.clone(),
+        action: "create_decision".into(),
+        required_permissions: PermissionSet::new(vec![Permission::new("create_decision")]),
+        is_self_grant: false,
+        modifies_kernel: false,
+    };
+    let mut ctx = state
+        .build_adjudication_context(&actor.did, &action.required_permissions)
+        .await;
     let provenance = match decision_create_action_provenance(
         &actor.did,
         &actor.tenant_id,
@@ -2649,13 +2697,6 @@ async fn handle_decision_create(
         }
     };
     ctx.provenance = Some(provenance);
-    let action = GkActionRequest {
-        actor: actor.did.clone(),
-        action: "create_decision".into(),
-        required_permissions: PermissionSet::new(vec![Permission::new("create_decision")]),
-        is_self_grant: false,
-        modifies_kernel: false,
-    };
     match state.kernel.adjudicate(&action, &ctx) {
         Verdict::Permitted => {}
         Verdict::Denied { .. } | Verdict::Escalated { .. } => {
@@ -3209,15 +3250,6 @@ async fn handle_advance_pace(
         Ok(metadata) => metadata,
         Err(e) => return metadata_error_response(e),
     };
-    // Build an adjudication context for this actor.
-    let mut ctx = state.build_adjudication_context(&actor).await;
-    let provenance = match advance_pace_action_provenance(&actor, &did, subject_kind, &metadata) {
-        Ok(provenance) => provenance,
-        Err(e) => {
-            return internal_error_response(e, "advance pace provenance", "advance pace failed");
-        }
-    };
-    ctx.provenance = Some(provenance);
     let action = GkActionRequest {
         actor: actor.clone(),
         action: "advance_pace".into(),
@@ -3225,6 +3257,17 @@ async fn handle_advance_pace(
         is_self_grant: false,
         modifies_kernel: false,
     };
+    // Build an adjudication context for this actor.
+    let mut ctx = state
+        .build_adjudication_context(&actor, &action.required_permissions)
+        .await;
+    let provenance = match advance_pace_action_provenance(&actor, &did, subject_kind, &metadata) {
+        Ok(provenance) => provenance,
+        Err(e) => {
+            return internal_error_response(e, "advance pace provenance", "advance pace failed");
+        }
+    };
+    ctx.provenance = Some(provenance);
     match state.kernel.adjudicate(&action, &ctx) {
         Verdict::Permitted => {}
         Verdict::Denied { .. } | Verdict::Escalated { .. } => {
@@ -6146,6 +6189,7 @@ mod tests {
             &actor,
             &role_rows,
             &[],
+            &PermissionSet::default(),
             None,
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -6176,6 +6220,7 @@ mod tests {
             &actor,
             &[],
             &consent_rows,
+            &PermissionSet::default(),
             Some(&chain_row),
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -8895,7 +8940,7 @@ mod tests {
             .find("require_authenticated_session_actor_from_header")
             .expect("advance_pace must authenticate a bearer session");
         let context_index = handler
-            .find("build_adjudication_context(&actor)")
+            .find("build_adjudication_context(&actor, &action.required_permissions)")
             .expect("advance_pace must adjudicate the authenticated session actor");
         let kernel_index = handler
             .find("state.kernel.adjudicate")
@@ -9822,6 +9867,7 @@ mod tests {
             &actor,
             &role_rows,
             &[],
+            &PermissionSet::default(),
             None,
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -9839,6 +9885,7 @@ mod tests {
             &actor,
             &role_rows,
             &[],
+            &PermissionSet::default(),
             None,
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -9856,6 +9903,7 @@ mod tests {
             &actor,
             &role_rows,
             &[],
+            &PermissionSet::default(),
             None,
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -9873,6 +9921,7 @@ mod tests {
             &actor,
             &[],
             &consent_rows,
+            &PermissionSet::default(),
             None,
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -9895,6 +9944,7 @@ mod tests {
             &actor,
             &[],
             &[],
+            &PermissionSet::default(),
             Some(&chain_row),
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -9919,6 +9969,7 @@ mod tests {
             &actor,
             &role_rows,
             &consent_rows,
+            &vote_action(&actor).required_permissions,
             Some(&chain_row),
             valid_context.trusted_authority_keys.clone(),
             valid_context.trusted_provenance_keys.clone(),
@@ -9958,6 +10009,7 @@ mod tests {
             &actor,
             &role_rows,
             &consent_rows,
+            &action_for_permission(&actor, "advance_pace").required_permissions,
             Some(&chain_row),
             trusted_authority_keys,
             TrustedProvenanceKeys::default(),
@@ -10005,6 +10057,7 @@ mod tests {
             &actor,
             &role_rows,
             &consent_rows,
+            &action_for_permission(&actor, "advance_pace").required_permissions,
             Some(&chain_row),
             trusted_authority_keys,
             TrustedProvenanceKeys::default(),
@@ -10016,6 +10069,49 @@ mod tests {
             !verdict.is_permitted(),
             "advance_pace authority must not convert unrelated profile consent into action consent"
         );
+    }
+
+    #[test]
+    fn adjudication_context_rows_bind_consent_to_requested_permission_independent_of_row_order() {
+        let kernel = adjudication_kernel();
+        let actor = Did::new("did:exo:pace-agent").unwrap();
+        let root = Did::new("did:exo:root-grantor").unwrap();
+        let authority_chain = AuthorityChain {
+            links: vec![signed_authority_link_for_permissions(
+                &root,
+                &actor,
+                PermissionSet::new(vec![Permission::new("advance_pace")]),
+            )],
+        };
+        let role_rows = vec![db_role_row(&actor, "worker", "executive")];
+        let unrelated_consent = db_consent_row_with_scope(&actor, root.as_str(), "data:profile");
+        let matching_consent = db_consent_row_with_scope(&actor, root.as_str(), "pace:advance");
+        let chain_row =
+            db_authority_chain_row(&actor, serde_json::to_value(&authority_chain).unwrap());
+        let trusted_authority_keys = trusted_authority_keys_for_test_chain(&authority_chain);
+        let action = action_for_permission(&actor, "advance_pace");
+
+        for consent_rows in [
+            vec![unrelated_consent.clone(), matching_consent.clone()],
+            vec![matching_consent, unrelated_consent],
+        ] {
+            let ctx = build_adjudication_context_from_rows(
+                &actor,
+                &role_rows,
+                &consent_rows,
+                &action.required_permissions,
+                Some(&chain_row),
+                trusted_authority_keys.clone(),
+                TrustedProvenanceKeys::default(),
+            )
+            .unwrap();
+            let verdict = kernel.adjudicate(&action, &ctx);
+
+            assert!(
+                verdict.is_permitted(),
+                "active matching consent must authorize the action regardless of DB row order: {verdict:?}"
+            );
+        }
     }
 
     #[test]
@@ -10039,6 +10135,7 @@ mod tests {
             &actor,
             &role_rows,
             &consent_rows,
+            &action_for_permission(&actor, "advance_pace").required_permissions,
             Some(&chain_row),
             TrustedAuthorityKeys::default(),
             TrustedProvenanceKeys::default(),
@@ -10079,6 +10176,7 @@ mod tests {
             &actor,
             &role_rows,
             &consent_rows,
+            &action_for_permission(&actor, "advance_pace").required_permissions,
             Some(&chain_row),
             trusted_authority_keys,
             TrustedProvenanceKeys::default(),
@@ -10124,6 +10222,7 @@ mod tests {
             &actor,
             &role_rows,
             &consent_rows,
+            &action_for_permission(&actor, "advance_pace").required_permissions,
             Some(&chain_row),
             trusted_authority_keys,
             trusted_provenance_keys,
@@ -10145,8 +10244,11 @@ mod tests {
         // produce a deny-all context — this is the WO-009 preservation check.
         let st = state();
         let actor = Did::new("did:exo:alice").unwrap();
-        let ctx = st.build_adjudication_context(&actor).await;
-        let verdict = st.kernel.adjudicate(&vote_action(&actor), &ctx);
+        let action = vote_action(&actor);
+        let ctx = st
+            .build_adjudication_context(&actor, &action.required_permissions)
+            .await;
+        let verdict = st.kernel.adjudicate(&action, &ctx);
         assert!(verdict.is_denied(), "scaffold must always deny");
     }
 

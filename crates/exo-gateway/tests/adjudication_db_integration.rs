@@ -149,7 +149,10 @@ fn full_db_context(actor: &Did) -> AdjudicationContext {
 async fn scaffold_denies_all_requests() {
     let state = empty_app_state();
     let actor = did("did:exo:actor001");
-    let ctx = state.build_adjudication_context(&actor).await;
+    let action = vote_action(&actor);
+    let ctx = state
+        .build_adjudication_context(&actor, &action.required_permissions)
+        .await;
 
     assert_eq!(
         ctx.bailment_state,
@@ -162,7 +165,7 @@ async fn scaffold_denies_all_requests() {
     // Use the full invariant set (including ProvenanceVerifiable) to confirm
     // the scaffold truly denies even a complete Kernel.
     let kernel = Kernel::new(b"exochain-constitution-v1", InvariantSet::all());
-    let verdict = kernel.adjudicate(&vote_action(&actor), &ctx);
+    let verdict = kernel.adjudicate(&action, &ctx);
     assert!(
         verdict.is_denied(),
         "scaffold must always deny: {verdict:?}"
@@ -509,11 +512,14 @@ mod db_roundtrip {
 
         // Build the context from the real DB and adjudicate.
         let state = AppState::new(Some(pool), Arc::new(RwLock::new(LocalDidRegistry::new())));
-        let ctx = state.build_adjudication_context(&actor).await;
+        let action = vote_action(&actor);
+        let ctx = state
+            .build_adjudication_context(&actor, &action.required_permissions)
+            .await;
 
         assert!(
             adjudication_kernel()
-                .adjudicate(&vote_action(&actor), &ctx)
+                .adjudicate(&action, &ctx)
                 .is_permitted(),
             "DB round-trip: active consent + authority chain must permit"
         );
@@ -580,15 +586,16 @@ mod db_roundtrip {
             Arc::new(RwLock::new(LocalDidRegistry::new())),
             failing_clock,
         );
-        let ctx = state.build_adjudication_context(&actor).await;
+        let action = vote_action(&actor);
+        let ctx = state
+            .build_adjudication_context(&actor, &action.required_permissions)
+            .await;
 
         assert_eq!(ctx.bailment_state, BailmentState::None);
         assert!(ctx.actor_roles.is_empty());
         assert!(ctx.authority_chain.is_empty());
         assert!(
-            adjudication_kernel()
-                .adjudicate(&vote_action(&actor), &ctx)
-                .is_denied(),
+            adjudication_kernel().adjudicate(&action, &ctx).is_denied(),
             "HLC failure must deny even when DB rows would permit at a fabricated fallback timestamp"
         );
     }
@@ -626,12 +633,13 @@ mod db_roundtrip {
 
         let actor = did(actor_did);
         let state = AppState::new(Some(pool), Arc::new(RwLock::new(LocalDidRegistry::new())));
-        let ctx = state.build_adjudication_context(&actor).await;
+        let action = vote_action(&actor);
+        let ctx = state
+            .build_adjudication_context(&actor, &action.required_permissions)
+            .await;
 
         assert!(
-            adjudication_kernel()
-                .adjudicate(&vote_action(&actor), &ctx)
-                .is_denied(),
+            adjudication_kernel().adjudicate(&action, &ctx).is_denied(),
             "DB round-trip: no consent rows must deny via ConsentRequired"
         );
     }
