@@ -74,6 +74,15 @@ struct GovernanceEventAuthorityPayload<'a> {
     signature: &'a Signature,
 }
 
+#[derive(serde::Serialize)]
+struct GovernanceEventSigningPayload<'a> {
+    domain: &'static str,
+    sender: &'a Did,
+    event_type: &'a GovernanceEventType,
+    payload_hash: &'a Hash256,
+    timestamp: &'a Timestamp,
+}
+
 #[derive(serde::Deserialize)]
 struct AuditEntryPayload {
     actor_did: String,
@@ -100,6 +109,21 @@ fn governance_event_authority_hash(event: &GovernanceEventMsg) -> Result<Hash256
         signature: &event.signature,
     })
     .map_err(|e| format!("governance event authority hash: {e}"))
+}
+
+fn governance_event_signing_payload(event: &GovernanceEventMsg) -> Result<Vec<u8>, String> {
+    let payload_hash = Hash256::digest(&event.payload);
+    let payload = GovernanceEventSigningPayload {
+        domain: "exo.reactor.governance_event.v1",
+        sender: &event.sender,
+        event_type: &event.event_type,
+        payload_hash: &payload_hash,
+        timestamp: &event.timestamp,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut bytes)
+        .map_err(|e| format!("governance event signing payload: {e}"))?;
+    Ok(bytes)
 }
 
 fn checked_committed_height(committed_len: usize) -> Result<u64, String> {
@@ -218,9 +242,7 @@ async fn verify_governance_event_signature(
     state: &SharedReactorState,
     event: &GovernanceEventMsg,
 ) -> Result<(), String> {
-    let sender = event.sender.clone();
-    let payload = event.payload.clone();
-    let signature = event.signature.clone();
+    let event = event.clone();
     with_reactor_state_blocking(
         Arc::clone(state),
         "governance_event_signature_verify",
@@ -228,12 +250,19 @@ async fn verify_governance_event_signature(
             let public_key = s
                 .validator_public_keys
                 .as_map()
-                .get(&sender)
+                .get(&event.sender)
                 .copied()
-                .ok_or_else(|| format!("governance event sender {sender} is not a validator"))?;
-            if !crypto::verify(&payload, &signature, &public_key) {
+                .ok_or_else(|| {
+                    format!(
+                        "governance event sender {} is not a validator",
+                        event.sender
+                    )
+                })?;
+            let payload = governance_event_signing_payload(&event)?;
+            if !crypto::verify(&payload, &event.signature, &public_key) {
                 return Err(format!(
-                    "governance event signature failed verification for sender {sender}"
+                    "governance event signature failed verification for sender {}",
+                    event.sender
                 ));
             }
             Ok(())
@@ -246,7 +275,6 @@ async fn receipt_from_audit_event(
     state: &SharedReactorState,
     event: &GovernanceEventMsg,
 ) -> Result<TrustReceipt, String> {
-    verify_governance_event_signature(state, event).await?;
     let payload: AuditEntryPayload = serde_json::from_slice(&event.payload)
         .map_err(|e| format!("audit entry payload must be JSON: {e}"))?;
     let actor_did =
@@ -280,6 +308,7 @@ async fn apply_governance_event_locally(
     store: &Arc<Mutex<SqliteDagStore>>,
     event: &GovernanceEventMsg,
 ) -> Result<(), String> {
+    verify_governance_event_signature(state, event).await?;
     if !matches!(event.event_type, GovernanceEventType::AuditEntry) {
         return Ok(());
     }
@@ -1369,26 +1398,36 @@ pub async fn broadcast_governance_event(
     event_type: GovernanceEventType,
     payload: Vec<u8>,
 ) -> anyhow::Result<()> {
-    let payload_for_signature = payload.clone();
-    let (sender, timestamp, signature) =
-        with_reactor_state_blocking(Arc::clone(state), "broadcast_governance", move |s| {
-            let sig = (s.sign_fn)(&payload_for_signature);
+    let (sender, timestamp) = with_reactor_state_blocking(
+        Arc::clone(state),
+        "broadcast_governance_timestamp",
+        move |s| {
             let timestamp = s
                 .clock
                 .try_tick()
                 .map_err(|e| format!("governance event timestamp: {e}"))?;
-            Ok((s.node_did.clone(), timestamp, sig))
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok((s.node_did.clone(), timestamp))
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let event = GovernanceEventMsg {
+    let mut event = GovernanceEventMsg {
         sender,
         event_type,
         payload,
         timestamp,
-        signature,
+        signature: Signature::empty(),
     };
+    let signing_payload =
+        governance_event_signing_payload(&event).map_err(|e| anyhow::anyhow!("{e}"))?;
+    event.signature = with_reactor_state_blocking(
+        Arc::clone(state),
+        "broadcast_governance_signature",
+        move |s| Ok((s.sign_fn)(&signing_payload)),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let msg = WireMessage::GovernanceEvent(event.clone());
 
     match net_handle.publish(topics::GOVERNANCE, msg.clone()).await {
@@ -1464,6 +1503,11 @@ mod tests {
         let keypair = validator_keypair(index);
         let payload = proposal.signing_payload().expect("proposal payload");
         keypair.sign(&payload)
+    }
+
+    fn sign_governance_event_for_index(event: &GovernanceEventMsg, index: usize) -> Signature {
+        let payload = governance_event_signing_payload(event).expect("governance event payload");
+        validator_keypair(index).sign(&payload)
     }
 
     fn sign_governance_payload_for_index(payload: &[u8], index: usize) -> Signature {
@@ -1748,6 +1792,31 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_governance_event_source_signs_event_envelope() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+        let broadcaster = production
+            .split("pub async fn broadcast_governance_event")
+            .nth(1)
+            .expect("governance broadcaster present")
+            .split("// ---------------------------------------------------------------------------")
+            .next()
+            .expect("governance broadcaster end");
+
+        assert!(
+            broadcaster.contains("governance_event_signing_payload(&event)"),
+            "governance broadcasts must sign the canonical event envelope"
+        );
+        assert!(
+            !broadcaster.contains("payload_for_signature"),
+            "governance broadcasts must not sign only raw event payload bytes"
+        );
+    }
+
+    #[test]
     fn create_reactor_state_initializes() {
         let validators = make_validators(4);
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators.clone());
@@ -1925,6 +1994,16 @@ mod tests {
             Timestamp::ZERO,
             "governance broadcasts must carry a non-placeholder monotonic timestamp"
         );
+        let keypair = validator_keypair(0);
+        let signing_payload = governance_event_signing_payload(&event).unwrap();
+        assert!(
+            crypto::verify(&signing_payload, &event.signature, keypair.public_key()),
+            "governance broadcasts must sign the full event envelope"
+        );
+        assert!(
+            !crypto::verify(&event.payload, &event.signature, keypair.public_key()),
+            "governance event signatures must not validate against raw payload bytes"
+        );
     }
 
     #[tokio::test]
@@ -2021,15 +2100,14 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::channel(32);
         let net_handle = NetworkHandle::new(cmd_tx);
         let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
-        let event = GovernanceEventMsg {
+        let mut event = GovernanceEventMsg {
             sender: Did::new("did:exo:v1").unwrap(),
             event_type: GovernanceEventType::AuditEntry,
             payload: audit_payload("did:exo:archon", "archon.workflow.success", "success"),
             timestamp: Timestamp::new(1_700, 0),
             signature: Signature::empty(),
         };
-        let mut event = event;
-        event.signature = sign_governance_payload_for_index(&event.payload, 1);
+        event.signature = sign_governance_event_for_index(&event, 1);
 
         handle_wire_message(
             &state,
@@ -2081,6 +2159,151 @@ mod tests {
         .await;
 
         assert!(reactor_rx.try_recv().is_err());
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .load_receipts_by_actor("did:exo:archon", 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_non_audit_event_rejects_empty_signature() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::DecisionCreated,
+            payload: b"decision-created".to_vec(),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::empty(),
+        };
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "unsigned non-audit governance events must not be emitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_non_audit_event_accepts_envelope_signature() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let mut event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::DecisionCreated,
+            payload: b"decision-created".to_vec(),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::empty(),
+        };
+        event.signature = sign_governance_event_for_index(&event, 1);
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        let ReactorEvent::GovernanceEventReceived { event } =
+            reactor_rx.recv().await.expect("reactor event emitted")
+        else {
+            panic!("expected governance event");
+        };
+        assert!(matches!(
+            event.event_type,
+            GovernanceEventType::DecisionCreated
+        ));
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_event_rejects_signature_replayed_to_other_type() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let mut event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::DecisionCreated,
+            payload: b"decision-created".to_vec(),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::empty(),
+        };
+        event.signature = sign_governance_event_for_index(&event, 1);
+        event.event_type = GovernanceEventType::VoteCast;
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "governance event signatures must bind event_type"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_audit_event_rejects_payload_only_signature() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let mut event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::AuditEntry,
+            payload: audit_payload("did:exo:archon", "archon.workflow.success", "success"),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::empty(),
+        };
+        event.signature = sign_governance_payload_for_index(&event.payload, 1);
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "payload-only signatures must not authenticate governance event envelopes"
+        );
         assert!(
             store
                 .lock()
