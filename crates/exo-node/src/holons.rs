@@ -431,7 +431,7 @@ pub fn build_holon_adjudication_context(
         bailment_state: BailmentState::Active {
             bailor: config.root_did.clone(),
             bailee: holon.id.clone(),
-            scope: "infrastructure".into(),
+            scope: "infrastructure-monitoring".into(),
         },
         human_override_preserved: true,
         actor_permissions: holon.capabilities.clone(),
