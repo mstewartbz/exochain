@@ -903,7 +903,8 @@ async fn start_node(
     );
 
     // Merge metrics + governance + passport + dashboard into a single extra router
-    // and apply bearer-token auth middleware (protects POST, allows GET).
+    // and apply bearer-token auth middleware. 0dentity signed writes use their
+    // local DID session and request-signature verifiers.
     // NOTE: /health and /ready are provided by the gateway's own router.
     let extra_router = metrics_router
         .merge(governance_router)

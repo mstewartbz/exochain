@@ -2,10 +2,12 @@
 //!
 //! On startup the node generates a random 256-bit admin token, persists it to
 //! a restrictive local file, and never writes token material to logs. Every
-//! mutating endpoint (`POST`) requires this token in the
-//! `Authorization: Bearer <token>` header. Public status and dashboard reads
-//! remain unauthenticated, while trust-object reads that disclose receipts,
-//! provenance, or credentials also require the bearer token.
+//! mutating endpoint requires this token in the `Authorization:
+//! Bearer <token>` header unless the route has a stricter local verifier.
+//! Public status and dashboard reads remain unauthenticated, while trust-object
+//! reads that disclose receipts, provenance, or credentials also require the
+//! bearer token. Exact 0dentity signed-write routes pass through so their
+//! handlers can verify DID-scoped session tokens and request signatures.
 
 use std::{
     io::{ErrorKind, Write},
@@ -138,22 +140,49 @@ fn is_sensitive_read_path(path: &str) -> bool {
         || (path.starts_with("/api/v1/agents/") && path.ends_with("/avcs"))
 }
 
+fn is_zerodentity_local_signed_write(method: &axum::http::Method, path: &str) -> bool {
+    const PREFIX: &str = "/api/v1/0dentity/";
+
+    let Some(rest) = path.strip_prefix(PREFIX) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+
+    let mut segments = rest.split('/');
+    let Some(did_segment) = segments.next() else {
+        return false;
+    };
+    if did_segment.is_empty() {
+        return false;
+    }
+
+    if method == axum::http::Method::POST {
+        return matches!((segments.next(), segments.next()), (Some("attest"), None));
+    }
+
+    method == axum::http::Method::DELETE && segments.next().is_none()
+}
+
 /// axum middleware: require bearer token on mutating requests and sensitive
 /// trust-object reads.
 ///
 /// Public `GET` and `HEAD` requests pass through without authentication unless
 /// they target receipts, provenance, AVCs, or agent credential listings. All
 /// other methods (`POST`, `PUT`, `DELETE`, `PATCH`) require
-/// `Authorization: Bearer <token>`.
+/// `Authorization: Bearer <token>` unless they are exact 0dentity signed-write
+/// routes whose handlers perform identity-session and request-signature checks.
 pub async fn require_bearer_on_writes(
     auth: BearerAuth,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let method = request.method().clone();
+    let path = request.uri().path();
     let is_public_read = (method == axum::http::Method::GET || method == axum::http::Method::HEAD)
-        && !is_sensitive_read_path(request.uri().path());
-    if is_public_read {
+        && !is_sensitive_read_path(path);
+    if is_public_read || is_zerodentity_local_signed_write(&method, path) {
         return Ok(next.run(request).await);
     }
 
@@ -197,7 +226,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
         middleware,
-        routing::{get, post},
+        routing::{delete, get, post},
     };
     use tower::ServiceExt;
 
@@ -218,6 +247,18 @@ mod tests {
             .route("/api/v1/provenance/:hash", get(|| async { "provenance" }))
             .route("/api/v1/avc/:id", get(|| async { "credential" }))
             .route("/api/v1/agents/:did/avcs", get(|| async { "credentials" }))
+            .route(
+                "/api/v1/0dentity/:did/attest",
+                post(|| async { "signed-attest" }),
+            )
+            .route(
+                "/api/v1/0dentity/:did",
+                delete(|| async { "signed-delete" }),
+            )
+            .route(
+                "/api/v1/0dentity/:did/score",
+                post(|| async { "unexpected-write" }),
+            )
             .route("/write", post(|| async { "ok" }))
             .layer(middleware::from_fn(move |req, next| {
                 let a = auth.clone();
@@ -429,6 +470,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn zerodentity_attest_post_with_identity_session_bearer_reaches_local_signed_verifier() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/0dentity/did:exo:alice/attest")
+                    .header("Authorization", "Bearer identity-session-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn zerodentity_delete_with_identity_session_bearer_reaches_local_signed_verifier() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/0dentity/did:exo:alice")
+                    .header("Authorization", "Bearer identity-session-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unknown_zerodentity_write_still_requires_admin_bearer() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/0dentity/did:exo:alice/score")
+                    .header("Authorization", "Bearer identity-session-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
