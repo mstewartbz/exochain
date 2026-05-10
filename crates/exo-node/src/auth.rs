@@ -3,12 +3,9 @@
 //! On startup the node generates a random 256-bit admin token, persists it to
 //! a restrictive local file, and never writes token material to logs. Every
 //! mutating endpoint (`POST`) requires this token in the
-//! `Authorization: Bearer <token>` header. Read-only endpoints (`GET`) are
-//! public — the data on a constitutional network is transparent by design.
-//!
-//! When the node identity module gains a full DID-document registry, this
-//! layer will be upgraded to Ed25519 DID-signature authentication (as already
-//! implemented in `exo-gateway/src/auth.rs`).
+//! `Authorization: Bearer <token>` header. Public status and dashboard reads
+//! remain unauthenticated, while trust-object reads that disclose receipts,
+//! provenance, or credentials also require the bearer token.
 
 use std::{
     io::{ErrorKind, Write},
@@ -133,19 +130,30 @@ pub async fn require_bearer(
     Ok(next.run(request).await)
 }
 
-/// axum middleware: require bearer token on mutating requests.
+fn is_sensitive_read_path(path: &str) -> bool {
+    path == "/api/v1/receipts"
+        || path.starts_with("/api/v1/receipts/")
+        || path.starts_with("/api/v1/provenance/")
+        || path.starts_with("/api/v1/avc/")
+        || (path.starts_with("/api/v1/agents/") && path.ends_with("/avcs"))
+}
+
+/// axum middleware: require bearer token on mutating requests and sensitive
+/// trust-object reads.
 ///
-/// `GET` and `HEAD` requests pass through without authentication.
-/// All other methods (`POST`, `PUT`, `DELETE`, `PATCH`) require
+/// Public `GET` and `HEAD` requests pass through without authentication unless
+/// they target receipts, provenance, AVCs, or agent credential listings. All
+/// other methods (`POST`, `PUT`, `DELETE`, `PATCH`) require
 /// `Authorization: Bearer <token>`.
 pub async fn require_bearer_on_writes(
     auth: BearerAuth,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Read-only methods pass through.
     let method = request.method().clone();
-    if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
+    let is_public_read = (method == axum::http::Method::GET || method == axum::http::Method::HEAD)
+        && !is_sensitive_read_path(request.uri().path());
+    if is_public_read {
         return Ok(next.run(request).await);
     }
 
@@ -205,6 +213,11 @@ mod tests {
         let auth = test_auth();
         Router::new()
             .route("/read", get(|| async { "ok" }))
+            .route("/api/v1/receipts/:hash", get(|| async { "receipt" }))
+            .route("/api/v1/receipts", get(|| async { "receipts" }))
+            .route("/api/v1/provenance/:hash", get(|| async { "provenance" }))
+            .route("/api/v1/avc/:id", get(|| async { "credential" }))
+            .route("/api/v1/agents/:did/avcs", get(|| async { "credentials" }))
             .route("/write", post(|| async { "ok" }))
             .layer(middleware::from_fn(move |req, next| {
                 let a = auth.clone();
@@ -263,6 +276,103 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/read")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn receipt_get_without_token_rejected() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/receipts/0000000000000000000000000000000000000000000000000000000000000000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn receipt_list_get_without_token_rejected() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/receipts?actor=did:exo:alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn provenance_get_without_token_rejected() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/provenance/0000000000000000000000000000000000000000000000000000000000000000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn avc_get_without_token_rejected() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/avc/0000000000000000000000000000000000000000000000000000000000000000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn agent_avc_list_get_without_token_rejected() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/agents/did:exo:alice/avcs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sensitive_get_with_correct_token_passes() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/provenance/0000000000000000000000000000000000000000000000000000000000000000")
+                    .header("Authorization", "Bearer test-token-abc123")
                     .body(Body::empty())
                     .unwrap(),
             )
