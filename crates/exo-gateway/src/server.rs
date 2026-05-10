@@ -294,6 +294,7 @@ pub struct AppState {
 pub struct AuthenticatedSessionUser {
     pub did: Did,
     pub tenant_id: String,
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -467,6 +468,7 @@ impl AppState {
         Ok(AuthenticatedSessionUser {
             did,
             tenant_id: user.tenant_id,
+            status: user.status,
         })
     }
 
