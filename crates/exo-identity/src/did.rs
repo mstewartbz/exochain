@@ -11,6 +11,23 @@
 use exo_core::{Did, PqPublicKey, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
+/// Derive the self-certifying EXOCHAIN DID bound to an Ed25519 public key.
+///
+/// The canonical node/participant DID format is
+/// `did:exo:<base58(blake3(public_key))>`. Runtime adapters use this helper
+/// whenever they need to prove that a caller-supplied DID is cryptographically
+/// bound to a caller-supplied public key without trusting a separate registry
+/// lookup.
+///
+/// # Errors
+/// Returns the core DID validation error if the derived string does not satisfy
+/// the `did:exo:*` syntax.
+pub fn did_from_public_key(public_key: &PublicKey) -> exo_core::Result<Did> {
+    let hash = blake3::hash(public_key.as_bytes());
+    let encoded = bs58::encode(hash.as_bytes()).into_string();
+    Did::new(&format!("did:exo:{encoded}"))
+}
+
 /// Authentication method associated with a DID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthenticationMethod {
@@ -166,6 +183,20 @@ mod tests {
             updated: Timestamp::new(1000, 0),
             revoked: false,
         }
+    }
+
+    #[test]
+    fn did_from_public_key_is_deterministic_and_key_bound() {
+        let (first_pk, _first_sk) = generate_keypair();
+        let (second_pk, _second_sk) = generate_keypair();
+
+        let first = did_from_public_key(&first_pk).unwrap();
+        let repeat = did_from_public_key(&first_pk).unwrap();
+        let second = did_from_public_key(&second_pk).unwrap();
+
+        assert_eq!(first, repeat);
+        assert_ne!(first, second);
+        assert!(first.as_str().starts_with("did:exo:"));
     }
 
     fn rotation_signature(
