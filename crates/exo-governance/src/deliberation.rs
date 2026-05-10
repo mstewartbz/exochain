@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     errors::GovernanceError,
     quorum::{
-        Approval, IndependenceAttestation, PublicKeyResolver, QuorumPolicy, QuorumResult, Role,
-        compute_quorum_verified,
+        Approval, ApprovalScope, IndependenceAttestation, PublicKeyResolver, QuorumPolicy,
+        QuorumResult, Role, compute_quorum_verified,
     },
 };
 
@@ -18,6 +18,17 @@ pub enum Position {
     For,
     Against,
     Abstain,
+}
+
+impl Position {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Position::For => "For",
+            Position::Against => "Against",
+            Position::Abstain => "Abstain",
+        }
+    }
 }
 
 /// A signed vote cast by a participant in a deliberation.
@@ -177,6 +188,12 @@ fn approvals_from_for_votes(delib: &Deliberation) -> Vec<Approval> {
             timestamp: delib.created,
             signature: v.signature.clone(),
             independence_attestation: v.independence_attestation.clone(),
+            scope: Some(ApprovalScope::DeliberationVote {
+                deliberation_id: delib.id,
+                proposal_hash: delib.proposal_hash,
+                position: v.position.as_str().to_string(),
+                reasoning_hash: v.reasoning_hash,
+            }),
         })
         .collect()
 }
@@ -313,6 +330,10 @@ mod tests {
             !close_verified.contains("compute_quorum(&approvals"),
             "production deliberation closure must not call structural quorum"
         );
+        assert!(
+            before_tests.contains("ApprovalScope::DeliberationVote"),
+            "production deliberation approvals must bind signatures to deliberation context"
+        );
     }
 
     fn vote(name: &str, pos: Position) -> Vote {
@@ -357,20 +378,26 @@ mod tests {
         attestation
     }
 
-    fn signed_vote(
+    fn signed_vote_for_deliberation(
+        delib: &Deliberation,
         name: &str,
         pos: Position,
         role: Role,
         keypair: &crypto::KeyPair,
-        timestamp: Timestamp,
     ) -> Vote {
         let attestation = signed_attestation(name, keypair);
         let mut approval = Approval {
             approver_did: did(name),
             role: role.clone(),
-            timestamp,
+            timestamp: delib.created,
             signature: Signature::Empty,
             independence_attestation: Some(attestation.clone()),
+            scope: Some(ApprovalScope::DeliberationVote {
+                deliberation_id: delib.id,
+                proposal_hash: delib.proposal_hash,
+                position: pos.as_str().to_string(),
+                reasoning_hash: [0u8; 32],
+            }),
         };
         let payload = approval
             .signing_payload()
@@ -512,17 +539,12 @@ mod tests {
         keys.insert(did("b"), *key_b.public_key());
 
         let mut d = open(b"p", &[did("a"), did("b"), did("c")]);
-        let created = d.created;
-        cast_vote(
-            &mut d,
-            signed_vote("a", Position::For, Role::Contributor, &key_a, created),
-        )
-        .unwrap();
-        cast_vote(
-            &mut d,
-            signed_vote("b", Position::For, Role::Contributor, &key_b, created),
-        )
-        .unwrap();
+        let vote_a =
+            signed_vote_for_deliberation(&d, "a", Position::For, Role::Contributor, &key_a);
+        let vote_b =
+            signed_vote_for_deliberation(&d, "b", Position::For, Role::Contributor, &key_b);
+        cast_vote(&mut d, vote_a).unwrap();
+        cast_vote(&mut d, vote_b).unwrap();
         cast_vote(&mut d, vote("c", Position::Against)).unwrap();
         assert!(matches!(
             close_verified(&mut d, &policy(2), &resolver(&keys)),
@@ -540,12 +562,9 @@ mod tests {
         keys.insert(did("a"), *key_a.public_key());
 
         let mut d = open(b"p", &[did("a"), did("b"), did("c")]);
-        let created = d.created;
-        cast_vote(
-            &mut d,
-            signed_vote("a", Position::For, Role::Contributor, &key_a, created),
-        )
-        .unwrap();
+        let vote_a =
+            signed_vote_for_deliberation(&d, "a", Position::For, Role::Contributor, &key_a);
+        cast_vote(&mut d, vote_a).unwrap();
         cast_vote(&mut d, vote("b", Position::Against)).unwrap();
         cast_vote(&mut d, vote("c", Position::Against)).unwrap();
         assert!(matches!(
@@ -571,17 +590,12 @@ mod tests {
         keys.insert(did("b"), *key_b.public_key());
 
         let mut d = open(b"p", &[did("a"), did("b"), did("c")]);
-        let created = d.created;
-        cast_vote(
-            &mut d,
-            signed_vote("a", Position::For, Role::Contributor, &key_a, created),
-        )
-        .unwrap();
-        cast_vote(
-            &mut d,
-            signed_vote("b", Position::For, Role::Contributor, &key_b, created),
-        )
-        .unwrap();
+        let vote_a =
+            signed_vote_for_deliberation(&d, "a", Position::For, Role::Contributor, &key_a);
+        let vote_b =
+            signed_vote_for_deliberation(&d, "b", Position::For, Role::Contributor, &key_b);
+        cast_vote(&mut d, vote_a).unwrap();
+        cast_vote(&mut d, vote_b).unwrap();
         cast_vote(&mut d, vote("c", Position::Abstain)).unwrap();
         assert!(matches!(
             close_verified(&mut d, &policy(2), &resolver(&keys)),
@@ -600,12 +614,9 @@ mod tests {
         keys.insert(alice, *alice_key.public_key());
 
         let mut d = open(b"p", &[did("alice")]);
-        let created = d.created;
-        cast_vote(
-            &mut d,
-            signed_vote("alice", Position::For, Role::Steward, &alice_key, created),
-        )
-        .unwrap();
+        let vote_alice =
+            signed_vote_for_deliberation(&d, "alice", Position::For, Role::Steward, &alice_key);
+        cast_vote(&mut d, vote_alice).unwrap();
 
         let quorum_policy = QuorumPolicy {
             min_approvals: 1,
@@ -631,8 +642,8 @@ mod tests {
         keys.insert(alice, *alice_key.public_key());
 
         let mut d = open(b"p", &[did("alice")]);
-        let created = d.created;
-        let mut forged = signed_vote("alice", Position::For, Role::Steward, &alice_key, created);
+        let mut forged =
+            signed_vote_for_deliberation(&d, "alice", Position::For, Role::Steward, &alice_key);
         forged.signature = test_sig();
         cast_vote(&mut d, forged).unwrap();
 
@@ -655,8 +666,8 @@ mod tests {
     fn close_without_resolver_fails_closed_for_unverified_quorum() {
         let alice_key = keypair(1);
         let mut d = open(b"p", &[did("alice")]);
-        let created = d.created;
-        let mut forged = signed_vote("alice", Position::For, Role::Steward, &alice_key, created);
+        let mut forged =
+            signed_vote_for_deliberation(&d, "alice", Position::For, Role::Steward, &alice_key);
         forged.signature = test_sig();
         cast_vote(&mut d, forged).unwrap();
 
@@ -683,12 +694,9 @@ mod tests {
         keys.insert(alice, *alice_key.public_key());
 
         let mut d = open(b"p", &[did("alice")]);
-        let created = d.created;
-        cast_vote(
-            &mut d,
-            signed_vote("alice", Position::For, Role::Steward, &alice_key, created),
-        )
-        .unwrap();
+        let vote_alice =
+            signed_vote_for_deliberation(&d, "alice", Position::For, Role::Steward, &alice_key);
+        cast_vote(&mut d, vote_alice).unwrap();
 
         let quorum_policy = QuorumPolicy {
             min_approvals: 1,
@@ -705,6 +713,111 @@ mod tests {
                 abstentions: 0
             }
         ));
+    }
+
+    #[test]
+    fn close_verified_rejects_vote_signature_replayed_to_other_deliberation() {
+        let alice_key = keypair(1);
+        let alice = did("alice");
+        let mut keys = BTreeMap::new();
+        keys.insert(alice, *alice_key.public_key());
+
+        let source = open_with_id(0xD210, b"proposal-a", &[did("alice")]);
+        let mut replay_target = open_deliberation(
+            delib_id(0xD211),
+            source.created,
+            b"proposal-b",
+            &[did("alice")],
+        )
+        .expect("deterministic target deliberation");
+        let vote_signed_for_source = signed_vote_for_deliberation(
+            &source,
+            "alice",
+            Position::For,
+            Role::Steward,
+            &alice_key,
+        );
+
+        cast_vote(&mut replay_target, vote_signed_for_source).unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match close_verified(&mut replay_target, &quorum_policy, &resolver(&keys)) {
+            DeliberationResult::NoQuorum { reason } => {
+                assert!(
+                    reason.contains("verified"),
+                    "replayed deliberation vote signatures must fail verified quorum"
+                );
+            }
+            other => panic!("replayed vote must not close another deliberation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_verified_rejects_vote_signature_replayed_to_other_position() {
+        let alice_key = keypair(1);
+        let alice = did("alice");
+        let mut keys = BTreeMap::new();
+        keys.insert(alice, *alice_key.public_key());
+
+        let mut d = open(b"p", &[did("alice")]);
+        let mut vote_alice =
+            signed_vote_for_deliberation(&d, "alice", Position::Against, Role::Steward, &alice_key);
+        vote_alice.position = Position::For;
+        cast_vote(&mut d, vote_alice).unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match close_verified(&mut d, &quorum_policy, &resolver(&keys)) {
+            DeliberationResult::NoQuorum { reason } => {
+                assert!(
+                    reason.contains("verified"),
+                    "vote position changes must invalidate scoped signatures"
+                );
+            }
+            other => panic!("position-replayed vote must not close deliberation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_verified_rejects_vote_signature_replayed_to_other_reasoning_hash() {
+        let alice_key = keypair(1);
+        let alice = did("alice");
+        let mut keys = BTreeMap::new();
+        keys.insert(alice, *alice_key.public_key());
+
+        let mut d = open(b"p", &[did("alice")]);
+        let mut vote_alice =
+            signed_vote_for_deliberation(&d, "alice", Position::For, Role::Steward, &alice_key);
+        vote_alice.reasoning_hash = [7u8; 32];
+        cast_vote(&mut d, vote_alice).unwrap();
+
+        let quorum_policy = QuorumPolicy {
+            min_approvals: 1,
+            min_independent: 1,
+            required_roles: vec![Role::Steward],
+            timeout: Timestamp::new(999_999, 0),
+        };
+
+        match close_verified(&mut d, &quorum_policy, &resolver(&keys)) {
+            DeliberationResult::NoQuorum { reason } => {
+                assert!(
+                    reason.contains("verified"),
+                    "reasoning-hash changes must invalidate scoped signatures"
+                );
+            }
+            other => panic!("reasoning-replayed vote must not close deliberation: {other:?}"),
+        }
     }
     #[test]
     fn close_does_not_overwrite_cancelled_deliberation() {
