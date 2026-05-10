@@ -7,6 +7,7 @@
 //!   2. Non-empty / non-zero signature bytes
 //!   3. Timestamp freshness (±`FRESHNESS_WINDOW_MS`)
 //!   4. Ed25519 signature via `exo_identity::did_verification::verify_did_signature`
+//!      over a domain-separated canonical CBOR authentication envelope
 //!      against the first active verification method in the resolved DID document
 //!
 //! ## Multi-credential support
@@ -26,6 +27,7 @@ use crate::error::{GatewayError, Result};
 /// Maximum age (or future skew) of a request timestamp in milliseconds.
 /// Requests outside this window are rejected to prevent replay attacks.
 const FRESHNESS_WINDOW_MS: u64 = 300_000; // 5 minutes
+const GATEWAY_AUTH_SIGNING_DOMAIN: &str = "exo.gateway.auth.request.v1";
 
 // ---------------------------------------------------------------------------
 // Existing types (backward-compatible)
@@ -68,6 +70,47 @@ impl AuthenticationMetadata {
         }
         Ok(Self { observed_at })
     }
+}
+
+#[derive(Serialize)]
+struct RequestSigningPayload<'a> {
+    domain: &'static str,
+    actor_did: &'a str,
+    action: &'a str,
+    body_hash: Hash256,
+    request_timestamp_physical_ms: u64,
+    request_timestamp_logical: u32,
+    observed_at_physical_ms: u64,
+    observed_at_logical: u32,
+}
+
+/// Build the canonical bytes signed by DID-authenticated gateway requests.
+///
+/// The signature binds both the signed body hash and security-sensitive request
+/// metadata consumed after authentication, so a signature for one action cannot
+/// be replayed as a different action with the same body.
+///
+/// # Errors
+///
+/// Returns `GatewayError::Internal` if canonical CBOR serialization fails.
+pub fn request_signing_payload(
+    request: &Request,
+    metadata: AuthenticationMetadata,
+) -> Result<Vec<u8>> {
+    let payload = RequestSigningPayload {
+        domain: GATEWAY_AUTH_SIGNING_DOMAIN,
+        actor_did: &request.actor_did,
+        action: &request.action,
+        body_hash: request.body_hash,
+        request_timestamp_physical_ms: request.timestamp.physical_ms,
+        request_timestamp_logical: request.timestamp.logical,
+        observed_at_physical_ms: metadata.observed_at.physical_ms,
+        observed_at_logical: metadata.observed_at.logical,
+    };
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&payload, &mut encoded)
+        .map_err(|e| GatewayError::Internal(format!("gateway auth payload CBOR: {e:?}")))?;
+    Ok(encoded)
 }
 
 // ---------------------------------------------------------------------------
@@ -322,15 +365,13 @@ pub fn authenticate(
             reason: "no active verification method for DID".into(),
         })?;
 
-    // 6. Cryptographically verify the Ed25519 signature over body_hash.
-    verify_did_signature(
-        doc,
-        &method.id,
-        request.body_hash.as_bytes(),
-        &request.signature,
-    )
-    .map_err(|e| GatewayError::AuthenticationFailed {
-        reason: format!("signature verification failed: {e}"),
+    // 6. Cryptographically verify the Ed25519 signature over the full
+    //    authentication envelope consumed by downstream authorization.
+    let signing_payload = request_signing_payload(request, metadata)?;
+    verify_did_signature(doc, &method.id, &signing_payload, &request.signature).map_err(|e| {
+        GatewayError::AuthenticationFailed {
+            reason: format!("signature verification failed: {e}"),
+        }
     })?;
 
     Ok(AuthenticatedActor {
@@ -506,25 +547,168 @@ mod tests {
         (reg, sk)
     }
 
+    fn signed_request(mut request: Request, secret_key: &exo_core::SecretKey) -> Request {
+        request.signature = sign(
+            &request_signing_payload(&request, auth_metadata()).unwrap(),
+            secret_key,
+        );
+        request
+    }
+
     // -----------------------------------------------------------------------
-    // Original authenticate() tests (unchanged)
+    // authenticate() tests
     // -----------------------------------------------------------------------
 
     #[test]
     fn auth_valid() {
         let (reg, sk) = registry_with_alice();
         let body_hash = Hash256::ZERO;
-        let signature = sign(body_hash.as_bytes(), &sk);
-        let r = Request {
+        let r = signed_request(
+            Request {
+                actor_did: "did:exo:alice".into(),
+                action: "read".into(),
+                body_hash,
+                signature: Signature::Empty,
+                timestamp: req_ts(),
+            },
+            &sk,
+        );
+        let a = authenticate(&r, &reg, auth_metadata()).unwrap();
+        assert_eq!(a.did.as_str(), "did:exo:alice");
+        assert_eq!(a.authenticated_at, auth_metadata().observed_at);
+    }
+
+    #[test]
+    fn auth_rejects_action_changed_after_signing() {
+        let (reg, sk) = registry_with_alice();
+        let body_hash = Hash256::digest(b"same body, different action");
+        let mut request = signed_request(
+            Request {
+                actor_did: "did:exo:alice".into(),
+                action: "read".into(),
+                body_hash,
+                signature: Signature::Empty,
+                timestamp: req_ts(),
+            },
+            &sk,
+        );
+        request.action = "submit_governance_vote".into();
+
+        assert!(authenticate(&request, &reg, auth_metadata()).is_err());
+    }
+
+    #[test]
+    fn auth_rejects_observed_at_changed_after_signing() {
+        let (reg, sk) = registry_with_alice();
+        let body_hash = Hash256::digest(b"same body, different observed time");
+        let request = signed_request(
+            Request {
+                actor_did: "did:exo:alice".into(),
+                action: "read".into(),
+                body_hash,
+                signature: Signature::Empty,
+                timestamp: req_ts(),
+            },
+            &sk,
+        );
+        let tampered_metadata =
+            AuthenticationMetadata::new(Timestamp::new(req_ts().physical_ms + 1, 0)).unwrap();
+
+        assert!(authenticate(&request, &reg, tampered_metadata).is_err());
+    }
+
+    #[test]
+    fn auth_rejects_timestamp_changed_after_signing() {
+        let (reg, sk) = registry_with_alice();
+        let body_hash = Hash256::digest(b"same body, different request timestamp");
+        let mut request = signed_request(
+            Request {
+                actor_did: "did:exo:alice".into(),
+                action: "read".into(),
+                body_hash,
+                signature: Signature::Empty,
+                timestamp: req_ts(),
+            },
+            &sk,
+        );
+        request.timestamp = Timestamp::new(req_ts().physical_ms + 1, 0);
+
+        assert!(authenticate(&request, &reg, auth_metadata()).is_err());
+    }
+
+    #[test]
+    fn auth_rejects_body_hash_changed_after_signing() {
+        let (reg, sk) = registry_with_alice();
+        let mut request = signed_request(
+            Request {
+                actor_did: "did:exo:alice".into(),
+                action: "read".into(),
+                body_hash: Hash256::digest(b"original body"),
+                signature: Signature::Empty,
+                timestamp: req_ts(),
+            },
+            &sk,
+        );
+        request.body_hash = Hash256::digest(b"tampered body");
+
+        assert!(authenticate(&request, &reg, auth_metadata()).is_err());
+    }
+
+    #[test]
+    fn request_signing_payload_is_domain_separated_cbor() {
+        #[derive(Deserialize)]
+        struct DecodedPayload {
+            domain: String,
+            actor_did: String,
+            action: String,
+            body_hash: Hash256,
+            request_timestamp_physical_ms: u64,
+            request_timestamp_logical: u32,
+            observed_at_physical_ms: u64,
+            observed_at_logical: u32,
+        }
+
+        let body_hash = Hash256::digest(b"canonical body hash");
+        let request = Request {
             actor_did: "did:exo:alice".into(),
-            action: "read".into(),
+            action: "read".to_owned(),
+            body_hash,
+            signature: Signature::Empty,
+            timestamp: req_ts(),
+        };
+        let payload = request_signing_payload(&request, auth_metadata()).unwrap();
+        let decoded: DecodedPayload = ciborium::from_reader(payload.as_slice()).unwrap();
+
+        assert_eq!(decoded.domain, GATEWAY_AUTH_SIGNING_DOMAIN);
+        assert_eq!(decoded.actor_did, "did:exo:alice");
+        assert_eq!(decoded.action, "read");
+        assert_eq!(decoded.body_hash, body_hash);
+        assert_eq!(decoded.request_timestamp_physical_ms, req_ts().physical_ms);
+        assert_eq!(decoded.request_timestamp_logical, req_ts().logical);
+        assert_eq!(
+            decoded.observed_at_physical_ms,
+            auth_metadata().observed_at.physical_ms
+        );
+        assert_eq!(
+            decoded.observed_at_logical,
+            auth_metadata().observed_at.logical
+        );
+    }
+
+    #[test]
+    fn auth_rejects_body_hash_only_signature_for_action_request() {
+        let (reg, sk) = registry_with_alice();
+        let body_hash = Hash256::digest(b"same body, different action");
+        let signature = sign(body_hash.as_bytes(), &sk);
+        let request = Request {
+            actor_did: "did:exo:alice".into(),
+            action: "submit_governance_vote".into(),
             body_hash,
             signature,
             timestamp: req_ts(),
         };
-        let a = authenticate(&r, &reg, auth_metadata()).unwrap();
-        assert_eq!(a.did.as_str(), "did:exo:alice");
-        assert_eq!(a.authenticated_at, auth_metadata().observed_at);
+
+        assert!(authenticate(&request, &reg, auth_metadata()).is_err());
     }
 
     #[test]
@@ -728,6 +912,24 @@ mod tests {
     }
 
     #[test]
+    fn auth_production_does_not_verify_raw_body_hash_signatures() {
+        let source = include_str!("auth.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            !production.contains("request.body_hash.as_bytes()"),
+            "gateway auth must bind DID signatures to the canonical request envelope"
+        );
+        assert!(
+            production.contains("request_signing_payload(request, metadata)"),
+            "gateway auth must route signature verification through the canonical payload helper"
+        );
+    }
+
+    #[test]
     fn auth_production_does_not_format_request_dids_into_errors() {
         let source = include_str!("auth.rs");
         let production = source
@@ -755,11 +957,20 @@ mod tests {
     fn credential_did_signature_valid() {
         let (reg, sk) = registry_with_alice();
         let body_hash = Hash256::ZERO;
-        let signature = sign(body_hash.as_bytes(), &sk);
+        let request = signed_request(
+            Request {
+                actor_did: "did:exo:alice".into(),
+                action: String::new(),
+                body_hash,
+                signature: Signature::Empty,
+                timestamp: req_ts(),
+            },
+            &sk,
+        );
         let cred = Credential::DidSignature {
             actor_did: "did:exo:alice".into(),
             body_hash,
-            signature,
+            signature: request.signature,
             timestamp: req_ts(),
         };
         let api_reg = ApiKeyRegistry::new();

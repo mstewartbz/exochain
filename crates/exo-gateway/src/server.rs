@@ -47,6 +47,8 @@ use tower_http::trace::TraceLayer;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_DID_DOCUMENT_BODY_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
+use crate::auth::request_signing_payload;
 use crate::{
     auth::{AuthenticatedActor, AuthenticationMetadata, Request as AuthRequest, authenticate},
     db,
@@ -1441,20 +1443,42 @@ fn session_login_payload_hash(
     Ok(Hash256::digest(&encoded))
 }
 
+fn session_login_auth_request(
+    did: &str,
+    metadata: &SessionIssueMetadata,
+    timestamp: Timestamp,
+    signature: Signature,
+) -> Result<AuthRequest> {
+    let body_hash = session_login_payload_hash(did, metadata, &timestamp)?;
+    Ok(AuthRequest {
+        actor_did: did.to_owned(),
+        action: "gateway_session_login".to_owned(),
+        body_hash,
+        signature,
+        timestamp,
+    })
+}
+
+#[cfg(test)]
+fn session_login_auth_signing_payload(
+    did: &str,
+    metadata: &SessionIssueMetadata,
+    timestamp: Timestamp,
+    observed_at: Timestamp,
+) -> Result<Vec<u8>> {
+    let auth_metadata = AuthenticationMetadata::new(observed_at)?;
+    let request = session_login_auth_request(did, metadata, timestamp, Signature::Empty)?;
+    request_signing_payload(&request, auth_metadata)
+}
+
 fn authenticate_session_login(
     did: &str,
     metadata: &SessionIssueMetadata,
     proof: &SessionLoginProof,
     registry: &dyn DidRegistry,
 ) -> Result<AuthenticatedActor> {
-    let body_hash = session_login_payload_hash(did, metadata, &proof.timestamp)?;
-    let request = AuthRequest {
-        actor_did: did.to_owned(),
-        action: "gateway_session_login".to_owned(),
-        body_hash,
-        signature: proof.signature.clone(),
-        timestamp: proof.timestamp,
-    };
+    let request =
+        session_login_auth_request(did, metadata, proof.timestamp, proof.signature.clone())?;
     let auth_metadata = AuthenticationMetadata::new(proof.observed_at)?;
     authenticate(&request, registry, auth_metadata)
 }
@@ -2508,8 +2532,8 @@ async fn handle_agents_enroll(
 /// POST /api/v1/auth/login — authenticate a DID and issue a session token.
 ///
 /// Body includes the actor DID, session metadata, HLC authentication metadata,
-/// and an Ed25519 `signature` hex string over the canonical domain-tagged
-/// session-login payload.
+/// and an Ed25519 `signature` hex string over the canonical gateway
+/// authentication envelope for the domain-tagged session-login payload hash.
 ///
 /// Returns a 256-bit bearer session token stored in the `sessions` table:
 /// ```sql
@@ -6961,8 +6985,10 @@ mod tests {
         };
         let timestamp = Timestamp::new(10_000, 0);
         let observed_at = Timestamp::new(10_000, 0);
-        let body_hash = session_login_payload_hash(did, &metadata, &timestamp).unwrap();
-        let signature = sign(body_hash.as_bytes(), &sk);
+        let signature = sign(
+            &session_login_auth_signing_payload(did, &metadata, timestamp, observed_at).unwrap(),
+            &sk,
+        );
         let body = serde_json::json!({
             "did": did,
             "createdAt": metadata.created_at,
@@ -7050,9 +7076,16 @@ mod tests {
             expires_at: 20_000,
         };
         let timestamp = Timestamp::new(10_000, 0);
-        let body_hash =
-            session_login_payload_hash("did:exo:login-alice", &metadata, &timestamp).unwrap();
-        let signature = sign(body_hash.as_bytes(), &sk);
+        let signature = sign(
+            &session_login_auth_signing_payload(
+                "did:exo:login-alice",
+                &metadata,
+                timestamp,
+                timestamp,
+            )
+            .unwrap(),
+            &sk,
+        );
         let proof = SessionLoginProof {
             timestamp,
             observed_at: timestamp,
@@ -7074,12 +7107,17 @@ mod tests {
             expires_at: 20_000,
         };
         let timestamp = Timestamp::new(10_000, 0);
-        let body_hash =
-            session_login_payload_hash("did:exo:login-alice", &metadata, &timestamp).unwrap();
+        let payload = session_login_auth_signing_payload(
+            "did:exo:login-alice",
+            &metadata,
+            timestamp,
+            timestamp,
+        )
+        .unwrap();
         let proof = SessionLoginProof {
             timestamp,
             observed_at: timestamp,
-            signature: sign(body_hash.as_bytes(), &wrong_sk),
+            signature: sign(&payload, &wrong_sk),
         };
         let guard = registry.read().unwrap();
 
@@ -7100,13 +7138,17 @@ mod tests {
             expires_at: 30_000,
         };
         let timestamp = Timestamp::new(10_000, 0);
-        let body_hash =
-            session_login_payload_hash("did:exo:login-alice", &signed_metadata, &timestamp)
-                .unwrap();
+        let payload = session_login_auth_signing_payload(
+            "did:exo:login-alice",
+            &signed_metadata,
+            timestamp,
+            timestamp,
+        )
+        .unwrap();
         let proof = SessionLoginProof {
             timestamp,
             observed_at: timestamp,
-            signature: sign(body_hash.as_bytes(), &sk),
+            signature: sign(&payload, &sk),
         };
         let guard = registry.read().unwrap();
 
@@ -7125,12 +7167,17 @@ mod tests {
         };
         let timestamp = Timestamp::new(1, 0);
         let observed_at = Timestamp::new(400_000, 0);
-        let body_hash =
-            session_login_payload_hash("did:exo:login-alice", &metadata, &timestamp).unwrap();
+        let payload = session_login_auth_signing_payload(
+            "did:exo:login-alice",
+            &metadata,
+            timestamp,
+            observed_at,
+        )
+        .unwrap();
         let proof = SessionLoginProof {
             timestamp,
             observed_at,
-            signature: sign(body_hash.as_bytes(), &sk),
+            signature: sign(&payload, &sk),
         };
         let guard = registry.read().unwrap();
         let err = authenticate_session_login("did:exo:login-alice", &metadata, &proof, &*guard)
