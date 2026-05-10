@@ -18,13 +18,14 @@
 //! layer.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
-use exo_core::types::{Did, PublicKey};
+use exo_core::types::{Did, Hash256, PublicKey};
 use exo_dag::{
     append::verify_node_creator_signature,
+    consensus::{CommitCertificate, ConsensusConfig},
     dag::{DagNode, compute_node_hash},
     error::{DagError, Result as DagResult},
 };
@@ -147,6 +148,98 @@ fn validate_incoming_sync_node(
 
     let resolver = |did: &Did| public_keys.get(did).copied();
     verify_node_creator_signature(node, &resolver)
+}
+
+fn validate_snapshot_commit_certificates(
+    nodes_with_heights: &[(DagNode, u64)],
+    certificates: &[CommitCertificate],
+    public_keys: &BTreeMap<Did, PublicKey>,
+) -> DagResult<()> {
+    if certificates.len() != nodes_with_heights.len() {
+        return Err(DagError::StoreError(format!(
+            "snapshot chunk must include one commit certificate per node: got {} certificates for {} nodes",
+            certificates.len(),
+            nodes_with_heights.len()
+        )));
+    }
+
+    for ((node, _height), certificate) in nodes_with_heights.iter().zip(certificates) {
+        validate_snapshot_commit_certificate(certificate, &node.hash, public_keys)?;
+    }
+
+    Ok(())
+}
+
+fn validate_snapshot_commit_certificate(
+    certificate: &CommitCertificate,
+    node_hash: &Hash256,
+    public_keys: &BTreeMap<Did, PublicKey>,
+) -> DagResult<()> {
+    if certificate.node_hash != *node_hash {
+        return Err(DagError::StoreError(format!(
+            "snapshot commit certificate node_hash {} does not match DAG node hash {}",
+            certificate.node_hash, node_hash
+        )));
+    }
+
+    let validators: BTreeSet<Did> = public_keys.keys().cloned().collect();
+    let quorum = ConsensusConfig::new(validators.clone(), 0).quorum_size();
+    if quorum == 0 {
+        return Err(DagError::StoreError(
+            "snapshot commit certificate cannot be validated with an empty validator set".into(),
+        ));
+    }
+
+    let mut distinct_voters = BTreeSet::new();
+    for vote in &certificate.votes {
+        if !validators.contains(&vote.voter) {
+            return Err(DagError::StoreError(format!(
+                "snapshot commit certificate contains vote from non-validator {}",
+                vote.voter
+            )));
+        }
+        if vote.round != certificate.round {
+            return Err(DagError::StoreError(format!(
+                "snapshot commit certificate vote from {} is for round {}, expected {}",
+                vote.voter, vote.round, certificate.round
+            )));
+        }
+        if vote.node_hash != certificate.node_hash {
+            return Err(DagError::StoreError(format!(
+                "snapshot commit certificate vote from {} references wrong node hash",
+                vote.voter
+            )));
+        }
+        if !distinct_voters.insert(vote.voter.clone()) {
+            return Err(DagError::StoreError(format!(
+                "snapshot commit certificate contains duplicate vote from {} in round {}",
+                vote.voter, vote.round
+            )));
+        }
+
+        let Some(public_key) = public_keys.get(&vote.voter) else {
+            return Err(DagError::StoreError(format!(
+                "snapshot commit certificate vote from {} has no configured public key",
+                vote.voter
+            )));
+        };
+        if !vote.verify_signature(public_key) {
+            return Err(DagError::StoreError(format!(
+                "snapshot commit certificate vote from {} has invalid signature",
+                vote.voter
+            )));
+        }
+    }
+
+    if distinct_voters.len() < quorum {
+        return Err(DagError::StoreError(format!(
+            "snapshot commit certificate has insufficient quorum: required {}, got {}",
+            quorum,
+            distinct_voters.len()
+        )));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -322,22 +415,36 @@ impl SyncEngine {
         loop {
             let to_height = snapshot_chunk_to_height(current_from, chunk_size, local_height);
 
-            let nodes = match with_store_blocking(
+            let (nodes, certificates) = match with_store_blocking(
                 Arc::clone(&self.store),
                 "handle_snapshot_request_chunk",
                 move |store| {
-                    store
+                    let nodes = store
                         .committed_dag_nodes_in_range(current_from, to_height)
                         .map_err(|e| {
                             anyhow::anyhow!("committed nodes {current_from}..={to_height}: {e}")
-                        })
+                        })?;
+                    let mut certificates = Vec::with_capacity(nodes.len());
+                    for node in &nodes {
+                        let certificate =
+                            store
+                                .load_certificate_for_hash(&node.hash)?
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "missing commit certificate for snapshot node {}",
+                                        node.hash
+                                    )
+                                })?;
+                        certificates.push(certificate);
+                    }
+                    Ok((nodes, certificates))
                 },
             )
             .await
             {
-                Ok(nodes) => nodes,
+                Ok(nodes_and_certificates) => nodes_and_certificates,
                 Err(e) => {
-                    tracing::warn!(err = %e, "Failed to query committed nodes");
+                    tracing::warn!(err = %e, "Failed to query committed nodes and certificates");
                     return;
                 }
             };
@@ -349,6 +456,7 @@ impl SyncEngine {
                 sender: self.config.node_did.clone(),
                 from_height: current_from,
                 nodes,
+                certificates,
                 to_height,
                 has_more,
             });
@@ -416,6 +524,7 @@ impl SyncEngine {
         // Store the nodes and mark them as committed.
         let from_height = msg.from_height;
         let nodes = msg.nodes;
+        let certificates = msg.certificates;
         let public_keys = self.config.validator_public_keys.clone();
         if let Err(e) = with_store_blocking(
             Arc::clone(&self.store),
@@ -433,7 +542,15 @@ impl SyncEngine {
                     accepted_nodes.insert(node.hash, node.clone());
                 }
 
-                store.put_committed_many_sync(&nodes_with_heights)?;
+                validate_snapshot_commit_certificates(
+                    &nodes_with_heights,
+                    &certificates,
+                    &public_keys,
+                )?;
+                store.put_committed_many_with_certificates_sync(
+                    &nodes_with_heights,
+                    &certificates,
+                )?;
                 Ok(())
             },
         )
@@ -685,9 +802,12 @@ pub async fn run_sync_engine(mut engine: SyncEngine, mut net_events: mpsc::Recei
 mod tests {
     use exo_core::{
         crypto::KeyPair,
-        types::{Did, PublicKey, Signature},
+        types::{Did, Hash256, PublicKey, Signature},
     };
-    use exo_dag::dag::{Dag, DeterministicDagClock, append};
+    use exo_dag::{
+        consensus::Vote,
+        dag::{Dag, DeterministicDagClock, append},
+    };
     use tokio::sync::mpsc;
 
     use super::*;
@@ -716,6 +836,28 @@ mod tests {
     fn make_sign_fn() -> Box<dyn Fn(&[u8]) -> Signature> {
         let keypair = test_keypair();
         Box::new(move |data: &[u8]| keypair.sign(data))
+    }
+
+    fn commit_certificate_for(node_hash: Hash256, round: u64) -> CommitCertificate {
+        let mut vote = Vote {
+            voter: test_did(),
+            round,
+            node_hash,
+            signature: Signature::Empty,
+        };
+        let payload = vote.signing_payload().unwrap();
+        vote.signature = test_keypair().sign(&payload);
+        CommitCertificate {
+            node_hash,
+            votes: vec![vote],
+            round,
+        }
+    }
+
+    fn invalid_commit_certificate_for(node_hash: Hash256, round: u64) -> CommitCertificate {
+        let mut certificate = commit_certificate_for(node_hash, round);
+        certificate.votes[0].signature = Signature::from_bytes([9u8; 64]);
+        certificate
     }
 
     fn test_did() -> Did {
@@ -784,6 +926,28 @@ mod tests {
     }
 
     #[test]
+    fn production_snapshot_sync_requires_commit_certificate_persistence() {
+        let source = include_str!("sync.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            production.contains("validate_snapshot_commit_certificates"),
+            "snapshot sync must validate commit certificates before accepting committed nodes"
+        );
+        assert!(
+            production.contains("put_committed_many_with_certificates_sync"),
+            "snapshot sync must persist nodes, commit markers, and certificates atomically"
+        );
+        assert!(
+            !production.contains("put_committed_many_sync(&nodes_with_heights)"),
+            "snapshot sync must not mark externally supplied nodes committed without certificates"
+        );
+    }
+
+    #[test]
     fn next_sync_from_height_rejects_u64_max() {
         let err = next_sync_from_height(u64::MAX).expect_err("u64::MAX cannot advance");
 
@@ -832,6 +996,9 @@ mod tests {
             store.put_sync(node).unwrap();
             let committed_height = u64::try_from(i + 1).expect("test height fits in u64");
             store.mark_committed_sync(&hash, committed_height).unwrap();
+            store
+                .save_certificate(&commit_certificate_for(hash, committed_height))
+                .unwrap();
             hashes.push(hash);
             parents = vec![hash];
         }
@@ -909,6 +1076,10 @@ mod tests {
                 assert_eq!(chunk.from_height, 1);
                 assert_eq!(chunk.to_height, 5);
                 assert_eq!(chunk.nodes.len(), 5);
+                assert_eq!(chunk.certificates.len(), 5);
+                for (node, certificate) in chunk.nodes.iter().zip(&chunk.certificates) {
+                    assert_eq!(certificate.node_hash, node.hash);
+                }
                 assert!(chunk.has_more);
             }
             _ => panic!("Expected StateSnapshotChunk"),
@@ -920,6 +1091,10 @@ mod tests {
                 assert_eq!(chunk.from_height, 6);
                 assert_eq!(chunk.to_height, 10);
                 assert_eq!(chunk.nodes.len(), 5);
+                assert_eq!(chunk.certificates.len(), 5);
+                for (node, certificate) in chunk.nodes.iter().zip(&chunk.certificates) {
+                    assert_eq!(certificate.node_hash, node.hash);
+                }
                 assert!(!chunk.has_more);
             }
             _ => panic!("Expected StateSnapshotChunk"),
@@ -931,6 +1106,49 @@ mod tests {
             events.push(ev);
         }
         assert_eq!(events.len(), 2, "Should emit 2 ServedSnapshot events");
+    }
+
+    #[tokio::test]
+    async fn sync_engine_refuses_to_serve_snapshot_node_without_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SqliteDagStore::open(dir.path()).unwrap();
+        let sign_fn = make_sign_fn();
+        let did = test_did();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"uncertified-local-snapshot-node",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.put_sync(node.clone()).unwrap();
+        store.mark_committed_sync(&node.hash, 1).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (net_handle, published) = acking_network_handle();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let engine = SyncEngine::new(sync_config(5, 200), store, net_handle, event_tx);
+
+        let request = StateSnapshotRequestMsg {
+            sender: Did::new("did:exo:requester").unwrap(),
+            from_height: 1,
+            chunk_size: 5,
+        };
+
+        engine.handle_snapshot_request(request).await;
+
+        assert!(
+            published.lock().unwrap().is_empty(),
+            "snapshot serving must fail closed when a committed node lacks a certificate"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "failed snapshot serving must not emit served events"
+        );
     }
 
     #[tokio::test]
@@ -973,6 +1191,10 @@ mod tests {
             sender: Did::new("did:exo:sender").unwrap(),
             from_height: 1,
             nodes: vec![node1.clone(), node2.clone()],
+            certificates: vec![
+                commit_certificate_for(node1.hash, 1),
+                commit_certificate_for(node2.hash, 2),
+            ],
             to_height: 2,
             has_more: false,
         };
@@ -985,6 +1207,7 @@ mod tests {
             assert!(st.contains_sync(&node1.hash).unwrap());
             assert!(st.contains_sync(&node2.hash).unwrap());
             assert_eq!(st.committed_height_value().unwrap(), 2);
+            assert_eq!(st.load_certificates().unwrap().len(), 2);
         }
 
         // Verify sync completed.
@@ -1002,6 +1225,171 @@ mod tests {
             .iter()
             .any(|e| matches!(e, SyncEvent::Complete { .. }));
         assert!(complete, "Should emit SyncEvent::Complete");
+    }
+
+    #[tokio::test]
+    async fn snapshot_chunk_without_commit_certificate_is_rejected_without_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteDagStore::open(dir.path()).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel(256);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut engine = SyncEngine::new(
+            sync_config(100, 200),
+            Arc::clone(&store),
+            net_handle,
+            event_tx,
+        );
+
+        let sign_fn = make_sign_fn();
+        let did = test_did();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"certless-snapshot-node",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+
+        engine.syncing = true;
+        let chunk = StateSnapshotChunkMsg {
+            sender: Did::new("did:exo:sender").unwrap(),
+            from_height: 1,
+            nodes: vec![node.clone()],
+            certificates: vec![],
+            to_height: 1,
+            has_more: false,
+        };
+
+        engine.handle_snapshot_chunk(chunk).await;
+
+        let st = store.lock().unwrap();
+        assert!(
+            !st.contains_sync(&node.hash).unwrap(),
+            "certificate-less snapshot chunks must not persist DAG nodes"
+        );
+        assert_eq!(st.committed_height_value().unwrap(), 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "certificate-less snapshot chunks must not emit progress or completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_chunk_rejects_certificate_for_different_node_without_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteDagStore::open(dir.path()).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel(256);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut engine = SyncEngine::new(
+            sync_config(100, 200),
+            Arc::clone(&store),
+            net_handle,
+            event_tx,
+        );
+
+        let sign_fn = make_sign_fn();
+        let did = test_did();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"mismatched-certificate-snapshot-node",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+
+        engine.syncing = true;
+        let chunk = StateSnapshotChunkMsg {
+            sender: Did::new("did:exo:sender").unwrap(),
+            from_height: 1,
+            nodes: vec![node.clone()],
+            certificates: vec![commit_certificate_for(Hash256::digest(b"wrong-node"), 1)],
+            to_height: 1,
+            has_more: false,
+        };
+
+        engine.handle_snapshot_chunk(chunk).await;
+
+        let st = store.lock().unwrap();
+        assert!(
+            !st.contains_sync(&node.hash).unwrap(),
+            "snapshot chunks with mismatched certificates must not persist DAG nodes"
+        );
+        assert_eq!(st.committed_height_value().unwrap(), 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "mismatched certificates must not emit progress or completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_chunk_rejects_invalid_commit_certificate_without_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteDagStore::open(dir.path()).unwrap();
+        let store = Arc::new(Mutex::new(store));
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel(256);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut engine = SyncEngine::new(
+            sync_config(100, 200),
+            Arc::clone(&store),
+            net_handle,
+            event_tx,
+        );
+
+        let sign_fn = make_sign_fn();
+        let did = test_did();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            b"invalid-certificate-snapshot-node",
+            &did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+
+        engine.syncing = true;
+        let chunk = StateSnapshotChunkMsg {
+            sender: Did::new("did:exo:sender").unwrap(),
+            from_height: 1,
+            nodes: vec![node.clone()],
+            certificates: vec![invalid_commit_certificate_for(node.hash, 1)],
+            to_height: 1,
+            has_more: false,
+        };
+
+        engine.handle_snapshot_chunk(chunk).await;
+
+        let st = store.lock().unwrap();
+        assert!(
+            !st.contains_sync(&node.hash).unwrap(),
+            "snapshot chunks with invalid certificates must not persist DAG nodes"
+        );
+        assert_eq!(st.committed_height_value().unwrap(), 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "invalid certificates must not emit progress or completion"
+        );
     }
 
     #[tokio::test]
@@ -1041,6 +1429,7 @@ mod tests {
             sender: Did::new("did:exo:sender").unwrap(),
             from_height: 1,
             nodes: vec![node.clone()],
+            certificates: vec![commit_certificate_for(node.hash, 1)],
             to_height: 1,
             has_more: false,
         };
@@ -1141,6 +1530,7 @@ mod tests {
             sender: Did::new("did:exo:unsolicited-sender").unwrap(),
             from_height: 1,
             nodes: vec![node.clone()],
+            certificates: vec![],
             to_height: 1,
             has_more: false,
         };
@@ -1212,6 +1602,11 @@ mod tests {
             sender: Did::new("did:exo:sender").unwrap(),
             from_height: u64::MAX - 1,
             nodes: vec![node1.clone(), node2.clone(), node3.clone()],
+            certificates: vec![
+                commit_certificate_for(node1.hash, 1),
+                commit_certificate_for(node2.hash, 2),
+                commit_certificate_for(node3.hash, 3),
+            ],
             to_height: u64::MAX,
             has_more: false,
         };
@@ -1284,7 +1679,8 @@ mod tests {
         let chunk = StateSnapshotChunkMsg {
             sender: Did::new("did:exo:sender").unwrap(),
             from_height: 1,
-            nodes: vec![node],
+            nodes: vec![node.clone()],
+            certificates: vec![commit_certificate_for(node.hash, 1)],
             to_height: 1,
             has_more: false,
         };
@@ -1359,6 +1755,10 @@ mod tests {
             sender: Did::new("did:exo:sender").unwrap(),
             from_height: 1,
             nodes: vec![node1.clone(), node2.clone()],
+            certificates: vec![
+                commit_certificate_for(node1.hash, 1),
+                commit_certificate_for(node2.hash, 2),
+            ],
             to_height: 2,
             has_more: false,
         };
