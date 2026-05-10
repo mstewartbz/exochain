@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 use exo_core::{Did, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     challenge::{Challenge, ChallengeStatus},
@@ -119,25 +120,55 @@ pub struct Approval {
     pub timestamp: Timestamp,
     pub signature: Signature,
     pub independence_attestation: Option<IndependenceAttestation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ApprovalScope>,
+}
+
+/// Optional context that binds a quorum approval to one governed action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalScope {
+    DeliberationVote {
+        deliberation_id: Uuid,
+        proposal_hash: [u8; 32],
+        position: String,
+        reasoning_hash: [u8; 32],
+    },
 }
 
 impl Approval {
     /// Canonical CBOR payload that the approver signs.
     ///
-    /// The approval signature binds the approver, role, timestamp, and attached
-    /// independence attestation. The `signature` field itself is excluded.
+    /// The approval signature binds the approver, role, timestamp, attached
+    /// independence attestation, and optional action scope. The `signature`
+    /// field itself is excluded. Unscoped approvals retain the v1 payload for
+    /// compatibility; scoped approvals use v2 so signatures cannot be replayed
+    /// into a different governed action.
     pub fn signing_payload(&self) -> Result<Vec<u8>, GovernanceError> {
-        let tuple = (
-            "exo.governance.quorum.approval.v1",
-            &self.approver_did,
-            &self.role,
-            &self.timestamp,
-            &self.independence_attestation,
-        );
         let mut buf = Vec::new();
-        ciborium::ser::into_writer(&tuple, &mut buf).map_err(|e| {
-            GovernanceError::Serialization(format!("approval canonical encoding failed: {e}"))
-        })?;
+        if let Some(scope) = &self.scope {
+            let tuple = (
+                "exo.governance.quorum.approval.v2",
+                &self.approver_did,
+                &self.role,
+                &self.timestamp,
+                &self.independence_attestation,
+                scope,
+            );
+            ciborium::ser::into_writer(&tuple, &mut buf).map_err(|e| {
+                GovernanceError::Serialization(format!("approval canonical encoding failed: {e}"))
+            })?;
+        } else {
+            let tuple = (
+                "exo.governance.quorum.approval.v1",
+                &self.approver_did,
+                &self.role,
+                &self.timestamp,
+                &self.independence_attestation,
+            );
+            ciborium::ser::into_writer(&tuple, &mut buf).map_err(|e| {
+                GovernanceError::Serialization(format!("approval canonical encoding failed: {e}"))
+            })?;
+        }
         Ok(buf)
     }
 
@@ -561,6 +592,7 @@ mod tests {
             } else {
                 None
             },
+            scope: None,
         }
     }
 
@@ -647,6 +679,7 @@ mod tests {
                 timestamp: Timestamp::new(1000, 0),
                 signature: test_sig(),
                 independence_attestation: Some(invalid_attestation(&d)),
+                scope: None,
             },
         ];
         assert_verified_quorum_required(compute_quorum(&approvals, &default_policy()));
@@ -1046,16 +1079,7 @@ mod tests {
     }
 
     fn approval_signing_payload_for_test(approval: &Approval) -> Vec<u8> {
-        let tuple = (
-            "exo.governance.quorum.approval.v1",
-            &approval.approver_did,
-            &approval.role,
-            &approval.timestamp,
-            &approval.independence_attestation,
-        );
-        let mut buf = Vec::new();
-        ciborium::ser::into_writer(&tuple, &mut buf).expect("approval payload");
-        buf
+        approval.signing_payload().expect("approval payload")
     }
 
     fn properly_signed_approval(
@@ -1081,6 +1105,7 @@ mod tests {
             timestamp,
             signature: Signature::Empty,
             independence_attestation: attestation,
+            scope: None,
         };
         let payload = approval_signing_payload_for_test(&approval);
         approval.signature = crypto::sign(&payload, sk);
@@ -1323,6 +1348,7 @@ mod tests {
             timestamp: Timestamp::new(1000, 0),
             signature: Signature::Ed25519([9u8; 64]),
             independence_attestation: Some(att),
+            scope: None,
         };
         let resolver =
             |d: &Did| -> Option<PublicKey> { if *d == alice { Some(pk_alice) } else { None } };
@@ -1342,6 +1368,45 @@ mod tests {
     }
 
     #[test]
+    fn approval_signing_payload_binds_optional_scope() {
+        let alice = did("alice");
+        let base = Approval {
+            approver_did: alice,
+            role: Role::Steward,
+            timestamp: Timestamp::new(1000, 0),
+            signature: Signature::Empty,
+            independence_attestation: None,
+            scope: None,
+        };
+        let unscoped = base.signing_payload().expect("unscoped payload");
+        let mut scoped_a = base.clone();
+        scoped_a.scope = Some(ApprovalScope::DeliberationVote {
+            deliberation_id: Uuid::from_u128(0xA001),
+            proposal_hash: [1u8; 32],
+            position: "For".to_string(),
+            reasoning_hash: [2u8; 32],
+        });
+        let mut scoped_b = scoped_a.clone();
+        scoped_b.scope = Some(ApprovalScope::DeliberationVote {
+            deliberation_id: Uuid::from_u128(0xA002),
+            proposal_hash: [1u8; 32],
+            position: "For".to_string(),
+            reasoning_hash: [2u8; 32],
+        });
+
+        assert_ne!(
+            unscoped,
+            scoped_a.signing_payload().expect("scoped payload"),
+            "scoped quorum approvals must not share the legacy unscoped signature payload"
+        );
+        assert_ne!(
+            scoped_a.signing_payload().expect("scoped payload"),
+            scoped_b.signing_payload().expect("changed scoped payload"),
+            "changing approval scope must change the canonical signature payload"
+        );
+    }
+
+    #[test]
     fn compute_quorum_verified_requires_attestation_from_approver() {
         let (pk_alice, sk_alice) = crypto::generate_keypair();
         let (pk_bob, sk_bob) = crypto::generate_keypair();
@@ -1354,6 +1419,7 @@ mod tests {
             timestamp: Timestamp::new(1000, 0),
             signature: Signature::Empty,
             independence_attestation: Some(alice_att),
+            scope: None,
         };
         let payload = approval_signing_payload_for_test(&bob_approval);
         bob_approval.signature = crypto::sign(&payload, &sk_bob);
@@ -1395,6 +1461,7 @@ mod tests {
             timestamp: Timestamp::new(10_000, 0),
             signature: test_sig(),
             independence_attestation: Some(att),
+            scope: None,
         }];
         let policy = QuorumPolicy {
             min_approvals: 1,
@@ -1423,6 +1490,7 @@ mod tests {
             timestamp: Timestamp::new(1000, 0),
             signature: test_sig(),
             independence_attestation: None,
+            scope: None,
         };
         // Replace DID with one whose as_str() is empty via a direct constructor.
         // Did::new rejects empties, so fabricate one by cloning and mutating
