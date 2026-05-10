@@ -4782,7 +4782,7 @@ mod tests {
         .bind("auth-me-alice-token")
         .bind("did:exo:auth-me-alice")
         .bind(10_000_i64)
-        .bind(20_000_i64)
+        .bind(TEST_ACTIVE_SESSION_EXPIRES_AT_MS)
         .execute(&pool)
         .await
         .unwrap();
