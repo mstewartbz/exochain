@@ -34,6 +34,8 @@ pub trait AvcRegistryRead {
 
 /// Mutating registry interface used by node API handlers and tests.
 pub trait AvcRegistryWrite: AvcRegistryRead {
+    /// Store a credential only after its issuer key resolves and its
+    /// issuer signature verifies against the canonical signing payload.
     fn put_credential(
         &mut self,
         credential: AutonomousVolitionCredential,
@@ -142,6 +144,41 @@ impl InMemoryAvcRegistry {
         Ok(())
     }
 
+    fn validate_credential(
+        &self,
+        credential: &AutonomousVolitionCredential,
+    ) -> Result<(), AvcError> {
+        if credential.signature.is_empty() {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "credential signature for issuer {} must not be empty",
+                    credential.issuer_did
+                ),
+            });
+        }
+
+        let public_key = self
+            .public_keys
+            .get(&credential.issuer_did)
+            .ok_or_else(|| AvcError::InvalidInput {
+                reason: format!(
+                    "credential issuer key for {} is unresolved",
+                    credential.issuer_did
+                ),
+            })?;
+        let payload = credential.signing_payload()?;
+        if !crypto::verify(&payload, &credential.signature, public_key) {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "credential signature for issuer {} is invalid",
+                    credential.issuer_did
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Get the receipt with the given hash, if present.
     #[must_use]
     pub fn get_receipt(&self, receipt_hash: &Hash256) -> Option<AvcTrustReceipt> {
@@ -193,6 +230,7 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
         &mut self,
         credential: AutonomousVolitionCredential,
     ) -> Result<Hash256, AvcError> {
+        self.validate_credential(&credential)?;
         let id = credential.id()?;
         self.by_subject
             .entry(credential.subject_did.clone())
@@ -287,7 +325,14 @@ mod tests {
     }
 
     fn sample_credential() -> AutonomousVolitionCredential {
-        issue_avc(baseline_draft(), |_| fixed_signature()).unwrap()
+        let issuer = keypair(0x11);
+        issue_avc(baseline_draft(), |bytes| issuer.sign(bytes)).unwrap()
+    }
+
+    fn put_issuer_key(reg: &mut InMemoryAvcRegistry) -> KeyPair {
+        let issuer = keypair(0x11);
+        reg.put_public_key(did("issuer"), issuer.public);
+        issuer
     }
 
     fn register_sample_credential_and_issuer_key(
@@ -295,9 +340,8 @@ mod tests {
     ) -> (Hash256, KeyPair) {
         let cred = sample_credential();
         let id = cred.id().unwrap();
-        let issuer_keypair = keypair(0x11);
+        let issuer_keypair = put_issuer_key(reg);
         reg.put_credential(cred).unwrap();
-        reg.put_public_key(did("issuer"), issuer_keypair.public);
         (id, issuer_keypair)
     }
 
@@ -323,6 +367,7 @@ mod tests {
     #[test]
     fn put_get_credential_round_trips() {
         let mut reg = fresh_registry();
+        put_issuer_key(&mut reg);
         let cred = sample_credential();
         let id = reg.put_credential(cred.clone()).unwrap();
         assert_eq!(reg.get_credential(&id).unwrap(), cred);
@@ -330,14 +375,73 @@ mod tests {
     }
 
     #[test]
+    fn put_credential_rejects_empty_signature_without_storing() {
+        let mut reg = fresh_registry();
+        put_issuer_key(&mut reg);
+        let mut cred = sample_credential();
+        let id = cred.id().unwrap();
+        cred.signature = Signature::empty();
+
+        let err = reg.put_credential(cred).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => assert!(reason.contains("signature")),
+            other => panic!("expected invalid input for unsigned credential, got {other:?}"),
+        }
+        assert_eq!(reg.credential_count(), 0);
+        assert!(reg.get_credential(&id).is_none());
+    }
+
+    #[test]
+    fn put_credential_rejects_unresolved_issuer_key_without_storing() {
+        let mut reg = fresh_registry();
+        let cred = sample_credential();
+        let id = cred.id().unwrap();
+
+        let err = reg.put_credential(cred).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("issuer"));
+                assert!(reason.contains("unresolved"));
+            }
+            other => panic!("expected invalid input for unresolved issuer, got {other:?}"),
+        }
+        assert_eq!(reg.credential_count(), 0);
+        assert!(reg.get_credential(&id).is_none());
+    }
+
+    #[test]
+    fn put_credential_rejects_wrong_signature_key_without_storing() {
+        let mut reg = fresh_registry();
+        put_issuer_key(&mut reg);
+        let attacker = keypair(0x22);
+        let mut cred = sample_credential();
+        let payload = cred.signing_payload().unwrap();
+        cred.signature = attacker.sign(&payload);
+        let id = cred.id().unwrap();
+
+        let err = reg.put_credential(cred).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("signature"));
+                assert!(reason.contains("invalid"));
+            }
+            other => panic!("expected invalid input for wrong signer, got {other:?}"),
+        }
+        assert_eq!(reg.credential_count(), 0);
+        assert!(reg.get_credential(&id).is_none());
+    }
+
+    #[test]
     fn list_credentials_for_subject_returns_subject_only() {
         let mut reg = fresh_registry();
+        put_issuer_key(&mut reg);
         let cred1 = sample_credential();
         reg.put_credential(cred1.clone()).unwrap();
         // Add an unrelated subject
         let mut draft2 = baseline_draft();
         draft2.subject_did = did("agent-other");
-        let cred2 = issue_avc(draft2, |_| fixed_signature()).unwrap();
+        let issuer = keypair(0x11);
+        let cred2 = issue_avc(draft2, |bytes| issuer.sign(bytes)).unwrap();
         reg.put_credential(cred2).unwrap();
 
         let listed = reg.list_credentials_for_subject(&cred1.subject_did);
@@ -386,6 +490,7 @@ mod tests {
         let id = cred.id().unwrap();
         let attacker = did("attacker");
         let attacker_keypair = keypair(0x22);
+        put_issuer_key(&mut reg);
         reg.put_credential(cred).unwrap();
         reg.put_public_key(attacker.clone(), attacker_keypair.public);
 
@@ -428,11 +533,15 @@ mod tests {
     #[test]
     fn put_revocation_rejects_unresolved_revoker_key_without_marking_revoked() {
         let mut reg = fresh_registry();
-        let cred = sample_credential();
-        let id = cred.id().unwrap();
+        let mut draft = baseline_draft();
+        draft.principal_did = did("principal");
         let issuer_keypair = keypair(0x11);
+        let cred = issue_avc(draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        let id = cred.id().unwrap();
+        reg.put_public_key(did("issuer"), issuer_keypair.public);
         reg.put_credential(cred).unwrap();
-        let revocation = sample_issuer_revocation(id, &issuer_keypair);
+        let principal_keypair = keypair(0x22);
+        let revocation = signed_revocation(id, did("principal"), &principal_keypair);
 
         let err = reg.put_revocation(revocation).unwrap_err();
         match err {

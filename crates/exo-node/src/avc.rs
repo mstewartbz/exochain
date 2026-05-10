@@ -434,6 +434,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_rejects_invalid_issuer_signature_without_storing_credential() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let mut credential = baseline_credential();
+        credential.delegated_intent.purpose = "tampered after signing".into();
+        let forged_id = credential.id().unwrap();
+        let body = serde_json::to_vec(&IssueRequest { credential }).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let registry = state.registry.lock().unwrap();
+        assert_eq!(
+            registry.credential_count(),
+            0,
+            "invalid issuer signatures must not be stored"
+        );
+        assert!(
+            registry.get_credential(&forged_id).is_none(),
+            "forged credential id must remain absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_rejects_unknown_issuer_without_storing_credential() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let mut credential = baseline_credential();
+        credential.issuer_did = Did::new("did:exo:unknown-issuer").unwrap();
+        let forged_id = credential.id().unwrap();
+        let body = serde_json::to_vec(&IssueRequest { credential }).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let registry = state.registry.lock().unwrap();
+        assert_eq!(
+            registry.credential_count(),
+            0,
+            "unresolved issuers must not be stored"
+        );
+        assert!(
+            registry.get_credential(&forged_id).is_none(),
+            "unknown-issuer credential id must remain absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegate_rejects_invalid_child_signature_without_storing_credential() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let mut credential = baseline_credential();
+        credential.parent_avc_id = Some(Hash256::from_bytes([0x42; 32]));
+        credential.delegated_intent.purpose = "tampered delegated purpose".into();
+        let forged_id = credential.id().unwrap();
+        let body = serde_json::to_vec(&DelegateRequest {
+            child_credential: credential,
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/delegate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let registry = state.registry.lock().unwrap();
+        assert_eq!(
+            registry.credential_count(),
+            0,
+            "invalid delegated credentials must not be stored"
+        );
+        assert!(
+            registry.get_credential(&forged_id).is_none(),
+            "forged delegated credential id must remain absent"
+        );
+    }
+
+    #[tokio::test]
     async fn validate_returns_allow_for_valid_credential() {
         let state = fresh_state();
         let app = avc_router(Arc::clone(&state));
