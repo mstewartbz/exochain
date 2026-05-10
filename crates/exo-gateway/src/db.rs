@@ -1434,6 +1434,7 @@ pub async fn load_consent_records(
            AND status = 'active' \
            AND created_at <= $2 \
            AND (expires_at IS NULL OR expires_at > $2) \
+         ORDER BY created_at DESC, subject_did ASC, scope ASC, bailment_type ASC, expires_at ASC NULLS LAST \
          LIMIT $3",
     )
     .bind(actor_did)
@@ -1881,6 +1882,17 @@ mod tests {
                 "{name} must bind the centralized row limit for every fetch_all query"
             );
         }
+    }
+
+    #[test]
+    fn load_consent_records_orders_active_rows_deterministically() {
+        let body = function_source(production_source(), "load_consent_records");
+        assert!(
+            body.contains(
+                "ORDER BY created_at DESC, subject_did ASC, scope ASC, bailment_type ASC, expires_at ASC NULLS LAST"
+            ),
+            "active consent rows must have a deterministic order before adapter selection"
+        );
     }
 
     #[test]

@@ -502,7 +502,9 @@ pub async fn vote_handler(
         is_self_grant: false,
         modifies_kernel: false,
     };
-    let mut ctx = state.build_adjudication_context(&voter_did).await;
+    let mut ctx = state
+        .build_adjudication_context(&voter_did, &gk_action.required_permissions)
+        .await;
     ctx.provenance = Some(provenance);
     match state.kernel.adjudicate(&gk_action, &ctx) {
         Verdict::Permitted => { /* proceed */ }
