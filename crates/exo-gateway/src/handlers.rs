@@ -1561,6 +1561,7 @@ mod tests {
         let decision_id = "decision-r4-audit-route";
         let reader = "did:exo:r4-audit-reader";
         let token = "r4-audit-reader-token";
+        const ACTIVE_TEST_SESSION_EXPIRES_AT_MS: i64 = 4_102_444_800_000;
         sqlx::query("DELETE FROM audit_entries WHERE decision_id = $1")
             .bind(decision_id)
             .execute(&pool)
@@ -1599,7 +1600,7 @@ mod tests {
         .bind(token)
         .bind(reader)
         .bind(1_000_i64)
-        .bind(20_000_i64)
+        .bind(ACTIVE_TEST_SESSION_EXPIRES_AT_MS)
         .execute(&pool)
         .await
         .expect("insert reader session");
