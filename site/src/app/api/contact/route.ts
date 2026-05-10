@@ -24,11 +24,47 @@ type ContactPayload = {
   intendedUse?: string;
 };
 
+type EmailConfig = {
+  apiKey: string;
+  fromEmail: string;
+  toEmail: string;
+};
+
+const RESEND_API_KEY_PREFIX = 're_';
+const CONTACT_DELIVERY_ERROR = 'Unable to send email right now.';
+const EMAIL_TRANSPORT_CONFIG_ERROR = 'Email transport is not configured.';
+
 function clean(value: unknown): string {
   if (typeof value !== 'string') {
     return '';
   }
   return value.trim();
+}
+
+function normalizeSecret(value: string | undefined): string {
+  let normalized = value?.trim() || '';
+  const hasDoubleQuotes = normalized.startsWith('"') && normalized.endsWith('"');
+  const hasSingleQuotes = normalized.startsWith("'") && normalized.endsWith("'");
+
+  if (normalized.length >= 2 && (hasDoubleQuotes || hasSingleQuotes)) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+
+  return normalized;
+}
+
+function getEmailConfig(): EmailConfig | null {
+  const apiKey = normalizeSecret(process.env.RESEND_API_KEY);
+
+  if (!apiKey || !apiKey.startsWith(RESEND_API_KEY_PREFIX)) {
+    return null;
+  }
+
+  return {
+    apiKey,
+    toEmail: clean(process.env.CONTACT_TO_EMAIL) || 'support@exochain.io',
+    fromEmail: clean(process.env.CONTACT_FROM_EMAIL) || 'support@exochain.io',
+  };
 }
 
 function getPayload(data: Record<string, unknown>): ContactPayload {
@@ -70,26 +106,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Name and email are required.' }, { status: 400 });
   }
 
-  const toEmail = process.env.CONTACT_TO_EMAIL || 'support@exochain.io';
-  const fromEmail = process.env.CONTACT_FROM_EMAIL || 'support@exochain.io';
-  const apiKey = process.env.RESEND_API_KEY;
+  const emailConfig = getEmailConfig();
 
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'Email transport is not configured.' },
-      { status: 503 },
-    );
+  if (!emailConfig) {
+    console.error('Contact form email transport is missing a valid Resend API key.');
+    return NextResponse.json({ error: EMAIL_TRANSPORT_CONFIG_ERROR }, { status: 503 });
   }
 
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${emailConfig.apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: fromEmail,
-      to: [toEmail],
+      from: emailConfig.fromEmail,
+      to: [emailConfig.toEmail],
       reply_to: incoming.email,
       subject: `Inquiry from ${incoming.name} (${incoming.email})`,
       text: toText(incoming),
@@ -98,10 +130,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   if (!response.ok) {
     const detail = await response.text();
-    return NextResponse.json(
-      { error: `Failed to send email: ${detail || 'provider error.'}` },
-      { status: 502 },
-    );
+    console.error('Contact form email provider failure.', {
+      status: response.status,
+      detail: detail.slice(0, 500),
+    });
+    return NextResponse.json({ error: CONTACT_DELIVERY_ERROR }, { status: 502 });
   }
 
   return NextResponse.json({ ok: true });
