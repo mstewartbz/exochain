@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
 
-use crate::server::{AppState, auth_boundary_error_response};
+use crate::server::{AppState, AuthenticatedSessionUser, auth_boundary_error_response};
 
 // ── Violation 3 fix: CBOR canonical hashing ──────────────────────────────
 
@@ -180,6 +180,7 @@ fn vote_action_hash(
     request: &VoteRequest,
     voter_did: &Did,
     affected_dids: &[Did],
+    actor_kind: &ActorKind,
 ) -> Result<Hash256, String> {
     let mut affected_dids = affected_dids.iter().map(Did::as_str).collect::<Vec<&str>>();
     affected_dids.sort_unstable();
@@ -191,7 +192,7 @@ fn vote_action_hash(
         decision_id: request.decision_id.as_str(),
         affected_dids,
         choice: vote_choice_label(request.choice),
-        actor_kind: &request.actor_kind,
+        actor_kind,
         rationale: request.rationale.as_deref(),
         timestamp_physical_ms: request.timestamp_physical_ms,
         timestamp_logical: request.timestamp_logical,
@@ -205,9 +206,10 @@ fn vote_action_provenance(
     request: &VoteRequest,
     voter_did: &Did,
     affected_dids: &[Did],
+    actor_kind: &ActorKind,
 ) -> Result<Provenance, String> {
     let timestamp = request.caller_supplied_provenance_timestamp()?;
-    let action_hash = vote_action_hash(request, voter_did, affected_dids)?;
+    let action_hash = vote_action_hash(request, voter_did, affected_dids, actor_kind)?;
     let signature = request.provenance_signature()?;
     Ok(Provenance {
         actor: voter_did.clone(),
@@ -424,6 +426,13 @@ impl VoteRequest {
     }
 }
 
+fn trusted_vote_actor_kind(actor: &AuthenticatedSessionUser) -> Result<ActorKind, String> {
+    if actor.status == "Active" {
+        return Ok(ActorKind::Human);
+    }
+    Err("voter is not eligible".to_owned())
+}
+
 /// Handle a vote submission with conflict-of-interest and authority chain checks.
 pub async fn vote_handler(
     State(state): State<AppState>,
@@ -457,6 +466,19 @@ pub async fn vote_handler(
         )
             .into_response();
     }
+    let actor_kind = match trusted_vote_actor_kind(&actor) {
+        Ok(actor_kind) => actor_kind,
+        Err(e) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "voter is not eligible",
+                    "message": e
+                })),
+            )
+                .into_response();
+        }
+    };
     let affected_dids = match body.caller_supplied_affected_dids() {
         Ok(dids) => dids,
         Err(e) => {
@@ -499,7 +521,7 @@ pub async fn vote_handler(
             .into_response();
     }
 
-    let provenance = match vote_action_provenance(&body, &voter_did, &affected_dids) {
+    let provenance = match vote_action_provenance(&body, &voter_did, &affected_dids, &actor_kind) {
         Ok(provenance) => provenance,
         Err(e) => {
             return (
@@ -703,7 +725,7 @@ pub async fn vote_handler(
     let vote = Vote {
         voter_did: voter_did.clone(),
         choice: body.choice,
-        actor_kind: body.actor_kind,
+        actor_kind: actor_kind.clone(),
         timestamp,
         signature_hash,
     };
@@ -904,8 +926,8 @@ mod tests {
             provenance_public_key: hex::encode(public_key.as_bytes()),
             provenance_signature: String::new(),
         };
-        let action_hash =
-            vote_action_hash(&request, &voter_did, &affected).expect("vote action hash");
+        let action_hash = vote_action_hash(&request, &voter_did, &affected, &actor_kind)
+            .expect("vote action hash");
         let mut provenance = Provenance {
             actor: voter_did,
             timestamp: hlc_timestamp_string(provenance_timestamp),
@@ -1017,36 +1039,88 @@ mod tests {
         ))
         .expect("signed vote request");
 
-        let baseline = vote_action_hash(&request, &voter, &affected).expect("vote action hash");
+        let trusted_actor_kind = ActorKind::Human;
+        let baseline = vote_action_hash(&request, &voter, &affected, &trusted_actor_kind)
+            .expect("vote action hash");
 
         let mut changed_decision = request;
         changed_decision.decision_id = "decision-2".to_owned();
         let changed_decision_hash =
-            vote_action_hash(&changed_decision, &voter, &affected).expect("vote action hash");
+            vote_action_hash(&changed_decision, &voter, &affected, &trusted_actor_kind)
+                .expect("vote action hash");
         assert_ne!(baseline, changed_decision_hash);
 
         let mut changed_choice = changed_decision;
         changed_choice.decision_id = "decision-1".to_owned();
         changed_choice.choice = VoteChoice::Reject;
         let changed_choice_hash =
-            vote_action_hash(&changed_choice, &voter, &affected).expect("vote action hash");
+            vote_action_hash(&changed_choice, &voter, &affected, &trusted_actor_kind)
+                .expect("vote action hash");
         assert_ne!(baseline, changed_choice_hash);
 
         let changed_affected = vec![Did::new("did:exo:tenant-c").expect("valid DID")];
-        let changed_affected_hash =
-            vote_action_hash(&changed_choice, &voter, &changed_affected).expect("vote action hash");
+        let changed_affected_hash = vote_action_hash(
+            &changed_choice,
+            &voter,
+            &changed_affected,
+            &trusted_actor_kind,
+        )
+        .expect("vote action hash");
         assert_ne!(baseline, changed_affected_hash);
 
         let reordered_affected = vec![
             Did::new("did:exo:tenant-a").expect("valid DID"),
             Did::new("did:exo:tenant-b").expect("valid DID"),
         ];
-        let reordered_hash = vote_action_hash(&changed_choice, &voter, &reordered_affected)
-            .expect("vote action hash");
+        let reordered_hash = vote_action_hash(
+            &changed_choice,
+            &voter,
+            &reordered_affected,
+            &trusted_actor_kind,
+        )
+        .expect("vote action hash");
         assert_ne!(baseline, reordered_hash);
         assert_eq!(
             changed_choice_hash, reordered_hash,
             "affected DID ordering must not alter the canonical vote action hash"
+        );
+    }
+
+    #[test]
+    fn vote_action_hash_binds_trusted_actor_kind_not_request_body_actor_kind() {
+        let voter = Did::new("did:exo:alice").expect("valid DID");
+        let affected = vec![Did::new("did:exo:tenant-a").expect("valid DID")];
+        let mut request: VoteRequest = serde_json::from_value(signed_vote_request_json(
+            "did:exo:alice",
+            "decision-1",
+            &["did:exo:tenant-a"],
+            VoteChoice::Approve,
+            ActorKind::Human,
+            exo_core::Timestamp::new(7000, 2),
+        ))
+        .expect("signed vote request");
+
+        let trusted_actor_kind = ActorKind::Human;
+        let baseline = vote_action_hash(&request, &voter, &affected, &trusted_actor_kind)
+            .expect("vote action hash");
+        request.actor_kind = ActorKind::AiAgent {
+            delegation_id: "delegation-1".to_owned(),
+            ceiling_class: decision_forum::decision_object::DecisionClass::Routine,
+        };
+        let client_claim_changed =
+            vote_action_hash(&request, &voter, &affected, &trusted_actor_kind)
+                .expect("vote action hash");
+        let trusted_actor_changed =
+            vote_action_hash(&request, &voter, &affected, &request.actor_kind)
+                .expect("vote action hash");
+
+        assert_eq!(
+            baseline, client_claim_changed,
+            "changing only request.actor_kind must not alter a trusted vote action hash"
+        );
+        assert_ne!(
+            baseline, trusted_actor_changed,
+            "changing the trusted actor kind must alter the vote action hash"
         );
     }
 
@@ -1063,8 +1137,8 @@ mod tests {
             exo_core::Timestamp::new(7000, 2),
         ))
         .expect("signed vote request");
-        let provenance =
-            vote_action_provenance(&request, &voter, &affected).expect("vote provenance");
+        let provenance = vote_action_provenance(&request, &voter, &affected, &ActorKind::Human)
+            .expect("vote provenance");
         let message = exo_gatekeeper::provenance_signature_message(&provenance)
             .expect("canonical provenance payload");
         let public_key = exo_core::PublicKey::from_bytes(
@@ -1560,6 +1634,95 @@ mod tests {
         assert!(
             !vote_handler.contains("let eligible_human_voters = eligible_voters"),
             "vote handler must not assume every registered DID is a human eligible voter"
+        );
+    }
+
+    #[test]
+    fn vote_handler_derives_actor_kind_from_authenticated_session_not_body() {
+        let source = include_str!("handlers.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+        let vote_handler = production
+            .split("pub async fn vote_handler")
+            .nth(1)
+            .expect("vote handler source present")
+            .split("// Add vote")
+            .next()
+            .expect("vote construction block present");
+
+        assert!(
+            production.contains("fn trusted_vote_actor_kind("),
+            "gateway vote actor kind must be derived at the runtime adapter boundary"
+        );
+        assert!(
+            vote_handler.contains("let actor_kind = match trusted_vote_actor_kind(&actor)")
+                && vote_handler.contains("Ok(actor_kind) => actor_kind"),
+            "vote handler must derive vote actor kind from the authenticated session profile"
+        );
+        assert!(
+            vote_handler
+                .contains("vote_action_provenance(&body, &voter_did, &affected_dids, &actor_kind)"),
+            "vote provenance must bind the trusted actor kind, not the caller-supplied body field"
+        );
+        assert!(
+            vote_handler.contains("actor_kind: actor_kind.clone()"),
+            "stored vote actor kind must come from the authenticated session profile"
+        );
+        assert!(
+            !vote_handler.contains("actor_kind: body.actor_kind"),
+            "vote handler must not let clients self-attest human quorum status"
+        );
+    }
+
+    #[test]
+    fn vote_actor_kind_derivation_requires_active_session_user_profile() {
+        let handler_source = include_str!("handlers.rs");
+        let handler_production = handler_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("test module marker present");
+        let server_source = include_str!("server.rs");
+
+        assert!(
+            server_source.contains("pub status: String"),
+            "authenticated session profiles must carry user status to vote eligibility boundaries"
+        );
+        assert!(
+            server_source.contains("status: user.status"),
+            "session user resolution must preserve the status loaded from the users table"
+        );
+        assert!(
+            handler_production.contains("actor.status == \"Active\""),
+            "trusted vote actor-kind derivation must only classify active users as human voters"
+        );
+        assert!(
+            handler_production.contains("\"voter is not eligible\""),
+            "vote handler must fail closed when the authenticated user is not vote-eligible"
+        );
+    }
+
+    #[test]
+    fn trusted_vote_actor_kind_accepts_only_active_session_users() {
+        let actor = AuthenticatedSessionUser {
+            did: Did::new("did:exo:active-voter").expect("valid DID"),
+            tenant_id: "tenant-a".to_owned(),
+            status: "Active".to_owned(),
+        };
+        assert_eq!(
+            trusted_vote_actor_kind(&actor).expect("active user is a human voter"),
+            ActorKind::Human
+        );
+
+        let inactive_actor = AuthenticatedSessionUser {
+            did: Did::new("did:exo:inactive-voter").expect("valid DID"),
+            tenant_id: "tenant-a".to_owned(),
+            status: "Suspended".to_owned(),
+        };
+        assert_eq!(
+            trusted_vote_actor_kind(&inactive_actor).expect_err("inactive user must fail closed"),
+            "voter is not eligible"
         );
     }
 
