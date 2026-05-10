@@ -2182,6 +2182,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attest_rejects_body_key_that_differs_from_authenticated_session_key() {
+        let store = new_shared_store();
+        let app = api_app(store.clone());
+        let attester = td("attest-session-key-a");
+        let target = td("attest-session-key-b");
+        let token = "attest-session-key-token";
+        let session_keypair = test_keypair(20);
+        let (body_public_key, body_secret_key) = keypair(47);
+
+        {
+            let mut s = store.lock().unwrap();
+            s.insert_claim(
+                "e1",
+                &make_claim(&attester, ClaimType::Email, ClaimStatus::Verified, 1_000),
+            )
+            .unwrap();
+            s.insert_session(&make_session_with_public_key(
+                &attester,
+                token,
+                1_000_000,
+                session_keypair.public_key().as_bytes().to_vec(),
+            ))
+            .unwrap();
+        }
+
+        let uri = format!("/api/v1/0dentity/{}/attest", attester.as_str());
+        let resp = post_with_signed_auth(
+            &app,
+            &uri,
+            token,
+            "nonce-body-key-session-mismatch",
+            signed_attest_body(
+                &attester,
+                &target,
+                AttestationType::Identity,
+                None,
+                1_236_500,
+                &body_public_key,
+                &body_secret_key,
+            ),
+            &session_keypair,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let guard = store.lock().unwrap();
+        assert!(guard.get_claims(&target).unwrap().is_empty());
+        assert!(guard.get_attestation(&attester, &target).unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn attest_valid_creates_attestation_201() {
         let store = new_shared_store();
         let app = api_app(store.clone());
@@ -2189,7 +2240,6 @@ mod tests {
         let target = td("attest-ok-b");
         let token = "attest-ok-token";
         let session_keypair = test_keypair(15);
-        let (public_key, secret_key) = keypair(41);
 
         {
             let mut s = store.lock().unwrap();
@@ -2220,8 +2270,8 @@ mod tests {
                 AttestationType::Identity,
                 None,
                 signed_created_ms,
-                &public_key,
-                &secret_key,
+                session_keypair.public_key(),
+                session_keypair.secret_key(),
             ),
             &session_keypair,
         )
@@ -2269,7 +2319,6 @@ mod tests {
         let target = td("attest-replay-b");
         let token = "attest-replay-token";
         let session_keypair = test_keypair(16);
-        let (public_key, secret_key) = keypair(42);
         let nonce = "nonce-replay";
 
         {
@@ -2295,8 +2344,8 @@ mod tests {
             AttestationType::Identity,
             None,
             1_237_000,
-            &public_key,
-            &secret_key,
+            session_keypair.public_key(),
+            session_keypair.secret_key(),
         );
         let first =
             post_with_signed_auth(&app, &uri, token, nonce, body.clone(), &session_keypair).await;
