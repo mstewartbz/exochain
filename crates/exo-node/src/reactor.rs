@@ -733,6 +733,25 @@ fn validate_proposal<R: consensus::PublicKeyResolver>(
     Ok(())
 }
 
+/// Validate external proposal DAG append rules against local persistent state.
+fn validate_external_proposal_append(store: &SqliteDagStore, node: &DagNode) -> Result<(), String> {
+    for parent_hash in &node.parents {
+        let parent = store
+            .get_sync(parent_hash)
+            .map_err(|e| format!("load proposal parent {parent_hash}: {e}"))?
+            .ok_or_else(|| format!("proposal parent {parent_hash} is absent from local DAG"))?;
+
+        if node.timestamp <= parent.timestamp {
+            return Err(format!(
+                "proposal node timestamp {:?} must exceed parent {} timestamp {:?}",
+                node.timestamp, parent_hash, parent.timestamp
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate a consensus vote before processing.
 ///
 /// Checks: voter is a known validator and the signature verifies against the
@@ -890,6 +909,7 @@ async fn handle_proposal(
     if let Err(e) = with_store_blocking(Arc::clone(store), "handle_proposal_put", {
         let node = msg.node.clone();
         move |store| {
+            validate_external_proposal_append(store, &node)?;
             store
                 .put_sync(node)
                 .map_err(|e| format!("store proposed node: {e}"))
@@ -1639,6 +1659,13 @@ mod tests {
 
     fn signature_is_invalid_error(err: &str) -> bool {
         err.contains("invalid signature") || err.contains("empty") || err.contains("zero-byte")
+    }
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start_idx = source.find(start).expect("source start marker");
+        let rest = &source[start_idx..];
+        let end_idx = rest.find(end).expect("source end marker");
+        &rest[..end_idx]
     }
 
     fn make_validators(n: usize) -> BTreeSet<Did> {
@@ -2847,6 +2874,103 @@ mod tests {
         append(&mut dag, &[], payload, &did, &*sf, &mut clock).unwrap()
     }
 
+    fn make_signed_external_node_for_payload(
+        parents: Vec<Hash256>,
+        payload: &[u8],
+        timestamp: Timestamp,
+    ) -> exo_dag::dag::DagNode {
+        let creator = Did::new("did:exo:v0").unwrap();
+        let payload_hash = Hash256::digest(payload);
+        let hash =
+            exo_dag::dag::compute_node_hash(&parents, &payload_hash, &creator, &timestamp).unwrap();
+        let signature = make_sign_fn()(hash.as_bytes());
+        exo_dag::dag::DagNode {
+            hash,
+            parents,
+            payload_hash,
+            creator_did: creator,
+            timestamp,
+            signature,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_proposal_rejects_missing_parent_before_store_or_vote() {
+        let validators = make_single_validator();
+        let proposer = Did::new("did:exo:v0").unwrap();
+        let config = config_for(
+            Did::new("did:exo:observer").unwrap(),
+            false,
+            validators.clone(),
+        );
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let payload = validator_change_payload_for_test();
+        let missing_parent = Hash256::digest(b"missing parent");
+        let node = make_signed_external_node_for_payload(
+            vec![missing_parent],
+            &payload,
+            Timestamp::new(10, 0),
+        );
+        let msg = proposal_msg_for_payload(proposer, 0, 0, node.clone(), payload);
+
+        handle_proposal(&state, &store, &net_handle, &reactor_tx, msg).await;
+
+        assert!(
+            !store.lock().unwrap().contains_sync(&node.hash).unwrap(),
+            "network proposals must not store nodes whose parents are absent"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "network proposals rejected at the DAG append boundary must not emit votes"
+        );
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "network proposals rejected at the DAG append boundary must not emit commit events"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_proposal_rejects_parent_causality_violation_before_store_or_vote() {
+        let validators = make_single_validator();
+        let proposer = Did::new("did:exo:v0").unwrap();
+        let config = config_for(
+            Did::new("did:exo:observer").unwrap(),
+            false,
+            validators.clone(),
+        );
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let parent_payload = validator_remove_payload_for_test();
+        let parent = make_node_for_payload(&parent_payload);
+        store.lock().unwrap().put_sync(parent.clone()).unwrap();
+        let payload = validator_change_payload_for_test();
+        let node =
+            make_signed_external_node_for_payload(vec![parent.hash], &payload, parent.timestamp);
+        let msg = proposal_msg_for_payload(proposer, 0, 0, node.clone(), payload);
+
+        handle_proposal(&state, &store, &net_handle, &reactor_tx, msg).await;
+
+        assert!(
+            !store.lock().unwrap().contains_sync(&node.hash).unwrap(),
+            "network proposals must not store nodes whose timestamp does not exceed every parent"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "network proposals rejected at the DAG append boundary must not emit votes"
+        );
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "network proposals rejected at the DAG append boundary must not emit commit events"
+        );
+    }
+
     #[test]
     fn validate_proposal_rejects_zero_byte_signature() {
         let validators = make_validators(1);
@@ -2931,6 +3055,27 @@ mod tests {
         assert!(
             err.contains("proposal DAG node creator signature invalid"),
             "network proposals must reject forged attached DAG nodes, got: {err}"
+        );
+    }
+
+    #[test]
+    fn handle_proposal_validates_external_append_before_store() {
+        let source = include_str!("reactor.rs");
+        let handler = source_between(
+            source,
+            "async fn handle_proposal",
+            "/// Handle a consensus vote from the network.",
+        );
+        let append_validation = handler
+            .find("validate_external_proposal_append")
+            .expect("network proposal handler must validate external DAG append rules");
+        let store_write = handler
+            .find(".put_sync(node)")
+            .expect("network proposal handler must persist the proposed node");
+
+        assert!(
+            append_validation < store_write,
+            "network proposals must validate parent existence and HLC causality before storage"
         );
     }
 
