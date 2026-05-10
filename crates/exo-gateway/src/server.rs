@@ -801,6 +801,7 @@ fn validate_conflict_declaration(
 const GATEWAY_SERVER_METADATA_INITIATIVE: &str =
     "Initiatives/fix-gateway-server-deterministic-metadata.md";
 const GATEWAY_SESSION_LOGIN_DOMAIN: &str = "exo.gateway.session_login.v1";
+const MAX_GATEWAY_SESSION_TTL_MS: i64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SessionIssueMetadata {
@@ -817,11 +818,39 @@ impl SessionIssueMetadata {
                 "session expiresAt must be greater than caller-supplied createdAt",
             ));
         }
+        let requested_ttl_ms = expires_at
+            .checked_sub(created_at)
+            .ok_or_else(|| metadata_error("session expiresAt overflows createdAt delta"))?;
+        if requested_ttl_ms > MAX_GATEWAY_SESSION_TTL_MS {
+            return Err(metadata_error(
+                "session expiresAt must be within one hour of session creation",
+            ));
+        }
         Ok(Self {
             created_at,
             expires_at,
         })
     }
+}
+
+fn validate_session_expires_at_within_gateway_ttl(
+    expires_at: i64,
+    trusted_gateway_time_ms: i64,
+) -> Result<()> {
+    if expires_at <= trusted_gateway_time_ms {
+        return Err(metadata_error(
+            "session expiresAt must be greater than trusted gateway validation time",
+        ));
+    }
+    let max_expires_at = trusted_gateway_time_ms
+        .checked_add(MAX_GATEWAY_SESSION_TTL_MS)
+        .ok_or_else(|| metadata_error("trusted gateway session TTL upper bound overflow"))?;
+    if expires_at > max_expires_at {
+        return Err(metadata_error(
+            "session expiresAt must be within one hour of trusted gateway time",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2676,6 +2705,14 @@ async fn handle_auth_login(
                 .into_response();
         }
     }
+    let issue_at_ms = match trusted_session_validation_time_ms(&state) {
+        Ok(issue_at_ms) => issue_at_ms,
+        Err(e) => return internal_error_response(e, "session login issue time", "login failed"),
+    };
+    if let Err(e) = validate_session_expires_at_within_gateway_ttl(metadata.expires_at, issue_at_ms)
+    {
+        return metadata_error_response(e);
+    }
     let token = match generate_session_token() {
         Ok(token) => token,
         Err(e) => return internal_error_response(e, "session token generation", "login failed"),
@@ -2758,10 +2795,10 @@ async fn handle_auth_refresh(
             );
         }
     };
-    if metadata.expires_at <= validation_at_ms {
-        return metadata_error_response(metadata_error(
-            "session refresh expiresAt must be greater than trusted gateway validation time",
-        ));
+    if let Err(e) =
+        validate_session_expires_at_within_gateway_ttl(metadata.expires_at, validation_at_ms)
+    {
+        return metadata_error_response(e);
     }
     match sqlx::query(
         "UPDATE sessions SET expires_at = $1 \
@@ -7119,6 +7156,85 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn auth_login_rejects_session_expiry_beyond_trusted_gateway_ttl() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let did = "did:exo:login-alice";
+        sqlx::query("DELETE FROM sessions WHERE actor_did = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (registry, sk) = signing_registry();
+        let did_key = Did::new(did).unwrap();
+        let doc = registry
+            .read()
+            .unwrap()
+            .resolve(&did_key)
+            .expect("signing DID document")
+            .clone();
+        db::insert_did_document(&pool, &doc)
+            .await
+            .expect("persist signing DID document");
+
+        let gateway_now_ms = 10_000_u64;
+        let gateway_now_ms_i64 = 10_000_i64;
+        let metadata = SessionIssueMetadata {
+            created_at: gateway_now_ms_i64,
+            expires_at: gateway_now_ms_i64 + 3_600_001,
+        };
+        let timestamp = Timestamp::new(gateway_now_ms, 0);
+        let signature = sign(
+            &session_login_auth_signing_payload(did, &metadata, timestamp, timestamp).unwrap(),
+            &sk,
+        );
+        let body = serde_json::json!({
+            "did": did,
+            "createdAt": metadata.created_at,
+            "expiresAt": metadata.expires_at,
+            "authTimestampPhysicalMs": timestamp.physical_ms,
+            "authTimestampLogical": timestamp.logical,
+            "observedAt": timestamp.physical_ms,
+            "observedAtLogical": timestamp.logical,
+            "signature": hex::encode(signature.to_bytes())
+        });
+
+        let response = handle_auth_login(
+            State(db_state_at(
+                pool.clone(),
+                Arc::new(RwLock::new(LocalDidRegistry::new())),
+                gateway_now_ms,
+            )),
+            Json(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let session_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE actor_did = $1")
+                .bind(did)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(session_count, 0);
+
+        sqlx::query("DELETE FROM did_documents WHERE did = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn session_login_proof_rejects_missing_signature() {
         let body = serde_json::json!({
@@ -7439,6 +7555,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_refresh_rejects_session_expiry_beyond_trusted_gateway_ttl() {
+        let pool = match gateway_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let token = "auth-refresh-ttl-token";
+        let did = "did:exo:auth-refresh-ttl";
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, actor_did, created_at, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(token)
+        .bind(did)
+        .bind(10_000_i64)
+        .bind(50_000_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = build_router(db_state_at(
+            pool.clone(),
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+            10_000,
+        ));
+        let body = serde_json::to_string(&serde_json::json!({
+            "expiresAt": 3_610_001
+        }))
+        .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/refresh")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let stored_expires_at: i64 =
+            sqlx::query_scalar("SELECT expires_at FROM sessions WHERE token = $1")
+                .bind(token)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_expires_at, 50_000);
+
+        sqlx::query("DELETE FROM sessions WHERE token = $1")
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn auth_logout_without_db_returns_503() {
         let app = build_router(state());
         let resp = app
@@ -7513,6 +7692,20 @@ mod tests {
     }
 
     #[test]
+    fn session_issue_metadata_rejects_expiry_beyond_one_hour() {
+        let body = serde_json::json!({
+            "did": "did:exo:alice",
+            "createdAt": 10_000,
+            "expiresAt": 3_610_001
+        });
+        let err = SessionIssueMetadata::from_body(&body).unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::BadRequest(reason) if reason.contains("one hour")),
+            "expected one-hour session TTL refusal, got {err}"
+        );
+    }
+
+    #[test]
     fn session_refresh_metadata_requires_expires_at() {
         let body = serde_json::json!({
             "observedAt": 4_600_000
@@ -7581,6 +7774,25 @@ mod tests {
         assert!(
             !refresh_handler.contains(".bind(metadata.observed_at)"),
             "session refresh update must not compare expiry against caller body time"
+        );
+    }
+
+    #[test]
+    fn auth_refresh_enforces_one_hour_ttl_from_trusted_gateway_time() {
+        let source = include_str!("server.rs");
+        let refresh_handler = source_between(
+            source,
+            "async fn handle_auth_refresh",
+            "/// POST /api/v1/auth/logout",
+        );
+
+        assert!(
+            refresh_handler.contains("validate_session_expires_at_within_gateway_ttl"),
+            "session refresh must cap caller-supplied expiresAt using trusted gateway time"
+        );
+        assert!(
+            refresh_handler.contains("validation_at_ms"),
+            "session refresh TTL cap must be computed from gateway validation time"
         );
     }
 
