@@ -26,7 +26,7 @@
 //! | Sentinel | Checks | Interval |
 //! |----------|--------|----------|
 //! | Liveness | Consensus round is advancing | 30s |
-//! | QuorumHealth | Validator count >= 4 (BFT minimum) | 30s |
+//! | QuorumHealth | Validator count >= 4, or explicit Node 0 bootstrap | 30s |
 //! | ReceiptIntegrity | Recent receipts pass `verify_hash()` | 60s |
 //! | StoreConsistency | Committed height matches certificate count | 60s |
 //! | ScoreIntegrity | 0dentity scores are deterministically reproducible | 60s |
@@ -129,6 +129,8 @@ pub type AlertReceiver = mpsc::Receiver<SentinelAlert>;
 
 type PreviousRound = Option<u64>;
 
+const BFT_MIN_VALIDATORS: usize = 4;
+
 fn sentinel_now_ms() -> Result<u64, String> {
     static SENTINEL_CLOCK: OnceLock<Mutex<HybridClock>> = OnceLock::new();
     let clock = SENTINEL_CLOCK.get_or_init(|| Mutex::new(HybridClock::new()));
@@ -208,10 +210,21 @@ fn check_liveness(reactor: &SharedReactorState, prev_round: &mut PreviousRound) 
     }
 }
 
-/// Check quorum health — minimum 4 validators for BFT safety.
+/// Check quorum health.
+///
+/// A full BFT validator set requires at least 4 validators. The documented
+/// Railway Node 0 deployment is an explicit single-validator genesis bootstrap
+/// state; it is operationally healthy but not BFT fault tolerant until quorum
+/// expansion completes.
 fn check_quorum_health(reactor: &SharedReactorState) -> SentinelStatus {
-    let validator_count = match reactor.lock() {
-        Ok(s) => s.consensus.config.validators.len(),
+    let (validator_count, node_zero_bootstrap) = match reactor.lock() {
+        Ok(s) => {
+            let validator_count = s.consensus.config.validators.len();
+            let node_zero_bootstrap = s.is_validator
+                && validator_count == 1
+                && s.consensus.config.validators.contains(&s.node_did);
+            (validator_count, node_zero_bootstrap)
+        }
         Err(_) => {
             tracing::error!("Reactor state mutex poisoned in quorum sentinel");
             return SentinelStatus {
@@ -223,11 +236,15 @@ fn check_quorum_health(reactor: &SharedReactorState) -> SentinelStatus {
         }
     };
 
-    let healthy = validator_count >= 4;
-    let message = if healthy {
-        format!("{validator_count} validators — quorum healthy")
+    let healthy = validator_count >= BFT_MIN_VALIDATORS || node_zero_bootstrap;
+    let message = if validator_count >= BFT_MIN_VALIDATORS {
+        format!("{validator_count} validators - BFT quorum healthy")
+    } else if node_zero_bootstrap {
+        format!(
+            "Node 0 genesis bootstrap: {validator_count} validator - not BFT fault tolerant until at least {BFT_MIN_VALIDATORS} validators join"
+        )
     } else {
-        format!("{validator_count} validators — BELOW BFT MINIMUM (need >= 4)")
+        format!("{validator_count} validators - BELOW BFT MINIMUM (need >= {BFT_MIN_VALIDATORS})")
     };
 
     SentinelStatus {
@@ -1364,6 +1381,28 @@ mod tests {
         assert!(!status.healthy);
         assert_eq!(status.check, SentinelCheck::StoreConsistency);
         assert!(status.message.contains("committed.height"));
+    }
+
+    #[test]
+    fn quorum_health_accepts_documented_node_zero_bootstrap_without_bft_claim() {
+        let node_did = Did::new("did:exo:v0").unwrap();
+        let validators: BTreeSet<Did> = [node_did.clone()].into_iter().collect();
+        let config = ReactorConfig {
+            node_did,
+            is_validator: true,
+            validators,
+            validator_public_keys: std::collections::BTreeMap::new(),
+            round_timeout_ms: 5000,
+        };
+        let reactor = create_reactor_state(&config, make_sign_fn(), None);
+
+        let status = check_quorum_health(&reactor);
+
+        assert!(status.healthy);
+        assert_eq!(status.check, SentinelCheck::QuorumHealth);
+        assert!(status.message.contains("Node 0 genesis bootstrap"));
+        assert!(status.message.contains("not BFT fault tolerant"));
+        assert!(!status.message.contains("quorum healthy"));
     }
 
     #[tokio::test]
