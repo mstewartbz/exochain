@@ -16,34 +16,104 @@
 
 import { IntPageHead } from '@/components/content/IntPageHead';
 import { Card, CardBody, CardHeader } from '@/components/ui/Card';
+import { DataTable, type Column } from '@/components/ui/DataTable';
 import { Pill } from '@/components/ui/Pill';
+import {
+  listRecentContactSubmissions,
+  type ContactSubmission,
+} from '@/lib/contact-submissions';
 
 export const metadata = { title: 'Support queue' };
+export const dynamic = 'force-dynamic';
 
-const TICKETS = [
-  { id: 't_0102', subject: 'Webhook signature header missing on retries', org: 'Aperture', severity: 'P2', sla: '4h' },
-  { id: 't_0101', subject: 'AVC validation reason code clarification', org: 'Northwind', severity: 'P3', sla: '2d' }
+const COLUMNS: Column<ContactSubmission>[] = [
+  {
+    key: 'submittedAt',
+    header: 'Submitted',
+    width: '180px',
+    render: (row) => <span className="font-mono text-xs">{row.submittedAt}</span>,
+  },
+  {
+    key: 'name',
+    header: 'Contact',
+    width: '260px',
+    render: (row) => (
+      <div>
+        <div className="font-medium">{row.name}</div>
+        <div className="font-mono text-xs text-ink/60 dark:text-vellum-soft/60">{row.email}</div>
+      </div>
+    ),
+  },
+  {
+    key: 'organization',
+    header: 'Organization',
+    width: '180px',
+  },
+  {
+    key: 'intendedUse',
+    header: 'Intended use',
+    render: (row) => (
+      <div>
+        <div>{row.intendedUse || '—'}</div>
+        <div className="mt-1 font-mono text-xs text-ink/50 dark:text-vellum-soft/50">
+          {row.role || 'No role selected'}
+        </div>
+      </div>
+    ),
+  },
+  {
+    key: 'notificationStatus',
+    header: 'Email',
+    width: '140px',
+    render: (row) => (
+      <Pill tone={row.notificationStatus === 'sent' ? 'signal' : 'alert'}>
+        {row.notificationStatus}
+      </Pill>
+    ),
+  },
 ];
 
-export default function Page() {
+async function getSubmissions(): Promise<{
+  rows: ContactSubmission[];
+  error: string;
+}> {
+  try {
+    return { rows: await listRecentContactSubmissions(), error: '' };
+  } catch (error) {
+    console.error('Unable to load contact submissions.', { error });
+    return {
+      rows: [],
+      error: 'Contact submission database is not reachable.',
+    };
+  }
+}
+
+export default async function Page() {
+  const { rows, error } = await getSubmissions();
+
   return (
     <>
       <IntPageHead
         eyebrow="Intranet · support"
         title="Support queue"
-        lede="Open tickets with owner and SLA."
+        lede="Recent public contact inquiries and support handoffs."
       />
-      <div className="grid md:grid-cols-2 gap-5">
-        {TICKETS.map(t => (
-          <Card key={t.id}>
-            <CardHeader title={t.subject} right={<Pill tone="signal">{t.severity}</Pill>} />
-            <CardBody className="text-sm">
-              <div className="font-mono text-xs">{t.id} · {t.org}</div>
-              <div className="mt-1">SLA <span className="font-mono">{t.sla}</span></div>
-            </CardBody>
-          </Card>
-        ))}
-      </div>
+      <Card>
+        <CardHeader title="Public contact submissions" />
+        <CardBody>
+          {error ? (
+            <div className="border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+              {error}
+            </div>
+          ) : (
+            <DataTable
+              columns={COLUMNS}
+              rows={rows}
+              empty="No contact submissions are queued."
+            />
+          )}
+        </CardBody>
+      </Card>
     </>
   );
 }
