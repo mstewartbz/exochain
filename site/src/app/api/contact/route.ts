@@ -15,6 +15,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  createContactSubmission,
+  updateContactSubmissionNotification,
+} from '@/lib/contact-submissions';
 
 type ContactPayload = {
   name: string;
@@ -31,8 +35,9 @@ type EmailConfig = {
 };
 
 const RESEND_API_KEY_PREFIX = 're_';
-const CONTACT_DELIVERY_ERROR = 'Unable to send email right now.';
-const EMAIL_TRANSPORT_CONFIG_ERROR = 'Email transport is not configured.';
+const CONTACT_QUEUE_ERROR = 'Unable to queue inquiry right now.';
+
+export const runtime = 'nodejs';
 
 function clean(value: unknown): string {
   if (typeof value !== 'string') {
@@ -90,6 +95,54 @@ function toText(payload: ContactPayload): string {
     .join('\n');
 }
 
+async function notifySupport(
+  submissionId: string,
+  payload: ContactPayload,
+): Promise<void> {
+  const emailConfig = getEmailConfig();
+
+  if (!emailConfig) {
+    console.error('Contact form email transport is missing a valid Resend API key.', {
+      submissionId,
+    });
+    await updateContactSubmissionNotification(submissionId, 'not_configured', 'missing valid Resend API key');
+    return;
+  }
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${emailConfig.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: emailConfig.fromEmail,
+      to: [emailConfig.toEmail],
+      reply_to: payload.email,
+      subject: `Inquiry from ${payload.name} (${payload.email})`,
+      text: toText(payload),
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    const sanitizedDetail = detail.slice(0, 500);
+    console.error('Contact form email provider failure.', {
+      submissionId,
+      status: response.status,
+      detail: sanitizedDetail,
+    });
+    await updateContactSubmissionNotification(
+      submissionId,
+      'failed',
+      `provider status ${response.status}: ${sanitizedDetail}`,
+    );
+    return;
+  }
+
+  await updateContactSubmissionNotification(submissionId, 'sent', '');
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let incoming: ContactPayload;
   try {
@@ -106,35 +159,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Name and email are required.' }, { status: 400 });
   }
 
-  const emailConfig = getEmailConfig();
-
-  if (!emailConfig) {
-    console.error('Contact form email transport is missing a valid Resend API key.');
-    return NextResponse.json({ error: EMAIL_TRANSPORT_CONFIG_ERROR }, { status: 503 });
+  let submissionId: string;
+  try {
+    const submission = await createContactSubmission({
+      name: incoming.name,
+      email: incoming.email,
+      organization: incoming.organization || '',
+      role: incoming.role || '',
+      intendedUse: incoming.intendedUse || '',
+      userAgent: clean(request.headers.get('user-agent')),
+      forwardedFor: clean(request.headers.get('x-forwarded-for')),
+    });
+    submissionId = submission.id;
+  } catch (error) {
+    console.error('Contact form database queue failure.', { error });
+    return NextResponse.json({ error: CONTACT_QUEUE_ERROR }, { status: 503 });
   }
 
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${emailConfig.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: emailConfig.fromEmail,
-      to: [emailConfig.toEmail],
-      reply_to: incoming.email,
-      subject: `Inquiry from ${incoming.name} (${incoming.email})`,
-      text: toText(incoming),
-    }),
-  });
-
-  if (!response.ok) {
-    const detail = await response.text();
-    console.error('Contact form email provider failure.', {
-      status: response.status,
-      detail: detail.slice(0, 500),
+  try {
+    await notifySupport(submissionId, incoming);
+  } catch (error) {
+    console.error('Contact form notification status update failed.', {
+      submissionId,
+      error,
     });
-    return NextResponse.json({ error: CONTACT_DELIVERY_ERROR }, { status: 502 });
   }
 
   return NextResponse.json({ ok: true });
