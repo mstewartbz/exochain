@@ -44,11 +44,10 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-#[cfg(any(test, feature = "unaudited-admin-governance-shortcut"))]
-use exo_core::types::Did;
+use chrono::{DateTime, Utc};
 #[cfg(feature = "unaudited-admin-governance-shortcut")]
 use exo_core::types::PublicKey;
-use exo_core::types::{Hash256, TrustReceipt};
+use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt};
 use serde::{Deserialize, Serialize};
 use tower::limit::ConcurrencyLimitLayer;
 
@@ -79,6 +78,8 @@ pub struct NodeApiState {
     pub reactor_state: SharedReactorState,
     pub store: Arc<Mutex<SqliteDagStore>>,
     pub net_handle: NetworkHandle,
+    pub node_did: Did,
+    pub sign_fn: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +154,30 @@ pub struct ReceiptQuery {
     pub actor: Option<String>,
     /// Maximum number of receipts to return (default 50, max 500).
     pub limit: Option<u32>,
+}
+
+/// Request body for `POST /api/v1/receipts`.
+#[derive(Debug, Deserialize)]
+pub struct CrossCheckedReceiptAnchorRequest {
+    pub source: String,
+    pub idempotency_key: String,
+    pub external_event_id: String,
+    pub external_receipt_hash: String,
+    pub payload_hash: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub event_type: String,
+    pub emitted_at: DateTime<Utc>,
+    pub public_proof_url: String,
+}
+
+/// Response from a successful CrossChecked receipt anchor.
+#[derive(Debug, Serialize)]
+pub struct CrossCheckedReceiptAnchorResponse {
+    pub status: String,
+    pub exochain_receipt_hash: String,
+    pub anchor_hash: String,
+    pub verified_at: DateTime<Utc>,
 }
 
 /// Response for `GET /api/v1/governance/status`.
@@ -277,6 +302,29 @@ async fn load_receipts_by_actor(
     .map_err(|e| {
         tracing::error!(err = %e, "Receipt list blocking task failed");
         internal_error_response("Receipt list failed")
+    })?
+}
+
+async fn save_crosschecked_receipt(
+    store: Arc<Mutex<SqliteDagStore>>,
+    receipt: TrustReceipt,
+) -> Result<(), (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let mut st = store.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Store unavailable".to_string(),
+            )
+        })?;
+        st.save_receipt(&receipt).map_err(|e| {
+            tracing::error!(err = %e, "CrossChecked receipt anchor failed");
+            internal_error_response("CrossChecked receipt anchor failed")
+        })
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(err = %e, "CrossChecked receipt anchor blocking task failed");
+        internal_error_response("CrossChecked receipt anchor failed")
     })?
 }
 
@@ -567,6 +615,102 @@ async fn handle_validator_change(
 // Trust receipt handlers
 // ---------------------------------------------------------------------------
 
+fn parse_hash256_hex(value: &str, field: &str) -> Result<Hash256, (StatusCode, String)> {
+    let bytes = hex::decode(value)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{field} must be hex: {e}")))?;
+    if bytes.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be 32 bytes, got {}", bytes.len()),
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(Hash256::from_bytes(arr))
+}
+
+/// `POST /api/v1/receipts` — anchor a CrossChecked receipt in the Exochain node.
+async fn handle_crosschecked_receipt_anchor(
+    State(api): State<Arc<NodeApiState>>,
+    Json(req): Json<CrossCheckedReceiptAnchorRequest>,
+) -> Result<Json<CrossCheckedReceiptAnchorResponse>, (StatusCode, String)> {
+    if req.source != "crosschecked" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "source must be crosschecked".to_string(),
+        ));
+    }
+    for (field, value) in [
+        ("idempotency_key", req.idempotency_key.as_str()),
+        ("external_event_id", req.external_event_id.as_str()),
+        ("tenant_id", req.tenant_id.as_str()),
+        ("workspace_id", req.workspace_id.as_str()),
+        ("event_type", req.event_type.as_str()),
+        ("public_proof_url", req.public_proof_url.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, format!("{field} is required")));
+        }
+    }
+    let action_hash = parse_hash256_hex(&req.external_receipt_hash, "external_receipt_hash")?;
+    let _payload_hash = parse_hash256_hex(&req.payload_hash, "payload_hash")?;
+    let authority_chain_hash = Hash256::digest(
+        format!(
+            "source={};idempotency_key={};external_event_id={};external_receipt_hash={};payload_hash={};tenant_id={};workspace_id={};event_type={};emitted_at={};public_proof_url={}",
+            req.source,
+            req.idempotency_key,
+            req.external_event_id,
+            req.external_receipt_hash,
+            req.payload_hash,
+            req.tenant_id,
+            req.workspace_id,
+            req.event_type,
+            req.emitted_at.to_rfc3339(),
+            req.public_proof_url
+        )
+        .as_bytes(),
+    );
+    let physical_ms = req.emitted_at.timestamp_millis();
+    let physical_ms = u64::try_from(physical_ms).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "emitted_at must be at or after the Unix epoch".to_string(),
+        )
+    })?;
+    let receipt = TrustReceipt::new(
+        api.node_did.clone(),
+        authority_chain_hash,
+        None,
+        "crosschecked.receipt.anchor.v1".to_string(),
+        action_hash,
+        ReceiptOutcome::Executed,
+        Timestamp {
+            physical_ms,
+            logical: 0,
+        },
+        &*api.sign_fn,
+    )
+    .map_err(|e| {
+        tracing::error!(err = %e, "CrossChecked trust receipt creation failed");
+        internal_error_response("CrossChecked receipt anchor failed")
+    })?;
+    let receipt_hash = receipt.receipt_hash;
+    save_crosschecked_receipt(Arc::clone(&api.store), receipt).await?;
+    let loaded = load_receipt_by_hash(Arc::clone(&api.store), receipt_hash).await?;
+    if loaded.is_none() {
+        return Err(internal_error_response(
+            "CrossChecked receipt anchor read-after-write failed",
+        ));
+    }
+    let hash_hex = hex::encode(receipt_hash.0);
+    Ok(Json(CrossCheckedReceiptAnchorResponse {
+        status: "anchored".to_string(),
+        exochain_receipt_hash: hash_hex.clone(),
+        anchor_hash: hash_hex,
+        verified_at: req.emitted_at,
+    }))
+}
+
 /// `GET /api/v1/receipts/:hash` — look up a trust receipt by content hash.
 async fn handle_receipt_by_hash(
     State(api): State<Arc<NodeApiState>>,
@@ -628,7 +772,10 @@ pub fn governance_router(state: Arc<NodeApiState>) -> Router {
             post(handle_validator_change),
         )
         .route("/api/v1/receipts/:hash", get(handle_receipt_by_hash))
-        .route("/api/v1/receipts", get(handle_receipts_list))
+        .route(
+            "/api/v1/receipts",
+            get(handle_receipts_list).post(handle_crosschecked_receipt_anchor),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_GOVERNANCE_API_BODY_BYTES))
         .layer(ConcurrencyLimitLayer::new(
@@ -691,7 +838,8 @@ mod tests {
             round_timeout_ms: 5000,
         };
 
-        let reactor_state = create_reactor_state(&config, make_sign_fn(), None);
+        let sign_fn = make_sign_fn();
+        let reactor_state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(SqliteDagStore::open(dir.path()).unwrap()));
 
@@ -709,6 +857,8 @@ mod tests {
             reactor_state,
             store,
             net_handle,
+            node_did: Did::new("did:exo:v0").unwrap(),
+            sign_fn,
         })
     }
 
@@ -1196,6 +1346,62 @@ mod tests {
         assert_eq!(result["actor_did"], "did:exo:test-actor");
         assert_eq!(result["action_type"], "dag.commit");
         assert_eq!(result["outcome"], "executed");
+    }
+
+    #[tokio::test]
+    async fn crosschecked_receipt_anchor_writes_readable_trust_receipt() {
+        let state = test_api_state();
+        let app = governance_router(Arc::clone(&state));
+        let external_hash = "11".repeat(32);
+        let payload_hash = "22".repeat(32);
+        let body = serde_json::json!({
+            "source": "crosschecked",
+            "idempotency_key": "crosschecked:test-event",
+            "external_event_id": "00000000-0000-0000-0000-000000000001",
+            "external_receipt_hash": external_hash,
+            "payload_hash": payload_hash,
+            "tenant_id": "00000000-0000-0000-0000-000000000101",
+            "workspace_id": "00000000-0000-0000-0000-000000000102",
+            "event_type": "synthetic.receipt.check",
+            "emitted_at": "2026-05-12T12:00:00Z",
+            "public_proof_url": "https://crosschecked.ai/verify?receipt=00000000-0000-0000-0000-000000000001"
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/receipts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["status"], "anchored");
+        let receipt_hash = result["exochain_receipt_hash"].as_str().unwrap();
+
+        let app = governance_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/api/v1/receipts/{receipt_hash}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["action_type"], "crosschecked.receipt.anchor.v1");
+        assert_eq!(result["action_hash"], external_hash);
+        assert_ne!(result["authority_chain_hash"], "00".repeat(32));
     }
 
     #[tokio::test]

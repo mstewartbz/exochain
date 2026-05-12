@@ -456,7 +456,7 @@ async fn start_node(
     };
 
     let reactor_state =
-        reactor::create_reactor_state(&reactor_config, sign_fn, Some(&shared_store));
+        reactor::create_reactor_state(&reactor_config, Arc::clone(&sign_fn), Some(&shared_store));
     let (reactor_tx, mut reactor_rx) = mpsc::channel::<ReactorEvent>(256);
     let (reactor_event_tx, reactor_event_rx) = mpsc::channel::<NetworkEvent>(256);
 
@@ -770,6 +770,8 @@ async fn start_node(
         reactor_state: Arc::clone(&reactor_state),
         store: Arc::clone(&shared_store),
         net_handle: net_handle.clone(),
+        node_did: node_identity.did.clone(),
+        sign_fn: Arc::clone(&sign_fn),
     });
     let governance_router = api::governance_router(api_state);
 
@@ -780,10 +782,16 @@ async fn start_node(
     // governance-write credential. The full token is written only to a file
     // with restrictive permissions (owner read/write only, 0600) under the
     // node's data directory.
-    let admin_token = auth::generate_admin_token().map_err(|e| {
-        tracing::error!(err = %e, "Failed to generate admin token — aborting startup");
-        anyhow::anyhow!("admin token entropy failed: {e}")
-    })?;
+    let admin_token = match std::env::var("EXOCHAIN_ADMIN_BEARER_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(token) => zeroize::Zeroizing::new(token),
+        None => auth::generate_admin_token().map_err(|e| {
+            tracing::error!(err = %e, "Failed to generate admin token — aborting startup");
+            anyhow::anyhow!("admin token entropy failed: {e}")
+        })?,
+    };
     let token_path = data_dir.join("admin_token");
     if let Err(e) = auth::write_admin_token_file(&token_path, admin_token.as_str()) {
         tracing::error!(
