@@ -251,6 +251,10 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     border-color: var(--accent-dim);
   }
 
+  .validator-item-placeholder {
+    color: var(--text-dim);
+  }
+
   .validator-dot {
     width: 6px;
     height: 6px;
@@ -345,6 +349,16 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
   .update-dot.flash { opacity: 1; }
 
+  .dashboard-meta {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+
+  .dashboard-node-did {
+    user-select: all;
+  }
+
   /* Responsive */
   @media (max-width: 640px) {
     header { padding: 1rem; }
@@ -397,14 +411,14 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         <span class="quorum-badge" id="quorum-info">—</span>
       </div>
       <ul class="validator-list" id="validator-list">
-        <li class="validator-item"><span style="color:var(--text-dim)">loading...</span></li>
+        <li class="validator-item validator-item-placeholder"><span>loading...</span></li>
       </ul>
     </div>
 
     <div class="activity-section">
       <div class="section-header">
         <span class="section-title">Activity</span>
-        <span style="font-size:0.75rem;color:var(--text-dim);font-family:var(--mono)" id="update-count"></span>
+        <span class="dashboard-meta" id="update-count"></span>
       </div>
       <div class="activity-log" id="activity-log"></div>
     </div>
@@ -412,7 +426,7 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
   <footer>
     <div>
-      <span id="node-did" style="user-select:all">—</span>
+      <span class="dashboard-node-did" id="node-did">—</span>
     </div>
     <div class="update-indicator">
       <div class="update-dot" id="update-dot"></div>
@@ -726,6 +740,14 @@ mod tests {
         assert!(
             !DASHBOARD_HTML.contains("innerHTML"),
             "dashboard must not render dynamic status, version, error, or DID data through innerHTML"
+        );
+    }
+
+    #[test]
+    fn dashboard_html_uses_no_inline_style_attributes() {
+        assert!(
+            !DASHBOARD_HTML.contains("style=\""),
+            "dashboard HTML should not rely on inline style attributes for CSP safety"
         );
     }
 }
