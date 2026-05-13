@@ -36,8 +36,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 22 | `ls -d crates/*/` |
 | Rust source files | 300 | `find crates -name '*.rs'` |
-| Rust LOC | 187758 | `wc -l` |
-| Workspace tests | 4,287 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 188017 | `wc -l` |
+| Workspace tests | 4,290 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 20 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -45,7 +45,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **4,286 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **4,290 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
