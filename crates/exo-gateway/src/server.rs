@@ -88,6 +88,7 @@ const GATEWAY_RATE_LIMIT_MAX_CLIENTS: usize = 16_384;
 const STRICT_TRANSPORT_SECURITY_VALUE: &str = "max-age=63072000; includeSubDomains";
 const CONTENT_SECURITY_POLICY_VALUE: &str =
     "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const CONTENT_SECURITY_POLICY_DASHBOARD_VALUE: &str = "default-src 'none'; style-src 'self' 'sha256-yJRhW9tEgjF5ZLILQcXDB6QDKvp1zziUPN6LHRtguoY='; script-src 'self' 'sha256-alo6f0Wtj7BryL8VG8ykQizNQTJHPzVuk5uHRX6v0no='; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const PERMISSIONS_POLICY_VALUE: &str = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
 const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const LAYOUT_TEMPLATE_MAX_ID_BYTES: usize = 128;
@@ -3572,8 +3573,14 @@ fn insert_static_response_header(headers: &mut HeaderMap, name: &'static str, va
 }
 
 async fn attach_gateway_security_headers(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    let content_security_policy = if path == "/" {
+        CONTENT_SECURITY_POLICY_DASHBOARD_VALUE
+    } else {
+        CONTENT_SECURITY_POLICY_VALUE
+    };
 
     insert_static_response_header(headers, "x-content-type-options", "nosniff");
     insert_static_response_header(headers, "x-frame-options", "DENY");
@@ -3583,11 +3590,7 @@ async fn attach_gateway_security_headers(request: Request<Body>, next: Next) -> 
         "strict-transport-security",
         STRICT_TRANSPORT_SECURITY_VALUE,
     );
-    insert_static_response_header(
-        headers,
-        "content-security-policy",
-        CONTENT_SECURITY_POLICY_VALUE,
-    );
+    insert_static_response_header(headers, "content-security-policy", content_security_policy);
     insert_static_response_header(headers, "permissions-policy", PERMISSIONS_POLICY_VALUE);
 
     response
@@ -4783,6 +4786,26 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(
                 "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_root_path_allows_dashboard_assets_csp() {
+        let app = build_router(state());
+
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("content-security-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some(
+                "default-src 'none'; style-src 'self' 'sha256-yJRhW9tEgjF5ZLILQcXDB6QDKvp1zziUPN6LHRtguoY='; script-src 'self' 'sha256-alo6f0Wtj7BryL8VG8ykQizNQTJHPzVuk5uHRX6v0no='; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
             )
         );
     }
