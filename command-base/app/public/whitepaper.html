@@ -795,12 +795,10 @@ SPDX-License-Identifier: Apache-2.0
     }
 
     // ── Main Render ─────────────────────────────────────
-    // Auth: get API key for authenticated requests
-    var _wpApiKey = null;
+    // Auth bootstrap for cookie-protected API requests
     async function wpFetch(url, extraOpts) {
       var opts = Object.assign({}, extraOpts || {});
       opts.headers = Object.assign({}, opts.headers || {});
-      if (_wpApiKey) opts.headers['X-API-Key'] = _wpApiKey;
       return fetch(url, opts);
     }
 
@@ -810,13 +808,9 @@ SPDX-License-Identifier: Apache-2.0
 
       try {
         // Bootstrap auth key
-        if (!_wpApiKey) {
-          try {
-            var authRes = await fetch('/api/auth/status');
-            var authData = await authRes.json();
-            if (authData.key) { _wpApiKey = authData.key; document.cookie = 'cb_auth=' + authData.key + ';path=/;SameSite=Strict'; }
-          } catch(e) {}
-        }
+        try {
+          await fetch('/api/auth/status');
+        } catch(e) {}
 
         var fetches = [
           wpFetch('/api/whitepaper/data').then(function(r) { return r.json(); }),

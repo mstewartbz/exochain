@@ -144,12 +144,9 @@
   }
 
   // ── API Auth: fetch key from server, include in all requests ──
-  var _cbApiKey = null;
   (async function() {
     try {
-      var r = await fetch('/api/auth/status');
-      var d = await r.json();
-      if (d.key) { _cbApiKey = d.key; document.cookie = 'cb_auth=' + d.key + ';path=/;SameSite=Strict'; }
+      await fetch('/api/auth/status');
     } catch (_) {}
   })();
 
@@ -157,7 +154,6 @@
   // All throw an Error with the server's `error` field when available on non-2xx.
   async function apiFetch(method, endpoint, body) {
     const opts = { method, headers: {} };
-    if (_cbApiKey) opts.headers['X-API-Key'] = _cbApiKey;
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);

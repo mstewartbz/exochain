@@ -40,8 +40,14 @@ const crypto = require('crypto');
 /** Default token TTL in seconds (1 hour). */
 const DEFAULT_TTL_SECONDS = 3600;
 
-/** HMAC fallback secret — override via EXOCHAIN_AUTH_SECRET env var. */
-const HMAC_SECRET = process.env.EXOCHAIN_AUTH_SECRET || 'exochain-dev-secret-change-in-production';
+/** HMAC fallback secret from runtime environment when WASM signing is unavailable. */
+function getHmacSecret() {
+  const secret = process.env.EXOCHAIN_AUTH_SECRET;
+  if (!secret) {
+    throw new Error('EXOCHAIN_AUTH_SECRET must be configured when wasm auth backend is unavailable');
+  }
+  return secret;
+}
 
 // ---------------------------------------------------------------------------
 // WASM loader — lazy, non-fatal
@@ -103,7 +109,7 @@ function sign(message) {
     return base64urlEncode(sigBytes);
   }
   // HMAC-SHA256 fallback
-  const hmac = crypto.createHmac('sha256', HMAC_SECRET);
+  const hmac = crypto.createHmac('sha256', getHmacSecret());
   hmac.update(message);
   return base64urlEncode(hmac.digest());
 }
@@ -122,11 +128,15 @@ function verify(message, signature) {
     return wasm.wasm_ed25519_verify(Buffer.from(message, 'utf8'), sigBytes);
   }
   // HMAC-SHA256 fallback: recompute and compare
-  const expected = sign(message);
-  return crypto.timingSafeEqual(
-    Buffer.from(expected, 'utf8'),
-    Buffer.from(signature, 'utf8')
-  );
+  try {
+    const expected = sign(message);
+    return crypto.timingSafeEqual(
+      Buffer.from(expected, 'utf8'),
+      Buffer.from(signature, 'utf8'),
+    );
+  } catch (_) {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

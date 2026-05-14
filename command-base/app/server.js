@@ -3429,7 +3429,11 @@ function getApiAuthKey() {
   return _apiAuthKey;
 }
 app.get('/api/auth/status', (req, res) => {
-  res.json({ authenticated: true, key: getApiAuthKey() });
+  const key = getApiAuthKey();
+  const isSecureTransport = req.secure || req.get('x-forwarded-proto') === 'https';
+  const secureFlag = isSecureTransport ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `cb_auth=${key}; Path=/; HttpOnly; SameSite=Strict${secureFlag}`);
+  res.json({ authenticated: true });
 });
 app.use('/api', (req, res, next) => {
   // Exempt auth status and whitepaper data (non-sensitive, needed before auth bootstrap)
