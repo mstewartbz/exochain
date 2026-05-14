@@ -126,7 +126,7 @@ export function ContactForm() {
         </p>
       )}
       <p className="text-xs text-ink/60 dark:text-vellum-soft/60">
-        Submissions are delivered to support@exochain.io.
+        Submissions are queued for support review.
       </p>
     </form>
   );

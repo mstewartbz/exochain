@@ -55,6 +55,20 @@ const config: Config = {
           deep: '#9C6F26',
           soft: '#F1C681'
         },
+        brand: {
+          vault: '#081E26',
+          teal: {
+            deep: '#0E4459'
+          },
+          cerulean: '#186B8C',
+          signal: '#2C96BF',
+          ice: '#91D8E8',
+          charter: '#B8955A',
+          midnight: '#1A2B35',
+          frost: '#C8D8DC',
+          porcelain: '#F0F4F5',
+          white: '#FFFFFF'
+        },
         alert: {
           DEFAULT: '#C0524A',
           deep: '#8E342D',

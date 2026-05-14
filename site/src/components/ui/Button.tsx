@@ -21,15 +21,15 @@ type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
 type Size = 'sm' | 'md' | 'lg';
 
 const base =
-  'inline-flex items-center justify-center font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-custody disabled:opacity-50 disabled:pointer-events-none whitespace-nowrap';
+  'inline-flex items-center justify-center font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-signal disabled:opacity-50 disabled:pointer-events-none whitespace-nowrap';
 
 const variants: Record<Variant, string> = {
   primary:
-    'bg-ink text-vellum-soft hover:bg-slate-800 dark:bg-vellum-soft dark:text-ink dark:hover:bg-vellum',
+    'bg-brand-vault text-brand-white hover:bg-brand-midnight dark:bg-brand-white dark:text-brand-vault dark:hover:bg-brand-porcelain',
   secondary:
-    'border border-ink/20 text-ink hover:bg-ink/5 dark:border-vellum-soft/20 dark:text-vellum-soft dark:hover:bg-vellum-soft/10',
+    'border border-brand-frost text-brand-vault hover:bg-brand-white/60 dark:border-brand-frost/40 dark:text-brand-white dark:hover:bg-brand-white/10',
   ghost:
-    'text-ink/80 hover:text-ink hover:bg-ink/5 dark:text-vellum-soft/80 dark:hover:text-vellum-soft dark:hover:bg-vellum-soft/10',
+    'text-brand-cerulean hover:text-brand-vault hover:bg-brand-white/50 dark:text-brand-ice dark:hover:text-brand-white dark:hover:bg-brand-white/10',
   danger:
     'bg-alert-deep text-white hover:bg-alert dark:bg-alert dark:hover:bg-alert-deep'
 };

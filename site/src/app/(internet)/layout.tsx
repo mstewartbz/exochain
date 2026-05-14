@@ -23,7 +23,7 @@ export default function InternetLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-dvh flex flex-col">
+    <div className="exo-public min-h-dvh flex flex-col bg-brand-porcelain text-brand-vault">
       <PublicNav />
       <div className="flex-1">{children}</div>
       <PublicFooter />

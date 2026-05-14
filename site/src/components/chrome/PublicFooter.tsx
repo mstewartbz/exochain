@@ -66,13 +66,17 @@ export function PublicFooter() {
     <footer className="mt-24 border-t hairline">
       <div className="max-w-page mx-auto px-6 md:px-10 py-12 grid gap-10 md:grid-cols-5">
         <div className="md:col-span-1">
-          <Logo />
-          <p className="mt-4 text-sm text-ink/70 dark:text-vellum-soft/70 max-w-xs">
+          <Logo className="text-brand-vault dark:text-brand-white" />
+          <p className="mt-4 text-sm text-brand-midnight/75 dark:text-brand-white/70 max-w-xs">
             Chain-of-custody for autonomous execution.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <Pill tone="signal">alpha</Pill>
-            <Pill tone="custody">zero-priced launch</Pill>
+            <Pill tone="neutral" className="border border-brand-charter/40 bg-brand-charter/10 text-brand-vault">
+              alpha
+            </Pill>
+            <Pill tone="neutral" className="border border-brand-signal/25 bg-brand-signal/10 text-brand-cerulean">
+              zero-priced launch
+            </Pill>
           </div>
         </div>
         {cols.map((col) => (
@@ -85,7 +89,7 @@ export function PublicFooter() {
                 <li key={l.href}>
                   <Link
                     href={l.href}
-                    className="text-ink/80 hover:text-ink dark:text-vellum-soft/80 dark:hover:text-vellum-soft"
+                    className="text-brand-midnight/80 hover:text-brand-vault dark:text-brand-white/75 dark:hover:text-brand-white"
                   >
                     {l.label}
                   </Link>
@@ -96,7 +100,7 @@ export function PublicFooter() {
         ))}
       </div>
       <div className="border-t hairline">
-        <div className="max-w-page mx-auto px-6 md:px-10 py-5 flex flex-wrap items-center gap-3 justify-between text-xs text-ink/60 dark:text-vellum-soft/60">
+        <div className="max-w-page mx-auto px-6 md:px-10 py-5 flex flex-wrap items-center gap-3 justify-between text-xs text-brand-midnight/65 dark:text-brand-white/60">
           <div>
             © {new Date().getFullYear()} EXOCHAIN — Apache-2.0 reference
             implementation.

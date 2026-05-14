@@ -28,14 +28,15 @@ import { mockNetworkMetrics } from '@/lib/mock-data';
 export default function HomePage() {
   return (
     <>
-      <Section className="surface-grain pt-16 md:pt-24 pb-12">
+      <Section className="pt-16 md:pt-24 pb-12">
         <div className="grid md:grid-cols-[1.2fr_1fr] gap-10 items-end">
           <div>
+            <div className="mb-6 h-px w-24 bg-brand-charter" />
             <Eyebrow>EXOCHAIN · custody-native blockchain · alpha</Eyebrow>
-            <H1 className="mt-4">
+            <H1 className="mt-4 font-light tracking-normal text-brand-vault">
               EXOCHAIN is chain-of-custody for autonomous execution.
             </H1>
-            <Lede className="mt-6 max-w-prose">
+            <Lede className="mt-6 max-w-prose text-brand-midnight/80">
               Credential autonomous intent, verify delegated authority, and
               preserve evidentiary custody for agents, holons, humans, and
               AI-native systems.
@@ -52,20 +53,24 @@ export default function HomePage() {
               </LinkButton>
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-2 text-sm">
-              <Pill tone="signal">alpha</Pill>
-              <Pill tone="custody">zero-priced launch</Pill>
-              <span className="text-ink/60 dark:text-vellum-soft/60">
+              <Pill tone="neutral" className="border border-brand-charter/40 bg-brand-charter/10 text-brand-vault">
+                alpha
+              </Pill>
+              <Pill tone="neutral" className="border border-brand-signal/25 bg-brand-signal/10 text-brand-cerulean">
+                zero-priced launch
+              </Pill>
+              <span className="text-brand-midnight/65 dark:text-vellum-soft/60">
                 Network mode: {mockNetworkMetrics.networkMode} · last release{' '}
                 <span className="font-mono">
                   {mockNetworkMetrics.lastReleaseTag}
                 </span>{' '}
-                · <Link href="/status" className="underline">status</Link>
+                · <Link href="/status" className="underline decoration-brand-signal/40 underline-offset-4">status</Link>
               </span>
             </div>
           </div>
-          <div className="border hairline rounded-md p-4">
+          <div className="border hairline rounded-md bg-brand-white/45 p-4">
             <CustodyFlowDiagram />
-            <p className="text-xs text-ink/60 dark:text-vellum-soft/60 mt-3">
+            <p className="text-xs text-brand-midnight/65 dark:text-vellum-soft/60 mt-3">
               Human → AVC → Agent → EXOCHAIN → Trust Receipt. Revocation
               cascades back through the credential graph.
             </p>
@@ -74,12 +79,12 @@ export default function HomePage() {
       </Section>
 
       <Section className="py-12">
-        <div className="border hairline rounded-md p-6 md:p-10">
+        <div className="border hairline rounded-md bg-brand-white/35 p-6 md:p-10">
           <Eyebrow>The frame</Eyebrow>
-          <p className="mt-3 text-2xl md:text-3xl font-semibold tracking-tightish leading-tight max-w-3xl">
+          <p className="mt-3 text-2xl md:text-3xl font-semibold tracking-normal leading-tight max-w-3xl text-brand-vault">
             Blockchain is the mechanism. Chain-of-custody is the purpose.
           </p>
-          <p className="mt-4 text-ink/75 dark:text-vellum-soft/75 max-w-2xl">
+          <p className="mt-4 text-brand-midnight/75 dark:text-vellum-soft/75 max-w-2xl">
             EXOCHAIN preserves every property you expect from a serious
             distributed ledger — deterministic ordering, cryptographic
             signatures, quorum, finality — and reframes the chain as a
@@ -93,7 +98,7 @@ export default function HomePage() {
 
       <Section className="py-12">
         <Eyebrow>The stack</Eyebrow>
-        <H2 className="mt-3 max-w-2xl">
+        <H2 className="mt-3 max-w-2xl tracking-normal text-brand-vault">
           Identity proves who an actor is. AVC proves what it may pursue.
           EXOCHAIN proves what actually happened.
         </H2>

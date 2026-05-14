@@ -33,9 +33,9 @@ const PRIMARY_LINKS = [
 
 export function PublicNav() {
   return (
-    <header className="sticky top-0 z-30 backdrop-blur bg-vellum-soft/80 dark:bg-ink-deep/80 border-b hairline">
+    <header className="sticky top-0 z-30 bg-brand-porcelain/95 dark:bg-brand-vault/95 border-b hairline">
       <div className="max-w-page mx-auto px-6 md:px-10 h-14 flex items-center justify-between gap-4">
-        <Link href="/" aria-label="EXOCHAIN home">
+        <Link href="/" aria-label="EXOCHAIN home" className="text-brand-vault dark:text-brand-white">
           <Logo />
         </Link>
         <nav className="hidden lg:flex items-center gap-5 text-sm">
@@ -43,7 +43,7 @@ export function PublicNav() {
             <Link
               key={l.href}
               href={l.href}
-              className="text-ink/70 hover:text-ink dark:text-vellum-soft/70 dark:hover:text-vellum-soft"
+              className="text-brand-midnight/70 hover:text-brand-vault dark:text-brand-white/70 dark:hover:text-brand-white"
             >
               {l.label}
             </Link>
