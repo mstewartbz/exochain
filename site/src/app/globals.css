@@ -47,6 +47,31 @@ html.dark body {
   background-image: var(--grain);
 }
 
+.exo-public {
+  background: #F0F4F5;
+  color: #081E26;
+}
+
+.exo-public .surface-grain {
+  background-image: none;
+}
+
+.exo-public .hairline {
+  border-color: #C8D8DC;
+}
+
+.exo-public .text-eyebrow {
+  color: #186B8C;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.exo-public .tracking-eyebrow,
+.exo-public .tracking-tightish {
+  letter-spacing: 0;
+}
+
 .text-eyebrow {
   font-family: theme('fontFamily.mono');
   font-size: 11px;
