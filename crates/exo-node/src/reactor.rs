@@ -3011,6 +3011,33 @@ mod tests {
     }
 
     #[test]
+    fn validate_proposal_rejects_forged_nonzero_signature() {
+        let validators = make_validators(1);
+        let proposer = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&proposer, key_for_validator_index(0));
+        let payload = validator_change_payload_for_test();
+        let node = make_node_for_payload(&payload);
+        let proposal = exo_dag::consensus::Proposal {
+            proposer,
+            round: 0,
+            node_hash: node.hash,
+        };
+        let signing_payload = proposal.signing_payload().unwrap();
+        let msg = ConsensusProposalMsg {
+            proposal,
+            node,
+            payload,
+            signature: sign_with_wrong_key(&signing_payload),
+        };
+
+        let err = validate_proposal(&msg, &validators, &resolver).unwrap_err();
+        assert!(
+            err.contains("signature"),
+            "network proposals must reject arbitrary nonzero signatures, got: {err}"
+        );
+    }
+
+    #[test]
     fn validate_proposal_accepts_signed_message() {
         let validators = make_validators(1);
         let proposer = Did::new("did:exo:v0").unwrap();
@@ -3143,6 +3170,34 @@ mod tests {
         let msg = ConsensusCommitMsg { certificate: cert };
         let err = validate_commit(&msg, &validators, &resolver).unwrap_err();
         assert!(signature_is_invalid_error(&err));
+    }
+
+    #[test]
+    fn validate_commit_rejects_forged_nonzero_vote_in_cert() {
+        let validators = make_validators(1);
+        let voter = Did::new("did:exo:v0").unwrap();
+        let resolver = validator_keys_for_single(&voter, key_for_validator_index(0));
+        let hash = exo_core::types::Hash256([7u8; 32]);
+        let mut vote = exo_dag::consensus::Vote {
+            voter,
+            round: 0,
+            node_hash: hash,
+            signature: Signature::empty(),
+        };
+        let signing_payload = vote.signing_payload().unwrap();
+        vote.signature = sign_with_wrong_key(&signing_payload);
+        let cert = exo_dag::consensus::CommitCertificate {
+            node_hash: hash,
+            votes: vec![vote],
+            round: 0,
+        };
+        let msg = ConsensusCommitMsg { certificate: cert };
+
+        let err = validate_commit(&msg, &validators, &resolver).unwrap_err();
+        assert!(
+            err.contains("invalid signature"),
+            "network commit certificates must reject arbitrary nonzero vote signatures, got: {err}"
+        );
     }
 
     #[test]
