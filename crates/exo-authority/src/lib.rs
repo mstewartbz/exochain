@@ -29,6 +29,9 @@ pub mod permission;
 
 pub use cache::ChainCache;
 pub use chain::{AuthorityChain, AuthorityLink, DelegateeKind};
-pub use delegation::{AuthorityRevocation, DelegationRegistry, DelegationRevocationGrant};
+pub use delegation::{
+    AuthorityRevocation, DelegationAuditAction, DelegationAuditEvent, DelegationRegistry,
+    DelegationRevocationGrant,
+};
 pub use error::AuthorityError;
 pub use permission::{Permission, PermissionSet};

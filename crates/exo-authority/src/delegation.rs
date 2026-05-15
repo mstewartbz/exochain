@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured};
 
 use crate::{
     chain::{self, AuthorityChain, AuthorityLink, DEFAULT_MAX_DEPTH, DelegateeKind},
@@ -29,6 +29,8 @@ use crate::{
 /// Domain tag for authority delegation revocation signatures.
 pub const AUTHORITY_REVOCATION_SIGNING_DOMAIN: &str = "exo.authority.revocation.v1";
 const AUTHORITY_REVOCATION_SIGNING_SCHEMA_VERSION: u16 = 1;
+const DELEGATION_AUDIT_EVENT_DOMAIN: &str = "exo.authority.delegation_audit_event.v1";
+const DELEGATION_AUDIT_EVENT_SCHEMA_VERSION: u16 = 1;
 
 /// Registry of all active delegations.
 #[derive(Debug, Default)]
@@ -39,6 +41,41 @@ pub struct DelegationRegistry {
     by_delegator: BTreeMap<String, Vec<Hash256>>,
     /// Reverse index: delegate DID -> list of link IDs.
     by_delegate: BTreeMap<String, Vec<Hash256>>,
+    /// Append-only audit events for registry mutations.
+    audit_events: Vec<DelegationAuditEvent>,
+}
+
+/// Audited registry mutation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DelegationAuditAction {
+    Granted,
+    Revoked,
+}
+
+/// Hash-chained audit event for a delegation registry mutation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DelegationAuditEvent {
+    pub sequence: u64,
+    pub action: DelegationAuditAction,
+    pub link_id: Hash256,
+    pub delegator_did: Did,
+    pub delegate_did: Did,
+    pub timestamp: Timestamp,
+    pub previous_event_hash: Hash256,
+    pub event_hash: Hash256,
+}
+
+#[derive(serde::Serialize)]
+struct DelegationAuditEventHashPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    sequence: u64,
+    action: DelegationAuditAction,
+    link_id: &'a Hash256,
+    delegator_did: &'a Did,
+    delegate_did: &'a Did,
+    timestamp: &'a Timestamp,
+    previous_event_hash: &'a Hash256,
 }
 
 /// Caller-supplied fields for a signed delegation grant.
@@ -244,6 +281,70 @@ impl DelegationRegistry {
         Self::default()
     }
 
+    /// Return the append-only delegation audit trail.
+    #[must_use]
+    pub fn audit_events(&self) -> &[DelegationAuditEvent] {
+        &self.audit_events
+    }
+
+    /// Verify the delegation audit trail's sequence, linkage, and event hashes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthorityError::AuditChainBroken`] at the first broken event,
+    /// or [`AuthorityError::AuditHashEncoding`] if canonical hashing fails.
+    pub fn verify_audit_chain(&self) -> Result<(), AuthorityError> {
+        let mut previous_event_hash = Hash256::ZERO;
+        for (index, event) in self.audit_events.iter().enumerate() {
+            let sequence = u64::try_from(index)
+                .map_err(|_| AuthorityError::AuditChainBroken { sequence: u64::MAX })?;
+            if event.sequence != sequence
+                || event.previous_event_hash != previous_event_hash
+                || event.timestamp == Timestamp::ZERO
+                || event.event_hash != delegation_audit_event_hash(event)?
+            {
+                return Err(AuthorityError::AuditChainBroken { sequence });
+            }
+            previous_event_hash = event.event_hash;
+        }
+        Ok(())
+    }
+
+    fn build_delegation_audit_event(
+        &self,
+        action: DelegationAuditAction,
+        link_id: Hash256,
+        link: &AuthorityLink,
+        timestamp: Timestamp,
+    ) -> Result<DelegationAuditEvent, AuthorityError> {
+        if timestamp == Timestamp::ZERO {
+            return Err(AuthorityError::InvalidDelegation {
+                reason: "delegation audit event timestamp must be non-zero".into(),
+            });
+        }
+        let sequence = u64::try_from(self.audit_events.len()).map_err(|_| {
+            AuthorityError::InvalidDelegation {
+                reason: "delegation audit log length does not fit u64 sequence".into(),
+            }
+        })?;
+        let previous_event_hash = self
+            .audit_events
+            .last()
+            .map_or(Hash256::ZERO, |event| event.event_hash);
+        let mut event = DelegationAuditEvent {
+            sequence,
+            action,
+            link_id,
+            delegator_did: link.delegator_did.clone(),
+            delegate_did: link.delegate_did.clone(),
+            timestamp,
+            previous_event_hash,
+            event_hash: Hash256::ZERO,
+        };
+        event.event_hash = delegation_audit_event_hash(&event)?;
+        Ok(event)
+    }
+
     /// Create a delegation from one DID to another.
     ///
     /// # Errors
@@ -335,6 +436,12 @@ impl DelegationRegistry {
         if self.links.contains_key(&id) {
             return Err(AuthorityError::DuplicateDelegation { id: id.to_string() });
         }
+        let audit_event = self.build_delegation_audit_event(
+            DelegationAuditAction::Granted,
+            id,
+            &link,
+            link.created,
+        )?;
         self.links.insert(id, link.clone());
         self.by_delegator
             .entry(from.as_str().to_owned())
@@ -344,15 +451,12 @@ impl DelegationRegistry {
             .entry(to.as_str().to_owned())
             .or_default()
             .push(id);
+        self.audit_events.push(audit_event);
 
         Ok(link)
     }
 
-    /// Revoke a delegation by its link ID.
-    ///
-    /// # Errors
-    /// Returns `NotFound` if the link doesn't exist.
-    pub fn revoke_delegation(&mut self, link_id: &Hash256) -> Result<(), AuthorityError> {
+    fn remove_delegation_link(&mut self, link_id: &Hash256) -> Result<(), AuthorityError> {
         let link = self
             .links
             .remove(link_id)
@@ -395,7 +499,14 @@ impl DelegationRegistry {
 
         let revocation =
             AuthorityRevocation::for_link(link, revoker, revoked_at, revoker_public_key, sign_fn)?;
-        self.revoke_delegation(link_id)?;
+        let audit_event = self.build_delegation_audit_event(
+            DelegationAuditAction::Revoked,
+            *link_id,
+            &revocation.revoked_link,
+            *revoked_at,
+        )?;
+        self.remove_delegation_link(link_id)?;
+        self.audit_events.push(audit_event);
         Ok(revocation)
     }
 
@@ -523,6 +634,23 @@ fn signature_is_all_zero(signature: &Signature) -> bool {
     signature.ed25519_component_is_zero()
 }
 
+fn delegation_audit_event_hash(event: &DelegationAuditEvent) -> Result<Hash256, AuthorityError> {
+    hash_structured(&DelegationAuditEventHashPayload {
+        domain: DELEGATION_AUDIT_EVENT_DOMAIN,
+        schema_version: DELEGATION_AUDIT_EVENT_SCHEMA_VERSION,
+        sequence: event.sequence,
+        action: event.action,
+        link_id: &event.link_id,
+        delegator_did: &event.delegator_did,
+        delegate_did: &event.delegate_did,
+        timestamp: &event.timestamp,
+        previous_event_hash: &event.previous_event_hash,
+    })
+    .map_err(|e| AuthorityError::AuditHashEncoding {
+        reason: e.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use exo_core::{
@@ -567,6 +695,24 @@ mod tests {
             |payload| signer.sign(payload),
         )
     }
+    fn signed_revoke(
+        reg: &mut DelegationRegistry,
+        link_id: &Hash256,
+        revoker: &str,
+        signer: &KeyPair,
+    ) -> Result<AuthorityRevocation, AuthorityError> {
+        let revoker = did(revoker);
+        let public_key = public_key(signer);
+        reg.revoke_delegation_signed(
+            DelegationRevocationGrant {
+                link_id,
+                revoker: &revoker,
+                revoked_at: &ts(6_000),
+                revoker_public_key: &public_key,
+            },
+            |payload| signer.sign(payload),
+        )
+    }
 
     fn raw_link(from: &str, to: &str, depth: usize) -> AuthorityLink {
         AuthorityLink {
@@ -605,6 +751,53 @@ mod tests {
         assert!(!link.signature.is_empty());
         let payload = link.signing_payload().unwrap();
         assert!(crypto::verify(&payload, &link.signature, &public_key));
+    }
+
+    #[test]
+    fn delegate_appends_hash_chained_audit_event() {
+        let mut reg = DelegationRegistry::new();
+        let keypair = KeyPair::generate();
+
+        let link =
+            signed_delegate(&mut reg, "alice", "bob", &[Permission::Read], &keypair).unwrap();
+
+        let events = reg.audit_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 0);
+        assert_eq!(events[0].action, DelegationAuditAction::Granted);
+        assert_eq!(events[0].link_id, link.id().unwrap());
+        assert_eq!(events[0].delegator_did, link.delegator_did);
+        assert_eq!(events[0].delegate_did, link.delegate_did);
+        assert_eq!(events[0].timestamp, link.created);
+        assert_eq!(events[0].previous_event_hash, Hash256::ZERO);
+        assert_ne!(events[0].event_hash, Hash256::ZERO);
+        reg.verify_audit_chain()
+            .expect("delegation audit event must verify");
+    }
+
+    #[test]
+    fn delegation_audit_chain_detects_tampering() {
+        let mut reg = DelegationRegistry::new();
+        let keypair = KeyPair::generate();
+        signed_delegate(&mut reg, "alice", "bob", &[Permission::Read], &keypair).unwrap();
+
+        reg.audit_events[0].delegate_did = did("mallory");
+
+        assert!(matches!(
+            reg.verify_audit_chain(),
+            Err(AuthorityError::AuditChainBroken { sequence: 0 })
+        ));
+    }
+
+    #[test]
+    fn delegation_registry_has_no_public_auditless_revoke() {
+        let source = include_str!("delegation.rs");
+        let forbidden = concat!("pub fn ", "revoke_delegation(");
+
+        assert!(
+            !source.contains(forbidden),
+            "revocation must pass through signed evidence and delegation audit"
+        );
     }
 
     #[test]
@@ -911,13 +1104,13 @@ mod tests {
     }
 
     #[test]
-    fn revoke_delegation() {
+    fn signed_revoke_delegation_removes_link() {
         let mut reg = DelegationRegistry::new();
         let alice_key = KeyPair::generate();
         let link =
             signed_delegate(&mut reg, "alice", "bob", &[Permission::Read], &alice_key).unwrap();
         let id = link.id().unwrap();
-        assert!(reg.revoke_delegation(&id).is_ok());
+        assert!(signed_revoke(&mut reg, &id, "alice", &alice_key).is_ok());
         assert_eq!(reg.len(), 0);
     }
 
@@ -957,6 +1150,42 @@ mod tests {
                 })
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn signed_revoke_delegation_appends_hash_chained_audit_event() {
+        let mut reg = DelegationRegistry::new();
+        let alice_key = KeyPair::generate();
+        let alice = did("alice");
+        let alice_public_key = public_key(&alice_key);
+        let link =
+            signed_delegate(&mut reg, "alice", "bob", &[Permission::Read], &alice_key).unwrap();
+        let id = link.id().unwrap();
+        let grant_event_hash = reg.audit_events()[0].event_hash;
+
+        reg.revoke_delegation_signed(
+            DelegationRevocationGrant {
+                link_id: &id,
+                revoker: &alice,
+                revoked_at: &ts(6_000),
+                revoker_public_key: &alice_public_key,
+            },
+            |payload| alice_key.sign(payload),
+        )
+        .unwrap();
+
+        let events = reg.audit_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].sequence, 1);
+        assert_eq!(events[1].action, DelegationAuditAction::Revoked);
+        assert_eq!(events[1].link_id, id);
+        assert_eq!(events[1].delegator_did, did("alice"));
+        assert_eq!(events[1].delegate_did, did("bob"));
+        assert_eq!(events[1].timestamp, ts(6_000));
+        assert_eq!(events[1].previous_event_hash, grant_event_hash);
+        assert_ne!(events[1].event_hash, Hash256::ZERO);
+        reg.verify_audit_chain()
+            .expect("signed revocation audit event must verify");
     }
 
     #[test]
@@ -1015,9 +1244,10 @@ mod tests {
     #[test]
     fn revoke_nonexistent() {
         let mut reg = DelegationRegistry::new();
+        let alice_key = KeyPair::generate();
         let fake = Hash256::digest(b"fake");
         assert!(matches!(
-            reg.revoke_delegation(&fake),
+            signed_revoke(&mut reg, &fake, "alice", &alice_key),
             Err(AuthorityError::NotFound(_))
         ));
     }
@@ -1025,9 +1255,10 @@ mod tests {
     #[test]
     fn missing_revocation_reports_stable_hash_label() {
         let mut reg = DelegationRegistry::new();
+        let alice_key = KeyPair::generate();
         let fake = Hash256::digest(b"missing-revocation");
 
-        let result = reg.revoke_delegation(&fake);
+        let result = signed_revoke(&mut reg, &fake, "alice", &alice_key);
 
         match result {
             Err(AuthorityError::NotFound(id)) => {
@@ -1126,7 +1357,7 @@ mod tests {
         let mut reg = DelegationRegistry::new();
         let alice_key = KeyPair::generate();
         let l = signed_delegate(&mut reg, "alice", "bob", &[Permission::Read], &alice_key).unwrap();
-        reg.revoke_delegation(&l.id().unwrap()).ok();
+        signed_revoke(&mut reg, &l.id().unwrap(), "alice", &alice_key).ok();
         // After revocation, chain should not be found
         assert!(reg.find_chain(&did("alice"), &did("bob")).is_none());
     }

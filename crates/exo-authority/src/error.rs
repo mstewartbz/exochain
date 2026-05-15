@@ -39,6 +39,12 @@ pub enum AuthorityError {
     #[error("delegation signing payload encoding failed: {reason}")]
     SigningPayloadEncoding { reason: String },
 
+    #[error("delegation audit hash encoding failed: {reason}")]
+    AuditHashEncoding { reason: String },
+
+    #[error("delegation audit chain broken at sequence {sequence}")]
+    AuditChainBroken { sequence: u64 },
+
     #[error("invalid delegation: {reason}")]
     InvalidDelegation { reason: String },
 
@@ -105,6 +111,20 @@ mod tests {
             reason: "writer".into(),
         };
         assert!(e.to_string().contains("writer"));
+    }
+
+    #[test]
+    fn error_display_audit_hash_encoding() {
+        let e = AuthorityError::AuditHashEncoding {
+            reason: "writer".into(),
+        };
+        assert!(e.to_string().contains("writer"));
+    }
+
+    #[test]
+    fn error_display_audit_chain_broken() {
+        let e = AuthorityError::AuditChainBroken { sequence: 7 };
+        assert!(e.to_string().contains("7"));
     }
 
     #[test]
