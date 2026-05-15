@@ -46,31 +46,10 @@ impl PostgresStore {
 
     /// Run schema migrations (idempotent — safe to call on every startup).
     pub async fn migrate(pool: &PgPool) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS dag_nodes (
-                hash            BYTEA PRIMARY KEY,
-                parents         BYTEA[] NOT NULL DEFAULT '{}',
-                payload_hash    BYTEA NOT NULL,
-                creator_did     TEXT NOT NULL,
-                ts_physical_ms  BIGINT NOT NULL,
-                ts_logical      BIGINT NOT NULL,
-                signature       BYTEA NOT NULL,
-                inserted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS dag_committed (
-                hash   BYTEA PRIMARY KEY REFERENCES dag_nodes(hash),
-                height BIGINT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_dag_nodes_creator ON dag_nodes(creator_did);
-            CREATE INDEX IF NOT EXISTS idx_dag_committed_height ON dag_committed(height);
-            "#,
-        )
-        .execute(pool)
-        .await
-        .map_err(store_err)?;
+        sqlx::migrate!("./migrations")
+            .run(pool)
+            .await
+            .map_err(store_err)?;
 
         Ok(())
     }
@@ -485,6 +464,31 @@ mod tests {
         assert!(
             method.contains("rows_affected"),
             "Postgres mark_committed must map an unmatched atomic INSERT to NodeNotFound"
+        );
+    }
+
+    #[test]
+    fn postgres_schema_is_tracked_by_sqlx_migrations_not_inline_ddl() {
+        let source = include_str!("pg_store.rs");
+        let migrate_method = source
+            .split("pub async fn migrate")
+            .nth(1)
+            .expect("PostgresStore::migrate method must exist")
+            .split("    /// Encode parents")
+            .next()
+            .expect("migrate method must end before encode_parents");
+
+        assert!(
+            migrate_method.contains("sqlx::migrate!(\"./migrations\")"),
+            "PostgresStore schema changes must be tracked by exo-dag sqlx migrations"
+        );
+        assert!(
+            !migrate_method.contains("CREATE TABLE IF NOT EXISTS dag_nodes"),
+            "PostgresStore::migrate must not carry inline DAG table DDL"
+        );
+        assert!(
+            !migrate_method.contains("CREATE TABLE IF NOT EXISTS dag_committed"),
+            "PostgresStore::migrate must not carry inline committed-table DDL"
         );
     }
 
