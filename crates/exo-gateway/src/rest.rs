@@ -31,6 +31,12 @@ pub struct HealthResponse {
 pub enum RestRoute {
     /// GET /health
     Health,
+    /// GET /ready
+    Ready,
+    /// GET /gateway/metrics
+    GatewayMetrics,
+    /// GET /health/db
+    DbHealth,
     /// GET /api/v1/decisions/:id
     GetDecision,
     /// POST /api/v1/decisions
@@ -65,10 +71,24 @@ pub enum RestRoute {
     AdvanceAgentPace,
     /// GET /api/v1/identity/:did/score
     GetIdentityScore,
+    /// DELETE /api/v1/identity/:did
+    DeleteIdentity,
     /// GET /api/v1/users
     ListUsers,
     /// POST /api/v1/users/:did/advance-pace
     AdvanceUserPace,
+    /// GET /api/v1/layout-templates
+    ListLayoutTemplates,
+    /// PUT /api/v1/layout-templates
+    PutLayoutTemplate,
+    /// DELETE /api/v1/layout-templates/:id
+    DeleteLayoutTemplate,
+    /// GET /api/v1/feedback-issues
+    ListFeedbackIssues,
+    /// POST /api/v1/feedback-issues
+    CreateFeedbackIssue,
+    /// PATCH /api/v1/feedback-issues/:id
+    UpdateFeedbackIssue,
 }
 
 impl RestRoute {
@@ -76,6 +96,9 @@ impl RestRoute {
     pub fn method(&self) -> &str {
         match self {
             RestRoute::Health
+            | RestRoute::Ready
+            | RestRoute::GatewayMetrics
+            | RestRoute::DbHealth
             | RestRoute::GetDecision
             | RestRoute::GetConstitution
             | RestRoute::AuditTrail
@@ -83,7 +106,9 @@ impl RestRoute {
             | RestRoute::ListAgents
             | RestRoute::GetAgent
             | RestRoute::GetIdentityScore
-            | RestRoute::ListUsers => "GET",
+            | RestRoute::ListUsers
+            | RestRoute::ListLayoutTemplates
+            | RestRoute::ListFeedbackIssues => "GET",
             RestRoute::CreateDecision
             | RestRoute::AuthToken
             | RestRoute::SamlCallback
@@ -94,7 +119,11 @@ impl RestRoute {
             | RestRoute::AuthLogout
             | RestRoute::AgentEnroll
             | RestRoute::AdvanceAgentPace
-            | RestRoute::AdvanceUserPace => "POST",
+            | RestRoute::AdvanceUserPace
+            | RestRoute::CreateFeedbackIssue => "POST",
+            RestRoute::PutLayoutTemplate => "PUT",
+            RestRoute::DeleteIdentity | RestRoute::DeleteLayoutTemplate => "DELETE",
+            RestRoute::UpdateFeedbackIssue => "PATCH",
         }
     }
 
@@ -102,6 +131,9 @@ impl RestRoute {
     pub fn path(&self) -> &str {
         match self {
             RestRoute::Health => "/health",
+            RestRoute::Ready => "/ready",
+            RestRoute::GatewayMetrics => "/gateway/metrics",
+            RestRoute::DbHealth => "/health/db",
             RestRoute::GetDecision => "/api/v1/decisions/:id",
             RestRoute::CreateDecision => "/api/v1/decisions",
             RestRoute::AuthToken => "/api/v1/auth/token",
@@ -119,8 +151,15 @@ impl RestRoute {
             RestRoute::GetAgent => "/api/v1/agents/:did",
             RestRoute::AdvanceAgentPace => "/api/v1/agents/:did/advance-pace",
             RestRoute::GetIdentityScore => "/api/v1/identity/:did/score",
+            RestRoute::DeleteIdentity => "/api/v1/identity/:did",
             RestRoute::ListUsers => "/api/v1/users",
             RestRoute::AdvanceUserPace => "/api/v1/users/:did/advance-pace",
+            RestRoute::ListLayoutTemplates => "/api/v1/layout-templates",
+            RestRoute::PutLayoutTemplate => "/api/v1/layout-templates",
+            RestRoute::DeleteLayoutTemplate => "/api/v1/layout-templates/:id",
+            RestRoute::ListFeedbackIssues => "/api/v1/feedback-issues",
+            RestRoute::CreateFeedbackIssue => "/api/v1/feedback-issues",
+            RestRoute::UpdateFeedbackIssue => "/api/v1/feedback-issues/:id",
         }
     }
 
@@ -128,6 +167,9 @@ impl RestRoute {
     pub fn all() -> Vec<RestRoute> {
         vec![
             RestRoute::Health,
+            RestRoute::Ready,
+            RestRoute::GatewayMetrics,
+            RestRoute::DbHealth,
             RestRoute::GetDecision,
             RestRoute::CreateDecision,
             RestRoute::AuthToken,
@@ -145,19 +187,31 @@ impl RestRoute {
             RestRoute::GetAgent,
             RestRoute::AdvanceAgentPace,
             RestRoute::GetIdentityScore,
+            RestRoute::DeleteIdentity,
             RestRoute::ListUsers,
             RestRoute::AdvanceUserPace,
+            RestRoute::ListLayoutTemplates,
+            RestRoute::PutLayoutTemplate,
+            RestRoute::DeleteLayoutTemplate,
+            RestRoute::ListFeedbackIssues,
+            RestRoute::CreateFeedbackIssue,
+            RestRoute::UpdateFeedbackIssue,
         ]
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
     fn test_route_methods() {
         assert_eq!(RestRoute::Health.method(), "GET");
+        assert_eq!(RestRoute::Ready.method(), "GET");
+        assert_eq!(RestRoute::GatewayMetrics.method(), "GET");
+        assert_eq!(RestRoute::DbHealth.method(), "GET");
         assert_eq!(RestRoute::CreateDecision.method(), "POST");
         assert_eq!(RestRoute::AuthRegister.method(), "POST");
         assert_eq!(RestRoute::AuthLogin.method(), "POST");
@@ -165,13 +219,23 @@ mod tests {
         assert_eq!(RestRoute::ListAgents.method(), "GET");
         assert_eq!(RestRoute::AgentEnroll.method(), "POST");
         assert_eq!(RestRoute::GetIdentityScore.method(), "GET");
+        assert_eq!(RestRoute::DeleteIdentity.method(), "DELETE");
         assert_eq!(RestRoute::ListUsers.method(), "GET");
         assert_eq!(RestRoute::AdvanceUserPace.method(), "POST");
+        assert_eq!(RestRoute::ListLayoutTemplates.method(), "GET");
+        assert_eq!(RestRoute::PutLayoutTemplate.method(), "PUT");
+        assert_eq!(RestRoute::DeleteLayoutTemplate.method(), "DELETE");
+        assert_eq!(RestRoute::ListFeedbackIssues.method(), "GET");
+        assert_eq!(RestRoute::CreateFeedbackIssue.method(), "POST");
+        assert_eq!(RestRoute::UpdateFeedbackIssue.method(), "PATCH");
     }
 
     #[test]
     fn test_route_paths() {
         assert_eq!(RestRoute::Health.path(), "/health");
+        assert_eq!(RestRoute::Ready.path(), "/ready");
+        assert_eq!(RestRoute::GatewayMetrics.path(), "/gateway/metrics");
+        assert_eq!(RestRoute::DbHealth.path(), "/health/db");
         assert_eq!(RestRoute::GetDecision.path(), "/api/v1/decisions/:id");
         assert_eq!(RestRoute::CreateDecision.path(), "/api/v1/decisions");
         assert_eq!(RestRoute::AuthToken.path(), "/api/v1/auth/token");
@@ -201,10 +265,35 @@ mod tests {
             RestRoute::GetIdentityScore.path(),
             "/api/v1/identity/:did/score"
         );
+        assert_eq!(RestRoute::DeleteIdentity.path(), "/api/v1/identity/:did");
         assert_eq!(RestRoute::ListUsers.path(), "/api/v1/users");
         assert_eq!(
             RestRoute::AdvanceUserPace.path(),
             "/api/v1/users/:did/advance-pace"
+        );
+        assert_eq!(
+            RestRoute::ListLayoutTemplates.path(),
+            "/api/v1/layout-templates"
+        );
+        assert_eq!(
+            RestRoute::PutLayoutTemplate.path(),
+            "/api/v1/layout-templates"
+        );
+        assert_eq!(
+            RestRoute::DeleteLayoutTemplate.path(),
+            "/api/v1/layout-templates/:id"
+        );
+        assert_eq!(
+            RestRoute::ListFeedbackIssues.path(),
+            "/api/v1/feedback-issues"
+        );
+        assert_eq!(
+            RestRoute::CreateFeedbackIssue.path(),
+            "/api/v1/feedback-issues"
+        );
+        assert_eq!(
+            RestRoute::UpdateFeedbackIssue.path(),
+            "/api/v1/feedback-issues/:id"
         );
     }
 
@@ -223,6 +312,52 @@ mod tests {
     #[test]
     fn test_all_routes() {
         let routes = RestRoute::all();
-        assert_eq!(routes.len(), 20);
+        assert_eq!(routes.len(), 30);
+    }
+
+    #[test]
+    fn rest_route_inventory_matches_live_non_graphql_gateway_surface() {
+        let routes = RestRoute::all();
+        let actual: BTreeSet<(&str, &str)> = routes
+            .iter()
+            .map(|route| (route.method(), route.path()))
+            .collect();
+        let expected = BTreeSet::from([
+            ("GET", "/health"),
+            ("GET", "/ready"),
+            ("GET", "/gateway/metrics"),
+            ("GET", "/health/db"),
+            ("GET", "/api/v1/decisions/:id"),
+            ("POST", "/api/v1/decisions"),
+            ("POST", "/api/v1/auth/token"),
+            ("POST", "/api/v1/auth/saml/callback"),
+            ("POST", "/api/v1/auth/register"),
+            ("POST", "/api/v1/auth/login"),
+            ("POST", "/api/v1/auth/refresh"),
+            ("GET", "/api/v1/auth/me"),
+            ("POST", "/api/v1/auth/logout"),
+            ("POST", "/api/v1/agents/enroll"),
+            ("GET", "/api/v1/agents"),
+            ("GET", "/api/v1/agents/:did"),
+            ("POST", "/api/v1/agents/:did/advance-pace"),
+            ("GET", "/api/v1/identity/:did/score"),
+            ("DELETE", "/api/v1/identity/:did"),
+            ("GET", "/api/v1/tenants/:id/constitution"),
+            ("POST", "/api/v1/ediscovery/export"),
+            ("GET", "/api/v1/audit/:decision_id"),
+            ("GET", "/api/v1/users"),
+            ("POST", "/api/v1/users/:did/advance-pace"),
+            ("GET", "/api/v1/layout-templates"),
+            ("PUT", "/api/v1/layout-templates"),
+            ("DELETE", "/api/v1/layout-templates/:id"),
+            ("GET", "/api/v1/feedback-issues"),
+            ("POST", "/api/v1/feedback-issues"),
+            ("PATCH", "/api/v1/feedback-issues/:id"),
+        ]);
+
+        assert_eq!(
+            actual, expected,
+            "RestRoute::all must enumerate every live non-GraphQL gateway HTTP endpoint"
+        );
     }
 }

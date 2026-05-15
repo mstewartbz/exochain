@@ -3952,8 +3952,8 @@ async fn handle_feedback_issue_update(
 
 /// Build the axum `Router` with all constitutional middleware wired.
 ///
-/// All 20 `RestRoute` paths are registered.  Unimplemented handlers return
-/// 501 until the full handler stack lands in a follow-up PR.
+/// All non-GraphQL `RestRoute` endpoints are registered. Unimplemented
+/// handlers return 501 while preserving the public contract.
 pub fn build_router(state: AppState) -> Router {
     build_router_with_extra_routes(state, None)
 }
