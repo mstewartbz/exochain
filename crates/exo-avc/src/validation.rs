@@ -971,6 +971,36 @@ mod tests {
     }
 
     #[test]
+    fn non_expiring_credential_allows_explicit_holder_action() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.holder_did = Some(did("holder"));
+        draft.expires_at = None;
+        let cred = h.issue(draft);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(baseline_action(did("holder")));
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+        assert_eq!(result.normalized_holder_did, did("holder"));
+        assert_eq!(result.valid_until, None);
+    }
+
+    #[test]
+    fn subject_actor_remains_valid_when_holder_is_explicit() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.holder_did = Some(did("holder"));
+        let cred = h.issue(draft);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(baseline_action(did("agent")));
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+        assert_eq!(result.normalized_holder_did, did("holder"));
+    }
+
+    #[test]
     fn denies_risk_exceeded() {
         let h = Harness::new();
         let mut draft = baseline_draft();
