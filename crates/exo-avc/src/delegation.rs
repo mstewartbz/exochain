@@ -511,4 +511,25 @@ mod tests {
         let child = delegate_avc(&parent, narrower_child(&parent), |_| fixed_signature()).unwrap();
         assert_eq!(parent_id_of(&child), Some(parent.id().unwrap()));
     }
+
+    #[test]
+    fn narrowing_helpers_cover_all_bound_cases() {
+        assert!(narrows_optional_u64(None, None));
+        assert!(narrows_optional_u64(None, Some(10)));
+        assert!(!narrows_optional_u64(Some(10), None));
+        assert!(narrows_optional_u64(Some(10), Some(10)));
+        assert!(!narrows_optional_u64(Some(10), Some(11)));
+
+        assert!(narrows_optional_u32(None, None));
+        assert!(narrows_optional_u32(None, Some(10)));
+        assert!(!narrows_optional_u32(Some(10), None));
+        assert!(narrows_optional_u32(Some(10), Some(10)));
+        assert!(!narrows_optional_u32(Some(10), Some(11)));
+
+        assert!(narrows_expiry(None, None));
+        assert!(narrows_expiry(None, Some(ts(20))));
+        assert!(!narrows_expiry(Some(ts(20)), None));
+        assert!(narrows_expiry(Some(ts(20)), Some(ts(20))));
+        assert!(!narrows_expiry(Some(ts(20)), Some(ts(21))));
+    }
 }

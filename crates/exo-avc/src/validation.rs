@@ -1079,6 +1079,31 @@ mod tests {
     }
 
     #[test]
+    fn valid_optional_human_approval_evidence_allows_unrequired_action() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let cred = h.issue(baseline_draft());
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            Some(ts(1_900_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
     fn human_approval_from_untrusted_approver_is_invalid() {
         let h = Harness::new();
         let approver_keypair = human_approver_keypair();
@@ -1250,6 +1275,36 @@ mod tests {
     }
 
     #[test]
+    fn human_approval_with_future_approval_time_is_invalid() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_600_000),
+            Some(ts(1_900_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
     fn human_approval_expiring_before_approval_time_is_invalid() {
         let mut h = Harness::new();
         let approver_keypair = human_approver_keypair();
@@ -1277,6 +1332,39 @@ mod tests {
             result.reason_codes,
             vec![AvcReasonCode::HumanApprovalInvalid]
         );
+    }
+
+    #[test]
+    fn risk_below_approval_threshold_allows_without_human_approval() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.constraints.max_action_risk_bp = Some(10_000);
+        draft.constraints.approval_threshold_bp = Some(5_000);
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.estimated_risk_bp = Some(4_999);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
+    fn risk_threshold_without_estimate_allows_without_human_approval() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.constraints.max_action_risk_bp = Some(10_000);
+        draft.constraints.approval_threshold_bp = Some(5_000);
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let action = baseline_action(actor);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
     }
 
     #[test]
