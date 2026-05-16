@@ -949,6 +949,28 @@ mod tests {
     }
 
     #[test]
+    fn in_scope_action_at_budget_and_risk_caps_allows() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.authority_scope.counterparties = vec![did("approved-cp")];
+        draft.constraints.max_budget_minor_units = Some(1_000);
+        draft.constraints.max_action_risk_bp = Some(1_000);
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.tool = Some("alpha".into());
+        action.data_class = Some(DataClass::Public);
+        action.target_did = Some(did("approved-cp"));
+        action.estimated_budget_minor_units = Some(1_000);
+        action.estimated_risk_bp = Some(1_000);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
     fn denies_risk_exceeded() {
         let h = Harness::new();
         let mut draft = baseline_draft();
