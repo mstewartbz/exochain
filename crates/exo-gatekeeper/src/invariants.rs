@@ -23,8 +23,9 @@ use exo_core::{Did, Hash256, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch, PermissionSet,
-    Provenance, QuorumEvidence, Role, TrustedAuthorityKeys, TrustedProvenanceKeys,
+    AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch,
+    IndependenceClaim, PermissionSet, Provenance, QuorumEvidence, QuorumVote, ReviewOrder, Role,
+    TrustedAuthorityKeys, TrustedProvenanceKeys, VoiceKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ pub struct InvariantViolation {
 
 const AUTHORITY_LINK_SIGNATURE_DOMAIN: &str = "exo.gatekeeper.authority-link-signature";
 const PROVENANCE_SIGNATURE_DOMAIN: &str = "exo.gatekeeper.provenance-signature";
+const QUORUM_VOTE_SIGNATURE_DOMAIN: &str = "exo.gatekeeper.quorum-vote-signature.v1";
 const SIGNATURE_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Serialize)]
@@ -152,6 +154,23 @@ struct ProvenanceSignaturePayload<'a> {
     actor: &'a Did,
     action_hash: &'a [u8],
     timestamp: &'a str,
+    voice_kind: Option<VoiceKind>,
+    independence: Option<IndependenceClaim>,
+    review_order: Option<ReviewOrder>,
+}
+
+#[derive(Serialize)]
+struct QuorumVoteSignaturePayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    voter: &'a Did,
+    approved: bool,
+    provenance_actor: &'a Did,
+    provenance_action_hash: &'a [u8],
+    provenance_timestamp: &'a str,
+    voice_kind: Option<VoiceKind>,
+    independence: Option<IndependenceClaim>,
+    review_order: Option<ReviewOrder>,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +269,31 @@ fn bailment_state_evidence(state: &BailmentState) -> Vec<String> {
             ]
         }
         BailmentState::Terminated => vec!["bailment_state: terminated".into()],
+    }
+}
+
+fn voice_kind_evidence_label(value: Option<VoiceKind>) -> &'static str {
+    match value {
+        Some(VoiceKind::Human) => "human",
+        Some(VoiceKind::Synthetic) => "synthetic",
+        Some(VoiceKind::System) => "system",
+        None => "missing",
+    }
+}
+
+fn independence_evidence_label(value: Option<IndependenceClaim>) -> &'static str {
+    match value {
+        Some(IndependenceClaim::Independent) => "independent",
+        Some(IndependenceClaim::Coordinated) => "coordinated",
+        None => "missing",
+    }
+}
+
+fn review_order_evidence_label(value: Option<ReviewOrder>) -> &'static str {
+    match value {
+        Some(ReviewOrder::FirstOrder) => "first-order",
+        Some(ReviewOrder::Derivative) => "derivative",
+        None => "missing",
     }
 }
 
@@ -669,6 +713,13 @@ fn check_quorum_legitimate(ctx: &InvariantContext) -> Result<(), InvariantViolat
     match &ctx.quorum_evidence {
         None => Ok(()),
         Some(evidence) => {
+            let Some(threshold) = usize::try_from(evidence.threshold).ok() else {
+                return Err(InvariantViolation {
+                    invariant: ConstitutionalInvariant::QuorumLegitimate,
+                    description: "Quorum threshold cannot be represented on this platform".into(),
+                    evidence: vec![format!("threshold: {}", evidence.threshold)],
+                });
+            };
             let duplicate_voters = evidence.duplicate_voters();
             if !duplicate_voters.is_empty() {
                 let duplicate_voters = duplicate_voters
@@ -686,27 +737,167 @@ fn check_quorum_legitimate(ctx: &InvariantContext) -> Result<(), InvariantViolat
                 });
             }
 
-            // CR-001 §8.3: synthetic voices SHALL never be counted as distinct
-            // humans. Use is_met_authentic() which excludes Synthetic-voiced
-            // votes from the approval count.
-            if !evidence.is_met_authentic() {
-                let authentic_approvals = evidence.distinct_authentic_approved_voter_count();
+            // CR-001 §8.3: human quorum approvals must be explicit,
+            // independent, first-order human voices with cryptographically
+            // verified provenance resolved through trusted DID keys.
+            let (verified_human_approvals, rejected_vote_evidence) =
+                verified_human_quorum_approvals(evidence, ctx);
+            if verified_human_approvals < threshold {
                 let synthetic_excluded = evidence.synthetic_vote_count();
-                Err(InvariantViolation {
+                let mut violation_evidence = vec![
+                    format!("threshold: {}", evidence.threshold),
+                    format!("verified_human_approvals: {verified_human_approvals}"),
+                    format!("synthetic_votes_excluded: {synthetic_excluded}"),
+                    format!("rejected_approved_votes: {}", rejected_vote_evidence.len()),
+                ];
+                violation_evidence.extend(rejected_vote_evidence);
+                return Err(InvariantViolation {
                     invariant: ConstitutionalInvariant::QuorumLegitimate,
-                    description: "Quorum threshold not met by authentic (non-synthetic) votes"
+                    description: "Quorum threshold not met by verified human vote provenance"
                         .into(),
-                    evidence: vec![
-                        format!("threshold: {}", evidence.threshold),
-                        format!("authentic_approvals: {}", authentic_approvals),
-                        format!("synthetic_votes_excluded: {}", synthetic_excluded),
-                    ],
-                })
-            } else {
-                Ok(())
+                    evidence: violation_evidence,
+                });
             }
+            Ok(())
         }
     }
+}
+
+fn verified_human_quorum_approvals(
+    evidence: &QuorumEvidence,
+    ctx: &InvariantContext,
+) -> (usize, Vec<String>) {
+    let mut approved_voters = std::collections::BTreeSet::new();
+    let mut rejected_vote_evidence = Vec::new();
+
+    for (index, vote) in evidence.votes.iter().enumerate() {
+        if !vote.approved {
+            continue;
+        }
+
+        match verify_human_quorum_vote(vote, index, ctx) {
+            Ok(()) => {
+                approved_voters.insert(vote.voter.clone());
+            }
+            Err(reason) => rejected_vote_evidence.push(reason),
+        }
+    }
+
+    (approved_voters.len(), rejected_vote_evidence)
+}
+
+fn verify_human_quorum_vote(
+    vote: &QuorumVote,
+    index: usize,
+    ctx: &InvariantContext,
+) -> Result<(), String> {
+    let Some(prov) = vote.provenance.as_ref() else {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; provenance: missing",
+            vote.voter
+        ));
+    };
+
+    if prov.actor != vote.voter {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; provenance_actor: {}",
+            vote.voter, prov.actor
+        ));
+    }
+    if !prov.is_human_voice() {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; voice_kind: {}",
+            vote.voter,
+            voice_kind_evidence_label(prov.voice_kind)
+        ));
+    }
+    if !prov.is_independent() {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; independence: {}",
+            vote.voter,
+            independence_evidence_label(prov.independence)
+        ));
+    }
+    if !prov.is_first_order_review() {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; review_order: {}",
+            vote.voter,
+            review_order_evidence_label(prov.review_order)
+        ));
+    }
+
+    let Some(pk_bytes) = prov.public_key.as_ref() else {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; public_key: missing",
+            vote.voter
+        ));
+    };
+    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; public_key_len: {}",
+            vote.voter,
+            pk_bytes.len()
+        ));
+    };
+    let Some(trusted_keys) = ctx.trusted_provenance_keys.get(&vote.voter) else {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; public_key: unresolved",
+            vote.voter
+        ));
+    };
+    if !trusted_keys
+        .iter()
+        .any(|trusted_key| trusted_key.as_slice() == pk_bytes.as_slice())
+    {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; public_key: not-bound",
+            vote.voter
+        ));
+    }
+    let Ok(sig_arr) = <[u8; 64]>::try_from(prov.signature.as_slice()) else {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; signature_len: {}",
+            vote.voter,
+            prov.signature.len()
+        ));
+    };
+    let message = provenance_signature_message(prov).map_err(|err| {
+        format!(
+            "vote_index: {index}; voter: {}; signature_payload_error: {err}",
+            vote.voter
+        )
+    })?;
+    let pubkey = exo_core::PublicKey::from_bytes(pk_arr);
+    let provenance_sig = exo_core::Signature::from_bytes(sig_arr);
+    if !exo_core::crypto::verify(message.as_bytes(), &provenance_sig, &pubkey) {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; signature: invalid",
+            vote.voter
+        ));
+    }
+
+    let Ok(vote_sig_arr) = <[u8; 64]>::try_from(vote.signature.as_slice()) else {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; vote_signature_len: {}",
+            vote.voter,
+            vote.signature.len()
+        ));
+    };
+    let vote_message = quorum_vote_signature_message(vote, prov).map_err(|err| {
+        format!(
+            "vote_index: {index}; voter: {}; vote_signature_payload_error: {err}",
+            vote.voter
+        )
+    })?;
+    let vote_sig = exo_core::Signature::from_bytes(vote_sig_arr);
+    if !exo_core::crypto::verify(vote_message.as_bytes(), &vote_sig, &pubkey) {
+        return Err(format!(
+            "vote_index: {index}; voter: {}; vote_signature: invalid",
+            vote.voter
+        ));
+    }
+
+    Ok(())
 }
 
 fn check_provenance_verifiable(ctx: &InvariantContext) -> Result<(), InvariantViolation> {
@@ -814,7 +1005,10 @@ pub fn authority_link_signature_message(link: &AuthorityLink) -> exo_core::Resul
 /// Compute the canonical Ed25519 message for action provenance.
 ///
 /// The message is the hash of a domain-separated CBOR payload that binds the
-/// provenance actor, action hash, and timestamp.
+/// provenance actor, action hash, timestamp, and voice-taxonomy metadata. The
+/// taxonomy fields are security-relevant for quorum counting, so changing a
+/// signed synthetic/coordinated/derivative provenance claim into a human
+/// quorum claim invalidates the signature.
 pub fn provenance_signature_message(prov: &Provenance) -> exo_core::Result<Hash256> {
     hash_structured(&ProvenanceSignaturePayload {
         domain: PROVENANCE_SIGNATURE_DOMAIN,
@@ -822,6 +1016,27 @@ pub fn provenance_signature_message(prov: &Provenance) -> exo_core::Result<Hash2
         actor: &prov.actor,
         action_hash: &prov.action_hash,
         timestamp: &prov.timestamp,
+        voice_kind: prov.voice_kind,
+        independence: prov.independence,
+        review_order: prov.review_order,
+    })
+}
+
+fn quorum_vote_signature_message(
+    vote: &QuorumVote,
+    prov: &Provenance,
+) -> exo_core::Result<Hash256> {
+    hash_structured(&QuorumVoteSignaturePayload {
+        domain: QUORUM_VOTE_SIGNATURE_DOMAIN,
+        schema_version: SIGNATURE_PAYLOAD_SCHEMA_VERSION,
+        voter: &vote.voter,
+        approved: vote.approved,
+        provenance_actor: &prov.actor,
+        provenance_action_hash: &prov.action_hash,
+        provenance_timestamp: &prov.timestamp,
+        voice_kind: prov.voice_kind,
+        independence: prov.independence,
+        review_order: prov.review_order,
     })
 }
 
@@ -1445,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn quorum_passes_met() {
+    fn quorum_rejects_raw_votes_without_verified_vote_provenance() {
         let engine = InvariantEngine::new(InvariantSet::with(vec![
             ConstitutionalInvariant::QuorumLegitimate,
         ]));
@@ -1467,7 +1682,11 @@ mod tests {
                 },
             ],
         });
-        assert!(enforce_all(&engine, &ctx).is_ok());
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(err[0].description.contains("verified human"));
     }
 
     #[test]
@@ -1636,10 +1855,55 @@ mod tests {
                 signature: vec![sig],
                 public_key: None,
                 voice_kind: Some(vk),
-                independence: None,
-                review_order: None,
+                independence: (vk == VoiceKind::Human).then_some(IndependenceClaim::Independent),
+                review_order: (vk == VoiceKind::Human).then_some(ReviewOrder::FirstOrder),
             }),
         }
+    }
+
+    fn signed_human_quorum_vote(ctx: &mut InvariantContext, voter: &str, sig: u8) -> QuorumVote {
+        signed_human_quorum_vote_with_approval(ctx, voter, sig, true)
+    }
+
+    fn signed_human_quorum_vote_with_approval(
+        ctx: &mut InvariantContext,
+        voter: &str,
+        sig: u8,
+        approved: bool,
+    ) -> QuorumVote {
+        let voter = did(voter);
+        let (pk, sk) = exo_core::crypto::generate_keypair();
+        let mut provenance = Provenance {
+            actor: voter.clone(),
+            timestamp: "2026-05-16T00:00:00Z".to_string(),
+            action_hash: vec![sig; 32],
+            signature: Vec::new(),
+            public_key: Some(pk.as_bytes().to_vec()),
+            voice_kind: Some(VoiceKind::Human),
+            independence: Some(IndependenceClaim::Independent),
+            review_order: Some(ReviewOrder::FirstOrder),
+        };
+        let message = provenance_signature_message(&provenance).expect("canonical provenance");
+        provenance.signature = exo_core::crypto::sign(message.as_bytes(), &sk)
+            .to_bytes()
+            .to_vec();
+        ctx.trusted_provenance_keys
+            .insert(voter.clone(), vec![pk.as_bytes().to_vec()]);
+        let mut vote = QuorumVote {
+            voter,
+            approved,
+            signature: Vec::new(),
+            provenance: Some(provenance),
+        };
+        let vote_message = quorum_vote_signature_message(
+            &vote,
+            vote.provenance.as_ref().expect("signed provenance"),
+        )
+        .expect("canonical vote signature");
+        vote.signature = exo_core::crypto::sign(vote_message.as_bytes(), &sk)
+            .to_bytes()
+            .to_vec();
+        vote
     }
 
     #[test]
@@ -1659,7 +1923,7 @@ mod tests {
         });
         let err = enforce_all(&engine, &ctx).unwrap_err();
         assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
-        assert!(err[0].description.contains("authentic"));
+        assert!(err[0].description.contains("verified human"));
         assert!(
             err[0]
                 .evidence
@@ -1675,12 +1939,15 @@ mod tests {
             ConstitutionalInvariant::QuorumLegitimate,
         ]));
         let mut ctx = passing_context();
+        let h1 = signed_human_quorum_vote(&mut ctx, "did:exo:h1", 1);
+        let h2 = signed_human_quorum_vote(&mut ctx, "did:exo:h2", 2);
+        let h3 = signed_human_quorum_vote(&mut ctx, "did:exo:h3", 3);
         ctx.quorum_evidence = Some(QuorumEvidence {
             threshold: 3,
             votes: vec![
-                make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human)),
-                make_vote("did:exo:h2", true, 2, Some(VoiceKind::Human)),
-                make_vote("did:exo:h3", true, 3, Some(VoiceKind::Human)),
+                h1,
+                h2,
+                h3,
                 make_vote("did:exo:ai1", true, 4, Some(VoiceKind::Synthetic)),
                 make_vote("did:exo:ai2", true, 5, Some(VoiceKind::Synthetic)),
             ],
@@ -1720,8 +1987,8 @@ mod tests {
     }
 
     #[test]
-    fn quorum_passes_legacy_votes_no_provenance() {
-        // Legacy votes (provenance=None) are not excluded
+    fn quorum_rejects_legacy_votes_no_provenance() {
+        // Legacy votes (provenance=None) are not verified human quorum votes.
         let engine = InvariantEngine::new(InvariantSet::with(vec![
             ConstitutionalInvariant::QuorumLegitimate,
         ]));
@@ -1743,7 +2010,214 @@ mod tests {
                 },
             ],
         });
-        assert!(enforce_all(&engine, &ctx).is_ok());
+        assert!(enforce_all(&engine, &ctx).is_err());
+    }
+
+    #[test]
+    fn quorum_rejects_votes_without_signed_human_provenance() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                    provenance: None,
+                },
+                QuorumVote {
+                    voter: did("did:exo:v2"),
+                    approved: true,
+                    signature: vec![2],
+                    provenance: None,
+                },
+            ],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0].description.contains("verified human"),
+            "missing vote provenance must fail with a human-verification explanation"
+        );
+    }
+
+    #[test]
+    fn quorum_rejects_non_human_or_non_independent_vote_provenance() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        let mut coordinated = make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human));
+        coordinated
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .independence = Some(IndependenceClaim::Coordinated);
+        coordinated
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .review_order = Some(ReviewOrder::FirstOrder);
+        let mut derivative = make_vote("did:exo:h2", true, 2, Some(VoiceKind::Human));
+        derivative
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .independence = Some(IndependenceClaim::Independent);
+        derivative
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .review_order = Some(ReviewOrder::Derivative);
+
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 3,
+            votes: vec![
+                make_vote("did:exo:system", true, 3, Some(VoiceKind::System)),
+                coordinated,
+                derivative,
+            ],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0].evidence.iter().any(|entry| entry.contains("system")),
+            "violation evidence must identify non-human vote provenance"
+        );
+    }
+
+    #[test]
+    fn quorum_rejects_vote_provenance_actor_mismatch() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        let mut vote = make_vote("did:exo:voter", true, 1, Some(VoiceKind::Human));
+        let provenance = vote.provenance.as_mut().expect("human provenance");
+        provenance.actor = did("did:exo:different-actor");
+        provenance.independence = Some(IndependenceClaim::Independent);
+        provenance.review_order = Some(ReviewOrder::FirstOrder);
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 1,
+            votes: vec![vote],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|entry| entry.contains("provenance_actor")),
+            "violation evidence must identify actor/voter mismatch"
+        );
+    }
+
+    #[test]
+    fn quorum_rejects_tampered_human_voice_metadata_after_signing() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        let voter = did("did:exo:voter");
+        let (pk, sk) = exo_core::crypto::generate_keypair();
+        let mut provenance = Provenance {
+            actor: voter.clone(),
+            timestamp: "2026-05-16T00:00:00Z".to_string(),
+            action_hash: vec![0x41; 32],
+            signature: Vec::new(),
+            public_key: Some(pk.as_bytes().to_vec()),
+            voice_kind: Some(VoiceKind::Synthetic),
+            independence: Some(IndependenceClaim::Coordinated),
+            review_order: Some(ReviewOrder::Derivative),
+        };
+        let message = provenance_signature_message(&provenance).expect("canonical provenance");
+        provenance.signature = exo_core::crypto::sign(message.as_bytes(), &sk)
+            .to_bytes()
+            .to_vec();
+        provenance.voice_kind = Some(VoiceKind::Human);
+        provenance.independence = Some(IndependenceClaim::Independent);
+        provenance.review_order = Some(ReviewOrder::FirstOrder);
+        ctx.trusted_provenance_keys
+            .insert(voter.clone(), vec![pk.as_bytes().to_vec()]);
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 1,
+            votes: vec![QuorumVote {
+                voter,
+                approved: true,
+                signature: vec![1],
+                provenance: Some(provenance),
+            }],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|entry| entry.contains("signature")),
+            "tampered voice metadata must invalidate the signed vote provenance"
+        );
+    }
+
+    #[test]
+    fn quorum_rejects_unsigned_vote_decision_with_valid_human_provenance() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        let mut vote = signed_human_quorum_vote(&mut ctx, "did:exo:voter", 1);
+        vote.signature = vec![1];
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 1,
+            votes: vec![vote],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|entry| entry.contains("vote_signature")),
+            "a valid human provenance signature must not authorize an unsigned approval decision"
+        );
+    }
+
+    #[test]
+    fn quorum_rejects_approval_flag_tampering_after_vote_signing() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::QuorumLegitimate,
+        ]));
+        let mut ctx = passing_context();
+        let mut vote = signed_human_quorum_vote_with_approval(&mut ctx, "did:exo:voter", 1, false);
+        vote.approved = true;
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 1,
+            votes: vec![vote],
+        });
+
+        let err = enforce_all(&engine, &ctx).unwrap_err();
+
+        assert_eq!(err[0].invariant, ConstitutionalInvariant::QuorumLegitimate);
+        assert!(
+            err[0]
+                .evidence
+                .iter()
+                .any(|entry| entry.contains("vote_signature: invalid")),
+            "approval decisions must be bound to the vote signature"
+        );
     }
 
     #[test]
