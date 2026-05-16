@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "security:contact-disclosure": "node scripts/assert-no-contact-submission-disclosure.mjs"
   },
   "dependencies": {
     "next": "^14.2.35",
