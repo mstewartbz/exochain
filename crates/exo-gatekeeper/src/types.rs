@@ -331,7 +331,8 @@ impl QuorumEvidence {
     }
 
     /// Returns `true` if the threshold is met counting only non-synthetic
-    /// approved votes. A vote with `provenance.voice_kind = Synthetic` is
+    /// approved votes with explicit human, independent, first-order provenance.
+    /// Missing, system, synthetic, coordinated, or derivative provenance is
     /// excluded from the human count per CR-001 §8.3.
     pub fn is_met_authentic(&self) -> bool {
         let Some(threshold) = usize::try_from(self.threshold).ok() else {
@@ -378,7 +379,11 @@ impl QuorumEvidence {
         self.votes
             .iter()
             .filter(|vote| {
-                vote.approved && !vote.provenance.as_ref().is_some_and(|p| p.is_synthetic())
+                vote.approved
+                    && vote
+                        .provenance
+                        .as_ref()
+                        .is_some_and(Provenance::is_authentic_human_quorum_voice)
             })
             .map(|vote| vote.voter.clone())
             .collect::<BTreeSet<_>>()
@@ -494,6 +499,19 @@ impl Provenance {
         self.independence == Some(IndependenceClaim::Independent)
     }
 
+    /// Returns `true` when this provenance is explicitly first-order review.
+    /// `None` and derivative review are not equivalent to direct human review.
+    pub fn is_first_order_review(&self) -> bool {
+        self.review_order == Some(ReviewOrder::FirstOrder)
+    }
+
+    /// Returns `true` when all taxonomy fields required for a human quorum
+    /// claim are present and explicit. Cryptographic verification is performed
+    /// by the invariant engine because it needs trusted DID-resolved keys.
+    pub fn is_authentic_human_quorum_voice(&self) -> bool {
+        self.is_human_voice() && self.is_independent() && self.is_first_order_review()
+    }
+
     /// Returns `true` when this is explicitly a synthetic (AI-generated) voice.
     pub fn is_synthetic(&self) -> bool {
         self.voice_kind == Some(VoiceKind::Synthetic)
@@ -584,8 +602,8 @@ mod tests {
                 signature: vec![sig],
                 public_key: None,
                 voice_kind: Some(vk),
-                independence: None,
-                review_order: None,
+                independence: (vk == VoiceKind::Human).then_some(IndependenceClaim::Independent),
+                review_order: (vk == VoiceKind::Human).then_some(ReviewOrder::FirstOrder),
             }),
         }
     }
@@ -715,8 +733,8 @@ mod tests {
     }
 
     #[test]
-    fn quorum_is_met_authentic_legacy_vote_counts() {
-        // Legacy votes (no provenance) are not excluded
+    fn quorum_is_met_authentic_rejects_legacy_votes_without_provenance() {
+        // Legacy votes (no provenance) are not authentic human quorum votes.
         let ev = QuorumEvidence {
             threshold: 2,
             votes: vec![
@@ -734,7 +752,65 @@ mod tests {
                 },
             ],
         };
-        assert!(ev.is_met_authentic());
+        assert!(!ev.is_met_authentic());
+    }
+
+    #[test]
+    fn quorum_is_met_authentic_rejects_votes_without_human_provenance() {
+        let ev = QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                QuorumVote {
+                    voter: did("did:exo:v1"),
+                    approved: true,
+                    signature: vec![1],
+                    provenance: None,
+                },
+                make_vote("did:exo:system1", true, 2, Some(VoiceKind::System)),
+            ],
+        };
+
+        assert!(
+            !ev.is_met_authentic(),
+            "authentic quorum must not assume missing or system provenance is human"
+        );
+    }
+
+    #[test]
+    fn quorum_is_met_authentic_requires_independent_first_order_human_votes() {
+        let mut coordinated = make_vote("did:exo:h1", true, 1, Some(VoiceKind::Human));
+        coordinated
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .independence = Some(IndependenceClaim::Coordinated);
+        coordinated
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .review_order = Some(ReviewOrder::FirstOrder);
+
+        let mut derivative = make_vote("did:exo:h2", true, 2, Some(VoiceKind::Human));
+        derivative
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .independence = Some(IndependenceClaim::Independent);
+        derivative
+            .provenance
+            .as_mut()
+            .expect("human provenance")
+            .review_order = Some(ReviewOrder::Derivative);
+
+        let ev = QuorumEvidence {
+            threshold: 2,
+            votes: vec![coordinated, derivative],
+        };
+
+        assert!(
+            !ev.is_met_authentic(),
+            "coordinated or derivative human claims must not count as authentic quorum"
+        );
     }
 
     // ── Provenance voice/independence helpers ────────────────────────────────
@@ -753,6 +829,8 @@ mod tests {
         };
         assert!(human_prov.is_human_voice());
         assert!(human_prov.is_independent());
+        assert!(human_prov.is_first_order_review());
+        assert!(human_prov.is_authentic_human_quorum_voice());
         assert!(!human_prov.is_synthetic());
     }
 

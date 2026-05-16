@@ -359,7 +359,10 @@ mod tests {
     use exo_gatekeeper::{
         InvariantEngine,
         invariants::{ConstitutionalInvariant, InvariantContext, enforce_all},
-        types::{AuthorityChain, BailmentState, ConsentRecord, PermissionSet},
+        types::{
+            AuthorityChain, BailmentState, ConsentRecord, PermissionSet, QuorumEvidence,
+            QuorumVote, TrustedAuthorityKeys, TrustedProvenanceKeys,
+        },
     };
 
     fn actor() -> Did {
@@ -619,6 +622,62 @@ mod tests {
                 .iter()
                 .any(|description| description.contains("trusted_provenance_keys")),
             "provenance key map boundary violation must be explicit: {descriptions:?}"
+        );
+    }
+
+    #[test]
+    fn wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence() {
+        let mut ctx = minimal_passing_context();
+        ctx.quorum_evidence = Some(QuorumEvidence {
+            threshold: 2,
+            votes: vec![
+                QuorumVote {
+                    voter: Did::new("did:exo:voter-one").expect("valid DID"),
+                    approved: true,
+                    signature: vec![1],
+                    provenance: None,
+                },
+                QuorumVote {
+                    voter: Did::new("did:exo:voter-two").expect("valid DID"),
+                    approved: true,
+                    signature: vec![2],
+                    provenance: None,
+                },
+            ],
+        });
+        ctx.trusted_authority_keys = TrustedAuthorityKeys::default();
+        ctx.trusted_provenance_keys = TrustedProvenanceKeys::default();
+        let req = super::WasmInvariantRequest {
+            actor: ctx.actor,
+            actor_roles: ctx.actor_roles,
+            bailment_state: ctx.bailment_state,
+            consent_records: ctx.consent_records,
+            authority_chain: ctx.authority_chain,
+            is_self_grant: ctx.is_self_grant,
+            human_override_preserved: ctx.human_override_preserved,
+            kernel_modification_attempted: ctx.kernel_modification_attempted,
+            quorum_evidence: ctx.quorum_evidence,
+            provenance: ctx.provenance,
+            actor_permissions: ctx.actor_permissions,
+            requested_permissions: ctx.requested_permissions,
+            trusted_authority_keys: ctx.trusted_authority_keys,
+            trusted_provenance_keys: ctx.trusted_provenance_keys,
+        };
+
+        let response = super::enforce_invariants_response(req);
+        assert_eq!(response["passed"], false);
+
+        let descriptions = response["violations"]
+            .as_array()
+            .expect("violations must be an array")
+            .iter()
+            .filter_map(|violation| violation["description"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            descriptions
+                .iter()
+                .any(|description| description.contains("verified human")),
+            "caller-supplied quorum evidence without verified human provenance must fail closed: {descriptions:?}"
         );
     }
 
