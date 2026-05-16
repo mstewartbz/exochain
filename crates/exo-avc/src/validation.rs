@@ -32,17 +32,20 @@
 use std::collections::BTreeSet;
 
 use exo_authority::permission::Permission;
-#[cfg(test)]
-use exo_core::Signature;
-use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    credential::{AuthorityScope, AutonomousVolitionCredential, AvcConstraints, DataClass},
+    credential::{
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomousVolitionCredential, AvcConstraints, DataClass,
+    },
     error::AvcError,
     receipt::AvcTrustReceipt,
     registry::AvcRegistryRead,
 };
+
+/// Signing domain tag for AVC human approval evidence.
+pub const AVC_HUMAN_APPROVAL_SIGNING_DOMAIN: &str = "exo.avc.human-approval.v1";
 
 // ---------------------------------------------------------------------------
 // Decision / Reason
@@ -78,6 +81,8 @@ pub enum AvcReasonCode {
     BudgetExceeded,
     RiskExceeded,
     HumanApprovalMissing,
+    HumanApprovalInvalid,
+    HumanApprovalExpired,
     DelegationNotAllowed,
     ConsentMissing,
     PolicyMissing,
@@ -100,9 +105,19 @@ pub struct AvcActionRequest {
     pub data_class: Option<DataClass>,
     pub estimated_budget_minor_units: Option<u64>,
     pub estimated_risk_bp: Option<u32>,
+    #[serde(default)]
+    pub human_approval: Option<AvcHumanApproval>,
     pub requires_human_approval: bool,
     /// Free-form action name used to enforce `forbidden_actions`.
     pub action_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvcHumanApproval {
+    pub approver_did: Did,
+    pub approved_at: Timestamp,
+    pub expires_at: Option<Timestamp>,
+    pub signature: Signature,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +135,25 @@ pub struct AvcValidationResult {
     pub normalized_holder_did: Did,
     pub valid_until: Option<Timestamp>,
     pub receipt: Option<AvcTrustReceipt>,
+}
+
+#[derive(Serialize)]
+struct HumanApprovalSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    credential_id: &'a Hash256,
+    action_id: &'a Hash256,
+    actor_did: &'a Did,
+    requested_permission: &'a Permission,
+    tool: Option<&'a String>,
+    target_did: Option<&'a Did>,
+    data_class: Option<&'a DataClass>,
+    estimated_budget_minor_units: Option<u64>,
+    estimated_risk_bp: Option<u32>,
+    action_name: Option<&'a String>,
+    approver_did: &'a Did,
+    approved_at: &'a Timestamp,
+    expires_at: Option<&'a Timestamp>,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,9 +249,11 @@ pub fn validate_avc<R: AvcRegistryRead>(
             credential,
             action,
             &normalized_holder_did,
+            registry,
+            &request.now,
             &mut reasons,
             &mut human_approval_required,
-        );
+        )?;
     }
 
     let mut sorted: Vec<AvcReasonCode> = reasons.into_iter().collect();
@@ -258,13 +294,53 @@ fn verify_signature(
     Ok(crypto::verify(&payload, &credential.signature, pubkey))
 }
 
-fn evaluate_action(
+/// Compute the canonical signing payload for a human approval over a
+/// specific AVC credential/action pair.
+///
+/// The caller-provided `requires_human_approval` flag is deliberately
+/// excluded because it is not proof of approval. Authorization depends
+/// on this signed approval evidence and the trusted human-approver key
+/// registry instead.
+///
+/// # Errors
+/// Returns [`AvcError::Serialization`] if canonical CBOR encoding fails.
+pub fn human_approval_signature_payload(
+    credential: &AutonomousVolitionCredential,
+    action: &AvcActionRequest,
+    approval: &AvcHumanApproval,
+) -> Result<Vec<u8>, AvcError> {
+    let credential_id = credential.id()?;
+    let payload = HumanApprovalSigningPayload {
+        domain: AVC_HUMAN_APPROVAL_SIGNING_DOMAIN,
+        schema_version: AVC_SCHEMA_VERSION,
+        credential_id: &credential_id,
+        action_id: &action.action_id,
+        actor_did: &action.actor_did,
+        requested_permission: &action.requested_permission,
+        tool: action.tool.as_ref(),
+        target_did: action.target_did.as_ref(),
+        data_class: action.data_class.as_ref(),
+        estimated_budget_minor_units: action.estimated_budget_minor_units,
+        estimated_risk_bp: action.estimated_risk_bp,
+        action_name: action.action_name.as_ref(),
+        approver_did: &approval.approver_did,
+        approved_at: &approval.approved_at,
+        expires_at: approval.expires_at.as_ref(),
+    };
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut buf)?;
+    Ok(buf)
+}
+
+fn evaluate_action<R: AvcRegistryRead>(
     credential: &AutonomousVolitionCredential,
     action: &AvcActionRequest,
     normalized_holder: &Did,
+    registry: &R,
+    now: &Timestamp,
     reasons: &mut BTreeSet<AvcReasonCode>,
     human_approval_required: &mut bool,
-) {
+) -> Result<(), AvcError> {
     if action.actor_did != *normalized_holder && action.actor_did != credential.subject_did {
         reasons.insert(AvcReasonCode::InvalidHolder);
     }
@@ -282,12 +358,16 @@ fn evaluate_action(
     enforce_counterparty(&credential.authority_scope, action, reasons);
     enforce_budget(&credential.constraints, action, reasons);
     enforce_risk(
+        credential,
         &credential.constraints,
         action,
+        registry,
+        now,
         reasons,
         human_approval_required,
-    );
+    )?;
     enforce_forbidden_action(&credential.constraints, action, reasons);
+    Ok(())
 }
 
 fn enforce_tool(
@@ -344,25 +424,73 @@ fn enforce_budget(
     }
 }
 
-fn enforce_risk(
+fn enforce_risk<R: AvcRegistryRead>(
+    credential: &AutonomousVolitionCredential,
     constraints: &AvcConstraints,
     action: &AvcActionRequest,
+    registry: &R,
+    now: &Timestamp,
     reasons: &mut BTreeSet<AvcReasonCode>,
     human_approval_required: &mut bool,
-) {
-    let Some(estimate) = action.estimated_risk_bp else {
-        return;
+) -> Result<(), AvcError> {
+    let risk_threshold_requires_approval = if let (Some(threshold), Some(estimate)) =
+        (constraints.approval_threshold_bp, action.estimated_risk_bp)
+    {
+        estimate >= threshold
+    } else {
+        false
     };
-    if let Some(cap) = constraints.max_action_risk_bp {
+    if let (Some(cap), Some(estimate)) = (constraints.max_action_risk_bp, action.estimated_risk_bp)
+    {
         if estimate > cap {
             reasons.insert(AvcReasonCode::RiskExceeded);
         }
     }
-    if let Some(threshold) = constraints.approval_threshold_bp {
-        if estimate >= threshold && !action.requires_human_approval {
-            reasons.insert(AvcReasonCode::HumanApprovalMissing);
-            *human_approval_required = true;
+
+    let approval_required = constraints.human_approval_required || risk_threshold_requires_approval;
+    if approval_required {
+        *human_approval_required = true;
+    }
+    if approval_required || action.human_approval.is_some() {
+        match verify_human_approval(credential, action, registry, now)? {
+            Ok(()) => {}
+            Err(reason) => {
+                reasons.insert(reason);
+            }
         }
+    }
+    Ok(())
+}
+
+fn verify_human_approval<R: AvcRegistryRead>(
+    credential: &AutonomousVolitionCredential,
+    action: &AvcActionRequest,
+    registry: &R,
+    now: &Timestamp,
+) -> Result<Result<(), AvcReasonCode>, AvcError> {
+    let Some(approval) = &action.human_approval else {
+        return Ok(Err(AvcReasonCode::HumanApprovalMissing));
+    };
+    if approval.signature.is_empty() || approval.approved_at > *now {
+        return Ok(Err(AvcReasonCode::HumanApprovalInvalid));
+    }
+    if let Some(expires_at) = approval.expires_at {
+        if expires_at <= approval.approved_at {
+            return Ok(Err(AvcReasonCode::HumanApprovalInvalid));
+        }
+        if expires_at <= *now {
+            return Ok(Err(AvcReasonCode::HumanApprovalExpired));
+        }
+    }
+
+    let Some(public_key) = registry.resolve_human_approval_key(&approval.approver_did) else {
+        return Ok(Err(AvcReasonCode::HumanApprovalInvalid));
+    };
+    let payload = human_approval_signature_payload(credential, action, approval)?;
+    if crypto::verify(&payload, &approval.signature, &public_key) {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(AvcReasonCode::HumanApprovalInvalid))
     }
 }
 
@@ -394,9 +522,14 @@ mod tests {
     };
 
     const ISSUER_SEED: [u8; 32] = [0x11; 32];
+    const HUMAN_APPROVER_SEED: [u8; 32] = [0x44; 32];
 
     fn issuer_keypair() -> KeyPair {
         KeyPair::from_secret_bytes(ISSUER_SEED).expect("valid seed")
+    }
+
+    fn human_approver_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(HUMAN_APPROVER_SEED).expect("valid seed")
     }
 
     /// Build a registry seeded with the issuer's public key.
@@ -437,9 +570,40 @@ mod tests {
             data_class: None,
             estimated_budget_minor_units: None,
             estimated_risk_bp: None,
+            human_approval: None,
             requires_human_approval: false,
             action_name: None,
         }
+    }
+
+    fn attach_signed_human_approval(
+        credential: &AutonomousVolitionCredential,
+        action: &mut AvcActionRequest,
+        approver_did: Did,
+        approved_at: Timestamp,
+        expires_at: Option<Timestamp>,
+        approver_keypair: &KeyPair,
+    ) {
+        action.human_approval = Some(AvcHumanApproval {
+            approver_did,
+            approved_at,
+            expires_at,
+            signature: Signature::empty(),
+        });
+        let payload = human_approval_signature_payload(
+            credential,
+            action,
+            action
+                .human_approval
+                .as_ref()
+                .expect("approval placeholder"),
+        )
+        .expect("canonical approval payload");
+        action
+            .human_approval
+            .as_mut()
+            .expect("approval placeholder")
+            .signature = approver_keypair.sign(&payload);
     }
 
     #[test]
@@ -820,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn risk_above_threshold_with_explicit_approval_does_not_flag() {
+    fn risk_above_threshold_ignores_caller_approval_flag() {
         let h = Harness::new();
         let mut draft = baseline_draft();
         draft.constraints.max_action_risk_bp = Some(10_000);
@@ -833,7 +997,228 @@ mod tests {
         let mut request = baseline_request(cred, ts(1_500_000));
         request.action = Some(action);
         let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::HumanApprovalRequired);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalMissing]
+        );
+    }
+
+    #[test]
+    fn credential_human_approval_required_blocks_action_without_evidence() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let action = baseline_action(actor);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::HumanApprovalRequired);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalMissing]
+        );
+    }
+
+    #[test]
+    fn signed_human_approval_satisfies_credential_requirement() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            Some(ts(1_900_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
         assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
+    fn signed_human_approval_satisfies_risk_threshold() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.max_action_risk_bp = Some(10_000);
+        draft.constraints.approval_threshold_bp = Some(5_000);
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.estimated_risk_bp = Some(7_500);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            None,
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
+    fn human_approval_from_untrusted_approver_is_invalid() {
+        let h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            Some(ts(1_900_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn issuer_public_key_alone_does_not_authorize_human_approval() {
+        let h = Harness::new();
+        let issuer_keypair = issuer_keypair();
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            did("issuer"),
+            ts(1_400_000),
+            Some(ts(1_900_000)),
+            &issuer_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn optional_human_approval_evidence_must_still_verify() {
+        let h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let cred = h.issue(baseline_draft());
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            did("human-approver"),
+            ts(1_400_000),
+            Some(ts(1_900_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn human_approval_signature_binds_action_fields() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.max_action_risk_bp = Some(10_000);
+        draft.constraints.approval_threshold_bp = Some(5_000);
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.estimated_risk_bp = Some(7_500);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            None,
+            &approver_keypair,
+        );
+        action.estimated_risk_bp = Some(7_501);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn expired_human_approval_is_rejected() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_300_000),
+            Some(ts(1_400_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalExpired]
+        );
     }
 
     #[test]
