@@ -511,6 +511,28 @@ mod tests {
     }
 
     #[test]
+    fn put_revocation_rejects_unsupported_schema_without_marking_revoked() {
+        let mut reg = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+
+        let mut revocation = sample_issuer_revocation(id, &issuer_keypair);
+        revocation.schema_version = crate::credential::AVC_SCHEMA_VERSION + 1;
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::UnsupportedSchema { got, supported } => {
+                assert_eq!(got, crate::credential::AVC_SCHEMA_VERSION + 1);
+                assert_eq!(supported, crate::credential::AVC_SCHEMA_VERSION);
+            }
+            other => panic!("expected unsupported schema for revocation, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "unsupported revocation schema must not create a tombstone"
+        );
+    }
+
+    #[test]
     fn put_revocation_rejects_revoker_that_is_not_issuer_or_principal() {
         let mut reg = fresh_registry();
         let cred = sample_credential();

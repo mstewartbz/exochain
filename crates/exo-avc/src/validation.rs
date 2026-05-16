@@ -1222,6 +1222,64 @@ mod tests {
     }
 
     #[test]
+    fn human_approval_with_empty_signature_is_invalid() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.human_approval = Some(AvcHumanApproval {
+            approver_did,
+            approved_at: ts(1_400_000),
+            expires_at: Some(ts(1_900_000)),
+            signature: Signature::empty(),
+        });
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn human_approval_expiring_before_approval_time_is_invalid() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            Some(ts(1_399_999)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
     fn denies_forbidden_action_name() {
         let h = Harness::new();
         let mut draft = baseline_draft();
