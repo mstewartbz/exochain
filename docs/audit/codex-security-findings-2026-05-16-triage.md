@@ -43,7 +43,7 @@ Current baseline when this triage was created:
 | P0 | Session expiry uses deterministic HLC in production | Core runtime adapter: `crates/exo-gateway/src/server.rs`; EXOCHAIN core support: `crates/exo-core/src/hlc.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway production_app_state_uses_database_time_for_db_backed_session_expiry -- --nocapture`; `cargo test -p exo-gateway production_session_auth_rejects_epoch_expired_token -- --nocapture` |
 | P0 | Bearer session TTL uses deterministic counter | Core runtime adapter: `crates/exo-node/src/zerodentity/api.rs`, `crates/exo-node/src/main.rs`; EXOCHAIN core support: `crates/exo-node/src/zerodentity/*`, `crates/exo-core/src/hlc.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node production_api_state -- --nocapture`; `cargo test -p exo-node store_session -- --nocapture` |
 | P1 | Client-supplied authority accepted for settlements | EXOCHAIN core: `crates/exo-economy/src/settlement.rs`, `crates/exo-economy/src/value_contribution.rs`; core runtime adapter: `crates/exo-node/src/economy.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node automated_settlement_rejects_client_supplied_preconditions -- --nocapture`; `cargo test -p exo-economy automated_settlement_rejects_authority_proof_not_bound_to_adoption -- --nocapture` |
-| P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Queued | Prove vote conflict adjudication derives affected parties from owned decision state |
+| P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway trusted_decision_affected_dids_block_conflict_even_when_request_context_is_unrelated -- --nocapture`; `cargo test -p exo-gateway vote_handler_derives_conflict_context_from_locked_decision_state -- --nocapture` |
 | P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs` | Queued | Prove MCP authority tools reject unsigned or caller-fabricated consent and override context |
 | P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Queued | Prove quorum vote provenance is verified for every counted voter class |
 | P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Queued | Prove human approval evidence is cryptographically bound, not a caller boolean |
@@ -167,6 +167,36 @@ cargo test -p exo-node automated_settlement_rejects_client_supplied_precondition
 cargo test -p exo-node automated_settlement_rejects_request_authority_not_bound_to_stored_acceptance -- --nocapture
 cargo test -p exo-economy automated_settlement_rejects_authority_proof_not_bound_to_adoption -- --nocapture
 cargo test -p exo-economy automated_preconditions_fail_closed_for_missing_authority_and_active_dispute -- --nocapture
+```
+
+### P1 - Vote Conflict Checks Trust Caller-Supplied Affected DIDs
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exo-gateway/src/handlers.rs`.
+- EXOCHAIN core: `crates/exo-governance/src/conflict.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- The vote handler loads the stored `DecisionObject` under a row lock and
+  derives conflict `affected_dids` from the decision's trusted metadata.
+- Request-body `affected_dids` can no longer make conflict adjudication
+  unrelated or empty.
+- Conflict recusal uses `load_blocking_conflict_declarations_for_vote` with
+  trusted affected DIDs and fails closed when the trusted context is empty.
+- `check_and_block` remains the enforcing gate before kernel adjudication and
+  vote persistence.
+
+Validation commands:
+
+```bash
+cargo test -p exo-gateway trusted_decision_affected_dids_block_conflict_even_when_request_context_is_unrelated -- --nocapture
+cargo test -p exo-gateway vote_handler_derives_conflict_context_from_locked_decision_state -- --nocapture
+cargo test -p exo-gateway vote_handler_source_does_not_default_conflict_adjudication -- --nocapture
+cargo test -p exo-gateway conflict_declaration_loader_rejects_empty_recusal_context -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
