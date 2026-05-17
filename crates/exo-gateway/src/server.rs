@@ -18,7 +18,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -220,6 +220,7 @@ pub struct GatewayConfig {
     pub bind_address: String,
     pub tls_config: Option<TlsConfig>,
     pub max_connections: u32,
+    pub trusted_rate_limit_proxy_ips: BTreeSet<IpAddr>,
 }
 
 impl Default for GatewayConfig {
@@ -228,8 +229,26 @@ impl Default for GatewayConfig {
             bind_address: "127.0.0.1:8443".into(),
             tls_config: None,
             max_connections: 1024,
+            trusted_rate_limit_proxy_ips: BTreeSet::new(),
         }
     }
+}
+
+pub fn parse_trusted_rate_limit_proxy_ips(raw: &str) -> Result<BTreeSet<IpAddr>> {
+    let mut trusted_proxies = BTreeSet::new();
+    for value in raw.split(',') {
+        let candidate = value.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let proxy_ip = candidate.parse::<IpAddr>().map_err(|error| {
+            GatewayError::BadRequest(format!(
+                "trusted_rate_limit_proxy_ips contains invalid IP '{candidate}': {error}"
+            ))
+        })?;
+        trusted_proxies.insert(proxy_ip);
+    }
+    Ok(trusted_proxies)
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +334,9 @@ pub struct AppState {
     session_time_source: SessionTimeSource,
     /// Default-on per-client request-rate admission state.
     rate_limiter: Arc<Mutex<GatewayRateLimiter>>,
+    /// Explicitly trusted immediate peer IPs whose forwarded client identity may
+    /// be used for gateway rate limiting.
+    trusted_rate_limit_proxy_ips: BTreeSet<IpAddr>,
 }
 
 /// Non-secret authenticated session profile used to carry tenant scope across
@@ -413,6 +435,21 @@ impl AppState {
             registry,
             HybridClock::new(),
             SessionTimeSource::DatabaseWhenAvailable,
+            BTreeSet::new(),
+        )
+    }
+
+    pub fn new_with_trusted_rate_limit_proxy_ips(
+        pool: Option<sqlx::PgPool>,
+        registry: Arc<RwLock<LocalDidRegistry>>,
+        trusted_rate_limit_proxy_ips: BTreeSet<IpAddr>,
+    ) -> Self {
+        Self::new_with_clock_and_session_time_source(
+            pool,
+            registry,
+            HybridClock::new(),
+            SessionTimeSource::DatabaseWhenAvailable,
+            trusted_rate_limit_proxy_ips,
         )
     }
 
@@ -427,6 +464,7 @@ impl AppState {
             registry,
             clock,
             SessionTimeSource::InjectedClock,
+            BTreeSet::new(),
         )
     }
 
@@ -435,6 +473,7 @@ impl AppState {
         registry: Arc<RwLock<LocalDidRegistry>>,
         mut clock: HybridClock,
         session_time_source: SessionTimeSource,
+        trusted_rate_limit_proxy_ips: BTreeSet<IpAddr>,
     ) -> Self {
         // Bootstrap kernel with the all-invariants set.
         // constitution bytes are hashed for immutability verification.
@@ -454,6 +493,7 @@ impl AppState {
             clock: Arc::new(Mutex::new(clock)),
             session_time_source,
             rate_limiter: Arc::new(Mutex::new(GatewayRateLimiter::default())),
+            trusted_rate_limit_proxy_ips,
         }
     }
 
@@ -4133,12 +4173,47 @@ fn build_unlayered_router(state: AppState) -> Router {
         .merge(gql_router)
 }
 
-fn gateway_rate_limit_key(request: &Request<Body>) -> String {
+fn gateway_socket_rate_limit_ip(request: &Request<Body>) -> Option<IpAddr> {
     request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(address)| address.ip().to_string())
-        .unwrap_or_else(|| "unknown-client".to_owned())
+        .map(|ConnectInfo(address)| address.ip())
+}
+
+fn forwarded_rate_limit_client_ip(
+    request: &Request<Body>,
+    trusted_rate_limit_proxy_ips: &BTreeSet<IpAddr>,
+) -> Option<IpAddr> {
+    let header_value = request.headers().get("x-forwarded-for")?.to_str().ok()?;
+    let parsed_ips: Vec<IpAddr> = header_value
+        .split(',')
+        .filter_map(|candidate| candidate.trim().parse::<IpAddr>().ok())
+        .collect();
+
+    parsed_ips
+        .iter()
+        .rev()
+        .copied()
+        .find(|ip| !trusted_rate_limit_proxy_ips.contains(ip))
+}
+
+fn gateway_rate_limit_key(
+    request: &Request<Body>,
+    trusted_rate_limit_proxy_ips: &BTreeSet<IpAddr>,
+) -> String {
+    let Some(socket_ip) = gateway_socket_rate_limit_ip(request) else {
+        return "unknown-client".to_owned();
+    };
+
+    if trusted_rate_limit_proxy_ips.contains(&socket_ip) {
+        if let Some(client_ip) =
+            forwarded_rate_limit_client_ip(request, trusted_rate_limit_proxy_ips)
+        {
+            return client_ip.to_string();
+        }
+    }
+
+    socket_ip.to_string()
 }
 
 fn gateway_rate_limit_response(retry_after_ms: u64) -> Response {
@@ -4156,7 +4231,7 @@ async fn enforce_gateway_rate_limit(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let client_key = gateway_rate_limit_key(&request);
+    let client_key = gateway_rate_limit_key(&request, &state.trusted_rate_limit_proxy_ips);
     let now_ms = match state.try_now_ms() {
         Ok(now_ms) => now_ms,
         Err(message) => {
@@ -4265,7 +4340,11 @@ pub async fn serve_with_extra_routes(
 ) -> Result<()> {
     validate_tls_config(config.tls_config.as_ref())?;
     let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
-    let state = AppState::new(pool, registry);
+    let state = AppState::new_with_trusted_rate_limit_proxy_ips(
+        pool,
+        registry,
+        config.trusted_rate_limit_proxy_ips.clone(),
+    );
     let app = build_router_with_extra_routes(state, extra);
 
     if let Some(tls_config) = config.tls_config.as_ref() {
@@ -4324,7 +4403,7 @@ pub async fn serve_with_extra_routes(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::{
-        net::SocketAddr,
+        net::{IpAddr, SocketAddr},
         sync::atomic::{AtomicU64, Ordering},
         time::Duration,
     };
@@ -4370,6 +4449,17 @@ mod tests {
             window_ms,
             8,
         )));
+        state
+    }
+
+    fn rate_limited_state_with_trusted_proxies(
+        max_requests_per_window: u32,
+        window_ms: u64,
+        wall: Arc<AtomicU64>,
+        trusted_proxies: &[IpAddr],
+    ) -> AppState {
+        let mut state = rate_limited_state(max_requests_per_window, window_ms, wall);
+        state.trusted_rate_limit_proxy_ips = trusted_proxies.iter().copied().collect();
         state
     }
 
@@ -4714,6 +4804,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_rate_limit_trusted_proxy_uses_verified_forwarded_client_ip() {
+        let wall = Arc::new(AtomicU64::new(25_000));
+        let trusted_proxy = "10.0.0.10".parse::<IpAddr>().unwrap();
+        let state = rate_limited_state_with_trusted_proxies(1, 60_000, wall, &[trusted_proxy]);
+        let app = apply_gateway_layers(
+            Router::new().route("/probe", get(probe)),
+            state,
+            GLOBAL_CONCURRENCY_LIMIT,
+        );
+
+        let first_client = app
+            .clone()
+            .oneshot(request_from(
+                "/probe",
+                "10.0.0.10:1000".parse().unwrap(),
+                "198.51.100.200, 203.0.113.77",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first_client.status(), StatusCode::OK);
+
+        let second_client_same_proxy = app
+            .clone()
+            .oneshot(request_from(
+                "/probe",
+                "10.0.0.10:2000".parse().unwrap(),
+                "198.51.100.200, 203.0.113.88",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second_client_same_proxy.status(), StatusCode::OK);
+
+        let first_client_again = app
+            .oneshot(request_from(
+                "/probe",
+                "10.0.0.10:3000".parse().unwrap(),
+                "198.51.100.200, 203.0.113.77",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first_client_again.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
     async fn gateway_rate_limit_uses_socket_ip_not_spoofable_forwarded_headers() {
         let wall = Arc::new(AtomicU64::new(25_000));
         let state = rate_limited_state(1, 60_000, wall);
@@ -4757,6 +4891,39 @@ mod tests {
             different_socket_ip_same_forwarded_header.status(),
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_rate_limit_trusted_proxy_malformed_forwarding_falls_back_to_socket_ip() {
+        let wall = Arc::new(AtomicU64::new(25_000));
+        let trusted_proxy = "10.0.0.10".parse::<IpAddr>().unwrap();
+        let state = rate_limited_state_with_trusted_proxies(1, 60_000, wall, &[trusted_proxy]);
+        let app = apply_gateway_layers(
+            Router::new().route("/probe", get(probe)),
+            state,
+            GLOBAL_CONCURRENCY_LIMIT,
+        );
+
+        let first = app
+            .clone()
+            .oneshot(request_from(
+                "/probe",
+                "10.0.0.10:1000".parse().unwrap(),
+                "not-an-ip",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(request_from(
+                "/probe",
+                "10.0.0.10:2000".parse().unwrap(),
+                "also-not-an-ip",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
@@ -4815,8 +4982,24 @@ mod tests {
         );
         assert!(
             production.contains("ConnectInfo<SocketAddr>")
-                && !production.contains("x-forwarded-for"),
-            "gateway rate limiting must key clients from socket identity, not spoofable forwarding headers"
+                && production.contains("trusted_rate_limit_proxy_ips")
+                && production.contains("x-forwarded-for"),
+            "gateway rate limiting must keep socket identity as the default and gate forwarded client identity behind trusted proxy configuration"
+        );
+        let key_derivation = source_between(
+            production,
+            "fn gateway_rate_limit_key",
+            "fn gateway_rate_limit_response",
+        );
+        let trusted_proxy_check = key_derivation
+            .find("trusted_rate_limit_proxy_ips.contains(&socket_ip)")
+            .expect("forwarded headers must be gated by trusted proxy membership");
+        let forwarded_header_read = key_derivation
+            .find("forwarded_rate_limit_client_ip")
+            .expect("trusted proxy handling must delegate forwarded client parsing");
+        assert!(
+            trusted_proxy_check < forwarded_header_read,
+            "gateway must prove the peer is trusted before reading forwarded client identity"
         );
     }
 
@@ -5267,6 +5450,27 @@ mod tests {
         let j = serde_json::to_string(&c).unwrap();
         let r: GatewayConfig = serde_json::from_str(&j).unwrap();
         assert_eq!(r.bind_address, c.bind_address);
+        assert!(r.trusted_rate_limit_proxy_ips.is_empty());
+    }
+
+    #[test]
+    fn parse_trusted_rate_limit_proxy_ips_accepts_unique_comma_separated_ips() {
+        let parsed = parse_trusted_rate_limit_proxy_ips("10.0.0.10, 192.0.2.10,10.0.0.10").unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains(&"10.0.0.10".parse::<IpAddr>().unwrap()));
+        assert!(parsed.contains(&"192.0.2.10".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn parse_trusted_rate_limit_proxy_ips_rejects_malformed_ips() {
+        let err = parse_trusted_rate_limit_proxy_ips("10.0.0.10,not-an-ip")
+            .expect_err("malformed trusted proxy configuration must fail closed");
+
+        assert!(
+            err.to_string().contains("not-an-ip"),
+            "error should identify the malformed trusted proxy entry: {err}"
+        );
     }
     #[test]
     fn tls_config_serde() {
