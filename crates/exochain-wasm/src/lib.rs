@@ -157,15 +157,24 @@ mod source_guard_tests {
     }
 
     #[test]
-    fn wasm_governance_close_uses_verified_deliberation_quorum() {
+    fn wasm_governance_close_requires_trusted_runtime_adapter() {
         let source = include_str!("governance_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
         assert!(
-            source.contains("close_verified"),
-            "WASM deliberation close must use cryptographically verified quorum closure"
+            production
+                .contains("verified deliberation closure requires a trusted core runtime adapter"),
+            "public WASM deliberation close must fail closed without a trusted runtime adapter"
         );
         assert!(
-            !source.contains("deliberation::close(&mut delib"),
+            !production.contains("deliberation::close(&mut delib"),
             "WASM deliberation close must not call the structural-only close path"
+        );
+        assert!(
+            !production.contains("close_verified(&mut delib, &policy, &resolver)"),
+            "public WASM deliberation close must not trust caller-supplied signer keys and roles"
         );
     }
 
@@ -186,9 +195,7 @@ mod source_guard_tests {
     fn wasm_governance_bridge_bounds_untrusted_collection_inputs() {
         let source = include_str!("governance_bindings.rs");
         for required in [
-            "MAX_WASM_PUBLIC_KEYS",
             "MAX_WASM_CLEARANCE_REGISTRY_ENTRIES",
-            "MAX_WASM_APPROVALS",
             "MAX_WASM_CONFLICT_DECLARATIONS",
             "MAX_WASM_AUDIT_ENTRIES",
             "MAX_WASM_DELIBERATION_PARTICIPANTS",
@@ -356,8 +363,6 @@ mod source_guard_tests {
         for required in [
             "MAX_WASM_FORUM_EMERGENCY_ACTIONS",
             "MAX_WASM_FORUM_CHALLENGES",
-            "MAX_WASM_FORUM_SIGNATURES",
-            "MAX_WASM_FORUM_PUBLIC_KEYS",
         ] {
             assert!(
                 source.contains(required),

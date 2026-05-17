@@ -24,8 +24,6 @@ use crate::serde_bridge::*;
 
 const MAX_WASM_FORUM_EMERGENCY_ACTIONS: usize = 4_096;
 const MAX_WASM_FORUM_CHALLENGES: usize = 4_096;
-const MAX_WASM_FORUM_SIGNATURES: usize = 1_024;
-const MAX_WASM_FORUM_PUBLIC_KEYS: usize = 1_024;
 const MAX_WASM_FORUM_CONSTITUTION_BYTES: usize = 1_048_576;
 
 #[derive(Deserialize)]
@@ -286,24 +284,16 @@ pub fn wasm_ratify_constitution(
     public_keys_json: &str,
     timestamp_ms: u64,
 ) -> Result<JsValue, JsValue> {
-    let mut corpus: decision_forum::constitution::ConstitutionCorpus = from_json_str(corpus_json)?;
-    let quorum: decision_forum::constitution::ConstitutionQuorum = from_json_str(quorum_json)?;
-    let sigs = parse_signature_pairs(signatures_json)?;
-    let public_keys = parse_public_key_pairs(public_keys_json)?;
-    let eligible: std::collections::BTreeSet<exo_core::Did> = public_keys.keys().cloned().collect();
-    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
-
-    let ts = exo_core::types::Timestamp::new(timestamp_ms, 0);
-    decision_forum::constitution::ratify_verified(
-        &mut corpus,
-        &sigs,
-        &quorum,
-        ts,
-        &eligible,
-        &resolver,
-    )
-    .map_err(|e| JsValue::from_str(&format!("Ratify error: {e}")))?;
-    to_js_value(&corpus)
+    let _ = (
+        corpus_json,
+        signatures_json,
+        quorum_json,
+        public_keys_json,
+        timestamp_ms,
+    );
+    Err(JsValue::from_str(
+        "constitutional ratification requires a trusted core runtime adapter; public WASM callers cannot supply signer keys or eligible signer sets",
+    ))
 }
 
 /// Amend a constitutional corpus by adding or updating an article.
@@ -322,26 +312,17 @@ pub fn wasm_amend_constitution(
     public_keys_json: &str,
     timestamp_ms: u64,
 ) -> Result<JsValue, JsValue> {
-    let mut corpus: decision_forum::constitution::ConstitutionCorpus = from_json_str(corpus_json)?;
-    let amendment: decision_forum::constitution::Article = from_json_str(amendment_json)?;
-    let quorum: decision_forum::constitution::ConstitutionQuorum = from_json_str(quorum_json)?;
-    let sigs = parse_signature_pairs(signatures_json)?;
-    let public_keys = parse_public_key_pairs(public_keys_json)?;
-    let eligible: std::collections::BTreeSet<exo_core::Did> = public_keys.keys().cloned().collect();
-    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
-    let ts = exo_core::types::Timestamp::new(timestamp_ms, 0);
-
-    decision_forum::constitution::amend_verified(
-        &mut corpus,
-        amendment,
-        &sigs,
-        &quorum,
-        ts,
-        &eligible,
-        &resolver,
-    )
-    .map_err(|e| JsValue::from_str(&format!("Amend error: {e}")))?;
-    to_js_value(&corpus)
+    let _ = (
+        corpus_json,
+        amendment_json,
+        signatures_json,
+        quorum_json,
+        public_keys_json,
+        timestamp_ms,
+    );
+    Err(JsValue::from_str(
+        "constitutional amendment requires a trusted core runtime adapter; public WASM callers cannot supply signer keys or eligible signer sets",
+    ))
 }
 
 /// Dry-run a constitutional amendment — returns conflict descriptions.
@@ -895,45 +876,6 @@ fn parse_public_key_hex(public_key_hex: &str) -> Result<exo_core::PublicKey, JsV
     Ok(exo_core::PublicKey::from_bytes(arr))
 }
 
-fn parse_signature_pairs(
-    signatures_json: &str,
-) -> Result<Vec<(exo_core::Did, exo_core::Signature)>, JsValue> {
-    let sig_pairs: Vec<(String, String)> = from_json_bounded_vec(
-        signatures_json,
-        "forum signatures",
-        MAX_WASM_FORUM_SIGNATURES,
-    )?;
-    let mut sigs = Vec::new();
-    for (did_str, sig_hex) in &sig_pairs {
-        let did = exo_core::Did::new(did_str)
-            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-        let sig_bytes =
-            hex::decode(sig_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-        let arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| JsValue::from_str("signature must be 64 bytes"))?;
-        sigs.push((did, exo_core::Signature::from_bytes(arr)));
-    }
-    Ok(sigs)
-}
-
-fn parse_public_key_pairs(
-    public_keys_json: &str,
-) -> Result<std::collections::BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
-    let key_pairs: Vec<(String, String)> = from_json_bounded_vec(
-        public_keys_json,
-        "forum public keys",
-        MAX_WASM_FORUM_PUBLIC_KEYS,
-    )?;
-    let mut public_keys = std::collections::BTreeMap::new();
-    for (did_str, public_key_hex) in &key_pairs {
-        let did = exo_core::Did::new(did_str)
-            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-        public_keys.insert(did, parse_public_key_hex(public_key_hex)?);
-    }
-    Ok(public_keys)
-}
-
 fn ensure_constitution_bytes(len: usize) -> Result<(), JsValue> {
     if len > MAX_WASM_FORUM_CONSTITUTION_BYTES {
         return Err(JsValue::from_str(
@@ -1023,5 +965,36 @@ mod tests {
             production.contains("verify_forum_authority_with_key"),
             "WASM authority verification must call the cryptographic core verifier"
         );
+    }
+
+    #[test]
+    fn wasm_constitution_exports_reject_caller_supplied_signer_keys() {
+        let source = include_str!("decision_forum_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        for export_name in ["wasm_ratify_constitution", "wasm_amend_constitution"] {
+            let body = production
+                .split(&format!("pub fn {export_name}"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{export_name} export must exist"))
+                .split("///")
+                .next()
+                .expect("export body must be bounded by next doc comment");
+            assert!(
+                body.contains("trusted core runtime adapter"),
+                "{export_name} must fail closed at the public WASM boundary"
+            );
+            assert!(
+                !body.contains("parse_public_key_pairs(public_keys_json)"),
+                "{export_name} must not parse caller-supplied signer keys"
+            );
+            assert!(
+                !body.contains("public_keys.keys().cloned().collect()"),
+                "{export_name} must not derive eligible signers from caller-supplied keys"
+            );
+        }
     }
 }
