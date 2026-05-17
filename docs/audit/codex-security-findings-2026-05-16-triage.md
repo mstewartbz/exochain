@@ -40,7 +40,7 @@ Current baseline when this triage was created:
 
 | Priority | Finding | Classification | Current status | First verification target |
 |---|---|---|---|---|
-| P0 | Session expiry uses deterministic HLC in production | Core runtime adapter: `crates/exo-gateway/src/server.rs`; EXOCHAIN core support: `crates/exo-core/src/hlc.rs` | Next remediation target | Prove expired gateway sessions fail closed under production `AppState::new` |
+| P0 | Session expiry uses deterministic HLC in production | Core runtime adapter: `crates/exo-gateway/src/server.rs`; EXOCHAIN core support: `crates/exo-core/src/hlc.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway production_app_state_uses_database_time_for_db_backed_session_expiry -- --nocapture`; `cargo test -p exo-gateway production_session_auth_rejects_epoch_expired_token -- --nocapture` |
 | P0 | Bearer session TTL uses deterministic counter | Core runtime adapter: `crates/exo-node/src/zerodentity/api.rs`, `crates/exo-node/src/main.rs`; EXOCHAIN core support: `crates/exo-node/src/zerodentity/*`, `crates/exo-core/src/hlc.rs` | Queued after gateway session expiry | Prove retained 0dentity bearer tokens expire by real deployment time, not request count |
 | P1 | Client-supplied authority accepted for settlements | EXOCHAIN core: `crates/exo-economy/src/settlement.rs`, `crates/exo-economy/src/value_contribution.rs`; core runtime adapter: `crates/exo-node/src/economy.rs` | Queued | Prove settlement authority cannot be supplied solely by the caller |
 | P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Queued | Prove vote conflict adjudication derives affected parties from owned decision state |
@@ -75,6 +75,35 @@ Current baseline when this triage was created:
   and owner-only identity access controls across live runtime adapters.
 
 ## Verification Log
+
+### P0 - Session Expiry Uses Deterministic HLC In Production
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exo-gateway/src/server.rs`.
+- EXOCHAIN core support: `crates/exo-core/src/hlc.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- Production `AppState::new` constructs DB-backed gateway state with
+  `SessionTimeSource::DatabaseWhenAvailable`.
+- `trusted_session_validation_time_ms` uses `trusted_database_epoch_ms` when a
+  DB pool is present, falling back to HLC only for injected-clock/dev paths.
+- `require_authenticated_session_actor_for_token` queries
+  `sessions` with `expires_at > trusted_session_validation_time_ms(state)`.
+- Session validation source guards prove caller-supplied observed-at headers do
+  not drive DB-backed session expiry checks.
+
+Validation commands:
+
+```bash
+cargo test -p exo-gateway production_app_state_uses_database_time_for_db_backed_session_expiry -- --nocapture
+cargo test -p exo-gateway session_validation_uses_gateway_clock_not_caller_header_time -- --nocapture
+cargo test -p exo-gateway production_session_auth_rejects_epoch_expired_token -- --nocapture
+```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
 
