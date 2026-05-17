@@ -971,6 +971,20 @@ mod tests {
     }
 
     #[test]
+    fn in_scope_action_with_allowed_tool_allows() {
+        let h = Harness::new();
+        let cred = h.issue(baseline_draft());
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.tool = Some("alpha".into());
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
     fn non_expiring_credential_allows_explicit_holder_action() {
         let h = Harness::new();
         let mut draft = baseline_draft();
@@ -998,6 +1012,26 @@ mod tests {
         assert_eq!(result.decision, AvcDecision::Allow);
         assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
         assert_eq!(result.normalized_holder_did, did("holder"));
+    }
+
+    #[test]
+    fn risk_at_approval_threshold_requires_human_approval() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.constraints.max_action_risk_bp = Some(10_000);
+        draft.constraints.approval_threshold_bp = Some(5_000);
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.estimated_risk_bp = Some(5_000);
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::HumanApprovalRequired);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalMissing]
+        );
     }
 
     #[test]
@@ -1323,6 +1357,66 @@ mod tests {
         assert_eq!(
             result.reason_codes,
             vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn human_approval_expiring_at_approval_time_is_invalid() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            Some(ts(1_400_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalInvalid]
+        );
+    }
+
+    #[test]
+    fn human_approval_expiring_at_now_is_expired() {
+        let mut h = Harness::new();
+        let approver_keypair = human_approver_keypair();
+        let approver_did = did("human-approver");
+        h.registry
+            .put_human_approval_key(approver_did.clone(), approver_keypair.public);
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        attach_signed_human_approval(
+            &cred,
+            &mut action,
+            approver_did,
+            ts(1_400_000),
+            Some(ts(1_500_000)),
+            &approver_keypair,
+        );
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+        let result = validate_avc(&request, &h.registry).unwrap();
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert_eq!(
+            result.reason_codes,
+            vec![AvcReasonCode::HumanApprovalExpired]
         );
     }
 
