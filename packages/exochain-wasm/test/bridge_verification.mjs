@@ -1330,12 +1330,16 @@ test('wasm_has_permission', () => {
   );
 });
 
-test('wasm_verify_authority_chain', () => {
+test('wasm_verify_authority_chain rejects caller-supplied keys', () => {
   if (!chain) throw new Error('skipped -- no chain from setup');
-  return wasm.wasm_verify_authority_chain(
-    JSON.stringify(chain),
-    NOW_MS,
-    JSON.stringify([])
+  return expectErrorContains(
+    'wasm_verify_authority_chain',
+    () => wasm.wasm_verify_authority_chain(
+      JSON.stringify(chain),
+      NOW_MS,
+      JSON.stringify([[TEST_DID, signer1.publicKeyHex]])
+    ),
+    'trusted core runtime adapter'
   );
 });
 

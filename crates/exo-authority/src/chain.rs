@@ -190,6 +190,17 @@ pub fn build_chain_with_depth(
     links: &[AuthorityLink],
     max_depth: usize,
 ) -> Result<AuthorityChain, AuthorityError> {
+    validate_chain_topology(links, max_depth)?;
+    Ok(AuthorityChain {
+        links: links.to_vec(),
+        max_depth,
+    })
+}
+
+fn validate_chain_topology(
+    links: &[AuthorityLink],
+    max_depth: usize,
+) -> Result<(), AuthorityError> {
     if links.is_empty() {
         return Err(AuthorityError::EmptyChain);
     }
@@ -223,10 +234,7 @@ pub fn build_chain_with_depth(
         }
     }
 
-    Ok(AuthorityChain {
-        links: links.to_vec(),
-        max_depth,
-    })
+    Ok(())
 }
 
 /// Verify an authority chain with cryptographic signature verification.
@@ -256,6 +264,7 @@ where
             max_depth: chain.max_depth,
         });
     }
+    validate_chain_topology(&chain.links, chain.max_depth)?;
 
     let mut prev_scope: Option<PermissionSet> = None;
 
@@ -701,6 +710,48 @@ mod tests {
         assert!(matches!(
             verify_chain(&chain, &now(), reg.resolver()),
             Err(AuthorityError::InvalidSignature { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_prebuilt_chain_with_broken_topology() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+        reg.register("charlie");
+
+        let chain = AuthorityChain {
+            links: vec![
+                signed_link(&reg, "root", "alice", vec![Permission::Read], 0, None),
+                signed_link(&reg, "charlie", "bob", vec![Permission::Read], 1, None),
+            ],
+            max_depth: DEFAULT_MAX_DEPTH,
+        };
+
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::ChainBroken { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_prebuilt_chain_with_forged_depth() {
+        let mut reg = KeyRegistry::new();
+        reg.register("root");
+        let chain = AuthorityChain {
+            links: vec![signed_link(
+                &reg,
+                "root",
+                "alice",
+                vec![Permission::Read],
+                7,
+                None,
+            )],
+            max_depth: DEFAULT_MAX_DEPTH,
+        };
+
+        assert!(matches!(
+            verify_chain(&chain, &now(), reg.resolver()),
+            Err(AuthorityError::ChainBroken { index: 0, .. })
         ));
     }
 
