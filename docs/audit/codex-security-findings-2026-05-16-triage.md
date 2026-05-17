@@ -44,7 +44,7 @@ Current baseline when this triage was created:
 | P0 | Bearer session TTL uses deterministic counter | Core runtime adapter: `crates/exo-node/src/zerodentity/api.rs`, `crates/exo-node/src/main.rs`; EXOCHAIN core support: `crates/exo-node/src/zerodentity/*`, `crates/exo-core/src/hlc.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node production_api_state -- --nocapture`; `cargo test -p exo-node store_session -- --nocapture` |
 | P1 | Client-supplied authority accepted for settlements | EXOCHAIN core: `crates/exo-economy/src/settlement.rs`, `crates/exo-economy/src/value_contribution.rs`; core runtime adapter: `crates/exo-node/src/economy.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node automated_settlement_rejects_client_supplied_preconditions -- --nocapture`; `cargo test -p exo-economy automated_settlement_rejects_authority_proof_not_bound_to_adoption -- --nocapture` |
 | P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway trusted_decision_affected_dids_block_conflict_even_when_request_context_is_unrelated -- --nocapture`; `cargo test -p exo-gateway vote_handler_derives_conflict_context_from_locked_decision_state -- --nocapture` |
-| P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs` | Queued | Prove MCP authority tools reject unsigned or caller-fabricated consent and override context |
+| P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs`; EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node middleware_rejects_context_without_context_evidence_signature -- --nocapture`; `cargo test -p exo-node execute_check_consent_refuses_without_live_registry -- --nocapture` |
 | P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Queued | Prove quorum vote provenance is verified for every counted voter class |
 | P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Queued | Prove human approval evidence is cryptographically bound, not a caller boolean |
 | P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Queued | Prove audit receipts are bound to quorum, chain state, and trusted validator membership |
@@ -197,6 +197,50 @@ cargo test -p exo-gateway trusted_decision_affected_dids_block_conflict_even_whe
 cargo test -p exo-gateway vote_handler_derives_conflict_context_from_locked_decision_state -- --nocapture
 cargo test -p exo-gateway vote_handler_source_does_not_default_conflict_adjudication -- --nocapture
 cargo test -p exo-gateway conflict_declaration_loader_rejects_empty_recusal_context -- --nocapture
+```
+
+### P1 - MCP Trusts Unsigned Consent And Override Context
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exo-node/src/mcp/middleware.rs`,
+  `crates/exo-node/src/mcp/tools/authority.rs`, and
+  `crates/exo-node/src/mcp/tools/consent.rs`.
+- EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- `ConstitutionalMiddleware::new()` has no MCP authority and fails closed until
+  a configured authority is supplied through `with_authority`.
+- Tool calls must include top-level `constitutional_context`; the middleware
+  parses the nested adjudication context with trusted authority and provenance
+  key maps and refuses absent, unsigned, replayed, or tampered context.
+- `context_evidence` is domain-separated, signed over the full adjudication
+  context, bound to the actor DID, and verified against trusted provenance
+  keys before MCP facts are derived.
+- The middleware binds provenance `action_hash` to the tool name and arguments,
+  so a signed context cannot be replayed against a different MCP action or
+  argument set.
+- Consent is derived from active bailment and consent records inside the
+  verified adjudication context, not from a caller boolean.
+- Consent read and mutation tools refuse by default when no live consent
+  registry or signed store is attached; the `unaudited-mcp-simulation-tools`
+  feature does not enable fabricated consent reads or writes.
+
+Validation commands:
+
+```bash
+cargo test -p exo-node middleware_rejects_signed_context_replayed_with_different_arguments -- --nocapture
+cargo test -p exo-node middleware_rejects_context_without_context_evidence_signature -- --nocapture
+cargo test -p exo-node middleware_rejects_adjudication_context_tampering_after_signing -- --nocapture
+cargo test -p exo-node middleware_refuses_without_verified_invocation_context -- --nocapture
+cargo test -p exo-node production_source_does_not_fabricate_mcp_context -- --nocapture
+cargo test -p exo-node execute_adjudicate_action_requires_verified_context -- --nocapture
+cargo test -p exo-node execute_check_consent_refuses_without_live_registry -- --nocapture
+cargo test -p exo-node execute_propose_bailment_refuses_by_default -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
