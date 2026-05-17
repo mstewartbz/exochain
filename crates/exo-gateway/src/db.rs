@@ -36,6 +36,8 @@ pub const MAX_DB_DID_DOCUMENTS: usize = MAX_LOCAL_DID_REGISTRY_DOCUMENTS;
 const DB_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 5;
 const DID_DOCUMENT_CAPACITY_ADVISORY_LOCK_KEY: i64 = 1_014_400_003;
 const LOCATION_CONSENT_SCOPE: &str = "location";
+const BLOCKING_CONFLICT_NATURE_PATTERNS: [&str; 4] =
+    ["%financial%", "%ownership%", "%personal%", "%family%"];
 
 #[derive(Debug, Error)]
 pub enum DbInitError {
@@ -947,6 +949,11 @@ pub async fn update_decision(
 }
 
 /// Load conflict declaration payloads for a declarant, oldest first.
+///
+/// This is a bounded list helper for administrative display and export
+/// surfaces. Vote recusal enforcement must use
+/// `list_blocking_conflict_declaration_payloads_for_recusal_db` so a generic
+/// UI row cap cannot hide a later blocking declaration.
 pub async fn list_conflict_declaration_payloads_db(
     pool: &PgPool,
     declarant_did: &str,
@@ -965,6 +972,40 @@ pub async fn list_conflict_declaration_payloads_db(
     rows.into_iter()
         .map(|row| row.try_get::<JsonValue, _>("payload"))
         .collect()
+}
+
+/// Load at most one blocking conflict declaration for vote recusal enforcement.
+pub async fn list_blocking_conflict_declaration_payloads_for_recusal_db(
+    pool: &PgPool,
+    declarant_did: &str,
+    affected_dids: &[String],
+) -> Result<Vec<JsonValue>, sqlx::Error> {
+    if affected_dids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let blocking_patterns = BLOCKING_CONFLICT_NATURE_PATTERNS
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<String>>();
+    let row = sqlx::query(
+        "SELECT payload FROM conflict_declarations
+         WHERE declarant_did = $1
+           AND related_dids ?| $2
+           AND nature LIKE ANY($3)
+         ORDER BY timestamp_physical_ms, timestamp_logical, id_hash
+         LIMIT 1",
+    )
+    .bind(declarant_did)
+    .bind(affected_dids)
+    .bind(blocking_patterns)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(row) => Ok(vec![row.try_get::<JsonValue, _>("payload")?]),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Row representation of a governance decision from the `decisions` table.
@@ -1749,6 +1790,7 @@ pub async fn update_feedback_issue_status(
 #[cfg(test)]
 mod tests {
     use exo_core::{Did, Timestamp};
+    use exo_governance::conflict::{ActionRequest, check_and_block, check_conflicts};
     use sha2::{Digest, Sha384};
 
     use super::*;
@@ -2117,6 +2159,129 @@ mod tests {
                 "{name} must bind the centralized row limit for every fetch_all query"
             );
         }
+    }
+
+    #[test]
+    fn conflict_recusal_enforcement_uses_scoped_blocking_lookup_not_ui_list_cap() {
+        let source = production_source();
+        let recusal_lookup = function_source(
+            source,
+            "list_blocking_conflict_declaration_payloads_for_recusal_db",
+        );
+
+        assert!(
+            recusal_lookup.contains("related_dids ?|"),
+            "recusal enforcement must scope the DB lookup to affected DIDs"
+        );
+        assert!(
+            recusal_lookup.contains("nature LIKE ANY"),
+            "recusal enforcement must query only blocking conflict natures"
+        );
+        assert!(
+            recusal_lookup.contains("LIMIT 1"),
+            "recusal enforcement only needs one matching blocking declaration to fail closed"
+        );
+        assert!(
+            !recusal_lookup.contains("MAX_DB_LIST_ROWS"),
+            "vote recusal enforcement must not reuse the UI/list cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_recusal_lookup_finds_blocking_declaration_beyond_ui_list_cap() {
+        let Some(pool) = gateway_test_pool().await else {
+            return;
+        };
+        let actor = Did::new("did:exo:recusal-cap-voter").expect("valid DID");
+        let unrelated = Did::new("did:exo:recusal-cap-unrelated").expect("valid DID");
+        let affected = Did::new("did:exo:recusal-cap-affected").expect("valid DID");
+        sqlx::query("DELETE FROM conflict_declarations WHERE declarant_did = $1")
+            .bind(actor.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean recusal cap fixture before test");
+
+        for idx in 0..MAX_DB_LIST_ROWS {
+            let timestamp = 10_000_i64 + idx;
+            sqlx::query(
+                "INSERT INTO conflict_declarations (id_hash, declarant_did, nature, related_dids, timestamp_physical_ms, timestamp_logical, payload) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(format!("recusal-cap-unrelated-{idx}"))
+            .bind(actor.as_str())
+            .bind("advisory")
+            .bind(serde_json::json!([unrelated.as_str()]))
+            .bind(timestamp)
+            .bind(0_i32)
+            .bind(serde_json::json!({
+                "declarant_did": actor.as_str(),
+                "nature": "advisory",
+                "related_dids": [unrelated.as_str()],
+                "timestamp": {
+                    "physical_ms": timestamp,
+                    "logical": 0
+                }
+            }))
+            .execute(&pool)
+            .await
+            .expect("insert unrelated advisory conflict declaration");
+        }
+
+        let blocking_timestamp = 20_000_i64 + MAX_DB_LIST_ROWS;
+        sqlx::query(
+            "INSERT INTO conflict_declarations (id_hash, declarant_did, nature, related_dids, timestamp_physical_ms, timestamp_logical, payload) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind("recusal-cap-blocking")
+        .bind(actor.as_str())
+        .bind("financial ownership")
+        .bind(serde_json::json!([affected.as_str()]))
+        .bind(blocking_timestamp)
+        .bind(0_i32)
+        .bind(serde_json::json!({
+            "declarant_did": actor.as_str(),
+            "nature": "financial ownership",
+            "related_dids": [affected.as_str()],
+            "timestamp": {
+                "physical_ms": blocking_timestamp,
+                "logical": 0
+            }
+        }))
+        .execute(&pool)
+        .await
+        .expect("insert blocking conflict declaration after capped rows");
+
+        let affected_did_strings = vec![affected.as_str().to_owned()];
+        let payloads = list_blocking_conflict_declaration_payloads_for_recusal_db(
+            &pool,
+            actor.as_str(),
+            &affected_did_strings,
+        )
+        .await
+        .expect("load conflict declarations");
+        let declarations = payloads
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decode conflict declarations");
+        let action = ActionRequest {
+            action_id: "recusal-cap-decision".to_owned(),
+            actor_did: actor.clone(),
+            affected_dids: vec![affected],
+            description: "vote on affected decision".to_owned(),
+        };
+        let conflicts = check_conflicts(&actor, &action, &declarations);
+
+        assert!(
+            check_and_block(&actor, &conflicts).is_err(),
+            "recusal enforcement must see blocking conflicts newer than the generic UI list cap"
+        );
+
+        sqlx::query("DELETE FROM conflict_declarations WHERE declarant_did = $1")
+            .bind(actor.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean recusal cap fixture after test");
     }
 
     #[test]

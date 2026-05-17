@@ -622,7 +622,10 @@ pub async fn vote_handler(
 
     // ── VIOLATION 1 FIX: ConflictAdjudication ───────────────────────────
     // Check if voter has a declared conflict of interest on this decision.
-    let declarations = match state.load_conflict_declarations(&voter_did).await {
+    let declarations = match state
+        .load_blocking_conflict_declarations_for_vote(&voter_did, &affected_dids)
+        .await
+    {
         Ok(declarations) => declarations,
         Err(e) => {
             tracing::error!(error = %e, "failed to load conflict declarations");
@@ -1602,6 +1605,12 @@ mod tests {
             "vote handler must fail closed when the conflict register cannot be loaded"
         );
         assert!(
+            production.contains(
+                ".load_blocking_conflict_declarations_for_vote(&voter_did, &affected_dids)"
+            ),
+            "vote handler must use a scoped blocking-conflict lookup for recusal enforcement"
+        );
+        assert!(
             !production.contains("affected_dids: vec![]"),
             "vote handler must not adjudicate conflicts against an empty affected-DID set"
         );
@@ -1665,7 +1674,7 @@ mod tests {
             .find("require_authenticated_session_user_from_header")
             .expect("vote handler must authenticate a bearer session");
         let conflict_index = vote_handler
-            .find("load_conflict_declarations(&voter_did)")
+            .find("load_blocking_conflict_declarations_for_vote(&voter_did, &affected_dids)")
             .expect("vote handler must retain conflict lookup");
         let kernel_index = vote_handler
             .find("state.kernel.adjudicate")

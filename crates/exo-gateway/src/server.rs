@@ -618,6 +618,9 @@ impl AppState {
 
     /// Load conflict declarations for an actor from the DB-backed standing
     /// conflict register.
+    ///
+    /// This method is capped for list/display surfaces. Vote recusal
+    /// enforcement must use `load_blocking_conflict_declarations_for_vote`.
     pub async fn load_conflict_declarations(
         &self,
         actor: &Did,
@@ -628,6 +631,40 @@ impl AppState {
             .map_err(|e| {
                 GatewayError::Internal(format!("failed to load conflict declarations: {e}"))
             })?;
+
+        payloads
+            .into_iter()
+            .map(|payload| decode_conflict_declaration_payload(actor, payload))
+            .collect()
+    }
+
+    /// Load blocking conflict declarations for vote recusal enforcement, scoped
+    /// to the trusted affected DIDs from the stored decision state.
+    pub async fn load_blocking_conflict_declarations_for_vote(
+        &self,
+        actor: &Did,
+        affected_dids: &[Did],
+    ) -> std::result::Result<Vec<ConflictDeclaration>, GatewayError> {
+        if affected_dids.is_empty() {
+            return Err(GatewayError::Internal(
+                "conflict recusal lookup requires at least one affected DID".into(),
+            ));
+        }
+
+        let pool = self.require_db()?;
+        let affected_did_strings = affected_dids
+            .iter()
+            .map(|did| did.as_str().to_owned())
+            .collect::<Vec<String>>();
+        let payloads = db::list_blocking_conflict_declaration_payloads_for_recusal_db(
+            pool,
+            actor.as_str(),
+            &affected_did_strings,
+        )
+        .await
+        .map_err(|e| {
+            GatewayError::Internal(format!("failed to load conflict declarations: {e}"))
+        })?;
 
         payloads
             .into_iter()
@@ -4608,6 +4645,7 @@ mod tests {
     async fn conflict_declaration_loader_fails_closed_without_db_pool() {
         let state = state();
         let actor = Did::new("did:exo:alice").expect("valid DID");
+        let affected = Did::new("did:exo:tenant-a").expect("valid DID");
         let err = state
             .load_conflict_declarations(&actor)
             .await
@@ -4615,6 +4653,28 @@ mod tests {
         assert!(
             err.to_string().contains("database"),
             "error should identify missing DB-backed conflict register, got: {err}"
+        );
+        let err = state
+            .load_blocking_conflict_declarations_for_vote(&actor, &[affected])
+            .await
+            .expect_err("missing recusal register must fail closed");
+        assert!(
+            err.to_string().contains("database"),
+            "error should identify missing DB-backed recusal register, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_declaration_loader_rejects_empty_recusal_context() {
+        let state = state();
+        let actor = Did::new("did:exo:alice").expect("valid DID");
+        let err = state
+            .load_blocking_conflict_declarations_for_vote(&actor, &[])
+            .await
+            .expect_err("empty affected DID context must fail closed");
+        assert!(
+            err.to_string().contains("affected DID"),
+            "error should identify missing trusted affected DID context, got: {err}"
         );
     }
 
