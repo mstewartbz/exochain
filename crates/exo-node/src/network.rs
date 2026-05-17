@@ -54,6 +54,7 @@ const IDENTIFY_AGENT_VERSION: &str = "exochain/1.0";
 pub(crate) const NETWORK_PUBLISH_MAX_ATTEMPTS: usize = 3;
 const NETWORK_PUBLISH_RETRY_BACKOFF_MS: u64 = 50;
 const NETWORK_PUBLISH_ACK_TIMEOUT_MS: u64 = 5_000;
+const P2P_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 #[derive(serde::Serialize)]
 struct GossipsubMessageIdPayload<'a> {
@@ -286,9 +287,18 @@ pub async fn run_network_loop(
 ) {
     let mut peer_registry = PeerRegistry::new();
     let mut rate_limiter = RateLimiter::new();
+    let mut rate_limit_window =
+        tokio::time::interval(Duration::from_secs(P2P_RATE_LIMIT_WINDOW_SECS));
+    rate_limit_window.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    rate_limit_window.tick().await;
 
     loop {
         tokio::select! {
+            _ = rate_limit_window.tick() => {
+                rate_limiter.reset();
+                tracing::debug!("P2P rate-limit window reset");
+            }
+
             // Process swarm events
             event = swarm.select_next_some() => {
                 match event {
@@ -659,6 +669,48 @@ mod tests {
         assert!(
             production.contains(".max_transmit_size(wire::MAX_WIRE_MESSAGE_BYTES)"),
             "gossipsub must reject oversized wire frames before normal message handling"
+        );
+    }
+
+    #[test]
+    fn production_network_loop_resets_rate_limiter_window() {
+        let source = include_str!("network.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source section exists");
+        let loop_source = production
+            .split("pub async fn run_network_loop")
+            .nth(1)
+            .expect("network loop source exists")
+            .split("impl NetworkHandle")
+            .next()
+            .expect("network handle source follows loop");
+
+        assert!(
+            production.contains("P2P_RATE_LIMIT_WINDOW_SECS"),
+            "network rate limiter must declare a bounded reset window"
+        );
+        assert!(
+            loop_source.contains("let mut rate_limit_window"),
+            "network loop must keep a rate-limit window timer"
+        );
+        assert!(
+            loop_source.contains("rate_limit_window.tick().await"),
+            "network loop must consume the immediate interval tick before handling traffic"
+        );
+        assert!(
+            loop_source.contains("_ = rate_limit_window.tick()"),
+            "network loop must poll the rate-limit reset window"
+        );
+        assert!(
+            loop_source.contains("rate_limiter.reset()"),
+            "network loop must reset rate-limit state when the window rotates"
+        );
+        assert!(
+            loop_source.find("let mut rate_limiter = RateLimiter::new()")
+                < loop_source.find("rate_limiter.reset()"),
+            "rate limiter must be initialized before its periodic reset"
         );
     }
 
