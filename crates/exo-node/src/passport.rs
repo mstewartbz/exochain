@@ -200,12 +200,15 @@ pub struct ConsentProfile {
 pub struct StandingProfile {
     /// Current standing: "active", "suspended", "revoked", "quarantined", "unknown".
     pub status: String,
-    /// Whether this DID has been revoked.
-    pub revoked: bool,
-    /// Whether this agent is under active sanctions.
-    pub sanctioned: bool,
-    /// Whether this agent is under a Sybil challenge hold.
-    pub sybil_challenge_hold: bool,
+    /// Whether this DID has been revoked. `None` means no verified standing
+    /// source is available for this DID.
+    pub revoked: Option<bool>,
+    /// Whether this agent is under active sanctions. `None` means no sanctions
+    /// source is wired for this DID.
+    pub sanctioned: Option<bool>,
+    /// Whether this agent is under a Sybil challenge hold. `None` means no
+    /// verified standing source is available for this DID.
+    pub sybil_challenge_hold: Option<bool>,
     /// Risk level if attested: "minimal", "low", "medium", "high", "critical", or "unassessed".
     pub risk_level: String,
 }
@@ -263,9 +266,9 @@ pub struct ConsentListResponse {
 pub struct StandingResponse {
     pub did: String,
     pub status: String,
-    pub revoked: bool,
-    pub sanctioned: bool,
-    pub sybil_challenge_hold: bool,
+    pub revoked: Option<bool>,
+    pub sanctioned: Option<bool>,
+    pub sybil_challenge_hold: Option<bool>,
     pub risk_level: String,
 }
 
@@ -311,7 +314,7 @@ async fn handle_passport(
                 computed_ms: s.computed_ms,
             });
 
-        let standing = build_standing_profile(known, &did_obj_for_store, zd)
+        let standing = build_standing_profile(&did_obj_for_store, zd)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         Ok((score_profile, standing))
@@ -322,7 +325,7 @@ async fn handle_passport(
         did: did.clone(),
         known,
         is_validator,
-        identity: build_identity_profile(&did, known),
+        identity: build_identity_profile(&did, standing.status == "active"),
         delegations: build_delegation_profile(),
         consent: build_consent_profile(),
         standing,
@@ -357,18 +360,9 @@ async fn handle_standing(
     Path(did): Path<String>,
 ) -> Result<Json<StandingResponse>, (StatusCode, String)> {
     let did_obj = parse_passport_did(&did)?;
-
-    let did_for_reactor = did.clone();
-    let did_obj_for_reactor = did_obj.clone();
-    let known = with_reactor_state_blocking(state.clone(), move |s| {
-        Ok(s.consensus.config.validators.contains(&did_obj_for_reactor)
-            || s.node_did.to_string() == did_for_reactor)
-    })
-    .await?;
-
     let did_obj_for_store = did_obj;
     let standing = with_zerodentity_store_blocking(state, move |zd| {
-        build_standing_profile(known, &did_obj_for_store, zd)
+        build_standing_profile(&did_obj_for_store, zd)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
     })
     .await?;
@@ -387,11 +381,11 @@ async fn handle_standing(
 // Profile builders
 // ---------------------------------------------------------------------------
 
-fn build_identity_profile(did: &str, known: bool) -> IdentityProfile {
+fn build_identity_profile(did: &str, verified_active_standing: bool) -> IdentityProfile {
     IdentityProfile {
         did: did.to_string(),
-        verification_capable: known,
-        key_state: if known {
+        verification_capable: verified_active_standing,
+        key_state: if verified_active_standing {
             "active".into()
         } else {
             "unknown".into()
@@ -434,8 +428,17 @@ fn consent_source_unavailable() -> PassportError {
     )
 }
 
+fn has_active_verified_claim(
+    claims: &[(String, crate::zerodentity::types::IdentityClaim)],
+) -> bool {
+    use crate::zerodentity::types::ClaimStatus;
+
+    claims
+        .iter()
+        .any(|(_, claim)| claim.status == ClaimStatus::Verified)
+}
+
 fn build_standing_profile(
-    known: bool,
     did: &exo_core::types::Did,
     zd_store: &crate::zerodentity::store::ZerodentityStore,
 ) -> Result<StandingProfile, String> {
@@ -475,17 +478,19 @@ fn build_standing_profile(
         "revoked"
     } else if sybil_hold {
         "quarantined"
-    } else if known || !claims.is_empty() {
+    } else if has_active_verified_claim(&claims) {
         "active"
     } else {
         "unknown"
     };
 
+    let has_standing_source = !claims.is_empty();
+
     Ok(StandingProfile {
         status: status.into(),
-        revoked: all_revoked,
-        sanctioned: false,
-        sybil_challenge_hold: sybil_hold,
+        revoked: has_standing_source.then_some(all_revoked),
+        sanctioned: None,
+        sybil_challenge_hold: has_standing_source.then_some(sybil_hold),
         risk_level: risk_level.into(),
     })
 }
@@ -564,6 +569,36 @@ mod tests {
     }
 
     #[test]
+    fn passport_active_standing_requires_verified_claim_evidence() {
+        let source = include_str!("passport.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        let standing_profile = production
+            .split("fn build_standing_profile")
+            .nth(1)
+            .and_then(|section| {
+                section.split("// ---------------------------------------------------------------------------\n// Router construction")
+                    .next()
+            })
+            .unwrap();
+
+        assert!(
+            standing_profile.contains("has_active_verified_claim(&claims)"),
+            "passport standing must require verified claim evidence before reporting active"
+        );
+        assert!(
+            !standing_profile.contains("known || !claims.is_empty()"),
+            "validator membership or claim presence alone must not report active standing"
+        );
+        assert!(
+            standing_profile.contains("sanctioned: None"),
+            "passport standing must not fabricate no-sanctions evidence when no sanctions source is wired"
+        );
+    }
+
+    #[test]
     fn passport_async_handlers_use_blocking_state_access() {
         let source = include_str!("passport.rs");
         let production = source
@@ -618,6 +653,38 @@ mod tests {
         crate::auth::BearerAuth {
             token: Arc::new(zeroize::Zeroizing::new("passport-test-token".to_string())),
         }
+    }
+
+    fn verified_claim(subject_did: &str) -> crate::zerodentity::types::IdentityClaim {
+        use crate::zerodentity::types::{ClaimStatus, ClaimType, IdentityClaim};
+
+        let mut signature = [0u8; 64];
+        signature[..32].copy_from_slice(
+            exo_core::types::Hash256::digest(format!("claim-signature:{subject_did}").as_bytes())
+                .as_bytes(),
+        );
+
+        IdentityClaim {
+            claim_hash: exo_core::types::Hash256::digest(format!("claim:{subject_did}").as_bytes()),
+            subject_did: Did::new(subject_did).unwrap(),
+            claim_type: ClaimType::ValidatorService {
+                round_range: (1, 2),
+            },
+            status: ClaimStatus::Verified,
+            created_ms: 1_000,
+            verified_ms: Some(2_000),
+            expires_ms: None,
+            signature: Signature::from_bytes(signature),
+            dag_node_hash: exo_core::types::Hash256::digest(
+                format!("claim-dag:{subject_did}").as_bytes(),
+            ),
+        }
+    }
+
+    fn insert_verified_claim(state: &Arc<PassportApiState>, subject_did: &str) {
+        let mut zd = state.zerodentity_store.lock().unwrap();
+        zd.insert_claim("verified-claim", &verified_claim(subject_did))
+            .unwrap();
     }
 
     fn passport_test_routes(state: Arc<PassportApiState>) -> Router {
@@ -708,11 +775,40 @@ mod tests {
         assert_eq!(passport["did"], "did:exo:v0");
         assert_eq!(passport["known"], true);
         assert_eq!(passport["is_validator"], true);
-        assert_eq!(passport["identity"]["key_state"], "active");
-        assert_eq!(passport["standing"]["status"], "active");
-        assert_eq!(passport["standing"]["revoked"], false);
+        assert_eq!(passport["identity"]["key_state"], "unknown");
+        assert_eq!(passport["standing"]["status"], "unknown");
+        assert!(passport["standing"]["revoked"].is_null());
         assert_eq!(passport["consent"]["default_deny_enforced"], true);
         assert_eq!(passport["persistence_ready"], false);
+    }
+
+    #[tokio::test]
+    async fn passport_known_validator_without_verified_claims_is_not_active() {
+        let state = test_passport_state();
+        let app = passport_test_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/did:exo:v0/passport")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let passport: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(passport["known"], true);
+        assert_eq!(passport["is_validator"], true);
+        assert_eq!(passport["identity"]["verification_capable"], false);
+        assert_eq!(passport["identity"]["key_state"], "unknown");
+        assert_eq!(passport["standing"]["status"], "unknown");
+        assert!(passport["standing"]["revoked"].is_null());
+        assert!(passport["standing"]["sanctioned"].is_null());
+        assert!(passport["standing"]["sybil_challenge_hold"].is_null());
     }
 
     #[tokio::test]
@@ -877,8 +973,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standing_shows_active_for_validator() {
+    async fn standing_shows_active_for_validator_with_verified_claim() {
         let state = test_passport_state();
+        insert_verified_claim(&state, "did:exo:v2");
         let app = passport_test_routes(state);
 
         let resp = app
@@ -896,7 +993,7 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(result["status"], "active");
         assert_eq!(result["revoked"], false);
-        assert_eq!(result["sanctioned"], false);
+        assert!(result["sanctioned"].is_null());
         assert_eq!(result["sybil_challenge_hold"], false);
     }
 
