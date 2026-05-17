@@ -121,6 +121,5 @@ export interface AutomatedSettlementRequest {
   readonly preapproved_terms_hash: Hash256;
   readonly basis_amounts: Record<string, string | number>;
   readonly zero_fee_reason?: string | null;
-  readonly preconditions: unknown;
   readonly created_at_hlc: unknown;
 }

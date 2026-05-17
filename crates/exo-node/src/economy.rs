@@ -47,13 +47,14 @@ use axum::{
 };
 use exo_core::{Hash256, Signature, Timestamp};
 use exo_economy::{
-    AdoptionEvent, AutomatedSettlementEvent, AutomatedSettlementInputs,
-    AutomatedSettlementPreconditions, BailmentTerms, BailmentWrapper, ContributionAcceptance,
-    ContributionOffer, ContributionReceipt, EconomyError, EconomyObjectKind, EconomyRecordAnchor,
-    EconomyStore, HonorGoodRuleset, InMemoryEconomyStore, LegacyReceipt, MicroExo, Mission,
-    MissionSettlement, PricingInputs, PricingPolicy, SettlementBasis, SettlementContext,
-    SettlementQuote, SettlementReceipt, UseEvent, ValueContributionNode, ValueEvent, ZeroFeeReason,
-    quote, settle,
+    AdoptionEvent, AuthorityEnvelopeRef, AutomatedSettlementEvent, AutomatedSettlementInputs,
+    AutomatedSettlementPreconditions, BailmentTerms, BailmentWrapper, BailmentWrapperStatus,
+    ContributionAcceptance, ContributionOffer, ContributionOfferStatus, ContributionReceipt,
+    EconomyError, EconomyObjectKind, EconomyRecordAnchor, EconomyStore, HonorGoodRuleset,
+    InMemoryEconomyStore, LegacyReceipt, MicroExo, Mission, MissionSettlement, PricingInputs,
+    PricingPolicy, RulesetStatus, SettlementBasis, SettlementContext, SettlementQuote,
+    SettlementReceipt, UseEvent, ValueContributionNode, ValueContributionStatus, ValueEvent,
+    ZeroFeeReason, quote, settle,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tower::limit::ConcurrencyLimitLayer;
@@ -139,13 +140,13 @@ pub struct MissionSettlementRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutomatedSettlementRequest {
     pub value_event_id: Hash256,
     pub automation_authority_ref: exo_economy::AuthorityEnvelopeRef,
     pub preapproved_terms_hash: Hash256,
     pub basis_amounts: BTreeMap<SettlementBasis, MicroExo>,
     pub zero_fee_reason: Option<ZeroFeeReason>,
-    pub preconditions: AutomatedSettlementPreconditions,
     pub created_at_hlc: Timestamp,
 }
 
@@ -1025,6 +1026,70 @@ async fn handle_get_mission_settlement(
     Ok(Json(object))
 }
 
+struct AutomatedSettlementPreconditionSource<'a> {
+    offer: &'a ContributionOffer,
+    acceptance: &'a ContributionAcceptance,
+    terms: &'a BailmentTerms,
+    wrapper: &'a BailmentWrapper,
+    adoption: &'a AdoptionEvent,
+    use_event: &'a UseEvent,
+    value_event: &'a ValueEvent,
+    contribution_node: &'a ValueContributionNode,
+    ruleset: &'a HonorGoodRuleset,
+    automation_authority_ref: &'a AuthorityEnvelopeRef,
+}
+
+fn derive_automated_settlement_preconditions(
+    source: AutomatedSettlementPreconditionSource<'_>,
+) -> Result<AutomatedSettlementPreconditions, EconomyError> {
+    source.contribution_node.validate()?;
+    source.ruleset.validate()?;
+    source.acceptance.validate_against_offer(source.offer)?;
+    source
+        .wrapper
+        .validate_against(source.offer, source.acceptance, source.terms)?;
+    source
+        .adoption
+        .validate_against(source.offer, source.acceptance, source.wrapper)?;
+    source
+        .use_event
+        .validate_against_adoption(source.adoption)?;
+    source
+        .value_event
+        .validate_against_use_event(source.use_event)?;
+    source.automation_authority_ref.validate()?;
+
+    let accepted_offer_exists = matches!(source.offer.status, ContributionOfferStatus::Accepted);
+    let authority_valid = source.automation_authority_ref == &source.acceptance.authority_envelope
+        && source.acceptance.authority_envelope.authority_proof_hash
+            == source.adoption.authority_proof_hash;
+    let ruleset_hash_matches = source.ruleset.ruleset_id
+        == source.contribution_node.settlement_ruleset_id
+        && source.ruleset.ruleset_id == source.wrapper.settlement_ruleset_id
+        && source.ruleset.ruleset_id == source.offer.settlement_ruleset_id;
+    let revocation_active = matches!(source.offer.status, ContributionOfferStatus::Revoked)
+        || matches!(source.wrapper.status, BailmentWrapperStatus::Revoked)
+        || matches!(source.ruleset.status, RulesetStatus::Revoked)
+        || matches!(
+            source.contribution_node.status,
+            ValueContributionStatus::Revoked
+        );
+    let preconditions = AutomatedSettlementPreconditions {
+        accepted_offer_exists,
+        valid_acceptance_exists: true,
+        valid_bailment_wrapper_exists: true,
+        authority_valid,
+        ruleset_hash_matches,
+        value_event_valid: source.value_event.settlement_triggered,
+        dispute_active: false,
+        revocation_active,
+        materiality_disputed: false,
+        legal_effect: source.offer.legal_effect,
+    };
+    preconditions.validate()?;
+    Ok(preconditions)
+}
+
 async fn handle_post_automated_settlement_event(
     State(state): State<Arc<EconomyApiState>>,
     Json(payload): Json<AutomatedSettlementRequest>,
@@ -1085,6 +1150,22 @@ async fn handle_post_automated_settlement_event(
         "contribution acceptance",
     )
     .await?;
+    let offer: ContributionOffer = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::ContributionOffer,
+        acceptance.offer_id,
+        |store, value| store.get_contribution_offer(value),
+        "contribution offer",
+    )
+    .await?;
+    let terms: BailmentTerms = require_economy_object(
+        Arc::clone(&state),
+        EconomyObjectKind::BailmentTerms,
+        acceptance.accepted_bailment_terms_hash,
+        |store, value| store.get_bailment_terms(value),
+        "bailment terms",
+    )
+    .await?;
     if adoption.acceptance_id != acceptance.acceptance_id
         || wrapper.acceptance_id != acceptance.acceptance_id
     {
@@ -1093,14 +1174,20 @@ async fn handle_post_automated_settlement_event(
             "automated settlement authority acceptance does not match adoption or wrapper".into(),
         ));
     }
-    acceptance.validate().map_err(map_economy_error)?;
-    if payload.automation_authority_ref != acceptance.authority_envelope {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "automated settlement authority must match stored contribution acceptance authority envelope"
-                .into(),
-        ));
-    }
+    let preconditions =
+        derive_automated_settlement_preconditions(AutomatedSettlementPreconditionSource {
+            offer: &offer,
+            acceptance: &acceptance,
+            terms: &terms,
+            wrapper: &wrapper,
+            adoption: &adoption,
+            use_event: &use_event,
+            value_event: &value_event,
+            contribution_node: &contribution_node,
+            ruleset: &ruleset,
+            automation_authority_ref: &payload.automation_authority_ref,
+        })
+        .map_err(map_economy_error)?;
     let object = AutomatedSettlementEvent::from_inputs(AutomatedSettlementInputs {
         value_event: &value_event,
         use_event: &use_event,
@@ -1112,7 +1199,7 @@ async fn handle_post_automated_settlement_event(
         preapproved_terms_hash: payload.preapproved_terms_hash,
         basis_amounts: &payload.basis_amounts,
         zero_fee_reason: payload.zero_fee_reason,
-        preconditions: payload.preconditions,
+        preconditions,
         created_at_hlc: payload.created_at_hlc,
     })
     .map_err(map_economy_error)?;
@@ -1669,18 +1756,6 @@ mod tests {
             preapproved_terms_hash,
             basis_amounts,
             zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
-            preconditions: AutomatedSettlementPreconditions {
-                accepted_offer_exists: true,
-                valid_acceptance_exists: true,
-                valid_bailment_wrapper_exists: true,
-                authority_valid: true,
-                ruleset_hash_matches: true,
-                value_event_valid: true,
-                dispute_active: false,
-                revocation_active: false,
-                materiality_disputed: false,
-                legal_effect: LegalEffect::AcceptedTerms,
-            },
             created_at_hlc: Timestamp::new(30_800, 0),
         }
     }
@@ -2103,18 +2178,6 @@ mod tests {
             preapproved_terms_hash: node.honor_good_terms_hash,
             basis_amounts,
             zero_fee_reason: Some(ZeroFeeReason::PolicyConfiguredZero),
-            preconditions: AutomatedSettlementPreconditions {
-                accepted_offer_exists: true,
-                valid_acceptance_exists: true,
-                valid_bailment_wrapper_exists: true,
-                authority_valid: true,
-                ruleset_hash_matches: true,
-                value_event_valid: true,
-                dispute_active: false,
-                revocation_active: false,
-                materiality_disputed: false,
-                legal_effect: LegalEffect::AcceptedTerms,
-            },
             created_at_hlc: Timestamp::new(30_800, 0),
         };
         let response = post_json(
@@ -2243,6 +2306,78 @@ mod tests {
         )
         .await;
         assert_eq!(direct_anchor, latest_anchor);
+    }
+
+    #[tokio::test]
+    async fn automated_settlement_requires_stored_offer_when_preconditions_are_derived() {
+        let state = fresh_state();
+        let app = economy_router(Arc::clone(&state));
+        let ruleset = apex_velocity_catalyst_client_services_ruleset().unwrap();
+        let node = value_contribution_node(&ruleset);
+        let terms = bailment_terms(&node);
+        let offer = contribution_offer(&node, &terms, &ruleset);
+        let authority_ref = authority("principal");
+        let acceptance = contribution_acceptance(&offer, authority_ref.clone());
+        let wrapper = bailment_wrapper(&node, &offer, &acceptance, &terms, &ruleset);
+        let mission = apex_velocity_catalyst_client_services_mission(Some(1_000_000)).unwrap();
+        let adoption = adoption_event(&node, &offer, &acceptance, &wrapper, &mission);
+        let use_event = use_event(&node, &adoption);
+        let value_event = value_event(&node, &use_event);
+        {
+            let mut store = state.store.lock().unwrap();
+            store.put_ruleset(ruleset).unwrap();
+            store.put_value_contribution_node(node.clone()).unwrap();
+            store.put_bailment_terms(terms).unwrap();
+            store.put_contribution_acceptance(acceptance).unwrap();
+            store.put_bailment_wrapper(wrapper).unwrap();
+            store.put_adoption_event(adoption).unwrap();
+            store.put_use_event(use_event).unwrap();
+            store.put_value_event(value_event.clone()).unwrap();
+        }
+
+        let response = post_json(
+            &app,
+            "/api/v1/economy/automated-settlements",
+            &automated_settlement_request(
+                value_event.value_event_id,
+                authority_ref,
+                node.honor_good_terms_hash,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = String::from_utf8(read_body(response).await).unwrap();
+        assert!(body.contains("contribution offer"));
+    }
+
+    #[tokio::test]
+    async fn automated_settlement_rejects_client_supplied_preconditions() {
+        let state = fresh_state();
+        let app = economy_router(Arc::clone(&state));
+        let prereqs = seed_automated_settlement_prereqs(&app).await;
+        let request = automated_settlement_request(
+            prereqs.value_event.value_event_id,
+            prereqs.authority_ref,
+            prereqs.node.honor_good_terms_hash,
+        );
+        let mut body = serde_json::to_value(&request).unwrap();
+        body["preconditions"] = serde_json::json!({
+            "accepted_offer_exists": true,
+            "valid_acceptance_exists": true,
+            "valid_bailment_wrapper_exists": true,
+            "authority_valid": true,
+            "ruleset_hash_matches": true,
+            "value_event_valid": true,
+            "dispute_active": false,
+            "revocation_active": false,
+            "materiality_disputed": false,
+            "legal_effect": "AcceptedTerms"
+        });
+
+        let response = post_json(&app, "/api/v1/economy/automated-settlements", &body).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = String::from_utf8(read_body(response).await).unwrap();
+        assert!(body.contains("preconditions"));
     }
 
     #[tokio::test]
