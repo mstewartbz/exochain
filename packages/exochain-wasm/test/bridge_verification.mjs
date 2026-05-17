@@ -722,9 +722,9 @@ test('wasm_bailment_is_active', () => {
 });
 
 // Build the canonical bailment signing payload and sign it with a
-// fresh ephemeral bailee keypair. Since GAP-012 landed (PR #109),
-// `wasm_accept_bailment` cryptographically verifies this signature;
-// arbitrary bytes no longer flip the bailment Active.
+// fresh ephemeral bailee keypair. WASM exposes the payload for external
+// signing, but acceptance itself must go through a trusted core runtime
+// adapter with DID resolution.
 const bailPayload = bailment
   ? wasm.wasm_bailment_signing_payload(JSON.stringify(bailment))
   : null;
@@ -744,26 +744,25 @@ test('wasm_bailment_signing_payload', () => {
   return wasm.wasm_bailment_signing_payload(JSON.stringify(bailment));
 });
 
-test('wasm_accept_bailment', () => {
+test('wasm_accept_bailment rejects caller-supplied bailee key material', () => {
   if (!bailment || !bailSig) throw new Error('skipped -- no bailment from setup');
-  return wasm.wasm_accept_bailment(
-    JSON.stringify(bailment),
-    JSON.stringify(bailPubKeyBytes),
-    JSON.stringify(bailSig.signature)
+  return expectErrorContains(
+    'wasm_accept_bailment',
+    () => wasm.wasm_accept_bailment(
+      JSON.stringify(bailment),
+      JSON.stringify(bailPubKeyBytes),
+      JSON.stringify(bailSig.signature)
+    ),
+    'cannot trust caller-supplied DID key material'
   );
 });
 
-const activeBailment = setup(() =>
-  (bailment && bailSig) && wasm.wasm_accept_bailment(
-    JSON.stringify(bailment),
-    JSON.stringify(bailPubKeyBytes),
-    JSON.stringify(bailSig.signature)
-  ));
+const terminationBailment = bailment;
 
 test('wasm_bailment_termination_payload', () => {
-  if (!activeBailment) throw new Error('skipped -- no active bailment from setup');
+  if (!terminationBailment) throw new Error('skipped -- no bailment from setup');
   const payload = wasm.wasm_bailment_termination_payload(
-    JSON.stringify(activeBailment),
+    JSON.stringify(terminationBailment),
     TEST_DID
   );
   if (!payload || payload.length === 0) {
@@ -773,11 +772,11 @@ test('wasm_bailment_termination_payload', () => {
 });
 
 test('wasm_terminate_bailment rejects unsigned termination', () => {
-  if (!activeBailment) throw new Error('skipped -- no active bailment from setup');
+  if (!terminationBailment) throw new Error('skipped -- no bailment from setup');
   return expectErrorContains(
     'wasm_terminate_bailment',
     () => wasm.wasm_terminate_bailment(
-      JSON.stringify(activeBailment),
+      JSON.stringify(terminationBailment),
       TEST_DID
     ),
     'unsigned bailment termination is disabled'
@@ -785,11 +784,11 @@ test('wasm_terminate_bailment rejects unsigned termination', () => {
 });
 
 test('wasm_terminate_bailment_signed rejects caller-supplied DID key material', () => {
-  if (!activeBailment) throw new Error('skipped -- no active bailment from setup');
+  if (!terminationBailment) throw new Error('skipped -- no bailment from setup');
   return expectErrorContains(
     'wasm_terminate_bailment_signed',
     () => wasm.wasm_terminate_bailment_signed(
-      JSON.stringify(activeBailment),
+      JSON.stringify(terminationBailment),
       TEST_DID,
       JSON.stringify([[TEST_DID, signer1.publicKeyHex]]),
       JSON.stringify(signatureJsonFromHex(signer1.signHex(TEXT_BYTES)))

@@ -140,6 +140,29 @@ mod source_guard_tests {
     }
 
     #[test]
+    fn wasm_consent_acceptance_refuses_caller_supplied_bailee_keys() {
+        let source = include_str!("consent_bindings.rs");
+        let acceptance = source
+            .split("pub fn wasm_accept_bailment(")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("pub fn wasm_bailment_signing_payload(")
+                    .next()
+            })
+            .expect("wasm_accept_bailment source");
+
+        assert!(
+            acceptance.contains("untrusted_wasm_bailment_acceptance_error"),
+            "WASM bailment acceptance must fail closed without trusted DID resolution"
+        );
+        assert!(
+            !acceptance.contains("exo_consent::bailment::accept("),
+            "WASM bailment acceptance must not call core accept without trusted DID resolution"
+        );
+    }
+
+    #[test]
     fn wasm_governance_bridge_requires_caller_supplied_metadata() {
         let source = include_str!("governance_bindings.rs");
         let forbidden = [
