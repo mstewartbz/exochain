@@ -41,7 +41,7 @@ Current baseline when this triage was created:
 | Priority | Finding | Classification | Current status | First verification target |
 |---|---|---|---|---|
 | P0 | Session expiry uses deterministic HLC in production | Core runtime adapter: `crates/exo-gateway/src/server.rs`; EXOCHAIN core support: `crates/exo-core/src/hlc.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway production_app_state_uses_database_time_for_db_backed_session_expiry -- --nocapture`; `cargo test -p exo-gateway production_session_auth_rejects_epoch_expired_token -- --nocapture` |
-| P0 | Bearer session TTL uses deterministic counter | Core runtime adapter: `crates/exo-node/src/zerodentity/api.rs`, `crates/exo-node/src/main.rs`; EXOCHAIN core support: `crates/exo-node/src/zerodentity/*`, `crates/exo-core/src/hlc.rs` | Queued after gateway session expiry | Prove retained 0dentity bearer tokens expire by real deployment time, not request count |
+| P0 | Bearer session TTL uses deterministic counter | Core runtime adapter: `crates/exo-node/src/zerodentity/api.rs`, `crates/exo-node/src/main.rs`; EXOCHAIN core support: `crates/exo-node/src/zerodentity/*`, `crates/exo-core/src/hlc.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node production_api_state -- --nocapture`; `cargo test -p exo-node store_session -- --nocapture` |
 | P1 | Client-supplied authority accepted for settlements | EXOCHAIN core: `crates/exo-economy/src/settlement.rs`, `crates/exo-economy/src/value_contribution.rs`; core runtime adapter: `crates/exo-node/src/economy.rs` | Queued | Prove settlement authority cannot be supplied solely by the caller |
 | P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Queued | Prove vote conflict adjudication derives affected parties from owned decision state |
 | P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs` | Queued | Prove MCP authority tools reject unsigned or caller-fabricated consent and override context |
@@ -103,6 +103,38 @@ Validation commands:
 cargo test -p exo-gateway production_app_state_uses_database_time_for_db_backed_session_expiry -- --nocapture
 cargo test -p exo-gateway session_validation_uses_gateway_clock_not_caller_header_time -- --nocapture
 cargo test -p exo-gateway production_session_auth_rejects_epoch_expired_token -- --nocapture
+```
+
+### P0 - Bearer Session TTL Uses Deterministic Counter
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exo-node/src/zerodentity/api.rs` and
+  `crates/exo-node/src/main.rs`.
+- EXOCHAIN core support: `crates/exo-node/src/zerodentity/*` and
+  `crates/exo-core/src/hlc.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- Production `ApiState::new` does not install `HybridClock::new()` or any
+  deterministic session clock.
+- Production 0dentity session-protected routes fail closed with
+  `Trusted 0dentity session clock unavailable` unless a trusted clock is
+  explicitly injected by `new_with_clock`.
+- `ZerodentityStore::get_session` rejects revoked sessions, expired sessions,
+  future-created sessions, and expiry-deadline arithmetic overflow.
+- API-level session reads reject retained bearer tokens once the absolute
+  24-hour `IDENTITY_SESSION_TTL_MS` deadline is reached.
+
+Validation commands:
+
+```bash
+cargo test -p exo-node production_api_state -- --nocapture
+cargo test -p exo-node list_claims_rejects_expired_session -- --nocapture
+cargo test -p exo-node store_session -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
