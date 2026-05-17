@@ -802,9 +802,21 @@ async fn register_did_document(
     if let Some(pool) = state.pool.as_ref() {
         exo_identity::registry::verify_did_registration_proof(&doc, &proof)
             .map_err(RegistryBlockingError::Registration)?;
-        let inserted = db::insert_did_document(pool, &doc)
-            .await
-            .map_err(|e| RegistryBlockingError::Persistence(e.to_string()))?;
+        let inserted = match db::insert_did_document(pool, &doc).await {
+            Ok(inserted) => inserted,
+            Err(db::DidDocumentPersistenceError::RegistryCapacityExceeded {
+                max_documents,
+                attempted_documents,
+            }) => {
+                return Err(RegistryBlockingError::Registration(
+                    IdentityError::RegistryCapacityExceeded {
+                        max_documents,
+                        attempted_documents,
+                    },
+                ));
+            }
+            Err(e) => return Err(RegistryBlockingError::Persistence(e.to_string())),
+        };
         if !inserted {
             return Err(RegistryBlockingError::Registration(
                 IdentityError::DuplicateDid(doc.id.clone()),
@@ -6183,6 +6195,21 @@ mod tests {
     #[test]
     fn db_configured_identity_paths_do_not_depend_on_local_did_memory() {
         let source = include_str!("server.rs");
+
+        let register_did_document = source_between(
+            source,
+            "async fn register_did_document",
+            "async fn resolve_did_document",
+        );
+        assert!(
+            register_did_document
+                .contains("db::DidDocumentPersistenceError::RegistryCapacityExceeded"),
+            "DB-backed DID registration must map durable capacity exhaustion into the registry rejection path"
+        );
+        assert!(
+            register_did_document.contains("IdentityError::RegistryCapacityExceeded"),
+            "durable DID capacity exhaustion must reuse the same fail-closed response as LocalDidRegistry capacity"
+        );
 
         let auth_register = source_between(
             source,
