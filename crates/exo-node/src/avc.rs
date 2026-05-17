@@ -349,8 +349,9 @@ mod tests {
     };
     use exo_authority::permission::Permission;
     use exo_avc::{
-        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDecision, AvcDraft,
-        AvcRevocationReason, AvcSubjectKind, DelegatedIntent, issue_avc, revoke_avc,
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcActionRequest, AvcConstraints,
+        AvcDecision, AvcDraft, AvcReasonCode, AvcRevocationReason, AvcSubjectKind, DelegatedIntent,
+        issue_avc, revoke_avc,
     };
     use exo_core::{Hash256, Signature, Timestamp, crypto::KeyPair};
     use tower::ServiceExt;
@@ -581,6 +582,62 @@ mod tests {
         let resp_bytes = read_body(response).await;
         let parsed: AvcValidationResult = serde_json::from_slice(&resp_bytes).unwrap();
         assert_eq!(parsed.decision, AvcDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_caller_claimed_human_approval_without_evidence() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let mut draft = baseline_draft();
+        draft.constraints.human_approval_required = true;
+        let credential = {
+            let kp = issuer_keypair();
+            issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
+        };
+        let action = AvcActionRequest {
+            action_id: Hash256::from_bytes([0x55; 32]),
+            actor_did: credential.subject_did.clone(),
+            requested_permission: Permission::Read,
+            tool: None,
+            target_did: None,
+            data_class: None,
+            estimated_budget_minor_units: None,
+            estimated_risk_bp: None,
+            human_approval: None,
+            requires_human_approval: true,
+            action_name: None,
+        };
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(action),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let mut body_value = serde_json::to_value(&request).unwrap();
+        body_value
+            .get_mut("action")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("human_approval");
+        let body = serde_json::to_vec(&body_value).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: AvcValidationResult =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.decision, AvcDecision::HumanApprovalRequired);
+        assert_eq!(
+            parsed.reason_codes,
+            vec![AvcReasonCode::HumanApprovalMissing]
+        );
     }
 
     #[tokio::test]

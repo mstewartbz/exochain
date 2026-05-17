@@ -35,6 +35,7 @@ use crate::{
 /// Read-only registry interface used by validation.
 pub trait AvcRegistryRead {
     fn resolve_public_key(&self, did: &Did) -> Option<PublicKey>;
+    fn resolve_human_approval_key(&self, did: &Did) -> Option<PublicKey>;
     fn is_revoked(&self, credential_id: &Hash256) -> bool;
     fn get_revocation(&self, credential_id: &Hash256) -> Option<AvcRevocation>;
     fn consent_ref_exists(&self, consent_id: &Hash256) -> bool;
@@ -59,6 +60,7 @@ pub trait AvcRegistryWrite: AvcRegistryRead {
     fn put_revocation(&mut self, revocation: AvcRevocation) -> Result<(), AvcError>;
     fn put_receipt(&mut self, receipt: AvcTrustReceipt) -> Result<(), AvcError>;
     fn put_public_key(&mut self, did: Did, public_key: PublicKey);
+    fn put_human_approval_key(&mut self, did: Did, public_key: PublicKey);
     fn add_consent_ref(&mut self, consent_id: Hash256);
     fn add_policy_ref(&mut self, policy_id: Hash256, policy_version: u16);
     fn mark_authority_chain_valid(&mut self, chain_hash: Hash256);
@@ -73,6 +75,7 @@ pub struct InMemoryAvcRegistry {
     revocations: BTreeMap<Hash256, AvcRevocation>,
     receipts: BTreeMap<Hash256, AvcTrustReceipt>,
     public_keys: BTreeMap<Did, PublicKey>,
+    human_approval_keys: BTreeMap<Did, PublicKey>,
     consent_refs: BTreeSet<Hash256>,
     policy_refs: BTreeSet<(Hash256, u16)>,
     authority_chains: BTreeSet<Hash256>,
@@ -207,6 +210,10 @@ impl AvcRegistryRead for InMemoryAvcRegistry {
         self.public_keys.get(did).copied()
     }
 
+    fn resolve_human_approval_key(&self, did: &Did) -> Option<PublicKey> {
+        self.human_approval_keys.get(did).copied()
+    }
+
     fn is_revoked(&self, credential_id: &Hash256) -> bool {
         self.revocations.contains_key(credential_id)
     }
@@ -281,6 +288,10 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
 
     fn put_public_key(&mut self, did: Did, public_key: PublicKey) {
         self.public_keys.insert(did, public_key);
+    }
+
+    fn put_human_approval_key(&mut self, did: Did, public_key: PublicKey) {
+        self.human_approval_keys.insert(did, public_key);
     }
 
     fn add_consent_ref(&mut self, consent_id: Hash256) {
@@ -496,6 +507,28 @@ mod tests {
         assert!(
             !reg.is_revoked(&id),
             "unsigned revocation must not create a tombstone"
+        );
+    }
+
+    #[test]
+    fn put_revocation_rejects_unsupported_schema_without_marking_revoked() {
+        let mut reg = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+
+        let mut revocation = sample_issuer_revocation(id, &issuer_keypair);
+        revocation.schema_version = crate::credential::AVC_SCHEMA_VERSION + 1;
+
+        let err = reg.put_revocation(revocation).unwrap_err();
+        match err {
+            AvcError::UnsupportedSchema { got, supported } => {
+                assert_eq!(got, crate::credential::AVC_SCHEMA_VERSION + 1);
+                assert_eq!(supported, crate::credential::AVC_SCHEMA_VERSION);
+            }
+            other => panic!("expected unsupported schema for revocation, got {other:?}"),
+        }
+        assert!(
+            !reg.is_revoked(&id),
+            "unsupported revocation schema must not create a tombstone"
         );
     }
 

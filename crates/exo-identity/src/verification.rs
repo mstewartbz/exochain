@@ -506,6 +506,31 @@ mod tests {
     }
 
     #[test]
+    fn identity_proof_debug_redacts_signature_message_and_webauthn_assertion() {
+        let (public_key, secret_key) = generate_keypair();
+        let message = b"super-secret-signature-message".to_vec();
+        let signature = sign(&message, &secret_key);
+        let signature_proof = IdentityProof::Signature(signature, public_key, message);
+        let webauthn = IdentityProof::WebAuthnAssertion(b"super-secret-webauthn".to_vec());
+
+        let signature_debug = format!("{signature_proof:?}");
+        let webauthn_debug = format!("{webauthn:?}");
+
+        assert!(
+            !signature_debug.contains("super-secret-signature-message"),
+            "Signature proof Debug output must redact the signed message"
+        );
+        assert!(
+            !webauthn_debug.contains("super-secret-webauthn"),
+            "WebAuthn proof Debug output must redact the assertion bytes"
+        );
+        assert!(signature_debug.contains("<redacted>"));
+        assert!(signature_debug.contains("message_len"));
+        assert!(webauthn_debug.contains("<redacted>"));
+        assert!(webauthn_debug.contains("assertion_len"));
+    }
+
+    #[test]
     fn verification_ceremony_debug_uses_redacted_identity_proofs() {
         let did = match Did::new("did:exo:redacted-proof") {
             Ok(did) => did,

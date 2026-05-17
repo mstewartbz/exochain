@@ -124,7 +124,8 @@ pub use revocation::{
     AVC_REVOCATION_SIGNING_DOMAIN, AvcRevocation, AvcRevocationReason, revoke_avc,
 };
 pub use validation::{
-    AvcActionRequest, AvcDecision, AvcReasonCode, AvcValidationRequest, AvcValidationResult,
+    AVC_HUMAN_APPROVAL_SIGNING_DOMAIN, AvcActionRequest, AvcDecision, AvcHumanApproval,
+    AvcReasonCode, AvcValidationRequest, AvcValidationResult, human_approval_signature_payload,
     validate_avc,
 };
 
@@ -132,6 +133,7 @@ pub use validation::{
 /// and external auditors who need to ensure no domain collisions.
 pub const AVC_SIGNING_DOMAINS: &[&str] = &[
     AVC_CREDENTIAL_SIGNING_DOMAIN,
+    AVC_HUMAN_APPROVAL_SIGNING_DOMAIN,
     AVC_RECEIPT_SIGNING_DOMAIN,
     AVC_REVOCATION_SIGNING_DOMAIN,
 ];
