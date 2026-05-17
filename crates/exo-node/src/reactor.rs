@@ -81,16 +81,6 @@ struct CommitReceiptAuthorityPayload<'a> {
 }
 
 #[derive(serde::Serialize)]
-struct GovernanceEventAuthorityPayload<'a> {
-    domain: &'static str,
-    sender: &'a Did,
-    event_type: &'a GovernanceEventType,
-    payload_hash: &'a Hash256,
-    timestamp: &'a Timestamp,
-    signature: &'a Signature,
-}
-
-#[derive(serde::Serialize)]
 struct GovernanceEventSigningPayload<'a> {
     domain: &'static str,
     sender: &'a Did,
@@ -112,19 +102,6 @@ fn commit_receipt_authority_hash(cert: &CommitCertificate) -> Result<Hash256, St
         certificate: cert,
     })
     .map_err(|e| format!("commit certificate authority hash: {e}"))
-}
-
-fn governance_event_authority_hash(event: &GovernanceEventMsg) -> Result<Hash256, String> {
-    let payload_hash = Hash256::digest(&event.payload);
-    hash_structured(&GovernanceEventAuthorityPayload {
-        domain: "exo.reactor.governance_event_authority.v1",
-        sender: &event.sender,
-        event_type: &event.event_type,
-        payload_hash: &payload_hash,
-        timestamp: &event.timestamp,
-        signature: &event.signature,
-    })
-    .map_err(|e| format!("governance event authority hash: {e}"))
 }
 
 fn governance_event_signing_payload(event: &GovernanceEventMsg) -> Result<Vec<u8>, String> {
@@ -300,58 +277,26 @@ async fn verify_governance_event_signature(
     .await
 }
 
-async fn receipt_from_audit_event(
-    state: &SharedReactorState,
-    event: &GovernanceEventMsg,
-) -> Result<TrustReceipt, String> {
+fn validate_audit_event_payload(event: &GovernanceEventMsg) -> Result<(), String> {
     let payload: AuditEntryPayload = serde_json::from_slice(&event.payload)
         .map_err(|e| format!("audit entry payload must be JSON: {e}"))?;
-    let actor_did =
-        Did::new(payload.actor_did.trim()).map_err(|e| format!("audit actor DID: {e}"))?;
+    Did::new(payload.actor_did.trim()).map_err(|e| format!("audit actor DID: {e}"))?;
     if payload.action_type.trim().is_empty() {
         return Err("audit action_type must not be empty".into());
     }
-    let outcome = parse_audit_receipt_outcome(&payload.outcome)?;
-    let authority_hash = governance_event_authority_hash(event)?;
-    let action_hash = Hash256::digest(&event.payload);
-    let timestamp = event.timestamp;
-    let action_type = payload.action_type;
-    with_reactor_state_blocking(Arc::clone(state), "governance_audit_receipt", move |s| {
-        TrustReceipt::new(
-            actor_did,
-            authority_hash,
-            None,
-            action_type,
-            action_hash,
-            outcome,
-            timestamp,
-            &*s.sign_fn,
-        )
-        .map_err(|e| format!("build governance audit receipt: {e}"))
-    })
-    .await
+    parse_audit_receipt_outcome(&payload.outcome)?;
+    Ok(())
 }
 
 async fn apply_governance_event_locally(
     state: &SharedReactorState,
-    store: &Arc<Mutex<SqliteDagStore>>,
     event: &GovernanceEventMsg,
 ) -> Result<(), String> {
     verify_governance_event_signature(state, event).await?;
     if !matches!(event.event_type, GovernanceEventType::AuditEntry) {
         return Ok(());
     }
-
-    let receipt = receipt_from_audit_event(state, event).await?;
-    with_store_blocking(Arc::clone(store), "governance_audit_receipt_save", {
-        let receipt = receipt.clone();
-        move |store| {
-            store
-                .save_receipt(&receipt)
-                .map_err(|e| format!("save governance audit receipt: {e}"))
-        }
-    })
-    .await
+    validate_audit_event_payload(event)
 }
 
 fn signed_vote(
@@ -880,7 +825,7 @@ async fn handle_wire_message(
             handle_commit(state, store, reactor_tx, msg).await;
         }
         WireMessage::GovernanceEvent(msg) => {
-            if let Err(e) = apply_governance_event_locally(state, store, &msg).await {
+            if let Err(e) = apply_governance_event_locally(state, &msg).await {
                 tracing::warn!(err = %e, "Rejected governance event from network");
                 return;
             }
@@ -1453,7 +1398,6 @@ pub async fn submit_proposal(
 /// Broadcast a governance event to the network.
 pub async fn broadcast_governance_event(
     state: &SharedReactorState,
-    store: &Arc<Mutex<SqliteDagStore>>,
     net_handle: &NetworkHandle,
     event_type: GovernanceEventType,
     payload: Vec<u8>,
@@ -1497,7 +1441,7 @@ pub async fn broadcast_governance_event(
                 event_type = ?event.event_type,
                 "single-validator governance broadcast has no peers; applying event locally"
             );
-            apply_governance_event_locally(state, store, &event)
+            apply_governance_event_locally(state, &event)
                 .await
                 .map_err(|e| anyhow::anyhow!("apply governance event locally: {e}"))
         }
@@ -1919,6 +1863,33 @@ mod tests {
     }
 
     #[test]
+    fn governance_audit_apply_path_does_not_persist_receipts() {
+        let source = include_str!("reactor.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+        let apply_body = source_between(
+            production,
+            "async fn apply_governance_event_locally",
+            "fn signed_vote",
+        );
+
+        assert!(
+            apply_body.contains("validate_audit_event_payload(event)"),
+            "audit governance events should be schema-validated before emission"
+        );
+        assert!(
+            !apply_body.contains("TrustReceipt::new"),
+            "governance audit events must not mint trust receipts"
+        );
+        assert!(
+            !apply_body.contains(".save_receipt("),
+            "governance audit events must not persist trust receipts"
+        );
+    }
+
+    #[test]
     fn create_reactor_state_initializes() {
         let validators = make_validators(4);
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators.clone());
@@ -2078,18 +2049,15 @@ mod tests {
         let validators = make_validators(4);
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
         let state = create_reactor_state(&config, make_sign_fn(), None);
-        let (_dir, store) = temp_store();
         let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
         let net_handle = NetworkHandle::new(cmd_tx);
 
         let broadcast_task = {
             let state = Arc::clone(&state);
-            let store = Arc::clone(&store);
             let net_handle = net_handle.clone();
             tokio::spawn(async move {
                 broadcast_governance_event(
                     &state,
-                    &store,
                     &net_handle,
                     GovernanceEventType::AuditEntry,
                     b"audit".to_vec(),
@@ -2136,7 +2104,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_validator_no_peers_applies_audit_event_locally() {
+    async fn single_validator_no_peers_applies_audit_event_without_minting_receipt() {
         let validators = make_single_validator();
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
         let state = create_reactor_state(&config, make_sign_fn(), None);
@@ -2147,13 +2115,11 @@ mod tests {
 
         let broadcast_task = {
             let state = Arc::clone(&state);
-            let store = Arc::clone(&store);
             let net_handle = net_handle.clone();
             let payload = payload.clone();
             tokio::spawn(async move {
                 broadcast_governance_event(
                     &state,
-                    &store,
                     &net_handle,
                     GovernanceEventType::AuditEntry,
                     payload,
@@ -2173,10 +2139,10 @@ mod tests {
             .unwrap()
             .load_receipts_by_actor("did:exo:archon", 10)
             .unwrap();
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].action_type, "archon.workflow.success");
-        assert_eq!(receipts[0].outcome, ReceiptOutcome::Executed);
-        assert_eq!(receipts[0].action_hash, Hash256::digest(&payload));
+        assert!(
+            receipts.is_empty(),
+            "single-validator governance fallback must not mint trust receipts"
+        );
     }
 
     #[tokio::test]
@@ -2190,12 +2156,10 @@ mod tests {
 
         let broadcast_task = {
             let state = Arc::clone(&state);
-            let store = Arc::clone(&store);
             let net_handle = net_handle.clone();
             tokio::spawn(async move {
                 broadcast_governance_event(
                     &state,
-                    &store,
                     &net_handle,
                     GovernanceEventType::AuditEntry,
                     audit_payload("did:exo:archon", "archon.workflow.success", "success"),
@@ -2221,7 +2185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_governance_audit_event_uses_same_local_apply_path() {
+    async fn inbound_governance_audit_event_emits_without_minting_receipt() {
         let validators = make_validators(4);
         let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
         let state = create_reactor_state(&config, make_sign_fn(), None);
@@ -2258,7 +2222,94 @@ mod tests {
             .unwrap()
             .load_receipts_by_actor("did:exo:archon", 10)
             .unwrap();
-        assert_eq!(receipts.len(), 1);
+        assert!(
+            receipts.is_empty(),
+            "governance audit events must not mint durable trust receipts"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_governance_audit_event_cannot_mint_receipt_without_commit_certificate() {
+        let validators = make_validators(4);
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+        let mut event = GovernanceEventMsg {
+            sender: Did::new("did:exo:v1").unwrap(),
+            event_type: GovernanceEventType::AuditEntry,
+            payload: audit_payload("did:exo:archon", "archon.workflow.success", "success"),
+            timestamp: Timestamp::new(1_700, 0),
+            signature: Signature::empty(),
+        };
+        event.signature = sign_governance_event_for_index(&event, 1);
+
+        handle_wire_message(
+            &state,
+            &store,
+            &net_handle,
+            &reactor_tx,
+            WireMessage::GovernanceEvent(event),
+        )
+        .await;
+
+        let ReactorEvent::GovernanceEventReceived { event } =
+            reactor_rx.recv().await.expect("reactor event emitted")
+        else {
+            panic!("expected governance event");
+        };
+        assert!(matches!(event.event_type, GovernanceEventType::AuditEntry));
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .load_receipts_by_actor("did:exo:archon", 10)
+                .unwrap()
+                .is_empty(),
+            "governance audit events must not mint durable trust receipts without a commit certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_validator_fallback_cannot_mint_audit_receipt_without_commit_certificate() {
+        let validators = make_single_validator();
+        let config = config_for(Did::new("did:exo:v0").unwrap(), true, validators);
+        let state = create_reactor_state(&config, make_sign_fn(), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(32);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let broadcast_task = {
+            let state = Arc::clone(&state);
+            let net_handle = net_handle.clone();
+            tokio::spawn(async move {
+                broadcast_governance_event(
+                    &state,
+                    &net_handle,
+                    GovernanceEventType::AuditEntry,
+                    audit_payload("did:exo:archon", "archon.workflow.success", "success"),
+                )
+                .await
+            })
+        };
+
+        reply_no_peers_to_publish_retries(&mut cmd_rx).await;
+        broadcast_task
+            .await
+            .expect("broadcast task joins")
+            .expect("single-validator local apply succeeds");
+
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .load_receipts_by_actor("did:exo:archon", 10)
+                .unwrap()
+                .is_empty(),
+            "single-validator governance fallback must not mint trust receipts"
+        );
     }
 
     #[tokio::test]
