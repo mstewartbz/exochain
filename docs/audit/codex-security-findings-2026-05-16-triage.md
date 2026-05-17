@@ -45,7 +45,7 @@ Current baseline when this triage was created:
 | P1 | Client-supplied authority accepted for settlements | EXOCHAIN core: `crates/exo-economy/src/settlement.rs`, `crates/exo-economy/src/value_contribution.rs`; core runtime adapter: `crates/exo-node/src/economy.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node automated_settlement_rejects_client_supplied_preconditions -- --nocapture`; `cargo test -p exo-economy automated_settlement_rejects_authority_proof_not_bound_to_adoption -- --nocapture` |
 | P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway trusted_decision_affected_dids_block_conflict_even_when_request_context_is_unrelated -- --nocapture`; `cargo test -p exo-gateway vote_handler_derives_conflict_context_from_locked_decision_state -- --nocapture` |
 | P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs`; EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node middleware_rejects_context_without_context_evidence_signature -- --nocapture`; `cargo test -p exo-node execute_check_consent_refuses_without_live_registry -- --nocapture` |
-| P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Queued | Prove quorum vote provenance is verified for every counted voter class |
+| P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gatekeeper quorum_rejects_raw_votes_without_verified_vote_provenance -- --nocapture`; `cargo test -p exochain-wasm wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence -- --nocapture` |
 | P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Queued | Prove human approval evidence is cryptographically bound, not a caller boolean |
 | P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Queued | Prove audit receipts are bound to quorum, chain state, and trusted validator membership |
 | P1 | Passport API reports active standing without verification | Core runtime adapter: `crates/exo-node/src/passport.rs`, `crates/exo-node/src/main.rs` | Queued | Prove passport active standing is registry-backed and not structurally inferred |
@@ -241,6 +241,52 @@ cargo test -p exo-node production_source_does_not_fabricate_mcp_context -- --noc
 cargo test -p exo-node execute_adjudicate_action_requires_verified_context -- --nocapture
 cargo test -p exo-node execute_check_consent_refuses_without_live_registry -- --nocapture
 cargo test -p exo-node execute_propose_bailment_refuses_by_default -- --nocapture
+```
+
+### P1 - Quorum Counts Unproven Non-Human Votes As Authentic
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` and
+  `crates/exo-gatekeeper/src/types.rs`.
+- Core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- `check_quorum_legitimate` counts `verified_human_quorum_approvals`, not raw
+  approval count, when enforcing `ConstitutionalInvariant::QuorumLegitimate`.
+- Each counted quorum vote must carry provenance whose actor matches the voter,
+  whose voice kind is human, whose independence claim is independent, and whose
+  review order is first-order.
+- The voter provenance public key must be present in
+  `trusted_provenance_keys`, bound to the voter DID, and used to verify the
+  provenance signature.
+- The vote's approval decision has its own domain-separated signature
+  (`quorum_vote_signature_message`) verified with the same DID-bound key, so
+  tampering with the approval flag after signing fails closed.
+- Legacy votes with no provenance, synthetic votes, coordinated/derivative
+  votes, actor/voter mismatches, and unsigned vote decisions are rejected from
+  the threshold count.
+- The public WASM invariant boundary rejects unproven caller-supplied quorum
+  evidence and does not accept caller-supplied trusted provenance keys as an
+  authority source.
+
+Validation commands:
+
+```bash
+cargo test -p exo-gatekeeper quorum_rejects_raw_votes_without_verified_vote_provenance -- --nocapture
+cargo test -p exo-gatekeeper quorum_fails_when_synthetic_makes_up_threshold -- --nocapture
+cargo test -p exo-gatekeeper quorum_passes_when_humans_meet_threshold_despite_synthetics -- --nocapture
+cargo test -p exo-gatekeeper quorum_rejects_legacy_votes_no_provenance -- --nocapture
+cargo test -p exo-gatekeeper quorum_rejects_non_human_or_non_independent_vote_provenance -- --nocapture
+cargo test -p exo-gatekeeper quorum_rejects_tampered_human_voice_metadata_after_signing -- --nocapture
+cargo test -p exo-gatekeeper quorum_rejects_unsigned_vote_decision_with_valid_human_provenance -- --nocapture
+cargo test -p exo-gatekeeper quorum_rejects_approval_flag_tampering_after_vote_signing -- --nocapture
+cargo test -p exo-gatekeeper quorum_is_met_authentic -- --nocapture
+cargo test -p exochain-wasm wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
