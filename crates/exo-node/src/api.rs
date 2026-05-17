@@ -447,7 +447,6 @@ async fn handle_broadcast(
 
         reactor::broadcast_governance_event(
             &api.reactor_state,
-            &api.store,
             &api.net_handle,
             event_type,
             payload,
