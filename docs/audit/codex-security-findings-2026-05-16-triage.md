@@ -47,7 +47,7 @@ Current baseline when this triage was created:
 | P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs`; EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node middleware_rejects_context_without_context_evidence_signature -- --nocapture`; `cargo test -p exo-node execute_check_consent_refuses_without_live_registry -- --nocapture` |
 | P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gatekeeper quorum_rejects_raw_votes_without_verified_vote_provenance -- --nocapture`; `cargo test -p exochain-wasm wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence -- --nocapture` |
 | P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-avc risk_above_threshold_ignores_caller_approval_flag -- --nocapture`; `cargo test -p exo-avc human_approval_signature_binds_action_fields -- --nocapture` |
-| P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Queued | Prove audit receipts are bound to quorum, chain state, and trusted validator membership |
+| P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node inbound_governance_audit_event_cannot_mint_receipt_without_commit_certificate -- --nocapture`; `cargo test -p exo-node local_commit_persists_certificate_receipt_and_emits_event -- --nocapture` |
 | P1 | Passport API reports active standing without verification | Core runtime adapter: `crates/exo-node/src/passport.rs`, `crates/exo-node/src/main.rs` | Queued | Prove passport active standing is registry-backed and not structurally inferred |
 | P2 | WASM receipt verifier trusts caller-supplied actor keys | Core runtime adapter: `crates/exochain-wasm/src/catapult_bindings.rs`; EXOCHAIN core: `crates/exo-catapult/src/receipt.rs` | Queued | Prove WASM receipt verification cannot accept caller-minted DID key bindings |
 | P2 | WASM governance trusts caller-supplied keys and roles | Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`, `crates/exochain-wasm/src/governance_bindings.rs`; EXOCHAIN core: `crates/exo-governance/src/deliberation.rs` | Queued | Prove governance close/count paths use trusted key and role resolution |
@@ -328,6 +328,49 @@ cargo test -p exo-avc optional_human_approval_evidence_must_still_verify -- --no
 cargo test -p exo-avc human_approval_signature_binds_action_fields -- --nocapture
 cargo test -p exo-avc human_approval_with_empty_signature_is_invalid -- --nocapture
 cargo test -p exo-avc expired_human_approval_is_rejected -- --nocapture
+```
+
+### P1 - Single Validator Can Mint Arbitrary Audit Receipts
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exo-node/src/reactor.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- Governance audit events are signature-verified against the validator public
+  key resolver, schema-validated, and emitted as reactor events without calling
+  `TrustReceipt::new` or persisting trust receipts.
+- Single-validator no-peer fallback applies audit events locally but does not
+  mint durable receipts.
+- Commit receipts are built only from `CommitCertificate` evidence through
+  `commit_receipt_from_certificate`.
+- The receipt authority hash is a domain-separated canonical hash over the full
+  commit certificate, binding the receipt to quorum votes, validator
+  membership, round, and committed node hash.
+- Receipt timestamps are loaded from the committed DAG node, not local wall
+  clock state.
+- Local and network commit paths verify the certificate against the current
+  validator public-key resolver and persist commit state and receipt atomically
+  before advancing live consensus state.
+
+Validation commands:
+
+```bash
+cargo test -p exo-node governance_audit_apply_path_does_not_persist_receipts -- --nocapture
+cargo test -p exo-node commit_receipt_uses_certificate_authority_and_node_timestamp -- --nocapture
+cargo test -p exo-node single_validator_no_peers_applies_audit_event_without_minting_receipt -- --nocapture
+cargo test -p exo-node inbound_governance_audit_event_emits_without_minting_receipt -- --nocapture
+cargo test -p exo-node inbound_governance_audit_event_cannot_mint_receipt_without_commit_certificate -- --nocapture
+cargo test -p exo-node single_validator_fallback_cannot_mint_audit_receipt_without_commit_certificate -- --nocapture
+cargo test -p exo-node inbound_governance_audit_event_rejects_bad_signature -- --nocapture
+cargo test -p exo-node commit_receipt_timestamp_rejects_missing_node -- --nocapture
+cargo test -p exo-node local_commit_does_not_advance_without_persisted_trust_receipt -- --nocapture
+cargo test -p exo-node network_commit_does_not_advance_without_persisted_trust_receipt -- --nocapture
+cargo test -p exo-node local_commit_persists_certificate_receipt_and_emits_event -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
