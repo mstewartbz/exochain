@@ -1607,10 +1607,14 @@ test('wasm_close_deliberation', () => {
     required_roles: [],
     timeout: { physical_ms: NOW_NUM + 86400000, logical: 0 }
   };
-  return wasm.wasm_close_deliberation(
-    JSON.stringify(deliberation),
-    JSON.stringify(quorumPolicy),
-    JSON.stringify([])
+  return expectErrorContains(
+    'wasm_close_deliberation',
+    () => wasm.wasm_close_deliberation(
+      JSON.stringify(deliberation),
+      JSON.stringify(quorumPolicy),
+      JSON.stringify([])
+    ),
+    'trusted core runtime adapter'
   );
 });
 
@@ -1671,10 +1675,14 @@ test('wasm_compute_quorum', () => {
     required_roles: [],
     timeout: { physical_ms: NOW_NUM + 86400000, logical: 0 }
   };
-  return wasm.wasm_compute_quorum(
-    JSON.stringify(approvals),
-    JSON.stringify(policy),
-    JSON.stringify([])
+  return expectErrorContains(
+    'wasm_compute_quorum',
+    () => wasm.wasm_compute_quorum(
+      JSON.stringify(approvals),
+      JSON.stringify(policy),
+      JSON.stringify([])
+    ),
+    'trusted core runtime adapter'
   );
 });
 
@@ -2122,12 +2130,16 @@ test('wasm_ratify_constitution', () => {
   const corpus = { version: 1, hash: ZERO_32_BYTES, articles: [], ratified_at: null, amendment_count: 0 };
   const sigs = [];
   const quorum = { required_signatures: 0, required_fraction_pct: 0 };
-  return wasm.wasm_ratify_constitution(
-    JSON.stringify(corpus),
-    JSON.stringify(sigs),
-    JSON.stringify(quorum),
-    JSON.stringify([]),
-    NOW_MS
+  return expectErrorContains(
+    'wasm_ratify_constitution',
+    () => wasm.wasm_ratify_constitution(
+      JSON.stringify(corpus),
+      JSON.stringify(sigs),
+      JSON.stringify(quorum),
+      JSON.stringify([]),
+      NOW_MS
+    ),
+    'trusted core runtime adapter'
   );
 });
 
@@ -2136,13 +2148,17 @@ test('wasm_amend_constitution', () => {
   const amendment = { id: 'art-1', title: 'Test', tier: 'Articles', text_hash: ZERO_32_BYTES, status: 'Active' };
   const sigs = [];
   const quorum = { required_signatures: 0, required_fraction_pct: 0 };
-  return wasm.wasm_amend_constitution(
-    JSON.stringify(corpus),
-    JSON.stringify(amendment),
-    JSON.stringify(sigs),
-    JSON.stringify(quorum),
-    JSON.stringify([]),
-    NOW_MS
+  return expectErrorContains(
+    'wasm_amend_constitution',
+    () => wasm.wasm_amend_constitution(
+      JSON.stringify(corpus),
+      JSON.stringify(amendment),
+      JSON.stringify(sigs),
+      JSON.stringify(quorum),
+      JSON.stringify([]),
+      NOW_MS
+    ),
+    'trusted core runtime adapter'
   );
 });
 

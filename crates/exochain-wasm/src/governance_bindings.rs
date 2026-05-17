@@ -21,9 +21,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::*;
 
-const MAX_WASM_PUBLIC_KEYS: usize = 512;
 const MAX_WASM_CLEARANCE_REGISTRY_ENTRIES: usize = 512;
-const MAX_WASM_APPROVALS: usize = 1_024;
 const MAX_WASM_CONFLICT_DECLARATIONS: usize = 1_024;
 const MAX_WASM_AUDIT_ENTRIES: usize = 4_096;
 const MAX_WASM_DELIBERATION_PARTICIPANTS: usize = 1_024;
@@ -115,25 +113,6 @@ fn parse_timestamp(
     })
 }
 
-fn parse_public_key_map(
-    public_keys_json: &str,
-) -> Result<std::collections::BTreeMap<exo_core::Did, exo_core::PublicKey>, JsValue> {
-    let key_pairs: Vec<(String, String)> =
-        parse_bounded_vec(public_keys_json, "public keys", MAX_WASM_PUBLIC_KEYS)?;
-    let mut keys = std::collections::BTreeMap::new();
-    for (did_str, public_key_hex) in &key_pairs {
-        let did = exo_core::Did::new(did_str)
-            .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
-        let bytes =
-            hex::decode(public_key_hex).map_err(|e| JsValue::from_str(&format!("hex: {e}")))?;
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| JsValue::from_str("public key must be 32 bytes"))?;
-        keys.insert(did, exo_core::PublicKey::from_bytes(arr));
-    }
-    Ok(keys)
-}
-
 fn parse_clearance_registry(
     registry_json: &str,
 ) -> Result<exo_governance::clearance::ClearanceRegistry, JsValue> {
@@ -162,28 +141,10 @@ pub fn wasm_compute_quorum(
     policy_json: &str,
     public_keys_json: &str,
 ) -> Result<JsValue, JsValue> {
-    let approvals: Vec<exo_governance::quorum::Approval> =
-        parse_bounded_vec(approvals_json, "approvals", MAX_WASM_APPROVALS)?;
-    let policy: exo_governance::quorum::QuorumPolicy = from_json_str(policy_json)?;
-    let public_keys = parse_public_key_map(public_keys_json)?;
-    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
-    let result = exo_governance::quorum::compute_quorum_verified(&approvals, &policy, &resolver);
-    // QuorumResult doesn't derive Serialize, so format it manually
-    let json = match result {
-        exo_governance::quorum::QuorumResult::Met {
-            independent_count,
-            total_count,
-        } => {
-            serde_json::json!({"status": "Met", "independent_count": independent_count, "total_count": total_count})
-        }
-        exo_governance::quorum::QuorumResult::NotMet { reason } => {
-            serde_json::json!({"status": "NotMet", "reason": reason})
-        }
-        exo_governance::quorum::QuorumResult::Contested { challenge } => {
-            serde_json::json!({"status": "Contested", "challenge": challenge})
-        }
-    };
-    to_js_value(&json)
+    let _ = (approvals_json, policy_json, public_keys_json);
+    Err(governance_boundary_error(
+        "verified quorum requires a trusted core runtime adapter; public WASM callers cannot supply signer keys or voter roles",
+    ))
 }
 
 /// Check clearance level for an actor on an action
@@ -354,41 +315,10 @@ pub fn wasm_close_deliberation(
     quorum_policy_json: &str,
     public_keys_json: &str,
 ) -> Result<JsValue, JsValue> {
-    use exo_governance::deliberation::DeliberationResult;
-
-    let mut delib: exo_governance::deliberation::Deliberation = from_json_str(deliberation_json)?;
-    let policy: exo_governance::quorum::QuorumPolicy = from_json_str(quorum_policy_json)?;
-    let public_keys = parse_public_key_map(public_keys_json)?;
-    let resolver = |did: &exo_core::Did| public_keys.get(did).copied();
-    let result = exo_governance::deliberation::close_verified(&mut delib, &policy, &resolver);
-
-    let json = match result {
-        DeliberationResult::Approved {
-            votes_for,
-            votes_against,
-            abstentions,
-        } => serde_json::json!({
-            "result": "Approved",
-            "votes_for": votes_for,
-            "votes_against": votes_against,
-            "abstentions": abstentions,
-        }),
-        DeliberationResult::Rejected {
-            votes_for,
-            votes_against,
-            abstentions,
-        } => serde_json::json!({
-            "result": "Rejected",
-            "votes_for": votes_for,
-            "votes_against": votes_against,
-            "abstentions": abstentions,
-        }),
-        DeliberationResult::NoQuorum { reason } => serde_json::json!({
-            "result": "NoQuorum",
-            "reason": reason,
-        }),
-    };
-    to_js_value(&json)
+    let _ = (deliberation_json, quorum_policy_json, public_keys_json);
+    Err(governance_boundary_error(
+        "verified deliberation closure requires a trusted core runtime adapter; public WASM callers cannot supply signer keys or voter roles",
+    ))
 }
 
 // ── Succession ───────────────────────────────────────────────────
@@ -668,22 +598,29 @@ mod tests {
 
     #[test]
     fn parse_bounded_vec_accepts_items_at_the_configured_limit() {
-        let input = vec!["did:exo:bounded"; MAX_WASM_PUBLIC_KEYS];
+        let input = vec!["did:exo:bounded"; MAX_WASM_CLEARANCE_REGISTRY_ENTRIES];
         let json = serde_json::to_string(&input).expect("serialize bounded input");
 
-        let parsed: Vec<String> = parse_bounded_vec(&json, "public keys", MAX_WASM_PUBLIC_KEYS)
-            .expect("input at the limit is accepted");
+        let parsed: Vec<String> = parse_bounded_vec(
+            &json,
+            "clearance registry",
+            MAX_WASM_CLEARANCE_REGISTRY_ENTRIES,
+        )
+        .expect("input at the limit is accepted");
 
-        assert_eq!(parsed.len(), MAX_WASM_PUBLIC_KEYS);
+        assert_eq!(parsed.len(), MAX_WASM_CLEARANCE_REGISTRY_ENTRIES);
     }
 
     #[test]
     fn parse_bounded_vec_rejects_items_over_the_configured_limit() {
-        let input = vec!["did:exo:bounded"; MAX_WASM_PUBLIC_KEYS + 1];
+        let input = vec!["did:exo:bounded"; MAX_WASM_CLEARANCE_REGISTRY_ENTRIES + 1];
         let json = serde_json::to_string(&input).expect("serialize oversized input");
 
-        let parsed: Result<Vec<String>, JsValue> =
-            parse_bounded_vec(&json, "public keys", MAX_WASM_PUBLIC_KEYS);
+        let parsed: Result<Vec<String>, JsValue> = parse_bounded_vec(
+            &json,
+            "clearance registry",
+            MAX_WASM_CLEARANCE_REGISTRY_ENTRIES,
+        );
 
         assert!(parsed.is_err(), "one item over the limit must fail closed");
     }
@@ -710,10 +647,11 @@ mod tests {
 
     #[test]
     fn registry_relationship_bound_counts_all_nested_registry_vectors() {
-        let relationships =
-            MAX_WASM_REGISTRY_RELATIONSHIPS - MAX_WASM_PUBLIC_KEYS - MAX_WASM_APPROVALS;
-        let total = MAX_WASM_PUBLIC_KEYS
-            .saturating_add(MAX_WASM_APPROVALS)
+        let relationships = MAX_WASM_REGISTRY_RELATIONSHIPS
+            - MAX_WASM_CLEARANCE_REGISTRY_ENTRIES
+            - MAX_WASM_CONFLICT_DECLARATIONS;
+        let total = MAX_WASM_CLEARANCE_REGISTRY_ENTRIES
+            .saturating_add(MAX_WASM_CONFLICT_DECLARATIONS)
             .saturating_add(relationships)
             .saturating_add(1);
 
@@ -725,6 +663,51 @@ mod tests {
             )
             .is_err(),
             "aggregate nested registry relationships must be bounded"
+        );
+    }
+
+    #[test]
+    fn wasm_governance_verified_paths_reject_caller_supplied_keys_and_roles() {
+        let source = include_str!("governance_bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let quorum_body = production
+            .split("pub fn wasm_compute_quorum")
+            .nth(1)
+            .expect("quorum export present")
+            .split("/// Check clearance")
+            .next()
+            .expect("quorum export body");
+        let close_body = production
+            .split("pub fn wasm_close_deliberation")
+            .nth(1)
+            .expect("close deliberation export present")
+            .split("/// Challenge")
+            .next()
+            .expect("close deliberation export body");
+
+        for (name, body) in [
+            ("wasm_compute_quorum", quorum_body),
+            ("wasm_close_deliberation", close_body),
+        ] {
+            assert!(
+                body.contains("trusted core runtime adapter"),
+                "{name} must fail closed at the public WASM boundary"
+            );
+            assert!(
+                !body.contains("parse_public_key_map(public_keys_json)"),
+                "{name} must not parse caller-supplied DID key bindings"
+            );
+        }
+        assert!(
+            !quorum_body.contains("compute_quorum_verified(&approvals, &policy, &resolver)"),
+            "wasm_compute_quorum must not call verified quorum with a caller-controlled resolver"
+        );
+        assert!(
+            !close_body.contains("close_verified(&mut delib, &policy, &resolver)"),
+            "wasm_close_deliberation must not close using caller-supplied vote roles and keys"
         );
     }
 }
