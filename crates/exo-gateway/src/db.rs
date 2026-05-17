@@ -424,7 +424,7 @@ pub async fn erase_gateway_identity_records(
 
     let conflict_declarations_deleted = sqlx::query(
         "DELETE FROM conflict_declarations \
-         WHERE declarant_did = $1 OR related_dids @> jsonb_build_array($1::text)",
+         WHERE declarant_did = $1",
     )
     .bind(did)
     .execute(&mut *tx)
@@ -2205,6 +2205,15 @@ mod tests {
             helper.contains("revoked = true") && helper.contains("erased_at_ms"),
             "DID document erasure must tombstone the DID instead of deleting the reuse guard"
         );
+        assert!(
+            helper.contains("DELETE FROM conflict_declarations")
+                && helper.contains("WHERE declarant_did = $1"),
+            "identity erasure may remove only conflict declarations authored by the erased DID"
+        );
+        assert!(
+            !helper.contains("related_dids @> jsonb_build_array($1::text)"),
+            "identity erasure must not delete third-party conflict declarations that merely reference the erased DID"
+        );
     }
 
     #[test]
@@ -2331,7 +2340,9 @@ mod tests {
             return Ok(());
         };
         let did = "did:exo:erasure-db-subject";
+        let third_party_declarant = "did:exo:erasure-db-third-party-declarant";
         cleanup_identity_erasure_fixture(&pool, did).await?;
+        cleanup_identity_erasure_fixture(&pool, third_party_declarant).await?;
 
         let doc = minimal_doc(did);
         insert_did_document(&pool, &doc).await?;
@@ -2516,6 +2527,27 @@ mod tests {
         .bind(serde_json::json!({"declarant_did": did}))
         .execute(&pool)
         .await?;
+        sqlx::query(
+            "INSERT INTO conflict_declarations (id_hash, declarant_did, nature, related_dids, timestamp_physical_ms, timestamp_logical, payload) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind("erasure-db-third-party-conflict")
+        .bind(third_party_declarant)
+        .bind("third-party conflict")
+        .bind(serde_json::json!([did]))
+        .bind(1_001_i64)
+        .bind(0_i32)
+        .bind(serde_json::json!({
+            "declarant_did": third_party_declarant,
+            "nature": "third-party conflict",
+            "related_dids": [did],
+            "timestamp": {
+                "physical_ms": 1_001_i64,
+                "logical": 0_i32
+            }
+        }))
+        .execute(&pool)
+        .await?;
 
         let summary = erase_gateway_identity_records(&pool, did, 9_000).await?;
 
@@ -2570,12 +2602,28 @@ mod tests {
             "SELECT COUNT(*) FROM delegations WHERE delegator = $1 OR delegatee = $1",
             "SELECT COUNT(*) FROM layout_templates WHERE user_did = $1",
             "SELECT COUNT(*) FROM feedback_issues WHERE reporter_did = $1",
-            "SELECT COUNT(*) FROM conflict_declarations WHERE declarant_did = $1 OR related_dids @> jsonb_build_array($1::text)",
+            "SELECT COUNT(*) FROM conflict_declarations WHERE declarant_did = $1",
         ] {
             assert_eq!(count_rows_by_did(&pool, statement, did).await?, 0);
         }
+        let third_party_conflicts_remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conflict_declarations \
+             WHERE id_hash = $1 \
+               AND declarant_did = $2 \
+               AND related_dids @> jsonb_build_array($3::text)",
+        )
+        .bind("erasure-db-third-party-conflict")
+        .bind(third_party_declarant)
+        .bind(did)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            third_party_conflicts_remaining, 1,
+            "identity erasure must preserve third-party conflict declarations that reference the erased DID"
+        );
 
         cleanup_identity_erasure_fixture(&pool, did).await?;
+        cleanup_identity_erasure_fixture(&pool, third_party_declarant).await?;
         Ok(())
     }
 
