@@ -1957,16 +1957,15 @@ test('wasm_transition_decision rejects unadjudicated transition', () =>
     'unadjudicated decision transitions are disabled'
   ));
 
-test('wasm_transition_decision_adjudicated', () => {
+function minimalDecisionTransitionRequest() {
   if (!decision) throw new Error('skipped -- no decision from setup');
   const transitionPermission = 'bcts:transition:Draft->Submitted';
-  const request = {
+  return {
     decision,
     to_state: 'Submitted',
     actor_did: TEST_DID,
     timestamp_ms: NOW_NUM + 1,
     timestamp_logical: 0,
-    invariant_set: { invariants: [] },
     action: {
       actor: TEST_DID,
       action: transitionPermission,
@@ -1988,9 +1987,32 @@ test('wasm_transition_decision_adjudicated', () => {
       active_challenge_reason: null
     }
   };
-  return wasm.wasm_transition_decision_adjudicated(
-    JSON.stringify(request),
-    new TextEncoder().encode('bridge constitution')
+}
+
+test('wasm_transition_decision_adjudicated rejects caller-supplied invariant set', () => {
+  const request = minimalDecisionTransitionRequest();
+  request.invariant_set = { invariants: [] };
+
+  return expectErrorContains(
+    'wasm_transition_decision_adjudicated',
+    () => wasm.wasm_transition_decision_adjudicated(
+      JSON.stringify(request),
+      new TextEncoder().encode('bridge constitution')
+    ),
+    'caller-supplied invariant_set is rejected'
+  );
+});
+
+test('wasm_transition_decision_adjudicated enforces canonical invariants', () => {
+  const request = minimalDecisionTransitionRequest();
+
+  return expectErrorContains(
+    'wasm_transition_decision_adjudicated',
+    () => wasm.wasm_transition_decision_adjudicated(
+      JSON.stringify(request),
+      new TextEncoder().encode('bridge constitution')
+    ),
+    'BCTS transition denied by kernel'
   );
 });
 
