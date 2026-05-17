@@ -46,7 +46,7 @@ Current baseline when this triage was created:
 | P1 | Vote conflict checks trust caller-supplied affected DIDs | Core runtime adapter: `crates/exo-gateway/src/handlers.rs`; EXOCHAIN core: `crates/exo-governance/src/conflict.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gateway trusted_decision_affected_dids_block_conflict_even_when_request_context_is_unrelated -- --nocapture`; `cargo test -p exo-gateway vote_handler_derives_conflict_context_from_locked_decision_state -- --nocapture` |
 | P1 | MCP trusts unsigned consent and override context | Core runtime adapter: `crates/exo-node/src/mcp/tools/authority.rs`, `crates/exo-node/src/mcp/middleware.rs`; EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node middleware_rejects_context_without_context_evidence_signature -- --nocapture`; `cargo test -p exo-node execute_check_consent_refuses_without_live_registry -- --nocapture` |
 | P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gatekeeper quorum_rejects_raw_votes_without_verified_vote_provenance -- --nocapture`; `cargo test -p exochain-wasm wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence -- --nocapture` |
-| P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Queued | Prove human approval evidence is cryptographically bound, not a caller boolean |
+| P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-avc risk_above_threshold_ignores_caller_approval_flag -- --nocapture`; `cargo test -p exo-avc human_approval_signature_binds_action_fields -- --nocapture` |
 | P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Queued | Prove audit receipts are bound to quorum, chain state, and trusted validator membership |
 | P1 | Passport API reports active standing without verification | Core runtime adapter: `crates/exo-node/src/passport.rs`, `crates/exo-node/src/main.rs` | Queued | Prove passport active standing is registry-backed and not structurally inferred |
 | P2 | WASM receipt verifier trusts caller-supplied actor keys | Core runtime adapter: `crates/exochain-wasm/src/catapult_bindings.rs`; EXOCHAIN core: `crates/exo-catapult/src/receipt.rs` | Queued | Prove WASM receipt verification cannot accept caller-minted DID key bindings |
@@ -287,6 +287,47 @@ cargo test -p exo-gatekeeper quorum_rejects_unsigned_vote_decision_with_valid_hu
 cargo test -p exo-gatekeeper quorum_rejects_approval_flag_tampering_after_vote_signing -- --nocapture
 cargo test -p exo-gatekeeper quorum_is_met_authentic -- --nocapture
 cargo test -p exochain-wasm wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence -- --nocapture
+```
+
+### P1 - AVC Validation Trusts Caller Approval Flag
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- EXOCHAIN core: `crates/exo-avc/src/credential.rs` and
+  `crates/exo-avc/src/validation.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- `AvcActionRequest::requires_human_approval` is not used as proof of approval.
+- `human_approval_signature_payload` explicitly excludes the caller-provided
+  approval flag and signs the credential ID, action ID, actor DID, requested
+  permission, tool, target DID, data class, budget estimate, risk estimate,
+  action name, approver DID, approval time, and expiry.
+- `enforce_risk` derives the need for approval from credential constraints and
+  risk threshold, not from the caller flag.
+- `verify_human_approval` requires a non-empty approval signature, rejects
+  future, expired, or malformed approval windows, resolves the approver key
+  through `resolve_human_approval_key`, and verifies the domain-separated
+  approval payload before allowing the action.
+- Optional human approval evidence is still verified when present, so a caller
+  cannot attach invalid approval data to bypass or launder a validation result.
+
+Validation commands:
+
+```bash
+cargo test -p exo-avc risk_above_threshold_ignores_caller_approval_flag -- --nocapture
+cargo test -p exo-avc credential_human_approval_required_blocks_action_without_evidence -- --nocapture
+cargo test -p exo-avc signed_human_approval_satisfies_credential_requirement -- --nocapture
+cargo test -p exo-avc signed_human_approval_satisfies_risk_threshold -- --nocapture
+cargo test -p exo-avc human_approval_from_untrusted_approver_is_invalid -- --nocapture
+cargo test -p exo-avc issuer_public_key_alone_does_not_authorize_human_approval -- --nocapture
+cargo test -p exo-avc optional_human_approval_evidence_must_still_verify -- --nocapture
+cargo test -p exo-avc human_approval_signature_binds_action_fields -- --nocapture
+cargo test -p exo-avc human_approval_with_empty_signature_is_invalid -- --nocapture
+cargo test -p exo-avc expired_human_approval_is_rejected -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
