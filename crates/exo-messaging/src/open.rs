@@ -17,10 +17,10 @@
 //! Open & Verify — recipient-side message decryption.
 //!
 //! Derives the shared secret from the ephemeral public key + recipient's
-//! X25519 secret key, decrypts the ciphertext, verifies the sender's
-//! Ed25519 signature, and checks the plaintext integrity hash.
+//! X25519 secret key, decrypts the ciphertext, and verifies the sender's
+//! Ed25519 signature over the encrypted envelope.
 
-use exo_core::{Hash256, PublicKey, crypto};
+use exo_core::{PublicKey, crypto};
 use exo_identity::vault::VaultEncryptor;
 
 use crate::{
@@ -69,14 +69,6 @@ pub fn unlock(
         )
         .map_err(|_| MessagingError::DecryptionFailed)?;
 
-    // 4. Verify plaintext integrity hash
-    let computed_hash = Hash256::digest(&plaintext);
-    if computed_hash != envelope.plaintext_hash {
-        return Err(MessagingError::InvalidEnvelope(
-            "plaintext hash mismatch".into(),
-        ));
-    }
-
     Ok(plaintext)
 }
 
@@ -113,7 +105,6 @@ mod tests {
         buf.extend_from_slice(&envelope.ephemeral_public_key);
         buf.extend_from_slice(&envelope.ciphertext);
         buf.extend_from_slice(&[u8::from(envelope.content_type)]);
-        buf.extend_from_slice(envelope.plaintext_hash.as_bytes());
         buf.extend_from_slice(&[u8::from(envelope.release_on_death)]);
         buf.extend_from_slice(&envelope.release_delay_hours.to_le_bytes());
         buf.extend_from_slice(&envelope.created.physical_ms.to_le_bytes());

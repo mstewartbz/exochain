@@ -193,14 +193,14 @@ pub fn prepare_envelope_for_signing_with_ephemeral(
         MESSAGE_KEX_CONTEXT,
     )?;
 
-    let plaintext_hash = Hash256::digest(plaintext);
+    let plaintext_nonce_input = Hash256::digest(plaintext);
     let nonce = derive_vault_nonce(
         &metadata,
         content_type,
         sender_did,
         recipient_did,
         ephemeral_x25519_keypair.public.as_bytes(),
-        &plaintext_hash,
+        &plaintext_nonce_input,
         release_on_death,
         release_delay_hours,
     )?;
@@ -212,8 +212,7 @@ pub fn prepare_envelope_for_signing_with_ephemeral(
         .encrypt_with_nonce(plaintext, recipient_did.as_str().as_bytes(), &nonce)
         .map_err(|e| MessagingError::EncryptionFailed(e.to_string()))?;
 
-    // 4. Hash plaintext for post-decrypt integrity check
-    // 5. Build envelope (without signature first)
+    // 4. Build envelope (without signature first)
     let envelope = EncryptedEnvelope {
         id: metadata.id.to_string(),
         sender_did: sender_did.clone(),
@@ -222,7 +221,6 @@ pub fn prepare_envelope_for_signing_with_ephemeral(
         ciphertext,
         content_type,
         signature: exo_core::Signature::empty(),
-        plaintext_hash,
         release_on_death,
         release_delay_hours,
         created: metadata.created,
@@ -244,7 +242,7 @@ fn derive_vault_nonce(
     sender_did: &Did,
     recipient_did: &Did,
     ephemeral_public_key: &[u8; 32],
-    plaintext_hash: &Hash256,
+    plaintext_nonce_input: &Hash256,
     release_on_death: bool,
     release_delay_hours: u32,
 ) -> Result<[u8; VAULT_NONCE_SIZE], MessagingError> {
@@ -264,7 +262,7 @@ fn derive_vault_nonce(
         recipient_did.as_str().as_bytes(),
     )?;
     transcript.extend_from_slice(ephemeral_public_key);
-    transcript.extend_from_slice(plaintext_hash.as_bytes());
+    transcript.extend_from_slice(plaintext_nonce_input.as_bytes());
     transcript.push(u8::from(content_type));
     transcript.push(u8::from(release_on_death));
     transcript.extend_from_slice(&release_delay_hours.to_le_bytes());

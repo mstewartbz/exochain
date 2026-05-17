@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use exo_core::{Did, Hash256, Signature, Timestamp};
+use exo_core::{Did, Signature, Timestamp};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
@@ -45,7 +45,6 @@ struct EnvelopeSigningPayload<'a> {
     ephemeral_public_key: &'a [u8; 32],
     ciphertext: &'a [u8],
     content_type: u8,
-    plaintext_hash: &'a Hash256,
     release_on_death: bool,
     release_delay_hours: u32,
     created: &'a Timestamp,
@@ -93,6 +92,7 @@ impl From<ContentType> for u8 {
 /// Format: `[24-byte nonce][ciphertext][16-byte Poly1305 tag]`
 /// (same layout as `VaultEncryptor` in `exo-identity`).
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EncryptedEnvelope {
     /// Unique message ID.
     pub id: String,
@@ -109,8 +109,6 @@ pub struct EncryptedEnvelope {
     pub content_type: ContentType,
     /// Ed25519 signature over the canonical envelope bytes (excl. signature field).
     pub signature: Signature,
-    /// Blake3 hash of the plaintext (for integrity verification after decrypt).
-    pub plaintext_hash: Hash256,
     /// Whether this message should be released after the sender's death.
     pub release_on_death: bool,
     /// Delay in hours after death verification before release (0 = immediate).
@@ -223,7 +221,6 @@ impl EncryptedEnvelope {
             ephemeral_public_key: &self.ephemeral_public_key,
             ciphertext: &self.ciphertext,
             content_type: u8::from(self.content_type),
-            plaintext_hash: &self.plaintext_hash,
             release_on_death: self.release_on_death,
             release_delay_hours: self.release_delay_hours,
             created: &self.created,
@@ -237,6 +234,7 @@ impl EncryptedEnvelope {
 
 #[cfg(test)]
 mod tests {
+    use exo_core::Hash256;
     use serde::Deserialize;
 
     use super::*;
@@ -296,7 +294,6 @@ mod tests {
         ephemeral_public_key: [u8; 32],
         ciphertext: Vec<u8>,
         content_type: u8,
-        plaintext_hash: Hash256,
         release_on_death: bool,
         release_delay_hours: u32,
         created: Timestamp,
@@ -311,7 +308,6 @@ mod tests {
             ciphertext: vec![1, 1, 2, 3, 5, 8],
             content_type: ContentType::Secret,
             signature: Signature::empty(),
-            plaintext_hash: Hash256::digest(b"plaintext"),
             release_on_death: true,
             release_delay_hours: 72,
             created: Timestamp::new(9_000, 3),
@@ -335,7 +331,6 @@ mod tests {
         assert_eq!(decoded.ephemeral_public_key, envelope.ephemeral_public_key);
         assert_eq!(decoded.ciphertext, envelope.ciphertext);
         assert_eq!(decoded.content_type, u8::from(envelope.content_type));
-        assert_eq!(decoded.plaintext_hash, envelope.plaintext_hash);
         assert_eq!(decoded.release_on_death, envelope.release_on_death);
         assert_eq!(decoded.release_delay_hours, envelope.release_delay_hours);
         assert_eq!(decoded.created, envelope.created);
@@ -352,6 +347,32 @@ mod tests {
         assert!(!debug.contains("ciphertext: [1, 1, 2, 3, 5, 8]"));
         assert!(!debug.contains("signature:"));
         assert!(!debug.contains("plaintext_hash:"));
+    }
+
+    #[test]
+    fn encrypted_envelope_wire_format_does_not_expose_plaintext_hash() {
+        let envelope = sample_envelope();
+        let value = serde_json::to_value(&envelope).expect("serialize envelope");
+
+        assert!(
+            value.get("plaintext_hash").is_none(),
+            "encrypted envelopes must not publish a deterministic plaintext hash"
+        );
+    }
+
+    #[test]
+    fn encrypted_envelope_deserialization_rejects_legacy_plaintext_hash_field() {
+        let envelope = sample_envelope();
+        let mut value = serde_json::to_value(&envelope).expect("serialize envelope");
+        value["plaintext_hash"] =
+            serde_json::to_value(Hash256::digest(b"plaintext")).expect("serialize hash");
+
+        let decoded: Result<EncryptedEnvelope, _> = serde_json::from_value(value);
+
+        assert!(
+            decoded.is_err(),
+            "encrypted envelopes must reject legacy plaintext_hash metadata"
+        );
     }
 
     #[test]
