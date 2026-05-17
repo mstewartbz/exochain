@@ -53,7 +53,7 @@ Current baseline when this triage was created:
 | P2 | WASM governance trusts caller-supplied keys and roles | Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`, `crates/exochain-wasm/src/governance_bindings.rs`; EXOCHAIN core: `crates/exo-governance/src/deliberation.rs` | Queued | Prove governance close/count paths use trusted key and role resolution |
 | P2 | Bailment acceptance trusts caller-supplied bailee key | EXOCHAIN core: `crates/exo-consent/src/bailment.rs`, `crates/exo-consent/src/gatekeeper.rs`; core runtime adapter: `crates/exochain-wasm/src/consent_bindings.rs` | Queued | Prove bailee key is resolved from trusted DID state before acceptance |
 | P2 | WASM authority verification skips chain topology validation | Core runtime adapter: `crates/exochain-wasm/src/authority_bindings.rs`; EXOCHAIN core: `crates/exo-authority/src/chain.rs` | Queued | Prove WASM authority-chain verification rejects broken topology and caller-only key maps |
-| P2 | WASM decision transitions can disable all invariants | Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`, `packages/exochain-wasm/test/bridge_verification.mjs`; EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` | Queued | Prove transition exports cannot accept an empty or caller-weakened invariant set |
+| P2 | WASM decision transitions can disable all invariants | Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`, `packages/exochain-wasm/test/bridge_verification.mjs`; EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` | Verified remediated on current main; no code change required | `cargo test -p exochain-wasm wasm_decision_transition_requires_kernel_adjudication -- --nocapture`; `node packages/exochain-wasm/test/bridge_verification.mjs` |
 | P2 | Governance attestations trust caller-supplied keys | Adjacent surface: `demo/services/audit-api/src/index.js`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Queued behind core-owned runtime issues | Prove governance health attestation keys are pinned or registry-resolved before persistence |
 | P2 | Plaintext hashes leak encrypted message contents | EXOCHAIN core: `crates/exo-messaging/src/envelope.rs`, `crates/exo-messaging/src/compose.rs`, `crates/exo-messaging/src/open.rs` | Queued | Prove encrypted-envelope metadata cannot be used as a plaintext equality oracle |
 | P2 | Identity erasure deletes third-party conflict records | Core runtime adapter: `crates/exo-gateway/src/server.rs`, `crates/exo-gateway/src/db.rs`, `crates/exo-gateway/src/handlers.rs` | Queued | Prove identity erasure tombstones subject-owned data without deleting independent conflict records |
@@ -73,3 +73,35 @@ Current baseline when this triage was created:
   across an untrusted caller boundary.
 - Session expiry findings are first because they can invalidate authentication
   and owner-only identity access controls across live runtime adapters.
+
+## Verification Log
+
+### P2 - WASM Decision Transitions Can Disable All Invariants
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`
+  and `packages/exochain-wasm/test/bridge_verification.mjs`.
+- EXOCHAIN core: `crates/exo-gatekeeper/src/invariants.rs` and
+  `crates/decision-forum/src/decision_object.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- `wasm_transition_decision` fails closed with
+  `unadjudicated decision transitions are disabled`.
+- `wasm_transition_decision_adjudicated` rejects caller-supplied
+  `invariant_set`.
+- The adjudicated WASM path constructs the kernel with `InvariantSet::all()`.
+- `DecisionObject::transition_at` rejects raw BCTS transition attempts, and
+  `transition_adjudicated_at` mutates state only after `Kernel::adjudicate`
+  returns `Verdict::Permitted`.
+
+Validation commands:
+
+```bash
+cargo test -p exochain-wasm wasm_decision_transition_requires_kernel_adjudication -- --nocapture
+node packages/exochain-wasm/test/bridge_verification.mjs
+```
