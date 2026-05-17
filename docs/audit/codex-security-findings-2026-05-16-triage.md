@@ -49,7 +49,7 @@ Current baseline when this triage was created:
 | P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-avc risk_above_threshold_ignores_caller_approval_flag -- --nocapture`; `cargo test -p exo-avc human_approval_signature_binds_action_fields -- --nocapture` |
 | P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node inbound_governance_audit_event_cannot_mint_receipt_without_commit_certificate -- --nocapture`; `cargo test -p exo-node local_commit_persists_certificate_receipt_and_emits_event -- --nocapture` |
 | P1 | Passport API reports active standing without verification | Core runtime adapter: `crates/exo-node/src/passport.rs`, `crates/exo-node/src/main.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node passport_active_standing_requires_verified_claim_evidence -- --nocapture`; `cargo test -p exo-node passport_known_validator_without_verified_claims_is_not_active -- --nocapture` |
-| P2 | WASM receipt verifier trusts caller-supplied actor keys | Core runtime adapter: `crates/exochain-wasm/src/catapult_bindings.rs`; EXOCHAIN core: `crates/exo-catapult/src/receipt.rs` | Queued | Prove WASM receipt verification cannot accept caller-minted DID key bindings |
+| P2 | WASM receipt verifier trusts caller-supplied actor keys | Core runtime adapter: `crates/exochain-wasm/src/catapult_bindings.rs`; EXOCHAIN core: `crates/exo-catapult/src/receipt.rs` | Verified remediated on current main; no code change required | `cargo test -p exochain-wasm receipt_chain_export_rejects_caller_supplied_actor_key_binding -- --nocapture`; `cargo test -p exo-catapult signed_chain_verification_rejects_missing_actor_key -- --nocapture` |
 | P2 | WASM governance trusts caller-supplied keys and roles | Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`, `crates/exochain-wasm/src/governance_bindings.rs`; EXOCHAIN core: `crates/exo-governance/src/deliberation.rs` | Queued | Prove governance close/count paths use trusted key and role resolution |
 | P2 | Bailment acceptance trusts caller-supplied bailee key | EXOCHAIN core: `crates/exo-consent/src/bailment.rs`, `crates/exo-consent/src/gatekeeper.rs`; core runtime adapter: `crates/exochain-wasm/src/consent_bindings.rs` | Queued | Prove bailee key is resolved from trusted DID state before acceptance |
 | P2 | WASM authority verification skips chain topology validation | Core runtime adapter: `crates/exochain-wasm/src/authority_bindings.rs`; EXOCHAIN core: `crates/exo-authority/src/chain.rs` | Queued | Prove WASM authority-chain verification rejects broken topology and caller-only key maps |
@@ -407,6 +407,41 @@ cargo test -p exo-node standing_shows_unknown_for_unrecognized_did -- --nocaptur
 cargo test -p exo-node passport_returns_profile_for_known_validator -- --nocapture
 cargo test -p exo-node standing_fails_closed_when_claim_read_fails -- --nocapture
 cargo test -p exo-node passport_marks_unavailable_trust_sources_without_fabricated_counts -- --nocapture
+```
+
+### P2 - WASM Receipt Verifier Trusts Caller-Supplied Actor Keys
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exochain-wasm/src/catapult_bindings.rs`.
+- EXOCHAIN core: `crates/exo-catapult/src/receipt.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- Public WASM `wasm_verify_franchise_receipt_chain` fails closed and requires a
+  trusted core runtime adapter with registry-backed actor DID resolution.
+- Public WASM `wasm_verify_franchise_receipt_chain_with_keys` rejects
+  caller-supplied actor public-key registries instead of authenticating DID
+  bindings supplied by the caller.
+- The WASM production section does not call hash-only
+  `ReceiptChain::verify_chain()` and does not contain a
+  `parse_actor_public_key_registry` path.
+- Core `ReceiptChain::verify_signed_chain` verifies hash linkage and every
+  receipt signature through a trusted `Did -> PublicKey` resolver.
+- Missing actor keys fail closed with `InvalidReceipt`, and tampered signatures
+  are rejected after deserialization even when hash linkage remains intact.
+
+Validation commands:
+
+```bash
+cargo test -p exochain-wasm receipt_chain_export_requires_actor_key_verification -- --nocapture
+cargo test -p exochain-wasm receipt_chain_export_rejects_caller_supplied_actor_key_binding -- --nocapture
+cargo test -p exo-catapult signed_chain_verification_rejects_signature_tamper_after_deserialize -- --nocapture
+cargo test -p exo-catapult signed_chain_verification_rejects_missing_actor_key -- --nocapture
+cargo test -p exo-catapult chain_append_requires_valid_signature_and_prev_hash -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
