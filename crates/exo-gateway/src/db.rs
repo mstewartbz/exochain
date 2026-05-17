@@ -23,7 +23,7 @@
 use std::time::Duration;
 
 use decision_forum::decision_object::DecisionClass;
-use exo_identity::did::DidDocument;
+use exo_identity::{did::DidDocument, registry::MAX_LOCAL_DID_REGISTRY_DOCUMENTS};
 use serde_json::Value as JsonValue;
 use sqlx::{
     Row,
@@ -32,7 +32,9 @@ use sqlx::{
 use thiserror::Error;
 
 pub const MAX_DB_LIST_ROWS: i64 = 1_000;
+pub const MAX_DB_DID_DOCUMENTS: usize = MAX_LOCAL_DID_REGISTRY_DOCUMENTS;
 const DB_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 5;
+const DID_DOCUMENT_CAPACITY_ADVISORY_LOCK_KEY: i64 = 1_014_400_003;
 const LOCATION_CONSENT_SCOPE: &str = "location";
 
 #[derive(Debug, Error)]
@@ -95,6 +97,13 @@ pub enum DidDocumentPersistenceError {
     DocumentDidMismatch {
         row_did: String,
         document_did: String,
+    },
+    #[error(
+        "DID document registry capacity exceeded: max_documents={max_documents}, attempted_documents={attempted_documents}"
+    )]
+    RegistryCapacityExceeded {
+        max_documents: usize,
+        attempted_documents: usize,
     },
     #[error("DID document persistence query failed")]
     Query {
@@ -202,6 +211,14 @@ pub async fn insert_did_document(
     pool: &PgPool,
     doc: &DidDocument,
 ) -> Result<bool, DidDocumentPersistenceError> {
+    insert_did_document_with_capacity(pool, doc, MAX_DB_DID_DOCUMENTS).await
+}
+
+async fn insert_did_document_with_capacity(
+    pool: &PgPool,
+    doc: &DidDocument,
+    max_documents: usize,
+) -> Result<bool, DidDocumentPersistenceError> {
     let did = doc.id.as_str();
     let document =
         serde_json::to_value(doc).map_err(|source| DidDocumentPersistenceError::Serialize {
@@ -210,6 +227,45 @@ pub async fn insert_did_document(
         })?;
     let created_at_ms = timestamp_ms_to_i64(did, "created", doc.created.physical_ms)?;
     let updated_at_ms = timestamp_ms_to_i64(did, "updated", doc.updated.physical_ms)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|source| DidDocumentPersistenceError::Query { source })?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(DID_DOCUMENT_CAPACITY_ADVISORY_LOCK_KEY)
+        .execute(&mut *tx)
+        .await
+        .map_err(|source| DidDocumentPersistenceError::Query { source })?;
+
+    let existing_did: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM did_documents WHERE did = $1)")
+            .bind(did)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|source| DidDocumentPersistenceError::Query { source })?;
+    if existing_did {
+        tx.commit()
+            .await
+            .map_err(|source| DidDocumentPersistenceError::Query { source })?;
+        return Ok(false);
+    }
+
+    let document_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) AS document_count FROM did_documents")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|source| DidDocumentPersistenceError::Query { source })?;
+    let existing_documents = match usize::try_from(document_count) {
+        Ok(count) => count,
+        Err(_) => max_documents,
+    };
+    if existing_documents >= max_documents {
+        return Err(DidDocumentPersistenceError::RegistryCapacityExceeded {
+            max_documents,
+            attempted_documents: existing_documents.saturating_add(1),
+        });
+    }
 
     let result = sqlx::query(
         "INSERT INTO did_documents (did, document, created_at_ms, updated_at_ms, revoked) \
@@ -221,9 +277,13 @@ pub async fn insert_did_document(
     .bind(created_at_ms)
     .bind(updated_at_ms)
     .bind(doc.revoked)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|source| DidDocumentPersistenceError::Query { source })?;
+
+    tx.commit()
+        .await
+        .map_err(|source| DidDocumentPersistenceError::Query { source })?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -2112,9 +2172,27 @@ mod tests {
 
         let source = production_source();
         let insert_source = function_source(source, "insert_did_document");
+        assert!(
+            source.contains("MAX_DB_DID_DOCUMENTS"),
+            "DB-backed DID registration must define a durable registry capacity limit"
+        );
+        assert!(
+            insert_source.contains("insert_did_document_with_capacity"),
+            "public DID persistence must route through the capacity-enforcing insert helper"
+        );
+        assert!(
+            source.contains("pg_advisory_xact_lock"),
+            "DID capacity checks must be serialized to avoid concurrent over-capacity inserts"
+        );
+        assert!(
+            source.contains("SELECT COUNT(*) AS document_count FROM did_documents"),
+            "DB-backed DID registration must check the durable did_documents row count before inserting"
+        );
         assert!(insert_source.contains("INSERT INTO did_documents"));
-        assert!(insert_source.contains("ON CONFLICT (did) DO NOTHING"));
-        assert!(insert_source.contains("rows_affected()"));
+        assert!(
+            source.contains("DidDocumentPersistenceError::RegistryCapacityExceeded"),
+            "durable DID capacity exhaustion must be a typed error, not an unbounded insert"
+        );
 
         let lookup_source = function_source(source, "find_did_document");
         assert!(lookup_source.contains("FROM did_documents"));
@@ -2286,6 +2364,50 @@ mod tests {
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_did_document_enforces_durable_capacity_limit()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = gateway_test_pool().await else {
+            return Ok(());
+        };
+        let first_did = "did:exo:durable-capacity-first";
+        let second_did = "did:exo:durable-capacity-second";
+        cleanup_identity_erasure_fixture(&pool, first_did).await?;
+        cleanup_identity_erasure_fixture(&pool, second_did).await?;
+
+        assert!(
+            insert_did_document_with_capacity(&pool, &minimal_doc(first_did), 1).await?,
+            "first DID document should fit inside the durable capacity budget"
+        );
+        let err = insert_did_document_with_capacity(&pool, &minimal_doc(second_did), 1)
+            .await
+            .expect_err("second distinct DID document must be rejected at the durable cap");
+
+        assert!(
+            matches!(
+                err,
+                DidDocumentPersistenceError::RegistryCapacityExceeded {
+                    max_documents: 1,
+                    attempted_documents: 2
+                }
+            ),
+            "expected typed durable capacity error, got {err}"
+        );
+        let stored_second: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM did_documents WHERE did = $1")
+                .bind(second_did)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            stored_second, 0,
+            "over-capacity DID document must not be persisted"
+        );
+
+        cleanup_identity_erasure_fixture(&pool, first_did).await?;
+        cleanup_identity_erasure_fixture(&pool, second_did).await?;
         Ok(())
     }
 
