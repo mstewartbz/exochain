@@ -48,7 +48,7 @@ Current baseline when this triage was created:
 | P1 | Quorum counts unproven non-human votes as authentic | EXOCHAIN core: `crates/exo-gatekeeper/src/types.rs`, `crates/exo-gatekeeper/src/invariants.rs`; core runtime adapter: `crates/exochain-wasm/src/gatekeeper_bindings.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-gatekeeper quorum_rejects_raw_votes_without_verified_vote_provenance -- --nocapture`; `cargo test -p exochain-wasm wasm_enforce_invariants_rejects_unproven_caller_quorum_evidence -- --nocapture` |
 | P1 | AVC validation trusts caller approval flag | EXOCHAIN core: `crates/exo-avc/src/credential.rs`, `crates/exo-avc/src/validation.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-avc risk_above_threshold_ignores_caller_approval_flag -- --nocapture`; `cargo test -p exo-avc human_approval_signature_binds_action_fields -- --nocapture` |
 | P1 | Single validator can mint arbitrary audit receipts | Core runtime adapter: `crates/exo-node/src/reactor.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node inbound_governance_audit_event_cannot_mint_receipt_without_commit_certificate -- --nocapture`; `cargo test -p exo-node local_commit_persists_certificate_receipt_and_emits_event -- --nocapture` |
-| P1 | Passport API reports active standing without verification | Core runtime adapter: `crates/exo-node/src/passport.rs`, `crates/exo-node/src/main.rs` | Queued | Prove passport active standing is registry-backed and not structurally inferred |
+| P1 | Passport API reports active standing without verification | Core runtime adapter: `crates/exo-node/src/passport.rs`, `crates/exo-node/src/main.rs` | Verified remediated on current main; no code change required | `cargo test -p exo-node passport_active_standing_requires_verified_claim_evidence -- --nocapture`; `cargo test -p exo-node passport_known_validator_without_verified_claims_is_not_active -- --nocapture` |
 | P2 | WASM receipt verifier trusts caller-supplied actor keys | Core runtime adapter: `crates/exochain-wasm/src/catapult_bindings.rs`; EXOCHAIN core: `crates/exo-catapult/src/receipt.rs` | Queued | Prove WASM receipt verification cannot accept caller-minted DID key bindings |
 | P2 | WASM governance trusts caller-supplied keys and roles | Core runtime adapter: `crates/exochain-wasm/src/decision_forum_bindings.rs`, `crates/exochain-wasm/src/governance_bindings.rs`; EXOCHAIN core: `crates/exo-governance/src/deliberation.rs` | Queued | Prove governance close/count paths use trusted key and role resolution |
 | P2 | Bailment acceptance trusts caller-supplied bailee key | EXOCHAIN core: `crates/exo-consent/src/bailment.rs`, `crates/exo-consent/src/gatekeeper.rs`; core runtime adapter: `crates/exochain-wasm/src/consent_bindings.rs` | Queued | Prove bailee key is resolved from trusted DID state before acceptance |
@@ -371,6 +371,42 @@ cargo test -p exo-node commit_receipt_timestamp_rejects_missing_node -- --nocapt
 cargo test -p exo-node local_commit_does_not_advance_without_persisted_trust_receipt -- --nocapture
 cargo test -p exo-node network_commit_does_not_advance_without_persisted_trust_receipt -- --nocapture
 cargo test -p exo-node local_commit_persists_certificate_receipt_and_emits_event -- --nocapture
+```
+
+### P1 - Passport API Reports Active Standing Without Verification
+
+Disposition on 2026-05-17: verified already remediated on current `main`.
+
+Path classification:
+
+- Core runtime adapter: `crates/exo-node/src/passport.rs` and
+  `crates/exo-node/src/main.rs`.
+- Imported evidence tracking: this file.
+
+Current enforcement evidence:
+
+- `build_standing_profile` loads 0dentity claims from the trusted
+  `ZerodentityStore` and fails closed if claim retrieval is unavailable.
+- Standing status becomes `active` only through `has_active_verified_claim`,
+  which requires at least one stored claim with `ClaimStatus::Verified`.
+- Known validator membership alone does not confer active standing; a known
+  validator without verified claims remains `unknown`.
+- Unrecognized DIDs remain `unknown`, and unavailable trust sources are marked
+  unavailable instead of fabricating active standing or counts.
+- Source guards assert the standing profile does not use
+  `.unwrap_or_default()` and does not infer active standing from
+  `known || !claims.is_empty()`.
+
+Validation commands:
+
+```bash
+cargo test -p exo-node passport_active_standing_requires_verified_claim_evidence -- --nocapture
+cargo test -p exo-node passport_known_validator_without_verified_claims_is_not_active -- --nocapture
+cargo test -p exo-node standing_shows_active_for_validator_with_verified_claim -- --nocapture
+cargo test -p exo-node standing_shows_unknown_for_unrecognized_did -- --nocapture
+cargo test -p exo-node passport_returns_profile_for_known_validator -- --nocapture
+cargo test -p exo-node standing_fails_closed_when_claim_read_fails -- --nocapture
+cargo test -p exo-node passport_marks_unavailable_trust_sources_without_fabricated_counts -- --nocapture
 ```
 
 ### P2 - WASM Decision Transitions Can Disable All Invariants
