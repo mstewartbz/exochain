@@ -262,7 +262,12 @@ mod source_guard_tests {
             (
                 "authority_bindings.rs",
                 include_str!("authority_bindings.rs"),
-                "MAX_WASM_AUTHORITY_KEYS",
+                "AUTHORITY_CHAIN_TRUSTED_ADAPTER_REQUIRED",
+            ),
+            (
+                "authority_bindings.rs",
+                include_str!("authority_bindings.rs"),
+                "AUTHORITY_CHAIN_CALLER_KEYS_REJECTED",
             ),
             (
                 "identity_bindings.rs",
