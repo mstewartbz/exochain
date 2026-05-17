@@ -437,6 +437,27 @@ mod source_guard_tests {
                 && source.contains("request_json"),
             "WASM adjudicated decision transition must use a typed bounded request JSON instead of a wide argument list"
         );
+        let adjudicated_transition = source
+            .split("pub fn wasm_transition_decision_adjudicated(")
+            .nth(1)
+            .and_then(|section| section.split("/// Add a vote").next())
+            .expect("adjudicated decision transition export source");
+        assert!(
+            adjudicated_transition.contains("InvariantSet::all()"),
+            "WASM adjudicated decision transition must enforce the canonical complete invariant set"
+        );
+        assert!(
+            !adjudicated_transition.contains("Kernel::new(constitution, invariant_set)"),
+            "WASM adjudicated decision transition must not build a kernel from caller-supplied invariants"
+        );
+        assert!(
+            source
+                .split("struct WasmDecisionTransitionAdjudicatedRequest")
+                .nth(1)
+                .and_then(|section| section.split("/// Create a new DecisionObject").next())
+                .is_some_and(|section| !section.contains("invariant_set:")),
+            "WASM adjudicated decision transition request must not deserialize caller-supplied invariants"
+        );
         assert!(
             !source.contains(
                 "timestamp_logical: u32,\n    constitution: &[u8],\n    invariant_set_json: &str,"

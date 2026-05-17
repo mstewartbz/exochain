@@ -29,15 +29,28 @@ const MAX_WASM_FORUM_PUBLIC_KEYS: usize = 1_024;
 const MAX_WASM_FORUM_CONSTITUTION_BYTES: usize = 1_048_576;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WasmDecisionTransitionAdjudicatedRequest {
     decision: decision_forum::decision_object::DecisionObject,
     to_state: exo_core::bcts::BctsState,
     actor_did: String,
     timestamp_ms: u64,
     timestamp_logical: u32,
-    invariant_set: exo_gatekeeper::invariants::InvariantSet,
     action: exo_gatekeeper::kernel::ActionRequest,
     context: exo_gatekeeper::kernel::AdjudicationContext,
+}
+
+fn parse_decision_transition_adjudicated_request(
+    request_json: &str,
+) -> Result<WasmDecisionTransitionAdjudicatedRequest, JsValue> {
+    let request_value: serde_json::Value = from_json_str(request_json)?;
+    if request_value.get("invariant_set").is_some() {
+        return Err(JsValue::from_str(
+            "caller-supplied invariant_set is rejected; WASM decision transitions enforce canonical constitutional invariants",
+        ));
+    }
+
+    serde_json::from_value(request_value).map_err(|_| JsValue::from_str("JSON parse error"))
 }
 
 /// Create a new DecisionObject with full BCTS lifecycle
@@ -102,14 +115,16 @@ pub fn wasm_transition_decision_adjudicated(
         actor_did,
         timestamp_ms,
         timestamp_logical,
-        invariant_set,
         action,
         context,
-    } = from_json_str(request_json)?;
+    } = parse_decision_transition_adjudicated_request(request_json)?;
     let actor = exo_core::Did::new(&actor_did)
         .map_err(|e| JsValue::from_str(&format!("DID error: {e}")))?;
     let ts = exo_core::types::Timestamp::new(timestamp_ms, timestamp_logical);
-    let kernel = exo_gatekeeper::kernel::Kernel::new(constitution, invariant_set);
+    let kernel = exo_gatekeeper::kernel::Kernel::new(
+        constitution,
+        exo_gatekeeper::invariants::InvariantSet::all(),
+    );
 
     decision
         .transition_adjudicated_at(to_state, &actor, ts, &kernel, &action, &context)
