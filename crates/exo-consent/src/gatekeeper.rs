@@ -371,7 +371,9 @@ mod tests {
         let (pk, sk) = exo_core::crypto::generate_keypair();
         let payload = bailment::signing_payload(&b).expect("canonical payload");
         let sig = exo_core::crypto::sign(&payload, &sk);
-        bailment::accept(&mut b, &pk, &sig).expect("test bailment accepts");
+        let bailee_did = b.bailee_did.clone();
+        bailment::accept(&mut b, |did| (did == &bailee_did).then_some(pk), &sig)
+            .expect("test bailment accepts");
         b.expires = exp;
         b
     }

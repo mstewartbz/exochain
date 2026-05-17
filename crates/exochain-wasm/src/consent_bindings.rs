@@ -36,6 +36,12 @@ fn untrusted_wasm_bailment_termination_error() -> JsValue {
     )
 }
 
+fn untrusted_wasm_bailment_acceptance_error() -> JsValue {
+    consent_bridge_error(
+        "WASM bailment acceptance cannot trust caller-supplied DID key material; use wasm_bailment_signing_payload and submit the signed request to a core runtime adapter with a trusted DID registry",
+    )
+}
+
 /// Propose a new bailment (consent-conditioned data sharing)
 #[wasm_bindgen]
 pub fn wasm_propose_bailment(
@@ -72,33 +78,25 @@ pub fn wasm_bailment_is_active(bailment_json: &str, now_json: &str) -> Result<bo
     Ok(exo_consent::bailment::is_active(&bailment, &now))
 }
 
-/// Accept a proposed bailment (bailee countersigns, status → Active).
+/// Refuse WASM-local bailment acceptance from caller-supplied identity data.
 ///
-/// `bailee_public_key_json` — JSON-serialized bailee PublicKey. Required
-/// to verify `signature_json` against the canonical bailment payload.
-/// Closes GAP-012: previously this binding passed the signature through
-/// unchecked, which flipped bailments to Active on any non-empty bytes.
-///
-/// `signature_json` — JSON-serialized bailee Signature over
-/// `exo_consent::bailment::signing_payload(&bailment)`.
+/// WASM can construct the canonical payload for external signing, but it cannot
+/// prove that a caller-supplied bailee DID-to-key binding came from the trusted
+/// EXOCHAIN identity registry. Submit the signed payload to a core runtime
+/// adapter that owns trusted DID resolution instead.
 #[wasm_bindgen]
 pub fn wasm_accept_bailment(
-    bailment_json: &str,
-    bailee_public_key_json: &str,
-    signature_json: &str,
+    _bailment_json: &str,
+    _bailee_public_key_json: &str,
+    _signature_json: &str,
 ) -> Result<JsValue, JsValue> {
-    let mut bailment: exo_consent::Bailment = from_json_str(bailment_json)?;
-    let pk: exo_core::PublicKey = from_json_str(bailee_public_key_json)?;
-    let sig: exo_core::Signature = from_json_str(signature_json)?;
-    exo_consent::bailment::accept(&mut bailment, &pk, &sig)
-        .map_err(|e| JsValue::from_str(&format!("Accept error: {e}")))?;
-    to_js_value(&bailment)
+    Err(untrusted_wasm_bailment_acceptance_error())
 }
 
 /// Compute the canonical signing payload for a bailment.
 ///
-/// Returns the CBOR bytes that the bailee must sign for
-/// [`wasm_accept_bailment`] to succeed. Mirrors
+/// Returns the CBOR bytes that the bailee must sign before submitting the
+/// signed request to a trusted core runtime adapter. Mirrors
 /// [`exo_consent::bailment::signing_payload`].
 ///
 /// # Errors
@@ -179,8 +177,13 @@ mod tests {
         let acceptance_payload =
             exo_consent::bailment::signing_payload(&bailment).expect("acceptance payload");
         let acceptance_signature = crypto::sign(&acceptance_payload, &bailee_sk);
-        exo_consent::bailment::accept(&mut bailment, &bailee_pk, &acceptance_signature)
-            .expect("accept");
+        let bailee_did = bailment.bailee_did.clone();
+        exo_consent::bailment::accept(
+            &mut bailment,
+            |did| (did == &bailee_did).then_some(bailee_pk),
+            &acceptance_signature,
+        )
+        .expect("accept");
         bailment
     }
 
@@ -226,6 +229,37 @@ mod tests {
         );
 
         assert!(result.is_err(), "missing actor key must fail");
+    }
+
+    #[test]
+    fn wasm_accept_bailment_rejects_caller_supplied_bailee_key_material() {
+        let bailor = did("did:exo:alice");
+        let bailee = did("did:exo:bob");
+        let bailment = exo_consent::bailment::propose(
+            &bailor,
+            &bailee,
+            b"wasm acceptance terms",
+            exo_consent::BailmentType::Custody,
+            "wasm-acceptance-test",
+            Timestamp::new(1_000, 0),
+        )
+        .expect("proposal");
+        let bailment_json = serde_json::to_string(&bailment).expect("bailment json");
+        let (attacker_pk, attacker_sk) = crypto::generate_keypair();
+        let payload =
+            exo_consent::bailment::signing_payload(&bailment).expect("acceptance payload");
+        let attacker_signature = crypto::sign(&payload, &attacker_sk);
+
+        let result = wasm_accept_bailment(
+            &bailment_json,
+            &serde_json::to_string(&attacker_pk).expect("public key json"),
+            &signature_json(&attacker_signature),
+        );
+
+        assert!(
+            result.is_err(),
+            "WASM bailment acceptance must not trust a caller-supplied DID-to-key binding"
+        );
     }
 
     #[test]
