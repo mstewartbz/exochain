@@ -20,15 +20,16 @@
 //!
 //! ## Environment variables
 //!
-//! | Variable        | Default           | Description                              |
-//! |-----------------|-------------------|------------------------------------------|
-//! | `BIND_ADDRESS`  | `127.0.0.1:8443`  | TCP address to bind                      |
-//! | `DATABASE_URL`  | *(none)*          | PostgreSQL connection string             |
+//! | Variable                         | Default          | Description                              |
+//! |----------------------------------|------------------|------------------------------------------|
+//! | `BIND_ADDRESS`                   | `127.0.0.1:8443` | TCP address to bind                      |
+//! | `DATABASE_URL`                   | *(none)*         | PostgreSQL connection string             |
+//! | `TRUSTED_RATE_LIMIT_PROXY_IPS`   | *(empty)*        | Comma-separated trusted proxy IPs        |
 //!
 //! If `DATABASE_URL` is unset the server starts without a database pool.
 //! The `/ready` probe will return 503 until a pool is configured.
 
-use exo_gateway::server::{GatewayConfig, serve};
+use exo_gateway::server::{GatewayConfig, parse_trusted_rate_limit_proxy_ips, serve};
 use tracing_subscriber::EnvFilter;
 
 fn init_tracing() {
@@ -50,9 +51,20 @@ async fn main() {
 
     // Build config from environment, falling back to defaults.
     let bind_address = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8443".into());
+    let trusted_rate_limit_proxy_ips = match std::env::var("TRUSTED_RATE_LIMIT_PROXY_IPS") {
+        Ok(raw) => match parse_trusted_rate_limit_proxy_ips(&raw) {
+            Ok(ips) => ips,
+            Err(error) => {
+                tracing::error!("Invalid TRUSTED_RATE_LIMIT_PROXY_IPS: {error}");
+                std::process::exit(1);
+            }
+        },
+        Err(_) => Default::default(),
+    };
 
     let config = GatewayConfig {
         bind_address,
+        trusted_rate_limit_proxy_ips,
         ..GatewayConfig::default()
     };
 
@@ -127,6 +139,27 @@ mod tests {
         assert!(
             init_tracing.contains(".json()"),
             "gateway runtime logging must emit structured JSON"
+        );
+    }
+
+    #[test]
+    fn gateway_main_parses_trusted_rate_limit_proxy_configuration() {
+        let production = match SOURCE.split("#[cfg(test)]").next() {
+            Some(source) => source,
+            None => panic!("production source precedes tests"),
+        };
+
+        assert!(
+            production.contains("TRUSTED_RATE_LIMIT_PROXY_IPS"),
+            "gateway runtime must expose explicit trusted proxy rate-limit configuration"
+        );
+        assert!(
+            production.contains("parse_trusted_rate_limit_proxy_ips(&raw)"),
+            "gateway runtime must parse trusted proxy IPs through the fail-closed server parser"
+        );
+        assert!(
+            production.contains("std::process::exit(1)"),
+            "invalid trusted proxy configuration must fail closed at startup"
         );
     }
 }
