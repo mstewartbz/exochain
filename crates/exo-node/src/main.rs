@@ -54,6 +54,8 @@ mod passport;
 mod provenance;
 mod reactor;
 mod receipt_dashboard;
+mod root_genesis;
+mod root_genesis_cli;
 mod sentinels;
 mod store;
 mod sync;
@@ -1173,6 +1175,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("MCP stdio server error: {e}"))
             }
         }
+        Command::Genesis { command } => root_genesis_cli::run_genesis_command(command).await,
     }
 }
 
@@ -1477,5 +1480,138 @@ mod tests {
                 "gateway DB initialization logs must not expose the database URL"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod root_genesis_adapter_tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use exo_core::{Did, Hash256, SecretKey, Timestamp, crypto::KeyPair};
+    use exo_root::{
+        CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase,
+        CertifierContact, GenesisCeremonyConfig,
+    };
+    use tower::ServiceExt;
+
+    use super::root_genesis::{RootGenesisApiState, root_genesis_router};
+
+    fn did(index: u16) -> Did {
+        Did::new(&format!("did:exo:root-portal-{index:02}")).expect("valid DID")
+    }
+
+    fn certifier(index: u16) -> (CertifierContact, SecretKey) {
+        let keypair = KeyPair::from_secret_bytes([u8::try_from(index).expect("index fits"); 32])
+            .expect("valid keypair");
+        let transport_secret = [u8::try_from(index).expect("index fits"); 32];
+        let transport_public =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(transport_secret));
+        (
+            CertifierContact {
+                did: did(index),
+                frost_identifier: index,
+                signing_public_key: *keypair.public_key(),
+                transport_public_key: *transport_public.as_bytes(),
+            },
+            keypair.secret_key().clone(),
+        )
+    }
+
+    fn config() -> (GenesisCeremonyConfig, SecretKey) {
+        let mut certifiers = Vec::new();
+        let mut first_secret = None;
+        for index in 1..=13 {
+            let (contact, secret) = certifier(index);
+            if index == 1 {
+                first_secret = Some(secret.clone());
+            }
+            certifiers.push(contact);
+        }
+        (
+            GenesisCeremonyConfig {
+                ceremony_id: "exo-root-portal-test".into(),
+                network_id: "exochain-test".into(),
+                repo_commit: "d8927686a34bdc28ba36d53938f665685d2c4c04".into(),
+                constitution_hash: Hash256::digest(b"constitution"),
+                threshold: 7,
+                max_signers: 13,
+                created_at: Timestamp::new(1_785_000_000_000, 0),
+                certifiers,
+            },
+            first_secret.expect("first certifier secret"),
+        )
+    }
+
+    async fn post_envelope(
+        router: axum::Router,
+        envelope: &CeremonyEnvelope,
+    ) -> axum::response::Response {
+        let body = serde_json::to_vec(envelope).expect("json body");
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/root-genesis/portal/envelopes")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn root_genesis_portal_handler_accepts_signed_envelope_and_rejects_replay() {
+        let (config, secret) = config();
+        let sender = config.certifiers[0].did.clone();
+        let recipient = config.certifiers[1].did.clone();
+        let state = RootGenesisApiState::new(config.clone());
+        let router = root_genesis_router(state);
+        let envelope = CeremonyEnvelope::sign(
+            CeremonyEnvelopeDraft {
+                ceremony_id: config.ceremony_id.clone(),
+                phase: CeremonyPhase::Round2,
+                payload_kind: CeremonyPayloadKind::Round2EncryptedPackage,
+                sender_did: sender,
+                recipient_did: Some(recipient),
+                sequence: 1,
+                payload_bytes: b"ciphertext".to_vec(),
+            },
+            &secret,
+        )
+        .expect("signed envelope");
+
+        let accepted = post_envelope(router.clone(), &envelope).await;
+        assert_eq!(accepted.status(), StatusCode::CREATED);
+
+        let replay = post_envelope(router, &envelope).await;
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn root_genesis_portal_handler_rejects_plaintext_round_two_payload() {
+        let (config, secret) = config();
+        let sender = config.certifiers[0].did.clone();
+        let recipient = config.certifiers[1].did.clone();
+        let router = root_genesis_router(RootGenesisApiState::new(config.clone()));
+        let envelope = CeremonyEnvelope::sign(
+            CeremonyEnvelopeDraft {
+                ceremony_id: config.ceremony_id.clone(),
+                phase: CeremonyPhase::Round2,
+                payload_kind: CeremonyPayloadKind::Round2PlaintextPackage,
+                sender_did: sender,
+                recipient_did: Some(recipient),
+                sequence: 2,
+                payload_bytes: b"raw share".to_vec(),
+            },
+            &secret,
+        )
+        .expect("signed envelope");
+
+        let response = post_envelope(router, &envelope).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

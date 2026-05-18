@@ -18,7 +18,16 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+
+pub const ROOT_GENESIS_LONG_HELP: &str = "\
+Root genesis creates a 7-of-13 institutional root authority. Genesis DKG \
+requires all 13 rostered certifiers to complete the ceremony; if any \
+certifier fails, abort and restart with a new signed roster.
+
+Certifier rules: keep private material offline, maintain an offline backup, \
+never submit plaintext shares, encrypt round-two payloads per recipient, and \
+run verify-bundle before trusting the result.";
 
 pub const DEFAULT_ROUND_TIMEOUT_MS: u64 = 5_000;
 pub const MIN_ROUND_TIMEOUT_MS: u64 = 250;
@@ -176,4 +185,207 @@ pub enum Command {
         #[arg(long)]
         sse: Option<String>,
     },
+
+    /// Run root genesis FROST DKG and root trust bundle operations.
+    Genesis {
+        #[command(subcommand)]
+        command: GenesisCommand,
+    },
+}
+
+#[derive(Subcommand)]
+#[command(after_long_help = ROOT_GENESIS_LONG_HELP)]
+/// Root genesis ceremony commands.
+pub enum GenesisCommand {
+    /// Certifier-local setup commands.
+    Certifier {
+        #[command(subcommand)]
+        command: GenesisCertifierCommand,
+    },
+
+    /// Ceremony operator setup commands.
+    Ceremony {
+        #[command(subcommand)]
+        command: GenesisCeremonyCommand,
+    },
+
+    /// Serve the untrusted root genesis relay portal.
+    Portal(GenesisPortalArgs),
+
+    /// Produce or verify DKG round-one material.
+    Round1(GenesisIoArgs),
+
+    /// Produce encrypted DKG round-two material.
+    Round2(GenesisIoArgs),
+
+    /// Finalize DKG once all thirteen certifiers have completed both rounds.
+    #[command(name = "finalize-dkg")]
+    FinalizeDkg(GenesisIoArgs),
+
+    /// Sign a root-governance artifact with at least seven certifier shares.
+    #[command(name = "sign-root-artifact")]
+    SignRootArtifact(GenesisIoArgs),
+
+    /// Assemble a root trust bundle after artifact signing.
+    #[command(name = "assemble-bundle")]
+    AssembleBundle(GenesisIoArgs),
+
+    /// Verify a root trust bundle before trusting any AVC issuer delegation.
+    #[command(name = "verify-bundle")]
+    VerifyBundle(GenesisIoArgs),
+
+    /// Seal a serialized certifier share artifact.
+    #[command(name = "seal-share")]
+    SealShare(GenesisIoArgs),
+
+    /// Open a sealed certifier share artifact.
+    #[command(name = "unseal-share")]
+    UnsealShare(GenesisIoArgs),
+}
+
+#[derive(Subcommand)]
+/// Certifier-local root genesis commands.
+pub enum GenesisCertifierCommand {
+    /// Generate certifier signing and transport material.
+    Init(GenesisCertifierInitArgs),
+}
+
+#[derive(Subcommand)]
+/// Ceremony-operator root genesis commands.
+pub enum GenesisCeremonyCommand {
+    /// Build a signed-roster ceremony configuration.
+    Init(GenesisCeremonyInitArgs),
+}
+
+#[derive(Args)]
+/// Generate local certifier key material.
+pub struct GenesisCertifierInitArgs {
+    /// Certifier DID.
+    #[arg(long)]
+    pub did: String,
+
+    /// FROST identifier in the inclusive range 1..=13.
+    #[arg(long)]
+    pub frost_identifier: u16,
+
+    /// Public certifier contact output path.
+    #[arg(long)]
+    pub certifier_out: PathBuf,
+
+    /// Private certifier material output path.
+    #[arg(long)]
+    pub private_out: PathBuf,
+}
+
+#[derive(Args)]
+/// Build a ceremony configuration from a roster.
+pub struct GenesisCeremonyInitArgs {
+    /// Ceremony identifier.
+    #[arg(long)]
+    pub ceremony_id: String,
+
+    /// EXOCHAIN network identifier.
+    #[arg(long)]
+    pub network_id: String,
+
+    /// Reviewed repository commit.
+    #[arg(long)]
+    pub repo_commit: String,
+
+    /// 32-byte constitution hash as lowercase or uppercase hex.
+    #[arg(long)]
+    pub constitution_hash: String,
+
+    /// HLC physical milliseconds supplied by the operator.
+    #[arg(long)]
+    pub created_physical_ms: u64,
+
+    /// JSON roster path containing thirteen certifier contacts.
+    #[arg(long)]
+    pub roster: PathBuf,
+
+    /// Ceremony configuration output path.
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+#[derive(Args)]
+/// Serve the root genesis relay portal.
+pub struct GenesisPortalArgs {
+    /// Ceremony configuration JSON path.
+    #[arg(long)]
+    pub config: PathBuf,
+
+    /// Portal bind address.
+    #[arg(long, default_value = "127.0.0.1:3017")]
+    pub bind: String,
+}
+
+#[derive(Args)]
+/// File-based root genesis command inputs.
+pub struct GenesisIoArgs {
+    /// Input JSON or binary path.
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Output JSON or binary path.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    fn long_help_for(path: &[&str]) -> String {
+        let mut command = Cli::command();
+        let mut current = &mut command;
+        for segment in path {
+            current = current
+                .find_subcommand_mut(segment)
+                .expect("subcommand should exist");
+        }
+        let mut help = Vec::new();
+        current
+            .write_long_help(&mut help)
+            .expect("help should render");
+        String::from_utf8(help).expect("help should be utf8")
+    }
+
+    #[test]
+    fn genesis_cli_exposes_complete_operator_command_set() {
+        let help = long_help_for(&["genesis"]);
+        for command in [
+            "certifier",
+            "ceremony",
+            "portal",
+            "round1",
+            "round2",
+            "finalize-dkg",
+            "sign-root-artifact",
+            "assemble-bundle",
+            "verify-bundle",
+            "seal-share",
+            "unseal-share",
+        ] {
+            assert!(help.contains(command), "missing genesis command {command}");
+        }
+    }
+
+    #[test]
+    fn genesis_cli_help_warns_certifiers_about_secret_handling_and_restart_rules() {
+        let help = long_help_for(&["genesis"]);
+        for required in [
+            "7-of-13",
+            "all 13 rostered certifiers",
+            "abort and restart",
+            "offline backup",
+            "never submit plaintext shares",
+            "verify-bundle",
+        ] {
+            assert!(help.contains(required), "missing help text {required}");
+        }
+    }
 }

@@ -28,28 +28,27 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 > Run `bash tools/repo_truth.sh` to regenerate these numbers from source.
 >
-> The crate count includes `exo-catapult`, `exo-consensus`, `exo-messaging`,
-> `exochain-sdk`, `exo-avc`, and `exo-economy` (six crates previously not
-> listed in this README).
+> The crate count includes `exo-root`, `exo-catapult`, `exo-consensus`,
+> `exo-messaging`, `exochain-sdk`, `exo-avc`, and `exo-economy`.
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Rust crates | 22 | `ls -d crates/*/` |
-| Rust source files | 301 | `find crates -name '*.rs'` |
-| Rust LOC | 193339 | `wc -l` |
-| Workspace tests | 4,402 listed | `cargo test --workspace -- --list` |
-| CI quality gates | 20 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
+| Rust crates | 23 | `ls -d crates/*/` |
+| Rust source files | 312 | `find crates -name '*.rs'` |
+| Rust LOC | 197127 | `wc -l` |
+| Workspace tests | 4,440 listed | `cargo test --workspace -- --list` |
+| CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
 | Live node health | Verified for https://exochain-production.up.railway.app/health on 2026-05-09 | `tools/verify_live_node_claim.sh` |
 
 ### What is verified today
 
-- **4,400 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **4,431 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **20 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
+- **22 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
 - **Traceability matrix** maps 118 requirements — see `governance/traceability_matrix.md`
 - **Threat model** covers 16 threats tracked: 16 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
@@ -114,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 22 crates, 193234 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 23 crates, 197127 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 4,400 listed workspace tests
+         cryptographic proofs, 4,440 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          160 verified bridge exports — Rust -> WebAssembly -> JavaScript
