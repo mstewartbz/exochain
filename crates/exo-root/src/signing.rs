@@ -25,6 +25,22 @@ fn frost_error(error: frost::Error) -> RootError {
     }
 }
 
+fn frost_sign_share(
+    signing_package: &frost::SigningPackage,
+    nonces: &frost::round1::SigningNonces,
+    key_package: &frost::keys::KeyPackage,
+) -> Result<frost::round2::SignatureShare> {
+    frost::round2::sign(signing_package, nonces, key_package).map_err(frost_error)
+}
+
+fn frost_aggregate_signature(
+    signing_package: &frost::SigningPackage,
+    signature_shares: &BTreeMap<frost::Identifier, frost::round2::SignatureShare>,
+    public: &frost::keys::PublicKeyPackage,
+) -> Result<frost::Signature> {
+    frost::aggregate(signing_package, signature_shares, public).map_err(frost_error)
+}
+
 /// Create a FROST threshold signature from at least seven rostered shares.
 pub fn threshold_sign<R>(
     config: &GenesisCeremonyConfig,
@@ -83,15 +99,13 @@ where
 
     let signing_package = frost::SigningPackage::new(signing_commitments, message);
     let mut signature_shares = BTreeMap::new();
-    let sign_share = frost::round2::sign;
     for (identifier, key_package) in &key_packages {
         let nonces = &signing_nonces[identifier];
-        let share = sign_share(&signing_package, nonces, key_package).map_err(frost_error)?;
+        let share = frost_sign_share(&signing_package, nonces, key_package)?;
         signature_shares.insert(*identifier, share);
     }
 
-    let aggregate = frost::aggregate;
-    let sig = aggregate(&signing_package, &signature_shares, &public).map_err(frost_error)?;
+    let sig = frost_aggregate_signature(&signing_package, &signature_shares, &public)?;
     let signature = serialize_frost(&sig)?;
 
     verify_root_signature(&public_key_package.root_public_key, message, &signature)?;

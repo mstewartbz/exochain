@@ -131,6 +131,21 @@ fn peer_packages_except(
         .collect()
 }
 
+fn frost_dkg_round1<R>(
+    identifier: frost::Identifier,
+    max_signers: u16,
+    threshold: u16,
+    rng: &mut R,
+) -> Result<(
+    frost::keys::dkg::round1::SecretPackage,
+    frost::keys::dkg::round1::Package,
+)>
+where
+    R: frost::rand_core::RngCore + frost::rand_core::CryptoRng,
+{
+    frost::keys::dkg::part1(identifier, max_signers, threshold, rng).map_err(frost_error)
+}
+
 pub(crate) fn serialize_public_key_package(
     config: &GenesisCeremonyConfig,
     package: &frost::keys::PublicKeyPackage,
@@ -170,10 +185,9 @@ where
 {
     config.validate()?;
     let identifier = rostered_frost_identifier(config, frost_identifier_value, "round-one")?;
-    let part1 = frost::keys::dkg::part1;
     let max_signers = config.max_signers;
     let threshold = config.threshold;
-    let round1 = part1(identifier, max_signers, threshold, rng).map_err(frost_error)?;
+    let round1 = frost_dkg_round1(identifier, max_signers, threshold, rng)?;
     let (secret_package, package) = round1;
     let output = RootDkgRound1Output {
         frost_identifier: frost_identifier_value,
