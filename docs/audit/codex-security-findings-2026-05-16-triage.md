@@ -36,6 +36,49 @@ Current baseline when this triage was created:
 - Pre-existing untracked `docs/heartfield/HEARTFIELD_AI_WHITEPAPER.md` remains
   unrelated to this triage.
 
+Current-main revalidation on 2026-05-19:
+
+- `main` and `origin/main` were both at
+  `d91c805239ad597a0529a04909eace3f1341d574`.
+- Railway production service `exochain` reported deployment `SUCCESS` for
+  `d91c805239ad597a0529a04909eace3f1341d574`, with `/health`, `/ready`, and
+  `/api/v1/governance/status` responding successfully.
+- All 22 Codex Security CSV rows below remained classified as already
+  remediated on current `main`; no live code remediation was required in this
+  pass.
+- The only untracked worktree file remained
+  `docs/heartfield/HEARTFIELD_AI_WHITEPAPER.md`; it was not read as source of
+  truth and was not modified.
+
+Current-main validation commands:
+
+```bash
+cargo test -p exo-node -- --nocapture
+cargo test -p exo-gateway -- --nocapture
+cargo test -p exo-avc -p exo-economy -p exo-gatekeeper -p exo-consent -p exo-authority -p exo-messaging -p exo-api -p exo-catapult -p exo-governance -p exochain-wasm -- --nocapture
+node packages/exochain-wasm/test/bridge_verification.mjs
+bash tools/test_agent_prompt_boundaries.sh
+bash tools/test_github_issue_workflow_boundaries.sh
+npx vitest run services/audit-api/src/index.test.js
+cargo fmt --all -- --check
+git diff --check
+bash tools/test_repo_truth.sh
+cargo clippy -p exo-node -p exo-gateway -p exo-avc -p exo-economy -p exo-gatekeeper -p exo-consent -p exo-authority -p exo-messaging -p exo-api -p exo-catapult -p exo-governance -p exochain-wasm --all-targets -- -D warnings
+```
+
+Current-main validation result:
+
+- `exo-node`: 1101 tests passed.
+- `exo-gateway`: 342 tests passed across lib, bin, and integration targets.
+- Core and WASM security batch:
+  `exo-avc`, `exo-economy`, `exo-gatekeeper`, `exo-consent`,
+  `exo-authority`, `exo-messaging`, `exo-api`, `exo-catapult`,
+  `exo-governance`, and `exochain-wasm` all passed.
+- WASM bridge verification: 160/160 checks passed.
+- Audit API attestation pinning: 17 Vitest tests passed.
+- Agent prompt boundary guard, GitHub issue workflow boundary guard, repo-truth,
+  formatting, diff hygiene, and clippy all passed.
+
 ## Priority Order
 
 | Priority | Finding | Classification | Current status | First verification target |
