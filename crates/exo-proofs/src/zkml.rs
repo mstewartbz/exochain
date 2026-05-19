@@ -36,7 +36,10 @@
 //! serialized `InferenceProof` values continue to deserialize correctly
 //! (Architecture panel backward-compat requirement).
 
-use exo_core::types::{Hash256, PublicKey, Signature};
+use exo_core::{
+    hash::hash_structured,
+    types::{Hash256, PublicKey, Signature},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ProofError, Result};
@@ -102,6 +105,11 @@ pub enum AttestationDecision {
 /// The `signature` field is an Ed25519 signature over the canonical message:
 /// `b"zkml:attestation:" || reviewer_did_len_le_u64 || reviewer_did_bytes || ai_recommendation_hash || final_decision_hash || decision_variant_byte`
 ///
+/// Daubert admissibility requires the stronger inference-bound message from
+/// [`HumanAttestation::signing_message_for_inference`], which binds the
+/// reviewer decision to the prompt hash, input hash, output hash, model
+/// commitment, proof, and verification tag.
+///
 /// Callers must verify the signature against the reviewer's `public_key` before
 /// relying on the attestation for evidentiary purposes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +174,67 @@ impl HumanAttestation {
         };
         exo_core::crypto::verify(&msg, &self.signature, &self.reviewer_public_key)
     }
+
+    /// Compute the canonical inference-bound message that must be signed when
+    /// the attestation is used for Daubert admissibility.
+    pub fn signing_message_for_inference(
+        reviewer_did: &str,
+        ai_recommendation_hash: &Hash256,
+        final_decision_hash: &Hash256,
+        decision: &AttestationDecision,
+        inference: &InferenceProof,
+    ) -> Result<Vec<u8>> {
+        let Some(prompt_hash) = inference.prompt_hash else {
+            return Err(ProofError::InvalidProofFormat(
+                "prompt_hash is required for inference-bound human attestation".into(),
+            ));
+        };
+        let payload = HumanAttestationInferenceSigningPayload {
+            domain: "exo.zkml.human_attestation.v2",
+            reviewer_did,
+            ai_recommendation_hash: *ai_recommendation_hash,
+            final_decision_hash: *final_decision_hash,
+            decision,
+            model_hash: inference.model_commitment.commitment_hash(),
+            input_hash: inference.input_hash,
+            output_hash: inference.output_hash,
+            proof: inference.proof,
+            verification_tag: inference.verification_tag,
+            prompt_hash,
+        };
+        canonical_cbor_message(&payload, "human attestation inference signing payload")
+    }
+
+    /// Verify this attestation against a concrete inference proof and its
+    /// provenance fields.
+    #[must_use]
+    pub fn verify_for_inference(&self, inference: &InferenceProof) -> bool {
+        let Ok(msg) = Self::signing_message_for_inference(
+            &self.reviewer_did,
+            &self.ai_recommendation_hash,
+            &self.final_decision_hash,
+            &self.decision,
+            inference,
+        ) else {
+            return false;
+        };
+        exo_core::crypto::verify(&msg, &self.signature, &self.reviewer_public_key)
+    }
+}
+
+#[derive(Serialize)]
+struct HumanAttestationInferenceSigningPayload<'a> {
+    domain: &'static str,
+    reviewer_did: &'a str,
+    ai_recommendation_hash: Hash256,
+    final_decision_hash: Hash256,
+    decision: &'a AttestationDecision,
+    model_hash: Hash256,
+    input_hash: Hash256,
+    output_hash: Hash256,
+    proof: Hash256,
+    verification_tag: Hash256,
+    prompt_hash: Hash256,
 }
 
 /// Captures divergence between AI recommendation and final human decision.
@@ -290,15 +359,15 @@ impl InferenceProof {
             };
         }
 
-        if !self.proof_integrity_valid() {
-            return DaubertAdmissibility::Inadmissible {
-                reason: "proof integrity check failed".into(),
-            };
-        }
-
         if self.prompt_hash.is_none() {
             return DaubertAdmissibility::Inadmissible {
                 reason: "prompt_hash is required for Daubert admissibility".into(),
+            };
+        }
+
+        if !self.proof_integrity_valid() {
+            return DaubertAdmissibility::Inadmissible {
+                reason: "proof integrity check failed".into(),
             };
         }
 
@@ -308,7 +377,7 @@ impl InferenceProof {
             };
         };
 
-        if !attestation.verify_signature() {
+        if !attestation.verify_for_inference(self) {
             return DaubertAdmissibility::Inadmissible {
                 reason: "human_attestation signature failed verification".into(),
             };
@@ -354,12 +423,15 @@ impl InferenceProof {
         let model_hash = self.model_commitment.commitment_hash();
         let expected_proof =
             compute_inference_proof(&model_hash, &self.input_hash, &self.output_hash);
-        let expected_tag = compute_verification_tag(
+        let Ok(expected_tag) = compute_verification_tag(
             &model_hash,
             &self.input_hash,
             &self.output_hash,
             &self.proof,
-        );
+            self.prompt_hash.as_ref(),
+        ) else {
+            return false;
+        };
 
         constant_time_hash256_eq(&expected_proof, &self.proof)
             & constant_time_hash256_eq(&expected_tag, &self.verification_tag)
@@ -392,7 +464,8 @@ pub fn prove_inference(
     // implementation and is documented as such for Daubert disclosure purposes.
     let proof = compute_inference_proof(&model_hash, &input_hash, &output_hash);
 
-    let verification_tag = compute_verification_tag(&model_hash, &input_hash, &output_hash, &proof);
+    let verification_tag =
+        compute_verification_tag(&model_hash, &input_hash, &output_hash, &proof, None)?;
 
     Ok(InferenceProof {
         model_commitment: model.clone(),
@@ -421,7 +494,16 @@ pub fn prove_inference_with_provenance(
 ) -> Result<InferenceProof> {
     // guard applied via the inner call
     let mut proof = prove_inference(model, input, output)?;
-    proof.prompt_hash = Some(Hash256::digest(prompt));
+    let prompt_hash = Hash256::digest(prompt);
+    proof.prompt_hash = Some(prompt_hash);
+    let model_hash = model.commitment_hash();
+    proof.verification_tag = compute_verification_tag(
+        &model_hash,
+        &proof.input_hash,
+        &proof.output_hash,
+        &proof.proof,
+        Some(&prompt_hash),
+    )?;
     Ok(proof)
 }
 
@@ -448,7 +530,8 @@ pub fn verify_inference(proof: &InferenceProof) -> Result<bool> {
         &proof.input_hash,
         &proof.output_hash,
         &proof.proof,
-    );
+        proof.prompt_hash.as_ref(),
+    )?;
 
     let tag_ok = constant_time_hash256_eq(&expected_tag, &proof.verification_tag);
 
@@ -477,14 +560,49 @@ fn compute_verification_tag(
     input_hash: &Hash256,
     output_hash: &Hash256,
     proof: &Hash256,
-) -> Hash256 {
+    prompt_hash: Option<&Hash256>,
+) -> Result<Hash256> {
+    if let Some(prompt_hash) = prompt_hash {
+        let payload = InferenceVerificationTagPayload {
+            domain: "exo.zkml.verification_tag.v2",
+            model_hash: *model_hash,
+            input_hash: *input_hash,
+            output_hash: *output_hash,
+            proof: *proof,
+            prompt_hash: *prompt_hash,
+        };
+        return hash_structured(&payload).map_err(|err| {
+            ProofError::InvalidProofFormat(format!(
+                "zkML verification tag canonical encoding failed: {err}"
+            ))
+        });
+    }
+
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"zkml:verify:");
     hasher.update(model_hash.as_bytes());
     hasher.update(input_hash.as_bytes());
     hasher.update(output_hash.as_bytes());
     hasher.update(proof.as_bytes());
-    Hash256::from_bytes(*hasher.finalize().as_bytes())
+    Ok(Hash256::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+#[derive(Serialize)]
+struct InferenceVerificationTagPayload {
+    domain: &'static str,
+    model_hash: Hash256,
+    input_hash: Hash256,
+    output_hash: Hash256,
+    proof: Hash256,
+    prompt_hash: Hash256,
+}
+
+fn canonical_cbor_message<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(value, &mut encoded).map_err(|err| {
+        ProofError::InvalidProofFormat(format!("{label} canonical CBOR encoding failed: {err}"))
+    })?;
+    Ok(encoded)
 }
 
 fn constant_time_hash256_eq(left: &Hash256, right: &Hash256) -> bool {
@@ -694,6 +812,20 @@ mod tests {
         assert!(verify_inference(&proof).unwrap());
     }
 
+    #[test]
+    fn verify_inference_rejects_swapped_prompt_provenance() {
+        let model = make_model();
+        let mut proof =
+            prove_inference_with_provenance(&model, b"prompt", b"context", b"output").unwrap();
+
+        proof.prompt_hash = Some(Hash256::digest(b"different prompt"));
+
+        assert!(
+            !verify_inference(&proof).unwrap(),
+            "prompt provenance must be bound to the inference verification tag"
+        );
+    }
+
     // ---- LEG-007: HumanAttestation with Ed25519 signature ----
 
     fn make_attestation(
@@ -713,6 +845,34 @@ mod tests {
             reviewer_public_key: public_key,
             ai_recommendation_hash: ai_rec,
             final_decision_hash: final_dec,
+            decision,
+            signature,
+        };
+        (att, secret_key)
+    }
+
+    fn make_inference_attestation(
+        proof: &InferenceProof,
+        final_decision_hash: Hash256,
+        decision: AttestationDecision,
+    ) -> (HumanAttestation, exo_core::types::SecretKey) {
+        let (public_key, secret_key) = crypto::generate_keypair();
+        let reviewer_did = "did:exo:reviewer-alice".to_string();
+        let msg = HumanAttestation::signing_message_for_inference(
+            &reviewer_did,
+            &proof.output_hash,
+            &final_decision_hash,
+            &decision,
+            proof,
+        )
+        .unwrap();
+        let signature = crypto::sign(&msg, &secret_key);
+
+        let att = HumanAttestation {
+            reviewer_did,
+            reviewer_public_key: public_key,
+            ai_recommendation_hash: proof.output_hash,
+            final_decision_hash,
             decision,
             signature,
         };
@@ -955,7 +1115,9 @@ mod tests {
             ai_output,
         )
         .unwrap();
-        let (attestation, _) = make_attestation(AttestationDecision::Rejected);
+        let human_output_hash = Hash256::digest(human_output);
+        let (attestation, _) =
+            make_inference_attestation(&proof, human_output_hash, AttestationDecision::Rejected);
         proof.human_attestation = Some(attestation);
         proof.ai_delta = Some(AiDelta::new(ai_output, human_output));
         proof.daubert_checklist = Some(complete_daubert_checklist());
@@ -970,6 +1132,37 @@ mod tests {
         assert_eq!(
             proof.daubert_admissibility_status(),
             DaubertAdmissibility::Admissible
+        );
+    }
+
+    #[test]
+    fn daubert_admissibility_rejects_replayed_attestation_with_swapped_prompt_hash() {
+        let mut proof = admissible_inference_proof();
+        assert_eq!(
+            proof.daubert_admissibility_status(),
+            DaubertAdmissibility::Admissible
+        );
+
+        proof.prompt_hash = Some(Hash256::digest(b"benign replacement prompt"));
+
+        let status = proof.daubert_admissibility_status();
+        assert!(
+            matches!(status, DaubertAdmissibility::Inadmissible { ref reason } if reason.contains("integrity") || reason.contains("human_attestation")),
+            "replayed provenance with a swapped prompt hash must be inadmissible, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn daubert_admissibility_rejects_legacy_output_only_attestation() {
+        let mut proof = admissible_inference_proof();
+        let (legacy_attestation, _) = make_attestation(AttestationDecision::Rejected);
+        proof.human_attestation = Some(legacy_attestation);
+
+        let status = proof.daubert_admissibility_status();
+
+        assert!(
+            matches!(status, DaubertAdmissibility::Inadmissible { ref reason } if reason.contains("human_attestation")),
+            "Daubert admissibility must reject attestations that do not bind proof provenance, got {status:?}"
         );
     }
 
