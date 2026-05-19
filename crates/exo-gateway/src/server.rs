@@ -4221,11 +4221,21 @@ fn forwarded_rate_limit_client_ip(
     request: &Request<Body>,
     trusted_rate_limit_proxy_ips: &BTreeSet<IpAddr>,
 ) -> Option<IpAddr> {
-    let header_value = request.headers().get("x-forwarded-for")?.to_str().ok()?;
-    let parsed_ips: Vec<IpAddr> = header_value
-        .split(',')
-        .filter_map(|candidate| candidate.trim().parse::<IpAddr>().ok())
-        .collect();
+    let mut forwarded_headers = request.headers().get_all("x-forwarded-for").iter();
+    let header_value = forwarded_headers.next()?.to_str().ok()?;
+    if forwarded_headers.next().is_some() {
+        return None;
+    }
+
+    let mut parsed_ips = Vec::new();
+    for candidate in header_value.split(',') {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let ip = trimmed.parse::<IpAddr>().ok()?;
+        parsed_ips.push(ip);
+    }
 
     parsed_ips
         .iter()
@@ -4504,6 +4514,21 @@ mod tests {
         Request::builder()
             .uri(path)
             .header("x-forwarded-for", forwarded_for)
+            .extension(ConnectInfo(address))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn request_from_duplicate_forwarded_headers(
+        path: &str,
+        address: SocketAddr,
+        first_forwarded_for: &str,
+        second_forwarded_for: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("x-forwarded-for", first_forwarded_for)
+            .header("x-forwarded-for", second_forwarded_for)
             .extension(ConnectInfo(address))
             .body(Body::empty())
             .unwrap()
@@ -4905,6 +4930,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first_client_again.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn gateway_rate_limit_trusted_proxy_duplicate_forwarding_falls_back_to_socket_ip() {
+        let wall = Arc::new(AtomicU64::new(25_000));
+        let trusted_proxy = "10.0.0.10".parse::<IpAddr>().unwrap();
+        let state = rate_limited_state_with_trusted_proxies(1, 60_000, wall, &[trusted_proxy]);
+        let app = apply_gateway_layers(
+            Router::new().route("/probe", get(probe)),
+            state,
+            GLOBAL_CONCURRENCY_LIMIT,
+        );
+
+        let first = app
+            .clone()
+            .oneshot(request_from_duplicate_forwarded_headers(
+                "/probe",
+                "10.0.0.10:1000".parse().unwrap(),
+                "198.51.100.201",
+                "203.0.113.77",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(request_from_duplicate_forwarded_headers(
+                "/probe",
+                "10.0.0.10:2000".parse().unwrap(),
+                "198.51.100.202",
+                "203.0.113.77",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
