@@ -1493,7 +1493,7 @@ mod root_genesis_adapter_tests {
     use exo_core::{Did, Hash256, SecretKey, Timestamp, crypto::KeyPair};
     use exo_root::{
         CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase,
-        CertifierContact, GenesisCeremonyConfig,
+        CertifierContact, GenesisCeremonyConfig, PairwiseEncryptedPayload,
     };
     use tower::ServiceExt;
 
@@ -1563,6 +1563,16 @@ mod root_genesis_adapter_tests {
             .expect("response")
     }
 
+    fn encrypted_payload_bytes(ciphertext: impl Into<Vec<u8>>) -> Vec<u8> {
+        let payload = PairwiseEncryptedPayload {
+            nonce: [1u8; 24],
+            ciphertext: ciphertext.into(),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&payload, &mut bytes).expect("encrypted payload encoding");
+        bytes
+    }
+
     #[tokio::test]
     async fn root_genesis_portal_handler_accepts_signed_envelope_and_rejects_replay() {
         let (config, secret) = config();
@@ -1578,7 +1588,7 @@ mod root_genesis_adapter_tests {
                 sender_did: sender,
                 recipient_did: Some(recipient),
                 sequence: 1,
-                payload_bytes: b"ciphertext".to_vec(),
+                payload_bytes: encrypted_payload_bytes(b"ciphertext"),
             },
             &secret,
         )

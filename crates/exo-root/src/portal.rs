@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use exo_core::{Did, Hash256, SecretKey, Signature, crypto, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
-use crate::{GenesisCeremonyConfig, Result, RootError};
+use crate::{GenesisCeremonyConfig, PairwiseEncryptedPayload, Result, RootError};
 
 const MAX_PORTAL_PAYLOAD_BYTES: usize = 64 * 1024;
 
@@ -284,6 +284,7 @@ impl PortalStore {
                         reason: "round-two encrypted package requires recipient".to_owned(),
                     });
                 }
+                validate_encrypted_round2_payload(envelope.payload_bytes.as_slice())?;
                 Ok(())
             }
             (_, CeremonyPayloadKind::Round2PlaintextPackage) => Err(RootError::PortalRejected {
@@ -294,6 +295,19 @@ impl PortalStore {
             }),
         }
     }
+}
+
+fn validate_encrypted_round2_payload(payload_bytes: &[u8]) -> Result<()> {
+    let encrypted: PairwiseEncryptedPayload =
+        ciborium::from_reader(payload_bytes).map_err(|error| RootError::PortalRejected {
+            reason: format!("round-two encrypted package is malformed: {error}"),
+        })?;
+    if encrypted.ciphertext.is_empty() {
+        return Err(RootError::PortalRejected {
+            reason: "round-two encrypted package ciphertext must not be empty".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]

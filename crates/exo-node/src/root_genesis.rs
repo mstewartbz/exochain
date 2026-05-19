@@ -132,7 +132,10 @@ mod tests {
         http::{Request, StatusCode},
     };
     use exo_core::{Did, SecretKey, Signature, Timestamp, crypto::KeyPair};
-    use exo_root::{CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact};
+    use exo_root::{
+        CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
+        PairwiseEncryptedPayload,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -189,6 +192,13 @@ mod tests {
         sequence: u64,
         payload_bytes: Vec<u8>,
     ) -> CeremonyEnvelope {
+        let encrypted_payload = PairwiseEncryptedPayload {
+            nonce: [u8::try_from(sequence).expect("sequence fits"); 24],
+            ciphertext: payload_bytes,
+        };
+        let mut encoded_payload = Vec::new();
+        ciborium::into_writer(&encrypted_payload, &mut encoded_payload)
+            .expect("encrypted payload encoding");
         CeremonyEnvelope::sign(
             CeremonyEnvelopeDraft {
                 ceremony_id: config.ceremony_id.clone(),
@@ -197,7 +207,7 @@ mod tests {
                 sender_did: config.certifiers[0].did.clone(),
                 recipient_did: Some(config.certifiers[1].did.clone()),
                 sequence,
-                payload_bytes,
+                payload_bytes: encoded_payload,
             },
             secret,
         )
