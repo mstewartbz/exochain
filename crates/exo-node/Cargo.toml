@@ -148,6 +148,18 @@ default = []
 # governance lifecycle.
 unaudited-admin-governance-shortcut = []
 
+# CrossChecked receipt anchoring was introduced as a convenience adapter for
+# customer-zero integration work. The route mints a node-signed TrustReceipt
+# from external CrossChecked metadata, but this crate does not yet have a
+# trusted CrossChecked authority resolver, proof fetcher, or tenant/workspace
+# authorization contract. The production default is therefore fail-closed.
+#
+# Do NOT enable this in production. Enabling it means: "I accept that
+# POST /api/v1/receipts can anchor CrossChecked metadata under the legacy,
+# unaudited adapter contract and does not prove the external receipt or
+# authority chain."
+unaudited-crosschecked-receipt-anchor = []
+
 # GAP (Onyx pass 3, RED #2 and follow-on trust-surface scans): several
 # MCP tools return truthy-shaped responses without persisting to any
 # store, invoking the reactor, appending to the DAG, delivering a
