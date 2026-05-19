@@ -339,3 +339,134 @@ fn decode_package_map(packages: BTreeMapStringBytes) -> anyhow::Result<BTreeMap<
     }
     Ok(decoded)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use exo_core::PublicKey;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn certifier(identifier: u16) -> CertifierContact {
+        let byte = u8::try_from(identifier).expect("identifier fits in byte");
+        CertifierContact {
+            did: Did::new(&format!("did:exo:root-cli-{identifier:02}")).expect("valid DID"),
+            frost_identifier: identifier,
+            signing_public_key: PublicKey::from_bytes([byte; 32]),
+            transport_public_key: [byte; 32],
+        }
+    }
+
+    fn io_args(input: PathBuf, output: PathBuf) -> GenesisIoArgs {
+        GenesisIoArgs {
+            input: Some(input),
+            output: Some(output),
+        }
+    }
+
+    #[test]
+    fn init_ceremony_writes_valid_institutional_config() {
+        let directory = tempdir().expect("temporary directory");
+        let roster_path = directory.path().join("roster.json");
+        let config_path = directory.path().join("ceremony.json");
+        let roster: Vec<_> = (1..=13).map(certifier).collect();
+        write_json(&roster_path, &roster).expect("write roster");
+
+        init_ceremony(GenesisCeremonyInitArgs {
+            ceremony_id: "root-cli-ceremony".to_owned(),
+            network_id: "exo-mainnet".to_owned(),
+            repo_commit: "d8927686a34bdc28ba36d53938f665685d2c4c04".to_owned(),
+            constitution_hash: hex::encode([7u8; 32]),
+            created_physical_ms: 42,
+            roster: roster_path,
+            out: config_path.clone(),
+        })
+        .expect("ceremony init");
+
+        let config: GenesisCeremonyConfig = read_json(&config_path).expect("read config");
+        assert_eq!(config.threshold, exo_root::ROOT_GENESIS_THRESHOLD);
+        assert_eq!(config.max_signers, exo_root::ROOT_GENESIS_SIGNERS);
+        assert_eq!(
+            config.certifiers.len(),
+            usize::from(exo_root::ROOT_GENESIS_SIGNERS)
+        );
+        assert_eq!(config.created_at, Timestamp::new(42, 0));
+        config.validate().expect("valid root genesis config");
+    }
+
+    #[test]
+    fn seal_and_unseal_share_commands_round_trip_hex_output() {
+        let directory = tempdir().expect("temporary directory");
+        let seal_input_path = directory.path().join("seal-input.json");
+        let sealed_path = directory.path().join("sealed.json");
+        let unseal_input_path = directory.path().join("unseal-input.json");
+        let opened_path = directory.path().join("opened.json");
+        let share = b"certifier-share-material";
+        let associated_data = b"root-genesis-share-v1";
+        let passphrase = b"long offline passphrase";
+        write_json(
+            &seal_input_path,
+            &SealShareCommandInput {
+                share_hex: hex::encode(share),
+                passphrase_hex: hex::encode(passphrase),
+                associated_data_hex: hex::encode(associated_data),
+                salt_hex: hex::encode([2u8; 16]),
+                nonce_hex: hex::encode([3u8; 24]),
+            },
+        )
+        .expect("write seal input");
+
+        run_seal_share(io_args(seal_input_path, sealed_path.clone())).expect("seal share");
+        let sealed: exo_root::SealedShare = read_json(&sealed_path).expect("read sealed share");
+        write_json(
+            &unseal_input_path,
+            &UnsealShareCommandInput {
+                sealed,
+                passphrase_hex: hex::encode(passphrase),
+                associated_data_hex: hex::encode(associated_data),
+            },
+        )
+        .expect("write unseal input");
+
+        run_unseal_share(io_args(unseal_input_path, opened_path.clone())).expect("unseal share");
+        let opened: HexBytesOutput = read_json(&opened_path).expect("read opened share");
+        assert_eq!(opened.bytes_hex, hex::encode(share));
+    }
+
+    #[test]
+    fn command_helpers_fail_closed_on_missing_input_and_bad_hex() {
+        let missing_input = GenesisIoArgs {
+            input: None,
+            output: None,
+        };
+        assert!(
+            required_input(&missing_input)
+                .expect_err("input must be required")
+                .to_string()
+                .contains("--input is required")
+        );
+        assert!(
+            parse_hash_hex("abcd")
+                .expect_err("short hash must fail")
+                .to_string()
+                .contains("constitution hash must be 32 bytes")
+        );
+        assert!(
+            decode_fixed_16("abcd")
+                .expect_err("short salt must fail")
+                .to_string()
+                .contains("expected 16 bytes")
+        );
+        assert!(
+            decode_fixed_24("abcd")
+                .expect_err("short nonce must fail")
+                .to_string()
+                .contains("expected 24 bytes")
+        );
+        let mut packages = BTreeMap::new();
+        packages.insert(7, "not-hex".to_owned());
+        assert!(decode_package_map(packages).is_err());
+    }
+}
