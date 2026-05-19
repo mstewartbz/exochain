@@ -7,7 +7,8 @@ use exo_core::{Did, Hash256, PublicKey, Timestamp, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    GenesisCeremonyConfig, Result, RootError, RootPublicKeyPackage, verify_root_signature,
+    GenesisCeremonyConfig, Result, RootError, RootPublicKeyPackage,
+    dkg::validate_public_key_package, verify_root_signature,
 };
 
 /// Operational AVC issuer authority delegated by the root.
@@ -133,6 +134,7 @@ pub fn assemble_root_bundle(
     transcript_hash: Hash256,
     root_signature: Vec<u8>,
 ) -> Result<RootTrustBundle> {
+    validate_public_key_package(&config, &public_key_package)?;
     let payload =
         issuer_delegation.root_artifact_payload(&config, &public_key_package, transcript_hash)?;
     verify_root_signature(
@@ -160,6 +162,7 @@ pub fn assemble_root_bundle(
 /// Verify that a root trust bundle is self-consistent and root-signed.
 pub fn verify_root_bundle(bundle: &RootTrustBundle) -> Result<()> {
     bundle.config.validate()?;
+    validate_public_key_package(&bundle.config, &bundle.public_key_package)?;
     let payload = bundle.issuer_delegation.root_artifact_payload(
         &bundle.config,
         &bundle.public_key_package,

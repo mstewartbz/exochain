@@ -174,6 +174,22 @@ pub(crate) fn serialize_public_key_package(
     })
 }
 
+pub(crate) fn validate_public_key_package(
+    config: &GenesisCeremonyConfig,
+    package: &RootPublicKeyPackage,
+) -> Result<()> {
+    let frost_package: frost::keys::PublicKeyPackage =
+        deserialize_frost(package.public_key_package.as_slice())?;
+    let expected = serialize_public_key_package(config, &frost_package)?;
+    if &expected != package {
+        return Err(RootError::BundleRejected {
+            reason: "public key package metadata does not match serialized FROST package"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Execute DKG round one for one rostered certifier.
 pub fn dkg_round1<R>(
     config: &GenesisCeremonyConfig,

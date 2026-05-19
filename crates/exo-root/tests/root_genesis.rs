@@ -6,10 +6,10 @@ use exo_authority::permission::Permission;
 use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp, crypto::KeyPair};
 use exo_root::{
     CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
-    GenesisCeremonyConfig, PortalStore, RootIssuerDelegation, SealedShare, assemble_root_bundle,
-    decrypt_pairwise_payload, dkg_finalize_participant, dkg_round1, dkg_round2,
-    encrypt_pairwise_payload, run_complete_dkg, seal_share, threshold_sign, unseal_share,
-    verify_root_bundle, verify_root_signature,
+    GenesisCeremonyConfig, PairwiseEncryptedPayload, PortalStore, RootIssuerDelegation,
+    SealedShare, assemble_root_bundle, decrypt_pairwise_payload, dkg_finalize_participant,
+    dkg_round1, dkg_round2, encrypt_pairwise_payload, run_complete_dkg, seal_share, threshold_sign,
+    unseal_share, verify_root_bundle, verify_root_signature,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -57,6 +57,16 @@ fn envelope_draft(
         sequence,
         payload_bytes,
     }
+}
+
+fn encrypted_payload_bytes(ciphertext: impl Into<Vec<u8>>) -> Vec<u8> {
+    let payload = PairwiseEncryptedPayload {
+        nonce: [7u8; 24],
+        ciphertext: ciphertext.into(),
+    };
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&payload, &mut bytes).expect("encrypted payload encoding");
+    bytes
 }
 
 fn config() -> (
@@ -658,6 +668,55 @@ fn root_bundle_verification_rejects_tampered_delegation() {
 }
 
 #[test]
+fn root_bundle_rejects_public_key_package_metadata_mismatch() {
+    let (config, _, _) = config();
+    let mut first_rng = StdRng::seed_from_u64(301);
+    let mut second_rng = StdRng::seed_from_u64(302);
+    let first_dkg = run_complete_dkg(&config, &mut first_rng).expect("first dkg");
+    let second_dkg = run_complete_dkg(&config, &mut second_rng).expect("second dkg");
+    let mut mixed_public = second_dkg.public_key_package.clone();
+    mixed_public.public_key_package = first_dkg.public_key_package.public_key_package;
+    let delegation = RootIssuerDelegation {
+        issuer_did: Did::new("did:exo:avc-issuer").expect("valid did"),
+        issuer_public_key: PublicKey::from_bytes([0x46; 32]),
+        granted_permissions: vec![Permission::Govern],
+        effective_at: Timestamp::new(1_785_000_010_000, 0),
+        expires_at: None,
+        purpose: "Delegate operational AVC issuing authority".into(),
+    };
+    let transcript_hash = Hash256::digest(b"transcript");
+    let payload = delegation
+        .root_artifact_payload(&config, &mixed_public, transcript_hash)
+        .expect("payload");
+    let mut signing_rng = StdRng::seed_from_u64(303);
+    let root_signature = threshold_sign(
+        &config,
+        &second_dkg.public_key_package,
+        second_dkg
+            .key_packages
+            .iter()
+            .take(7)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect(),
+        &payload,
+        &mut signing_rng,
+    )
+    .expect("signature");
+
+    assert!(
+        assemble_root_bundle(
+            config,
+            mixed_public,
+            delegation,
+            transcript_hash,
+            root_signature.signature,
+        )
+        .is_err(),
+        "bundle must reject root key metadata that does not derive from the serialized FROST public package"
+    );
+}
+
+#[test]
 fn root_artifact_payload_rejects_unbounded_delegation() {
     let (config, _, _) = config();
     let mut rng = StdRng::seed_from_u64(98);
@@ -758,7 +817,7 @@ fn portal_rejects_replay_plaintext_round2_and_wrong_phase_envelopes() {
             sender.clone(),
             Some(recipient.clone()),
             1,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -772,7 +831,7 @@ fn portal_rejects_replay_plaintext_round2_and_wrong_phase_envelopes() {
             CeremonyPhase::Round2,
             CeremonyPayloadKind::Round2PlaintextPackage,
             sender.clone(),
-            Some(recipient),
+            Some(recipient.clone()),
             2,
             b"plaintext share".to_vec(),
         ),
@@ -780,6 +839,42 @@ fn portal_rejects_replay_plaintext_round2_and_wrong_phase_envelopes() {
     )
     .expect("plaintext envelope");
     assert!(store.submit(plaintext).is_err());
+
+    let mislabeled_plaintext = CeremonyEnvelope::sign(
+        envelope_draft(
+            &config.ceremony_id,
+            CeremonyPhase::Round2,
+            CeremonyPayloadKind::Round2EncryptedPackage,
+            sender.clone(),
+            Some(recipient.clone()),
+            4,
+            b"plaintext share".to_vec(),
+        ),
+        signing_secret,
+    )
+    .expect("mislabeled plaintext envelope");
+    assert!(
+        store.submit(mislabeled_plaintext).is_err(),
+        "round-two plaintext bytes mislabeled as encrypted must be rejected"
+    );
+
+    let empty_ciphertext = CeremonyEnvelope::sign(
+        envelope_draft(
+            &config.ceremony_id,
+            CeremonyPhase::Round2,
+            CeremonyPayloadKind::Round2EncryptedPackage,
+            sender.clone(),
+            Some(recipient.clone()),
+            5,
+            encrypted_payload_bytes(Vec::new()),
+        ),
+        signing_secret,
+    )
+    .expect("empty ciphertext envelope");
+    assert!(
+        store.submit(empty_ciphertext).is_err(),
+        "round-two encrypted package must carry ciphertext"
+    );
 
     let wrong_phase = CeremonyEnvelope::sign(
         envelope_draft(
@@ -789,7 +884,7 @@ fn portal_rejects_replay_plaintext_round2_and_wrong_phase_envelopes() {
             sender,
             None,
             3,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -813,7 +908,7 @@ fn portal_rejects_unsigned_wrong_certifier_oversized_and_malformed_envelopes() {
             sender.clone(),
             Some(recipient.clone()),
             10,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -829,7 +924,7 @@ fn portal_rejects_unsigned_wrong_certifier_oversized_and_malformed_envelopes() {
             Did::new("did:exo:not-rostered").expect("valid did"),
             Some(recipient.clone()),
             11,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -859,7 +954,7 @@ fn portal_rejects_unsigned_wrong_certifier_oversized_and_malformed_envelopes() {
             sender,
             Some(recipient),
             13,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -884,7 +979,7 @@ fn portal_rejects_wrong_ceremony_bad_recipient_self_target_and_bad_broadcasts() 
             sender.clone(),
             Some(recipient.clone()),
             20,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -899,7 +994,7 @@ fn portal_rejects_wrong_ceremony_bad_recipient_self_target_and_bad_broadcasts() 
             sender.clone(),
             Some(Did::new("did:exo:not-rostered").expect("valid did")),
             21,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -914,7 +1009,7 @@ fn portal_rejects_wrong_ceremony_bad_recipient_self_target_and_bad_broadcasts() 
             sender.clone(),
             Some(sender.clone()),
             22,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )
@@ -944,7 +1039,7 @@ fn portal_rejects_wrong_ceremony_bad_recipient_self_target_and_bad_broadcasts() 
             sender,
             None,
             24,
-            b"ciphertext".to_vec(),
+            encrypted_payload_bytes(b"ciphertext"),
         ),
         signing_secret,
     )

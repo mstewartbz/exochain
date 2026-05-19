@@ -1,6 +1,6 @@
 //! Root genesis CLI command implementation.
 
-use std::{collections::BTreeMap, fs, net::SocketAddr};
+use std::{collections::BTreeMap, fs, io::Write, net::SocketAddr};
 
 use exo_core::{Did, Hash256, Timestamp, crypto::KeyPair};
 use exo_root::{
@@ -288,6 +288,29 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> anyhow::Re
 
 fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
+    write_json_bytes(path, bytes.as_slice())?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_json_bytes(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_json_bytes(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     fs::write(path, bytes)?;
     Ok(())
 }
@@ -468,5 +491,32 @@ mod tests {
         let mut packages = BTreeMap::new();
         packages.insert(7, "not-hex".to_owned());
         assert!(decode_package_map(packages).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_outputs_are_rewritten_owner_only_even_when_file_exists() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary directory");
+        let output_path = directory.path().join("private-material.json");
+        fs::write(&output_path, b"previous material").expect("seed existing file");
+        fs::set_permissions(&output_path, fs::Permissions::from_mode(0o644))
+            .expect("make existing file too broad");
+
+        write_json(
+            &output_path,
+            &HexBytesOutput {
+                bytes_hex: hex::encode(b"secret"),
+            },
+        )
+        .expect("rewrite output");
+
+        let mode = fs::metadata(&output_path)
+            .expect("output metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
