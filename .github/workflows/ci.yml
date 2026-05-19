@@ -546,6 +546,69 @@ jobs:
           retention-days: 30
 
   # -----------------------------------------------------------------------
+  # Gate 18: Root Genesis Crate Coverage (100% line coverage)
+  # -----------------------------------------------------------------------
+  root-genesis-coverage:
+    name: "Gate 18 — Root Genesis Crate Coverage (100%)"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --version 0.35.4 --locked
+      - name: Run exo-root coverage
+        run: |
+          cargo tarpaulin \
+            --packages exo-root \
+            --include-files "crates/exo-root/src/**" \
+            --out xml \
+            --out stdout \
+            --output-dir coverage-exo-root \
+            --skip-clean \
+            --engine llvm \
+            --timeout 600 \
+            --fail-under 100
+      - name: Upload exo-root coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exo-root-coverage-${{ github.sha }}
+          path: coverage-exo-root/cobertura.xml
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
+  # Gate 19: Root Genesis Portal Coverage (100% line coverage)
+  # -----------------------------------------------------------------------
+  root-genesis-portal-coverage:
+    name: "Gate 19 — Root Genesis Portal Coverage (100%)"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --version 0.35.4 --locked
+      - name: Run root genesis portal coverage
+        run: |
+          cargo tarpaulin \
+            --packages exo-node \
+            --include-files "crates/exo-node/src/root_genesis.rs" \
+            --out xml \
+            --output-dir coverage-root-genesis-portal \
+            --skip-clean \
+            --engine llvm \
+            --timeout 120 \
+            --fail-under 100
+      - name: Upload root genesis portal coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: root-genesis-portal-coverage-${{ github.sha }}
+          path: coverage-root-genesis-portal/cobertura.xml
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
   # Gate 20: WASM build
   # -----------------------------------------------------------------------
   build-wasm:
@@ -643,6 +706,8 @@ jobs:
       - state-sync-integration
       - cross-platform
       - zerodentity-coverage
+      - root-genesis-coverage
+      - root-genesis-portal-coverage
       - build-wasm
       - test-bridge
       - wasm-sync
