@@ -1164,6 +1164,38 @@ mod tests {
                 nonces_out: nonces_out.clone(),
             })
             .expect("sign-commit");
+            // sign-commit splits its output: the coordinator-facing commitment
+            // file must carry no nonces field, and the secret nonces must live
+            // only in the separate local-only file.
+            let commitment_value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&commitment_out).expect("read commitment file"))
+                    .expect("commitment json");
+            let commitment_object = commitment_value
+                .as_object()
+                .expect("commitment is a JSON object");
+            assert!(
+                !commitment_object.contains_key("nonces"),
+                "coordinator-facing commitment file must not contain a nonces field"
+            );
+            for key in commitment_object.keys() {
+                let lowered = key.to_lowercase();
+                assert!(
+                    !(lowered.contains("nonce")
+                        || lowered.contains("secret")
+                        || lowered.contains("private")),
+                    "commitment file must not expose field `{key}`"
+                );
+            }
+            let nonces_value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&nonces_out).expect("read nonces file"))
+                    .expect("nonces json");
+            assert!(
+                nonces_value
+                    .as_object()
+                    .expect("nonces is a JSON object")
+                    .contains_key("nonces"),
+                "the secret nonces file must carry the nonces"
+            );
             let commit: exo_root::RootSigningCommitment =
                 read_json(&commitment_out).expect("read commitment");
             commitments_hex.insert(*id, hex::encode(commit.commitments.as_slice()));
@@ -1238,12 +1270,12 @@ mod tests {
     #[test]
     fn root_signing_commitment_json_has_no_secret_named_field() {
         // The relay-safe RootSigningCommitment, round-tripped through JSON, must
-        // expose no field whose name suggests secret material.
-        let config = rostered_config();
-        let dkg = exo_root::run_complete_dkg(&config, &mut rand::rngs::OsRng).expect("dkg");
-        let (commitment, _nonces) =
-            exo_root::sign_commit(&config, &dkg.key_packages[&1], &mut rand::rngs::OsRng)
-                .expect("commit");
+        // expose no field whose name suggests secret material. Constructed
+        // directly (no DKG) to keep this off the slow coverage-instrumented path.
+        let commitment = exo_root::RootSigningCommitment {
+            frost_identifier: 1,
+            commitments: vec![1, 2, 3, 4],
+        };
         let json = serde_json::to_string(&commitment).expect("serialize commitment");
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse commitment json");
         let object = value
@@ -1258,63 +1290,6 @@ mod tests {
                 "relay-safe RootSigningCommitment must not expose field `{key}`"
             );
         }
-    }
-
-    #[test]
-    fn sign_commit_writes_public_commitment_and_secret_nonces_to_separate_files() {
-        let config = rostered_config();
-        let dkg = exo_root::run_complete_dkg(&config, &mut rand::rngs::OsRng).expect("dkg");
-        let directory = tempdir().expect("temporary directory");
-        let in_path = directory.path().join("commit-in.json");
-        let commitment_out = directory.path().join("commitment.json");
-        let nonces_out = directory.path().join("nonces.json");
-        write_json(
-            &in_path,
-            &SignCommitCommandInput {
-                config: config.clone(),
-                key_package: dkg.key_packages[&1].clone(),
-            },
-        )
-        .expect("write commit input");
-        run_sign_commit(GenesisSignCommitArgs {
-            input: Some(in_path),
-            commitment_out: commitment_out.clone(),
-            nonces_out: nonces_out.clone(),
-        })
-        .expect("sign-commit");
-
-        // The coordinator-facing commitment file carries no nonces field.
-        let commitment_value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&commitment_out).expect("read commitment"))
-                .expect("commitment json");
-        let commitment_object = commitment_value
-            .as_object()
-            .expect("commitment is a JSON object");
-        assert!(
-            !commitment_object.contains_key("nonces"),
-            "coordinator-facing commitment file must not contain a nonces field"
-        );
-        for key in commitment_object.keys() {
-            let lowered = key.to_lowercase();
-            assert!(
-                !(lowered.contains("nonce")
-                    || lowered.contains("secret")
-                    || lowered.contains("private")),
-                "commitment file must not expose field `{key}`"
-            );
-        }
-
-        // The secret nonces live only in the separate local-only file.
-        let nonces_value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&nonces_out).expect("read nonces"))
-                .expect("nonces json");
-        assert!(
-            nonces_value
-                .as_object()
-                .expect("nonces is a JSON object")
-                .contains_key("nonces"),
-            "the secret nonces file must carry the nonces"
-        );
     }
 
     #[test]

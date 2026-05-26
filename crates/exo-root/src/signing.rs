@@ -576,4 +576,23 @@ mod tests {
             RootError::ThresholdNotMet { required: 7, .. }
         ));
     }
+
+    #[test]
+    fn sign_share_rejects_nonces_bound_to_a_different_signer() {
+        // Nonces must belong to the same signer as the key package. The identifier
+        // check runs before any deserialization, so empty byte fields suffice and
+        // no DKG is needed.
+        let config = test_config();
+        let key_package = RootKeyPackage {
+            frost_identifier: 1,
+            key_package: Vec::new(),
+        };
+        let foreign_nonces = RootSigningNonces {
+            frost_identifier: 2,
+            nonces: Vec::new(),
+        };
+        let error = sign_share(&config, &key_package, &foreign_nonces, &[])
+            .expect_err("nonces bound to a different signer must be rejected");
+        assert!(error.to_string().contains("mismatches key 1"));
+    }
 }
