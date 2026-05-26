@@ -235,6 +235,8 @@ mod tests {
                 max_signers: exo_root::ROOT_GENESIS_SIGNERS,
                 created_at: Timestamp::new(1_785_000_000_000, 0),
                 certifiers,
+                signing_set: (1..=7).collect(),
+                signing_alternates: (8..=13).collect(),
             },
             first_secret.expect("first certifier secret"),
         )

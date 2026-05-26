@@ -272,6 +272,8 @@ fn init_ceremony(args: GenesisCeremonyInitArgs) -> anyhow::Result<()> {
         max_signers: exo_root::ROOT_GENESIS_SIGNERS,
         created_at: Timestamp::new(args.created_physical_ms, 0),
         certifiers,
+        signing_set: args.signing_set,
+        signing_alternates: args.signing_alternates,
     };
     config.validate()?;
     write_json(&args.out, &config)?;
@@ -569,7 +571,18 @@ fn run_sign_share(args: GenesisSignShareArgs) -> anyhow::Result<()> {
         &nonces,
         decode_hex(&input.signing_package_hex)?.as_slice(),
     )?;
-    write_output(&io, &output)
+    write_output(&io, &output)?;
+    // Single-use: consume (delete) the nonces file after a successful share so
+    // the same nonces can never be reused. Fail loud if consumption fails — the
+    // signing session must then be aborted and fresh commitments/nonces produced.
+    fs::remove_file(&args.nonces).map_err(|error| {
+        anyhow::anyhow!(
+            "sign-share produced a share but failed to consume the single-use nonces file {}: \
+             {error}; delete it manually and abort this signing session",
+            args.nonces.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn run_aggregate_signature(args: GenesisIoArgs) -> anyhow::Result<()> {
@@ -766,9 +779,19 @@ mod tests {
             max_signers: exo_root::ROOT_GENESIS_SIGNERS,
             created_at: Timestamp::new(1_785_000_000_000, 0),
             certifiers,
+            signing_set: (1..=7).collect(),
+            signing_alternates: (8..=13).collect(),
         };
         config.validate().expect("rostered config is valid");
         config
+    }
+
+    /// A schema-valid round-one package payload (the portal now decodes these to a
+    /// concrete FROST type, so placeholder bytes no longer pass).
+    fn valid_round1_package(config: &GenesisCeremonyConfig) -> Vec<u8> {
+        exo_root::dkg_round1(config, 1, &mut rand::rngs::OsRng)
+            .expect("round one")
+            .round1_package
     }
 
     fn round1_broadcast(
@@ -810,6 +833,8 @@ mod tests {
             constitution_hash: hex::encode([7u8; 32]),
             created_physical_ms: 42,
             roster: roster_path,
+            signing_set: (1..=7).collect(),
+            signing_alternates: (8..=13).collect(),
             out: config_path.clone(),
         })
         .expect("ceremony init");
@@ -943,7 +968,7 @@ mod tests {
                 sender_did: signer.did.clone(),
                 recipient_did: None,
                 sequence: 1,
-                payload_bytes: b"round1 package bytes".to_vec(),
+                payload_bytes: valid_round1_package(&config),
             },
         )
         .expect("write draft");
@@ -1238,6 +1263,11 @@ mod tests {
                 output: Some(out_path.clone()),
             })
             .expect("sign-share");
+            // Single-use: the nonces file is consumed (deleted) on success.
+            assert!(
+                !nonces_paths[id].exists(),
+                "sign-share must consume (delete) the single-use nonces file"
+            );
             let share: exo_root::RootSignatureShareOutput =
                 read_json(&out_path).expect("read share");
             shares_hex.insert(*id, hex::encode(share.signature_share.as_slice()));
@@ -1328,7 +1358,7 @@ mod tests {
     #[tokio::test]
     async fn submit_envelope_posts_signed_envelope_to_running_portal() {
         let config = rostered_config();
-        let envelope = round1_broadcast(&config, 0, 1, b"round1 package bytes".to_vec());
+        let envelope = round1_broadcast(&config, 0, 1, valid_round1_package(&config));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

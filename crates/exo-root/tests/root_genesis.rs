@@ -7,9 +7,10 @@ use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp, crypto:
 use exo_root::{
     CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
     GenesisCeremonyConfig, PairwiseEncryptedPayload, PortalStore, RootIssuerDelegation,
-    SealedShare, assemble_root_bundle, decrypt_pairwise_payload, dkg_finalize_participant,
-    dkg_round1, dkg_round2, encrypt_pairwise_payload, run_complete_dkg, seal_share, threshold_sign,
-    unseal_share, verify_root_bundle, verify_root_signature,
+    SealedShare, assemble_root_bundle, build_signing_package, decrypt_pairwise_payload,
+    dkg_finalize_participant, dkg_round1, dkg_round2, encrypt_pairwise_payload, run_complete_dkg,
+    seal_share, sign_commit, sign_share, threshold_sign, unseal_share, verify_root_bundle,
+    verify_root_signature,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -93,6 +94,8 @@ fn config() -> (
             max_signers: 13,
             created_at: Timestamp::new(1_785_000_000_000, 0),
             certifiers,
+            signing_set: (1..=7).collect(),
+            signing_alternates: (8..=13).collect(),
         },
         signing_secrets,
         transport_secrets,
@@ -1048,56 +1051,152 @@ fn portal_rejects_wrong_ceremony_bad_recipient_self_target_and_bad_broadcasts() 
 }
 
 #[test]
-fn portal_accepts_all_valid_broadcast_phase_kinds() {
+fn portal_schema_validates_accepted_kinds_and_disables_unratified_ones() {
     let (config, signing_secrets, _) = config();
     let sender = config.certifiers[0].did.clone();
-    let signing_secret = signing_secrets.get(&sender).expect("secret");
-    let mut store = PortalStore::new(config.clone());
+    let signing_secret = signing_secrets.get(&sender).expect("secret").clone();
+    let mut rng = StdRng::seed_from_u64(2026);
+    let dkg = run_complete_dkg(&config, &mut rng).expect("dkg");
 
-    for (sequence, phase, kind) in [
-        (
-            30,
-            CeremonyPhase::Round1,
-            CeremonyPayloadKind::Round1Package,
-        ),
-        (
-            31,
-            CeremonyPhase::Round1SetAttestation,
-            CeremonyPayloadKind::Round1SetAttestation,
-        ),
-        (
-            32,
-            CeremonyPhase::Finalize,
-            CeremonyPayloadKind::FinalKeyConfirmation,
-        ),
-        (
-            33,
-            CeremonyPhase::RootSigning,
-            CeremonyPayloadKind::RootSigningCommitment,
-        ),
-        (
-            34,
-            CeremonyPhase::RootSigning,
-            CeremonyPayloadKind::RootSignatureShare,
-        ),
-    ] {
+    // Mint real, schema-valid payloads for the three accepted broadcast kinds.
+    let round1_package = dkg_round1(&config, 1, &mut rng)
+        .expect("round one")
+        .round1_package;
+    let mut commitments = std::collections::BTreeMap::new();
+    let mut nonces = std::collections::BTreeMap::new();
+    for identifier in 1..=7u16 {
+        let (commitment, signer_nonces) =
+            sign_commit(&config, &dkg.key_packages[&identifier], &mut rng).expect("commit");
+        commitments.insert(identifier, commitment.commitments.clone());
+        nonces.insert(identifier, signer_nonces);
+    }
+    let commitment_payload = commitments[&1].clone();
+    let package = build_signing_package(&config, commitments, b"artifact").expect("package");
+    let share_payload = sign_share(
+        &config,
+        &dkg.key_packages[&1],
+        &nonces[&1],
+        &package.signing_package,
+    )
+    .expect("share")
+    .signature_share;
+
+    let submit = |store: &mut PortalStore,
+                  sequence: u64,
+                  phase: CeremonyPhase,
+                  kind: CeremonyPayloadKind,
+                  recipient: Option<Did>,
+                  payload: Vec<u8>| {
         let envelope = CeremonyEnvelope::sign(
             envelope_draft(
                 &config.ceremony_id,
                 phase,
                 kind,
                 sender.clone(),
-                None,
+                recipient,
                 sequence,
-                b"payload".to_vec(),
+                payload,
             ),
-            signing_secret,
+            &signing_secret,
         )
         .expect("envelope");
-        store.submit(envelope).expect("accepted broadcast");
-    }
+        store.submit(envelope)
+    };
 
-    assert_eq!(store.envelope_count(), 5);
+    let mut store = PortalStore::new(config.clone());
+
+    // Schema-valid broadcasts are accepted.
+    submit(
+        &mut store,
+        30,
+        CeremonyPhase::Round1,
+        CeremonyPayloadKind::Round1Package,
+        None,
+        round1_package.clone(),
+    )
+    .expect("round-one package accepted");
+    submit(
+        &mut store,
+        31,
+        CeremonyPhase::RootSigning,
+        CeremonyPayloadKind::RootSigningCommitment,
+        None,
+        commitment_payload,
+    )
+    .expect("signing commitment accepted");
+    submit(
+        &mut store,
+        32,
+        CeremonyPhase::RootSigning,
+        CeremonyPayloadKind::RootSignatureShare,
+        None,
+        share_payload.clone(),
+    )
+    .expect("signature share accepted");
+    assert_eq!(store.envelope_count(), 3);
+
+    // Disabled kinds (no ratified, portal-validated schema) are rejected.
+    assert!(
+        submit(
+            &mut store,
+            33,
+            CeremonyPhase::Round1SetAttestation,
+            CeremonyPayloadKind::Round1SetAttestation,
+            None,
+            vec![1, 2, 3],
+        )
+        .is_err()
+    );
+    assert!(
+        submit(
+            &mut store,
+            34,
+            CeremonyPhase::Finalize,
+            CeremonyPayloadKind::FinalKeyConfirmation,
+            None,
+            vec![1, 2, 3],
+        )
+        .is_err()
+    );
+
+    // A structurally invalid round-one package fails schema validation.
+    assert!(
+        submit(
+            &mut store,
+            35,
+            CeremonyPhase::Round1,
+            CeremonyPayloadKind::Round1Package,
+            None,
+            b"not a round-one package".to_vec(),
+        )
+        .is_err()
+    );
+
+    // A broadcast kind may not carry a recipient.
+    assert!(
+        submit(
+            &mut store,
+            36,
+            CeremonyPhase::Round1,
+            CeremonyPayloadKind::Round1Package,
+            Some(config.certifiers[1].did.clone()),
+            round1_package,
+        )
+        .is_err()
+    );
+
+    // A second signature share from the same signer is rejected (single-use).
+    assert!(
+        submit(
+            &mut store,
+            37,
+            CeremonyPhase::RootSigning,
+            CeremonyPayloadKind::RootSignatureShare,
+            None,
+            share_payload,
+        )
+        .is_err()
+    );
 }
 
 #[test]

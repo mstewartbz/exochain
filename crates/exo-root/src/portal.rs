@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use exo_core::{Did, Hash256, SecretKey, Signature, crypto, hash::hash_structured};
+use frost_ristretto255 as frost;
 use serde::{Deserialize, Serialize};
 
 use crate::{GenesisCeremonyConfig, PairwiseEncryptedPayload, Result, RootError};
@@ -100,6 +101,9 @@ pub struct PortalStore {
     config: GenesisCeremonyConfig,
     envelopes: BTreeMap<PortalEnvelopeKey, CeremonyEnvelope>,
     seen_sequences: BTreeSet<(Did, u64)>,
+    /// Signers who have already submitted a root signature share this session.
+    /// Enforces one share per signer (single-use of the signer's nonces).
+    signature_share_senders: BTreeSet<Did>,
 }
 
 #[derive(Serialize)]
@@ -180,6 +184,7 @@ impl PortalStore {
             config,
             envelopes: BTreeMap::new(),
             seen_sequences: BTreeSet::new(),
+            signature_share_senders: BTreeSet::new(),
         }
     }
 
@@ -221,6 +226,15 @@ impl PortalStore {
                 reason: "sender sequence replay".to_owned(),
             });
         }
+        // One root signature share per signer per session: a second share from the
+        // same signer is rejected, enforcing single-use of that signer's nonces.
+        if envelope.payload_kind == CeremonyPayloadKind::RootSignatureShare
+            && self.signature_share_senders.contains(&envelope.sender_did)
+        {
+            return Err(RootError::PortalRejected {
+                reason: "signer has already submitted a signature share this session".to_owned(),
+            });
+        }
         let key = PortalEnvelopeKey {
             sender_did: envelope.sender_did.clone(),
             phase: envelope.phase,
@@ -230,6 +244,10 @@ impl PortalStore {
         };
         let envelope_id = hash_structured(&key_parts(&key)).map_err(canonical_encoding_error)?;
         self.seen_sequences.insert(sequence_key);
+        if envelope.payload_kind == CeremonyPayloadKind::RootSignatureShare {
+            self.signature_share_senders
+                .insert(envelope.sender_did.clone());
+        }
         self.envelopes.insert(key, envelope);
         Ok(envelope_id)
     }
@@ -288,18 +306,32 @@ impl PortalStore {
     }
 
     fn validate_phase_policy(&self, envelope: &CeremonyEnvelope) -> Result<()> {
+        // Every accepted payload kind is schema-validated by decoding it to its
+        // concrete type before storage — the portal never stores opaque bytes for
+        // a security-sensitive kind. Kinds without a ratified, decodable schema
+        // (round-one set attestation, final key confirmation) are disabled.
+        let bytes = envelope.payload_bytes.as_slice();
         match (envelope.phase, envelope.payload_kind) {
-            (CeremonyPhase::Round1, CeremonyPayloadKind::Round1Package)
-            | (CeremonyPhase::Round1SetAttestation, CeremonyPayloadKind::Round1SetAttestation)
-            | (CeremonyPhase::Finalize, CeremonyPayloadKind::FinalKeyConfirmation)
-            | (CeremonyPhase::RootSigning, CeremonyPayloadKind::RootSigningCommitment)
-            | (CeremonyPhase::RootSigning, CeremonyPayloadKind::RootSignatureShare) => {
-                if envelope.recipient_did.is_some() {
-                    return Err(RootError::PortalRejected {
-                        reason: "broadcast payload must not set recipient".to_owned(),
-                    });
-                }
-                Ok(())
+            (CeremonyPhase::Round1, CeremonyPayloadKind::Round1Package) => {
+                reject_recipient(envelope)?;
+                reject_unless_decodable::<frost::keys::dkg::round1::Package>(
+                    bytes,
+                    "round-one package",
+                )
+            }
+            (CeremonyPhase::RootSigning, CeremonyPayloadKind::RootSigningCommitment) => {
+                reject_recipient(envelope)?;
+                reject_unless_decodable::<frost::round1::SigningCommitments>(
+                    bytes,
+                    "root signing commitment",
+                )
+            }
+            (CeremonyPhase::RootSigning, CeremonyPayloadKind::RootSignatureShare) => {
+                reject_recipient(envelope)?;
+                reject_unless_decodable::<frost::round2::SignatureShare>(
+                    bytes,
+                    "root signature share",
+                )
             }
             (CeremonyPhase::Round2, CeremonyPayloadKind::Round2EncryptedPackage) => {
                 if envelope.recipient_did.is_none() {
@@ -307,8 +339,21 @@ impl PortalStore {
                         reason: "round-two encrypted package requires recipient".to_owned(),
                     });
                 }
-                validate_encrypted_round2_payload(envelope.payload_bytes.as_slice())?;
-                Ok(())
+                validate_encrypted_round2_payload(bytes)
+            }
+            (CeremonyPhase::Round1SetAttestation, CeremonyPayloadKind::Round1SetAttestation) => {
+                Err(RootError::PortalRejected {
+                    reason: "round-one set attestation is disabled pending a ratified, \
+                             portal-validated payload schema"
+                        .to_owned(),
+                })
+            }
+            (CeremonyPhase::Finalize, CeremonyPayloadKind::FinalKeyConfirmation) => {
+                Err(RootError::PortalRejected {
+                    reason: "final key confirmation is disabled pending a ratified, \
+                             portal-validated payload schema"
+                        .to_owned(),
+                })
             }
             (_, CeremonyPayloadKind::Round2PlaintextPackage) => Err(RootError::PortalRejected {
                 reason: "round-two raw package is rejected".to_owned(),
@@ -318,6 +363,26 @@ impl PortalStore {
             }),
         }
     }
+}
+
+/// Reject a broadcast payload that carries a recipient.
+fn reject_recipient(envelope: &CeremonyEnvelope) -> Result<()> {
+    if envelope.recipient_did.is_some() {
+        return Err(RootError::PortalRejected {
+            reason: "broadcast payload must not set recipient".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Schema-validate a payload by decoding it to its concrete type `T`; a decode
+/// failure is a portal rejection (bad request), never silent storage.
+fn reject_unless_decodable<T: serde::de::DeserializeOwned>(bytes: &[u8], kind: &str) -> Result<()> {
+    ciborium::from_reader::<T, _>(bytes)
+        .map(|_decoded| ())
+        .map_err(|error| RootError::PortalRejected {
+            reason: format!("{kind} payload failed schema validation: {error}"),
+        })
 }
 
 fn validate_encrypted_round2_payload(payload_bytes: &[u8]) -> Result<()> {
@@ -356,9 +421,17 @@ fn key_parts(key: &PortalEnvelopeKey) -> PortalEnvelopeKeyParts<'_> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use exo_core::{Timestamp, crypto::KeyPair};
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
     use crate::{CertifierContact, PairwiseEncryptedPayload};
+
+    fn round1_package_bytes(config: &GenesisCeremonyConfig, frost_identifier: u16) -> Vec<u8> {
+        let mut rng = StdRng::seed_from_u64(u64::from(frost_identifier));
+        crate::dkg_round1(config, frost_identifier, &mut rng)
+            .expect("round one")
+            .round1_package
+    }
 
     fn certifier(index: u16) -> (CertifierContact, exo_core::SecretKey) {
         let seed = [u8::try_from(index).expect("index fits"); 32];
@@ -394,6 +467,8 @@ mod tests {
                 max_signers: crate::ROOT_GENESIS_SIGNERS,
                 created_at: Timestamp::new(1, 0),
                 certifiers,
+                signing_set: (1..=7).collect(),
+                signing_alternates: (8..=13).collect(),
             },
             secrets,
         )
@@ -431,7 +506,7 @@ mod tests {
                         sender_did: config.certifiers[0].did.clone(),
                         recipient_did: None,
                         sequence: 0,
-                        payload_bytes: b"round1".to_vec(),
+                        payload_bytes: round1_package_bytes(&config, 1),
                     },
                     &secrets[0],
                 )

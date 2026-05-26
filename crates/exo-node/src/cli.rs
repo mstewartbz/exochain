@@ -354,6 +354,17 @@ pub struct GenesisCeremonyInitArgs {
     #[arg(long)]
     pub roster: PathBuf,
 
+    /// Predeclared signing set: exactly `threshold` (7) rostered FROST identifiers
+    /// that will sign root artifacts, comma-separated (e.g. `1,2,3,4,5,6,7`).
+    #[arg(long, value_delimiter = ',')]
+    pub signing_set: Vec<u16>,
+
+    /// Ordered alternate signers (rostered, disjoint from `--signing-set`),
+    /// comma-separated, used only to replace a primary unavailable before
+    /// commitments, taken in order (e.g. `8,9,10,11,12,13`).
+    #[arg(long, value_delimiter = ',')]
+    pub signing_alternates: Vec<u16>,
+
     /// Ceremony configuration output path.
     #[arg(long)]
     pub out: PathBuf,
