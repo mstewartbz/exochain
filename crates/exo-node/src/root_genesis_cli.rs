@@ -6,10 +6,10 @@ use exo_core::{Did, Hash256, SecretKey, Timestamp, crypto::KeyPair};
 use exo_root::{
     CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
     GenesisCeremonyConfig, PairwiseEncryptedPayload, RootIssuerDelegation, RootKeyPackage,
-    RootPublicKeyPackage, RootTrustBundle, aggregate_signature, assemble_root_bundle,
-    build_signing_package, decrypt_pairwise_payload, dkg_finalize_participant, dkg_round1,
-    dkg_round2, encrypt_pairwise_payload, seal_share, sign_commit, sign_share, threshold_sign,
-    unseal_share, verify_root_bundle,
+    RootPublicKeyPackage, RootSigningNonces, RootTrustBundle, aggregate_signature,
+    assemble_root_bundle, build_signing_package, decrypt_pairwise_payload,
+    dkg_finalize_participant, dkg_round1, dkg_round2, encrypt_pairwise_payload, seal_share,
+    sign_commit, sign_share, threshold_sign, unseal_share, verify_root_bundle,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -19,22 +19,14 @@ use crate::{
     cli::{
         GenesisCeremonyCommand, GenesisCeremonyInitArgs, GenesisCertifierCommand,
         GenesisCertifierInitArgs, GenesisCommand, GenesisIoArgs, GenesisPortalArgs,
-        GenesisPullEnvelopesArgs, GenesisSignEnvelopeArgs, GenesisSubmitEnvelopeArgs,
+        GenesisPullEnvelopesArgs, GenesisSignCommitArgs, GenesisSignEnvelopeArgs,
+        GenesisSignShareArgs, GenesisSubmitEnvelopeArgs,
     },
     root_genesis::{RootGenesisApiState, root_genesis_router},
 };
 
 /// Portal HTTP path that accepts signed ceremony envelopes.
 const PORTAL_ENVELOPES_PATH: &str = "/api/v1/root-genesis/portal/envelopes";
-
-/// Domain separator for the PROVISIONAL round-one set attestation statement.
-///
-/// The canonical shape of a `Round1SetAttestation` payload is not defined or
-/// validated anywhere in `exo-root` (the portal treats the bytes as opaque).
-/// This encoding is a deterministic best-effort proposal and is NOT ratified;
-/// the `V0_UNRATIFIED` suffix must change once the exo-root maintainer confirms
-/// the intended shape. See `run_build_round1_attestation`.
-const ROUND1_SET_ATTESTATION_DOMAIN: &str = "EXOCHAIN_ROOT_ROUND1_SET_ATTESTATION_V0_UNRATIFIED";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrivateCertifierMaterial {
@@ -128,7 +120,6 @@ struct EncryptPairwiseCommandInput {
     sender_transport_secret_hex: String,
     recipient_transport_pubkey_hex: String,
     associated_data_hex: String,
-    nonce_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,11 +139,6 @@ struct EmitArtifactBytesCommandInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct BuildRound1AttestationCommandInput {
-    round1_envelopes: Vec<CeremonyEnvelope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ArtifactBytesOutput {
     artifact_hex: String,
 }
@@ -160,34 +146,6 @@ struct ArtifactBytesOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PlaintextOutput {
     plaintext: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Round1AttestationOutput {
-    /// Bytes to place in the `payload_bytes` field of a `Round1SetAttestation`
-    /// envelope (then sign with `sign-envelope`). PROVISIONAL encoding.
-    payload_hex: String,
-    /// blake3 of `payload_hex` — a convenience digest of the attested set.
-    attestation_hash_hex: String,
-    /// Number of round-one packages bound by this attestation.
-    entry_count: usize,
-}
-
-/// One `(sender, round1-package-hash)` binding inside the provisional
-/// round-one set attestation statement, canonicalised in sorted order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Round1SetAttestationEntry {
-    sender_did: Did,
-    round1_package_hash: Hash256,
-}
-
-/// Provisional canonical statement bound by a `Round1SetAttestation` envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct Round1SetAttestationStatement<'a> {
-    domain: &'static str,
-    ceremony_id: &'a str,
-    entry_count: usize,
-    entries: &'a [Round1SetAttestationEntry],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +180,6 @@ struct BuildSigningPackageCommandInput {
 struct SignShareCommandInput {
     config: GenesisCeremonyConfig,
     key_package: RootKeyPackage,
-    nonces_hex: String,
     signing_package_hex: String,
 }
 
@@ -255,7 +212,6 @@ pub async fn run_genesis_command(command: GenesisCommand) -> anyhow::Result<()> 
         GenesisCommand::EncryptPairwise(args) => run_encrypt_pairwise(args),
         GenesisCommand::DecryptPairwise(args) => run_decrypt_pairwise(args),
         GenesisCommand::EmitArtifactBytes(args) => run_emit_artifact_bytes(args),
-        GenesisCommand::BuildRound1Attestation(args) => run_build_round1_attestation(args),
         GenesisCommand::SubmitEnvelope(args) => run_submit_envelope(args).await,
         GenesisCommand::PullEnvelopes(args) => run_pull_envelopes(args).await,
         GenesisCommand::EncodeEncryptedPayload(args) => run_encode_encrypted_payload(args),
@@ -430,7 +386,17 @@ fn run_sign_envelope(args: GenesisSignEnvelopeArgs) -> anyhow::Result<()> {
         output: args.output.clone(),
     };
     let input: SignEnvelopeCommandInput = read_json(&required_input(&io)?)?;
-    let signing_secret = SecretKey::from_bytes(decode_fixed_32(&args.signing_key_hex)?);
+    // The signing secret is read from the certifier's 0600 private-material file,
+    // never from argv — see GenesisSignEnvelopeArgs.
+    let private: PrivateCertifierMaterial = read_json(&args.private_input)?;
+    if private.did != input.sender_did {
+        anyhow::bail!(
+            "private material DID {} does not match envelope sender_did {}",
+            private.did,
+            input.sender_did
+        );
+    }
+    let signing_secret = SecretKey::from_bytes(decode_fixed_32(&private.signing_secret_hex)?);
     let draft = CeremonyEnvelopeDraft {
         ceremony_id: input.ceremony_id,
         phase: input.phase,
@@ -448,7 +414,13 @@ fn run_encrypt_pairwise(args: GenesisIoArgs) -> anyhow::Result<()> {
     let input: EncryptPairwiseCommandInput = read_json(&required_input(&args)?)?;
     let sender_secret = decode_fixed_32(&input.sender_transport_secret_hex)?;
     let recipient_public = decode_fixed_32(&input.recipient_transport_pubkey_hex)?;
-    let nonce = decode_fixed_24(&input.nonce_hex)?;
+    // The 24-byte XChaCha20-Poly1305 nonce is generated internally with the OS
+    // CSPRNG, never taken from caller input: a repeated nonce under the same
+    // derived key would break round-two confidentiality, so the binary — not an
+    // operator script — owns nonce uniqueness. The nonce is returned inside the
+    // encrypted payload for the recipient to use during decryption.
+    let mut nonce = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
     let associated_data = decode_hex(&input.associated_data_hex)?;
     let encrypted = encrypt_pairwise_payload(
         &sender_secret,
@@ -486,71 +458,6 @@ fn run_emit_artifact_bytes(args: GenesisIoArgs) -> anyhow::Result<()> {
         &args,
         &ArtifactBytesOutput {
             artifact_hex: hex::encode(artifact),
-        },
-    )
-}
-
-/// Build a PROVISIONAL round-one set attestation payload.
-///
-/// `exo-root` defines no canonical shape for `Round1SetAttestation` payloads —
-/// the portal accepts the bytes opaquely (see `portal.rs::validate_phase_policy`,
-/// which only checks phase/kind/recipient, never content). This command emits a
-/// deterministic statement binding the sorted set of
-/// `(sender_did, round1_package_hash)` pairs taken from the round-one
-/// broadcast envelopes, domain-separated by [`ROUND1_SET_ATTESTATION_DOMAIN`]
-/// and CBOR-encoded with the same canonical encoder the library uses for its
-/// own signing payloads.
-///
-/// This encoding is UNRATIFIED. Do not rely on it for the production ceremony
-/// until the exo-root maintainer confirms the intended shape; if they choose a
-/// different one (for example a bare digest, or keying on `frost_identifier`
-/// instead of `sender_did`), only this function and the domain tag change.
-fn run_build_round1_attestation(args: GenesisIoArgs) -> anyhow::Result<()> {
-    let input: BuildRound1AttestationCommandInput = read_json(&required_input(&args)?)?;
-    if input.round1_envelopes.is_empty() {
-        anyhow::bail!("round1 set must contain at least one envelope");
-    }
-    let ceremony_id = input.round1_envelopes[0].ceremony_id.clone();
-    let mut entries = Vec::with_capacity(input.round1_envelopes.len());
-    for envelope in &input.round1_envelopes {
-        if envelope.ceremony_id != ceremony_id {
-            anyhow::bail!("round1 set mixes ceremony identifiers");
-        }
-        if envelope.phase != CeremonyPhase::Round1
-            || envelope.payload_kind != CeremonyPayloadKind::Round1Package
-        {
-            anyhow::bail!("round1 set contains a non-Round1Package envelope");
-        }
-        entries.push(Round1SetAttestationEntry {
-            sender_did: envelope.sender_did.clone(),
-            round1_package_hash: envelope.payload_hash,
-        });
-    }
-    entries.sort_by(|left, right| left.sender_did.cmp(&right.sender_did));
-    for pair in entries.windows(2) {
-        if pair[0].sender_did == pair[1].sender_did {
-            anyhow::bail!(
-                "round1 set contains duplicate sender {}",
-                pair[0].sender_did
-            );
-        }
-    }
-    let statement = Round1SetAttestationStatement {
-        domain: ROUND1_SET_ATTESTATION_DOMAIN,
-        ceremony_id: &ceremony_id,
-        entry_count: entries.len(),
-        entries: entries.as_slice(),
-    };
-    let mut payload = Vec::new();
-    ciborium::into_writer(&statement, &mut payload)
-        .map_err(|error| anyhow::anyhow!("round1 attestation encoding failed: {error}"))?;
-    let attestation_hash = Hash256::digest(payload.as_slice());
-    write_output(
-        &args,
-        &Round1AttestationOutput {
-            payload_hex: hex::encode(payload.as_slice()),
-            attestation_hash_hex: hex::encode(attestation_hash.as_bytes()),
-            entry_count: entries.len(),
         },
     )
 }
@@ -621,12 +528,20 @@ fn run_decode_encrypted_payload(args: GenesisIoArgs) -> anyhow::Result<()> {
     write_output(&args, &encrypted)
 }
 
-fn run_sign_commit(args: GenesisIoArgs) -> anyhow::Result<()> {
-    let input: SignCommitCommandInput = read_json(&required_input(&args)?)?;
+fn run_sign_commit(args: GenesisSignCommitArgs) -> anyhow::Result<()> {
+    let io = GenesisIoArgs {
+        input: args.input.clone(),
+        output: None,
+    };
+    let input: SignCommitCommandInput = read_json(&required_input(&io)?)?;
     let mut rng = rand::rngs::OsRng;
-    let output = sign_commit(&input.config, &input.key_package, &mut rng)?;
-    // Contains secret signing nonces — never print to stdout.
-    write_secret_output(&args, &output)
+    let (commitment, nonces) = sign_commit(&input.config, &input.key_package, &mut rng)?;
+    // The public commitment goes to a file safe to transmit to the coordinator;
+    // the SECRET nonces go to a SEPARATE local-only file. Both writes are
+    // create-new + 0600 and refuse to overwrite an existing path.
+    write_json(&args.commitment_out, &commitment)?;
+    write_json(&args.nonces_out, &nonces)?;
+    Ok(())
 }
 
 fn run_build_signing_package(args: GenesisIoArgs) -> anyhow::Result<()> {
@@ -640,15 +555,21 @@ fn run_build_signing_package(args: GenesisIoArgs) -> anyhow::Result<()> {
     write_output(&args, &output)
 }
 
-fn run_sign_share(args: GenesisIoArgs) -> anyhow::Result<()> {
-    let input: SignShareCommandInput = read_json(&required_input(&args)?)?;
+fn run_sign_share(args: GenesisSignShareArgs) -> anyhow::Result<()> {
+    let io = GenesisIoArgs {
+        input: args.input.clone(),
+        output: args.output.clone(),
+    };
+    let input: SignShareCommandInput = read_json(&required_input(&io)?)?;
+    // The secret nonces are read from the signer's local-only file, never inline.
+    let nonces: RootSigningNonces = read_json(&args.nonces)?;
     let output = sign_share(
         &input.config,
         &input.key_package,
-        decode_hex(&input.nonces_hex)?.as_slice(),
+        &nonces,
         decode_hex(&input.signing_package_hex)?.as_slice(),
     )?;
-    write_output(&args, &output)
+    write_output(&io, &output)
 }
 
 fn run_aggregate_signature(args: GenesisIoArgs) -> anyhow::Result<()> {
@@ -1011,6 +932,7 @@ mod tests {
         let signer = config.certifiers[0].clone();
         let directory = tempdir().expect("temporary directory");
         let input_path = directory.path().join("draft.json");
+        let private_path = directory.path().join("certifier-01.private.json");
         let output_path = directory.path().join("envelope.json");
         write_json(
             &input_path,
@@ -1025,11 +947,22 @@ mod tests {
             },
         )
         .expect("write draft");
+        // The signing secret lives only in the 0600 private-material file.
+        write_json(
+            &private_path,
+            &PrivateCertifierMaterial {
+                did: signer.did.clone(),
+                frost_identifier: signer.frost_identifier,
+                signing_secret_hex: hex::encode([1u8; 32]),
+                transport_secret_hex: hex::encode([65u8; 32]),
+            },
+        )
+        .expect("write private material");
 
         run_sign_envelope(GenesisSignEnvelopeArgs {
             input: Some(input_path),
             output: Some(output_path.clone()),
-            signing_key_hex: hex::encode([1u8; 32]),
+            private_input: private_path,
         })
         .expect("sign envelope");
 
@@ -1050,7 +983,6 @@ mod tests {
         let recipient_public =
             *X25519PublicKey::from(&StaticSecret::from(recipient_secret)).as_bytes();
         let associated_data = b"exo-root-round2";
-        let nonce = [7u8; 24];
         let plaintext = b"round2 secret package".to_vec();
 
         let encrypt_in = directory.path().join("encrypt-in.json");
@@ -1062,14 +994,14 @@ mod tests {
                 sender_transport_secret_hex: hex::encode(sender_secret),
                 recipient_transport_pubkey_hex: hex::encode(recipient_public),
                 associated_data_hex: hex::encode(associated_data),
-                nonce_hex: hex::encode(nonce),
             },
         )
         .expect("write encrypt input");
         run_encrypt_pairwise(io_args(encrypt_in, encrypt_out.clone())).expect("encrypt pairwise");
+        // The nonce is generated by the command and carried in the payload for
+        // the recipient; the caller never supplies it.
         let encrypted: PairwiseEncryptedPayload =
             read_json(&encrypt_out).expect("read encrypted payload");
-        assert_eq!(encrypted.nonce, nonce);
 
         let decrypt_in = directory.path().join("decrypt-in.json");
         let decrypt_out = directory.path().join("decrypt-out.json");
@@ -1086,6 +1018,43 @@ mod tests {
         run_decrypt_pairwise(io_args(decrypt_in, decrypt_out.clone())).expect("decrypt pairwise");
         let opened: PlaintextOutput = read_json(&decrypt_out).expect("read plaintext");
         assert_eq!(opened.plaintext, plaintext);
+    }
+
+    #[test]
+    fn encrypt_pairwise_cannot_be_forced_to_reuse_a_nonce() {
+        // Identical plaintext + AAD + keys across two invocations must still
+        // produce different nonces, because the caller cannot supply one and the
+        // command draws it from the OS CSPRNG each time.
+        let directory = tempdir().expect("temporary directory");
+        let sender_secret = [5u8; 32];
+        let recipient_public = *X25519PublicKey::from(&StaticSecret::from([6u8; 32])).as_bytes();
+        let make_input = || EncryptPairwiseCommandInput {
+            plaintext: b"identical round2 plaintext".to_vec(),
+            sender_transport_secret_hex: hex::encode(sender_secret),
+            recipient_transport_pubkey_hex: hex::encode(recipient_public),
+            associated_data_hex: hex::encode(b"exo-root-round2"),
+        };
+
+        let first_in = directory.path().join("reuse-in-1.json");
+        let first_out = directory.path().join("reuse-out-1.json");
+        write_json(&first_in, &make_input()).expect("write first input");
+        run_encrypt_pairwise(io_args(first_in, first_out.clone())).expect("first encrypt");
+        let first: PairwiseEncryptedPayload = read_json(&first_out).expect("read first");
+
+        let second_in = directory.path().join("reuse-in-2.json");
+        let second_out = directory.path().join("reuse-out-2.json");
+        write_json(&second_in, &make_input()).expect("write second input");
+        run_encrypt_pairwise(io_args(second_in, second_out.clone())).expect("second encrypt");
+        let second: PairwiseEncryptedPayload = read_json(&second_out).expect("read second");
+
+        assert_ne!(
+            first.nonce, second.nonce,
+            "internally generated nonces must differ across invocations"
+        );
+        assert_ne!(
+            first.ciphertext, second.ciphertext,
+            "distinct nonces must yield distinct ciphertext"
+        );
     }
 
     #[test]
@@ -1167,73 +1136,6 @@ mod tests {
     }
 
     #[test]
-    fn build_round1_attestation_is_order_independent_and_portal_submittable() {
-        let config = rostered_config();
-        let envelopes = vec![
-            round1_broadcast(&config, 0, 1, b"round1-a".to_vec()),
-            round1_broadcast(&config, 1, 1, b"round1-b".to_vec()),
-            round1_broadcast(&config, 2, 1, b"round1-c".to_vec()),
-        ];
-
-        let directory = tempdir().expect("temporary directory");
-        let forward_in = directory.path().join("attest-forward-in.json");
-        let forward_out = directory.path().join("attest-forward-out.json");
-        write_json(
-            &forward_in,
-            &BuildRound1AttestationCommandInput {
-                round1_envelopes: envelopes.clone(),
-            },
-        )
-        .expect("write forward input");
-        run_build_round1_attestation(io_args(forward_in, forward_out.clone()))
-            .expect("build attestation (forward)");
-
-        let mut reversed = envelopes;
-        reversed.reverse();
-        let reversed_in = directory.path().join("attest-reversed-in.json");
-        let reversed_out = directory.path().join("attest-reversed-out.json");
-        write_json(
-            &reversed_in,
-            &BuildRound1AttestationCommandInput {
-                round1_envelopes: reversed,
-            },
-        )
-        .expect("write reversed input");
-        run_build_round1_attestation(io_args(reversed_in, reversed_out.clone()))
-            .expect("build attestation (reversed)");
-
-        let forward: Round1AttestationOutput =
-            read_json(&forward_out).expect("read forward output");
-        let reversed: Round1AttestationOutput =
-            read_json(&reversed_out).expect("read reversed output");
-        assert_eq!(
-            forward, reversed,
-            "attestation must be canonical regardless of input order"
-        );
-        assert_eq!(forward.entry_count, 3);
-
-        let payload_bytes = hex::decode(forward.payload_hex.as_str()).expect("hex payload");
-        let attestation_secret = SecretKey::from_bytes([1u8; 32]);
-        let attestation = CeremonyEnvelope::sign(
-            CeremonyEnvelopeDraft {
-                ceremony_id: config.ceremony_id.clone(),
-                phase: CeremonyPhase::Round1SetAttestation,
-                payload_kind: CeremonyPayloadKind::Round1SetAttestation,
-                sender_did: config.certifiers[0].did.clone(),
-                recipient_did: None,
-                sequence: 100,
-                payload_bytes,
-            },
-            &attestation_secret,
-        )
-        .expect("sign attestation envelope");
-        let mut store = PortalStore::new(config);
-        store
-            .submit(attestation)
-            .expect("portal accepts the attestation envelope");
-    }
-
-    #[test]
     fn distributed_signing_handlers_produce_a_verifiable_signature() {
         let config = rostered_config();
         let dkg = exo_root::run_complete_dkg(&config, &mut rand::rngs::OsRng).expect("dkg");
@@ -1243,10 +1145,11 @@ mod tests {
         let signers: Vec<u16> = (1..=7).collect();
 
         let mut commitments_hex = BTreeMap::new();
-        let mut nonces_hex = BTreeMap::new();
+        let mut nonces_paths: BTreeMap<u16, PathBuf> = BTreeMap::new();
         for id in &signers {
             let in_path = directory.path().join(format!("commit-in-{id}.json"));
-            let out_path = directory.path().join(format!("commit-out-{id}.json"));
+            let commitment_out = directory.path().join(format!("commitment-{id}.json"));
+            let nonces_out = directory.path().join(format!("nonces-{id}.json"));
             write_json(
                 &in_path,
                 &SignCommitCommandInput {
@@ -1255,11 +1158,18 @@ mod tests {
                 },
             )
             .expect("write commit input");
-            run_sign_commit(io_args(in_path, out_path.clone())).expect("sign-commit");
+            run_sign_commit(GenesisSignCommitArgs {
+                input: Some(in_path),
+                commitment_out: commitment_out.clone(),
+                nonces_out: nonces_out.clone(),
+            })
+            .expect("sign-commit");
             let commit: exo_root::RootSigningCommitment =
-                read_json(&out_path).expect("read commitment");
-            commitments_hex.insert(*id, hex::encode(&commit.commitments));
-            nonces_hex.insert(*id, hex::encode(&commit.nonces));
+                read_json(&commitment_out).expect("read commitment");
+            commitments_hex.insert(*id, hex::encode(commit.commitments.as_slice()));
+            // The secret nonces stay in their own local-only file, referenced by
+            // path for round two — they never travel with the commitment.
+            nonces_paths.insert(*id, nonces_out);
         }
 
         let pkg_in = directory.path().join("pkg-in.json");
@@ -1286,15 +1196,19 @@ mod tests {
                 &SignShareCommandInput {
                     config: config.clone(),
                     key_package: dkg.key_packages[id].clone(),
-                    nonces_hex: nonces_hex[id].clone(),
                     signing_package_hex: signing_package_hex.clone(),
                 },
             )
             .expect("write share input");
-            run_sign_share(io_args(in_path, out_path.clone())).expect("sign-share");
+            run_sign_share(GenesisSignShareArgs {
+                input: Some(in_path),
+                nonces: nonces_paths[id].clone(),
+                output: Some(out_path.clone()),
+            })
+            .expect("sign-share");
             let share: exo_root::RootSignatureShareOutput =
                 read_json(&out_path).expect("read share");
-            shares_hex.insert(*id, hex::encode(&share.signature_share));
+            shares_hex.insert(*id, hex::encode(share.signature_share.as_slice()));
         }
 
         let agg_in = directory.path().join("agg-in.json");
@@ -1319,6 +1233,88 @@ mod tests {
             &signature.signature,
         )
         .expect("distributed signature verifies against the root key");
+    }
+
+    #[test]
+    fn root_signing_commitment_json_has_no_secret_named_field() {
+        // The relay-safe RootSigningCommitment, round-tripped through JSON, must
+        // expose no field whose name suggests secret material.
+        let config = rostered_config();
+        let dkg = exo_root::run_complete_dkg(&config, &mut rand::rngs::OsRng).expect("dkg");
+        let (commitment, _nonces) =
+            exo_root::sign_commit(&config, &dkg.key_packages[&1], &mut rand::rngs::OsRng)
+                .expect("commit");
+        let json = serde_json::to_string(&commitment).expect("serialize commitment");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse commitment json");
+        let object = value
+            .as_object()
+            .expect("commitment serializes as a JSON object");
+        for key in object.keys() {
+            let lowered = key.to_lowercase();
+            assert!(
+                !(lowered.contains("nonce")
+                    || lowered.contains("secret")
+                    || lowered.contains("private")),
+                "relay-safe RootSigningCommitment must not expose field `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_commit_writes_public_commitment_and_secret_nonces_to_separate_files() {
+        let config = rostered_config();
+        let dkg = exo_root::run_complete_dkg(&config, &mut rand::rngs::OsRng).expect("dkg");
+        let directory = tempdir().expect("temporary directory");
+        let in_path = directory.path().join("commit-in.json");
+        let commitment_out = directory.path().join("commitment.json");
+        let nonces_out = directory.path().join("nonces.json");
+        write_json(
+            &in_path,
+            &SignCommitCommandInput {
+                config: config.clone(),
+                key_package: dkg.key_packages[&1].clone(),
+            },
+        )
+        .expect("write commit input");
+        run_sign_commit(GenesisSignCommitArgs {
+            input: Some(in_path),
+            commitment_out: commitment_out.clone(),
+            nonces_out: nonces_out.clone(),
+        })
+        .expect("sign-commit");
+
+        // The coordinator-facing commitment file carries no nonces field.
+        let commitment_value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&commitment_out).expect("read commitment"))
+                .expect("commitment json");
+        let commitment_object = commitment_value
+            .as_object()
+            .expect("commitment is a JSON object");
+        assert!(
+            !commitment_object.contains_key("nonces"),
+            "coordinator-facing commitment file must not contain a nonces field"
+        );
+        for key in commitment_object.keys() {
+            let lowered = key.to_lowercase();
+            assert!(
+                !(lowered.contains("nonce")
+                    || lowered.contains("secret")
+                    || lowered.contains("private")),
+                "commitment file must not expose field `{key}`"
+            );
+        }
+
+        // The secret nonces live only in the separate local-only file.
+        let nonces_value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&nonces_out).expect("read nonces"))
+                .expect("nonces json");
+        assert!(
+            nonces_value
+                .as_object()
+                .expect("nonces is a JSON object")
+                .contains_key("nonces"),
+            "the secret nonces file must carry the nonces"
+        );
     }
 
     #[test]

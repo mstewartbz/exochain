@@ -147,14 +147,29 @@ fn signature_rejected(error: frost::Error) -> RootError {
 // and `RootSignatureShare` payload kinds.
 // ---------------------------------------------------------------------------
 
-/// One signer's round-one signing material. `commitments` is public and is
-/// broadcast; `nonces` is SECRET and must be retained locally until `sign_share`.
+/// One signer's round-one PUBLIC commitment. Relay-safe: carries no secret
+/// material and is the only round-one artifact broadcast to the coordinator.
+/// Kept deliberately separate from [`RootSigningNonces`] so the secret nonces
+/// can never be co-serialized with, or mistaken for, relay-safe data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootSigningCommitment {
     /// Owner's FROST identifier.
     pub frost_identifier: u16,
     /// Serialized public signing commitments (broadcast to the coordinator).
     pub commitments: Vec<u8>,
+}
+
+/// One signer's round-one SECRET signing nonces. **LOCAL-ONLY** — this artifact
+/// must never be broadcast, archived off the signer, copied to the coordinator,
+/// or submitted through the portal. In FROST, disclosure of these nonces
+/// together with the signer's later signature share can compromise the signer's
+/// secret key share. It derives `Serialize`/`Deserialize` only so a signer can
+/// persist it to a `0600` local file between `sign_commit` and `sign_share`; the
+/// distinct type name keeps it from being confused with relay-safe data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootSigningNonces {
+    /// Owner's FROST identifier.
+    pub frost_identifier: u16,
     /// Serialized secret signing nonces (retained by the signer; never shared).
     pub nonces: Vec<u8>,
 }
@@ -188,13 +203,16 @@ fn ensure_rostered(config: &GenesisCeremonyConfig, identifier: u16, role: &str) 
     Ok(())
 }
 
-/// Distributed signing — round one. Produce one signer's public commitments and
-/// secret nonces. Run by each participating certifier against its own share.
+/// Distributed signing — round one. Produce one signer's PUBLIC commitment and
+/// SECRET nonces as two distinct artifacts. Run by each participating certifier
+/// against its own share. The caller MUST broadcast only the
+/// [`RootSigningCommitment`] and retain the [`RootSigningNonces`] locally (never
+/// share, archive off-host, or submit it) until [`sign_share`].
 pub fn sign_commit<R>(
     config: &GenesisCeremonyConfig,
     key_package: &RootKeyPackage,
     rng: &mut R,
-) -> Result<RootSigningCommitment>
+) -> Result<(RootSigningCommitment, RootSigningNonces)>
 where
     R: frost::rand_core::RngCore + frost::rand_core::CryptoRng,
 {
@@ -202,11 +220,16 @@ where
     ensure_rostered(config, key_package.frost_identifier, "signer")?;
     let parsed: frost::keys::KeyPackage = deserialize_frost(key_package.key_package.as_slice())?;
     let (nonces, commitments) = frost::round1::commit(parsed.signing_share(), rng);
-    Ok(RootSigningCommitment {
-        frost_identifier: key_package.frost_identifier,
-        commitments: serialize_frost(&commitments)?,
-        nonces: serialize_frost(&nonces)?,
-    })
+    Ok((
+        RootSigningCommitment {
+            frost_identifier: key_package.frost_identifier,
+            commitments: serialize_frost(&commitments)?,
+        },
+        RootSigningNonces {
+            frost_identifier: key_package.frost_identifier,
+            nonces: serialize_frost(&nonces)?,
+        },
+    ))
 }
 
 /// Distributed signing — coordinator assembles the signing package from at
@@ -240,18 +263,26 @@ pub fn build_signing_package(
 }
 
 /// Distributed signing — round two. One signer produces its signature share
-/// from its key package, its retained nonces, and the coordinator's package.
+/// from its key package, its retained local-only [`RootSigningNonces`], and the
+/// coordinator's package.
 pub fn sign_share(
     config: &GenesisCeremonyConfig,
     key_package: &RootKeyPackage,
-    nonces: &[u8],
+    nonces: &RootSigningNonces,
     signing_package: &[u8],
 ) -> Result<RootSignatureShareOutput> {
     config.validate()?;
     ensure_rostered(config, key_package.frost_identifier, "signer")?;
+    if nonces.frost_identifier != key_package.frost_identifier {
+        let nonce_id = nonces.frost_identifier;
+        let key_id = key_package.frost_identifier;
+        return Err(RootError::Frost {
+            detail: format!("nonces id {nonce_id} mismatches key {key_id}"),
+        });
+    }
     let parsed_key: frost::keys::KeyPackage =
         deserialize_frost(key_package.key_package.as_slice())?;
-    let parsed_nonces: frost::round1::SigningNonces = deserialize_frost(nonces)?;
+    let parsed_nonces: frost::round1::SigningNonces = deserialize_frost(nonces.nonces.as_slice())?;
     let parsed_package: frost::SigningPackage = deserialize_frost(signing_package)?;
     let share =
         frost::round2::sign(&parsed_package, &parsed_nonces, &parsed_key).map_err(frost_error)?;
@@ -437,9 +468,9 @@ mod tests {
         let mut commitments = BTreeMap::new();
         let mut nonces = BTreeMap::new();
         for (id, kp) in &signers {
-            let commitment = sign_commit(&config, kp, &mut rng).expect("commit");
-            nonces.insert(*id, commitment.nonces.clone());
-            commitments.insert(*id, commitment.commitments.clone());
+            let (commitment, signer_nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            nonces.insert(*id, signer_nonces);
+            commitments.insert(*id, commitment.commitments);
         }
 
         // Coordinator builds the signing package from the commitments.
@@ -480,7 +511,7 @@ mod tests {
         let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
         let mut commitments = BTreeMap::new();
         for (id, kp) in dkg.key_packages.iter().take(3) {
-            let commitment = sign_commit(&config, kp, &mut rng).expect("commit");
+            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
             commitments.insert(*id, commitment.commitments);
         }
         let error = build_signing_package(&config, commitments, b"msg")
@@ -511,12 +542,8 @@ mod tests {
         // build_signing_package rejects a commitment from an unrostered signer.
         let mut commitments = BTreeMap::new();
         for (id, kp) in dkg.key_packages.iter().take(7) {
-            commitments.insert(
-                *id,
-                sign_commit(&config, kp, &mut rng)
-                    .expect("commit")
-                    .commitments,
-            );
+            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            commitments.insert(*id, commitment.commitments);
         }
         let mut unrostered = commitments.clone();
         let stolen = unrostered.remove(&1).expect("commitment one");
@@ -528,9 +555,10 @@ mod tests {
 
         // sign_share rejects an unrostered key package.
         let package = build_signing_package(&config, commitments, b"msg").expect("package");
-        let commit = sign_commit(&config, &dkg.key_packages[&1], &mut rng).expect("commit");
+        let (_commitment, commit_nonces) =
+            sign_commit(&config, &dkg.key_packages[&1], &mut rng).expect("commit");
         assert!(matches!(
-            sign_share(&config, &stranger, &commit.nonces, &package.signing_package)
+            sign_share(&config, &stranger, &commit_nonces, &package.signing_package)
                 .expect_err("unrostered share"),
             RootError::InvalidConfig { .. }
         ));

@@ -28,7 +28,7 @@ pub use seal::{
     seal_share, unseal_share,
 };
 pub use signing::{
-    RootSignature, RootSignatureShareOutput, RootSigningCommitment, RootSigningPackage,
-    aggregate_signature, build_signing_package, sign_commit, sign_share, threshold_sign,
-    verify_root_signature,
+    RootSignature, RootSignatureShareOutput, RootSigningCommitment, RootSigningNonces,
+    RootSigningPackage, aggregate_signature, build_signing_package, sign_commit, sign_share,
+    threshold_sign, verify_root_signature,
 };

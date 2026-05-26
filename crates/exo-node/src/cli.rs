@@ -259,11 +259,6 @@ pub enum GenesisCommand {
     #[command(name = "emit-artifact-bytes")]
     EmitArtifactBytes(GenesisIoArgs),
 
-    /// Build a PROVISIONAL round-one set attestation payload (shape pending
-    /// ratification — see command long help).
-    #[command(name = "build-round1-attestation")]
-    BuildRound1Attestation(GenesisIoArgs),
-
     /// Submit a signed envelope to a running root genesis portal.
     #[command(name = "submit-envelope")]
     SubmitEnvelope(GenesisSubmitEnvelopeArgs),
@@ -280,9 +275,10 @@ pub enum GenesisCommand {
     #[command(name = "decode-encrypted-payload")]
     DecodeEncryptedPayload(GenesisIoArgs),
 
-    /// Distributed signing — produce one signer's commitment + secret nonces.
+    /// Distributed signing — produce one signer's public commitment (and a
+    /// separate local-only secret-nonces file).
     #[command(name = "sign-commit")]
-    SignCommit(GenesisIoArgs),
+    SignCommit(GenesisSignCommitArgs),
 
     /// Distributed signing — coordinator builds the signing package from >=7 commitments.
     #[command(name = "build-signing-package")]
@@ -290,7 +286,7 @@ pub enum GenesisCommand {
 
     /// Distributed signing — produce one signer's signature share.
     #[command(name = "sign-share")]
-    SignShare(GenesisIoArgs),
+    SignShare(GenesisSignShareArgs),
 
     /// Distributed signing — coordinator aggregates >=7 shares into the root signature.
     #[command(name = "aggregate-signature")]
@@ -390,10 +386,12 @@ pub struct GenesisIoArgs {
 #[derive(Args)]
 /// Sign a ceremony portal envelope.
 ///
-/// The 32-byte Ed25519 signing secret is supplied as a hex flag rather than
-/// inside the envelope draft so the draft file never carries certifier key
-/// material. The secret is visible in the process table while the command
-/// runs; run certifier signing on an isolated, single-operator host.
+/// The signing secret is read from the certifier's `0600` private-material file
+/// (`--private-input`, the file written by `certifier init --private-out`), never
+/// passed on the command line. Passing key material through argv would leak it
+/// through process listings, shell history, terminal capture, and operator
+/// transcripts — unacceptable for a ceremony artifact that may later be
+/// challenged by a third-party auditor.
 pub struct GenesisSignEnvelopeArgs {
     /// Envelope draft JSON path (ceremony_id, phase, payload_kind, sender_did,
     /// recipient_did, sequence, payload_bytes).
@@ -404,9 +402,11 @@ pub struct GenesisSignEnvelopeArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// 32-byte Ed25519 signing secret as hex (from `certifier-NN.private.json`).
+    /// Path to the certifier's private-material JSON (`certifier-NN.private.json`,
+    /// `0600`). The 32-byte Ed25519 signing secret is read from this file's
+    /// `signing_secret_hex` field; it is never accepted as a CLI argument.
     #[arg(long)]
-    pub signing_key_hex: String,
+    pub private_input: PathBuf,
 }
 
 #[derive(Args)]
@@ -446,6 +446,47 @@ pub struct GenesisSubmitEnvelopeArgs {
     /// Signed envelope JSON path to POST.
     #[arg(long)]
     pub input: Option<PathBuf>,
+}
+
+#[derive(Args)]
+/// Distributed signing round one — emit a public commitment and a separate
+/// local-only secret-nonces file.
+///
+/// The commitment is relay-safe and is broadcast to the coordinator; the nonces
+/// file is SECRET, written `0600`, and must stay on the signer's host until
+/// `sign-share`. They are written to two distinct paths so the secret nonces are
+/// never co-located with the artifact that leaves the signer.
+pub struct GenesisSignCommitArgs {
+    /// Input JSON path (`config`, `key_package`).
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Output path for the PUBLIC `RootSigningCommitment` (safe to transmit to
+    /// the coordinator). Refused if it already exists.
+    #[arg(long)]
+    pub commitment_out: PathBuf,
+
+    /// Output path for the SECRET `RootSigningNonces` (`0600`, local-only, fed to
+    /// `sign-share`). Refused if it already exists.
+    #[arg(long)]
+    pub nonces_out: PathBuf,
+}
+
+#[derive(Args)]
+/// Distributed signing round two — produce one signer's signature share.
+pub struct GenesisSignShareArgs {
+    /// Input JSON path (`config`, `key_package`, `signing_package_hex`).
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Path to this signer's local-only `RootSigningNonces` file produced by
+    /// `sign-commit --nonces-out`.
+    #[arg(long)]
+    pub nonces: PathBuf,
+
+    /// Signature-share output path. Omit to print to stdout (the share is public).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -488,11 +529,64 @@ mod tests {
             "encrypt-pairwise",
             "decrypt-pairwise",
             "emit-artifact-bytes",
-            "build-round1-attestation",
             "submit-envelope",
+            "pull-envelopes",
+            "encode-encrypted-payload",
+            "decode-encrypted-payload",
+            "sign-commit",
+            "build-signing-package",
+            "sign-share",
+            "aggregate-signature",
         ] {
             assert!(help.contains(command), "missing genesis command {command}");
         }
+    }
+
+    #[test]
+    fn genesis_build_round1_attestation_command_is_absent_pending_ratification() {
+        // The unratified round-one set attestation command was removed; it must
+        // not reappear on the production ceremony CLI until a ratified payload
+        // shape lands and the portal validates it.
+        let help = long_help_for(&["genesis"]);
+        assert!(!help.contains("build-round1-attestation"));
+    }
+
+    #[test]
+    fn genesis_sign_envelope_takes_no_signing_secret_through_argv() {
+        use clap::Parser;
+
+        // The signing secret comes from a `0600` private-material file path.
+        let with_file = Cli::try_parse_from([
+            "exochain",
+            "genesis",
+            "sign-envelope",
+            "--input",
+            "draft.json",
+            "--private-input",
+            "certifier-01.private.json",
+            "--output",
+            "envelope.json",
+        ]);
+        assert!(
+            with_file.is_ok(),
+            "private-material file path must be accepted"
+        );
+
+        // A 32-byte hex secret cannot be passed as a CLI argument: the old flag
+        // is gone and any attempt to supply key material on argv is rejected.
+        let with_argv_secret = Cli::try_parse_from([
+            "exochain",
+            "genesis",
+            "sign-envelope",
+            "--input",
+            "draft.json",
+            "--signing-key-hex",
+            &"ab".repeat(32),
+        ]);
+        assert!(
+            with_argv_secret.is_err(),
+            "no CLI argument may carry 32-byte signing-secret material"
+        );
     }
 
     #[test]
