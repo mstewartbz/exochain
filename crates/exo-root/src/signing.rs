@@ -829,4 +829,40 @@ mod tests {
         .expect_err("a second, different message under the same nonces must be rejected");
         assert!(error.to_string().contains("bound to a different artifact"));
     }
+
+    #[test]
+    fn sign_share_rejects_a_signing_package_missing_a_declared_signer() {
+        // A RootSigningPackage whose signer_ids claim a signer whose commitment is
+        // absent from the embedded package is malformed; the rebuild fails closed.
+        let config = test_config();
+        let mut rng = StdRng::seed_from_u64(808);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let mut commitments = BTreeMap::new();
+        let mut signer_one_nonces = None;
+        for (id, kp) in dkg.key_packages.iter().take(7) {
+            let (commitment, nonces) =
+                sign_commit(&config, kp, b"artifact", &mut rng).expect("commit");
+            if *id == 1 {
+                signer_one_nonces = Some(nonces);
+            }
+            commitments.insert(*id, commitment.commitments);
+        }
+        let mut package =
+            build_signing_package(&config, commitments, b"artifact").expect("package");
+        // Tamper: claim signer 8 participated, though its commitment is not present.
+        package.signer_ids.push(8);
+        let error = sign_share(
+            &config,
+            &dkg.key_packages[&1],
+            &signer_one_nonces.expect("signer one nonces"),
+            &package,
+            b"artifact",
+        )
+        .expect_err("a signing package missing a declared signer must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("missing commitment for signer 8")
+        );
+    }
 }
