@@ -1065,18 +1065,31 @@ fn portal_schema_validates_accepted_kinds_and_disables_unratified_ones() {
     let mut commitments = std::collections::BTreeMap::new();
     let mut nonces = std::collections::BTreeMap::new();
     for identifier in 1..=7u16 {
-        let (commitment, signer_nonces) =
-            sign_commit(&config, &dkg.key_packages[&identifier], &mut rng).expect("commit");
+        let (commitment, signer_nonces) = sign_commit(
+            &config,
+            &dkg.key_packages[&identifier],
+            b"artifact",
+            &mut rng,
+        )
+        .expect("commit");
         commitments.insert(identifier, commitment.commitments.clone());
         nonces.insert(identifier, signer_nonces);
     }
     let commitment_payload = commitments[&1].clone();
+    // A serialized RootSigningNonces blob (Bob's blocker-1 probe): it must NOT be
+    // accepted as a public RootSigningCommitment payload.
+    let nonces_shaped_payload = {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&nonces[&1], &mut bytes).expect("encode nonces");
+        bytes
+    };
     let package = build_signing_package(&config, commitments, b"artifact").expect("package");
     let share_payload = sign_share(
         &config,
         &dkg.key_packages[&1],
         &nonces[&1],
-        &package.signing_package,
+        &package,
+        b"artifact",
     )
     .expect("share")
     .signature_share;
@@ -1170,6 +1183,21 @@ fn portal_schema_validates_accepted_kinds_and_disables_unratified_ones() {
             b"not a round-one package".to_vec(),
         )
         .is_err()
+    );
+
+    // Bob's blocker-1 probe: serialized secret nonces must NOT be relayable under
+    // the public RootSigningCommitment kind — schema validation rejects them.
+    assert!(
+        submit(
+            &mut store,
+            38,
+            CeremonyPhase::RootSigning,
+            CeremonyPayloadKind::RootSigningCommitment,
+            None,
+            nonces_shaped_payload,
+        )
+        .is_err(),
+        "RootSigningNonces bytes must not be accepted as a public commitment"
     );
 
     // A broadcast kind may not carry a recipient.

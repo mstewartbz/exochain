@@ -174,11 +174,15 @@ pub struct RootSigningNonces {
     /// Ceremony these nonces were generated for; `sign_share` rejects reuse in a
     /// different ceremony.
     pub ceremony_id: String,
+    /// blake3 of the exact root artifact (message) these nonces commit to.
+    /// `sign_share` requires the message it signs to hash to this value, so a
+    /// given nonce set can only ever sign its one bound artifact — this is what
+    /// prevents a coordinator from getting the same nonces to sign two different
+    /// messages (FROST nonce reuse exposes the signer's key share).
+    pub artifact_hash: Hash256,
     /// blake3 of the public commitment these nonces pair with. `sign_share`
     /// requires this to equal the hash of the commitment bound for this signer in
-    /// the supplied signing package — which transitively binds the nonces to that
-    /// package's artifact (message) and full signer set, so they can only be
-    /// consumed for the one signing instance they were committed to.
+    /// the signing package.
     pub commitment_hash: Hash256,
     /// Serialized secret signing nonces (retained by the signer; never shared).
     pub nonces: Vec<u8>,
@@ -220,13 +224,16 @@ fn ensure_rostered(config: &GenesisCeremonyConfig, identifier: u16, role: &str) 
 }
 
 /// Distributed signing — round one. Produce one signer's PUBLIC commitment and
-/// SECRET nonces as two distinct artifacts. Run by each participating certifier
-/// against its own share. The caller MUST broadcast only the
-/// [`RootSigningCommitment`] and retain the [`RootSigningNonces`] locally (never
-/// share, archive off-host, or submit it) until [`sign_share`].
+/// SECRET nonces as two distinct artifacts, **bound to the exact root `artifact`
+/// being signed**. Run by each participating certifier against its own share.
+/// The caller MUST broadcast only the [`RootSigningCommitment`] and retain the
+/// [`RootSigningNonces`] locally (never share, archive off-host, or submit it)
+/// until [`sign_share`]. The artifact must be the bytes emitted by
+/// `root_artifact_payload` and is known before commitments are produced.
 pub fn sign_commit<R>(
     config: &GenesisCeremonyConfig,
     key_package: &RootKeyPackage,
+    artifact: &[u8],
     rng: &mut R,
 ) -> Result<(RootSigningCommitment, RootSigningNonces)>
 where
@@ -245,6 +252,7 @@ where
         RootSigningNonces {
             frost_identifier: key_package.frost_identifier,
             ceremony_id: config.ceremony_id.clone(),
+            artifact_hash: Hash256::digest(artifact),
             commitment_hash: commitment_hash(commitment_bytes.as_slice()),
             nonces: serialize_frost(&nonces)?,
         },
@@ -285,14 +293,24 @@ pub fn build_signing_package(
     })
 }
 
-/// Distributed signing — round two. One signer produces its signature share
-/// from its key package, its retained local-only [`RootSigningNonces`], and the
-/// coordinator's package.
+/// Distributed signing — round two. One signer produces its signature share from
+/// its key package, its retained local-only [`RootSigningNonces`], the
+/// coordinator's [`RootSigningPackage`], and the `message` (root artifact) it
+/// intends to sign.
+///
+/// The share is produced over a signing package **rebuilt from the supplied
+/// commitments and the caller's `message`**, never over a coordinator-controlled
+/// message. Combined with the nonce's `artifact_hash` binding, this means a given
+/// nonce set can only ever sign the one artifact it committed to: a coordinator
+/// cannot present two packages built from the same commitments but different
+/// messages to obtain two shares under one nonce (which would expose the signer's
+/// key share). The caller must additionally retire the nonces after one share.
 pub fn sign_share(
     config: &GenesisCeremonyConfig,
     key_package: &RootKeyPackage,
     nonces: &RootSigningNonces,
-    signing_package: &[u8],
+    signing_package: &RootSigningPackage,
+    message: &[u8],
 ) -> Result<RootSignatureShareOutput> {
     config.validate()?;
     ensure_rostered(config, key_package.frost_identifier, "signer")?;
@@ -308,16 +326,19 @@ pub fn sign_share(
             detail: "nonces were generated for a different ceremony".to_owned(),
         });
     }
+    // Bind the nonces to the exact artifact being signed. A nonce committed to one
+    // artifact can never be used to sign a different message.
+    if Hash256::digest(message) != nonces.artifact_hash {
+        return Err(RootError::Frost {
+            detail: "nonces are bound to a different artifact than the message".to_owned(),
+        });
+    }
     let parsed_key: frost::keys::KeyPackage =
         deserialize_frost(key_package.key_package.as_slice())?;
     let parsed_nonces: frost::round1::SigningNonces = deserialize_frost(nonces.nonces.as_slice())?;
-    let parsed_package: frost::SigningPackage = deserialize_frost(signing_package)?;
-    // Bind the nonces to this exact signing instance: the commitment they pair
-    // with must be the one this signer contributed to the signing package. Because
-    // the package fixes the message (artifact) and every signer's commitment (the
-    // signer set), matching the commitment hash binds the nonces to that artifact
-    // and signer set. Combined with single-use consumption by the caller, a set of
-    // nonces can never be replayed against a different artifact, set, or session.
+    let parsed_package: frost::SigningPackage =
+        deserialize_frost(signing_package.signing_package.as_slice())?;
+    // The nonces must pair with this signer's commitment in the package.
     let frost_id = crate::dkg::frost_identifier(key_package.frost_identifier)?;
     let package_commitment = parsed_package
         .signing_commitment(&frost_id)
@@ -329,8 +350,22 @@ pub fn sign_share(
             detail: "nonces are not bound to this signing package's commitment".to_owned(),
         });
     }
+    // Rebuild the signing package from the supplied commitments and the caller's
+    // message, so the share is provably over `message` regardless of what message
+    // the coordinator embedded in the distributed package.
+    let mut commitments = BTreeMap::new();
+    for identifier in &signing_package.signer_ids {
+        let signer_frost_id = crate::dkg::frost_identifier(*identifier)?;
+        let commitment = parsed_package
+            .signing_commitment(&signer_frost_id)
+            .ok_or_else(|| RootError::Frost {
+                detail: format!("signing package is missing commitment for signer {identifier}"),
+            })?;
+        commitments.insert(signer_frost_id, commitment);
+    }
+    let rebuilt_package = frost::SigningPackage::new(commitments, message);
     let share =
-        frost::round2::sign(&parsed_package, &parsed_nonces, &parsed_key).map_err(frost_error)?;
+        frost::round2::sign(&rebuilt_package, &parsed_nonces, &parsed_key).map_err(frost_error)?;
     Ok(RootSignatureShareOutput {
         frost_identifier: key_package.frost_identifier,
         signature_share: serialize_frost(&share)?,
@@ -515,7 +550,8 @@ mod tests {
         let mut commitments = BTreeMap::new();
         let mut nonces = BTreeMap::new();
         for (id, kp) in &signers {
-            let (commitment, signer_nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            let (commitment, signer_nonces) =
+                sign_commit(&config, kp, message, &mut rng).expect("commit");
             nonces.insert(*id, signer_nonces);
             commitments.insert(*id, commitment.commitments);
         }
@@ -524,11 +560,11 @@ mod tests {
         let package = build_signing_package(&config, commitments, message).expect("package");
         assert_eq!(package.signer_ids.len(), 7);
 
-        // Round two: each signer produces its share from its own nonces.
+        // Round two: each signer produces its share from its own nonces, signing
+        // the artifact its nonces are bound to.
         let mut shares = BTreeMap::new();
         for (id, kp) in &signers {
-            let share =
-                sign_share(&config, kp, &nonces[id], &package.signing_package).expect("share");
+            let share = sign_share(&config, kp, &nonces[id], &package, message).expect("share");
             shares.insert(*id, share.signature_share);
         }
 
@@ -558,7 +594,7 @@ mod tests {
         let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
         let mut commitments = BTreeMap::new();
         for (id, kp) in dkg.key_packages.iter().take(3) {
-            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            let (commitment, _nonces) = sign_commit(&config, kp, b"msg", &mut rng).expect("commit");
             commitments.insert(*id, commitment.commitments);
         }
         let error = build_signing_package(&config, commitments, b"msg")
@@ -582,14 +618,14 @@ mod tests {
         let mut stranger = dkg.key_packages[&1].clone();
         stranger.frost_identifier = 99;
         assert!(matches!(
-            sign_commit(&config, &stranger, &mut rng).expect_err("unrostered commit"),
+            sign_commit(&config, &stranger, b"msg", &mut rng).expect_err("unrostered commit"),
             RootError::InvalidConfig { .. }
         ));
 
         // build_signing_package rejects a commitment from an unrostered signer.
         let mut commitments = BTreeMap::new();
         for (id, kp) in dkg.key_packages.iter().take(7) {
-            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            let (commitment, _nonces) = sign_commit(&config, kp, b"msg", &mut rng).expect("commit");
             commitments.insert(*id, commitment.commitments);
         }
         let mut unrostered = commitments.clone();
@@ -603,9 +639,9 @@ mod tests {
         // sign_share rejects an unrostered key package.
         let package = build_signing_package(&config, commitments, b"msg").expect("package");
         let (_commitment, commit_nonces) =
-            sign_commit(&config, &dkg.key_packages[&1], &mut rng).expect("commit");
+            sign_commit(&config, &dkg.key_packages[&1], b"msg", &mut rng).expect("commit");
         assert!(matches!(
-            sign_share(&config, &stranger, &commit_nonces, &package.signing_package)
+            sign_share(&config, &stranger, &commit_nonces, &package, b"msg")
                 .expect_err("unrostered share"),
             RootError::InvalidConfig { .. }
         ));
@@ -637,11 +673,22 @@ mod tests {
         let foreign_nonces = RootSigningNonces {
             frost_identifier: 2,
             ceremony_id: config.ceremony_id.clone(),
+            artifact_hash: Hash256::digest(b"artifact"),
             commitment_hash: Hash256::digest(b"unrelated commitment"),
             nonces: Vec::new(),
         };
-        let error = sign_share(&config, &key_package, &foreign_nonces, &[])
-            .expect_err("nonces bound to a different signer must be rejected");
+        let empty_package = RootSigningPackage {
+            signing_package: Vec::new(),
+            signer_ids: Vec::new(),
+        };
+        let error = sign_share(
+            &config,
+            &key_package,
+            &foreign_nonces,
+            &empty_package,
+            b"artifact",
+        )
+        .expect_err("nonces bound to a different signer must be rejected");
         assert!(error.to_string().contains("mismatches key 1"));
     }
 
@@ -657,11 +704,22 @@ mod tests {
         let foreign_nonces = RootSigningNonces {
             frost_identifier: 1,
             ceremony_id: "some-other-ceremony".to_owned(),
+            artifact_hash: Hash256::digest(b"artifact"),
             commitment_hash: Hash256::digest(b"unrelated commitment"),
             nonces: Vec::new(),
         };
-        let error = sign_share(&config, &key_package, &foreign_nonces, &[])
-            .expect_err("nonces from a different ceremony must be rejected");
+        let empty_package = RootSigningPackage {
+            signing_package: Vec::new(),
+            signer_ids: Vec::new(),
+        };
+        let error = sign_share(
+            &config,
+            &key_package,
+            &foreign_nonces,
+            &empty_package,
+            b"artifact",
+        )
+        .expect_err("nonces from a different ceremony must be rejected");
         assert!(error.to_string().contains("different ceremony"));
     }
 
@@ -675,19 +733,21 @@ mod tests {
         let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
         let mut commitments = BTreeMap::new();
         for (id, kp) in dkg.key_packages.iter().take(7) {
-            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            let (commitment, _nonces) =
+                sign_commit(&config, kp, b"artifact", &mut rng).expect("commit");
             commitments.insert(*id, commitment.commitments);
         }
         let package = build_signing_package(&config, commitments, b"artifact").expect("package");
-        // Fresh nonces for signer 1 from a *different* commitment than the one in
-        // the package (a second sign_commit produces a different commitment).
+        // Fresh nonces for signer 1 (same artifact) from a *different* commitment
+        // than the one in the package (a second sign_commit produces a new commitment).
         let (_other_commitment, stale_nonces) =
-            sign_commit(&config, &dkg.key_packages[&1], &mut rng).expect("commit");
+            sign_commit(&config, &dkg.key_packages[&1], b"artifact", &mut rng).expect("commit");
         let error = sign_share(
             &config,
             &dkg.key_packages[&1],
             &stale_nonces,
-            &package.signing_package,
+            &package,
+            b"artifact",
         )
         .expect_err("nonces not bound to the package commitment must be rejected");
         assert!(
@@ -706,17 +766,19 @@ mod tests {
         let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
         let mut commitments = BTreeMap::new();
         for (id, kp) in dkg.key_packages.iter().take(7) {
-            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            let (commitment, _nonces) =
+                sign_commit(&config, kp, b"artifact", &mut rng).expect("commit");
             commitments.insert(*id, commitment.commitments);
         }
         let package = build_signing_package(&config, commitments, b"artifact").expect("package");
         let (_commitment8, nonces8) =
-            sign_commit(&config, &dkg.key_packages[&8], &mut rng).expect("commit 8");
+            sign_commit(&config, &dkg.key_packages[&8], b"artifact", &mut rng).expect("commit 8");
         let error = sign_share(
             &config,
             &dkg.key_packages[&8],
             &nonces8,
-            &package.signing_package,
+            &package,
+            b"artifact",
         )
         .expect_err("a signer absent from the package must be rejected");
         assert!(
@@ -724,5 +786,47 @@ mod tests {
                 .to_string()
                 .contains("has no commitment for this signer")
         );
+    }
+
+    #[test]
+    fn sign_share_refuses_to_sign_a_second_different_message_with_one_nonce_set() {
+        // Bob's blocker-2 regression: a coordinator must not be able to get one
+        // RootSigningNonces object to sign two different messages (FROST nonce
+        // reuse exposes the signer key share). The first share over the bound
+        // artifact succeeds; a second share over a *different* message is rejected.
+        let config = test_config();
+        let mut rng = StdRng::seed_from_u64(707);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let artifact = b"the one true root artifact";
+        let mut commitments = BTreeMap::new();
+        let mut nonces = BTreeMap::new();
+        for (id, kp) in dkg.key_packages.iter().take(7) {
+            let (commitment, signer_nonces) =
+                sign_commit(&config, kp, artifact, &mut rng).expect("commit");
+            commitments.insert(*id, commitment.commitments);
+            nonces.insert(*id, signer_nonces);
+        }
+        let package = build_signing_package(&config, commitments, artifact).expect("package");
+
+        // First use over the bound artifact succeeds.
+        sign_share(
+            &config,
+            &dkg.key_packages[&1],
+            &nonces[&1],
+            &package,
+            artifact,
+        )
+        .expect("first share over the bound artifact");
+
+        // Second use of the SAME nonces over a different message is refused.
+        let error = sign_share(
+            &config,
+            &dkg.key_packages[&1],
+            &nonces[&1],
+            &package,
+            b"a different message the coordinator wants signed",
+        )
+        .expect_err("a second, different message under the same nonces must be rejected");
+        assert!(error.to_string().contains("bound to a different artifact"));
     }
 }

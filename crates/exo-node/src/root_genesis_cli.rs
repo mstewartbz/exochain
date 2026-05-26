@@ -6,8 +6,8 @@ use exo_core::{Did, Hash256, SecretKey, Timestamp, crypto::KeyPair};
 use exo_root::{
     CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
     GenesisCeremonyConfig, PairwiseEncryptedPayload, RootIssuerDelegation, RootKeyPackage,
-    RootPublicKeyPackage, RootSigningNonces, RootTrustBundle, aggregate_signature,
-    assemble_root_bundle, build_signing_package, decrypt_pairwise_payload,
+    RootPublicKeyPackage, RootSigningNonces, RootSigningPackage, RootTrustBundle,
+    aggregate_signature, assemble_root_bundle, build_signing_package, decrypt_pairwise_payload,
     dkg_finalize_participant, dkg_round1, dkg_round2, encrypt_pairwise_payload, seal_share,
     sign_commit, sign_share, threshold_sign, unseal_share, verify_root_bundle,
 };
@@ -167,6 +167,9 @@ struct PayloadBytesOutput {
 struct SignCommitCommandInput {
     config: GenesisCeremonyConfig,
     key_package: RootKeyPackage,
+    /// Hex of the exact root artifact to be signed (from `emit-artifact-bytes`).
+    /// The nonces are bound to this artifact and can sign no other message.
+    artifact_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,7 +183,11 @@ struct BuildSigningPackageCommandInput {
 struct SignShareCommandInput {
     config: GenesisCeremonyConfig,
     key_package: RootKeyPackage,
-    signing_package_hex: String,
+    /// The coordinator's signing package (commitments + signer set).
+    signing_package: RootSigningPackage,
+    /// Hex of the root artifact this signer intends to sign; must equal the
+    /// artifact its nonces were bound to at `sign-commit`.
+    artifact_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +395,26 @@ fn run_sign_envelope(args: GenesisSignEnvelopeArgs) -> anyhow::Result<()> {
         output: args.output.clone(),
     };
     let input: SignEnvelopeCommandInput = read_json(&required_input(&io)?)?;
+    // Fail closed on disabled / unratified payload kinds: the generic signer must
+    // not be usable to mint envelopes the portal rejects (round-one set
+    // attestation and final key confirmation have no ratified schema; raw
+    // round-two plaintext is never relayed). This keeps the signer aligned with
+    // the portal's accepted set rather than relying on the portal alone.
+    match input.payload_kind {
+        CeremonyPayloadKind::Round1SetAttestation
+        | CeremonyPayloadKind::FinalKeyConfirmation
+        | CeremonyPayloadKind::Round2PlaintextPackage => {
+            anyhow::bail!(
+                "sign-envelope refuses payload kind {:?}: it is disabled/unratified and rejected \
+                 by the portal",
+                input.payload_kind
+            );
+        }
+        CeremonyPayloadKind::Round1Package
+        | CeremonyPayloadKind::Round2EncryptedPackage
+        | CeremonyPayloadKind::RootSigningCommitment
+        | CeremonyPayloadKind::RootSignatureShare => {}
+    }
     // The signing secret is read from the certifier's 0600 private-material file,
     // never from argv — see GenesisSignEnvelopeArgs.
     let private: PrivateCertifierMaterial = read_json(&args.private_input)?;
@@ -536,8 +563,14 @@ fn run_sign_commit(args: GenesisSignCommitArgs) -> anyhow::Result<()> {
         output: None,
     };
     let input: SignCommitCommandInput = read_json(&required_input(&io)?)?;
+    let artifact = decode_hex(&input.artifact_hex)?;
     let mut rng = rand::rngs::OsRng;
-    let (commitment, nonces) = sign_commit(&input.config, &input.key_package, &mut rng)?;
+    let (commitment, nonces) = sign_commit(
+        &input.config,
+        &input.key_package,
+        artifact.as_slice(),
+        &mut rng,
+    )?;
     // The public commitment goes to a file safe to transmit to the coordinator;
     // the SECRET nonces go to a SEPARATE local-only file. Both writes are
     // create-new + 0600 and refuse to overwrite an existing path.
@@ -565,11 +598,13 @@ fn run_sign_share(args: GenesisSignShareArgs) -> anyhow::Result<()> {
     let input: SignShareCommandInput = read_json(&required_input(&io)?)?;
     // The secret nonces are read from the signer's local-only file, never inline.
     let nonces: RootSigningNonces = read_json(&args.nonces)?;
+    let artifact = decode_hex(&input.artifact_hex)?;
     let output = sign_share(
         &input.config,
         &input.key_package,
         &nonces,
-        decode_hex(&input.signing_package_hex)?.as_slice(),
+        &input.signing_package,
+        artifact.as_slice(),
     )?;
     write_output(&io, &output)?;
     // Single-use: consume (delete) the nonces file after a successful share so
@@ -1000,6 +1035,48 @@ mod tests {
     }
 
     #[test]
+    fn sign_envelope_refuses_disabled_payload_kinds() {
+        // Bob's blocker-3 regression: the generic signer must fail closed on
+        // disabled/unratified kinds so it cannot mint envelopes the portal rejects.
+        let config = rostered_config();
+        let signer = config.certifiers[0].clone();
+        let directory = tempdir().expect("temporary directory");
+        let input_path = directory.path().join("attestation-draft.json");
+        let private_path = directory.path().join("certifier-01.private.json");
+        write_json(
+            &input_path,
+            &SignEnvelopeCommandInput {
+                ceremony_id: config.ceremony_id.clone(),
+                phase: CeremonyPhase::Round1SetAttestation,
+                payload_kind: CeremonyPayloadKind::Round1SetAttestation,
+                sender_did: signer.did.clone(),
+                recipient_did: None,
+                sequence: 1,
+                payload_bytes: b"unratified attestation payload".to_vec(),
+            },
+        )
+        .expect("write draft");
+        write_json(
+            &private_path,
+            &PrivateCertifierMaterial {
+                did: signer.did.clone(),
+                frost_identifier: signer.frost_identifier,
+                signing_secret_hex: hex::encode([1u8; 32]),
+                transport_secret_hex: hex::encode([65u8; 32]),
+            },
+        )
+        .expect("write private material");
+
+        let error = run_sign_envelope(GenesisSignEnvelopeArgs {
+            input: Some(input_path),
+            output: Some(directory.path().join("envelope.json")),
+            private_input: private_path,
+        })
+        .expect_err("sign-envelope must refuse a disabled/unratified payload kind");
+        assert!(error.to_string().contains("disabled/unratified"));
+    }
+
+    #[test]
     fn encrypt_then_decrypt_pairwise_round_trips() {
         let directory = tempdir().expect("temporary directory");
         let sender_secret = [5u8; 32];
@@ -1180,6 +1257,7 @@ mod tests {
                 &SignCommitCommandInput {
                     config: config.clone(),
                     key_package: dkg.key_packages[id].clone(),
+                    artifact_hex: artifact_hex.clone(),
                 },
             )
             .expect("write commit input");
@@ -1242,7 +1320,6 @@ mod tests {
         .expect("write package input");
         run_build_signing_package(io_args(pkg_in, pkg_out.clone())).expect("build-signing-package");
         let package: exo_root::RootSigningPackage = read_json(&pkg_out).expect("read package");
-        let signing_package_hex = hex::encode(&package.signing_package);
 
         let mut shares_hex = BTreeMap::new();
         for id in &signers {
@@ -1253,7 +1330,8 @@ mod tests {
                 &SignShareCommandInput {
                     config: config.clone(),
                     key_package: dkg.key_packages[id].clone(),
-                    signing_package_hex: signing_package_hex.clone(),
+                    signing_package: package.clone(),
+                    artifact_hex: artifact_hex.clone(),
                 },
             )
             .expect("write share input");
@@ -1280,7 +1358,7 @@ mod tests {
             &AggregateSignatureCommandInput {
                 config: config.clone(),
                 public_key_package: dkg.public_key_package.clone(),
-                signing_package_hex,
+                signing_package_hex: hex::encode(package.signing_package.as_slice()),
                 shares_hex,
                 artifact_hex,
             },
