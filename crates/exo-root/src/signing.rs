@@ -696,4 +696,33 @@ mod tests {
                 .contains("not bound to this signing package")
         );
     }
+
+    #[test]
+    fn sign_share_rejects_signer_absent_from_signing_package() {
+        // A rostered signer that did not contribute a commitment to the package
+        // (here an alternate, id 8) has no commitment to bind its nonces to.
+        let config = test_config();
+        let mut rng = StdRng::seed_from_u64(606);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let mut commitments = BTreeMap::new();
+        for (id, kp) in dkg.key_packages.iter().take(7) {
+            let (commitment, _nonces) = sign_commit(&config, kp, &mut rng).expect("commit");
+            commitments.insert(*id, commitment.commitments);
+        }
+        let package = build_signing_package(&config, commitments, b"artifact").expect("package");
+        let (_commitment8, nonces8) =
+            sign_commit(&config, &dkg.key_packages[&8], &mut rng).expect("commit 8");
+        let error = sign_share(
+            &config,
+            &dkg.key_packages[&8],
+            &nonces8,
+            &package.signing_package,
+        )
+        .expect_err("a signer absent from the package must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("has no commitment for this signer")
+        );
+    }
 }
