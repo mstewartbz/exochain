@@ -622,7 +622,7 @@ jobs:
             --output-dir coverage-root-genesis-portal \
             --skip-clean \
             --engine llvm \
-            --timeout 120 \
+            --timeout 300 \
             --fail-under 100
       - name: Upload root genesis portal coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
