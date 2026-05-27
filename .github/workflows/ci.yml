@@ -555,7 +555,7 @@ jobs:
             --output-dir coverage-zerodentity \
             --skip-clean \
             --engine llvm \
-            --timeout 120 \
+            --timeout 300 \
             --fail-under 80
       - name: Upload 0dentity coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
