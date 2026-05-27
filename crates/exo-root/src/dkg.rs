@@ -425,7 +425,6 @@ mod tests {
             created_at: Timestamp::new(1, 0),
             certifiers,
             signing_set: (1..=7).collect(),
-            signing_alternates: (8..=13).collect(),
         }
     }
 

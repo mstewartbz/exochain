@@ -223,7 +223,11 @@ pub enum GenesisCommand {
     #[command(name = "finalize-dkg")]
     FinalizeDkg(GenesisIoArgs),
 
-    /// Sign a root-governance artifact with at least seven certifier shares.
+    /// Build CBOR payload bytes for this certifier's final key confirmation.
+    #[command(name = "build-final-key-confirmation")]
+    BuildFinalKeyConfirmation(GenesisIoArgs),
+
+    /// Sign a root-governance artifact with the exact predeclared signing set.
     #[command(name = "sign-root-artifact")]
     SignRootArtifact(GenesisIoArgs),
 
@@ -267,6 +271,14 @@ pub enum GenesisCommand {
     #[command(name = "pull-envelopes")]
     PullEnvelopes(GenesisPullEnvelopesArgs),
 
+    /// Replay accepted envelopes and emit the completed DKG transcript hash.
+    #[command(name = "compute-dkg-transcript-hash")]
+    ComputeDkgTranscriptHash(GenesisIoArgs),
+
+    /// Replay accepted envelopes and emit the final ceremony transcript hash.
+    #[command(name = "compute-final-transcript-hash")]
+    ComputeFinalTranscriptHash(GenesisIoArgs),
+
     /// CBOR-encode an encrypted round-two payload into envelope `payload_bytes`.
     #[command(name = "encode-encrypted-payload")]
     EncodeEncryptedPayload(GenesisIoArgs),
@@ -280,7 +292,7 @@ pub enum GenesisCommand {
     #[command(name = "sign-commit")]
     SignCommit(GenesisSignCommitArgs),
 
-    /// Distributed signing — coordinator builds the signing package from >=7 commitments.
+    /// Distributed signing — coordinator builds the signing package from the declared set.
     #[command(name = "build-signing-package")]
     BuildSigningPackage(GenesisIoArgs),
 
@@ -288,7 +300,7 @@ pub enum GenesisCommand {
     #[command(name = "sign-share")]
     SignShare(GenesisSignShareArgs),
 
-    /// Distributed signing — coordinator aggregates >=7 shares into the root signature.
+    /// Distributed signing — coordinator aggregates the declared set into the root signature.
     #[command(name = "aggregate-signature")]
     AggregateSignature(GenesisIoArgs),
 }
@@ -358,12 +370,6 @@ pub struct GenesisCeremonyInitArgs {
     /// that will sign root artifacts, comma-separated (e.g. `1,2,3,4,5,6,7`).
     #[arg(long, value_delimiter = ',')]
     pub signing_set: Vec<u16>,
-
-    /// Ordered alternate signers (rostered, disjoint from `--signing-set`),
-    /// comma-separated, used only to replace a primary unavailable before
-    /// commitments, taken in order (e.g. `8,9,10,11,12,13`).
-    #[arg(long, value_delimiter = ',')]
-    pub signing_alternates: Vec<u16>,
 
     /// Ceremony configuration output path.
     #[arg(long)]
@@ -531,6 +537,7 @@ mod tests {
             "round1",
             "round2",
             "finalize-dkg",
+            "build-final-key-confirmation",
             "sign-root-artifact",
             "assemble-bundle",
             "verify-bundle",
@@ -542,6 +549,8 @@ mod tests {
             "emit-artifact-bytes",
             "submit-envelope",
             "pull-envelopes",
+            "compute-dkg-transcript-hash",
+            "compute-final-transcript-hash",
             "encode-encrypted-payload",
             "decode-encrypted-payload",
             "sign-commit",

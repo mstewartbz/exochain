@@ -47,14 +47,9 @@ pub struct GenesisCeremonyConfig {
     pub certifiers: Vec<CertifierContact>,
     /// Predeclared deterministic signing set: exactly `threshold` rostered FROST
     /// identifiers chosen before commitments are emitted. Root artifacts are
-    /// signed by this set unless a primary is unavailable before commitments, in
-    /// which case the next unused `signing_alternates` member substitutes, in
-    /// declared order. Fixing the set in the bound config removes coordinator
-    /// discretion over which signers participate.
+    /// signed only by this exact set. If any signer is unavailable, the ceremony
+    /// aborts and restarts with a new signed config and ceremony id.
     pub signing_set: Vec<u16>,
-    /// Ordered alternate signers (rostered, disjoint from `signing_set`) used only
-    /// to replace a primary that is unavailable before commitments, taken in order.
-    pub signing_alternates: Vec<u16>,
 }
 
 impl GenesisCeremonyConfig {
@@ -133,7 +128,7 @@ impl GenesisCeremonyConfig {
         Ok(())
     }
 
-    /// Validate the predeclared signing set and alternates.
+    /// Validate the predeclared signing set.
     fn validate_signing_set(&self) -> Result<()> {
         if self.signing_set.len() != usize::from(self.threshold) {
             return Err(RootError::InvalidConfig {
@@ -143,34 +138,16 @@ impl GenesisCeremonyConfig {
                 ),
             });
         }
-        let mut primaries = BTreeSet::new();
+        let mut declared = BTreeSet::new();
         for identifier in &self.signing_set {
             if self.certifier_by_identifier(*identifier).is_none() {
                 return Err(RootError::InvalidConfig {
                     reason: format!("signing_set member {identifier} is not rostered"),
                 });
             }
-            if !primaries.insert(*identifier) {
+            if !declared.insert(*identifier) {
                 return Err(RootError::InvalidConfig {
                     reason: format!("duplicate signing_set member {identifier}"),
-                });
-            }
-        }
-        let mut alternates = BTreeSet::new();
-        for identifier in &self.signing_alternates {
-            if self.certifier_by_identifier(*identifier).is_none() {
-                return Err(RootError::InvalidConfig {
-                    reason: format!("signing_alternate {identifier} is not rostered"),
-                });
-            }
-            if primaries.contains(identifier) {
-                return Err(RootError::InvalidConfig {
-                    reason: format!("signing_alternate {identifier} is also a primary signer"),
-                });
-            }
-            if !alternates.insert(*identifier) {
-                return Err(RootError::InvalidConfig {
-                    reason: format!("duplicate signing_alternate {identifier}"),
                 });
             }
         }
@@ -178,11 +155,9 @@ impl GenesisCeremonyConfig {
     }
 
     /// Validate that `submitted` is the canonical signing selection for this
-    /// ceremony: exactly `threshold` signers, every one a declared primary or
-    /// alternate, and any primary absent from the selection replaced by the
-    /// leading unused alternates in declared order. This removes coordinator
-    /// discretion — the only permitted deviation from the predeclared set is
-    /// ordered alternate substitution for a primary unavailable before commitments.
+    /// ceremony: exactly the predeclared `signing_set`. There is no in-ceremony
+    /// alternate substitution; an unavailable signer aborts the ceremony and forces
+    /// a new config/ceremony id.
     pub fn validate_signing_selection(&self, submitted: &BTreeSet<u16>) -> Result<()> {
         if submitted.len() != usize::from(self.threshold) {
             return Err(RootError::InvalidConfig {
@@ -192,39 +167,10 @@ impl GenesisCeremonyConfig {
                 ),
             });
         }
-        let primaries: BTreeSet<u16> = self.signing_set.iter().copied().collect();
-        let alternates: BTreeSet<u16> = self.signing_alternates.iter().copied().collect();
-        for identifier in submitted {
-            if !primaries.contains(identifier) && !alternates.contains(identifier) {
-                return Err(RootError::InvalidConfig {
-                    reason: format!(
-                        "signer {identifier} is not in the declared signing set or alternates"
-                    ),
-                });
-            }
-        }
-        let absent_primaries = self
-            .signing_set
-            .iter()
-            .filter(|primary| !submitted.contains(primary))
-            .count();
-        // The canonical selection keeps present primaries and substitutes the
-        // leading `absent_primaries` alternates, in declared order. If too few
-        // alternates are declared, the expected set is smaller than the selection
-        // and the equality check below rejects it.
-        let mut expected: BTreeSet<u16> = self
-            .signing_set
-            .iter()
-            .copied()
-            .filter(|primary| submitted.contains(primary))
-            .collect();
-        for alternate in self.signing_alternates.iter().take(absent_primaries) {
-            expected.insert(*alternate);
-        }
+        let expected: BTreeSet<u16> = self.signing_set.iter().copied().collect();
         if &expected != submitted {
             return Err(RootError::InvalidConfig {
-                reason: "signing selection must use declared alternates in order to replace \
-                         unavailable primaries"
+                reason: "signing selection must exactly match the predeclared signing_set"
                     .to_owned(),
             });
         }
@@ -278,7 +224,6 @@ mod tests {
             created_at: Timestamp::new(1, 0),
             certifiers,
             signing_set: (1..=7).collect(),
-            signing_alternates: (8..=13).collect(),
         }
     }
 
@@ -292,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_malformed_signing_set_and_alternates() {
+    fn validate_rejects_malformed_signing_set() {
         let mut wrong_len = config();
         wrong_len.signing_set = (1..=6).collect();
         assert!(wrong_len.validate().is_err());
@@ -304,39 +249,18 @@ mod tests {
         let mut duplicate_primary = config();
         duplicate_primary.signing_set = vec![1, 2, 3, 4, 5, 6, 6];
         assert!(duplicate_primary.validate().is_err());
-
-        let mut unrostered_alternate = config();
-        unrostered_alternate.signing_alternates = vec![99];
-        assert!(unrostered_alternate.validate().is_err());
-
-        let mut alternate_is_primary = config();
-        alternate_is_primary.signing_alternates = vec![1];
-        assert!(alternate_is_primary.validate().is_err());
-
-        let mut duplicate_alternate = config();
-        duplicate_alternate.signing_alternates = vec![8, 8];
-        assert!(duplicate_alternate.validate().is_err());
     }
 
     #[test]
-    fn validate_signing_selection_accepts_declared_set_and_ordered_alternates() {
+    fn validate_signing_selection_accepts_only_declared_set() {
         let config = config();
-        // The full predeclared primary set.
         config
             .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 7]))
             .expect("declared set accepted");
-        // Primary 1 unavailable → first alternate (8) substitutes.
-        config
-            .validate_signing_selection(&selection(&[2, 3, 4, 5, 6, 7, 8]))
-            .expect("ordered alternate substitution accepted");
-        // Primaries 1 and 2 unavailable → first two alternates (8, 9).
-        config
-            .validate_signing_selection(&selection(&[3, 4, 5, 6, 7, 8, 9]))
-            .expect("two ordered alternates accepted");
     }
 
     #[test]
-    fn validate_signing_selection_rejects_wrong_size_unknown_and_misordered() {
+    fn validate_signing_selection_rejects_wrong_size_unknown_and_substitution() {
         let config = config();
         // Wrong size.
         assert!(
@@ -350,10 +274,10 @@ mod tests {
                 .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 99]))
                 .is_err()
         );
-        // Out-of-order alternate: primary 2 absent but alternate 9 used instead of 8.
+        // No alternate substitution: primary 7 absent and alternate 8 present.
         assert!(
             config
-                .validate_signing_selection(&selection(&[1, 3, 4, 5, 6, 7, 9]))
+                .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 8]))
                 .is_err()
         );
     }

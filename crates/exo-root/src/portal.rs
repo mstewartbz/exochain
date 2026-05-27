@@ -6,9 +6,17 @@ use exo_core::{Did, Hash256, SecretKey, Signature, crypto, hash::hash_structured
 use frost_ristretto255 as frost;
 use serde::{Deserialize, Serialize};
 
-use crate::{GenesisCeremonyConfig, PairwiseEncryptedPayload, Result, RootError};
+use crate::{
+    GenesisCeremonyConfig, PairwiseEncryptedPayload, Result, RootError,
+    dkg::{
+        RootParticipantDkgOutput, RootPublicKeyPackage, deserialize_frost, frost_identifier,
+        validate_public_key_package,
+    },
+};
 
 const MAX_PORTAL_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const FINAL_KEY_CONFIRMATION_DOMAIN: &str = "EXOCHAIN_ROOT_FINAL_KEY_CONFIRMATION_V1";
+pub const FINAL_KEY_CONFIRMATION_SCHEMA_VERSION: u16 = 1;
 
 /// Ceremony phase associated with a portal envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -86,6 +94,33 @@ pub struct CeremonyEnvelopeDraft {
     pub payload_bytes: Vec<u8>,
 }
 
+/// Ratified final DKG key confirmation payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalKeyConfirmation {
+    /// Domain separator; must equal [`FINAL_KEY_CONFIRMATION_DOMAIN`].
+    pub domain: String,
+    /// Schema version; must equal [`FINAL_KEY_CONFIRMATION_SCHEMA_VERSION`].
+    pub schema_version: u16,
+    /// Ceremony identifier.
+    pub ceremony_id: String,
+    /// Confirming certifier DID.
+    pub certifier_did: Did,
+    /// Confirming certifier FROST identifier.
+    pub frost_identifier: u16,
+    /// Canonical hash of the ceremony config.
+    pub config_hash: Hash256,
+    /// Canonical hash of the completed DKG relay transcript.
+    pub dkg_transcript_hash: Hash256,
+    /// Public key package independently derived by the certifier.
+    pub public_key_package: RootPublicKeyPackage,
+    /// Canonical hash of the full public key package.
+    pub root_public_key_package_hash: Hash256,
+    /// Hash of `public_key_package.root_public_key`.
+    pub root_public_key_hash: Hash256,
+    /// Hash of this certifier's verifying share in the public key package.
+    pub certifier_verifying_share_hash: Hash256,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PortalEnvelopeKey {
     sender_did: Did,
@@ -101,6 +136,7 @@ pub struct PortalStore {
     config: GenesisCeremonyConfig,
     envelopes: BTreeMap<PortalEnvelopeKey, CeremonyEnvelope>,
     seen_sequences: BTreeSet<(Did, u64)>,
+    final_key_confirmations: BTreeMap<Did, FinalKeyConfirmation>,
     /// Signers who have already submitted a root signature share this session.
     /// Enforces one share per signer (single-use of the signer's nonces).
     signature_share_senders: BTreeSet<Did>,
@@ -125,6 +161,32 @@ struct EnvelopeSigningPayload<'a> {
     payload_hash: Hash256,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+struct TranscriptEnvelopeRecord {
+    phase: CeremonyPhase,
+    payload_kind: CeremonyPayloadKind,
+    sender_did: Did,
+    recipient_did: Option<Did>,
+    sequence: u64,
+    envelope_id: Hash256,
+    envelope_hash: Hash256,
+}
+
+#[derive(Serialize)]
+struct DkgTranscriptPayload<'a> {
+    domain: &'static str,
+    config_hash: Hash256,
+    envelopes: &'a [TranscriptEnvelopeRecord],
+}
+
+#[derive(Serialize)]
+struct FinalTranscriptPayload<'a> {
+    domain: &'static str,
+    config_hash: Hash256,
+    dkg_transcript_hash: Hash256,
+    final_key_confirmations: &'a [TranscriptEnvelopeRecord],
+}
+
 fn payload_hash(kind: CeremonyPayloadKind, payload_bytes: &[u8]) -> Result<Hash256> {
     hash_structured(&PayloadHashEnvelope {
         domain: "EXOCHAIN_ROOT_PORTAL_PAYLOAD_V1",
@@ -132,6 +194,79 @@ fn payload_hash(kind: CeremonyPayloadKind, payload_bytes: &[u8]) -> Result<Hash2
         payload_bytes,
     })
     .map_err(canonical_encoding_error)
+}
+
+/// Canonical hash of a root genesis ceremony config.
+pub fn ceremony_config_hash(config: &GenesisCeremonyConfig) -> Result<Hash256> {
+    hash_structured(config).map_err(canonical_encoding_error)
+}
+
+/// Encode a ratified final key confirmation as portal payload bytes.
+pub fn encode_final_key_confirmation_payload(
+    confirmation: &FinalKeyConfirmation,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(confirmation, &mut bytes).map_err(canonical_encoding_error)?;
+    Ok(bytes)
+}
+
+fn decode_final_key_confirmation_payload(bytes: &[u8]) -> Result<FinalKeyConfirmation> {
+    ciborium::from_reader(bytes).map_err(|error| RootError::PortalRejected {
+        reason: format!("final key confirmation payload failed schema validation: {error}"),
+    })
+}
+
+/// Build the ratified final key confirmation payload for one finalized
+/// certifier. This emits only public confirmation material; the secret FROST key
+/// package is parsed locally to bind the certifier identifier but is never copied
+/// into the payload.
+pub fn build_final_key_confirmation(
+    config: &GenesisCeremonyConfig,
+    dkg_output: &RootParticipantDkgOutput,
+    dkg_transcript_hash: Hash256,
+) -> Result<FinalKeyConfirmation> {
+    config.validate()?;
+    validate_public_key_package(config, &dkg_output.public_key_package)?;
+    let frost_identifier_value = dkg_output.key_package.frost_identifier;
+    let certifier = config
+        .certifier_by_identifier(frost_identifier_value)
+        .ok_or_else(|| RootError::InvalidConfig {
+            reason: format!(
+                "final key confirmation certifier {frost_identifier_value} is not rostered"
+            ),
+        })?;
+    let parsed_key_package: frost::keys::KeyPackage =
+        deserialize_frost(dkg_output.key_package.key_package.as_slice())?;
+    if *parsed_key_package.identifier() != frost_identifier(frost_identifier_value)? {
+        return Err(RootError::Frost {
+            detail: "final key confirmation key package identifier mismatch".to_owned(),
+        });
+    }
+    let verifying_share = dkg_output
+        .public_key_package
+        .verifying_shares
+        .get(&frost_identifier_value)
+        .ok_or_else(|| RootError::BundleRejected {
+            reason: format!(
+                "public key package missing verifying share for certifier {frost_identifier_value}"
+            ),
+        })?;
+    Ok(FinalKeyConfirmation {
+        domain: FINAL_KEY_CONFIRMATION_DOMAIN.to_owned(),
+        schema_version: FINAL_KEY_CONFIRMATION_SCHEMA_VERSION,
+        ceremony_id: config.ceremony_id.clone(),
+        certifier_did: certifier.did.clone(),
+        frost_identifier: frost_identifier_value,
+        config_hash: ceremony_config_hash(config)?,
+        dkg_transcript_hash,
+        public_key_package: dkg_output.public_key_package.clone(),
+        root_public_key_package_hash: hash_structured(&dkg_output.public_key_package)
+            .map_err(canonical_encoding_error)?,
+        root_public_key_hash: Hash256::digest(
+            dkg_output.public_key_package.root_public_key.as_slice(),
+        ),
+        certifier_verifying_share_hash: Hash256::digest(verifying_share.as_slice()),
+    })
 }
 
 fn signing_payload(envelope: &CeremonyEnvelope) -> Result<Vec<u8>> {
@@ -184,6 +319,7 @@ impl PortalStore {
             config,
             envelopes: BTreeMap::new(),
             seen_sequences: BTreeSet::new(),
+            final_key_confirmations: BTreeMap::new(),
             signature_share_senders: BTreeSet::new(),
         }
     }
@@ -220,6 +356,12 @@ impl PortalStore {
     /// Submit a signed envelope to the relay.
     pub fn submit(&mut self, envelope: CeremonyEnvelope) -> Result<Hash256> {
         self.validate_envelope(&envelope)?;
+        let final_key_confirmation =
+            if envelope.payload_kind == CeremonyPayloadKind::FinalKeyConfirmation {
+                Some(self.validate_final_key_confirmation(&envelope)?)
+            } else {
+                None
+            };
         let sequence_key = (envelope.sender_did.clone(), envelope.sequence);
         if self.seen_sequences.contains(&sequence_key) {
             return Err(RootError::PortalRejected {
@@ -248,8 +390,39 @@ impl PortalStore {
             self.signature_share_senders
                 .insert(envelope.sender_did.clone());
         }
+        if let Some(confirmation) = final_key_confirmation {
+            self.final_key_confirmations
+                .insert(envelope.sender_did.clone(), confirmation);
+        }
         self.envelopes.insert(key, envelope);
         Ok(envelope_id)
+    }
+
+    /// Canonical hash over the complete accepted DKG relay transcript.
+    pub fn dkg_transcript_hash(&self) -> Result<Hash256> {
+        let records = self.dkg_transcript_records()?;
+        self.ensure_dkg_transcript_complete(records.as_slice())?;
+        let payload = DkgTranscriptPayload {
+            domain: "EXOCHAIN_ROOT_DKG_TRANSCRIPT_V1",
+            config_hash: ceremony_config_hash(&self.config)?,
+            envelopes: records.as_slice(),
+        };
+        hash_structured(&payload).map_err(canonical_encoding_error)
+    }
+
+    /// Canonical final ceremony transcript hash, including all accepted final
+    /// key confirmation envelopes. This is the transcript hash root artifacts
+    /// must bind before root signing begins.
+    pub fn final_transcript_hash(&self) -> Result<Hash256> {
+        self.ensure_final_key_confirmations_complete()?;
+        let records = self.final_key_confirmation_records()?;
+        let payload = FinalTranscriptPayload {
+            domain: "EXOCHAIN_ROOT_FINAL_TRANSCRIPT_V1",
+            config_hash: ceremony_config_hash(&self.config)?,
+            dkg_transcript_hash: self.dkg_transcript_hash()?,
+            final_key_confirmations: records.as_slice(),
+        };
+        hash_structured(&payload).map_err(canonical_encoding_error)
     }
 
     fn validate_envelope(&self, envelope: &CeremonyEnvelope) -> Result<()> {
@@ -309,11 +482,18 @@ impl PortalStore {
         // Every accepted payload kind is schema-validated by decoding it to its
         // concrete type before storage — the portal never stores opaque bytes for
         // a security-sensitive kind. Kinds without a ratified, decodable schema
-        // (round-one set attestation, final key confirmation) are disabled.
+        // (round-one set attestation) are disabled.
         let bytes = envelope.payload_bytes.as_slice();
         match (envelope.phase, envelope.payload_kind) {
             (CeremonyPhase::Round1, CeremonyPayloadKind::Round1Package) => {
                 reject_recipient(envelope)?;
+                self.reject_dkg_mutation_after_final_confirmation()?;
+                self.reject_duplicate_broadcast_sender(
+                    envelope,
+                    CeremonyPhase::Round1,
+                    CeremonyPayloadKind::Round1Package,
+                    "round-one package already submitted by sender",
+                )?;
                 reject_unless_decodable::<frost::keys::dkg::round1::Package>(
                     bytes,
                     "round-one package",
@@ -321,6 +501,13 @@ impl PortalStore {
             }
             (CeremonyPhase::RootSigning, CeremonyPayloadKind::RootSigningCommitment) => {
                 reject_recipient(envelope)?;
+                self.ensure_final_key_confirmations_complete()?;
+                self.reject_duplicate_broadcast_sender(
+                    envelope,
+                    CeremonyPhase::RootSigning,
+                    CeremonyPayloadKind::RootSigningCommitment,
+                    "root signing commitment already submitted by sender",
+                )?;
                 reject_unless_decodable::<frost::round1::SigningCommitments>(
                     bytes,
                     "root signing commitment",
@@ -328,6 +515,7 @@ impl PortalStore {
             }
             (CeremonyPhase::RootSigning, CeremonyPayloadKind::RootSignatureShare) => {
                 reject_recipient(envelope)?;
+                self.ensure_final_key_confirmations_complete()?;
                 reject_unless_decodable::<frost::round2::SignatureShare>(
                     bytes,
                     "root signature share",
@@ -339,6 +527,13 @@ impl PortalStore {
                         reason: "round-two encrypted package requires recipient".to_owned(),
                     });
                 }
+                self.reject_dkg_mutation_after_final_confirmation()?;
+                self.reject_duplicate_pairwise_sender_recipient(
+                    envelope,
+                    CeremonyPhase::Round2,
+                    CeremonyPayloadKind::Round2EncryptedPackage,
+                    "round-two encrypted package already submitted for sender and recipient",
+                )?;
                 validate_encrypted_round2_payload(bytes)
             }
             (CeremonyPhase::Round1SetAttestation, CeremonyPayloadKind::Round1SetAttestation) => {
@@ -349,11 +544,8 @@ impl PortalStore {
                 })
             }
             (CeremonyPhase::Finalize, CeremonyPayloadKind::FinalKeyConfirmation) => {
-                Err(RootError::PortalRejected {
-                    reason: "final key confirmation is disabled pending a ratified, \
-                             portal-validated payload schema"
-                        .to_owned(),
-                })
+                reject_recipient(envelope)?;
+                self.validate_final_key_confirmation(envelope).map(|_| ())
             }
             (_, CeremonyPayloadKind::Round2PlaintextPackage) => Err(RootError::PortalRejected {
                 reason: "round-two raw package is rejected".to_owned(),
@@ -362,6 +554,315 @@ impl PortalStore {
                 reason: "payload kind is not valid for phase".to_owned(),
             }),
         }
+    }
+
+    fn reject_dkg_mutation_after_final_confirmation(&self) -> Result<()> {
+        if !self.final_key_confirmations.is_empty() {
+            return Err(RootError::PortalRejected {
+                reason: "dkg transcript is frozen after final key confirmation".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn reject_duplicate_broadcast_sender(
+        &self,
+        envelope: &CeremonyEnvelope,
+        phase: CeremonyPhase,
+        payload_kind: CeremonyPayloadKind,
+        reason: &str,
+    ) -> Result<()> {
+        if self.envelopes.values().any(|accepted| {
+            accepted.sender_did == envelope.sender_did
+                && accepted.phase == phase
+                && accepted.payload_kind == payload_kind
+                && accepted.recipient_did.is_none()
+                && accepted.sequence != envelope.sequence
+        }) {
+            return Err(RootError::PortalRejected {
+                reason: reason.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn reject_duplicate_pairwise_sender_recipient(
+        &self,
+        envelope: &CeremonyEnvelope,
+        phase: CeremonyPhase,
+        payload_kind: CeremonyPayloadKind,
+        reason: &str,
+    ) -> Result<()> {
+        if self.envelopes.values().any(|accepted| {
+            accepted.sender_did == envelope.sender_did
+                && accepted.recipient_did == envelope.recipient_did
+                && accepted.phase == phase
+                && accepted.payload_kind == payload_kind
+                && accepted.sequence != envelope.sequence
+        }) {
+            return Err(RootError::PortalRejected {
+                reason: reason.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_final_key_confirmation(
+        &self,
+        envelope: &CeremonyEnvelope,
+    ) -> Result<FinalKeyConfirmation> {
+        if self
+            .final_key_confirmations
+            .contains_key(&envelope.sender_did)
+        {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation already submitted by sender".to_owned(),
+            });
+        }
+        let confirmation =
+            decode_final_key_confirmation_payload(envelope.payload_bytes.as_slice())?;
+        self.validate_final_key_confirmation_semantics(envelope, &confirmation)?;
+        for accepted in self.final_key_confirmations.values() {
+            if accepted.config_hash != confirmation.config_hash {
+                return Err(RootError::PortalRejected {
+                    reason: "final key confirmation config hash disagrees with accepted set"
+                        .to_owned(),
+                });
+            }
+            if accepted.dkg_transcript_hash != confirmation.dkg_transcript_hash {
+                return Err(RootError::PortalRejected {
+                    reason:
+                        "final key confirmation DKG transcript hash disagrees with accepted set"
+                            .to_owned(),
+                });
+            }
+            if accepted.public_key_package != confirmation.public_key_package {
+                return Err(RootError::PortalRejected {
+                    reason: "final key confirmation public key package disagrees with accepted set"
+                        .to_owned(),
+                });
+            }
+            if accepted.root_public_key_package_hash != confirmation.root_public_key_package_hash {
+                return Err(RootError::PortalRejected {
+                    reason:
+                        "final key confirmation public key package hash disagrees with accepted set"
+                            .to_owned(),
+                });
+            }
+            if accepted.root_public_key_hash != confirmation.root_public_key_hash {
+                return Err(RootError::PortalRejected {
+                    reason: "final key confirmation root key hash disagrees with accepted set"
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(confirmation)
+    }
+
+    fn validate_final_key_confirmation_semantics(
+        &self,
+        envelope: &CeremonyEnvelope,
+        confirmation: &FinalKeyConfirmation,
+    ) -> Result<()> {
+        if confirmation.domain != FINAL_KEY_CONFIRMATION_DOMAIN {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation domain mismatch".to_owned(),
+            });
+        }
+        if confirmation.schema_version != FINAL_KEY_CONFIRMATION_SCHEMA_VERSION {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation schema version mismatch".to_owned(),
+            });
+        }
+        if confirmation.ceremony_id != self.config.ceremony_id {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation ceremony_id mismatch".to_owned(),
+            });
+        }
+        if confirmation.certifier_did != envelope.sender_did {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation certifier_did must match envelope sender"
+                    .to_owned(),
+            });
+        }
+        let certifier = self
+            .config
+            .certifier_by_did(&confirmation.certifier_did)
+            .ok_or_else(|| RootError::PortalRejected {
+                reason: "final key confirmation certifier is not rostered".to_owned(),
+            })?;
+        if certifier.frost_identifier != confirmation.frost_identifier {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation DID and FROST identifier mismatch".to_owned(),
+            });
+        }
+        let expected_config_hash = ceremony_config_hash(&self.config)?;
+        if confirmation.config_hash != expected_config_hash {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation config hash mismatch".to_owned(),
+            });
+        }
+        let expected_dkg_transcript_hash = self.dkg_transcript_hash()?;
+        if confirmation.dkg_transcript_hash != expected_dkg_transcript_hash {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation DKG transcript hash mismatch".to_owned(),
+            });
+        }
+        validate_public_key_package(&self.config, &confirmation.public_key_package)?;
+        let expected_package_hash =
+            hash_structured(&confirmation.public_key_package).map_err(canonical_encoding_error)?;
+        if confirmation.root_public_key_package_hash != expected_package_hash {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation public key package hash mismatch".to_owned(),
+            });
+        }
+        let expected_root_public_key_hash =
+            Hash256::digest(confirmation.public_key_package.root_public_key.as_slice());
+        if confirmation.root_public_key_hash != expected_root_public_key_hash {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation root public key hash mismatch".to_owned(),
+            });
+        }
+        let verifying_share = confirmation
+            .public_key_package
+            .verifying_shares
+            .get(&confirmation.frost_identifier)
+            .ok_or_else(|| RootError::PortalRejected {
+                reason: "final key confirmation verifying share is missing".to_owned(),
+            })?;
+        if confirmation.certifier_verifying_share_hash
+            != Hash256::digest(verifying_share.as_slice())
+        {
+            return Err(RootError::PortalRejected {
+                reason: "final key confirmation verifying share hash mismatch".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn dkg_transcript_records(&self) -> Result<Vec<TranscriptEnvelopeRecord>> {
+        let mut records = Vec::new();
+        for (key, envelope) in &self.envelopes {
+            if matches!(
+                (envelope.phase, envelope.payload_kind),
+                (CeremonyPhase::Round1, CeremonyPayloadKind::Round1Package)
+                    | (
+                        CeremonyPhase::Round2,
+                        CeremonyPayloadKind::Round2EncryptedPackage
+                    )
+            ) {
+                records.push(transcript_record(key, envelope)?);
+            }
+        }
+        records.sort();
+        Ok(records)
+    }
+
+    fn final_key_confirmation_records(&self) -> Result<Vec<TranscriptEnvelopeRecord>> {
+        let mut records = Vec::new();
+        for (key, envelope) in &self.envelopes {
+            if envelope.phase == CeremonyPhase::Finalize
+                && envelope.payload_kind == CeremonyPayloadKind::FinalKeyConfirmation
+            {
+                records.push(transcript_record(key, envelope)?);
+            }
+        }
+        records.sort();
+        Ok(records)
+    }
+
+    fn ensure_dkg_transcript_complete(&self, records: &[TranscriptEnvelopeRecord]) -> Result<()> {
+        let expected_certifiers: BTreeSet<Did> = self
+            .config
+            .certifiers
+            .iter()
+            .map(|certifier| certifier.did.clone())
+            .collect();
+        let mut round1_senders = BTreeSet::new();
+        let mut round2_pairs = BTreeSet::new();
+        for record in records {
+            match (record.phase, record.payload_kind) {
+                (CeremonyPhase::Round1, CeremonyPayloadKind::Round1Package) => {
+                    if record.recipient_did.is_some() {
+                        return Err(RootError::PortalRejected {
+                            reason: "dkg transcript round-one record has a recipient".to_owned(),
+                        });
+                    }
+                    if !round1_senders.insert(record.sender_did.clone()) {
+                        return Err(RootError::PortalRejected {
+                            reason: "dkg transcript contains duplicate round-one sender".to_owned(),
+                        });
+                    }
+                }
+                (CeremonyPhase::Round2, CeremonyPayloadKind::Round2EncryptedPackage) => {
+                    let recipient =
+                        record
+                            .recipient_did
+                            .clone()
+                            .ok_or_else(|| RootError::PortalRejected {
+                                reason: "dkg transcript round-two record missing recipient"
+                                    .to_owned(),
+                            })?;
+                    if !round2_pairs.insert((record.sender_did.clone(), recipient)) {
+                        return Err(RootError::PortalRejected {
+                            reason:
+                                "dkg transcript contains duplicate round-two sender-recipient pair"
+                                    .to_owned(),
+                        });
+                    }
+                }
+                _ => {
+                    return Err(RootError::PortalRejected {
+                        reason: "dkg transcript contains non-DKG envelope".to_owned(),
+                    });
+                }
+            }
+        }
+        if round1_senders != expected_certifiers {
+            return Err(RootError::PortalRejected {
+                reason: "dkg transcript requires one round-one package from every certifier"
+                    .to_owned(),
+            });
+        }
+        let expected_round2 = usize::from(self.config.max_signers)
+            * usize::from(self.config.max_signers.saturating_sub(1));
+        if round2_pairs.len() != expected_round2 {
+            return Err(RootError::PortalRejected {
+                reason: "dkg transcript requires every ordered round-two sender-recipient package"
+                    .to_owned(),
+            });
+        }
+        for sender in &expected_certifiers {
+            for recipient in &expected_certifiers {
+                if sender == recipient {
+                    continue;
+                }
+                if !round2_pairs.contains(&(sender.clone(), recipient.clone())) {
+                    return Err(RootError::PortalRejected {
+                        reason: "dkg transcript missing round-two sender-recipient package"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_final_key_confirmations_complete(&self) -> Result<()> {
+        if self.final_key_confirmations.len() != usize::from(self.config.max_signers) {
+            return Err(RootError::PortalRejected {
+                reason: "root signing requires final key confirmations from all certifiers"
+                    .to_owned(),
+            });
+        }
+        for certifier in &self.config.certifiers {
+            if !self.final_key_confirmations.contains_key(&certifier.did) {
+                return Err(RootError::PortalRejected {
+                    reason: "root signing missing a certifier final key confirmation".to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -417,6 +918,21 @@ fn key_parts(key: &PortalEnvelopeKey) -> PortalEnvelopeKeyParts<'_> {
     }
 }
 
+fn transcript_record(
+    key: &PortalEnvelopeKey,
+    envelope: &CeremonyEnvelope,
+) -> Result<TranscriptEnvelopeRecord> {
+    Ok(TranscriptEnvelopeRecord {
+        phase: envelope.phase,
+        payload_kind: envelope.payload_kind,
+        sender_did: envelope.sender_did.clone(),
+        recipient_did: envelope.recipient_did.clone(),
+        sequence: envelope.sequence,
+        envelope_id: hash_structured(&key_parts(key)).map_err(canonical_encoding_error)?,
+        envelope_hash: hash_structured(envelope).map_err(canonical_encoding_error)?,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -468,7 +984,6 @@ mod tests {
                 created_at: Timestamp::new(1, 0),
                 certifiers,
                 signing_set: (1..=7).collect(),
-                signing_alternates: (8..=13).collect(),
             },
             secrets,
         )

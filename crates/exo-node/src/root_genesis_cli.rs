@@ -5,11 +5,13 @@ use std::{collections::BTreeMap, fs, io::Write, net::SocketAddr};
 use exo_core::{Did, Hash256, SecretKey, Timestamp, crypto::KeyPair};
 use exo_root::{
     CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
-    GenesisCeremonyConfig, PairwiseEncryptedPayload, RootIssuerDelegation, RootKeyPackage,
-    RootPublicKeyPackage, RootSigningNonces, RootSigningPackage, RootTrustBundle,
-    aggregate_signature, assemble_root_bundle, build_signing_package, decrypt_pairwise_payload,
-    dkg_finalize_participant, dkg_round1, dkg_round2, encrypt_pairwise_payload, seal_share,
-    sign_commit, sign_share, threshold_sign, unseal_share, verify_root_bundle,
+    GenesisCeremonyConfig, PairwiseEncryptedPayload, PortalStore, RootIssuerDelegation,
+    RootKeyPackage, RootParticipantDkgOutput, RootPublicKeyPackage, RootSignature,
+    RootSigningNonces, RootSigningPackage, RootTrustBundle, aggregate_signature,
+    assemble_root_bundle, build_final_key_confirmation, build_signing_package,
+    decrypt_pairwise_payload, dkg_finalize_participant, dkg_round1, dkg_round2,
+    encode_final_key_confirmation_payload, encrypt_pairwise_payload, seal_share, sign_commit,
+    sign_share, threshold_sign, unseal_share, verify_root_bundle,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -60,6 +62,13 @@ struct FinalizeDkgCommandInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BuildFinalKeyConfirmationCommandInput {
+    config: GenesisCeremonyConfig,
+    dkg_output: RootParticipantDkgOutput,
+    dkg_transcript_hash_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SignRootArtifactCommandInput {
     config: GenesisCeremonyConfig,
     public_key_package: RootPublicKeyPackage,
@@ -73,12 +82,18 @@ struct AssembleBundleCommandInput {
     public_key_package: RootPublicKeyPackage,
     issuer_delegation: RootIssuerDelegation,
     transcript_hash: Hash256,
-    root_signature_hex: String,
+    root_signature: RootSignature,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VerifyBundleCommandInput {
     bundle: RootTrustBundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TranscriptHashCommandInput {
+    config: GenesisCeremonyConfig,
+    envelopes: Vec<CeremonyEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +115,11 @@ struct UnsealShareCommandInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HexBytesOutput {
     bytes_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HashHexOutput {
+    hash_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +230,7 @@ pub async fn run_genesis_command(command: GenesisCommand) -> anyhow::Result<()> 
         GenesisCommand::Round1(args) => run_round1(args),
         GenesisCommand::Round2(args) => run_round2(args),
         GenesisCommand::FinalizeDkg(args) => run_finalize_dkg(args),
+        GenesisCommand::BuildFinalKeyConfirmation(args) => run_build_final_key_confirmation(args),
         GenesisCommand::SignRootArtifact(args) => run_sign_root_artifact(args),
         GenesisCommand::AssembleBundle(args) => run_assemble_bundle(args),
         GenesisCommand::VerifyBundle(args) => run_verify_bundle(args),
@@ -221,6 +242,8 @@ pub async fn run_genesis_command(command: GenesisCommand) -> anyhow::Result<()> 
         GenesisCommand::EmitArtifactBytes(args) => run_emit_artifact_bytes(args),
         GenesisCommand::SubmitEnvelope(args) => run_submit_envelope(args).await,
         GenesisCommand::PullEnvelopes(args) => run_pull_envelopes(args).await,
+        GenesisCommand::ComputeDkgTranscriptHash(args) => run_compute_dkg_transcript_hash(args),
+        GenesisCommand::ComputeFinalTranscriptHash(args) => run_compute_final_transcript_hash(args),
         GenesisCommand::EncodeEncryptedPayload(args) => run_encode_encrypted_payload(args),
         GenesisCommand::DecodeEncryptedPayload(args) => run_decode_encrypted_payload(args),
         GenesisCommand::SignCommit(args) => run_sign_commit(args),
@@ -280,7 +303,6 @@ fn init_ceremony(args: GenesisCeremonyInitArgs) -> anyhow::Result<()> {
         created_at: Timestamp::new(args.created_physical_ms, 0),
         certifiers,
         signing_set: args.signing_set,
-        signing_alternates: args.signing_alternates,
     };
     config.validate()?;
     write_json(&args.out, &config)?;
@@ -328,6 +350,15 @@ fn run_finalize_dkg(args: GenesisIoArgs) -> anyhow::Result<()> {
     write_secret_output(&args, &output)
 }
 
+fn run_build_final_key_confirmation(args: GenesisIoArgs) -> anyhow::Result<()> {
+    let input: BuildFinalKeyConfirmationCommandInput = read_json(&required_input(&args)?)?;
+    let dkg_transcript_hash = parse_hash_hex(&input.dkg_transcript_hash_hex)?;
+    let confirmation =
+        build_final_key_confirmation(&input.config, &input.dkg_output, dkg_transcript_hash)?;
+    let payload_bytes = encode_final_key_confirmation_payload(&confirmation)?;
+    write_output(&args, &PayloadBytesOutput { payload_bytes })
+}
+
 fn run_sign_root_artifact(args: GenesisIoArgs) -> anyhow::Result<()> {
     let input: SignRootArtifactCommandInput = read_json(&required_input(&args)?)?;
     let artifact = decode_hex(&input.artifact_hex)?;
@@ -349,7 +380,7 @@ fn run_assemble_bundle(args: GenesisIoArgs) -> anyhow::Result<()> {
         input.public_key_package,
         input.issuer_delegation,
         input.transcript_hash,
-        decode_hex(&input.root_signature_hex)?,
+        input.root_signature,
     )?;
     write_output(&args, &bundle)
 }
@@ -395,23 +426,20 @@ fn run_sign_envelope(args: GenesisSignEnvelopeArgs) -> anyhow::Result<()> {
         output: args.output.clone(),
     };
     let input: SignEnvelopeCommandInput = read_json(&required_input(&io)?)?;
-    // Fail closed on disabled / unratified payload kinds: the generic signer must
-    // not be usable to mint envelopes the portal rejects (round-one set
-    // attestation and final key confirmation have no ratified schema; raw
-    // round-two plaintext is never relayed). This keeps the signer aligned with
-    // the portal's accepted set rather than relying on the portal alone.
+    // Fail closed on disabled payload kinds: the generic signer must not be
+    // usable to mint envelopes the portal rejects. FinalKeyConfirmation is now
+    // ratified, but it must be produced by `build-final-key-confirmation` before
+    // signing.
     match input.payload_kind {
-        CeremonyPayloadKind::Round1SetAttestation
-        | CeremonyPayloadKind::FinalKeyConfirmation
-        | CeremonyPayloadKind::Round2PlaintextPackage => {
+        CeremonyPayloadKind::Round1SetAttestation | CeremonyPayloadKind::Round2PlaintextPackage => {
             anyhow::bail!(
-                "sign-envelope refuses payload kind {:?}: it is disabled/unratified and rejected \
-                 by the portal",
+                "sign-envelope refuses payload kind {:?}: it is disabled and rejected by the portal",
                 input.payload_kind
             );
         }
         CeremonyPayloadKind::Round1Package
         | CeremonyPayloadKind::Round2EncryptedPackage
+        | CeremonyPayloadKind::FinalKeyConfirmation
         | CeremonyPayloadKind::RootSigningCommitment
         | CeremonyPayloadKind::RootSignatureShare => {}
     }
@@ -487,6 +515,30 @@ fn run_emit_artifact_bytes(args: GenesisIoArgs) -> anyhow::Result<()> {
         &args,
         &ArtifactBytesOutput {
             artifact_hex: hex::encode(artifact),
+        },
+    )
+}
+
+fn run_compute_dkg_transcript_hash(args: GenesisIoArgs) -> anyhow::Result<()> {
+    let input: TranscriptHashCommandInput = read_json(&required_input(&args)?)?;
+    let store = replay_portal_envelopes(input.config, input.envelopes)?;
+    let hash = store.dkg_transcript_hash()?;
+    write_output(
+        &args,
+        &HashHexOutput {
+            hash_hex: hex::encode(hash.as_bytes()),
+        },
+    )
+}
+
+fn run_compute_final_transcript_hash(args: GenesisIoArgs) -> anyhow::Result<()> {
+    let input: TranscriptHashCommandInput = read_json(&required_input(&args)?)?;
+    let store = replay_portal_envelopes(input.config, input.envelopes)?;
+    let hash = store.final_transcript_hash()?;
+    write_output(
+        &args,
+        &HashHexOutput {
+            hash_hex: hex::encode(hash.as_bytes()),
         },
     )
 }
@@ -633,6 +685,29 @@ fn run_aggregate_signature(args: GenesisIoArgs) -> anyhow::Result<()> {
     write_output(&args, &output)
 }
 
+fn replay_portal_envelopes(
+    config: GenesisCeremonyConfig,
+    mut envelopes: Vec<CeremonyEnvelope>,
+) -> anyhow::Result<PortalStore> {
+    sort_portal_envelopes(envelopes.as_mut_slice());
+    let mut store = PortalStore::new(config);
+    for envelope in envelopes {
+        store.submit(envelope)?;
+    }
+    Ok(store)
+}
+
+fn sort_portal_envelopes(envelopes: &mut [CeremonyEnvelope]) {
+    envelopes.sort_by(|left, right| {
+        left.phase
+            .cmp(&right.phase)
+            .then(left.payload_kind.cmp(&right.payload_kind))
+            .then(left.sender_did.cmp(&right.sender_did))
+            .then(left.recipient_did.cmp(&right.recipient_did))
+            .then(left.sequence.cmp(&right.sequence))
+    });
+}
+
 /// Append the portal envelopes path to a base URL unless it is already present.
 fn portal_envelopes_url(base: &str) -> String {
     let trimmed = base.trim_end_matches('/');
@@ -646,7 +721,7 @@ fn portal_envelopes_url(base: &str) -> String {
 fn parse_hash_hex(value: &str) -> anyhow::Result<Hash256> {
     let bytes = hex::decode(value)?;
     if bytes.len() != 32 {
-        anyhow::bail!("constitution hash must be 32 bytes");
+        anyhow::bail!("hash must be 32 bytes");
     }
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&bytes);
@@ -765,7 +840,7 @@ mod tests {
 
     use exo_authority::permission::Permission;
     use exo_core::PublicKey;
-    use exo_root::PortalStore;
+    use rand::SeedableRng;
     use tempfile::tempdir;
 
     use super::*;
@@ -815,7 +890,6 @@ mod tests {
             created_at: Timestamp::new(1_785_000_000_000, 0),
             certifiers,
             signing_set: (1..=7).collect(),
-            signing_alternates: (8..=13).collect(),
         };
         config.validate().expect("rostered config is valid");
         config
@@ -827,6 +901,50 @@ mod tests {
         exo_root::dkg_round1(config, 1, &mut rand::rngs::OsRng)
             .expect("round one")
             .round1_package
+    }
+
+    fn signed_test_envelope(
+        config: &GenesisCeremonyConfig,
+        sender_identifier: u16,
+        phase: CeremonyPhase,
+        payload_kind: CeremonyPayloadKind,
+        recipient_identifier: Option<u16>,
+        sequence: u64,
+        payload_bytes: Vec<u8>,
+    ) -> CeremonyEnvelope {
+        let sender = config
+            .certifier_by_identifier(sender_identifier)
+            .expect("sender");
+        let recipient = recipient_identifier.map(|identifier| {
+            config
+                .certifier_by_identifier(identifier)
+                .expect("recipient")
+                .did
+                .clone()
+        });
+        CeremonyEnvelope::sign(
+            CeremonyEnvelopeDraft {
+                ceremony_id: config.ceremony_id.clone(),
+                phase,
+                payload_kind,
+                sender_did: sender.did.clone(),
+                recipient_did: recipient,
+                sequence,
+                payload_bytes,
+            },
+            &SecretKey::from_bytes([u8::try_from(sender_identifier).expect("id fits"); 32]),
+        )
+        .expect("signed envelope")
+    }
+
+    fn encoded_pairwise_payload(ciphertext: impl Into<Vec<u8>>) -> Vec<u8> {
+        let payload = PairwiseEncryptedPayload {
+            nonce: [9u8; 24],
+            ciphertext: ciphertext.into(),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&payload, &mut bytes).expect("encode encrypted payload");
+        bytes
     }
 
     fn round1_broadcast(
@@ -869,7 +987,6 @@ mod tests {
             created_physical_ms: 42,
             roster: roster_path,
             signing_set: (1..=7).collect(),
-            signing_alternates: (8..=13).collect(),
             out: config_path.clone(),
         })
         .expect("ceremony init");
@@ -967,7 +1084,7 @@ mod tests {
             parse_hash_hex("abcd")
                 .expect_err("short hash must fail")
                 .to_string()
-                .contains("constitution hash must be 32 bytes")
+                .contains("hash must be 32 bytes")
         );
         assert!(
             decode_fixed_16("abcd")
@@ -1035,9 +1152,156 @@ mod tests {
     }
 
     #[test]
+    fn build_final_key_confirmation_emits_only_public_payload_bytes() {
+        let config = rostered_config();
+        let mut rng = rand::rngs::OsRng;
+        let dkg = exo_root::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let transcript_hash = Hash256::digest(b"accepted dkg transcript");
+        let participant = RootParticipantDkgOutput {
+            key_package: dkg.key_packages[&1].clone(),
+            public_key_package: dkg.public_key_package.clone(),
+        };
+        let directory = tempdir().expect("temporary directory");
+        let input_path = directory.path().join("final-key-confirmation-in.json");
+        let output_path = directory.path().join("final-key-confirmation-out.json");
+        write_json(
+            &input_path,
+            &BuildFinalKeyConfirmationCommandInput {
+                config: config.clone(),
+                dkg_output: participant,
+                dkg_transcript_hash_hex: hex::encode(transcript_hash.as_bytes()),
+            },
+        )
+        .expect("write confirmation input");
+
+        run_build_final_key_confirmation(io_args(input_path, output_path.clone()))
+            .expect("build final key confirmation");
+        let output: PayloadBytesOutput = read_json(&output_path).expect("read payload bytes");
+        let confirmation: exo_root::FinalKeyConfirmation =
+            ciborium::from_reader(output.payload_bytes.as_slice()).expect("decode confirmation");
+        assert_eq!(confirmation.certifier_did, config.certifiers[0].did);
+        assert_eq!(confirmation.frost_identifier, 1);
+        assert_eq!(confirmation.dkg_transcript_hash, transcript_hash);
+        assert_eq!(confirmation.public_key_package, dkg.public_key_package);
+
+        let confirmation_json =
+            serde_json::to_value(&confirmation).expect("confirmation json projection");
+        let object = confirmation_json
+            .as_object()
+            .expect("confirmation is a JSON object");
+        assert!(
+            !object.contains_key("key_package"),
+            "final confirmation payload must not expose the secret FROST key package"
+        );
+        let rendered = serde_json::to_string(&confirmation_json).expect("render confirmation");
+        assert!(
+            !rendered.to_lowercase().contains("secret"),
+            "final confirmation payload must not expose secret-labeled fields"
+        );
+    }
+
+    #[test]
+    fn transcript_hash_commands_replay_envelopes_in_ceremony_order() {
+        let config = rostered_config();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(5_151);
+        let mut envelopes = Vec::new();
+        let mut store = PortalStore::new(config.clone());
+        for certifier in &config.certifiers {
+            let round1 = dkg_round1(&config, certifier.frost_identifier, &mut rng)
+                .expect("round one")
+                .round1_package;
+            let envelope = signed_test_envelope(
+                &config,
+                certifier.frost_identifier,
+                CeremonyPhase::Round1,
+                CeremonyPayloadKind::Round1Package,
+                None,
+                10,
+                round1,
+            );
+            store.submit(envelope.clone()).expect("submit round one");
+            envelopes.push(envelope);
+        }
+        for sender in &config.certifiers {
+            for recipient in &config.certifiers {
+                if sender.frost_identifier == recipient.frost_identifier {
+                    continue;
+                }
+                let sequence = 1_000
+                    + u64::from(sender.frost_identifier) * 100
+                    + u64::from(recipient.frost_identifier);
+                let envelope = signed_test_envelope(
+                    &config,
+                    sender.frost_identifier,
+                    CeremonyPhase::Round2,
+                    CeremonyPayloadKind::Round2EncryptedPackage,
+                    Some(recipient.frost_identifier),
+                    sequence,
+                    encoded_pairwise_payload(format!(
+                        "round2-{}-{}",
+                        sender.frost_identifier, recipient.frost_identifier
+                    )),
+                );
+                store.submit(envelope.clone()).expect("submit round two");
+                envelopes.push(envelope);
+            }
+        }
+        let dkg_hash = store.dkg_transcript_hash().expect("dkg hash");
+
+        let directory = tempdir().expect("temporary directory");
+        let dkg_in = directory.path().join("dkg-hash-in.json");
+        let dkg_out = directory.path().join("dkg-hash-out.json");
+        let mut reversed = envelopes.clone();
+        reversed.reverse();
+        write_json(
+            &dkg_in,
+            &TranscriptHashCommandInput {
+                config: config.clone(),
+                envelopes: reversed,
+            },
+        )
+        .expect("write dkg hash input");
+        run_compute_dkg_transcript_hash(io_args(dkg_in, dkg_out.clone()))
+            .expect("compute dkg hash");
+        let dkg_output: HashHexOutput = read_json(&dkg_out).expect("read dkg hash");
+        assert_eq!(dkg_output.hash_hex, hex::encode(dkg_hash.as_bytes()));
+
+        let dkg = exo_root::run_complete_dkg(&config, &mut rng).expect("dkg");
+        for identifier in 1..=13u16 {
+            let participant = RootParticipantDkgOutput {
+                key_package: dkg.key_packages[&identifier].clone(),
+                public_key_package: dkg.public_key_package.clone(),
+            };
+            let confirmation =
+                build_final_key_confirmation(&config, &participant, dkg_hash).expect("confirm");
+            let envelope = signed_test_envelope(
+                &config,
+                identifier,
+                CeremonyPhase::Finalize,
+                CeremonyPayloadKind::FinalKeyConfirmation,
+                None,
+                5_000 + u64::from(identifier),
+                encode_final_key_confirmation_payload(&confirmation).expect("encode"),
+            );
+            store.submit(envelope.clone()).expect("submit confirmation");
+            envelopes.push(envelope);
+        }
+        let final_hash = store.final_transcript_hash().expect("final hash");
+        let final_in = directory.path().join("final-hash-in.json");
+        let final_out = directory.path().join("final-hash-out.json");
+        envelopes.reverse();
+        write_json(&final_in, &TranscriptHashCommandInput { config, envelopes })
+            .expect("write final hash input");
+        run_compute_final_transcript_hash(io_args(final_in, final_out.clone()))
+            .expect("compute final hash");
+        let final_output: HashHexOutput = read_json(&final_out).expect("read final hash");
+        assert_eq!(final_output.hash_hex, hex::encode(final_hash.as_bytes()));
+    }
+
+    #[test]
     fn sign_envelope_refuses_disabled_payload_kinds() {
         // Bob's blocker-3 regression: the generic signer must fail closed on
-        // disabled/unratified kinds so it cannot mint envelopes the portal rejects.
+        // disabled kinds so it cannot mint envelopes the portal rejects.
         let config = rostered_config();
         let signer = config.certifiers[0].clone();
         let directory = tempdir().expect("temporary directory");
@@ -1072,8 +1336,8 @@ mod tests {
             output: Some(directory.path().join("envelope.json")),
             private_input: private_path,
         })
-        .expect_err("sign-envelope must refuse a disabled/unratified payload kind");
-        assert!(error.to_string().contains("disabled/unratified"));
+        .expect_err("sign-envelope must refuse a disabled payload kind");
+        assert!(error.to_string().contains("disabled"));
     }
 
     #[test]

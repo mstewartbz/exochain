@@ -21,7 +21,9 @@ pub use dkg::{
 };
 pub use error::{Result, RootError};
 pub use portal::{
-    CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, PortalStore,
+    CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase,
+    FinalKeyConfirmation, PortalStore, build_final_key_confirmation, ceremony_config_hash,
+    encode_final_key_confirmation_payload,
 };
 pub use seal::{
     PairwiseEncryptedPayload, SealedShare, decrypt_pairwise_payload, encrypt_pairwise_payload,

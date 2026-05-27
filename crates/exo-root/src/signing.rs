@@ -42,7 +42,7 @@ fn frost_aggregate_signature(
     frost::aggregate(signing_package, signature_shares, public).map_err(frost_error)
 }
 
-/// Create a FROST threshold signature from at least seven rostered shares.
+/// Create a FROST threshold signature from the exact predeclared signing set.
 pub fn threshold_sign<R>(
     config: &GenesisCeremonyConfig,
     public_key_package: &RootPublicKeyPackage,
@@ -65,13 +65,14 @@ where
         };
         return Err(error);
     }
+    let signer_ids: Vec<u16> = shares.keys().copied().collect();
+    validate_root_signer_ids(config, signer_ids.as_slice())?;
 
     let public = deserialize_frost(public_key_package.public_key_package.as_slice())?;
 
     let mut key_packages = BTreeMap::new();
     let mut signing_nonces = BTreeMap::new();
     let mut signing_commitments = BTreeMap::new();
-    let mut signer_ids = Vec::new();
 
     for (identifier, share) in shares {
         if config.certifier_by_identifier(identifier).is_none() {
@@ -95,7 +96,6 @@ where
         signing_nonces.insert(frost_identifier, nonces);
         signing_commitments.insert(frost_identifier, commitments);
         key_packages.insert(frost_identifier, key_package);
-        signer_ids.push(identifier);
     }
 
     let signing_package = frost::SigningPackage::new(signing_commitments, message);
@@ -223,6 +223,34 @@ fn ensure_rostered(config: &GenesisCeremonyConfig, identifier: u16, role: &str) 
     Ok(())
 }
 
+pub(crate) fn validate_root_signer_ids(
+    config: &GenesisCeremonyConfig,
+    signer_ids: &[u16],
+) -> Result<()> {
+    if signer_ids.len() != usize::from(config.threshold) {
+        return Err(RootError::InvalidConfig {
+            reason: format!(
+                "signing selection must contain exactly {} signers",
+                config.threshold
+            ),
+        });
+    }
+    let mut selection = BTreeSet::new();
+    for identifier in signer_ids {
+        if config.certifier_by_identifier(*identifier).is_none() {
+            return Err(RootError::InvalidConfig {
+                reason: format!("signer {identifier} is not rostered"),
+            });
+        }
+        if !selection.insert(*identifier) {
+            return Err(RootError::InvalidConfig {
+                reason: format!("duplicate signer {identifier}"),
+            });
+        }
+    }
+    config.validate_signing_selection(&selection)
+}
+
 /// Distributed signing — round one. Produce one signer's PUBLIC commitment and
 /// SECRET nonces as two distinct artifacts, **bound to the exact root `artifact`
 /// being signed**. Run by each participating certifier against its own share.
@@ -260,7 +288,7 @@ where
 }
 
 /// Distributed signing — coordinator assembles the signing package from at
-/// least `threshold` public commitments bound to `message` (the root artifact).
+/// the exact predeclared public commitments bound to `message` (the root artifact).
 pub fn build_signing_package(
     config: &GenesisCeremonyConfig,
     commitments: BTreeMap<u16, Vec<u8>>,
@@ -273,18 +301,17 @@ pub fn build_signing_package(
             supplied: u16::try_from(commitments.len()).unwrap_or(u16::MAX),
         });
     }
-    // The participating signers must be the predeclared signing set, allowing only
-    // ordered alternate substitution for primaries unavailable before commitments.
-    let selection: BTreeSet<u16> = commitments.keys().copied().collect();
-    config.validate_signing_selection(&selection)?;
+    // The participating signers must be exactly the predeclared signing set. Any
+    // unavailability aborts the ceremony before commitments and requires a new
+    // config/ceremony id.
+    let signer_ids: Vec<u16> = commitments.keys().copied().collect();
+    validate_root_signer_ids(config, signer_ids.as_slice())?;
     let mut parsed = BTreeMap::new();
-    let mut signer_ids = Vec::new();
     for (identifier, bytes) in commitments {
         ensure_rostered(config, identifier, "signer")?;
         let frost_id = crate::dkg::frost_identifier(identifier)?;
         let commitment: frost::round1::SigningCommitments = deserialize_frost(bytes.as_slice())?;
         parsed.insert(frost_id, commitment);
-        signer_ids.push(identifier);
     }
     let signing_package = frost::SigningPackage::new(parsed, message);
     Ok(RootSigningPackage {
@@ -334,11 +361,10 @@ pub fn sign_share(
         });
     }
     // Enforce the ratified deterministic signer-selection policy signer-side too:
-    // a signer must refuse a signing package whose signer set is not the canonical
-    // selection (predeclared primaries with ordered alternate substitution), even
-    // when a coordinator builds the package outside `build_signing_package`.
-    let selection: BTreeSet<u16> = signing_package.signer_ids.iter().copied().collect();
-    config.validate_signing_selection(&selection)?;
+    // a signer must refuse a signing package whose signer set is not exactly the
+    // predeclared set, even when a coordinator builds the package outside
+    // `build_signing_package`.
+    validate_root_signer_ids(config, signing_package.signer_ids.as_slice())?;
     let parsed_key: frost::keys::KeyPackage =
         deserialize_frost(key_package.key_package.as_slice())?;
     let parsed_nonces: frost::round1::SigningNonces = deserialize_frost(nonces.nonces.as_slice())?;
@@ -376,8 +402,8 @@ pub fn sign_share(
     })
 }
 
-/// Distributed signing — coordinator aggregates `>= threshold` signature shares
-/// into the final root signature and verifies it against the root public key.
+/// Distributed signing — coordinator aggregates the exact predeclared signature
+/// shares into the final root signature and verifies it against the root public key.
 pub fn aggregate_signature(
     config: &GenesisCeremonyConfig,
     public_key_package: &RootPublicKeyPackage,
@@ -392,16 +418,16 @@ pub fn aggregate_signature(
             supplied: u16::try_from(shares.len()).unwrap_or(u16::MAX),
         });
     }
+    let signer_ids: Vec<u16> = shares.keys().copied().collect();
+    validate_root_signer_ids(config, signer_ids.as_slice())?;
     let public = deserialize_frost(public_key_package.public_key_package.as_slice())?;
     let parsed_package: frost::SigningPackage = deserialize_frost(signing_package)?;
     let mut parsed_shares = BTreeMap::new();
-    let mut signer_ids = Vec::new();
     for (identifier, bytes) in shares {
         ensure_rostered(config, identifier, "signer")?;
         let frost_id = crate::dkg::frost_identifier(identifier)?;
         let share: frost::round2::SignatureShare = deserialize_frost(bytes.as_slice())?;
         parsed_shares.insert(frost_id, share);
-        signer_ids.push(identifier);
     }
     let aggregated =
         frost::aggregate(&parsed_package, &parsed_shares, &public).map_err(frost_error)?;
@@ -444,7 +470,6 @@ mod tests {
             created_at: Timestamp::new(1, 0),
             certifiers,
             signing_set: (1..=7).collect(),
-            signing_alternates: (8..=13).collect(),
         }
     }
 
@@ -533,6 +558,35 @@ mod tests {
         )
         .expect_err("share identifier mismatch");
         assert!(error.to_string().contains("mismatches key 1"));
+    }
+
+    #[test]
+    fn threshold_sign_rejects_non_declared_signer_set_before_public_deserialization() {
+        let config = test_config();
+        let public_key_package = RootPublicKeyPackage {
+            public_key_package: b"not a public package".to_vec(),
+            root_public_key: b"not a verifying key".to_vec(),
+            verifying_shares: BTreeMap::new(),
+        };
+        let shares = [1, 2, 3, 4, 5, 6, 9]
+            .into_iter()
+            .map(|identifier| {
+                (
+                    identifier,
+                    RootKeyPackage {
+                        frost_identifier: identifier,
+                        key_package: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        let mut rng = StdRng::seed_from_u64(72);
+        let error = threshold_sign(&config, &public_key_package, shares, b"artifact", &mut rng)
+            .expect_err("non-declared signer set");
+        assert!(
+            error.to_string().contains("predeclared signing_set"),
+            "expected signer-set rejection before public package decoding, got: {error}"
+        );
     }
 
     #[test]
@@ -662,6 +716,32 @@ mod tests {
             .expect_err("sub-threshold aggregate"),
             RootError::ThresholdNotMet { required: 7, .. }
         ));
+    }
+
+    #[test]
+    fn aggregate_signature_rejects_non_declared_signer_set_before_deserialization() {
+        let config = test_config();
+        let public_key_package = RootPublicKeyPackage {
+            public_key_package: b"not a public package".to_vec(),
+            root_public_key: b"not a verifying key".to_vec(),
+            verifying_shares: BTreeMap::new(),
+        };
+        let shares = [1, 2, 3, 4, 5, 6, 9]
+            .into_iter()
+            .map(|identifier| (identifier, vec![u8::try_from(identifier).expect("id fits")]))
+            .collect();
+        let error = aggregate_signature(
+            &config,
+            &public_key_package,
+            b"not a signing package",
+            shares,
+            b"artifact",
+        )
+        .expect_err("non-declared aggregate signer set");
+        assert!(
+            error.to_string().contains("predeclared signing_set"),
+            "expected signer-set rejection before signature artifacts decode, got: {error}"
+        );
     }
 
     #[test]
@@ -796,9 +876,9 @@ mod tests {
     fn sign_share_rejects_non_canonical_signer_set() {
         // Bob's regression: a coordinator must not bypass the ratified
         // signer-selection policy by hand-crafting a RootSigningPackage with a
-        // non-canonical signer set. Set [1,2,3,4,5,6,9] skips the required first
-        // alternate (8) for the absent primary (7); sign_share must reject it even
-        // though build_signing_package was never used.
+        // non-declared signer set. Set [1,2,3,4,5,6,9] replaces signer 7 with
+        // signer 9; sign_share must reject it even though build_signing_package
+        // was never used.
         let config = test_config();
         let mut rng = StdRng::seed_from_u64(909);
         let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
@@ -825,7 +905,7 @@ mod tests {
         )
         .expect_err("a non-canonical signer set must be rejected");
         assert!(
-            error.to_string().contains("alternates in order"),
+            error.to_string().contains("predeclared signing_set"),
             "expected a signing-selection-policy rejection, got: {error}"
         );
     }
@@ -891,11 +971,25 @@ mod tests {
         }
         let mut package =
             build_signing_package(&config, commitments, b"artifact").expect("package");
-        // Tamper: replace primary 7 with alternate 8 in signer_ids. This set
-        // [1,2,3,4,5,6,8] IS canonical (passes the selection policy), but the
-        // embedded package still only contains commitments for 1..7, so the
-        // rebuild fails closed when it can't find signer 8's commitment.
-        package.signer_ids = vec![1, 2, 3, 4, 5, 6, 8];
+        let parsed_package: frost::SigningPackage =
+            deserialize_frost(package.signing_package.as_slice()).expect("parsed package");
+        let mut embedded_commitments = BTreeMap::new();
+        for id in 1..=6u16 {
+            let signer_frost_id = crate::dkg::frost_identifier(id).expect("frost id");
+            let commitment = parsed_package
+                .signing_commitment(&signer_frost_id)
+                .expect("commitment");
+            embedded_commitments.insert(signer_frost_id, commitment);
+        }
+        let (commitment8, _nonces8) =
+            sign_commit(&config, &dkg.key_packages[&8], b"artifact", &mut rng).expect("commit 8");
+        embedded_commitments.insert(
+            crate::dkg::frost_identifier(8).expect("frost id 8"),
+            deserialize_frost(commitment8.commitments.as_slice()).expect("commitment 8"),
+        );
+        let malformed_package = frost::SigningPackage::new(embedded_commitments, b"artifact");
+        package.signing_package = serialize_frost(&malformed_package).expect("serialize package");
+        package.signer_ids = vec![1, 2, 3, 4, 5, 6, 7];
         let error = sign_share(
             &config,
             &dkg.key_packages[&1],
@@ -907,7 +1001,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("missing commitment for signer 8")
+                .contains("missing commitment for signer 7")
         );
     }
 }

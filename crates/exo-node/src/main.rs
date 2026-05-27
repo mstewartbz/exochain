@@ -1541,7 +1541,6 @@ mod root_genesis_adapter_tests {
                 created_at: Timestamp::new(1_785_000_000_000, 0),
                 certifiers,
                 signing_set: (1..=7).collect(),
-                signing_alternates: (8..=13).collect(),
             },
             first_secret.expect("first certifier secret"),
         )
