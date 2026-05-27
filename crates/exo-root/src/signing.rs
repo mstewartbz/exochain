@@ -333,23 +333,17 @@ pub fn sign_share(
             detail: "nonces are bound to a different artifact than the message".to_owned(),
         });
     }
+    // Enforce the ratified deterministic signer-selection policy signer-side too:
+    // a signer must refuse a signing package whose signer set is not the canonical
+    // selection (predeclared primaries with ordered alternate substitution), even
+    // when a coordinator builds the package outside `build_signing_package`.
+    let selection: BTreeSet<u16> = signing_package.signer_ids.iter().copied().collect();
+    config.validate_signing_selection(&selection)?;
     let parsed_key: frost::keys::KeyPackage =
         deserialize_frost(key_package.key_package.as_slice())?;
     let parsed_nonces: frost::round1::SigningNonces = deserialize_frost(nonces.nonces.as_slice())?;
     let parsed_package: frost::SigningPackage =
         deserialize_frost(signing_package.signing_package.as_slice())?;
-    // The nonces must pair with this signer's commitment in the package.
-    let frost_id = crate::dkg::frost_identifier(key_package.frost_identifier)?;
-    let package_commitment = parsed_package
-        .signing_commitment(&frost_id)
-        .ok_or_else(|| RootError::Frost {
-            detail: "signing package has no commitment for this signer".to_owned(),
-        })?;
-    if commitment_hash(serialize_frost(&package_commitment)?.as_slice()) != nonces.commitment_hash {
-        return Err(RootError::Frost {
-            detail: "nonces are not bound to this signing package's commitment".to_owned(),
-        });
-    }
     // Rebuild the signing package from the supplied commitments and the caller's
     // message, so the share is provably over `message` regardless of what message
     // the coordinator embedded in the distributed package.
@@ -362,6 +356,16 @@ pub fn sign_share(
                 detail: format!("signing package is missing commitment for signer {identifier}"),
             })?;
         commitments.insert(signer_frost_id, commitment);
+    }
+    // The nonces must pair with this signer's commitment in the bound set.
+    let frost_id = crate::dkg::frost_identifier(key_package.frost_identifier)?;
+    let package_commitment = commitments.get(&frost_id).ok_or_else(|| RootError::Frost {
+        detail: "signer is not in the signing package's signer set".to_owned(),
+    })?;
+    if commitment_hash(serialize_frost(package_commitment)?.as_slice()) != nonces.commitment_hash {
+        return Err(RootError::Frost {
+            detail: "nonces are not bound to this signing package's commitment".to_owned(),
+        });
     }
     let rebuilt_package = frost::SigningPackage::new(commitments, message);
     let share =
@@ -759,8 +763,8 @@ mod tests {
 
     #[test]
     fn sign_share_rejects_signer_absent_from_signing_package() {
-        // A rostered signer that did not contribute a commitment to the package
-        // (here an alternate, id 8) has no commitment to bind its nonces to.
+        // Signers 1..7 are the canonical set; an alternate (id 8) that is not in
+        // that set cannot sign against it.
         let config = test_config();
         let mut rng = StdRng::seed_from_u64(606);
         let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
@@ -780,11 +784,49 @@ mod tests {
             &package,
             b"artifact",
         )
-        .expect_err("a signer absent from the package must be rejected");
+        .expect_err("a signer absent from the set must be rejected");
         assert!(
             error
                 .to_string()
-                .contains("has no commitment for this signer")
+                .contains("signer is not in the signing package's signer set")
+        );
+    }
+
+    #[test]
+    fn sign_share_rejects_non_canonical_signer_set() {
+        // Bob's regression: a coordinator must not bypass the ratified
+        // signer-selection policy by hand-crafting a RootSigningPackage with a
+        // non-canonical signer set. Set [1,2,3,4,5,6,9] skips the required first
+        // alternate (8) for the absent primary (7); sign_share must reject it even
+        // though build_signing_package was never used.
+        let config = test_config();
+        let mut rng = StdRng::seed_from_u64(909);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let mut commitments = BTreeMap::new();
+        let mut signer_one_nonces = None;
+        for (id, kp) in dkg.key_packages.iter().take(7) {
+            let (commitment, nonces) =
+                sign_commit(&config, kp, b"artifact", &mut rng).expect("commit");
+            if *id == 1 {
+                signer_one_nonces = Some(nonces);
+            }
+            commitments.insert(*id, commitment.commitments);
+        }
+        let mut package =
+            build_signing_package(&config, commitments, b"artifact").expect("package");
+        // Hand-craft a non-canonical signer set (skips required alternate 8).
+        package.signer_ids = vec![1, 2, 3, 4, 5, 6, 9];
+        let error = sign_share(
+            &config,
+            &dkg.key_packages[&1],
+            &signer_one_nonces.expect("signer one nonces"),
+            &package,
+            b"artifact",
+        )
+        .expect_err("a non-canonical signer set must be rejected");
+        assert!(
+            error.to_string().contains("alternates in order"),
+            "expected a signing-selection-policy rejection, got: {error}"
         );
     }
 
@@ -849,8 +891,11 @@ mod tests {
         }
         let mut package =
             build_signing_package(&config, commitments, b"artifact").expect("package");
-        // Tamper: claim signer 8 participated, though its commitment is not present.
-        package.signer_ids.push(8);
+        // Tamper: replace primary 7 with alternate 8 in signer_ids. This set
+        // [1,2,3,4,5,6,8] IS canonical (passes the selection policy), but the
+        // embedded package still only contains commitments for 1..7, so the
+        // rebuild fails closed when it can't find signer 8's commitment.
+        package.signer_ids = vec![1, 2, 3, 4, 5, 6, 8];
         let error = sign_share(
             &config,
             &dkg.key_packages[&1],
