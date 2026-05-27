@@ -40,6 +40,25 @@ END_UNTRUSTED_USER_ARGUMENTS
 
 ## Validation Checklist
 
+### 0. Deterministic Repository Gates
+Model review is advisory evidence only. It cannot by itself authorize a
+governance-approved PR, override a failed command, or convert missing command
+evidence into approval. Before outputting `"passed": true`, run the applicable
+deterministic repository gates for the changed paths and include the exact
+commands and results in `validation_evidence`.
+
+At minimum, run these source guards for Archon workflow or command changes:
+
+- `bash tools/test_agent_prompt_boundaries.sh`
+- `bash tools/test_agent_workflow_bounds.sh`
+
+For Rust core, runtime adapter, governance, CI, or deployment changes, run the
+focused crate tests plus the relevant workspace gate from `AGENTS.md`. If any
+required gate is not run, fails, is inconclusive, or is replaced by prose-only
+LLM judgment, output `"passed": false` and
+`"governance_disposition": "REQUIRE_AMENDMENT"` or `"BLOCK"` with the missing
+or failed command listed in `blocking_issues`.
+
 ### 1. Constitutional Invariants (8)
 For each invariant, verify the changes do not violate:
 
@@ -101,6 +120,9 @@ Output:
     "bcts_integrity": "pass|fail",
     "architecture_compliance": "pass|fail",
     "security_assessment": "pass|fail",
+    "validation_evidence": [
+      { "command": "...", "result": "pass|fail|not_run", "detail": "..." }
+    ],
     "blocking_issues": ["..."],
     "warnings": ["..."],
     "recommendations": ["..."],

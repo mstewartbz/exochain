@@ -147,6 +147,32 @@ describe('POST /api/death/initiate trustee boundary', () => {
   });
 });
 
+describe('POST /api/messages/compose encryption boundary', () => {
+  it('rejects plaintext/raw-signing-key compose requests', async () => {
+    const res = await request.post('/api/messages/compose').send({
+      plaintext: 'do not encrypt on the server',
+      content_type: 'Text',
+      sender_did: 'did:exo:sender',
+      recipient_did: 'did:exo:recipient',
+      sender_signing_key_hex: 'aa'.repeat(32),
+      recipient_x25519_public_hex: 'bb'.repeat(32),
+      message_id: '11111111-1111-4111-8111-111111111111',
+      created_physical_ms: 1000,
+      created_logical: 0,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/client-side encrypted envelope is required/);
+  });
+
+  it('rejects server-side X25519 key generation requests', async () => {
+    const res = await request.post('/api/keys/generate').send({});
+
+    expect(res.status).toBe(410);
+    expect(res.body.error).toMatch(/server-side X25519 key generation is disabled/);
+  });
+});
+
 describe('POST /api/death/confirm trustee boundary', () => {
   it('uses the public key bound into stored verification state instead of request body key material', async () => {
     const storedState = {

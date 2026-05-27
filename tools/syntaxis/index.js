@@ -354,12 +354,12 @@ const NODE_REGISTRY = {
  * Syntaxis Protocol Engine Main Class
  */
 class SyntaxisProtocolEngine {
-  constructor() {
+  constructor(options = {}) {
     this.nodeRegistry = NODE_REGISTRY;
     this.bctsTransitions = BCTS_TRANSITIONS;
     this.bctsStates = BCTS_STATES;
     this.compiler = new SyntaxisCompiler();
-    this.solutionsBuilder = new SolutionsBuilder();
+    this.solutionsBuilder = new SolutionsBuilder(options);
   }
 
   /**
@@ -511,8 +511,8 @@ class SyntaxisProtocolEngine {
 /**
  * Factory function to create engine instance
  */
-function createSyntaxisEngine() {
-  return new SyntaxisProtocolEngine();
+function createSyntaxisEngine(options = {}) {
+  return new SyntaxisProtocolEngine(options);
 }
 
 /**

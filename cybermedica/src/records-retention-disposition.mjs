@@ -456,7 +456,7 @@ function activeLegalHoldFamilies(holds) {
   );
 }
 
-function evaluateDispositionRequest(request, activeHolds, reasons) {
+function evaluateDispositionRequest(request, activeHolds, schedule, reasons) {
   const family = request?.recordFamily ?? 'unknown';
   const activeHold = activeHolds.includes(request?.recordFamily);
 
@@ -471,6 +471,20 @@ function evaluateDispositionRequest(request, activeHolds, reasons) {
   addReason(reasons, !isDigest(request?.dispositionEvidenceHash), `disposition_evidence_hash_invalid:${family}`);
   addReason(reasons, request?.legalHoldChecked !== true, `legal_hold_check_absent:${family}`);
   addReason(reasons, request?.recordsPastEligibleDate !== true, `disposition_before_eligible:${family}`);
+  addReason(
+    reasons,
+    hlcTuple(schedule?.eligibleDispositionAtHlc) !== null &&
+      hlcTuple(request?.requestedAtHlc) !== null &&
+      hlcBefore(request.requestedAtHlc, schedule.eligibleDispositionAtHlc),
+    `disposition_request_before_schedule_eligible:${family}`,
+  );
+  addReason(
+    reasons,
+    hlcTuple(schedule?.eligibleDispositionAtHlc) !== null &&
+      hlcTuple(request?.approvedAtHlc) !== null &&
+      hlcBefore(request.approvedAtHlc, schedule.eligibleDispositionAtHlc),
+    `disposition_approval_before_schedule_eligible:${family}`,
+  );
   addReason(reasons, activeHold && request?.dispositionType !== 'retain_on_hold', `disposition_blocked_by_legal_hold:${family}`);
   addReason(
     reasons,
@@ -545,7 +559,7 @@ function evaluateCoverage(input, activeHolds, reasons) {
     evaluateLegalHold(hold, reasons);
   }
   for (const request of Array.isArray(input?.dispositionRequests) ? input.dispositionRequests : []) {
-    evaluateDispositionRequest(request, activeHolds, reasons);
+    evaluateDispositionRequest(request, activeHolds, scheduleMap.get(request?.recordFamily), reasons);
   }
 }
 
@@ -555,6 +569,11 @@ function evaluateHumanReview(input, reasons) {
   addReason(reasons, !hasText(review?.reviewerDid), 'human_reviewer_absent');
   addReason(reasons, !Array.isArray(review?.reviewerRoleRefs) || review.reviewerRoleRefs.length === 0, 'human_reviewer_roles_absent');
   addReason(reasons, !HUMAN_REVIEW_DECISIONS.has(review?.decision), 'human_review_decision_invalid');
+  addReason(
+    reasons,
+    review?.decision === 'hold_for_records_retention_gap',
+    'human_review_hold_for_records_retention_gap',
+  );
   addReason(reasons, !isDigest(review?.decisionHash), 'human_review_decision_hash_invalid');
   addReason(reasons, review?.finalAuthority !== 'human', 'human_review_final_authority_invalid');
   addReason(reasons, review?.aiFinalAuthority === true, 'human_review_ai_final_authority_forbidden');

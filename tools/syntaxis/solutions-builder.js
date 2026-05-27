@@ -21,10 +21,12 @@
  * Each template is a pre-configured Syntaxis workflow that can be customized.
  */
 
+const crypto = require('crypto');
 const { SyntaxisCompiler, STANDARD_BCTS_FLOW } = require('./compiler');
 const { NODE_IMPLEMENTATIONS } = require('./nodes');
 const {
   advanceHlc,
+  canonicalJson,
   compareHlc,
   deterministicId,
   hashCanonical,
@@ -50,6 +52,11 @@ const INVARIANT_EVIDENCE_REQUIREMENTS = {
   KERNEL_INTEGRITY: 'kernel-adjudicate'
 };
 const UNVERIFIED_ROOT_AUTHORITY_DID = ['did', 'exo', 'root'].join(':');
+const GOVERNANCE_EVIDENCE_VERIFICATION_DOMAIN = 'syntaxis.governance-evidence-verification.v1';
+const IDENTITY_PROOF_SIGNATURE_DOMAIN = 'syntaxis.identity-proof.v1';
+const DELEGATION_SIGNATURE_DOMAIN = 'syntaxis.delegation.v1';
+const CONSENT_RESPONSE_SIGNATURE_DOMAIN = 'syntaxis.consent-response.v1';
+const INVARIANT_EVIDENCE_SIGNATURE_DOMAIN = 'syntaxis.invariant-evidence.v1';
 
 function isObjectRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -65,6 +72,52 @@ function isNonZeroHash(value) {
     /^0x[0-9a-f]{64}$/.test(value) &&
     !/^0x0+$/.test(value)
   );
+}
+
+function isNonEmptyBase64(value) {
+  if (!isNonEmptyString(value)) {
+    return false;
+  }
+  try {
+    return Buffer.from(value, 'base64').length > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function signedPayloadHash(payload) {
+  return `0x${hashCanonical(payload)}`;
+}
+
+function verifyEd25519Signature(publicKeyPem, signatureBase64, payload) {
+  const publicKey = crypto.createPublicKey(publicKeyPem);
+  return crypto.verify(
+    null,
+    Buffer.from(canonicalJson(payload), 'utf8'),
+    publicKey,
+    Buffer.from(signatureBase64, 'base64')
+  );
+}
+
+function normalizeTrustedVerifierKeys(rawKeys) {
+  const normalized = new Map();
+  if (rawKeys instanceof Map) {
+    for (const [verifierId, publicKeyPem] of rawKeys.entries()) {
+      if (isNonEmptyString(verifierId) && isNonEmptyString(publicKeyPem)) {
+        normalized.set(verifierId, publicKeyPem);
+      }
+    }
+    return normalized;
+  }
+  if (!isObjectRecord(rawKeys)) {
+    return normalized;
+  }
+  for (const [verifierId, publicKeyPem] of Object.entries(rawKeys)) {
+    if (isNonEmptyString(verifierId) && isNonEmptyString(publicKeyPem)) {
+      normalized.set(verifierId, publicKeyPem);
+    }
+  }
+  return normalized;
 }
 
 /**
@@ -332,10 +385,13 @@ const SOLUTION_TEMPLATES = {
  * Solutions Builder Class
  */
 class SolutionsBuilder {
-  constructor() {
+  constructor(options = {}) {
     this.templates = SOLUTION_TEMPLATES;
     this.compiler = new SyntaxisCompiler();
     this.deploymentLog = [];
+    this.trustedGovernanceVerifierKeys = normalizeTrustedVerifierKeys(
+      options.trustedGovernanceVerifierKeys
+    );
   }
 
   /**
@@ -687,6 +743,13 @@ class SolutionsBuilder {
     this._validateTrustedDelegationChain(solution, verdict, errors);
     this._validateTrustedConsentResponses(solution, proposal, verdict, errors);
     this._validateTrustedInvariantEvidence(solution, verdict, errors);
+    this._validateTrustedGovernanceVerification(
+      solution,
+      proposal,
+      governanceEvidence,
+      verdict,
+      errors
+    );
 
     if (errors.length > 0) {
       throw new Error(`invalid trusted governance evidence: ${errors.join('; ')}`);
@@ -743,6 +806,10 @@ class SolutionsBuilder {
       errors.push('identity proof must include public key and signature');
       return;
     }
+    if (proof.publicKeyPem !== proof.publicKey || proof.signatureBase64 !== proof.signature) {
+      errors.push('identity proof must expose the verified Ed25519 public key and signature to the workflow node');
+      return;
+    }
     const expectedProofHash = `0x${hashCanonical({
       identityId: solution.metadata.author,
       method: 'cryptographic',
@@ -752,6 +819,16 @@ class SolutionsBuilder {
     if (proof.proofHash !== expectedProofHash) {
       errors.push('identity proof hash must bind author, method, nonce, and public key');
     }
+    const payload = {
+      domain: IDENTITY_PROOF_SIGNATURE_DOMAIN,
+      method: 'cryptographic',
+      nonce: expectedNonce,
+      proposalId: proposal.id,
+      solutionId: solution.solutionId,
+      subjectId: solution.metadata.author,
+      verdictId: verdict.id
+    };
+    this._validateSignedPayload(proof, payload, 'identity proof', errors);
   }
 
   _validateTrustedDelegationChain(solution, verdict, errors) {
@@ -791,6 +868,15 @@ class SolutionsBuilder {
       if (link.chainHash !== expectedChainHash) {
         errors.push('delegation chain hash must bind each link to its predecessor');
       }
+      const payload = {
+        authority: link.authority,
+        domain: DELEGATION_SIGNATURE_DOMAIN,
+        granteeId: link.granteeId,
+        grantorId: link.grantorId,
+        previousChainHash,
+        scope: link.scope
+      };
+      this._validateSignedPayload(link, payload, 'delegation chain entry', errors);
       previousChainHash = link.chainHash;
     }
 
@@ -828,6 +914,16 @@ class SolutionsBuilder {
       if (!isNonZeroHash(response.signatureHash)) {
         errors.push(`consent response for ${panel} must include a non-zero signature hash`);
       }
+      const payload = {
+        consent: true,
+        consentRequestId: `consent_req_${proposal.id}`,
+        domain: CONSENT_RESPONSE_SIGNATURE_DOMAIN,
+        panel,
+        proposalId: proposal.id,
+        responseHash: expectedResponseHash,
+        verdictId: verdict.id
+      };
+      this._validateSignedPayload(response, payload, `consent response for ${panel}`, errors);
     }
   }
 
@@ -847,7 +943,90 @@ class SolutionsBuilder {
         !isNonZeroHash(record.evidenceHash)
       ) {
         errors.push(`invariant evidence for ${invariant} must bind ${nodeType}`);
+        continue;
       }
+      const payload = {
+        domain: INVARIANT_EVIDENCE_SIGNATURE_DOMAIN,
+        evidenceHash: record.evidenceHash,
+        invariant,
+        nodeType,
+        solutionId: solution.solutionId,
+        verdictId: verdict.id
+      };
+      this._validateSignedPayload(record, payload, `invariant evidence for ${invariant}`, errors);
+    }
+  }
+
+  _validateTrustedGovernanceVerification(
+    solution,
+    proposal,
+    governanceEvidence,
+    verdict,
+    errors
+  ) {
+    if (this.trustedGovernanceVerifierKeys.size === 0) {
+      errors.push('trusted governance verifier keyring is required for solution deployment');
+      return;
+    }
+
+    const verification = governanceEvidence.verification;
+    if (!isObjectRecord(verification)) {
+      errors.push('trusted governance verifier attestation is required');
+      return;
+    }
+    if (!isNonEmptyString(verification.verifierId)) {
+      errors.push('trusted governance verifier attestation must include verifierId');
+      return;
+    }
+    const expectedPublicKeyPem = this.trustedGovernanceVerifierKeys.get(verification.verifierId);
+    if (!expectedPublicKeyPem) {
+      errors.push(`trusted governance verifier ${verification.verifierId} is not configured`);
+      return;
+    }
+    if (verification.publicKeyPem !== expectedPublicKeyPem) {
+      errors.push(`trusted governance verifier ${verification.verifierId} public key does not match configured trust anchor`);
+      return;
+    }
+
+    const payload = {
+      domain: GOVERNANCE_EVIDENCE_VERIFICATION_DOMAIN,
+      proposalId: proposal.id,
+      solutionId: solution.solutionId,
+      solutionType: solution.solutionType,
+      verdictHash: `0x${hashCanonical(verdict)}`
+    };
+    this._validateSignedPayload(
+      verification,
+      payload,
+      `trusted governance verifier ${verification.verifierId}`,
+      errors
+    );
+  }
+
+  _validateSignedPayload(evidence, payload, label, errors) {
+    if (!isObjectRecord(evidence)) {
+      errors.push(`${label} signature evidence is required`);
+      return;
+    }
+    if (!isNonEmptyString(evidence.publicKeyPem)) {
+      errors.push(`${label} must include an Ed25519 publicKeyPem`);
+      return;
+    }
+    if (!isNonEmptyBase64(evidence.signatureBase64)) {
+      errors.push(`${label} must include a base64 Ed25519 signature`);
+      return;
+    }
+    const expectedPayloadHash = signedPayloadHash(payload);
+    if (evidence.signedPayloadHash !== expectedPayloadHash) {
+      errors.push(`${label} signedPayloadHash must bind the canonical signed payload`);
+      return;
+    }
+    try {
+      if (!verifyEd25519Signature(evidence.publicKeyPem, evidence.signatureBase64, payload)) {
+        errors.push(`${label} Ed25519 signature verification failed`);
+      }
+    } catch (error) {
+      errors.push(`${label} Ed25519 signature verification failed: ${error.message}`);
     }
   }
 

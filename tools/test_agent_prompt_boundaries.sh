@@ -120,4 +120,14 @@ for file in "${workflow_output_files[@]}"; do
   assert_workflow_node_outputs_bounded "$file"
 done
 
+validator_prompt=".archon/commands/exochain-validate-constitution.md"
+assert_contains "$validator_prompt" "### 0\\. Deterministic Repository Gates"
+assert_contains "$validator_prompt" "Model review is advisory evidence only"
+assert_contains "$validator_prompt" 'Do not.*outputting `\"passed\": true`|Before outputting `\"passed\": true`'
+assert_contains "$validator_prompt" "bash tools/test_agent_prompt_boundaries\\.sh"
+assert_contains "$validator_prompt" "bash tools/test_agent_workflow_bounds\\.sh"
+assert_contains "$validator_prompt" "validation_evidence"
+assert_contains "$validator_prompt" "prose-only"
+assert_contains "$validator_prompt" "LLM judgment"
+
 echo "agent prompt boundary test passed"

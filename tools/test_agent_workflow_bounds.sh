@@ -80,8 +80,18 @@ require_pattern ".github/workflows/ci.yml" 'bash tools/test_agent_workflow_bound
 fix_issue_workflow=".archon/workflows/exochain-fix-issue-dag.yaml"
 require_file "$fix_issue_workflow"
 require_pattern "$fix_issue_workflow" "when: \"\\\$council_review\\.output\\.aggregate_disposition == 'Approved'\"" "approved-only council gate before fix node"
+require_pattern "$fix_issue_workflow" "when: \"\\\$validate\\.output\\.passed == 'true' && \\\$validate\\.output\\.governance_disposition == 'APPROVE'\"" "approved-only validation gate before PR creation"
 if grep -Fq "aggregate_disposition != 'Rejected'" "$fix_issue_workflow"; then
   fail "$fix_issue_workflow must not route Deferred or Requires-Amendment council outputs to code-writing nodes"
 fi
+
+self_improvement_workflow=".archon/workflows/exochain-self-improvement-cycle.yaml"
+require_file "$self_improvement_workflow"
+require_pattern "$self_improvement_workflow" "when: \"\\\$validate_constitution\\.output\\.passed == 'true' && \\\$validate_constitution\\.output\\.governance_disposition == 'APPROVE'\"" "approved-only validation gate before self-improvement PR creation"
+require_pattern "$self_improvement_workflow" "when: \"\\\$validate_constitution\\.output\\.passed == 'false' && \\\$validate_constitution\\.output\\.governance_disposition == 'REQUIRE_AMENDMENT'\"" "amendment-only auto-remediation gate"
+
+client_onboarding_workflow=".archon/workflows/exochain-client-onboarding.yaml"
+require_file "$client_onboarding_workflow"
+require_pattern "$client_onboarding_workflow" "when: \"\\\$validate\\.output\\.passed == 'true' && \\\$validate\\.output\\.governance_disposition == 'APPROVE'\"" "approved-only validation gate before client onboarding PR creation"
 
 printf 'agent workflow bound test passed\n'
