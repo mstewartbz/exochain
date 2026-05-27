@@ -97,9 +97,9 @@ pub struct CeremonyEnvelopeDraft {
 /// Ratified final DKG key confirmation payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalKeyConfirmation {
-    /// Domain separator; must equal [`FINAL_KEY_CONFIRMATION_DOMAIN`].
+    /// Domain separator; must equal [`crate::FINAL_KEY_CONFIRMATION_DOMAIN`].
     pub domain: String,
-    /// Schema version; must equal [`FINAL_KEY_CONFIRMATION_SCHEMA_VERSION`].
+    /// Schema version; must equal [`crate::FINAL_KEY_CONFIRMATION_SCHEMA_VERSION`].
     pub schema_version: u16,
     /// Ceremony identifier.
     pub ceremony_id: String,
