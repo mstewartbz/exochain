@@ -67,7 +67,7 @@ nodes:
   - id: create_pr
     command: archon-finalize-pr
     depends_on: [validate]
-    when: "$validate.output.passed == 'true'"
+    when: "$validate.output.passed == 'true' && $validate.output.governance_disposition == 'APPROVE'"
     trigger_rule: all_success
     description: Create governance-approved PR
 

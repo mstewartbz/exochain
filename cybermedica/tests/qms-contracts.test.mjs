@@ -188,3 +188,30 @@ test('participant consent revocation and tenant mismatch deny regulated access',
   assert.equal(tenantMismatchDecision.decision, 'denied');
   assert.ok(tenantMismatchDecision.reasons.includes('tenant_boundary_violation'));
 });
+
+test('unknown and absent governed actions fail closed instead of bypassing permission policy', async () => {
+  const { evaluateGovernedAction } = await loadQmsContracts();
+
+  const missingActionDecision = evaluateGovernedAction({
+    tenantId: 'tenant-site-alpha',
+    targetTenantId: 'tenant-site-alpha',
+    actor: { did: 'did:exo:principal-investigator-alpha', kind: 'human' },
+    authority: { valid: true, revoked: false, expired: false, permissions: ['govern', 'read'] },
+  });
+
+  assert.equal(missingActionDecision.decision, 'denied');
+  assert.equal(missingActionDecision.failClosed, true);
+  assert.ok(missingActionDecision.reasons.includes('action_absent'));
+
+  const unknownActionDecision = evaluateGovernedAction({
+    action: 'caller_defined_runtime_override',
+    tenantId: 'tenant-site-alpha',
+    targetTenantId: 'tenant-site-alpha',
+    actor: { did: 'did:exo:principal-investigator-alpha', kind: 'human' },
+    authority: { valid: true, revoked: false, expired: false, permissions: ['govern', 'read'] },
+  });
+
+  assert.equal(unknownActionDecision.decision, 'denied');
+  assert.equal(unknownActionDecision.failClosed, true);
+  assert.ok(unknownActionDecision.reasons.includes('action_unsupported'));
+});

@@ -16,10 +16,8 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth, type AuthState } from '@/hooks/useAuth';
-import {
-  initCrypto, isCryptoReady,
-  generateX25519Keypair as genX25519Wasm,
-} from '@/lib/crypto';
+import { initCrypto, isCryptoReady } from '@/lib/crypto';
+import { createLocalVault, openLocalVault } from '@/lib/localVault';
 
 export default function Login() {
   const { login } = useAuth();
@@ -37,25 +35,17 @@ export default function Login() {
   const handleSubmit = async () => {
     if (!passphrase) return;
     setIsLoading(true);
-    setStatus('Deriving zero-knowledge identity...');
+    setStatus(mode === 'register' ? 'Creating local identity vault...' : 'Unlocking local identity vault...');
 
     try {
       // Ensure WASM is ready
       if (!isCryptoReady()) await initCrypto();
 
-      const encoder = new TextEncoder();
-      const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(passphrase));
-      const hashArray = new Uint8Array(hashBuffer);
-      const identityDigestHex = Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join('');
-
-      // Generate X25519 keypair via WASM (real Diffie-Hellman crypto)
-      const x25519Kp = genX25519Wasm();
-      const x25519Public = x25519Kp.public_key_hex;
-      const x25519Secret = x25519Kp.secret_key_hex;
-
-      // Derive DID from passphrase hash (deterministic across sessions)
-      const did = `did:exo:${identityDigestHex.slice(0, 16)}`;
-      const name = displayName || `User-${identityDigestHex.slice(0, 8)}`;
+      const identity = mode === 'register'
+        ? await createLocalVault(passphrase, displayName)
+        : await openLocalVault(passphrase);
+      const did = identity.did;
+      const name = identity.displayName;
 
       setStatus('Initializing sharded keystore...');
 
@@ -66,7 +56,11 @@ export default function Login() {
         await fetch('/api/profile', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ did, display_name: name, x25519_public_key_hex: x25519Public }),
+          body: JSON.stringify({
+            did,
+            display_name: name,
+            x25519_public_key_hex: identity.x25519PublicHex,
+          }),
           signal: ctrl.signal,
         });
         clearTimeout(timer);
@@ -77,8 +71,10 @@ export default function Login() {
       const authState: AuthState = {
         did,
         displayName: name,
-        x25519PublicHex: x25519Public,
-        x25519SecretHex: x25519Secret,
+        ed25519PublicHex: identity.ed25519PublicHex,
+        ed25519PrivatePkcs8Hex: identity.ed25519PrivatePkcs8Hex,
+        x25519PublicHex: identity.x25519PublicHex,
+        x25519SecretHex: identity.x25519SecretHex,
       };
 
       login(authState);

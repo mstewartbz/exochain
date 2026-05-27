@@ -393,6 +393,44 @@ test('records retention disposition blocks destruction under hold or before elig
   assert.ok(result.reasons.includes('disposition_before_eligible:audit_trails'));
 });
 
+test('records retention disposition denies human hold and caller-asserted premature eligibility', async () => {
+  const { evaluateRecordsRetentionDisposition } = await loadRecordsRetentionDisposition();
+
+  const holdDecision = evaluateRecordsRetentionDisposition(
+    retentionInput({
+      humanReview: {
+        decision: 'hold_for_records_retention_gap',
+      },
+    }),
+  );
+
+  assert.equal(holdDecision.decision, 'denied');
+  assert.equal(holdDecision.failClosed, true);
+  assert.ok(holdDecision.reasons.includes('human_review_hold_for_records_retention_gap'));
+  assert.equal(holdDecision.retentionPackage, null);
+
+  const prematureDisposition = evaluateRecordsRetentionDisposition(
+    retentionInput({
+      dispositionRequests: retentionInput().dispositionRequests.map((request) =>
+        request.recordFamily === 'audit_trails'
+          ? {
+              ...request,
+              recordsPastEligibleDate: true,
+              requestedAtHlc: { physicalMs: 1802048000000, logical: 0 },
+              approvedAtHlc: { physicalMs: 1802048000000, logical: 1 },
+            }
+          : request,
+      ),
+    }),
+  );
+
+  assert.equal(prematureDisposition.decision, 'denied');
+  assert.equal(prematureDisposition.failClosed, true);
+  assert.ok(prematureDisposition.reasons.includes('disposition_request_before_schedule_eligible:audit_trails'));
+  assert.ok(prematureDisposition.reasons.includes('disposition_approval_before_schedule_eligible:audit_trails'));
+  assert.equal(prematureDisposition.retentionPackage, null);
+});
+
 test('records retention disposition validates human review inactive trust and HLC ordering', async () => {
   const { evaluateRecordsRetentionDisposition } = await loadRecordsRetentionDisposition();
 

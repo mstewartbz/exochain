@@ -332,6 +332,16 @@ test('wasm_x25519_public_from_secret rejects raw X25519 secret derivation', () =
     'raw X25519 secret public derivation is disabled'
   ));
 
+test('wasm_caller_managed_x25519_public_from_secret', () => {
+  const publicKey = wasm.wasm_caller_managed_x25519_public_from_secret(DUMMY_SECRET_HEX_2);
+  const publicKeyHex = publicKey?.public_key_hex;
+  assertHex(publicKeyHex, 32, 'caller-managed X25519 public key');
+  if (publicKeyHex === DUMMY_SECRET_HEX_2) {
+    throw new Error('caller-managed X25519 public key must not echo the secret');
+  }
+  return publicKey;
+});
+
 test('wasm_encrypt_message rejects raw sender signing', () => {
   if (!recipientKex) throw new Error('skipped -- no recipient X25519 keypair');
   return expectErrorContains(

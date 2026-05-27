@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "cd ../../.. && wasm-pack build crates/exochain-wasm --target web --release --out-dir \"$PWD/demo/apps/vitallock/src/wasm\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:security": "node tests/security-guards.mjs"

@@ -28,6 +28,8 @@
 
 # Build artifacts
 demo/packages/exochain-wasm/wasm/
+demo/apps/vitallock/src/wasm/
+demo/apps/vitallock/dist/
 demo/web/dist/
 web/dist/
 

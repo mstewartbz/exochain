@@ -57,11 +57,13 @@ export default function Compose() {
       const createdLogical = 0;
 
       // Encrypt client-side — plaintext never leaves the browser
-      const envelope = encryptMessage(
+      const envelope = await encryptMessage(
         body,
         contentType,
         auth!.did,
         recipientDid,
+        auth!.ed25519PublicHex,
+        auth!.ed25519PrivatePkcs8Hex,
         recipientX25519,
         messageId,
         createdPhysicalMs,
