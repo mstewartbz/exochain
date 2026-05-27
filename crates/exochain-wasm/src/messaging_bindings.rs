@@ -52,6 +52,21 @@ pub fn wasm_x25519_public_from_secret(_secret_hex: &str) -> Result<JsValue, JsVa
     ))
 }
 
+/// Derive the public key for caller-managed X25519 material.
+///
+/// The bridge does not generate, persist, or export secret material. Browser or
+/// service key management supplies the secret bytes explicitly and receives only
+/// the corresponding public key.
+#[wasm_bindgen]
+pub fn wasm_caller_managed_x25519_public_from_secret(secret_hex: &str) -> Result<JsValue, JsValue> {
+    let secret = exo_messaging::X25519SecretKey::from_hex(secret_hex)
+        .map_err(|e| JsValue::from_str(&format!("invalid caller-managed X25519 secret: {e}")))?;
+    let public = secret.public_key();
+    to_js_value(&serde_json::json!({
+        "public_key_hex": public.to_hex(),
+    }))
+}
+
 /// Encrypt a message for a specific recipient (Lock & Send).
 ///
 /// # Parameters

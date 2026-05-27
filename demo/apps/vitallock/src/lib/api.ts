@@ -30,12 +30,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 // ── Messaging ──
 export const composeMessage = (data: {
-  plaintext: string;
-  content_type: string;
+  envelope: unknown;
   sender_did: string;
   recipient_did: string;
-  sender_signing_key_hex: string;
-  recipient_x25519_public_hex: string;
+  content_type: string;
   release_on_death?: boolean;
   release_delay_hours?: number;
   subject?: string;
@@ -69,6 +67,7 @@ export const getAfterlifeMessages = (did: string) =>
   request<Array<{
     id: string; recipient_did: string; content_type: string;
     subject: string | null; release_delay_hours: number; released: boolean;
+    created_at_ms: number;
   }>>(`/messages/afterlife/${did}`);
 
 // ── PACE Network ──
@@ -195,9 +194,3 @@ export const getFamily = (did: string) =>
     id: number; member_name: string; member_email: string;
     relationship: string; access_level: string; status: string;
   }>>(`/family/${did}`);
-
-// ── Keys ──
-export const generateX25519Keypair = () =>
-  request<{ public_key_hex: string; secret_key_hex: string }>('/keys/generate', {
-    method: 'POST',
-  });

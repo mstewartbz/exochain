@@ -22,8 +22,9 @@
  */
 
 import init, {
-  wasm_generate_x25519_keypair,
-  wasm_encrypt_message,
+  wasm_caller_managed_x25519_public_from_secret,
+  wasm_prepare_encrypted_message,
+  wasm_attach_message_signature,
   wasm_decrypt_message,
   wasm_verify_message_signature,
   wasm_shamir_split,
@@ -54,9 +55,41 @@ export interface X25519KeyPair {
   secret_key_hex: string;
 }
 
-/** Generate an X25519 keypair (for encryption key exchange). */
+function randomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]+$/iu.test(hex)) {
+    throw new Error('invalid hex encoding');
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function arrayBufferFromBytes(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer as ArrayBuffer;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/** Generate caller-managed X25519 material for encryption key exchange. */
 export function generateX25519Keypair(): X25519KeyPair {
-  return wasm_generate_x25519_keypair();
+  const secretKeyHex = randomHex(32);
+  const publicKey = wasm_caller_managed_x25519_public_from_secret(secretKeyHex);
+  return {
+    public_key_hex: publicKey.public_key_hex,
+    secret_key_hex: secretKeyHex,
+  };
 }
 
 // ── Message Encryption (E2E) ──
@@ -75,35 +108,71 @@ export interface EncryptedEnvelope {
   created: { physical_ms: number; logical: number };
 }
 
+interface PreparedEnvelope {
+  envelope: EncryptedEnvelope;
+  signing_payload_hex: string;
+}
+
+async function signEnvelopePayload(
+  senderEd25519PrivatePkcs8Hex: string,
+  signingPayloadHex: string,
+): Promise<string> {
+  const privateKey = await crypto.subtle.importKey(
+    'pkcs8',
+    arrayBufferFromBytes(hexToBytes(senderEd25519PrivatePkcs8Hex)),
+    { name: 'Ed25519' } as Algorithm,
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign(
+    { name: 'Ed25519' } as Algorithm,
+    privateKey,
+    arrayBufferFromBytes(hexToBytes(signingPayloadHex)),
+  );
+  return bytesToHex(new Uint8Array(signature));
+}
+
 /**
  * Lock & Send: encrypt a message client-side.
  * Plaintext never leaves the browser.
  */
-export function encryptMessage(
+export async function encryptMessage(
   plaintext: string,
   contentType: string,
   senderDid: string,
   recipientDid: string,
+  senderEd25519PublicHex: string,
+  senderEd25519PrivatePkcs8Hex: string,
   recipientX25519PublicHex: string,
   messageId: string,
   createdPhysicalMs: bigint,
   createdLogical: number,
   releaseOnDeath: boolean = false,
   releaseDelayHours: number = 0,
-): EncryptedEnvelope {
-  return wasm_encrypt_message(
+): Promise<EncryptedEnvelope> {
+  const ephemeralKeypair = generateX25519Keypair();
+  const prepared = wasm_prepare_encrypted_message(
     plaintext,
     JSON.stringify(contentType),
     senderDid,
     recipientDid,
-    '',
     recipientX25519PublicHex,
+    ephemeralKeypair.secret_key_hex,
     messageId,
     createdPhysicalMs,
     createdLogical,
     releaseOnDeath,
     releaseDelayHours,
+  ) as PreparedEnvelope;
+  const signatureHex = await signEnvelopePayload(
+    senderEd25519PrivatePkcs8Hex,
+    prepared.signing_payload_hex,
   );
+  return wasm_attach_message_signature(
+    JSON.stringify(prepared.envelope),
+    senderEd25519PublicHex,
+    signatureHex,
+  ) as EncryptedEnvelope;
 }
 
 /**

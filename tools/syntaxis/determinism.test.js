@@ -15,16 +15,60 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const { SyntaxisCompiler } = require('./compiler');
 const { NODE_IMPLEMENTATIONS } = require('./nodes');
 const { SolutionsBuilder } = require('./solutions-builder');
-const { deterministicId, hashCanonical } = require('./determinism');
+const { canonicalJson, deterministicId, hashCanonical } = require('./determinism');
 
 const HLC = { physicalMs: 1700000000000, logical: 7 };
 const DEPLOY_HLC = { physicalMs: 1700000000001, logical: 0 };
+const GOVERNANCE_EVIDENCE_VERIFICATION_DOMAIN = 'syntaxis.governance-evidence-verification.v1';
+const IDENTITY_PROOF_SIGNATURE_DOMAIN = 'syntaxis.identity-proof.v1';
+const DELEGATION_SIGNATURE_DOMAIN = 'syntaxis.delegation.v1';
+const CONSENT_RESPONSE_SIGNATURE_DOMAIN = 'syntaxis.consent-response.v1';
+const INVARIANT_EVIDENCE_SIGNATURE_DOMAIN = 'syntaxis.invariant-evidence.v1';
+
+function testSigner(verifierId) {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  return {
+    verifierId,
+    privateKey,
+    publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' })
+  };
+}
+
+const GOVERNANCE_VERIFIER = testSigner('determinism-governance-verifier');
+const GOVERNANCE_CERTIFIER = testSigner('determinism-governance-certifier');
+const PANEL_CERTIFIERS = new Map();
+
+function panelCertifier(panel) {
+  if (!PANEL_CERTIFIERS.has(panel)) {
+    PANEL_CERTIFIERS.set(panel, testSigner(`determinism-panel-${panel}`));
+  }
+  return PANEL_CERTIFIERS.get(panel);
+}
+
+function trustedBuilder() {
+  return new SolutionsBuilder({
+    trustedGovernanceVerifierKeys: {
+      [GOVERNANCE_VERIFIER.verifierId]: GOVERNANCE_VERIFIER.publicKeyPem
+    }
+  });
+}
+
+function signPayload(signer, payload) {
+  return {
+    publicKeyPem: signer.publicKeyPem,
+    signatureBase64: crypto
+      .sign(null, Buffer.from(canonicalJson(payload), 'utf8'), signer.privateKey)
+      .toString('base64'),
+    signedPayloadHash: `0x${hashCanonical(payload)}`
+  };
+}
 
 function verdict() {
   return {
@@ -154,15 +198,26 @@ function solutionGovernanceEvidence(solution, verdictOverrides = {}) {
       proposalId: solution.solutionId,
       verdictId
     })}`;
+    const responsePayload = {
+      consent: true,
+      consentRequestId: `consent_req_${solution.solutionId}`,
+      domain: CONSENT_RESPONSE_SIGNATURE_DOMAIN,
+      panel,
+      proposalId: solution.solutionId,
+      responseHash,
+      verdictId
+    };
+    const responseSignature = signPayload(panelCertifier(panel), responsePayload);
     consentResponses[panel] = {
       consent: true,
       responseHash,
       signatureHash: `0x${hashCanonical({
         panel,
         responseHash,
-        signer: `${panel} certifier`,
+        signer: panelCertifier(panel).publicKeyPem,
         verdictId
-      })}`
+      })}`,
+      ...responseSignature
     };
   }
   const invariantEvidence = {};
@@ -173,42 +228,110 @@ function solutionGovernanceEvidence(solution, verdictOverrides = {}) {
     KERNEL_INTEGRITY: 'kernel-adjudicate'
   })) {
     if (solution.nodeSequence.includes(nodeType)) {
+      const evidenceHash = `0x${hashCanonical({
+        invariant,
+        nodeType,
+        solutionId: solution.solutionId,
+        verdictId
+      })}`;
+      const evidencePayload = {
+        domain: INVARIANT_EVIDENCE_SIGNATURE_DOMAIN,
+        evidenceHash,
+        invariant,
+        nodeType,
+        solutionId: solution.solutionId,
+        verdictId
+      };
       invariantEvidence[invariant] = {
         nodeType,
-        evidenceHash: `0x${hashCanonical({
-          invariant,
-          nodeType,
-          solutionId: solution.solutionId,
-          verdictId
-        })}`
+        evidenceHash,
+        ...signPayload(GOVERNANCE_CERTIFIER, evidencePayload)
       };
     }
   }
+  const identityPayload = {
+    domain: IDENTITY_PROOF_SIGNATURE_DOMAIN,
+    method: 'cryptographic',
+    nonce,
+    proposalId: solution.solutionId,
+    solutionId: solution.solutionId,
+    subjectId: solution.metadata.author,
+    verdictId
+  };
+  const identitySignature = signPayload(GOVERNANCE_CERTIFIER, identityPayload);
+  const delegationPayload = {
+    authority: 'GOVERNANCE_PROPOSER',
+    domain: DELEGATION_SIGNATURE_DOMAIN,
+    granteeId: solution.metadata.author,
+    grantorId: 'did:exo:governance-council',
+    previousChainHash: null,
+    scope: solution.solutionType
+  };
+  const delegationSignature = signPayload(GOVERNANCE_CERTIFIER, delegationPayload);
+  const delegationSignatureHash = `0x${hashCanonical({
+    authority: 'GOVERNANCE_PROPOSER',
+    granteeId: solution.metadata.author,
+    grantorId: 'did:exo:governance-council',
+    scope: solution.solutionType,
+    signature: delegationSignature.signatureBase64
+  })}`;
   const councilVerdict = {
     id: verdictId,
     status: 'APPROVED',
     affectedPanels: [...solution.requiredPanels],
     panelAssessments,
-    identityProof: identityProof(
-      solution.metadata.author,
-      'cryptographic',
+    identityProof: {
+      subjectId: solution.metadata.author,
+      method: 'cryptographic',
       nonce,
-      'ed25519-governance-certifier-public-key'
-    ),
+      publicKey: GOVERNANCE_CERTIFIER.publicKeyPem,
+      signature: identitySignature.signatureBase64,
+      proofHash: `0x${hashCanonical({
+        identityId: solution.metadata.author,
+        method: 'cryptographic',
+        nonce,
+        publicKey: GOVERNANCE_CERTIFIER.publicKeyPem
+      })}`,
+      ...identitySignature
+    },
     delegationChain: [
-      delegationLink({
+      {
         grantorId: 'did:exo:governance-council',
         granteeId: solution.metadata.author,
         authority: 'GOVERNANCE_PROPOSER',
-        scope: solution.solutionType
-      })
+        scope: solution.solutionType,
+        signatureHash: delegationSignatureHash,
+        chainHash: `0x${hashCanonical({
+          authority: 'GOVERNANCE_PROPOSER',
+          granteeId: solution.metadata.author,
+          grantorId: 'did:exo:governance-council',
+          previousChainHash: null,
+          scope: solution.solutionType,
+          signatureHash: delegationSignatureHash
+        })}`,
+        ...delegationSignature
+      }
     ],
     consentResponses,
     invariantEvidence,
     systemState: { source: 'external-council-verdict' },
     precedingProposals: ['root-authority-resolution']
   };
-  return { councilVerdict: { ...councilVerdict, ...verdictOverrides } };
+  const signedCouncilVerdict = { ...councilVerdict, ...verdictOverrides };
+  const verificationPayload = {
+    domain: GOVERNANCE_EVIDENCE_VERIFICATION_DOMAIN,
+    proposalId: solution.solutionId,
+    solutionId: solution.solutionId,
+    solutionType: solution.solutionType,
+    verdictHash: `0x${hashCanonical(signedCouncilVerdict)}`
+  };
+  return {
+    councilVerdict: signedCouncilVerdict,
+    verification: {
+      verifierId: GOVERNANCE_VERIFIER.verifierId,
+      ...signPayload(GOVERNANCE_VERIFIER, verificationPayload)
+    }
+  };
 }
 
 function run() {
@@ -528,7 +651,7 @@ function run() {
   });
   assert.strictEqual(compiledProofVerification.outputs.verified, true);
 
-  const builder = new SolutionsBuilder();
+  const builder = trustedBuilder();
   for (const templateSummary of builder.listTemplates()) {
     const template = builder.getTemplate(templateSummary.type);
     for (const requiredNodeType of [
@@ -627,7 +750,7 @@ function run() {
     { valid: true, errors: [], nodeCount: 11, dependencyCount: 10 },
     'solution deployments must generate workflows with validated BCTS gate evidence'
   );
-  const deploymentB = new SolutionsBuilder().deploySolution(solutionA, {
+  const deploymentB = trustedBuilder().deploySolution(solutionA, {
     path: '/exoforge/deployments',
     environment: 'PRODUCTION',
     governanceEvidence: solutionGovernanceEvidence(solutionA),

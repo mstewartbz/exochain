@@ -98,6 +98,7 @@ const GATEWAY_RATE_LIMIT_REQUESTS_PER_WINDOW: u32 = 120;
 const GATEWAY_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
 const GATEWAY_RATE_LIMIT_MAX_CLIENTS: usize = 16_384;
 const GATEWAY_RATE_LIMIT_DB_CLOCK_REFRESH_MS: u64 = 1_000;
+const GATEWAY_RATE_LIMIT_PROCESS_CLOCK_TICK_MS: u64 = 1_000;
 const STRICT_TRANSPORT_SECURITY_VALUE: &str = "max-age=63072000; includeSubDomains";
 const CONTENT_SECURITY_POLICY_VALUE: &str =
     "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -541,7 +542,7 @@ impl AppState {
             clock: Arc::new(Mutex::new(clock)),
             session_time_source,
             rate_limiter: Arc::new(Mutex::new(GatewayRateLimiter::default())),
-            trusted_rate_limit_epoch_ms: Arc::new(AtomicU64::new(0)),
+            trusted_rate_limit_epoch_ms: Arc::new(AtomicU64::new(start_time.physical_ms)),
             trusted_rate_limit_proxy_ips,
         }
     }
@@ -555,19 +556,6 @@ impl AppState {
             .now()
             .map(|timestamp| timestamp.physical_ms)
             .map_err(|_| "Gateway AppState HLC exhausted while reading timestamp")
-    }
-
-    fn try_rate_limit_hlc_ms(&self) -> std::result::Result<u64, &'static str> {
-        let mut clock = self.clock.lock().map_err(
-            |_| "Gateway AppState HLC mutex poisoned while reading rate-limit timestamp",
-        )?;
-        let timestamp = clock
-            .now()
-            .map_err(|_| "Gateway AppState HLC exhausted while reading rate-limit timestamp")?;
-        timestamp
-            .physical_ms
-            .checked_add(u64::from(timestamp.logical))
-            .ok_or("Gateway AppState HLC rate-limit timestamp overflowed")
     }
 
     fn now_ms(&self) -> u64 {
@@ -3759,16 +3747,30 @@ async fn trusted_gateway_rate_limit_time_ms(state: &AppState) -> Result<u64> {
         return Ok(cached_now_ms);
     }
 
-    if let Some(db) = state.pool.as_ref() {
-        let now_ms = trusted_database_epoch_ms(db).await?;
-        let now_ms = u64::try_from(now_ms).map_err(|_| {
-            GatewayError::Internal("gateway rate-limit database time is negative".to_owned())
-        })?;
-        state.store_trusted_rate_limit_time_ms(now_ms);
-        return Ok(now_ms);
+    if state.pool.is_some() {
+        return Err(GatewayError::Internal(
+            "gateway rate-limit database clock cache unavailable".to_owned(),
+        ));
     }
 
     trusted_gateway_rate_limit_time_ms_from_hlc(state)
+}
+
+async fn refresh_gateway_rate_limit_clock_from_database(
+    pool: &sqlx::PgPool,
+    state: &AppState,
+) -> Result<()> {
+    let now_ms = trusted_database_epoch_ms(pool).await?;
+    let now_ms = u64::try_from(now_ms).map_err(|_| {
+        GatewayError::Internal("gateway rate-limit database time is negative".to_owned())
+    })?;
+    if now_ms == 0 {
+        return Err(GatewayError::Internal(
+            "gateway rate-limit database clock returned zero".to_owned(),
+        ));
+    }
+    state.store_trusted_rate_limit_time_ms(now_ms);
+    Ok(())
 }
 
 fn spawn_gateway_rate_limit_clock_refresh(
@@ -3801,9 +3803,31 @@ fn spawn_gateway_rate_limit_clock_refresh(
     }));
 }
 
+fn spawn_gateway_rate_limit_process_clock_refresh(trusted_rate_limit_epoch_ms: Arc<AtomicU64>) {
+    std::mem::drop(tokio::spawn(async move {
+        loop {
+            let current = trusted_rate_limit_epoch_ms.load(Ordering::Relaxed);
+            if current != 0 {
+                let next = current.saturating_add(GATEWAY_RATE_LIMIT_PROCESS_CLOCK_TICK_MS);
+                if next != current {
+                    trusted_rate_limit_epoch_ms.store(next, Ordering::Relaxed);
+                } else {
+                    tracing::error!("Gateway rate-limit process clock saturated");
+                }
+            } else {
+                tracing::error!("Gateway rate-limit process clock is unseeded");
+            }
+            tokio::time::sleep(Duration::from_millis(
+                GATEWAY_RATE_LIMIT_PROCESS_CLOCK_TICK_MS,
+            ))
+            .await;
+        }
+    }));
+}
+
 fn trusted_gateway_rate_limit_time_ms_from_hlc(state: &AppState) -> Result<u64> {
     let now_ms = state
-        .try_rate_limit_hlc_ms()
+        .try_now_ms()
         .map_err(|message| GatewayError::Internal(message.to_owned()))?;
     if now_ms == 0 {
         return Err(GatewayError::Internal(
@@ -4552,26 +4576,7 @@ async fn enforce_gateway_rate_limit(
     next: Next,
 ) -> Response {
     let client_key = gateway_rate_limit_key(&request, &state.trusted_rate_limit_proxy_ips);
-    let preflight_now_ms = if let Some(cached_now_ms) = state.cached_trusted_rate_limit_time_ms() {
-        Some(cached_now_ms)
-    } else {
-        match state.try_rate_limit_hlc_ms() {
-            Ok(now_ms) => Some(now_ms),
-            Err(message) => {
-                tracing::error!(
-                    message,
-                    "Gateway rate limiter preflight timestamp unavailable"
-                );
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "gateway rate limiter unavailable",
-                )
-                    .into_response();
-            }
-        }
-    };
-
-    if let Some(preflight_now_ms) = preflight_now_ms {
+    if let Some(preflight_now_ms) = state.cached_trusted_rate_limit_time_ms() {
         let preflight_outcome = match state.rate_limiter.lock() {
             Ok(mut limiter) => limiter.preflight_limit(&client_key, preflight_now_ms),
             Err(_) => {
@@ -4702,10 +4707,15 @@ pub async fn serve_with_extra_routes(
         config.trusted_rate_limit_proxy_ips.clone(),
     );
     if let Some(pool) = state.pool.clone() {
+        refresh_gateway_rate_limit_clock_from_database(&pool, &state).await?;
         spawn_gateway_rate_limit_clock_refresh(
             pool,
             Arc::clone(&state.trusted_rate_limit_epoch_ms),
         );
+    } else {
+        spawn_gateway_rate_limit_process_clock_refresh(Arc::clone(
+            &state.trusted_rate_limit_epoch_ms,
+        ));
     }
     let app = build_router_with_extra_routes(state, extra);
 
@@ -5310,9 +5320,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_default_hlc_rate_limit_window_resets_from_hlc_progress() {
+    async fn gateway_default_hlc_rejected_requests_do_not_reset_window() {
         let mut state = state();
         state.rate_limiter = Arc::new(Mutex::new(GatewayRateLimiter::with_limits(1, 2, 8)));
+        let state_handle = state.clone();
         let app = apply_gateway_layers(
             Router::new().route("/probe", get(probe)),
             state,
@@ -5344,6 +5355,7 @@ mod tests {
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
 
         let third = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/probe")
@@ -5352,13 +5364,27 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(third.status(), StatusCode::OK);
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        state_handle.store_trusted_rate_limit_time_ms(1_000_003);
+
+        let fourth = app
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fourth.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn gateway_rate_limit_resets_after_hlc_window() {
+    async fn gateway_rate_limit_resets_after_trusted_clock_window() {
         let wall = Arc::new(AtomicU64::new(10_000));
         let state = rate_limited_state(1, 60_000, Arc::clone(&wall));
+        let state_handle = state.clone();
         let app = apply_gateway_layers(
             Router::new().route("/probe", get(probe)),
             state,
@@ -5390,6 +5416,7 @@ mod tests {
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
 
         wall.store(70_005, Ordering::Relaxed);
+        state_handle.store_trusted_rate_limit_time_ms(wall.load(Ordering::Relaxed));
 
         let third = app
             .oneshot(
@@ -5635,25 +5662,29 @@ mod tests {
             "production rate limiting must use the trusted runtime time boundary"
         );
         assert!(
-            rate_limit_middleware.contains("state.try_rate_limit_hlc_ms()"),
-            "production rate limiting may use HLC logical progress for non-admitting preflight checks"
+            !rate_limit_middleware.contains("try_rate_limit_hlc_ms"),
+            "production rate limiting must not advance HLC logical progress during preflight"
         );
         let rate_limit_time_boundary = source_between(
             production,
             "async fn trusted_gateway_rate_limit_time_ms",
-            "fn trusted_gateway_rate_limit_time_ms_from_hlc",
+            "async fn refresh_gateway_rate_limit_clock_from_database",
         );
         assert!(
             rate_limit_time_boundary.contains("cached_trusted_rate_limit_time_ms"),
             "production rate limiting must use the cached DB clock sample before querying the database"
         );
         assert!(
-            rate_limit_time_boundary.contains("trusted_database_epoch_ms(db).await"),
-            "production rate limiting may query the trusted database clock only when no cached sample is available"
+            !rate_limit_time_boundary.contains("trusted_database_epoch_ms"),
+            "production request-rate limiting must not issue unauthenticated DB clock queries from the request path"
         );
         assert!(
-            production.contains("checked_add(u64::from(timestamp.logical))"),
-            "no-DB gateway rate limiting must include HLC logical progress so buckets can reset deterministically"
+            rate_limit_time_boundary.contains("database clock cache unavailable"),
+            "DB-backed request-rate limiting must fail closed when no out-of-band clock sample is available"
+        );
+        assert!(
+            !production.contains("checked_add(u64::from(timestamp.logical))"),
+            "no-DB gateway rate limiting must not convert request-driven HLC logical progress into elapsed milliseconds"
         );
         let serve_entrypoint = source_between(
             production,
@@ -5663,6 +5694,10 @@ mod tests {
         assert!(
             serve_entrypoint.contains("spawn_gateway_rate_limit_clock_refresh"),
             "production serve entrypoint must refresh the trusted DB rate-limit clock out of band"
+        );
+        assert!(
+            serve_entrypoint.contains("spawn_gateway_rate_limit_process_clock_refresh"),
+            "no-DB production serve entrypoint must refresh rate-limit time out of band instead of per request"
         );
         assert!(
             production.contains("ConnectInfo<SocketAddr>")

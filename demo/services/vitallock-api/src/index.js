@@ -136,7 +136,7 @@ export const server = http.createServer(async (req, res) => {
     // ══════════════════════════════════════════════════════════════════
 
     // ── Compose (Lock & Send) ──
-    // Accepts either pre-encrypted envelope (from browser WASM) or plaintext (server-side encryption)
+    // Accepts only a pre-encrypted envelope from browser-side key management.
     if (url.pathname === '/api/messages/compose' && req.method === 'POST') {
       const body = await parseBody(req);
 
@@ -148,34 +148,9 @@ export const server = http.createServer(async (req, res) => {
         envelope = body.envelope;
         msgId = envelope.id;
       } else {
-        // Server-side encryption fallback
-        const {
-          plaintext, content_type, sender_did, recipient_did,
-          sender_signing_key_hex, recipient_x25519_public_hex,
-          message_id, created_physical_ms, created_logical,
-          release_on_death, release_delay_hours,
-        } = body;
-
-        if (!message_id || created_physical_ms === undefined || created_logical === undefined) {
-          return json(res, 400, {
-            error: 'message_id, created_physical_ms, and created_logical are required for server-side encryption',
-          });
-        }
-
-        envelope = wasm.wasm_encrypt_message(
-          plaintext,
-          JSON.stringify(content_type || 'Text'),
-          sender_did,
-          recipient_did,
-          sender_signing_key_hex,
-          recipient_x25519_public_hex,
-          message_id,
-          BigInt(created_physical_ms),
-          created_logical,
-          release_on_death || false,
-          release_delay_hours || 0,
-        );
-        msgId = envelope.id;
+        return json(res, 400, {
+          error: 'client-side encrypted envelope is required; server-side raw signing-key encryption is disabled',
+        });
       }
 
       await pool.query(
@@ -718,8 +693,9 @@ export const server = http.createServer(async (req, res) => {
 
     // ── X25519 Key Generation ──
     if (url.pathname === '/api/keys/generate' && req.method === 'POST') {
-      const keypair = wasm.wasm_generate_x25519_keypair();
-      return json(res, 200, keypair);
+      return json(res, 410, {
+        error: 'server-side X25519 key generation is disabled; use browser-local key management',
+      });
     }
 
     // 404
