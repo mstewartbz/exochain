@@ -75,11 +75,6 @@ where
     let mut signing_commitments = BTreeMap::new();
 
     for (identifier, share) in shares {
-        if config.certifier_by_identifier(identifier).is_none() {
-            return Err(RootError::InvalidConfig {
-                reason: format!("signer {identifier} is not rostered"),
-            });
-        }
         if share.frost_identifier != identifier {
             let share_id = share.frost_identifier;
             let detail = format!("share id {share_id} mismatches key {identifier}");
@@ -272,19 +267,18 @@ where
     let parsed: frost::keys::KeyPackage = deserialize_frost(key_package.key_package.as_slice())?;
     let (nonces, commitments) = frost::round1::commit(parsed.signing_share(), rng);
     let commitment_bytes = serialize_frost(&commitments)?;
-    Ok((
-        RootSigningCommitment {
-            frost_identifier: key_package.frost_identifier,
-            commitments: commitment_bytes.clone(),
-        },
-        RootSigningNonces {
-            frost_identifier: key_package.frost_identifier,
-            ceremony_id: config.ceremony_id.clone(),
-            artifact_hash: Hash256::digest(artifact),
-            commitment_hash: commitment_hash(commitment_bytes.as_slice()),
-            nonces: serialize_frost(&nonces)?,
-        },
-    ))
+    let commitment = RootSigningCommitment {
+        frost_identifier: key_package.frost_identifier,
+        commitments: commitment_bytes.clone(),
+    };
+    let signing_nonces = RootSigningNonces {
+        frost_identifier: key_package.frost_identifier,
+        ceremony_id: config.ceremony_id.clone(),
+        artifact_hash: Hash256::digest(artifact),
+        commitment_hash: commitment_hash(commitment_bytes.as_slice()),
+        nonces: serialize_frost(&nonces)?,
+    };
+    Ok((commitment, signing_nonces))
 }
 
 /// Distributed signing — coordinator assembles the signing package from at
@@ -515,6 +509,18 @@ mod tests {
                 supplied: 0
             }
         );
+    }
+
+    #[test]
+    fn signer_id_validation_rejects_wrong_count_and_duplicates() {
+        let config = test_config();
+        let wrong_count = validate_root_signer_ids(&config, &[1, 2, 3, 4, 5, 6])
+            .expect_err("signer set must match threshold count");
+        assert!(wrong_count.to_string().contains("exactly 7 signers"));
+
+        let duplicate = validate_root_signer_ids(&config, &[1, 2, 3, 4, 5, 6, 6])
+            .expect_err("signer set must reject duplicates");
+        assert!(duplicate.to_string().contains("duplicate signer 6"));
     }
 
     #[test]

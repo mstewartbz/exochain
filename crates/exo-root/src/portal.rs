@@ -216,6 +216,18 @@ fn decode_final_key_confirmation_payload(bytes: &[u8]) -> Result<FinalKeyConfirm
     })
 }
 
+fn certifier_verifying_share_hash(
+    public_key_package: &RootPublicKeyPackage,
+    frost_identifier_value: u16,
+    missing_error: RootError,
+) -> Result<Hash256> {
+    let verifying_share = public_key_package
+        .verifying_shares
+        .get(&frost_identifier_value)
+        .ok_or(missing_error)?;
+    Ok(Hash256::digest(verifying_share.as_slice()))
+}
+
 /// Build the ratified final key confirmation payload for one finalized
 /// certifier. This emits only public confirmation material; the secret FROST key
 /// package is parsed locally to bind the certifier identifier but is never copied
@@ -242,15 +254,15 @@ pub fn build_final_key_confirmation(
             detail: "final key confirmation key package identifier mismatch".to_owned(),
         });
     }
-    let verifying_share = dkg_output
-        .public_key_package
-        .verifying_shares
-        .get(&frost_identifier_value)
-        .ok_or_else(|| RootError::BundleRejected {
+    let certifier_verifying_share_hash = certifier_verifying_share_hash(
+        &dkg_output.public_key_package,
+        frost_identifier_value,
+        RootError::BundleRejected {
             reason: format!(
                 "public key package missing verifying share for certifier {frost_identifier_value}"
             ),
-        })?;
+        },
+    )?;
     Ok(FinalKeyConfirmation {
         domain: FINAL_KEY_CONFIRMATION_DOMAIN.to_owned(),
         schema_version: FINAL_KEY_CONFIRMATION_SCHEMA_VERSION,
@@ -265,7 +277,7 @@ pub fn build_final_key_confirmation(
         root_public_key_hash: Hash256::digest(
             dkg_output.public_key_package.root_public_key.as_slice(),
         ),
-        certifier_verifying_share_hash: Hash256::digest(verifying_share.as_slice()),
+        certifier_verifying_share_hash,
     })
 }
 
@@ -723,16 +735,14 @@ impl PortalStore {
                 reason: "final key confirmation root public key hash mismatch".to_owned(),
             });
         }
-        let verifying_share = confirmation
-            .public_key_package
-            .verifying_shares
-            .get(&confirmation.frost_identifier)
-            .ok_or_else(|| RootError::PortalRejected {
+        let certifier_verifying_share_hash = certifier_verifying_share_hash(
+            &confirmation.public_key_package,
+            confirmation.frost_identifier,
+            RootError::PortalRejected {
                 reason: "final key confirmation verifying share is missing".to_owned(),
-            })?;
-        if confirmation.certifier_verifying_share_hash
-            != Hash256::digest(verifying_share.as_slice())
-        {
+            },
+        )?;
+        if confirmation.certifier_verifying_share_hash != certifier_verifying_share_hash {
             return Err(RootError::PortalRejected {
                 reason: "final key confirmation verifying share hash mismatch".to_owned(),
             });
@@ -999,6 +1009,201 @@ mod tests {
         bytes
     }
 
+    fn encrypted_payload_with(ciphertext: impl Into<Vec<u8>>) -> Vec<u8> {
+        let payload = PairwiseEncryptedPayload {
+            nonce: [9u8; 24],
+            ciphertext: ciphertext.into(),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&payload, &mut bytes).expect("encode");
+        bytes
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sign_envelope(
+        config: &GenesisCeremonyConfig,
+        secrets: &[SecretKey],
+        sender_identifier: u16,
+        phase: CeremonyPhase,
+        payload_kind: CeremonyPayloadKind,
+        recipient_identifier: Option<u16>,
+        sequence: u64,
+        payload_bytes: Vec<u8>,
+    ) -> CeremonyEnvelope {
+        let sender_index = usize::from(sender_identifier - 1);
+        let recipient_did = recipient_identifier
+            .map(|identifier| config.certifiers[usize::from(identifier - 1)].did.clone());
+        CeremonyEnvelope::sign(
+            CeremonyEnvelopeDraft {
+                ceremony_id: config.ceremony_id.clone(),
+                phase,
+                payload_kind,
+                sender_did: config.certifiers[sender_index].did.clone(),
+                recipient_did,
+                sequence,
+                payload_bytes,
+            },
+            &secrets[sender_index],
+        )
+        .expect("signed envelope")
+    }
+
+    fn participant_output(
+        dkg: &crate::RootDkgOutput,
+        identifier: u16,
+    ) -> crate::RootParticipantDkgOutput {
+        crate::RootParticipantDkgOutput {
+            key_package: dkg.key_packages[&identifier].clone(),
+            public_key_package: dkg.public_key_package.clone(),
+        }
+    }
+
+    fn submit_complete_dkg_transcript(
+        store: &mut PortalStore,
+        config: &GenesisCeremonyConfig,
+        secrets: &[SecretKey],
+    ) -> Hash256 {
+        for certifier in &config.certifiers {
+            store
+                .submit(sign_envelope(
+                    config,
+                    secrets,
+                    certifier.frost_identifier,
+                    CeremonyPhase::Round1,
+                    CeremonyPayloadKind::Round1Package,
+                    None,
+                    10,
+                    round1_package_bytes(config, certifier.frost_identifier),
+                ))
+                .expect("round one submit");
+        }
+        for sender in &config.certifiers {
+            for recipient in &config.certifiers {
+                if sender.frost_identifier == recipient.frost_identifier {
+                    continue;
+                }
+                store
+                    .submit(sign_envelope(
+                        config,
+                        secrets,
+                        sender.frost_identifier,
+                        CeremonyPhase::Round2,
+                        CeremonyPayloadKind::Round2EncryptedPackage,
+                        Some(recipient.frost_identifier),
+                        1_000
+                            + u64::from(sender.frost_identifier) * 100
+                            + u64::from(recipient.frost_identifier),
+                        encrypted_payload_with(format!(
+                            "round2-{}-{}",
+                            sender.frost_identifier, recipient.frost_identifier
+                        )),
+                    ))
+                    .expect("round two submit");
+            }
+        }
+        store.dkg_transcript_hash().expect("dkg transcript hash")
+    }
+
+    fn final_key_confirmation(
+        config: &GenesisCeremonyConfig,
+        dkg: &crate::RootDkgOutput,
+        identifier: u16,
+        dkg_transcript_hash: Hash256,
+    ) -> FinalKeyConfirmation {
+        build_final_key_confirmation(
+            config,
+            &participant_output(dkg, identifier),
+            dkg_transcript_hash,
+        )
+        .expect("final key confirmation")
+    }
+
+    fn final_key_confirmation_envelope(
+        config: &GenesisCeremonyConfig,
+        secrets: &[SecretKey],
+        identifier: u16,
+        confirmation: &FinalKeyConfirmation,
+    ) -> CeremonyEnvelope {
+        sign_envelope(
+            config,
+            secrets,
+            identifier,
+            CeremonyPhase::Finalize,
+            CeremonyPayloadKind::FinalKeyConfirmation,
+            None,
+            5_000 + u64::from(identifier),
+            encode_final_key_confirmation_payload(confirmation).expect("confirmation payload"),
+        )
+    }
+
+    fn transcript_record_for(
+        config: &GenesisCeremonyConfig,
+        phase: CeremonyPhase,
+        payload_kind: CeremonyPayloadKind,
+        sender_identifier: u16,
+        recipient_identifier: Option<u16>,
+        sequence: u64,
+    ) -> TranscriptEnvelopeRecord {
+        let sender_did = if sender_identifier == 0 {
+            Did::new("did:exo:transcript-outside").expect("outside did")
+        } else {
+            config.certifiers[usize::from(sender_identifier - 1)]
+                .did
+                .clone()
+        };
+        let recipient_did = recipient_identifier.map(|identifier| {
+            if identifier == 0 {
+                Did::new("did:exo:transcript-outside-recipient").expect("outside recipient")
+            } else {
+                config.certifiers[usize::from(identifier - 1)].did.clone()
+            }
+        });
+        let material = format!("{phase:?}:{payload_kind:?}:{sender_identifier}:{sequence}");
+        TranscriptEnvelopeRecord {
+            phase,
+            payload_kind,
+            sender_did,
+            recipient_did,
+            sequence,
+            envelope_id: Hash256::digest(material.as_bytes()),
+            envelope_hash: Hash256::digest(format!("hash:{material}").as_bytes()),
+        }
+    }
+
+    fn complete_transcript_records(
+        config: &GenesisCeremonyConfig,
+    ) -> Vec<TranscriptEnvelopeRecord> {
+        let mut records = Vec::new();
+        for certifier in &config.certifiers {
+            records.push(transcript_record_for(
+                config,
+                CeremonyPhase::Round1,
+                CeremonyPayloadKind::Round1Package,
+                certifier.frost_identifier,
+                None,
+                10,
+            ));
+        }
+        for sender in &config.certifiers {
+            for recipient in &config.certifiers {
+                if sender.frost_identifier == recipient.frost_identifier {
+                    continue;
+                }
+                records.push(transcript_record_for(
+                    config,
+                    CeremonyPhase::Round2,
+                    CeremonyPayloadKind::Round2EncryptedPackage,
+                    sender.frost_identifier,
+                    Some(recipient.frost_identifier),
+                    1_000
+                        + u64::from(sender.frost_identifier) * 100
+                        + u64::from(recipient.frost_identifier),
+                ));
+            }
+        }
+        records
+    }
+
     #[test]
     fn canonical_error_conversion_is_diagnostic() {
         let error = canonical_encoding_error("portal encoding failed");
@@ -1087,5 +1292,361 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn final_key_confirmation_builder_rejects_misbound_key_material() {
+        let (config, _) = config_with_secrets();
+        let mut rng = StdRng::seed_from_u64(7_001);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let dkg_transcript_hash = Hash256::digest(b"dkg transcript");
+
+        let mut unrostered = participant_output(&dkg, 1);
+        unrostered.key_package.frost_identifier = 99;
+        assert!(
+            build_final_key_confirmation(&config, &unrostered, dkg_transcript_hash).is_err(),
+            "builder must reject a certifier id outside the ratified roster"
+        );
+
+        let mut mismatched = participant_output(&dkg, 1);
+        mismatched.key_package.key_package = dkg.key_packages[&2].key_package.clone();
+        assert!(
+            build_final_key_confirmation(&config, &mismatched, dkg_transcript_hash).is_err(),
+            "builder must bind the public confirmation to the certifier key package"
+        );
+
+        let mut missing_share = participant_output(&dkg, 1);
+        missing_share.public_key_package.verifying_shares.remove(&1);
+        assert!(
+            build_final_key_confirmation(&config, &missing_share, dkg_transcript_hash).is_err(),
+            "builder must reject public key package metadata that omits a rostered share"
+        );
+        let missing_share_error = certifier_verifying_share_hash(
+            &missing_share.public_key_package,
+            1,
+            RootError::PortalRejected {
+                reason: "unit missing share".to_owned(),
+            },
+        )
+        .expect_err("missing share helper must fail closed");
+        assert!(
+            missing_share_error
+                .to_string()
+                .contains("unit missing share")
+        );
+    }
+
+    #[test]
+    fn duplicate_dkg_replacements_are_rejected() {
+        let (config, secrets) = config_with_secrets();
+        let mut store = PortalStore::new(config.clone());
+        store
+            .submit(sign_envelope(
+                &config,
+                &secrets,
+                1,
+                CeremonyPhase::Round1,
+                CeremonyPayloadKind::Round1Package,
+                None,
+                1,
+                round1_package_bytes(&config, 1),
+            ))
+            .expect("first round-one");
+        assert!(
+            store
+                .submit(sign_envelope(
+                    &config,
+                    &secrets,
+                    1,
+                    CeremonyPhase::Round1,
+                    CeremonyPayloadKind::Round1Package,
+                    None,
+                    2,
+                    round1_package_bytes(&config, 1),
+                ))
+                .is_err(),
+            "a sender cannot replace a broadcast DKG package after acceptance"
+        );
+
+        store
+            .submit(sign_envelope(
+                &config,
+                &secrets,
+                1,
+                CeremonyPhase::Round2,
+                CeremonyPayloadKind::Round2EncryptedPackage,
+                Some(2),
+                101,
+                encrypted_payload_with(b"one"),
+            ))
+            .expect("first round-two");
+        assert!(
+            store
+                .submit(sign_envelope(
+                    &config,
+                    &secrets,
+                    1,
+                    CeremonyPhase::Round2,
+                    CeremonyPayloadKind::Round2EncryptedPackage,
+                    Some(2),
+                    102,
+                    encrypted_payload_with(b"two"),
+                ))
+                .is_err(),
+            "a sender cannot replace a pairwise DKG package after acceptance"
+        );
+    }
+
+    #[test]
+    fn final_key_confirmation_semantics_reject_every_bound_field() {
+        let (config, secrets) = config_with_secrets();
+        let mut rng = StdRng::seed_from_u64(7_002);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let mut store = PortalStore::new(config.clone());
+        let dkg_transcript_hash = submit_complete_dkg_transcript(&mut store, &config, &secrets);
+        let valid = final_key_confirmation(&config, &dkg, 1, dkg_transcript_hash);
+        let envelope = final_key_confirmation_envelope(&config, &secrets, 1, &valid);
+
+        let mut bad = valid.clone();
+        bad.domain = "wrong-domain".to_owned();
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.schema_version = FINAL_KEY_CONFIRMATION_SCHEMA_VERSION + 1;
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.ceremony_id = "wrong-ceremony".to_owned();
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad_envelope = envelope.clone();
+        bad_envelope.sender_did = Did::new("did:exo:not-rostered").expect("outside did");
+        let mut bad = valid.clone();
+        bad.certifier_did = bad_envelope.sender_did.clone();
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&bad_envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.frost_identifier = 2;
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.config_hash = Hash256::digest(b"wrong config hash");
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.dkg_transcript_hash = Hash256::digest(b"wrong dkg transcript");
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.root_public_key_package_hash = Hash256::digest(b"wrong public package");
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid.clone();
+        bad.root_public_key_hash = Hash256::digest(b"wrong root key");
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+
+        let mut bad = valid;
+        bad.certifier_verifying_share_hash = Hash256::digest(b"wrong verifying share");
+        assert!(
+            store
+                .validate_final_key_confirmation_semantics(&envelope, &bad)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn final_key_confirmation_rejects_accepted_set_drift() {
+        let (config, secrets) = config_with_secrets();
+        let mut rng = StdRng::seed_from_u64(7_003);
+        let dkg = crate::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let mut store = PortalStore::new(config.clone());
+        let dkg_transcript_hash = submit_complete_dkg_transcript(&mut store, &config, &secrets);
+        let valid_one = final_key_confirmation(&config, &dkg, 1, dkg_transcript_hash);
+        let valid_two = final_key_confirmation(&config, &dkg, 2, dkg_transcript_hash);
+        let envelope_two = final_key_confirmation_envelope(&config, &secrets, 2, &valid_two);
+        let transcript_store = store.clone();
+
+        for mutation in 0..5 {
+            let mut store = transcript_store.clone();
+            let mut accepted = valid_one.clone();
+            if mutation == 0 {
+                accepted.config_hash = Hash256::digest(b"accepted config drift");
+            } else if mutation == 1 {
+                accepted.dkg_transcript_hash = Hash256::digest(b"accepted transcript drift");
+            } else if mutation == 2 {
+                accepted.public_key_package.root_public_key = b"accepted package drift".to_vec();
+            } else if mutation == 3 {
+                accepted.root_public_key_package_hash =
+                    Hash256::digest(b"accepted package hash drift");
+            } else {
+                accepted.root_public_key_hash = Hash256::digest(b"accepted root drift");
+            }
+            store
+                .final_key_confirmations
+                .insert(valid_one.certifier_did.clone(), accepted);
+            assert!(
+                store
+                    .validate_final_key_confirmation(&envelope_two)
+                    .is_err(),
+                "accepted-set drift case {mutation} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn dkg_transcript_completion_reports_malformed_shapes() {
+        let (config, _) = config_with_secrets();
+        let store = PortalStore::new(config.clone());
+        let complete = complete_transcript_records(&config);
+
+        let mut round1_with_recipient = complete.clone();
+        round1_with_recipient[0].recipient_did = Some(config.certifiers[1].did.clone());
+        assert!(
+            store
+                .ensure_dkg_transcript_complete(&round1_with_recipient)
+                .is_err()
+        );
+
+        let mut duplicate_round1 = complete.clone();
+        duplicate_round1[1].sender_did = duplicate_round1[0].sender_did.clone();
+        assert!(
+            store
+                .ensure_dkg_transcript_complete(&duplicate_round1)
+                .is_err()
+        );
+
+        let round2_start = usize::from(config.max_signers);
+        let mut round2_missing_recipient = complete.clone();
+        round2_missing_recipient[round2_start].recipient_did = None;
+        assert!(
+            store
+                .ensure_dkg_transcript_complete(&round2_missing_recipient)
+                .is_err()
+        );
+
+        let mut duplicate_round2 = complete.clone();
+        duplicate_round2[round2_start + 1].sender_did =
+            duplicate_round2[round2_start].sender_did.clone();
+        duplicate_round2[round2_start + 1].recipient_did =
+            duplicate_round2[round2_start].recipient_did.clone();
+        assert!(
+            store
+                .ensure_dkg_transcript_complete(&duplicate_round2)
+                .is_err()
+        );
+
+        let mut non_dkg = complete.clone();
+        non_dkg[0].phase = CeremonyPhase::Finalize;
+        assert!(store.ensure_dkg_transcript_complete(&non_dkg).is_err());
+
+        let mut missing_round1 = complete.clone();
+        missing_round1.remove(0);
+        assert!(
+            store
+                .ensure_dkg_transcript_complete(&missing_round1)
+                .is_err()
+        );
+
+        let round1_only = complete[..round2_start].to_vec();
+        assert!(store.ensure_dkg_transcript_complete(&round1_only).is_err());
+
+        let mut missing_specific_pair = complete;
+        let removed = missing_specific_pair.remove(round2_start);
+        assert_eq!(removed.sender_did, config.certifiers[0].did);
+        missing_specific_pair.push(transcript_record_for(
+            &config,
+            CeremonyPhase::Round2,
+            CeremonyPayloadKind::Round2EncryptedPackage,
+            0,
+            Some(2),
+            9_999,
+        ));
+        assert!(
+            store
+                .ensure_dkg_transcript_complete(&missing_specific_pair)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn root_signing_completion_rejects_missing_rostered_confirmation() {
+        let (config, _) = config_with_secrets();
+        let mut store = PortalStore::new(config.clone());
+        for certifier in &config.certifiers[1..] {
+            let confirmation = FinalKeyConfirmation {
+                domain: FINAL_KEY_CONFIRMATION_DOMAIN.to_owned(),
+                schema_version: FINAL_KEY_CONFIRMATION_SCHEMA_VERSION,
+                ceremony_id: config.ceremony_id.clone(),
+                certifier_did: certifier.did.clone(),
+                frost_identifier: certifier.frost_identifier,
+                config_hash: Hash256::digest(b"config"),
+                dkg_transcript_hash: Hash256::digest(b"dkg"),
+                public_key_package: RootPublicKeyPackage {
+                    public_key_package: Vec::new(),
+                    root_public_key: Vec::new(),
+                    verifying_shares: BTreeMap::new(),
+                },
+                root_public_key_package_hash: Hash256::digest(b"package"),
+                root_public_key_hash: Hash256::digest(b"root"),
+                certifier_verifying_share_hash: Hash256::digest(b"share"),
+            };
+            store
+                .final_key_confirmations
+                .insert(certifier.did.clone(), confirmation);
+        }
+        let outside = Did::new("did:exo:outside-confirmation").expect("outside did");
+        let mut outside_confirmation = store
+            .final_key_confirmations
+            .values()
+            .next()
+            .expect("seed confirmation")
+            .clone();
+        outside_confirmation.certifier_did = outside.clone();
+        store
+            .final_key_confirmations
+            .insert(outside, outside_confirmation);
+        assert!(store.ensure_final_key_confirmations_complete().is_err());
+    }
+
+    #[test]
+    fn encrypted_round2_payload_validation_rejects_bad_shapes() {
+        assert!(validate_encrypted_round2_payload(b"not cbor").is_err());
+        assert!(validate_encrypted_round2_payload(&encrypted_payload_with(Vec::new())).is_err());
     }
 }
