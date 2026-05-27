@@ -21,10 +21,17 @@ pub use dkg::{
 };
 pub use error::{Result, RootError};
 pub use portal::{
-    CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, PortalStore,
+    CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase,
+    FINAL_KEY_CONFIRMATION_DOMAIN, FINAL_KEY_CONFIRMATION_SCHEMA_VERSION, FinalKeyConfirmation,
+    PortalStore, build_final_key_confirmation, ceremony_config_hash,
+    encode_final_key_confirmation_payload,
 };
 pub use seal::{
     PairwiseEncryptedPayload, SealedShare, decrypt_pairwise_payload, encrypt_pairwise_payload,
     seal_share, unseal_share,
 };
-pub use signing::{RootSignature, threshold_sign, verify_root_signature};
+pub use signing::{
+    RootSignature, RootSignatureShareOutput, RootSigningCommitment, RootSigningNonces,
+    RootSigningPackage, aggregate_signature, build_signing_package, sign_commit, sign_share,
+    threshold_sign, verify_root_signature,
+};

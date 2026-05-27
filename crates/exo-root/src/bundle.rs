@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     GenesisCeremonyConfig, Result, RootError, RootPublicKeyPackage,
-    dkg::validate_public_key_package, verify_root_signature,
+    dkg::validate_public_key_package,
+    signing::{RootSignature, validate_root_signer_ids},
+    verify_root_signature,
 };
 
 /// Operational AVC issuer authority delegated by the root.
@@ -40,7 +42,7 @@ pub struct RootTrustBundle {
     /// Canonical transcript hash.
     pub transcript_hash: Hash256,
     /// Root threshold signature over the trust artifact payload.
-    pub root_signature: Vec<u8>,
+    pub root_signature: RootSignature,
     /// Canonical bundle content identifier.
     pub bundle_id: Hash256,
 }
@@ -59,7 +61,7 @@ struct RootArtifactPayload<'a> {
 struct RootBundleIdPayload<'a> {
     domain: &'static str,
     artifact_payload_hash: Hash256,
-    root_signature: &'a [u8],
+    root_signature: &'a RootSignature,
 }
 
 fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -114,7 +116,7 @@ fn bundle_id(
     config: &GenesisCeremonyConfig,
     public_key_package: &RootPublicKeyPackage,
     transcript_hash: Hash256,
-    root_signature: &[u8],
+    root_signature: &RootSignature,
 ) -> Result<Hash256> {
     let artifact_payload =
         delegation.root_artifact_payload(config, public_key_package, transcript_hash)?;
@@ -132,22 +134,23 @@ pub fn assemble_root_bundle(
     public_key_package: RootPublicKeyPackage,
     issuer_delegation: RootIssuerDelegation,
     transcript_hash: Hash256,
-    root_signature: Vec<u8>,
+    root_signature: RootSignature,
 ) -> Result<RootTrustBundle> {
     validate_public_key_package(&config, &public_key_package)?;
+    validate_root_signer_ids(&config, root_signature.signer_ids.as_slice())?;
     let payload =
         issuer_delegation.root_artifact_payload(&config, &public_key_package, transcript_hash)?;
     verify_root_signature(
         &public_key_package.root_public_key,
         &payload,
-        root_signature.as_slice(),
+        root_signature.signature.as_slice(),
     )?;
     let bundle_id = bundle_id(
         &issuer_delegation,
         &config,
         &public_key_package,
         transcript_hash,
-        root_signature.as_slice(),
+        &root_signature,
     )?;
     Ok(RootTrustBundle {
         config,
@@ -163,6 +166,7 @@ pub fn assemble_root_bundle(
 pub fn verify_root_bundle(bundle: &RootTrustBundle) -> Result<()> {
     bundle.config.validate()?;
     validate_public_key_package(&bundle.config, &bundle.public_key_package)?;
+    validate_root_signer_ids(&bundle.config, bundle.root_signature.signer_ids.as_slice())?;
     let payload = bundle.issuer_delegation.root_artifact_payload(
         &bundle.config,
         &bundle.public_key_package,
@@ -171,14 +175,14 @@ pub fn verify_root_bundle(bundle: &RootTrustBundle) -> Result<()> {
     verify_root_signature(
         &bundle.public_key_package.root_public_key,
         &payload,
-        bundle.root_signature.as_slice(),
+        bundle.root_signature.signature.as_slice(),
     )?;
     let expected_id = bundle_id(
         &bundle.issuer_delegation,
         &bundle.config,
         &bundle.public_key_package,
         bundle.transcript_hash,
-        bundle.root_signature.as_slice(),
+        &bundle.root_signature,
     )?;
     if expected_id != bundle.bundle_id {
         return Err(RootError::BundleRejected {

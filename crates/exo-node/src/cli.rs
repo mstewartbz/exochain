@@ -223,7 +223,11 @@ pub enum GenesisCommand {
     #[command(name = "finalize-dkg")]
     FinalizeDkg(GenesisIoArgs),
 
-    /// Sign a root-governance artifact with at least seven certifier shares.
+    /// Build CBOR payload bytes for this certifier's final key confirmation.
+    #[command(name = "build-final-key-confirmation")]
+    BuildFinalKeyConfirmation(GenesisIoArgs),
+
+    /// Sign a root-governance artifact with the exact predeclared signing set.
     #[command(name = "sign-root-artifact")]
     SignRootArtifact(GenesisIoArgs),
 
@@ -242,6 +246,63 @@ pub enum GenesisCommand {
     /// Open a sealed certifier share artifact.
     #[command(name = "unseal-share")]
     UnsealShare(GenesisIoArgs),
+
+    /// Sign a ceremony portal envelope ready for submission.
+    #[command(name = "sign-envelope")]
+    SignEnvelope(GenesisSignEnvelopeArgs),
+
+    /// Encrypt a DKG round-two payload for exactly one recipient.
+    #[command(name = "encrypt-pairwise")]
+    EncryptPairwise(GenesisIoArgs),
+
+    /// Decrypt a recipient-bound DKG round-two payload.
+    #[command(name = "decrypt-pairwise")]
+    DecryptPairwise(GenesisIoArgs),
+
+    /// Emit the exact root-artifact bytes that `sign-root-artifact` must sign.
+    #[command(name = "emit-artifact-bytes")]
+    EmitArtifactBytes(GenesisIoArgs),
+
+    /// Submit a signed envelope to a running root genesis portal.
+    #[command(name = "submit-envelope")]
+    SubmitEnvelope(GenesisSubmitEnvelopeArgs),
+
+    /// Pull accepted envelopes back from a running portal (read half of the relay).
+    #[command(name = "pull-envelopes")]
+    PullEnvelopes(GenesisPullEnvelopesArgs),
+
+    /// Replay accepted envelopes and emit the completed DKG transcript hash.
+    #[command(name = "compute-dkg-transcript-hash")]
+    ComputeDkgTranscriptHash(GenesisIoArgs),
+
+    /// Replay accepted envelopes and emit the final ceremony transcript hash.
+    #[command(name = "compute-final-transcript-hash")]
+    ComputeFinalTranscriptHash(GenesisIoArgs),
+
+    /// CBOR-encode an encrypted round-two payload into envelope `payload_bytes`.
+    #[command(name = "encode-encrypted-payload")]
+    EncodeEncryptedPayload(GenesisIoArgs),
+
+    /// CBOR-decode envelope `payload_bytes` back into an encrypted round-two payload.
+    #[command(name = "decode-encrypted-payload")]
+    DecodeEncryptedPayload(GenesisIoArgs),
+
+    /// Distributed signing — produce one signer's public commitment (and a
+    /// separate local-only secret-nonces file).
+    #[command(name = "sign-commit")]
+    SignCommit(GenesisSignCommitArgs),
+
+    /// Distributed signing — coordinator builds the signing package from the declared set.
+    #[command(name = "build-signing-package")]
+    BuildSigningPackage(GenesisIoArgs),
+
+    /// Distributed signing — produce one signer's signature share.
+    #[command(name = "sign-share")]
+    SignShare(GenesisSignShareArgs),
+
+    /// Distributed signing — coordinator aggregates the declared set into the root signature.
+    #[command(name = "aggregate-signature")]
+    AggregateSignature(GenesisIoArgs),
 }
 
 #[derive(Subcommand)]
@@ -305,6 +366,11 @@ pub struct GenesisCeremonyInitArgs {
     #[arg(long)]
     pub roster: PathBuf,
 
+    /// Predeclared signing set: exactly `threshold` (7) rostered FROST identifiers
+    /// that will sign root artifacts, comma-separated (e.g. `1,2,3,4,5,6,7`).
+    #[arg(long, value_delimiter = ',')]
+    pub signing_set: Vec<u16>,
+
     /// Ceremony configuration output path.
     #[arg(long)]
     pub out: PathBuf,
@@ -330,6 +396,112 @@ pub struct GenesisIoArgs {
     pub input: Option<PathBuf>,
 
     /// Output JSON or binary path.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+/// Sign a ceremony portal envelope.
+///
+/// The signing secret is read from the certifier's `0600` private-material file
+/// (`--private-input`, the file written by `certifier init --private-out`), never
+/// passed on the command line. Passing key material through argv would leak it
+/// through process listings, shell history, terminal capture, and operator
+/// transcripts — unacceptable for a ceremony artifact that may later be
+/// challenged by a third-party auditor.
+pub struct GenesisSignEnvelopeArgs {
+    /// Envelope draft JSON path (ceremony_id, phase, payload_kind, sender_did,
+    /// recipient_did, sequence, payload_bytes).
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Signed envelope output path. Omit to print to stdout.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Path to the certifier's private-material JSON (`certifier-NN.private.json`,
+    /// `0600`). The 32-byte Ed25519 signing secret is read from this file's
+    /// `signing_secret_hex` field; it is never accepted as a CLI argument.
+    #[arg(long)]
+    pub private_input: PathBuf,
+}
+
+#[derive(Args)]
+/// Pull accepted envelopes back from a running portal.
+pub struct GenesisPullEnvelopesArgs {
+    /// Portal base URL (for example `http://127.0.0.1:3017`). The
+    /// `/api/v1/root-genesis/portal/envelopes` path is appended automatically.
+    #[arg(long)]
+    pub portal_url: String,
+
+    /// Optional ceremony phase filter (Round1, Round2, Finalize, RootSigning, ...).
+    #[arg(long)]
+    pub phase: Option<String>,
+
+    /// Optional payload-kind filter (Round1Package, Round2EncryptedPackage, ...).
+    #[arg(long)]
+    pub payload_kind: Option<String>,
+
+    /// Optional recipient DID filter (for recipient-bound round-two packages).
+    #[arg(long)]
+    pub recipient_did: Option<String>,
+
+    /// Output path for the JSON array of matching envelopes.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+/// Submit a signed envelope to a running portal.
+pub struct GenesisSubmitEnvelopeArgs {
+    /// Portal base URL (for example `http://127.0.0.1:3017`). The
+    /// `/api/v1/root-genesis/portal/envelopes` path is appended automatically
+    /// when it is not already present.
+    #[arg(long)]
+    pub portal_url: String,
+
+    /// Signed envelope JSON path to POST.
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+}
+
+#[derive(Args)]
+/// Distributed signing round one — emit a public commitment and a separate
+/// local-only secret-nonces file.
+///
+/// The commitment is relay-safe and is broadcast to the coordinator; the nonces
+/// file is SECRET, written `0600`, and must stay on the signer's host until
+/// `sign-share`. They are written to two distinct paths so the secret nonces are
+/// never co-located with the artifact that leaves the signer.
+pub struct GenesisSignCommitArgs {
+    /// Input JSON path (`config`, `key_package`).
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Output path for the PUBLIC `RootSigningCommitment` (safe to transmit to
+    /// the coordinator). Refused if it already exists.
+    #[arg(long)]
+    pub commitment_out: PathBuf,
+
+    /// Output path for the SECRET `RootSigningNonces` (`0600`, local-only, fed to
+    /// `sign-share`). Refused if it already exists.
+    #[arg(long)]
+    pub nonces_out: PathBuf,
+}
+
+#[derive(Args)]
+/// Distributed signing round two — produce one signer's signature share.
+pub struct GenesisSignShareArgs {
+    /// Input JSON path (`config`, `key_package`, `signing_package_hex`).
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Path to this signer's local-only `RootSigningNonces` file produced by
+    /// `sign-commit --nonces-out`.
+    #[arg(long)]
+    pub nonces: PathBuf,
+
+    /// Signature-share output path. Omit to print to stdout (the share is public).
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
@@ -365,14 +537,76 @@ mod tests {
             "round1",
             "round2",
             "finalize-dkg",
+            "build-final-key-confirmation",
             "sign-root-artifact",
             "assemble-bundle",
             "verify-bundle",
             "seal-share",
             "unseal-share",
+            "sign-envelope",
+            "encrypt-pairwise",
+            "decrypt-pairwise",
+            "emit-artifact-bytes",
+            "submit-envelope",
+            "pull-envelopes",
+            "compute-dkg-transcript-hash",
+            "compute-final-transcript-hash",
+            "encode-encrypted-payload",
+            "decode-encrypted-payload",
+            "sign-commit",
+            "build-signing-package",
+            "sign-share",
+            "aggregate-signature",
         ] {
             assert!(help.contains(command), "missing genesis command {command}");
         }
+    }
+
+    #[test]
+    fn genesis_build_round1_attestation_command_is_absent_pending_ratification() {
+        // The unratified round-one set attestation command was removed; it must
+        // not reappear on the production ceremony CLI until a ratified payload
+        // shape lands and the portal validates it.
+        let help = long_help_for(&["genesis"]);
+        assert!(!help.contains("build-round1-attestation"));
+    }
+
+    #[test]
+    fn genesis_sign_envelope_takes_no_signing_secret_through_argv() {
+        use clap::Parser;
+
+        // The signing secret comes from a `0600` private-material file path.
+        let with_file = Cli::try_parse_from([
+            "exochain",
+            "genesis",
+            "sign-envelope",
+            "--input",
+            "draft.json",
+            "--private-input",
+            "certifier-01.private.json",
+            "--output",
+            "envelope.json",
+        ]);
+        assert!(
+            with_file.is_ok(),
+            "private-material file path must be accepted"
+        );
+
+        // A 32-byte hex secret cannot be passed as a CLI argument: the old flag
+        // is gone and any attempt to supply key material on argv is rejected.
+        let with_argv_secret = Cli::try_parse_from([
+            "exochain",
+            "genesis",
+            "sign-envelope",
+            "--input",
+            "draft.json",
+            "--signing-key-hex",
+            &"ab".repeat(32),
+        ]);
+        assert!(
+            with_argv_secret.is_err(),
+            "no CLI argument may carry 32-byte signing-secret material"
+        );
     }
 
     #[test]

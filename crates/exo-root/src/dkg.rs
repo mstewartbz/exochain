@@ -424,6 +424,7 @@ mod tests {
             max_signers: 13,
             created_at: Timestamp::new(1, 0),
             certifiers,
+            signing_set: (1..=7).collect(),
         }
     }
 

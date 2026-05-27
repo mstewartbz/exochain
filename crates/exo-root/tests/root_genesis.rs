@@ -6,10 +6,12 @@ use exo_authority::permission::Permission;
 use exo_core::{Did, Hash256, PublicKey, SecretKey, Signature, Timestamp, crypto::KeyPair};
 use exo_root::{
     CeremonyEnvelope, CeremonyEnvelopeDraft, CeremonyPayloadKind, CeremonyPhase, CertifierContact,
-    GenesisCeremonyConfig, PairwiseEncryptedPayload, PortalStore, RootIssuerDelegation,
-    SealedShare, assemble_root_bundle, decrypt_pairwise_payload, dkg_finalize_participant,
-    dkg_round1, dkg_round2, encrypt_pairwise_payload, run_complete_dkg, seal_share, threshold_sign,
-    unseal_share, verify_root_bundle, verify_root_signature,
+    GenesisCeremonyConfig, PairwiseEncryptedPayload, PortalStore, RootDkgOutput,
+    RootIssuerDelegation, RootParticipantDkgOutput, SealedShare, assemble_root_bundle,
+    build_final_key_confirmation, build_signing_package, decrypt_pairwise_payload,
+    dkg_finalize_participant, dkg_round1, dkg_round2, encode_final_key_confirmation_payload,
+    encrypt_pairwise_payload, run_complete_dkg, seal_share, sign_commit, sign_share,
+    threshold_sign, unseal_share, verify_root_bundle, verify_root_signature,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -69,6 +71,158 @@ fn encrypted_payload_bytes(ciphertext: impl Into<Vec<u8>>) -> Vec<u8> {
     bytes
 }
 
+#[allow(clippy::too_many_arguments)]
+fn sign_envelope(
+    config: &GenesisCeremonyConfig,
+    signing_secrets: &BTreeMap<Did, SecretKey>,
+    sender_identifier: u16,
+    phase: CeremonyPhase,
+    payload_kind: CeremonyPayloadKind,
+    recipient_identifier: Option<u16>,
+    sequence: u64,
+    payload_bytes: Vec<u8>,
+) -> CeremonyEnvelope {
+    let sender = config
+        .certifier_by_identifier(sender_identifier)
+        .expect("sender");
+    let recipient = recipient_identifier.map(|identifier| {
+        config
+            .certifier_by_identifier(identifier)
+            .expect("recipient")
+            .did
+            .clone()
+    });
+    let signing_secret = signing_secrets.get(&sender.did).expect("secret");
+    CeremonyEnvelope::sign(
+        envelope_draft(
+            &config.ceremony_id,
+            phase,
+            payload_kind,
+            sender.did.clone(),
+            recipient,
+            sequence,
+            payload_bytes,
+        ),
+        signing_secret,
+    )
+    .expect("signed envelope")
+}
+
+fn submit_complete_dkg_transcript(
+    store: &mut PortalStore,
+    config: &GenesisCeremonyConfig,
+    signing_secrets: &BTreeMap<Did, SecretKey>,
+    rng: &mut StdRng,
+) -> Hash256 {
+    for certifier in &config.certifiers {
+        let round1 = dkg_round1(config, certifier.frost_identifier, rng)
+            .expect("round one")
+            .round1_package;
+        store
+            .submit(sign_envelope(
+                config,
+                signing_secrets,
+                certifier.frost_identifier,
+                CeremonyPhase::Round1,
+                CeremonyPayloadKind::Round1Package,
+                None,
+                10,
+                round1,
+            ))
+            .expect("submit round one");
+    }
+    for sender in &config.certifiers {
+        for recipient in &config.certifiers {
+            if sender.frost_identifier == recipient.frost_identifier {
+                continue;
+            }
+            let sequence = 1_000
+                + u64::from(sender.frost_identifier) * 100
+                + u64::from(recipient.frost_identifier);
+            store
+                .submit(sign_envelope(
+                    config,
+                    signing_secrets,
+                    sender.frost_identifier,
+                    CeremonyPhase::Round2,
+                    CeremonyPayloadKind::Round2EncryptedPackage,
+                    Some(recipient.frost_identifier),
+                    sequence,
+                    encrypted_payload_bytes(format!(
+                        "round2-{}-{}",
+                        sender.frost_identifier, recipient.frost_identifier
+                    )),
+                ))
+                .expect("submit round two");
+        }
+    }
+    store.dkg_transcript_hash().expect("dkg transcript hash")
+}
+
+fn participant_output(dkg: &RootDkgOutput, identifier: u16) -> RootParticipantDkgOutput {
+    RootParticipantDkgOutput {
+        key_package: dkg.key_packages[&identifier].clone(),
+        public_key_package: dkg.public_key_package.clone(),
+    }
+}
+
+fn final_key_confirmation_payload(
+    config: &GenesisCeremonyConfig,
+    dkg: &RootDkgOutput,
+    identifier: u16,
+    dkg_transcript_hash: Hash256,
+) -> Vec<u8> {
+    let confirmation = build_final_key_confirmation(
+        config,
+        &participant_output(dkg, identifier),
+        dkg_transcript_hash,
+    )
+    .expect("final key confirmation");
+    encode_final_key_confirmation_payload(&confirmation).expect("confirmation payload")
+}
+
+fn submit_final_key_confirmations(
+    store: &mut PortalStore,
+    config: &GenesisCeremonyConfig,
+    signing_secrets: &BTreeMap<Did, SecretKey>,
+    dkg: &RootDkgOutput,
+    dkg_transcript_hash: Hash256,
+    count: u16,
+) {
+    for identifier in 1..=count {
+        submit_final_key_confirmation(
+            store,
+            config,
+            signing_secrets,
+            dkg,
+            dkg_transcript_hash,
+            identifier,
+        );
+    }
+}
+
+fn submit_final_key_confirmation(
+    store: &mut PortalStore,
+    config: &GenesisCeremonyConfig,
+    signing_secrets: &BTreeMap<Did, SecretKey>,
+    dkg: &RootDkgOutput,
+    dkg_transcript_hash: Hash256,
+    identifier: u16,
+) {
+    store
+        .submit(sign_envelope(
+            config,
+            signing_secrets,
+            identifier,
+            CeremonyPhase::Finalize,
+            CeremonyPayloadKind::FinalKeyConfirmation,
+            None,
+            5_000 + u64::from(identifier),
+            final_key_confirmation_payload(config, dkg, identifier, dkg_transcript_hash),
+        ))
+        .expect("submit final key confirmation");
+}
+
 fn config() -> (
     GenesisCeremonyConfig,
     BTreeMap<Did, SecretKey>,
@@ -93,6 +247,7 @@ fn config() -> (
             max_signers: 13,
             created_at: Timestamp::new(1_785_000_000_000, 0),
             certifiers,
+            signing_set: (1..=7).collect(),
         },
         signing_secrets,
         transport_secrets,
@@ -657,7 +812,7 @@ fn root_bundle_verification_rejects_tampered_delegation() {
         dkg.public_key_package.clone(),
         delegation.clone(),
         transcript_hash,
-        root_signature.signature,
+        root_signature,
     )
     .expect("bundle");
     verify_root_bundle(&bundle).expect("bundle verifies");
@@ -709,7 +864,7 @@ fn root_bundle_rejects_public_key_package_metadata_mismatch() {
             mixed_public,
             delegation,
             transcript_hash,
-            root_signature.signature,
+            root_signature,
         )
         .is_err(),
         "bundle must reject root key metadata that does not derive from the serialized FROST public package"
@@ -780,7 +935,7 @@ fn root_bundle_verification_rejects_tampered_config_transcript_signature_and_id(
         dkg.public_key_package,
         delegation,
         transcript_hash,
-        root_signature.signature,
+        root_signature,
     )
     .expect("bundle");
 
@@ -793,8 +948,12 @@ fn root_bundle_verification_rejects_tampered_config_transcript_signature_and_id(
     assert!(verify_root_bundle(&tampered_transcript).is_err());
 
     let mut tampered_signature = bundle.clone();
-    tampered_signature.root_signature[0] ^= 0x01;
+    tampered_signature.root_signature.signature[0] ^= 0x01;
     assert!(verify_root_bundle(&tampered_signature).is_err());
+
+    let mut tampered_signer_set = bundle.clone();
+    tampered_signer_set.root_signature.signer_ids = vec![1, 2, 3, 4, 5, 6, 9];
+    assert!(verify_root_bundle(&tampered_signer_set).is_err());
 
     let mut tampered_id = bundle;
     tampered_id.bundle_id = Hash256::digest(b"wrong bundle id");
@@ -1048,56 +1207,339 @@ fn portal_rejects_wrong_ceremony_bad_recipient_self_target_and_bad_broadcasts() 
 }
 
 #[test]
-fn portal_accepts_all_valid_broadcast_phase_kinds() {
+fn portal_schema_validates_dkg_kinds_and_keeps_unratified_kinds_disabled() {
     let (config, signing_secrets, _) = config();
-    let sender = config.certifiers[0].did.clone();
-    let signing_secret = signing_secrets.get(&sender).expect("secret");
+    let mut rng = StdRng::seed_from_u64(2026);
+    let round1_package = dkg_round1(&config, 1, &mut rng)
+        .expect("round one")
+        .round1_package;
     let mut store = PortalStore::new(config.clone());
 
-    for (sequence, phase, kind) in [
-        (
-            30,
+    store
+        .submit(sign_envelope(
+            &config,
+            &signing_secrets,
+            1,
             CeremonyPhase::Round1,
             CeremonyPayloadKind::Round1Package,
-        ),
-        (
+            None,
+            30,
+            round1_package.clone(),
+        ))
+        .expect("round-one package accepted");
+    store
+        .submit(sign_envelope(
+            &config,
+            &signing_secrets,
+            1,
+            CeremonyPhase::Round2,
+            CeremonyPayloadKind::Round2EncryptedPackage,
+            Some(2),
             31,
-            CeremonyPhase::Round1SetAttestation,
-            CeremonyPayloadKind::Round1SetAttestation,
-        ),
-        (
-            32,
-            CeremonyPhase::Finalize,
-            CeremonyPayloadKind::FinalKeyConfirmation,
-        ),
-        (
-            33,
+            encrypted_payload_bytes(b"ciphertext"),
+        ))
+        .expect("round-two encrypted package accepted");
+    assert_eq!(store.envelope_count(), 2);
+
+    // FinalKeyConfirmation is ratified, but it still fails closed until the
+    // complete DKG transcript exists and the typed payload verifies.
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::Finalize,
+                CeremonyPayloadKind::FinalKeyConfirmation,
+                None,
+                32,
+                vec![1, 2, 3],
+            ))
+            .is_err()
+    );
+
+    // Round-one set attestation remains disabled because it still has no
+    // ratified producer/schema/verifier.
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::Round1SetAttestation,
+                CeremonyPayloadKind::Round1SetAttestation,
+                None,
+                33,
+                vec![1, 2, 3],
+            ))
+            .is_err()
+    );
+
+    // A structurally invalid round-one package fails schema validation.
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                2,
+                CeremonyPhase::Round1,
+                CeremonyPayloadKind::Round1Package,
+                None,
+                35,
+                b"not a round-one package".to_vec(),
+            ))
+            .is_err()
+    );
+
+    // A broadcast kind may not carry a recipient.
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                3,
+                CeremonyPhase::Round1,
+                CeremonyPayloadKind::Round1Package,
+                Some(2),
+                36,
+                round1_package,
+            ))
+            .is_err()
+    );
+}
+
+#[test]
+fn final_key_confirmation_gates_root_signing_and_final_transcript_hash() {
+    let (config, signing_secrets, _) = config();
+    let mut rng = StdRng::seed_from_u64(2126);
+    let dkg = run_complete_dkg(&config, &mut rng).expect("dkg");
+    let mut store = PortalStore::new(config.clone());
+    let dkg_transcript_hash =
+        submit_complete_dkg_transcript(&mut store, &config, &signing_secrets, &mut rng);
+
+    let (commitment, signer_nonces) =
+        sign_commit(&config, &dkg.key_packages[&1], b"artifact", &mut rng).expect("commit");
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::RootSigning,
+                CeremonyPayloadKind::RootSigningCommitment,
+                None,
+                6_001,
+                commitment.commitments.clone(),
+            ))
+            .is_err(),
+        "root signing must be blocked before final key confirmations"
+    );
+
+    submit_final_key_confirmations(
+        &mut store,
+        &config,
+        &signing_secrets,
+        &dkg,
+        dkg_transcript_hash,
+        12,
+    );
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::RootSigning,
+                CeremonyPayloadKind::RootSigningCommitment,
+                None,
+                6_002,
+                commitment.commitments.clone(),
+            ))
+            .is_err(),
+        "root signing must wait for all thirteen confirmations"
+    );
+
+    submit_final_key_confirmation(
+        &mut store,
+        &config,
+        &signing_secrets,
+        &dkg,
+        dkg_transcript_hash,
+        13,
+    );
+    let final_transcript_hash = store
+        .final_transcript_hash()
+        .expect("final transcript hash");
+    assert_ne!(final_transcript_hash, dkg_transcript_hash);
+
+    store
+        .submit(sign_envelope(
+            &config,
+            &signing_secrets,
+            1,
             CeremonyPhase::RootSigning,
             CeremonyPayloadKind::RootSigningCommitment,
-        ),
-        (
-            34,
+            None,
+            6_003,
+            commitment.commitments,
+        ))
+        .expect("root signing commitment accepted after all confirmations");
+
+    let mut nonces_shaped_payload = Vec::new();
+    ciborium::into_writer(&signer_nonces, &mut nonces_shaped_payload).expect("encode nonces");
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                2,
+                CeremonyPhase::RootSigning,
+                CeremonyPayloadKind::RootSigningCommitment,
+                None,
+                6_004,
+                nonces_shaped_payload,
+            ))
+            .is_err(),
+        "RootSigningNonces bytes must not be accepted as a public commitment"
+    );
+
+    let mut commitments = BTreeMap::new();
+    let mut nonces = BTreeMap::new();
+    for identifier in 1..=7u16 {
+        let (commitment, signer_nonces) = sign_commit(
+            &config,
+            &dkg.key_packages[&identifier],
+            b"artifact",
+            &mut rng,
+        )
+        .expect("commit");
+        commitments.insert(identifier, commitment.commitments);
+        nonces.insert(identifier, signer_nonces);
+    }
+    let package = build_signing_package(&config, commitments, b"artifact").expect("package");
+    let share_payload = sign_share(
+        &config,
+        &dkg.key_packages[&1],
+        &nonces[&1],
+        &package,
+        b"artifact",
+    )
+    .expect("share")
+    .signature_share;
+    store
+        .submit(sign_envelope(
+            &config,
+            &signing_secrets,
+            1,
             CeremonyPhase::RootSigning,
             CeremonyPayloadKind::RootSignatureShare,
-        ),
-    ] {
-        let envelope = CeremonyEnvelope::sign(
-            envelope_draft(
-                &config.ceremony_id,
-                phase,
-                kind,
-                sender.clone(),
+            None,
+            6_005,
+            share_payload.clone(),
+        ))
+        .expect("signature share accepted after all confirmations");
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::RootSigning,
+                CeremonyPayloadKind::RootSignatureShare,
                 None,
-                sequence,
-                b"payload".to_vec(),
-            ),
-            signing_secret,
-        )
-        .expect("envelope");
-        store.submit(envelope).expect("accepted broadcast");
-    }
+                6_006,
+                share_payload,
+            ))
+            .is_err(),
+        "a second signature share from one signer is rejected"
+    );
 
-    assert_eq!(store.envelope_count(), 5);
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::Round2,
+                CeremonyPayloadKind::Round2EncryptedPackage,
+                Some(2),
+                6_007,
+                encrypted_payload_bytes(b"late dkg mutation"),
+            ))
+            .is_err(),
+        "the DKG transcript is frozen after final confirmations begin"
+    );
+}
+
+#[test]
+fn final_key_confirmation_rejects_sender_hash_and_duplicate_mismatches() {
+    let (config, signing_secrets, _) = config();
+    let mut rng = StdRng::seed_from_u64(2226);
+    let dkg = run_complete_dkg(&config, &mut rng).expect("dkg");
+    let mut store = PortalStore::new(config.clone());
+    let dkg_transcript_hash =
+        submit_complete_dkg_transcript(&mut store, &config, &signing_secrets, &mut rng);
+
+    // Payload certifier DID/FROST id must match the signed envelope sender.
+    let id1_payload = final_key_confirmation_payload(&config, &dkg, 1, dkg_transcript_hash);
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                2,
+                CeremonyPhase::Finalize,
+                CeremonyPayloadKind::FinalKeyConfirmation,
+                None,
+                5_002,
+                id1_payload,
+            ))
+            .is_err()
+    );
+
+    submit_final_key_confirmation(
+        &mut store,
+        &config,
+        &signing_secrets,
+        &dkg,
+        dkg_transcript_hash,
+        1,
+    );
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                1,
+                CeremonyPhase::Finalize,
+                CeremonyPayloadKind::FinalKeyConfirmation,
+                None,
+                5_101,
+                final_key_confirmation_payload(&config, &dkg, 1, dkg_transcript_hash),
+            ))
+            .is_err(),
+        "at most one final key confirmation is accepted per certifier"
+    );
+
+    let mut tampered =
+        build_final_key_confirmation(&config, &participant_output(&dkg, 2), dkg_transcript_hash)
+            .expect("confirmation");
+    tampered.root_public_key_hash = Hash256::digest(b"wrong root key hash");
+    assert!(
+        store
+            .submit(sign_envelope(
+                &config,
+                &signing_secrets,
+                2,
+                CeremonyPhase::Finalize,
+                CeremonyPayloadKind::FinalKeyConfirmation,
+                None,
+                5_102,
+                encode_final_key_confirmation_payload(&tampered).expect("tampered payload"),
+            ))
+            .is_err(),
+        "semantic hash mismatches must fail closed"
+    );
 }
 
 #[test]

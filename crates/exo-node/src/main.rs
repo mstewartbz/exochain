@@ -1540,6 +1540,7 @@ mod root_genesis_adapter_tests {
                 max_signers: 13,
                 created_at: Timestamp::new(1_785_000_000_000, 0),
                 certifiers,
+                signing_set: (1..=7).collect(),
             },
             first_secret.expect("first certifier secret"),
         )
