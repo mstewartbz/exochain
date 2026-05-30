@@ -45,6 +45,11 @@ pub struct GenesisCeremonyConfig {
     pub created_at: Timestamp,
     /// Full certifier roster.
     pub certifiers: Vec<CertifierContact>,
+    /// Predeclared deterministic signing set: exactly `threshold` rostered FROST
+    /// identifiers chosen before commitments are emitted. Root artifacts are
+    /// signed only by this exact set. If any signer is unavailable, the ceremony
+    /// aborts and restarts with a new signed config and ceremony id.
+    pub signing_set: Vec<u16>,
 }
 
 impl GenesisCeremonyConfig {
@@ -118,6 +123,57 @@ impl GenesisCeremonyConfig {
             }
         }
 
+        self.validate_signing_set()?;
+
+        Ok(())
+    }
+
+    /// Validate the predeclared signing set.
+    fn validate_signing_set(&self) -> Result<()> {
+        if self.signing_set.len() != usize::from(self.threshold) {
+            return Err(RootError::InvalidConfig {
+                reason: format!(
+                    "signing_set must contain exactly {} signers",
+                    self.threshold
+                ),
+            });
+        }
+        let mut declared = BTreeSet::new();
+        for identifier in &self.signing_set {
+            if self.certifier_by_identifier(*identifier).is_none() {
+                return Err(RootError::InvalidConfig {
+                    reason: format!("signing_set member {identifier} is not rostered"),
+                });
+            }
+            if !declared.insert(*identifier) {
+                return Err(RootError::InvalidConfig {
+                    reason: format!("duplicate signing_set member {identifier}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that `submitted` is the canonical signing selection for this
+    /// ceremony: exactly the predeclared `signing_set`. There is no in-ceremony
+    /// alternate substitution; an unavailable signer aborts the ceremony and forces
+    /// a new config/ceremony id.
+    pub fn validate_signing_selection(&self, submitted: &BTreeSet<u16>) -> Result<()> {
+        if submitted.len() != usize::from(self.threshold) {
+            return Err(RootError::InvalidConfig {
+                reason: format!(
+                    "signing selection must contain exactly {} signers",
+                    self.threshold
+                ),
+            });
+        }
+        let expected: BTreeSet<u16> = self.signing_set.iter().copied().collect();
+        if &expected != submitted {
+            return Err(RootError::InvalidConfig {
+                reason: "signing selection must exactly match the predeclared signing_set"
+                    .to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -135,5 +191,94 @@ impl GenesisCeremonyConfig {
         self.certifiers
             .iter()
             .find(|certifier| certifier.frost_identifier == identifier)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use exo_core::{Did, Hash256, PublicKey, Timestamp};
+
+    use super::*;
+
+    fn config() -> GenesisCeremonyConfig {
+        let certifiers = (1..=ROOT_GENESIS_SIGNERS)
+            .map(|index| {
+                let byte = u8::try_from(index).expect("index fits");
+                CertifierContact {
+                    did: Did::new(&format!("did:exo:ceremony-unit-{index:02}")).expect("did"),
+                    frost_identifier: index,
+                    signing_public_key: PublicKey::from_bytes([byte; 32]),
+                    transport_public_key: [byte; 32],
+                }
+            })
+            .collect();
+        GenesisCeremonyConfig {
+            ceremony_id: "ceremony-unit".into(),
+            network_id: "exochain-test".into(),
+            repo_commit: "d8927686a34bdc28ba36d53938f665685d2c4c04".into(),
+            constitution_hash: Hash256::digest(b"constitution"),
+            threshold: ROOT_GENESIS_THRESHOLD,
+            max_signers: ROOT_GENESIS_SIGNERS,
+            created_at: Timestamp::new(1, 0),
+            certifiers,
+            signing_set: (1..=7).collect(),
+        }
+    }
+
+    fn selection(ids: &[u16]) -> BTreeSet<u16> {
+        ids.iter().copied().collect()
+    }
+
+    #[test]
+    fn valid_config_with_signing_set_validates() {
+        config().validate().expect("config validates");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_signing_set() {
+        let mut wrong_len = config();
+        wrong_len.signing_set = (1..=6).collect();
+        assert!(wrong_len.validate().is_err());
+
+        let mut unrostered_primary = config();
+        unrostered_primary.signing_set = vec![1, 2, 3, 4, 5, 6, 99];
+        assert!(unrostered_primary.validate().is_err());
+
+        let mut duplicate_primary = config();
+        duplicate_primary.signing_set = vec![1, 2, 3, 4, 5, 6, 6];
+        assert!(duplicate_primary.validate().is_err());
+    }
+
+    #[test]
+    fn validate_signing_selection_accepts_only_declared_set() {
+        let config = config();
+        config
+            .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 7]))
+            .expect("declared set accepted");
+    }
+
+    #[test]
+    fn validate_signing_selection_rejects_wrong_size_unknown_and_substitution() {
+        let config = config();
+        // Wrong size.
+        assert!(
+            config
+                .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 7, 8]))
+                .is_err()
+        );
+        // Signer outside the declared pool.
+        assert!(
+            config
+                .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 99]))
+                .is_err()
+        );
+        // No alternate substitution: primary 7 absent and alternate 8 present.
+        assert!(
+            config
+                .validate_signing_selection(&selection(&[1, 2, 3, 4, 5, 6, 8]))
+                .is_err()
+        );
     }
 }
