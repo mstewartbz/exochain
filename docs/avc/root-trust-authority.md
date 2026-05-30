@@ -40,3 +40,18 @@ An AVC issuer delegation is rejected when:
 - the bundle references a different repo commit, constitution hash, network ID, or ceremony ID than the verifier expects.
 
 Self-issued AVC credentials can be useful for local testing, but they are not root-trusted AVC governance credentials.
+
+The bundled root trust artifact in production is provisioned through an
+adjacent-surface install flow in this repository:
+
+- Intake record and trust-boundary contract:
+  [root-trust-install-intake.md](root-trust-install-intake.md)
+- Operator installation runbook:
+  [root-trust-installation.md](root-trust-installation.md)
+- Installer implementation:
+  `tools/root-trust-install.sh`
+
+Do not treat imported ceremony artifacts as live EXOCHAIN trust signals.
+The artifact is considered active only when a consuming path validates:
+- `exo-node genesis verify-bundle` succeeds for the bundle exactly as emitted, using the ceremony `repo_commit` recorded in the bundle, and
+- the adjacent manifest/pointer record reports `verification_status = verified` and the recorded checksum matches the stored canonical bundle.

@@ -70,6 +70,9 @@ SPDX-License-Identifier: Apache-2.0
 - [HeartField.ai](heartfield/README.md) — Adjacent movement surface for uplifting self-governance and its kinship map.
 - [HonorGood Compact](honorgood/HONOR_GOOD_COMPACT.md) — EXOCHAIN-native provenance and conditional participation primitives.
 - [Mission Economics](economy/MISSION_ECONOMICS.md) — Mission, receipt, ruleset, and settlement accounting model.
+- [AVC Root Trust Authority](avc/root-trust-authority.md) — Root trust bundle semantics and ceremony-binding policy.
+- [AVC Root Trust Install Runbook](avc/root-trust-installation.md) — Emitted-bundle verification and publish manifest process.
+- [AVC Root Trust Install Intake](avc/root-trust-install-intake.md) — Adjacent-surface trust-boundary and governance record.
 
 ## Proofs
 

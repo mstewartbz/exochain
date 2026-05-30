@@ -1,0 +1,60 @@
+{
+  "artifact_id": "avc-exo-ceremony-2026",
+  "artifact_uri": "file:///Users/bobstewart/.codex/worktrees/2cd0/exochain/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json",
+  "bundle_checksum": {
+    "algorithm": "BLAKE3",
+    "value": "f186c7ed524f39ea0a191dca52323a97b681df924c6c04529a837253ccaa7c31"
+  },
+  "bundle_format": "emitted_root_signature_object",
+  "bundle_id": [
+    125,
+    153,
+    84,
+    167,
+    151,
+    239,
+    36,
+    76,
+    21,
+    173,
+    27,
+    115,
+    60,
+    247,
+    117,
+    152,
+    18,
+    92,
+    206,
+    240,
+    248,
+    18,
+    164,
+    4,
+    19,
+    126,
+    130,
+    124,
+    25,
+    45,
+    106,
+    88
+  ],
+  "bundle_id_hex": "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58",
+  "frozen": {
+    "read_only": true
+  },
+  "issued_at": "2026-05-30T18:14:55Z",
+  "pointer_checksum": {
+    "algorithm": "BLAKE3",
+    "value": "89e71b55d2a861b3547820e4ddceb041a9ff7a500d3b8efe365ac12d2c3448b4"
+  },
+  "pointer_file": "root-trust-pointer.6131feb462d3a4c2.json",
+  "record_id": "6131feb462d3a4c2",
+  "schema": "exo.root_trust_bundle_pointer.v1",
+  "source_path": "/Users/bobstewart/exo-ceremony/bundle.json",
+  "verification_command": "CARGO_TARGET_DIR=/Users/bobstewart/.codex/worktrees/2cd0/exochain/target-root-trust-dd18b58cd49f cargo run -p exo-node -- genesis verify-bundle --input /var/folders/3h/_vld6h0n4_l51vd2t5z85p9m0000gn/T/exo-root-trust-install.XXXXXX.TrhAMvBWvo/avc-exo-ceremony-2026.verify.input.json",
+  "verification_status": "verified",
+  "verifier_commit": "dd18b58cd49f9c96f396180bb72722db4f7d70d7",
+  "verifier_version": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
+}
