@@ -1,0 +1,145 @@
+{
+  "artifact_id": "avc-exo-ceremony-2026",
+  "latest_record_id": "6131feb462d3a4c2",
+  "latest_recorded_at": "2026-05-30T18:14:55Z",
+  "manifest_checksum": {
+    "algorithm": "BLAKE3",
+    "value": "6cb04b38cdc545642bba5fcdaaad07e939e6b1d89070d83cd0c471bcf9b29ff9"
+  },
+  "policy": {
+    "allowed_exochain_claims": "none until downstream runtime verifier re-checks",
+    "append_only": true,
+    "required_runtime_check": "exo-node verify-bundle at verifier_commit",
+    "trust_source": "imported evidence"
+  },
+  "records": [
+    {
+      "artifact_id": "avc-exo-ceremony-2026",
+      "artifact_uri": "file:///Users/bobstewart/.codex/worktrees/2cd0/exochain/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json",
+      "bundle_checksum": {
+        "algorithm": "BLAKE3",
+        "value": "f186c7ed524f39ea0a191dca52323a97b681df924c6c04529a837253ccaa7c31"
+      },
+      "bundle_format": "emitted_root_signature_object",
+      "bundle_id": [
+        125,
+        153,
+        84,
+        167,
+        151,
+        239,
+        36,
+        76,
+        21,
+        173,
+        27,
+        115,
+        60,
+        247,
+        117,
+        152,
+        18,
+        92,
+        206,
+        240,
+        248,
+        18,
+        164,
+        4,
+        19,
+        126,
+        130,
+        124,
+        25,
+        45,
+        106,
+        88
+      ],
+      "bundle_id_hex": "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58",
+      "canonical_bundle_checksum": {
+        "algorithm": "BLAKE3",
+        "value": "984673648f1af4a81eb7bcf749b8a9d2c8c74469e0a90e3ba997b311e689129b"
+      },
+      "ceremony": {
+        "ceremony_id": "avc-exo-ceremony-2026",
+        "constitution_hash": [
+          72,
+          134,
+          253,
+          156,
+          203,
+          39,
+          205,
+          145,
+          208,
+          146,
+          196,
+          46,
+          45,
+          53,
+          127,
+          11,
+          231,
+          213,
+          151,
+          74,
+          107,
+          153,
+          167,
+          66,
+          96,
+          181,
+          199,
+          183,
+          233,
+          118,
+          210,
+          99
+        ],
+        "created_at": {
+          "logical": 0,
+          "physical_ms": 1780086674434
+        },
+        "max_signers": 13,
+        "network_id": "exochain-main",
+        "repo_commit": "dd18b58cd49f9c96f396180bb72722db4f7d70d7",
+        "threshold": 7
+      },
+      "policy": {
+        "allowed_exochain_trust_claims": [
+          "only after downstream equivalent verification at verifier_commit"
+        ],
+        "fail_closed": true,
+        "rollback_path": "delete artifact/pointer and re-run install with replacement manifest",
+        "source_type": "imported evidence"
+      },
+      "record_id": "6131feb462d3a4c2",
+      "recorded_at": "2026-05-30T18:14:55Z",
+      "root_signature_signers": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "source_checksum": {
+        "algorithm": "BLAKE3",
+        "value": "9122967cdddf58a67ec6919e5adb012e8056bcaf57af9e20d84f9c73b36fa3bc"
+      },
+      "source_path": "/Users/bobstewart/exo-ceremony/bundle.json",
+      "source_sha256": "70e4b623c2614f4a1931b0fa047447855b60cfbb0ac9a9c52797e6bcee8a34e8",
+      "verification": {
+        "command": "CARGO_TARGET_DIR=/Users/bobstewart/.codex/worktrees/2cd0/exochain/target-root-trust-dd18b58cd49f cargo run -p exo-node -- genesis verify-bundle --input /var/folders/3h/_vld6h0n4_l51vd2t5z85p9m0000gn/T/exo-root-trust-install.XXXXXX.TrhAMvBWvo/avc-exo-ceremony-2026.verify.input.json",
+        "command_toolchain": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+        "command_version": "dd18b58cd49f9c96f396180bb72722db4f7d70d7",
+        "pointer_file": "root-trust-pointer.6131feb462d3a4c2.json",
+        "result": "verified"
+      }
+    }
+  ],
+  "records_count": 1,
+  "schema": "exo.root_trust_install_manifest.v1",
+  "updated_at": "2026-05-30T18:14:55Z"
+}
