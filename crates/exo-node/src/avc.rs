@@ -41,7 +41,10 @@
 //! access is performed inside `tokio::task::spawn_blocking` so async
 //! workers are not held under the registry lock.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path as FsPath,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -53,12 +56,21 @@ use exo_avc::{
     AutonomousVolitionCredential, AvcRegistryRead, AvcRegistryWrite, AvcRevocation,
     AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry, validate_avc,
 };
-use exo_core::{Did, Hash256};
+use exo_core::{Did, Hash256, PublicKey};
+use exo_root::{RootTrustBundle, verify_root_bundle};
 use serde::{Deserialize, Serialize};
 use tower::limit::ConcurrencyLimitLayer;
 
 const MAX_AVC_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_AVC_API_CONCURRENT_REQUESTS: usize = 64;
+pub const AVC_ROOT_TRUST_BUNDLE_ENV: &str = "EXO_AVC_ROOT_TRUST_BUNDLE";
+pub const AVC_ROOT_TRUST_CEREMONY_ID: &str = "avc-exo-ceremony-2026";
+pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
+    "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58";
+pub const AVC_ROOT_TRUST_ISSUER_DID: &str =
+    "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX";
+pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
+    "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32";
 
 /// Shared state for AVC route handlers.
 #[derive(Clone)]
@@ -80,6 +92,140 @@ impl Default for AvcApiState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootTrustIssuerRegistration {
+    pub bundle_id: Hash256,
+    pub ceremony_id: String,
+    pub issuer_did: Did,
+    pub issuer_public_key: PublicKey,
+}
+
+fn parse_expected_hash(hex_value: &str, label: &str) -> anyhow::Result<Hash256> {
+    let bytes = hex::decode(hex_value)
+        .map_err(|error| anyhow::anyhow!("invalid {label} hex constant: {error}"))?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "invalid {label} hex constant: expected 32 bytes, got {}",
+            bytes.len()
+        );
+    }
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&bytes);
+    Ok(Hash256::from_bytes(buf))
+}
+
+fn parse_expected_public_key(hex_value: &str, label: &str) -> anyhow::Result<PublicKey> {
+    let bytes = hex::decode(hex_value)
+        .map_err(|error| anyhow::anyhow!("invalid {label} hex constant: {error}"))?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "invalid {label} hex constant: expected 32 bytes, got {}",
+            bytes.len()
+        );
+    }
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&bytes);
+    Ok(PublicKey::from_bytes(buf))
+}
+
+/// Load the configured AVC root trust bundle, verify it in-process, and
+/// register the delegated operational issuer public key.
+///
+/// If `EXO_AVC_ROOT_TRUST_BUNDLE` is absent, no registration is performed.
+/// If it is present, any read, parse, verification, or expected-identity
+/// mismatch error is fatal to preserve fail-closed production startup.
+pub fn load_configured_root_trust_bundle(
+    state: &AvcApiState,
+) -> anyhow::Result<Option<RootTrustIssuerRegistration>> {
+    let Some(path) = std::env::var_os(AVC_ROOT_TRUST_BUNDLE_ENV) else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        anyhow::bail!("{AVC_ROOT_TRUST_BUNDLE_ENV} is set but empty");
+    }
+    load_root_trust_bundle_from_path(state, FsPath::new(&path)).map(Some)
+}
+
+pub fn load_root_trust_bundle_from_path(
+    state: &AvcApiState,
+    path: &FsPath,
+) -> anyhow::Result<RootTrustIssuerRegistration> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to read AVC root trust bundle at {}: {error}",
+            path.display()
+        )
+    })?;
+    let bundle: RootTrustBundle = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to parse AVC root trust bundle at {}: {error}",
+            path.display()
+        )
+    })?;
+    verify_root_bundle(&bundle).map_err(|error| {
+        anyhow::anyhow!(
+            "AVC root trust bundle verification failed for {}: {error}",
+            path.display()
+        )
+    })?;
+
+    if bundle.config.ceremony_id != AVC_ROOT_TRUST_CEREMONY_ID {
+        anyhow::bail!(
+            "AVC root trust bundle ceremony mismatch: expected {}, got {}",
+            AVC_ROOT_TRUST_CEREMONY_ID,
+            bundle.config.ceremony_id
+        );
+    }
+
+    let expected_bundle_id =
+        parse_expected_hash(AVC_ROOT_TRUST_BUNDLE_ID_HEX, "AVC root trust bundle id")?;
+    if bundle.bundle_id != expected_bundle_id {
+        anyhow::bail!(
+            "AVC root trust bundle id mismatch: expected {}, got {}",
+            expected_bundle_id,
+            bundle.bundle_id
+        );
+    }
+
+    let expected_issuer_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID)
+        .map_err(|error| anyhow::anyhow!("invalid AVC root trust issuer DID constant: {error}"))?;
+    if bundle.issuer_delegation.issuer_did != expected_issuer_did {
+        anyhow::bail!(
+            "AVC root trust issuer DID mismatch: expected {}, got {}",
+            expected_issuer_did,
+            bundle.issuer_delegation.issuer_did
+        );
+    }
+
+    let expected_public_key = parse_expected_public_key(
+        AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX,
+        "AVC root trust issuer public key",
+    )?;
+    if bundle.issuer_delegation.issuer_public_key != expected_public_key {
+        anyhow::bail!(
+            "AVC root trust issuer public key mismatch for {}",
+            expected_issuer_did
+        );
+    }
+
+    let registration = RootTrustIssuerRegistration {
+        bundle_id: bundle.bundle_id,
+        ceremony_id: bundle.config.ceremony_id.clone(),
+        issuer_did: bundle.issuer_delegation.issuer_did.clone(),
+        issuer_public_key: bundle.issuer_delegation.issuer_public_key,
+    };
+
+    let mut registry = state.registry.lock().map_err(|_| {
+        anyhow::anyhow!("AVC registry unavailable while registering root trust issuer")
+    })?;
+    registry.put_public_key(
+        registration.issuer_did.clone(),
+        registration.issuer_public_key,
+    );
+
+    Ok(registration)
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +1032,85 @@ mod tests {
         assert!(
             production.contains("ConcurrencyLimitLayer::new(MAX_AVC_API_CONCURRENT_REQUESTS)"),
             "AVC router must apply local request admission control"
+        );
+    }
+}
+
+#[cfg(test)]
+mod avc_root_trust_tests {
+    use super::*;
+    use exo_avc::AvcRegistryRead;
+
+    fn repo_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crate has workspace root")
+            .to_path_buf()
+    }
+
+    fn installed_bundle_path() -> std::path::PathBuf {
+        repo_root().join(
+            "artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json",
+        )
+    }
+
+    #[test]
+    fn avc_root_trust_bundle_loader_registers_expected_issuer() {
+        let state = AvcApiState::new();
+        let registration =
+            load_root_trust_bundle_from_path(&state, &installed_bundle_path()).expect("load bundle");
+        let expected_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID).expect("expected issuer DID");
+        let expected_public_key = parse_expected_public_key(
+            AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX,
+            "expected issuer key",
+        )
+        .expect("expected issuer key");
+
+        assert_eq!(registration.ceremony_id, AVC_ROOT_TRUST_CEREMONY_ID);
+        assert_eq!(registration.issuer_did, expected_did);
+        assert_eq!(registration.issuer_public_key, expected_public_key);
+
+        let registry = state.registry.lock().expect("registry lock");
+        assert_eq!(
+            registry.resolve_public_key(&expected_did),
+            Some(expected_public_key)
+        );
+    }
+
+    #[test]
+    fn avc_root_trust_bundle_tamper_fails_closed_without_registering_issuer() {
+        let mut bundle: RootTrustBundle =
+            serde_json::from_slice(&std::fs::read(installed_bundle_path()).expect("read bundle"))
+                .expect("parse bundle");
+        bundle.transcript_hash = Hash256::from_bytes([42u8; 32]);
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        serde_json::to_writer(temp.as_file(), &bundle).expect("write tampered bundle");
+
+        let state = AvcApiState::new();
+        let error = load_root_trust_bundle_from_path(&state, temp.path())
+            .expect_err("tampered bundle must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("AVC root trust bundle verification failed")
+        );
+
+        let expected_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID).expect("expected issuer DID");
+        let registry = state.registry.lock().expect("registry lock");
+        assert_eq!(registry.resolve_public_key(&expected_did), None);
+    }
+
+    #[test]
+    fn avc_root_trust_bundle_missing_required_path_fails_closed() {
+        let state = AvcApiState::new();
+        let missing = repo_root().join("artifacts/trust/avc-exo-ceremony-2026/missing.json");
+        let error = load_root_trust_bundle_from_path(&state, &missing)
+            .expect_err("missing configured bundle path must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read AVC root trust bundle")
         );
     }
 }

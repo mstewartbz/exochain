@@ -895,6 +895,22 @@ async fn start_node(
 
     // Build the AVC API router (Autonomous Volition Credentials).
     let avc_state = Arc::new(avc::AvcApiState::new());
+    match avc::load_configured_root_trust_bundle(avc_state.as_ref())? {
+        Some(registration) => {
+            tracing::info!(
+                ceremony_id = %registration.ceremony_id,
+                bundle_id = %registration.bundle_id,
+                issuer_did = %registration.issuer_did,
+                "AVC root trust issuer registered from verified bundle"
+            );
+        }
+        None => {
+            tracing::warn!(
+                env = avc::AVC_ROOT_TRUST_BUNDLE_ENV,
+                "AVC root trust bundle not configured; issuer registry starts without root delegation"
+            );
+        }
+    }
     let avc_router = avc::avc_router(Arc::clone(&avc_state));
     tracing::info!(
         "AVC router ready — /api/v1/avc/{{issue,validate,delegate,revoke,:id}}, /api/v1/agents/:did/avcs"
@@ -1461,6 +1477,22 @@ mod tests {
         assert!(
             !gateway_section.contains("serve_with_extra_routes(gateway_config, None"),
             "node startup must not force /ready into no_db_configured state"
+        );
+    }
+
+    #[test]
+    fn avc_root_trust_loader_runs_before_router_construction() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let loader_index = production
+            .find("load_configured_root_trust_bundle")
+            .expect("AVC root trust loader call present");
+        let router_index = production
+            .find("let avc_router = avc::avc_router")
+            .expect("AVC router construction present");
+        assert!(
+            loader_index < router_index,
+            "AVC root trust issuer must be registered before AVC router construction"
         );
     }
 
