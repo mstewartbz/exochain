@@ -1,0 +1,18 @@
+{
+  "record_type": "runtime_activation",
+  "artifact_id": "avc-exo-ceremony-2026",
+  "activation_date": "2026-05-31",
+  "bundle_id_hex": "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58",
+  "ceremony_id": "avc-exo-ceremony-2026",
+  "runtime_path_env": "EXO_AVC_ROOT_TRUST_BUNDLE",
+  "runtime_path": "/app/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json",
+  "loader": {
+    "verification": "exo_root::verify_root_bundle",
+    "fail_closed_when_configured": true,
+    "registers_runtime_endpoint": false,
+    "registered_issuer_did": "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX",
+    "registered_issuer_public_key_hex": "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32"
+  },
+  "trust_boundary": "The node registers only the verified operational AVC issuer public key at boot. The loader does not publish secrets, accept dynamic trust registration, or widen the root-trust artifact claims beyond verified issuer-key resolution.",
+  "source_install_manifest": "install-manifest.json"
+}

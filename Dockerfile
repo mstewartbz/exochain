@@ -50,6 +50,7 @@ WORKDIR /app
 COPY --from=rust-builder /app/target/release/exochain /app/
 COPY --from=rust-builder /app/target/release/exo-gateway /app/
 COPY crates/exo-gateway/migrations /app/migrations
+COPY artifacts/trust/avc-exo-ceremony-2026 /app/artifacts/trust/avc-exo-ceremony-2026
 # Bundle the entrypoint script so env-var driven configuration works
 # regardless of which start-command override is in effect.
 COPY deploy/entrypoint.sh /app/entrypoint.sh
@@ -57,6 +58,7 @@ RUN chmod +x /app/entrypoint.sh && ln -s /app/exochain /usr/local/bin/exochain
 
 # Default data directory inside the container.
 ENV EXOCHAIN_DATA_DIR=/data
+ENV EXO_AVC_ROOT_TRUST_BUNDLE=/app/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json
 ENV RUST_LOG=info
 
 # P2P (TCP + QUIC) and HTTP API.
