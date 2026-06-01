@@ -1770,6 +1770,7 @@ dependencies = [
  "ed25519-dalek",
  "exo-api",
  "exo-authority",
+ "exo-avc",
  "exo-catapult",
  "exo-consent",
  "exo-core",

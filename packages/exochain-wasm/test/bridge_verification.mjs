@@ -2601,6 +2601,82 @@ test('wasm_validation_invariant_request', () => {
 });
 
 // =========================================================================
+// Module 26b — AVC action-signature bridge (credential-bearing receipts)
+// =========================================================================
+
+console.log('\n--- AVC ---');
+
+// Load the byte-parity vector emitted by the Rust side
+// (crates/exochain-wasm/src/avc_bindings.rs :: emit_deterministic_vector).
+// The same vector is asserted by the Rust test
+// `checked_in_vector_reproduces_and_verifies`; here we prove the *compiled
+// wasm artifact* reproduces it byte-for-byte.
+const avcFs = require('node:fs');
+const avcPath = require('node:path');
+const avcUrl = require('node:url');
+const avcHere = avcPath.dirname(avcUrl.fileURLToPath(import.meta.url));
+const avcVector = JSON.parse(
+  avcFs.readFileSync(
+    avcPath.resolve(avcHere, '../../../crates/exochain-wasm/test/avc_action_vector.json'),
+    'utf8',
+  ),
+);
+
+test('wasm_avc_sign_action reproduces the checked-in byte-parity vector', () => {
+  const sig = wasm.wasm_avc_sign_action(
+    avcVector.credential_json,
+    avcVector.action_json,
+    BigInt(avcVector.now_physical_ms), // u64 -> BigInt at the wasm boundary
+    avcVector.now_logical,
+    avcVector.subject_secret_hex,
+  );
+  if (sig !== avcVector.expected_signature_json) {
+    throw new Error(
+      'wasm_avc_sign_action output does not match the checked-in vector — ' +
+        'the shipped artifact diverged from the node payload',
+    );
+  }
+  return sig;
+});
+
+test('wasm_avc_sign_action rejects a zero (non-caller-supplied) timestamp', () =>
+  expectErrorContains(
+    'wasm_avc_sign_action zero-ts',
+    () =>
+      wasm.wasm_avc_sign_action(
+        avcVector.credential_json,
+        avcVector.action_json,
+        0n,
+        0,
+        avcVector.subject_secret_hex,
+      ),
+    'caller-supplied HLC',
+  ));
+
+test('wasm_avc_build_emit_request emits the 3-field node request body', () => {
+  const body = JSON.parse(
+    wasm.wasm_avc_build_emit_request(
+      avcVector.credential_json,
+      avcVector.action_json,
+      BigInt(avcVector.now_physical_ms),
+      avcVector.now_logical,
+      avcVector.subject_secret_hex,
+      false,
+    ),
+  );
+  if (!body.validation || body.subject_signature === undefined) {
+    throw new Error('wasm_avc_build_emit_request body missing required fields');
+  }
+  if (body.subject_public_key !== undefined) {
+    throw new Error('subject_public_key must be omitted when include_public_key=false');
+  }
+  if (!body.validation.credential || body.validation.action === undefined || !body.validation.now) {
+    throw new Error('validation must carry { credential, action, now }');
+  }
+  return body;
+});
+
+// =========================================================================
 // Module 27 — Bridge Coverage Guard
 // =========================================================================
 
