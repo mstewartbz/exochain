@@ -29,6 +29,7 @@
 //! |--------|------|---------|
 //! | `POST` | `/api/v1/avc/issue` | Register a signed credential. |
 //! | `POST` | `/api/v1/avc/validate` | Validate a credential and optional action. |
+//! | `POST` | `/api/v1/avc/receipts/emit` | Validate a subject-signed action and mint a node-signed receipt. |
 //! | `POST` | `/api/v1/avc/delegate` | Register a signed child credential. |
 //! | `POST` | `/api/v1/avc/revoke` | Register a signed revocation. |
 //! | `GET`  | `/api/v1/avc/:id` | Fetch a registered credential by hex ID. |
@@ -53,10 +54,11 @@ use axum::{
     routing::{get, post},
 };
 use exo_avc::{
-    AutonomousVolitionCredential, AvcRegistryRead, AvcRegistryWrite, AvcRevocation,
-    AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry, validate_avc,
+    AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcRegistryRead, AvcRegistryWrite,
+    AvcRevocation, AvcTrustReceipt, AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry,
+    avc_action_signature_payload, create_trust_receipt, validate_avc,
 };
-use exo_core::{Did, Hash256, PublicKey};
+use exo_core::{Did, Hash256, PublicKey, Signature, crypto};
 use exo_root::{RootTrustBundle, verify_root_bundle};
 use serde::{Deserialize, Serialize};
 use tower::limit::ConcurrencyLimitLayer;
@@ -67,30 +69,29 @@ pub const AVC_ROOT_TRUST_BUNDLE_ENV: &str = "EXO_AVC_ROOT_TRUST_BUNDLE";
 pub const AVC_ROOT_TRUST_CEREMONY_ID: &str = "avc-exo-ceremony-2026";
 pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
     "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58";
-pub const AVC_ROOT_TRUST_ISSUER_DID: &str =
-    "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX";
+pub const AVC_ROOT_TRUST_ISSUER_DID: &str = "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX";
 pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
     "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32";
+
+pub type AvcReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
 
 /// Shared state for AVC route handlers.
 #[derive(Clone)]
 pub struct AvcApiState {
     pub registry: Arc<Mutex<InMemoryAvcRegistry>>,
+    validator_did: Did,
+    receipt_signer: AvcReceiptSigner,
 }
 
 impl AvcApiState {
     /// Wrap a fresh registry in the standard `Arc<Mutex<_>>` envelope.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(validator_did: Did, receipt_signer: AvcReceiptSigner) -> Self {
         Self {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
+            validator_did,
+            receipt_signer,
         }
-    }
-}
-
-impl Default for AvcApiState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -267,6 +268,23 @@ pub struct RevokeResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct EmitReceiptRequest {
+    pub validation: AvcValidationRequest,
+    pub subject_signature: Signature,
+    /// Optional subject public key for did:exo values derived from a key.
+    /// If the registry already has a trusted key for the actor DID, that
+    /// registered key wins and this field is ignored.
+    pub subject_public_key: Option<PublicKey>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EmitReceiptResponse {
+    pub receipt_hash: String,
+    pub receipt: AvcTrustReceipt,
+    pub validation: AvcValidationResult,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AvcSummary {
     pub credential_id: String,
     pub subject_did: String,
@@ -362,6 +380,102 @@ fn summary_of(credential: &AutonomousVolitionCredential) -> ApiResult<AvcSummary
     })
 }
 
+fn require_action(request: &AvcValidationRequest) -> ApiResult<&AvcActionRequest> {
+    request.action.as_ref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "receipt emission requires an action".into(),
+    ))
+}
+
+fn resolve_subject_public_key(
+    registry: &InMemoryAvcRegistry,
+    action: &AvcActionRequest,
+    supplied_public_key: Option<PublicKey>,
+) -> ApiResult<PublicKey> {
+    if let Some(public_key) = registry.resolve_public_key(&action.actor_did) {
+        return Ok(public_key);
+    }
+
+    let Some(public_key) = supplied_public_key else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "subject public key is unresolved".into(),
+        ));
+    };
+    let derived_did = crate::identity::did_from_public_key(&public_key).map_err(|err| {
+        tracing::warn!(%err, "rejected AVC receipt action public key");
+        (
+            StatusCode::UNAUTHORIZED,
+            "subject public key is not a valid did:exo actor key".into(),
+        )
+    })?;
+    if derived_did != action.actor_did {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "subject public key does not match action actor DID".into(),
+        ));
+    }
+    Ok(public_key)
+}
+
+fn verify_subject_action_signature(
+    registry: &InMemoryAvcRegistry,
+    request: &AvcValidationRequest,
+    subject_signature: &Signature,
+    subject_public_key: Option<PublicKey>,
+) -> ApiResult<()> {
+    if subject_signature.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "subject action signature must not be empty".into(),
+        ));
+    }
+    let action = require_action(request)?;
+    let public_key = resolve_subject_public_key(registry, action, subject_public_key)?;
+    let payload = avc_action_signature_payload(&request.credential, action, &request.now)
+        .map_err(map_avc_error)?;
+    if !crypto::verify(&payload, subject_signature, &public_key) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "subject action signature is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_registered_credential(
+    registry: &InMemoryAvcRegistry,
+    request: &AvcValidationRequest,
+) -> ApiResult<Hash256> {
+    let credential_id = request.credential.id().map_err(map_avc_error)?;
+    let registered = registry
+        .get_credential(&credential_id)
+        .ok_or((StatusCode::NOT_FOUND, "credential is not registered".into()))?;
+    if registered != request.credential {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "credential does not match registered AVC".into(),
+        ));
+    }
+    Ok(credential_id)
+}
+
+fn store_receipt_idempotent(
+    registry: &mut InMemoryAvcRegistry,
+    receipt: AvcTrustReceipt,
+) -> ApiResult<()> {
+    let receipt_id = receipt.receipt_id;
+    match registry.put_receipt(receipt.clone()) {
+        Ok(()) => Ok(()),
+        Err(exo_avc::AvcError::Registry { .. })
+            if registry.get_receipt(&receipt_id).as_ref() == Some(&receipt) =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(map_avc_error(err)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -390,6 +504,48 @@ async fn handle_validate(
     })
     .await?;
     Ok(Json(result))
+}
+
+async fn handle_emit_receipt(
+    State(state): State<Arc<AvcApiState>>,
+    Json(payload): Json<EmitReceiptRequest>,
+) -> ApiResult<Json<EmitReceiptResponse>> {
+    let validator_did = state.validator_did.clone();
+    let receipt_signer = Arc::clone(&state.receipt_signer);
+    let response = with_registry_blocking(state, move |registry| {
+        let request = payload.validation;
+        let action_id = require_action(&request)?.action_id;
+        require_registered_credential(registry, &request)?;
+        verify_subject_action_signature(
+            registry,
+            &request,
+            &payload.subject_signature,
+            payload.subject_public_key,
+        )?;
+        let validation = validate_avc(&request, registry).map_err(map_avc_error)?;
+        if validation.decision != AvcDecision::Allow {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("AVC validation denied: {:?}", validation.reason_codes),
+            ));
+        }
+        let receipt = create_trust_receipt(
+            &validation,
+            Some(action_id),
+            validator_did,
+            request.now,
+            |bytes| (receipt_signer)(bytes),
+        )
+        .map_err(map_avc_error)?;
+        store_receipt_idempotent(registry, receipt.clone())?;
+        Ok(EmitReceiptResponse {
+            receipt_hash: format!("{}", receipt.receipt_id),
+            receipt,
+            validation,
+        })
+    })
+    .await?;
+    Ok(Json(response))
 }
 
 async fn handle_delegate(
@@ -468,12 +624,14 @@ async fn handle_list_for_subject(
 // ---------------------------------------------------------------------------
 
 /// Build the AVC API router. POST routes inherit bearer-token auth
-/// from the merged write guard in `main.rs`. Trust denials surface as
-/// `200 OK` with `decision: Deny` rather than `403`.
+/// from the merged write guard in `main.rs`. The validation route returns
+/// ordinary AVC denials as `200 OK` with `decision: Deny`; receipt emission
+/// returns `403` because no receipt is minted for a denied action.
 pub fn avc_router(state: Arc<AvcApiState>) -> Router {
     Router::new()
         .route("/api/v1/avc/issue", post(handle_issue))
         .route("/api/v1/avc/validate", post(handle_validate))
+        .route("/api/v1/avc/receipts/emit", post(handle_emit_receipt))
         .route("/api/v1/avc/delegate", post(handle_delegate))
         .route("/api/v1/avc/revoke", post(handle_revoke))
         .route("/api/v1/avc/:id", get(handle_get))
@@ -499,19 +657,34 @@ mod tests {
         AvcDecision, AvcDraft, AvcReasonCode, AvcRevocationReason, AvcSubjectKind, DelegatedIntent,
         issue_avc, revoke_avc,
     };
-    use exo_core::{Hash256, Signature, Timestamp, crypto::KeyPair};
+    use exo_core::{Hash256, Signature, Timestamp, crypto, crypto::KeyPair};
     use tower::ServiceExt;
 
     use super::*;
 
     const ISSUER_SEED: [u8; 32] = [0x11; 32];
+    const SUBJECT_SEED: [u8; 32] = [0x22; 32];
+    const VALIDATOR_SEED: [u8; 32] = [0x33; 32];
 
     fn issuer_keypair() -> KeyPair {
         KeyPair::from_secret_bytes(ISSUER_SEED).expect("valid seed")
     }
 
+    fn subject_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(SUBJECT_SEED).expect("valid seed")
+    }
+
+    fn validator_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(VALIDATOR_SEED).expect("valid seed")
+    }
+
+    fn validator_did() -> Did {
+        Did::new("did:exo:validator").unwrap()
+    }
+
     fn fresh_state() -> Arc<AvcApiState> {
-        let state = AvcApiState::new();
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::new(validator_did(), signer);
         // Seed the issuer key so validate paths succeed.
         let kp = issuer_keypair();
         let did = Did::new("did:exo:issuer").unwrap();
@@ -520,6 +693,11 @@ mod tests {
             .lock()
             .unwrap()
             .put_public_key(did, kp.public);
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_public_key(Did::new("did:exo:agent").unwrap(), subject_keypair().public);
         Arc::new(state)
     }
 
@@ -562,6 +740,37 @@ mod tests {
     fn baseline_credential() -> AutonomousVolitionCredential {
         let kp = issuer_keypair();
         issue_avc(baseline_draft(), |bytes| kp.sign(bytes)).unwrap()
+    }
+
+    fn credential_for_subject(subject_did: Did) -> AutonomousVolitionCredential {
+        let mut draft = baseline_draft();
+        draft.subject_did = subject_did;
+        let kp = issuer_keypair();
+        issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
+    }
+
+    fn baseline_action(actor_did: Did) -> AvcActionRequest {
+        AvcActionRequest {
+            action_id: Hash256::from_bytes([0x55; 32]),
+            actor_did,
+            requested_permission: Permission::Read,
+            tool: None,
+            target_did: None,
+            data_class: None,
+            estimated_budget_minor_units: None,
+            estimated_risk_bp: None,
+            human_approval: None,
+            requires_human_approval: false,
+            action_name: None,
+        }
+    }
+
+    fn sign_action(request: &AvcValidationRequest, keypair: &KeyPair) -> Signature {
+        let action = request.action.as_ref().unwrap();
+        let payload =
+            exo_avc::avc_action_signature_payload(&request.credential, action, &request.now)
+                .unwrap();
+        keypair.sign(&payload)
     }
 
     async fn read_body(response: axum::response::Response) -> Vec<u8> {
@@ -728,6 +937,219 @@ mod tests {
         let resp_bytes = read_body(response).await;
         let parsed: AvcValidationResult = serde_json::from_slice(&resp_bytes).unwrap();
         assert_eq!(parsed.decision, AvcDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_mints_and_stores_node_signed_receipt_for_registered_credential() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let action_id = request.action.as_ref().unwrap().action_id;
+        let subject_signature = sign_action(&request, &subject_keypair());
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request,
+            subject_signature,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(
+            parsed.receipt_hash,
+            format!("{}", parsed.receipt.receipt_id)
+        );
+        assert_eq!(parsed.receipt.credential_id, credential_id);
+        assert_eq!(parsed.receipt.action_id, Some(action_id));
+        assert_eq!(parsed.receipt.validator_did, validator_did());
+        assert_eq!(parsed.validation.decision, AvcDecision::Allow);
+        assert!(parsed.receipt.verify_id().unwrap());
+        let signing_payload = parsed.receipt.signing_payload().unwrap();
+        assert!(crypto::verify(
+            &signing_payload,
+            &parsed.receipt.signature,
+            validator_keypair().public_key()
+        ));
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_accepts_derived_subject_public_key_when_registry_key_absent() {
+        let state = fresh_state();
+        let subject = crate::identity::did_from_public_key(subject_keypair().public_key()).unwrap();
+        let credential = credential_for_subject(subject.clone());
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(subject)),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let subject_signature = sign_action(&request, &subject_keypair());
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request,
+            subject_signature,
+            subject_public_key: Some(*subject_keypair().public_key()),
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_unregistered_credential_without_receipt() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            subject_signature: sign_action(&request, &subject_keypair()),
+            validation: request,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_invalid_subject_signature_without_receipt() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request,
+            subject_signature: Signature::from_bytes([0x99; 64]),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_denied_validation_without_receipt() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let mut action = baseline_action(Did::new("did:exo:agent").unwrap());
+        action.requested_permission = Permission::Write;
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(action),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            subject_signature: sign_action(&request, &subject_keypair()),
+            validation: request,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
     #[tokio::test]
@@ -1038,8 +1460,17 @@ mod tests {
 
 #[cfg(test)]
 mod avc_root_trust_tests {
-    use super::*;
     use exo_avc::AvcRegistryRead;
+
+    use super::*;
+
+    fn avc_state_for_root_trust_test() -> AvcApiState {
+        let signer: AvcReceiptSigner = Arc::new(|_| Signature::empty());
+        AvcApiState::new(
+            Did::new("did:exo:test-validator").expect("test DID"),
+            signer,
+        )
+    }
 
     fn repo_root() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1050,22 +1481,18 @@ mod avc_root_trust_tests {
     }
 
     fn installed_bundle_path() -> std::path::PathBuf {
-        repo_root().join(
-            "artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json",
-        )
+        repo_root().join("artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json")
     }
 
     #[test]
     fn avc_root_trust_bundle_loader_registers_expected_issuer() {
-        let state = AvcApiState::new();
-        let registration =
-            load_root_trust_bundle_from_path(&state, &installed_bundle_path()).expect("load bundle");
+        let state = avc_state_for_root_trust_test();
+        let registration = load_root_trust_bundle_from_path(&state, &installed_bundle_path())
+            .expect("load bundle");
         let expected_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID).expect("expected issuer DID");
-        let expected_public_key = parse_expected_public_key(
-            AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX,
-            "expected issuer key",
-        )
-        .expect("expected issuer key");
+        let expected_public_key =
+            parse_expected_public_key(AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX, "expected issuer key")
+                .expect("expected issuer key");
 
         assert_eq!(registration.ceremony_id, AVC_ROOT_TRUST_CEREMONY_ID);
         assert_eq!(registration.issuer_did, expected_did);
@@ -1087,7 +1514,7 @@ mod avc_root_trust_tests {
         let temp = tempfile::NamedTempFile::new().expect("temp file");
         serde_json::to_writer(temp.as_file(), &bundle).expect("write tampered bundle");
 
-        let state = AvcApiState::new();
+        let state = avc_state_for_root_trust_test();
         let error = load_root_trust_bundle_from_path(&state, temp.path())
             .expect_err("tampered bundle must fail");
         assert!(
@@ -1103,7 +1530,7 @@ mod avc_root_trust_tests {
 
     #[test]
     fn avc_root_trust_bundle_missing_required_path_fails_closed() {
-        let state = AvcApiState::new();
+        let state = avc_state_for_root_trust_test();
         let missing = repo_root().join("artifacts/trust/avc-exo-ceremony-2026/missing.json");
         let error = load_root_trust_bundle_from_path(&state, &missing)
             .expect_err("missing configured bundle path must fail");

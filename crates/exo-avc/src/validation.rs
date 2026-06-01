@@ -46,6 +46,8 @@ use crate::{
 
 /// Signing domain tag for AVC human approval evidence.
 pub const AVC_HUMAN_APPROVAL_SIGNING_DOMAIN: &str = "exo.avc.human-approval.v1";
+/// Signing domain tag for AVC subject action proofs.
+pub const AVC_ACTION_SIGNING_DOMAIN: &str = "exo.avc.action.v1";
 
 // ---------------------------------------------------------------------------
 // Decision / Reason
@@ -154,6 +156,15 @@ struct HumanApprovalSigningPayload<'a> {
     approver_did: &'a Did,
     approved_at: &'a Timestamp,
     expires_at: Option<&'a Timestamp>,
+}
+
+#[derive(Serialize)]
+struct AvcActionSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    credential_id: &'a Hash256,
+    action: &'a AvcActionRequest,
+    validation_now: &'a Timestamp,
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +337,32 @@ pub fn human_approval_signature_payload(
         approver_did: &approval.approver_did,
         approved_at: &approval.approved_at,
         expires_at: approval.expires_at.as_ref(),
+    };
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&payload, &mut buf)?;
+    Ok(buf)
+}
+
+/// Compute the canonical signing payload for a subject's action proof.
+///
+/// The payload binds the action to the AVC credential ID and the validation
+/// timestamp supplied to the node. This prevents a detached action signature
+/// from being replayed against a different credential or validation context.
+///
+/// # Errors
+/// Returns [`AvcError::Serialization`] if canonical CBOR encoding fails.
+pub fn avc_action_signature_payload(
+    credential: &AutonomousVolitionCredential,
+    action: &AvcActionRequest,
+    validation_now: &Timestamp,
+) -> Result<Vec<u8>, AvcError> {
+    let credential_id = credential.id()?;
+    let payload = AvcActionSigningPayload {
+        domain: AVC_ACTION_SIGNING_DOMAIN,
+        schema_version: AVC_SCHEMA_VERSION,
+        credential_id: &credential_id,
+        action,
+        validation_now,
     };
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&payload, &mut buf)?;
@@ -614,6 +651,19 @@ mod tests {
         let result = validate_avc(&request, &h.registry).unwrap();
         assert_eq!(result.decision, AvcDecision::Allow);
         assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
+    fn action_signature_payload_is_domain_separated_and_context_bound() {
+        let h = Harness::new();
+        let cred = h.issue(baseline_draft());
+        let action = baseline_action(cred.subject_did.clone());
+        let payload_one = avc_action_signature_payload(&cred, &action, &ts(1_500_000)).unwrap();
+        let payload_two = avc_action_signature_payload(&cred, &action, &ts(1_500_001)).unwrap();
+        let needle = AVC_ACTION_SIGNING_DOMAIN.as_bytes();
+
+        assert!(payload_one.windows(needle.len()).any(|w| w == needle));
+        assert_ne!(payload_one, payload_two);
     }
 
     #[test]
