@@ -33,14 +33,13 @@
 //! this bridge and verifying through the node's own verification path
 //! ([`exo_core::crypto::verify`] over the same payload).
 
-use wasm_bindgen::prelude::*;
-use zeroize::Zeroizing;
-
 use exo_avc::{
-    AvcActionRequest, AvcValidationRequest, AutonomousVolitionCredential,
+    AutonomousVolitionCredential, AvcActionRequest, AvcValidationRequest,
     avc_action_signature_payload,
 };
 use exo_core::{Signature, Timestamp, crypto};
+use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Core logic — returns `Result<_, String>` so it is fully testable on the
@@ -54,8 +53,7 @@ use exo_core::{Signature, Timestamp, crypto};
 /// `Zeroizing` wrappers so they are wiped from memory on drop; the value is
 /// never logged, returned, or echoed.
 fn parse_subject_secret(label: &str, value: &str) -> Result<exo_core::SecretKey, String> {
-    let bytes =
-        Zeroizing::new(hex::decode(value).map_err(|e| format!("{label}: {e}"))?);
+    let bytes = Zeroizing::new(hex::decode(value).map_err(|e| format!("{label}: {e}"))?);
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
@@ -77,8 +75,8 @@ fn derive_subject_public_key(secret_hex: &str) -> Result<exo_core::PublicKey, St
         .try_into()
         .map_err(|_| "subject_secret_hex must be 32 bytes".to_string())?;
     let arr = Zeroizing::new(arr);
-    let keypair = crypto::KeyPair::from_secret_bytes(*arr)
-        .map_err(|e| format!("subject keypair: {e}"))?;
+    let keypair =
+        crypto::KeyPair::from_secret_bytes(*arr).map_err(|e| format!("subject keypair: {e}"))?;
     Ok(*keypair.public_key())
 }
 
@@ -87,8 +85,7 @@ fn derive_subject_public_key(secret_hex: &str) -> Result<exo_core::PublicKey, St
 fn parse_now(physical_ms: u64, logical: u32) -> Result<Timestamp, String> {
     if physical_ms == 0 {
         return Err(
-            "validation_now timestamp must be a caller-supplied HLC (physical_ms != 0)"
-                .to_string(),
+            "validation_now timestamp must be a caller-supplied HLC (physical_ms != 0)".to_string(),
         );
     }
     Ok(Timestamp::new(physical_ms, logical))
@@ -242,11 +239,11 @@ pub fn wasm_avc_build_emit_request(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use exo_avc::{
-        AuthorityScope, AutonomyLevel, AvcConstraints, AvcSubjectKind, DataClass,
-        DelegatedIntent, issue_avc,
-    };
     use exo_authority::permission::Permission;
+    use exo_avc::{
+        AuthorityScope, AutonomyLevel, AvcConstraints, AvcSubjectKind, DataClass, DelegatedIntent,
+        issue_avc,
+    };
     use exo_core::{Did, Hash256, Timestamp, crypto};
 
     use super::*;
@@ -258,14 +255,19 @@ mod tests {
     /// A registered-shaped credential whose subject is `subject_did`,
     /// self-issued for the test (issuer == subject is fine — action signing
     /// is over credential_id + action + now, independent of the issuer sig).
-    fn test_credential(subject_did: &Did, issuer_secret: &exo_core::SecretKey) -> AutonomousVolitionCredential {
+    fn test_credential(
+        subject_did: &Did,
+        issuer_secret: &exo_core::SecretKey,
+    ) -> AutonomousVolitionCredential {
         let draft = exo_avc::AvcDraft {
             schema_version: exo_avc::AVC_SCHEMA_VERSION,
             issuer_did: subject_did.clone(),
             principal_did: subject_did.clone(),
             subject_did: subject_did.clone(),
             holder_did: None,
-            subject_kind: AvcSubjectKind::Service { service_id: "test-svc".into() },
+            subject_kind: AvcSubjectKind::Service {
+                service_id: "test-svc".into(),
+            },
             created_at: Timestamp::new(1_000_000, 0),
             expires_at: Some(Timestamp::new(9_000_000, 0)),
             delegated_intent: DelegatedIntent {
@@ -322,14 +324,14 @@ mod tests {
         let now = Timestamp::new(1_500_000, 0);
 
         // Sign through the bridge's internal path.
-        let signature = sign_action_internal(&credential, &action, &now, &subject_sk)
-            .expect("bridge signs");
+        let signature =
+            sign_action_internal(&credential, &action, &now, &subject_sk).expect("bridge signs");
 
         // Reconstruct the canonical payload the NODE verifies and check the
         // bridge's signature against the subject key — exactly what
         // exo-node's verify_subject_action_signature does.
-        let node_payload = avc_action_signature_payload(&credential, &action, &now)
-            .expect("node payload");
+        let node_payload =
+            avc_action_signature_payload(&credential, &action, &now).expect("node payload");
         assert!(
             crypto::verify(&node_payload, &signature, &subject_pk),
             "bridge signature must verify against the node's canonical action payload"
@@ -385,12 +387,18 @@ mod tests {
         .expect("build emit request");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.get("validation").is_some(), "has validation");
-        assert!(v.get("subject_signature").is_some(), "has subject_signature");
+        assert!(
+            v.get("subject_signature").is_some(),
+            "has subject_signature"
+        );
         assert!(
             v.get("subject_public_key").is_none(),
             "omits subject_public_key when not requested"
         );
-        assert!(v["validation"].get("credential").is_some(), "validation.credential");
+        assert!(
+            v["validation"].get("credential").is_some(),
+            "validation.credential"
+        );
         assert!(v["validation"].get("action").is_some(), "validation.action");
         assert!(v["validation"].get("now").is_some(), "validation.now");
     }
@@ -458,9 +466,14 @@ mod tests {
         let subject_pk_hex = v["subject_public_key_hex"].as_str().unwrap();
 
         // 1. Exact reproduction (determinism).
-        let produced =
-            sign_action_core(credential_json, action_json, now_ms, now_logical, secret_hex)
-                .expect("sign");
+        let produced = sign_action_core(
+            credential_json,
+            action_json,
+            now_ms,
+            now_logical,
+            secret_hex,
+        )
+        .expect("sign");
         assert_eq!(
             produced, expected_sig_json,
             "binding must reproduce the checked-in expected signature exactly"
