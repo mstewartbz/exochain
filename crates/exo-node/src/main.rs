@@ -894,10 +894,11 @@ async fn start_node(
     }
 
     // Build the AVC API router (Autonomous Volition Credentials).
-    let avc_state = Arc::new(avc::AvcApiState::new(
+    let avc_state = Arc::new(avc::AvcApiState::with_durable_registry(
+        data_dir,
         node_identity.did.clone(),
         Arc::clone(&sign_fn),
-    ));
+    )?);
     match avc::load_configured_root_trust_bundle(avc_state.as_ref())? {
         Some(registration) => {
             tracing::info!(

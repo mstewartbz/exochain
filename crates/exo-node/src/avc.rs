@@ -43,7 +43,9 @@
 //! workers are not held under the registry lock.
 
 use std::{
-    path::Path as FsPath,
+    fs::{self, File},
+    io::Write,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -54,9 +56,10 @@ use axum::{
     routing::{get, post},
 };
 use exo_avc::{
-    AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcRegistryRead, AvcRegistryWrite,
-    AvcRevocation, AvcTrustReceipt, AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry,
-    avc_action_signature_payload, create_trust_receipt, validate_avc,
+    AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcRegistryDurableState,
+    AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt, AvcValidationRequest,
+    AvcValidationResult, InMemoryAvcRegistry, avc_action_signature_payload, create_trust_receipt,
+    validate_avc,
 };
 use exo_core::{Did, Hash256, PublicKey, Signature, crypto};
 use exo_root::{RootTrustBundle, verify_root_bundle};
@@ -72,6 +75,7 @@ pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
 pub const AVC_ROOT_TRUST_ISSUER_DID: &str = "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX";
 pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
     "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32";
+const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
 
 pub type AvcReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
 
@@ -81,18 +85,120 @@ pub struct AvcApiState {
     pub registry: Arc<Mutex<InMemoryAvcRegistry>>,
     validator_did: Did,
     receipt_signer: AvcReceiptSigner,
+    durable_state_path: Option<Arc<PathBuf>>,
 }
 
 impl AvcApiState {
     /// Wrap a fresh registry in the standard `Arc<Mutex<_>>` envelope.
+    #[cfg(test)]
     #[must_use]
     pub fn new(validator_did: Did, receipt_signer: AvcReceiptSigner) -> Self {
         Self {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did,
             receipt_signer,
+            durable_state_path: None,
         }
     }
+
+    /// Open the AVC registry with durable runtime-record persistence.
+    ///
+    /// Credentials, revocations, and receipts are restored from the node data
+    /// directory. Public-key trust anchors are intentionally reloaded separately
+    /// from verified startup configuration.
+    pub fn with_durable_registry(
+        data_dir: &FsPath,
+        validator_did: Did,
+        receipt_signer: AvcReceiptSigner,
+    ) -> anyhow::Result<Self> {
+        let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
+        let registry = load_durable_registry(&durable_state_path)?;
+        Ok(Self {
+            registry: Arc::new(Mutex::new(registry)),
+            validator_did,
+            receipt_signer,
+            durable_state_path: Some(Arc::new(durable_state_path)),
+        })
+    }
+}
+
+fn load_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
+    if !path.exists() {
+        return Ok(InMemoryAvcRegistry::new());
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to read AVC durable registry at {}: {error}",
+            path.display()
+        )
+    })?;
+    if bytes.is_empty() {
+        anyhow::bail!("AVC durable registry at {} is empty", path.display());
+    }
+    let state: AvcRegistryDurableState =
+        ciborium::from_reader(bytes.as_slice()).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to decode AVC durable registry at {}: {error}",
+                path.display()
+            )
+        })?;
+    InMemoryAvcRegistry::from_durable_state(state).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to validate AVC durable registry at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn persist_durable_registry(registry: &InMemoryAvcRegistry, path: &FsPath) -> anyhow::Result<()> {
+    let state = registry.durable_state();
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&state, &mut bytes)
+        .map_err(|error| anyhow::anyhow!("failed to encode AVC durable registry: {error}"))?;
+
+    let tmp_path = path.with_extension("cbor.tmp");
+    {
+        let mut file = File::create(&tmp_path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to create AVC durable registry temp file at {}: {error}",
+                tmp_path.display()
+            )
+        })?;
+        file.write_all(&bytes).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to write AVC durable registry temp file at {}: {error}",
+                tmp_path.display()
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            anyhow::anyhow!(
+                "failed to sync AVC durable registry temp file at {}: {error}",
+                tmp_path.display()
+            )
+        })?;
+    }
+
+    fs::rename(&tmp_path, path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to install AVC durable registry at {}: {error}",
+            path.display()
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        let dir = File::open(parent).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to open AVC durable registry directory {}: {error}",
+                parent.display()
+            )
+        })?;
+        dir.sync_all().map_err(|error| {
+            anyhow::anyhow!(
+                "failed to sync AVC durable registry directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,7 +436,11 @@ fn parse_hash(raw: &str) -> ApiResult<Hash256> {
     Ok(Hash256::from_bytes(buf))
 }
 
-async fn with_registry_blocking<T, F>(state: Arc<AvcApiState>, op: F) -> ApiResult<T>
+async fn with_registry_blocking<T, F>(
+    state: Arc<AvcApiState>,
+    persist_after: bool,
+    op: F,
+) -> ApiResult<T>
 where
     T: Send + 'static,
     F: FnOnce(&mut InMemoryAvcRegistry) -> ApiResult<T> + Send + 'static,
@@ -342,7 +452,35 @@ where
                 "AVC registry unavailable".into(),
             )
         })?;
-        op(&mut guard)
+        let rollback = if persist_after {
+            Some(guard.clone())
+        } else {
+            None
+        };
+        let result = match op(&mut guard) {
+            Ok(result) => result,
+            Err(err) => {
+                if let Some(snapshot) = rollback {
+                    *guard = snapshot;
+                }
+                return Err(err);
+            }
+        };
+        if persist_after {
+            if let Some(path) = state.durable_state_path.as_deref() {
+                persist_durable_registry(&guard, path).map_err(|err| {
+                    if let Some(snapshot) = rollback {
+                        *guard = snapshot;
+                    }
+                    tracing::error!(err = %err, "AVC registry persistence failed");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "AVC registry persistence failed".into(),
+                    )
+                })?;
+            }
+        }
+        Ok(result)
     })
     .await
     .map_err(|err| {
@@ -485,7 +623,7 @@ async fn handle_issue(
     Json(payload): Json<IssueRequest>,
 ) -> ApiResult<Json<IssueResponse>> {
     let credential = payload.credential;
-    let id = with_registry_blocking(state, move |registry| {
+    let id = with_registry_blocking(state, true, move |registry| {
         registry.put_credential(credential).map_err(map_avc_error)
     })
     .await?;
@@ -499,7 +637,7 @@ async fn handle_validate(
     State(state): State<Arc<AvcApiState>>,
     Json(request): Json<AvcValidationRequest>,
 ) -> ApiResult<Json<AvcValidationResult>> {
-    let result = with_registry_blocking(state, move |registry| {
+    let result = with_registry_blocking(state, false, move |registry| {
         validate_avc(&request, registry).map_err(map_avc_error)
     })
     .await?;
@@ -512,7 +650,7 @@ async fn handle_emit_receipt(
 ) -> ApiResult<Json<EmitReceiptResponse>> {
     let validator_did = state.validator_did.clone();
     let receipt_signer = Arc::clone(&state.receipt_signer);
-    let response = with_registry_blocking(state, move |registry| {
+    let response = with_registry_blocking(state, true, move |registry| {
         let request = payload.validation;
         let action_id = require_action(&request)?.action_id;
         require_registered_credential(registry, &request)?;
@@ -554,7 +692,7 @@ async fn handle_delegate(
 ) -> ApiResult<Json<DelegateResponse>> {
     let credential = payload.child_credential;
     let parent_avc_id = credential.parent_avc_id.map(|h| format!("{h}"));
-    let id = with_registry_blocking(state, move |registry| {
+    let id = with_registry_blocking(state, true, move |registry| {
         registry.put_credential(credential).map_err(map_avc_error)
     })
     .await?;
@@ -571,7 +709,7 @@ async fn handle_revoke(
 ) -> ApiResult<Json<RevokeResponse>> {
     let revocation = payload.revocation;
     let id = revocation.credential_id;
-    with_registry_blocking(state, move |registry| {
+    with_registry_blocking(state, true, move |registry| {
         registry.put_revocation(revocation).map_err(map_avc_error)
     })
     .await?;
@@ -586,7 +724,7 @@ async fn handle_get(
     Path(id): Path<String>,
 ) -> ApiResult<Json<AutonomousVolitionCredential>> {
     let hash = parse_hash(&id)?;
-    let credential = with_registry_blocking(state, move |registry| {
+    let credential = with_registry_blocking(state, false, move |registry| {
         registry
             .get_credential(&hash)
             .ok_or((StatusCode::NOT_FOUND, "credential not found".into()))
@@ -602,7 +740,7 @@ async fn handle_list_for_subject(
     let did = parse_did(&did_str)?;
     let did_for_response = did.to_string();
     let did_for_lookup = did.clone();
-    let credentials = with_registry_blocking(state, move |registry| {
+    let credentials = with_registry_blocking(state, false, move |registry| {
         let creds = registry.list_credentials_for_subject(&did_for_lookup);
         let mut summaries = Vec::with_capacity(creds.len());
         for c in &creds {
@@ -682,22 +820,27 @@ mod tests {
         Did::new("did:exo:validator").unwrap()
     }
 
+    fn seed_avc_trust_keys(state: &AvcApiState) {
+        let kp = issuer_keypair();
+        let did = Did::new("did:exo:issuer").unwrap();
+        let mut registry = state.registry.lock().unwrap();
+        registry.put_public_key(did, kp.public);
+        registry.put_public_key(Did::new("did:exo:agent").unwrap(), subject_keypair().public);
+    }
+
     fn fresh_state() -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
         let state = AvcApiState::new(validator_did(), signer);
         // Seed the issuer key so validate paths succeed.
-        let kp = issuer_keypair();
-        let did = Did::new("did:exo:issuer").unwrap();
-        state
-            .registry
-            .lock()
-            .unwrap()
-            .put_public_key(did, kp.public);
-        state
-            .registry
-            .lock()
-            .unwrap()
-            .put_public_key(Did::new("did:exo:agent").unwrap(), subject_keypair().public);
+        seed_avc_trust_keys(&state);
+        Arc::new(state)
+    }
+
+    fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::with_durable_registry(data_dir, validator_did(), signer)
+            .expect("durable AVC state");
+        seed_avc_trust_keys(&state);
         Arc::new(state)
     }
 
@@ -803,6 +946,102 @@ mod tests {
         let parsed: IssueResponse = serde_json::from_slice(&resp_bytes).unwrap();
         assert_eq!(parsed.credential_id, format!("{cred_id}"));
         assert_eq!(parsed.status, "registered");
+    }
+
+    #[tokio::test]
+    async fn durable_registry_restores_issued_credentials_for_receipt_emit_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fresh_durable_state(dir.path());
+        let app = avc_router(Arc::clone(&state));
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        let body = serde_json::to_vec(&IssueRequest {
+            credential: credential.clone(),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let restarted = fresh_durable_state(dir.path());
+        assert_eq!(restarted.registry.lock().unwrap().credential_count(), 1);
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let action_id = request.action.as_ref().unwrap().action_id;
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            subject_signature: sign_action(&request, &subject_keypair()),
+            validation: request,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&restarted));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.receipt.credential_id, credential_id);
+        assert_eq!(parsed.receipt.action_id, Some(action_id));
+
+        let restarted_again = fresh_durable_state(dir.path());
+        assert_eq!(
+            restarted_again.registry.lock().unwrap().credential_count(),
+            1
+        );
+        assert_eq!(restarted_again.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_registry_rolls_back_issue_when_persistence_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fresh_durable_state(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let app = avc_router(Arc::clone(&state));
+        let credential = baseline_credential();
+        let body = serde_json::to_vec(&IssueRequest { credential }).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state.registry.lock().unwrap().credential_count(),
+            0,
+            "failed persistence must not leave an in-memory credential that callers think was rejected"
+        );
     }
 
     #[tokio::test]
@@ -1037,6 +1276,46 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_registry_subject_key_wins_over_supplied_public_key() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let attacker_keypair = KeyPair::from_secret_bytes([0x44; 32]).unwrap();
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &attacker_keypair),
+            subject_public_key: Some(*attacker_keypair.public_key()),
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
     #[tokio::test]
@@ -1442,7 +1721,10 @@ mod tests {
     #[test]
     fn router_uses_blocking_store_access() {
         let source = include_str!("avc.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source
+            .split("\n// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
         assert!(
             production.contains("tokio::task::spawn_blocking"),
             "AVC handlers must isolate synchronous registry access from Tokio workers"

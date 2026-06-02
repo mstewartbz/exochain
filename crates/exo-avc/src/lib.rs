@@ -119,7 +119,9 @@ pub use credential::{
 pub use delegation::{delegate_avc, parent_id_of};
 pub use error::AvcError;
 pub use receipt::{AVC_RECEIPT_SIGNING_DOMAIN, AvcTrustReceipt, create_trust_receipt};
-pub use registry::{AvcRegistryRead, AvcRegistryWrite, InMemoryAvcRegistry};
+pub use registry::{
+    AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, InMemoryAvcRegistry,
+};
 pub use revocation::{
     AVC_REVOCATION_SIGNING_DOMAIN, AvcRevocation, AvcRevocationReason, revoke_avc,
 };

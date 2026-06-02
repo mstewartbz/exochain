@@ -2622,58 +2622,118 @@ const avcVector = JSON.parse(
   ),
 );
 
-test('wasm_avc_sign_action reproduces the checked-in byte-parity vector', () => {
-  const sig = wasm.wasm_avc_sign_action(
-    avcVector.credential_json,
-    avcVector.action_json,
-    BigInt(avcVector.now_physical_ms), // u64 -> BigInt at the wasm boundary
-    avcVector.now_logical,
-    avcVector.subject_secret_hex,
-  );
-  if (sig !== avcVector.expected_signature_json) {
-    throw new Error(
-      'wasm_avc_sign_action output does not match the checked-in vector — ' +
-        'the shipped artifact diverged from the node payload',
-    );
-  }
-  return sig;
-});
-
-test('wasm_avc_sign_action rejects a zero (non-caller-supplied) timestamp', () =>
+test('wasm_avc_sign_action fails closed for raw subject-key signing', () =>
   expectErrorContains(
-    'wasm_avc_sign_action zero-ts',
+    'wasm_avc_sign_action raw signing',
     () =>
       wasm.wasm_avc_sign_action(
         avcVector.credential_json,
         avcVector.action_json,
+        BigInt(avcVector.now_physical_ms),
+        avcVector.now_logical,
+        avcVector.subject_secret_hex,
+      ),
+    'raw AVC subject-key signing is disabled',
+  ));
+
+test('wasm_avc_action_signing_payload supports the checked-in byte-parity vector', () => {
+  const payload = wasm.wasm_avc_action_signing_payload(
+    avcVector.credential_json,
+    avcVector.action_json,
+    BigInt(avcVector.now_physical_ms), // u64 -> BigInt at the wasm boundary
+    avcVector.now_logical,
+  );
+  const signer = seededEd25519Signer(avcVector.subject_secret_hex);
+  const sig = JSON.stringify(signatureJsonFromHex(signer.signHex(payload)));
+  if (sig !== avcVector.expected_signature_json) {
+    throw new Error(
+      'external signature over wasm_avc_action_signing_payload does not match the checked-in vector — ' +
+        'the shipped artifact diverged from the node payload',
+    );
+  }
+  return { payloadBytes: payload.length, sig };
+});
+
+test('wasm_avc_action_signing_payload rejects a zero (non-caller-supplied) timestamp', () =>
+  expectErrorContains(
+    'wasm_avc_action_signing_payload zero-ts',
+    () =>
+      wasm.wasm_avc_action_signing_payload(
+        avcVector.credential_json,
+        avcVector.action_json,
         0n,
         0,
-        avcVector.subject_secret_hex,
       ),
     'caller-supplied HLC',
   ));
 
-test('wasm_avc_build_emit_request emits the 3-field node request body', () => {
+test('wasm_avc_build_emit_request fails closed for raw subject-key request building', () =>
+  expectErrorContains(
+    'wasm_avc_build_emit_request raw signing',
+    () =>
+      wasm.wasm_avc_build_emit_request(
+        avcVector.credential_json,
+        avcVector.action_json,
+        BigInt(avcVector.now_physical_ms),
+        avcVector.now_logical,
+        avcVector.subject_secret_hex,
+        false,
+      ),
+    'raw AVC subject-key emit request building is disabled',
+  ));
+
+test('wasm_avc_build_emit_request_from_signature emits the 3-field node request body', () => {
+  const payload = wasm.wasm_avc_action_signing_payload(
+    avcVector.credential_json,
+    avcVector.action_json,
+    BigInt(avcVector.now_physical_ms),
+    avcVector.now_logical,
+  );
+  const signer = seededEd25519Signer(avcVector.subject_secret_hex);
+  const sig = JSON.stringify(signatureJsonFromHex(signer.signHex(payload)));
+  if (sig !== avcVector.expected_signature_json) {
+    throw new Error('external AVC signature must match checked-in vector');
+  }
   const body = JSON.parse(
-    wasm.wasm_avc_build_emit_request(
+    wasm.wasm_avc_build_emit_request_from_signature(
       avcVector.credential_json,
       avcVector.action_json,
       BigInt(avcVector.now_physical_ms),
       avcVector.now_logical,
-      avcVector.subject_secret_hex,
-      false,
+      sig,
+      '',
     ),
   );
   if (!body.validation || body.subject_signature === undefined) {
-    throw new Error('wasm_avc_build_emit_request body missing required fields');
+    throw new Error('wasm_avc_build_emit_request_from_signature body missing required fields');
+  }
+  if (JSON.stringify(body.subject_signature) !== avcVector.expected_signature_json) {
+    throw new Error('emit request subject_signature must match the externally supplied vector signature');
   }
   if (body.subject_public_key !== undefined) {
-    throw new Error('subject_public_key must be omitted when include_public_key=false');
+    throw new Error('subject_public_key must be omitted when subject_public_key_hex is empty');
   }
   if (!body.validation.credential || body.validation.action === undefined || !body.validation.now) {
     throw new Error('validation must carry { credential, action, now }');
   }
   return body;
+});
+
+test('wasm_avc_build_emit_request_from_signature includes explicit subject public key', () => {
+  const body = JSON.parse(
+    wasm.wasm_avc_build_emit_request_from_signature(
+      avcVector.credential_json,
+      avcVector.action_json,
+      BigInt(avcVector.now_physical_ms),
+      avcVector.now_logical,
+      avcVector.expected_signature_json,
+      avcVector.subject_public_key_hex,
+    ),
+  );
+  if (body.subject_public_key === undefined) {
+    throw new Error('subject_public_key must be included when subject_public_key_hex is supplied');
+  }
+  return body.subject_public_key;
 });
 
 // =========================================================================
