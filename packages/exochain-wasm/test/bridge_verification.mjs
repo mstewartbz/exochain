@@ -24,7 +24,13 @@
  */
 
 import { createRequire } from 'node:module';
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign as nodeSign } from 'node:crypto';
+import {
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  sign as nodeSign,
+  verify as nodeVerify,
+} from 'node:crypto';
 const require = createRequire(import.meta.url);
 const wasm = require('../wasm/exochain_wasm.js');
 
@@ -103,6 +109,21 @@ function seededEd25519Signer(secretHex) {
     type: 'pkcs8'
   });
   return signerFromPrivateKey(privateKey);
+}
+
+function ed25519PublicKeyFromRawHex(publicKeyHex) {
+  const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+  return createPublicKey({
+    key: Buffer.concat([spkiPrefix, Buffer.from(publicKeyHex, 'hex')]),
+    format: 'der',
+    type: 'spki'
+  });
+}
+
+function verifySignatureJson(payload, signatureJson, publicKeyHex) {
+  const parsed = JSON.parse(signatureJson);
+  const signature = Buffer.from(parsed.Ed25519);
+  return nodeVerify(null, Buffer.from(payload), ed25519PublicKeyFromRawHex(publicKeyHex), signature);
 }
 
 // Convenience constants
@@ -2631,7 +2652,6 @@ test('wasm_avc_sign_action fails closed for raw subject-key signing', () =>
         avcVector.action_json,
         BigInt(avcVector.now_physical_ms),
         avcVector.now_logical,
-        avcVector.subject_secret_hex,
       ),
     'raw AVC subject-key signing is disabled',
   ));
@@ -2643,15 +2663,17 @@ test('wasm_avc_action_signing_payload supports the checked-in byte-parity vector
     BigInt(avcVector.now_physical_ms), // u64 -> BigInt at the wasm boundary
     avcVector.now_logical,
   );
-  const signer = seededEd25519Signer(avcVector.subject_secret_hex);
-  const sig = JSON.stringify(signatureJsonFromHex(signer.signHex(payload)));
-  if (sig !== avcVector.expected_signature_json) {
+  const payloadHex = Buffer.from(payload).toString('hex');
+  if (payloadHex !== avcVector.expected_payload_hex) {
     throw new Error(
-      'external signature over wasm_avc_action_signing_payload does not match the checked-in vector — ' +
+      'wasm_avc_action_signing_payload bytes do not match the checked-in vector — ' +
         'the shipped artifact diverged from the node payload',
     );
   }
-  return { payloadBytes: payload.length, sig };
+  if (!verifySignatureJson(payload, avcVector.expected_signature_json, avcVector.subject_public_key_hex)) {
+    throw new Error('checked-in external AVC signature must verify against the wasm payload');
+  }
+  return { payloadBytes: payload.length, payloadHex };
 });
 
 test('wasm_avc_action_signing_payload rejects a zero (non-caller-supplied) timestamp', () =>
@@ -2676,7 +2698,6 @@ test('wasm_avc_build_emit_request fails closed for raw subject-key request build
         avcVector.action_json,
         BigInt(avcVector.now_physical_ms),
         avcVector.now_logical,
-        avcVector.subject_secret_hex,
         false,
       ),
     'raw AVC subject-key emit request building is disabled',
@@ -2689,10 +2710,11 @@ test('wasm_avc_build_emit_request_from_signature emits the 3-field node request 
     BigInt(avcVector.now_physical_ms),
     avcVector.now_logical,
   );
-  const signer = seededEd25519Signer(avcVector.subject_secret_hex);
-  const sig = JSON.stringify(signatureJsonFromHex(signer.signHex(payload)));
-  if (sig !== avcVector.expected_signature_json) {
-    throw new Error('external AVC signature must match checked-in vector');
+  if (Buffer.from(payload).toString('hex') !== avcVector.expected_payload_hex) {
+    throw new Error('AVC payload must match checked-in vector before request building');
+  }
+  if (!verifySignatureJson(payload, avcVector.expected_signature_json, avcVector.subject_public_key_hex)) {
+    throw new Error('external AVC signature must verify against checked-in vector');
   }
   const body = JSON.parse(
     wasm.wasm_avc_build_emit_request_from_signature(
@@ -2700,7 +2722,7 @@ test('wasm_avc_build_emit_request_from_signature emits the 3-field node request 
       avcVector.action_json,
       BigInt(avcVector.now_physical_ms),
       avcVector.now_logical,
-      sig,
+      avcVector.expected_signature_json,
       '',
     ),
   );

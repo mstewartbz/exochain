@@ -237,27 +237,9 @@ fn persist_file_durable_registry_state(
     Ok(())
 }
 
-async fn ensure_postgres_avc_registry_schema(pool: &PgPool) -> anyhow::Result<()> {
-    let statement = format!(
-        "CREATE TABLE IF NOT EXISTS {AVC_REGISTRY_POSTGRES_TABLE} (
-            registry_key TEXT PRIMARY KEY,
-            state_cbor BYTEA NOT NULL,
-            CONSTRAINT avc_registry_state_singleton CHECK (registry_key = '{AVC_REGISTRY_POSTGRES_KEY}')
-        )"
-    );
-    sqlx::query(&statement)
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to ensure AVC Postgres registry schema: {error}")
-        })?;
-    Ok(())
-}
-
 async fn begin_postgres_registry_transaction(
     pool: &PgPool,
 ) -> anyhow::Result<Transaction<'_, Postgres>> {
-    ensure_postgres_avc_registry_schema(pool).await?;
     let mut transaction = pool.begin().await.map_err(|error| {
         anyhow::anyhow!("failed to begin AVC Postgres registry transaction: {error}")
     })?;
@@ -630,7 +612,13 @@ where
         ))
         .map_err(persistence_error)?
     {
-        *guard = fresh_registry;
+        guard
+            .apply_durable_state(fresh_registry.durable_state())
+            .map_err(|error| {
+                persistence_error(anyhow::anyhow!(
+                    "failed to apply AVC Postgres registry state: {error}"
+                ))
+            })?;
     }
 
     let rollback = guard.clone();
@@ -1065,6 +1053,30 @@ mod tests {
         Arc::new(state)
     }
 
+    async fn clear_postgres_avc_registry_state(pool: &PgPool) -> Result<(), sqlx::Error> {
+        let statement =
+            format!("DELETE FROM {AVC_REGISTRY_POSTGRES_TABLE} WHERE registry_key = $1");
+        sqlx::query(&statement)
+            .bind(AVC_REGISTRY_POSTGRES_KEY)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn postgres_avc_test_pool() -> Option<PgPool> {
+        if std::env::var("EXO_TEST_AVC_POSTGRES_DURABILITY")
+            .ok()
+            .as_deref()
+            != Some("1")
+        {
+            return None;
+        }
+        let database_url = std::env::var("DATABASE_URL").ok()?;
+        let pool = exo_gateway::db::init_pool(&database_url).await.ok()?;
+        clear_postgres_avc_registry_state(&pool).await.ok()?;
+        Some(pool)
+    }
+
     fn baseline_draft() -> AvcDraft {
         AvcDraft {
             schema_version: AVC_SCHEMA_VERSION,
@@ -1113,6 +1125,13 @@ mod tests {
         issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
     }
 
+    fn credential_with_purpose(purpose: &str) -> AutonomousVolitionCredential {
+        let mut draft = baseline_draft();
+        draft.delegated_intent.purpose = purpose.into();
+        let kp = issuer_keypair();
+        issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
+    }
+
     fn baseline_action(actor_did: Did) -> AvcActionRequest {
         AvcActionRequest {
             action_id: Hash256::from_bytes([0x55; 32]),
@@ -1142,6 +1161,21 @@ mod tests {
             .await
             .unwrap()
             .to_vec()
+    }
+
+    async fn issue_credential(app: Router, credential: AutonomousVolitionCredential) -> StatusCode {
+        let body = serde_json::to_vec(&IssueRequest { credential }).unwrap();
+        app.oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/avc/issue")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
     }
 
     #[tokio::test]
@@ -1234,6 +1268,96 @@ mod tests {
             1
         );
         assert_eq!(restarted_again.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_durable_registry_preserves_trust_anchors_across_multiple_mutations() {
+        let pool = match postgres_avc_test_pool().await {
+            Some(pool) => pool,
+            None => return,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::with_durable_registry(
+            dir.path(),
+            validator_did(),
+            Arc::clone(&signer),
+            Some(pool.clone()),
+        )
+        .await
+        .expect("Postgres AVC state");
+        seed_avc_trust_keys(&state);
+        let state = Arc::new(state);
+        let app = avc_router(Arc::clone(&state));
+
+        let first = credential_with_purpose("postgres anchor persistence one");
+        let second = credential_with_purpose("postgres anchor persistence two");
+        assert_eq!(
+            issue_credential(app.clone(), first).await,
+            StatusCode::OK,
+            "first Postgres-backed issue must persist"
+        );
+        assert_eq!(
+            issue_credential(app.clone(), second.clone()).await,
+            StatusCode::OK,
+            "second Postgres-backed issue must not wipe issuer trust anchors"
+        );
+
+        {
+            let registry = state.registry.lock().unwrap();
+            assert_eq!(registry.credential_count(), 2);
+            assert_eq!(
+                registry.resolve_public_key(&Did::new("did:exo:issuer").unwrap()),
+                Some(issuer_keypair().public)
+            );
+            assert_eq!(
+                registry.resolve_public_key(&Did::new("did:exo:agent").unwrap()),
+                Some(subject_keypair().public)
+            );
+        }
+
+        let request = AvcValidationRequest {
+            credential: second,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "receipt emission after the second Postgres mutation must still resolve subject keys"
+        );
+
+        let reloaded = AvcApiState::with_durable_registry(
+            dir.path(),
+            validator_did(),
+            signer,
+            Some(pool.clone()),
+        )
+        .await
+        .expect("reloaded Postgres AVC state");
+        seed_avc_trust_keys(&reloaded);
+        assert_eq!(reloaded.registry.lock().unwrap().credential_count(), 2);
+        assert_eq!(reloaded.registry.lock().unwrap().receipt_count(), 1);
+        clear_postgres_avc_registry_state(&pool)
+            .await
+            .expect("clean up Postgres AVC state");
     }
 
     #[tokio::test]
@@ -1982,6 +2106,14 @@ mod tests {
         assert!(
             production.contains("load_postgres_durable_registry_in_transaction"),
             "AVC Postgres mutations must reload current durable state inside the lock"
+        );
+        assert!(
+            production.contains(".apply_durable_state(fresh_registry.durable_state())"),
+            "AVC Postgres reload must merge durable records without wiping trust anchors"
+        );
+        assert!(
+            !production.contains("*guard = fresh_registry"),
+            "AVC Postgres reload must not replace the full registry and drop startup trust anchors"
         );
         assert!(
             production.contains("load_postgres_durable_registry_or_import_file"),

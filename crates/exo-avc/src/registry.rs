@@ -190,6 +190,22 @@ impl InMemoryAvcRegistry {
         Ok(registry)
     }
 
+    /// Replace only the durable runtime records, preserving trust anchors and
+    /// locally configured validation context.
+    ///
+    /// This is intended for runtime adapters that reload durable state from a
+    /// database while issuer/actor public keys, human approval keys, consent
+    /// refs, policy refs, and authority-chain cache entries remain supplied by
+    /// verified startup configuration or live runtime registration.
+    pub fn apply_durable_state(&mut self, state: AvcRegistryDurableState) -> Result<(), AvcError> {
+        let durable = Self::from_durable_state(state)?;
+        self.credentials = durable.credentials;
+        self.by_subject = durable.by_subject;
+        self.revocations = durable.revocations;
+        self.receipts = durable.receipts;
+        Ok(())
+    }
+
     /// Number of credentials currently stored.
     #[must_use]
     pub fn credential_count(&self) -> usize {
@@ -816,6 +832,53 @@ mod tests {
             restored.resolve_public_key(&did("issuer")).is_none(),
             "key trust anchors must be reloaded from verified startup config"
         );
+    }
+
+    #[test]
+    fn apply_durable_state_preserves_trust_anchors_and_validation_context() {
+        let mut durable_source = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut durable_source);
+        let revocation = sample_issuer_revocation(id, &issuer_keypair);
+        durable_source.put_revocation(revocation.clone()).unwrap();
+        let receipt = receipt_for_credential(id);
+        durable_source.put_receipt(receipt.clone()).unwrap();
+
+        let subject_keypair = keypair(0x22);
+        let human_keypair = keypair(0x33);
+        let consent_ref = h256(0xCA);
+        let policy_ref = h256(0xCB);
+        let authority_chain = h256(0xCC);
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_public_key(did("subject"), subject_keypair.public);
+        live.put_human_approval_key(did("human"), human_keypair.public);
+        live.add_consent_ref(consent_ref);
+        live.add_policy_ref(policy_ref, 7);
+        live.mark_authority_chain_valid(authority_chain);
+
+        live.apply_durable_state(durable_source.durable_state())
+            .unwrap();
+
+        assert_eq!(live.credential_count(), 1);
+        assert_eq!(live.revocation_count(), 1);
+        assert_eq!(live.receipt_count(), 1);
+        assert_eq!(live.get_revocation(&id).unwrap(), revocation);
+        assert_eq!(live.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+        assert_eq!(
+            live.resolve_public_key(&did("issuer")).unwrap(),
+            issuer_keypair.public
+        );
+        assert_eq!(
+            live.resolve_public_key(&did("subject")).unwrap(),
+            subject_keypair.public
+        );
+        assert_eq!(
+            live.resolve_human_approval_key(&did("human")).unwrap(),
+            human_keypair.public
+        );
+        assert!(live.consent_ref_exists(&consent_ref));
+        assert!(live.policy_ref_exists(&policy_ref, 7));
+        assert!(live.authority_chain_valid(&authority_chain, &ts(9)));
     }
 
     #[test]

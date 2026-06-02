@@ -812,6 +812,7 @@ mod source_guard_tests {
 
         for pattern in [
             "subject_secret_hex",
+            "raw_subject_key_material",
             "SecretKey::from_bytes",
             "KeyPair::from_secret_bytes",
             "crypto::sign(",

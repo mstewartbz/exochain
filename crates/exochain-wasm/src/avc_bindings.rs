@@ -164,7 +164,6 @@ pub fn wasm_avc_sign_action(
     _action_json: &str,
     _now_physical_ms: u64,
     _now_logical: u32,
-    _raw_subject_key_material: &str,
 ) -> Result<String, JsValue> {
     Err(JsValue::from_str(
         "raw AVC subject-key signing is disabled at the WASM boundary; use wasm_avc_action_signing_payload, sign externally, then call wasm_avc_build_emit_request_from_signature",
@@ -193,7 +192,6 @@ pub fn wasm_avc_build_emit_request(
     _action_json: &str,
     _now_physical_ms: u64,
     _now_logical: u32,
-    _raw_subject_key_material: &str,
     _include_public_key: bool,
 ) -> Result<String, JsValue> {
     Err(JsValue::from_str(
@@ -430,7 +428,6 @@ mod tests {
 
         let credential_json = serde_json::to_string(&credential).unwrap();
         let action_json = serde_json::to_string(&action).unwrap();
-        let secret_hex = hex::encode([0x11u8; 32]);
         let payload =
             action_signing_payload_core(&credential_json, &action_json, 1_700_000, 5).unwrap();
         let sig_json = signature_json_for_payload(&payload, &subject_sk);
@@ -445,7 +442,7 @@ mod tests {
             "action_json": action_json,
             "now_physical_ms": 1_700_000u64,
             "now_logical": 5u32,
-            "subject_secret_hex": secret_hex,
+            "expected_payload_hex": hex::encode(&payload),
             "subject_public_key_hex": hex::encode(subject_pk.as_bytes()),
             "expected_signature_json": sig_json,
         });
@@ -453,7 +450,6 @@ mod tests {
             "AVC_VECTOR_JSON={}",
             serde_json::to_string_pretty(&vector).unwrap()
         );
-        let _ = subject_sk;
     }
 
     /// Consume the checked-in vector: the binding must reproduce the node's
@@ -468,7 +464,7 @@ mod tests {
         let action_json = v["action_json"].as_str().unwrap();
         let now_ms = v["now_physical_ms"].as_u64().unwrap();
         let now_logical = v["now_logical"].as_u64().unwrap() as u32;
-        let secret_hex = v["subject_secret_hex"].as_str().unwrap();
+        let expected_payload_hex = v["expected_payload_hex"].as_str().unwrap();
         let expected_sig_json = v["expected_signature_json"].as_str().unwrap();
         let subject_pk_hex = v["subject_public_key_hex"].as_str().unwrap();
 
@@ -484,13 +480,10 @@ mod tests {
             bridge_payload, node_payload,
             "binding must reproduce the node's checked-in action payload exactly"
         );
-
-        let sk_bytes: [u8; 32] = hex::decode(secret_hex).unwrap().try_into().unwrap();
-        let subject_sk = exo_core::SecretKey::from_bytes(sk_bytes);
-        let produced = signature_json_for_payload(&bridge_payload, &subject_sk);
         assert_eq!(
-            produced, expected_sig_json,
-            "external signature over bridge payload must reproduce the checked-in expected signature"
+            hex::encode(&bridge_payload),
+            expected_payload_hex,
+            "bridge payload must match the checked-in expected payload bytes"
         );
 
         let signature: Signature = serde_json::from_str(expected_sig_json).unwrap();
