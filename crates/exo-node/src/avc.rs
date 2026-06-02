@@ -64,6 +64,7 @@ use exo_avc::{
 use exo_core::{Did, Hash256, PublicKey, Signature, crypto};
 use exo_root::{RootTrustBundle, verify_root_bundle};
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use tower::limit::ConcurrencyLimitLayer;
 
 const MAX_AVC_API_BODY_BYTES: usize = 64 * 1024;
@@ -76,8 +77,19 @@ pub const AVC_ROOT_TRUST_ISSUER_DID: &str = "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1m
 pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
     "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32";
 const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
+const AVC_REGISTRY_POSTGRES_TABLE: &str = "avc_registry_state";
+const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
+const AVC_REGISTRY_POSTGRES_LOCK_KEY: i64 = 0x4156_435F_5245_4749;
 
 pub type AvcReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
+
+#[derive(Clone)]
+enum AvcRegistryDurability {
+    #[cfg(test)]
+    None,
+    File(Arc<PathBuf>),
+    Postgres(PgPool),
+}
 
 /// Shared state for AVC route handlers.
 #[derive(Clone)]
@@ -85,7 +97,7 @@ pub struct AvcApiState {
     pub registry: Arc<Mutex<InMemoryAvcRegistry>>,
     validator_did: Did,
     receipt_signer: AvcReceiptSigner,
-    durable_state_path: Option<Arc<PathBuf>>,
+    durability: AvcRegistryDurability,
 }
 
 impl AvcApiState {
@@ -97,32 +109,45 @@ impl AvcApiState {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did,
             receipt_signer,
-            durable_state_path: None,
+            durability: AvcRegistryDurability::None,
         }
     }
 
     /// Open the AVC registry with durable runtime-record persistence.
     ///
-    /// Credentials, revocations, and receipts are restored from the node data
-    /// directory. Public-key trust anchors are intentionally reloaded separately
-    /// from verified startup configuration.
-    pub fn with_durable_registry(
+    /// Credentials, revocations, and receipts are restored from the configured
+    /// Postgres database when available, otherwise from the node data directory.
+    /// Public-key trust anchors are intentionally reloaded separately from
+    /// verified startup configuration.
+    pub async fn with_durable_registry(
         data_dir: &FsPath,
         validator_did: Did,
         receipt_signer: AvcReceiptSigner,
+        database_pool: Option<PgPool>,
     ) -> anyhow::Result<Self> {
         let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
-        let registry = load_durable_registry(&durable_state_path)?;
+        let (registry, durability) = match database_pool {
+            Some(pool) => {
+                let registry =
+                    load_postgres_durable_registry_or_import_file(&pool, &durable_state_path)
+                        .await?;
+                (registry, AvcRegistryDurability::Postgres(pool))
+            }
+            None => (
+                load_file_durable_registry(&durable_state_path)?,
+                AvcRegistryDurability::File(Arc::new(durable_state_path)),
+            ),
+        };
         Ok(Self {
             registry: Arc::new(Mutex::new(registry)),
             validator_did,
             receipt_signer,
-            durable_state_path: Some(Arc::new(durable_state_path)),
+            durability,
         })
     }
 }
 
-fn load_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
+fn load_file_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
     if !path.exists() {
         return Ok(InMemoryAvcRegistry::new());
     }
@@ -135,26 +160,37 @@ fn load_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
     if bytes.is_empty() {
         anyhow::bail!("AVC durable registry at {} is empty", path.display());
     }
-    let state: AvcRegistryDurableState =
-        ciborium::from_reader(bytes.as_slice()).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to decode AVC durable registry at {}: {error}",
-                path.display()
-            )
-        })?;
+    decode_durable_registry_bytes(&bytes, &format!("{}", path.display()))
+}
+
+fn decode_durable_registry_bytes(
+    bytes: &[u8],
+    location: &str,
+) -> anyhow::Result<InMemoryAvcRegistry> {
+    let state: AvcRegistryDurableState = ciborium::from_reader(bytes).map_err(|error| {
+        anyhow::anyhow!("failed to decode AVC durable registry at {location}: {error}")
+    })?;
     InMemoryAvcRegistry::from_durable_state(state).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to validate AVC durable registry at {}: {error}",
-            path.display()
-        )
+        anyhow::anyhow!("failed to validate AVC durable registry at {location}: {error}")
     })
 }
 
-fn persist_durable_registry(registry: &InMemoryAvcRegistry, path: &FsPath) -> anyhow::Result<()> {
-    let state = registry.durable_state();
+fn durable_state_has_runtime_records(state: &AvcRegistryDurableState) -> bool {
+    !(state.credentials.is_empty() && state.revocations.is_empty() && state.receipts.is_empty())
+}
+
+fn encode_durable_registry_state(state: &AvcRegistryDurableState) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(&state, &mut bytes)
+    ciborium::into_writer(state, &mut bytes)
         .map_err(|error| anyhow::anyhow!("failed to encode AVC durable registry: {error}"))?;
+    Ok(bytes)
+}
+
+fn persist_file_durable_registry_state(
+    state: &AvcRegistryDurableState,
+    path: &FsPath,
+) -> anyhow::Result<()> {
+    let bytes = encode_durable_registry_state(state)?;
 
     let tmp_path = path.with_extension("cbor.tmp");
     {
@@ -199,6 +235,138 @@ fn persist_durable_registry(registry: &InMemoryAvcRegistry, path: &FsPath) -> an
         })?;
     }
     Ok(())
+}
+
+async fn ensure_postgres_avc_registry_schema(pool: &PgPool) -> anyhow::Result<()> {
+    let statement = format!(
+        "CREATE TABLE IF NOT EXISTS {AVC_REGISTRY_POSTGRES_TABLE} (
+            registry_key TEXT PRIMARY KEY,
+            state_cbor BYTEA NOT NULL,
+            CONSTRAINT avc_registry_state_singleton CHECK (registry_key = '{AVC_REGISTRY_POSTGRES_KEY}')
+        )"
+    );
+    sqlx::query(&statement)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to ensure AVC Postgres registry schema: {error}")
+        })?;
+    Ok(())
+}
+
+async fn begin_postgres_registry_transaction(
+    pool: &PgPool,
+) -> anyhow::Result<Transaction<'_, Postgres>> {
+    ensure_postgres_avc_registry_schema(pool).await?;
+    let mut transaction = pool.begin().await.map_err(|error| {
+        anyhow::anyhow!("failed to begin AVC Postgres registry transaction: {error}")
+    })?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(AVC_REGISTRY_POSTGRES_LOCK_KEY)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to lock AVC Postgres registry state: {error}"))?;
+    Ok(transaction)
+}
+
+async fn load_postgres_durable_registry_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> anyhow::Result<Option<InMemoryAvcRegistry>> {
+    let statement = format!(
+        "SELECT state_cbor FROM {AVC_REGISTRY_POSTGRES_TABLE} WHERE registry_key = $1 FOR UPDATE"
+    );
+    let Some(row) = sqlx::query(&statement)
+        .bind(AVC_REGISTRY_POSTGRES_KEY)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load AVC Postgres registry state: {error}"))?
+    else {
+        return Ok(None);
+    };
+
+    let bytes: Vec<u8> = row.try_get("state_cbor").map_err(|error| {
+        anyhow::anyhow!("failed to read AVC Postgres registry state bytes: {error}")
+    })?;
+    if bytes.is_empty() {
+        anyhow::bail!("AVC Postgres registry state is empty");
+    }
+    decode_durable_registry_bytes(&bytes, AVC_REGISTRY_POSTGRES_TABLE).map(Some)
+}
+
+async fn persist_postgres_durable_registry_state_in_transaction(
+    state: &AvcRegistryDurableState,
+    transaction: &mut Transaction<'_, Postgres>,
+) -> anyhow::Result<()> {
+    let bytes = encode_durable_registry_state(state)?;
+    let statement = format!(
+        "INSERT INTO {AVC_REGISTRY_POSTGRES_TABLE} (registry_key, state_cbor)
+         VALUES ($1, $2)
+         ON CONFLICT (registry_key)
+         DO UPDATE SET state_cbor = EXCLUDED.state_cbor"
+    );
+    sqlx::query(&statement)
+        .bind(AVC_REGISTRY_POSTGRES_KEY)
+        .bind(bytes)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to persist AVC Postgres registry state: {error}")
+        })?;
+    Ok(())
+}
+
+async fn persist_postgres_durable_registry_state(
+    state: &AvcRegistryDurableState,
+    pool: &PgPool,
+) -> anyhow::Result<()> {
+    let mut transaction = begin_postgres_registry_transaction(pool).await?;
+    persist_postgres_durable_registry_state_in_transaction(state, &mut transaction).await?;
+    transaction.commit().await.map_err(|error| {
+        anyhow::anyhow!("failed to commit AVC Postgres registry state: {error}")
+    })?;
+    Ok(())
+}
+
+async fn load_postgres_durable_registry_or_import_file(
+    pool: &PgPool,
+    file_path: &FsPath,
+) -> anyhow::Result<InMemoryAvcRegistry> {
+    let mut transaction = begin_postgres_registry_transaction(pool).await?;
+    if let Some(registry) = load_postgres_durable_registry_in_transaction(&mut transaction).await? {
+        transaction.commit().await.map_err(|error| {
+            anyhow::anyhow!("failed to commit AVC Postgres registry load: {error}")
+        })?;
+        return Ok(registry);
+    }
+
+    let registry = load_file_durable_registry(file_path)?;
+    let state = registry.durable_state();
+    if durable_state_has_runtime_records(&state) {
+        persist_postgres_durable_registry_state_in_transaction(&state, &mut transaction).await?;
+        tracing::info!(
+            path = %file_path.display(),
+            table = AVC_REGISTRY_POSTGRES_TABLE,
+            "Imported existing AVC file registry state into Postgres"
+        );
+    }
+    transaction.commit().await.map_err(|error| {
+        anyhow::anyhow!("failed to commit AVC Postgres registry import: {error}")
+    })?;
+    Ok(registry)
+}
+
+fn persist_durable_registry(
+    registry: &InMemoryAvcRegistry,
+    durability: &AvcRegistryDurability,
+) -> anyhow::Result<()> {
+    let state = registry.durable_state();
+    match durability {
+        #[cfg(test)]
+        AvcRegistryDurability::None => Ok(()),
+        AvcRegistryDurability::File(path) => persist_file_durable_registry_state(&state, path),
+        AvcRegistryDurability::Postgres(pool) => tokio::runtime::Handle::current()
+            .block_on(persist_postgres_durable_registry_state(&state, pool)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +604,67 @@ fn parse_hash(raw: &str) -> ApiResult<Hash256> {
     Ok(Hash256::from_bytes(buf))
 }
 
+fn persistence_error(err: anyhow::Error) -> ApiError {
+    tracing::error!(err = %err, "AVC registry persistence failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AVC registry persistence failed".into(),
+    )
+}
+
+fn mutate_postgres_registry_blocking<T, F>(
+    pool: &PgPool,
+    guard: &mut InMemoryAvcRegistry,
+    op: F,
+) -> ApiResult<T>
+where
+    F: FnOnce(&mut InMemoryAvcRegistry) -> ApiResult<T>,
+{
+    let handle = tokio::runtime::Handle::current();
+    let mut transaction = handle
+        .block_on(begin_postgres_registry_transaction(pool))
+        .map_err(persistence_error)?;
+    if let Some(fresh_registry) = handle
+        .block_on(load_postgres_durable_registry_in_transaction(
+            &mut transaction,
+        ))
+        .map_err(persistence_error)?
+    {
+        *guard = fresh_registry;
+    }
+
+    let rollback = guard.clone();
+    let result = match op(guard) {
+        Ok(result) => result,
+        Err(err) => {
+            *guard = rollback;
+            if let Err(rollback_error) = handle.block_on(transaction.rollback()) {
+                tracing::error!(
+                    err = %rollback_error,
+                    "failed to roll back AVC Postgres registry transaction after rejected operation"
+                );
+            }
+            return Err(err);
+        }
+    };
+
+    let state = guard.durable_state();
+    handle
+        .block_on(async {
+            persist_postgres_durable_registry_state_in_transaction(&state, &mut transaction)
+                .await?;
+            transaction.commit().await.map_err(|error| {
+                anyhow::anyhow!("failed to commit AVC Postgres registry state: {error}")
+            })?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .map_err(|err| {
+            *guard = rollback;
+            persistence_error(err)
+        })?;
+    Ok(result)
+}
+
 async fn with_registry_blocking<T, F>(
     state: Arc<AvcApiState>,
     persist_after: bool,
@@ -452,33 +681,24 @@ where
                 "AVC registry unavailable".into(),
             )
         })?;
-        let rollback = if persist_after {
-            Some(guard.clone())
-        } else {
-            None
-        };
+        if persist_after {
+            if let AvcRegistryDurability::Postgres(pool) = &state.durability {
+                return mutate_postgres_registry_blocking(pool, &mut guard, op);
+            }
+        }
+        let rollback = guard.clone();
         let result = match op(&mut guard) {
             Ok(result) => result,
             Err(err) => {
-                if let Some(snapshot) = rollback {
-                    *guard = snapshot;
-                }
+                *guard = rollback;
                 return Err(err);
             }
         };
         if persist_after {
-            if let Some(path) = state.durable_state_path.as_deref() {
-                persist_durable_registry(&guard, path).map_err(|err| {
-                    if let Some(snapshot) = rollback {
-                        *guard = snapshot;
-                    }
-                    tracing::error!(err = %err, "AVC registry persistence failed");
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "AVC registry persistence failed".into(),
-                    )
-                })?;
-            }
+            persist_durable_registry(&guard, &state.durability).map_err(|err| {
+                *guard = rollback;
+                persistence_error(err)
+            })?;
         }
         Ok(result)
     })
@@ -836,9 +1056,10 @@ mod tests {
         Arc::new(state)
     }
 
-    fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
+    async fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let state = AvcApiState::with_durable_registry(data_dir, validator_did(), signer)
+        let state = AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None)
+            .await
             .expect("durable AVC state");
         seed_avc_trust_keys(&state);
         Arc::new(state)
@@ -951,7 +1172,7 @@ mod tests {
     #[tokio::test]
     async fn durable_registry_restores_issued_credentials_for_receipt_emit_after_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let state = fresh_durable_state(dir.path());
+        let state = fresh_durable_state(dir.path()).await;
         let app = avc_router(Arc::clone(&state));
         let credential = baseline_credential();
         let credential_id = credential.id().unwrap();
@@ -973,7 +1194,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let restarted = fresh_durable_state(dir.path());
+        let restarted = fresh_durable_state(dir.path()).await;
         assert_eq!(restarted.registry.lock().unwrap().credential_count(), 1);
         let request = AvcValidationRequest {
             credential,
@@ -1007,7 +1228,7 @@ mod tests {
         assert_eq!(parsed.receipt.credential_id, credential_id);
         assert_eq!(parsed.receipt.action_id, Some(action_id));
 
-        let restarted_again = fresh_durable_state(dir.path());
+        let restarted_again = fresh_durable_state(dir.path()).await;
         assert_eq!(
             restarted_again.registry.lock().unwrap().credential_count(),
             1
@@ -1018,7 +1239,7 @@ mod tests {
     #[tokio::test]
     async fn durable_registry_rolls_back_issue_when_persistence_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let state = fresh_durable_state(dir.path());
+        let state = fresh_durable_state(dir.path()).await;
         std::fs::remove_dir_all(dir.path()).unwrap();
         let app = avc_router(Arc::clone(&state));
         let credential = baseline_credential();
@@ -1736,6 +1957,39 @@ mod tests {
         assert!(
             production.contains("ConcurrencyLimitLayer::new(MAX_AVC_API_CONCURRENT_REQUESTS)"),
             "AVC router must apply local request admission control"
+        );
+    }
+
+    #[test]
+    fn durable_registry_prefers_postgres_and_keeps_file_fallback() {
+        let source = include_str!("avc.rs");
+        let production = source
+            .split("\n// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        assert!(
+            production.contains("database_pool: Option<PgPool>"),
+            "AVC durable registry must accept the existing gateway Postgres pool"
+        );
+        assert!(
+            production.contains("AvcRegistryDurability::Postgres(pool)"),
+            "AVC durable registry must persist to Postgres when DATABASE_URL is configured"
+        );
+        assert!(
+            production.contains("pg_advisory_xact_lock"),
+            "AVC Postgres mutations must use a database transaction lock"
+        );
+        assert!(
+            production.contains("load_postgres_durable_registry_in_transaction"),
+            "AVC Postgres mutations must reload current durable state inside the lock"
+        );
+        assert!(
+            production.contains("load_postgres_durable_registry_or_import_file"),
+            "AVC startup must import any existing file-backed state into Postgres"
+        );
+        assert!(
+            production.contains("AvcRegistryDurability::File"),
+            "AVC durable registry must keep a no-DATABASE_URL file fallback for local nodes"
         );
     }
 }
