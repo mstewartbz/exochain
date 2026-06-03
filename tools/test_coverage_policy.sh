@@ -72,6 +72,20 @@ PY
 grep -F 'bash tools/test_coverage_policy.sh' .github/workflows/ci.yml >/dev/null \
   || fail "CI must run tools/test_coverage_policy.sh before the coverage gate"
 
+coverage_gate_block=$(
+  awk '
+    /# Gate 3: Coverage/ { capture = 1 }
+    capture { print }
+    /# Gate 4: Lint/ { exit }
+  ' .github/workflows/ci.yml
+)
+
+[[ -n "$coverage_gate_block" ]] || fail "CI coverage gate block is missing"
+
+if grep -F -- '--skip-clean' <<<"$coverage_gate_block" >/dev/null; then
+  fail "default workspace coverage gate must clean instrumentation before measuring the 90% threshold"
+fi
+
 if grep -nE '90%[+[:space:]-]*line coverage|Coverage.*>=90|Coverage.*>= 90' README.md .github/workflows/ci.yml docs/guides/GETTING-STARTED.md \
   | grep -viE 'scoped|tarpaulin.toml|not independently verified outside CI' >/tmp/coverage-policy-claims.txt; then
   if grep -nE 'exclude-files|--exclude' tarpaulin.toml .github/workflows/ci.yml >/dev/null; then
