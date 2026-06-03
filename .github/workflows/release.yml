@@ -37,6 +37,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   # -----------------------------------------------------------------------
@@ -153,7 +156,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release
-        run: cargo build --workspace --release --target ${{ matrix.target }}
+        run: bash tools/ci_cargo_retry.sh cargo build --workspace --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -230,7 +233,7 @@ jobs:
 
       # ── SBOM ─────────────────────────────────────────────────────────────
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+        run: bash tools/ci_cargo_retry.sh cargo install cargo-cyclonedx --version 0.5.9 --locked
 
       - name: Generate CycloneDX SBOM
         env:
