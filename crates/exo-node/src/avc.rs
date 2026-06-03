@@ -1163,6 +1163,14 @@ mod tests {
             .to_vec()
     }
 
+    fn unreachable_postgres_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://exochain:test@127.0.0.1:1/exochain_test")
+            .unwrap()
+    }
+
     async fn issue_credential(app: Router, credential: AutonomousVolitionCredential) -> StatusCode {
         let body = serde_json::to_vec(&IssueRequest { credential }).unwrap();
         app.oneshot(
@@ -1176,6 +1184,100 @@ mod tests {
         .await
         .unwrap()
         .status()
+    }
+
+    #[test]
+    fn durable_state_runtime_record_detection_covers_each_record_kind() {
+        assert!(!durable_state_has_runtime_records(
+            &AvcRegistryDurableState::default()
+        ));
+
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        let mut credential_state = AvcRegistryDurableState::default();
+        credential_state
+            .credentials
+            .insert(credential_id, credential.clone());
+        assert!(durable_state_has_runtime_records(&credential_state));
+
+        let mut revocation_state = AvcRegistryDurableState::default();
+        revocation_state.revocations.insert(
+            credential_id,
+            AvcRevocation {
+                schema_version: AVC_SCHEMA_VERSION,
+                credential_id,
+                revoker_did: Did::new("did:exo:issuer").unwrap(),
+                reason: AvcRevocationReason::IssuerRevoked,
+                created_at: Timestamp::new(2, 0),
+                signature: Signature::from_bytes([0x44; 64]),
+            },
+        );
+        assert!(durable_state_has_runtime_records(&revocation_state));
+
+        let validation = AvcValidationResult {
+            credential_id,
+            decision: AvcDecision::Allow,
+            reason_codes: Vec::new(),
+            normalized_holder_did: credential.subject_did.clone(),
+            valid_until: credential.expires_at,
+            receipt: None,
+        };
+        let receipt = create_trust_receipt(
+            &validation,
+            None,
+            validator_did(),
+            Timestamp::new(1_500_000, 0),
+            |bytes| validator_keypair().sign(bytes),
+        )
+        .unwrap();
+        let mut receipt_state = AvcRegistryDurableState::default();
+        receipt_state.receipts.insert(receipt.receipt_id, receipt);
+        assert!(durable_state_has_runtime_records(&receipt_state));
+    }
+
+    #[test]
+    fn file_durable_registry_round_trips_records_and_rejects_bad_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(AVC_REGISTRY_DURABLE_STATE_FILE);
+        let mut registry = InMemoryAvcRegistry::new();
+        registry.put_public_key(Did::new("did:exo:issuer").unwrap(), issuer_keypair().public);
+        let credential = baseline_credential();
+        let credential_id = registry.put_credential(credential.clone()).unwrap();
+        let state = registry.durable_state();
+
+        persist_file_durable_registry_state(&state, &path).unwrap();
+        let loaded = load_file_durable_registry(&path).unwrap();
+        assert_eq!(loaded.credential_count(), 1);
+        assert_eq!(loaded.get_credential(&credential_id), Some(credential));
+        assert_eq!(
+            loaded.resolve_public_key(&Did::new("did:exo:issuer").unwrap()),
+            None,
+            "durable files must not persist trust anchors"
+        );
+
+        let empty_path = dir.path().join("empty.cbor");
+        std::fs::write(&empty_path, []).unwrap();
+        let empty_error = load_file_durable_registry(&empty_path)
+            .unwrap_err()
+            .to_string();
+        assert!(empty_error.contains("is empty"));
+
+        let corrupt_path = dir.path().join("corrupt.cbor");
+        std::fs::write(&corrupt_path, b"not cbor").unwrap();
+        let corrupt_error = load_file_durable_registry(&corrupt_path)
+            .unwrap_err()
+            .to_string();
+        assert!(corrupt_error.contains("failed to decode AVC durable registry"));
+
+        let mut invalid_state = AvcRegistryDurableState::default();
+        invalid_state
+            .credentials
+            .insert(Hash256::from_bytes([0x99; 32]), baseline_credential());
+        let invalid_bytes = encode_durable_registry_state(&invalid_state).unwrap();
+        let invalid_error = decode_durable_registry_bytes(&invalid_bytes, "invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(invalid_error.contains("failed to validate AVC durable registry"));
     }
 
     #[tokio::test]
@@ -1268,6 +1370,52 @@ mod tests {
             1
         );
         assert_eq!(restarted_again.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_durable_registry_fails_closed_when_database_is_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = unreachable_postgres_pool();
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let startup_error = match AvcApiState::with_durable_registry(
+            dir.path(),
+            validator_did(),
+            Arc::clone(&signer),
+            Some(pool.clone()),
+        )
+        .await
+        {
+            Ok(_) => panic!("unreachable Postgres pool must fail closed at AVC startup"),
+            Err(error) => error.to_string(),
+        };
+        assert!(startup_error.contains("failed to begin AVC Postgres registry transaction"));
+
+        let state = AvcApiState {
+            registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
+            validator_did: validator_did(),
+            receipt_signer: signer,
+            durability: AvcRegistryDurability::Postgres(pool.clone()),
+        };
+        seed_avc_trust_keys(&state);
+        let state = Arc::new(state);
+        let app = avc_router(Arc::clone(&state));
+        assert_eq!(
+            issue_credential(app, baseline_credential()).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(state.registry.lock().unwrap().credential_count(), 0);
+
+        let persist_error = tokio::task::spawn_blocking(move || {
+            persist_durable_registry(
+                &InMemoryAvcRegistry::new(),
+                &AvcRegistryDurability::Postgres(pool),
+            )
+            .unwrap_err()
+            .to_string()
+        })
+        .await
+        .unwrap();
+        assert!(persist_error.contains("failed to begin AVC Postgres registry transaction"));
     }
 
     #[tokio::test]
@@ -1390,6 +1538,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_operation_error_rolls_back_in_memory_mutation() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        let error = with_registry_blocking(Arc::clone(&state), false, move |registry| {
+            registry.put_credential(credential).unwrap();
+            Err::<(), _>((StatusCode::BAD_REQUEST, "synthetic rejection".into()))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .get_credential(&credential_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_task_fails_closed_when_mutex_is_poisoned() {
+        let state = fresh_state();
+        let registry = Arc::clone(&state.registry);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = registry.lock().unwrap();
+            panic!("poison AVC registry mutex for fail-closed test");
+        });
+
+        let error = with_registry_blocking(state, false, |_registry| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.1, "AVC registry unavailable");
+    }
+
+    #[tokio::test]
     async fn issue_rejects_invalid_issuer_signature_without_storing_credential() {
         let state = fresh_state();
         let app = avc_router(Arc::clone(&state));
@@ -1493,6 +1680,43 @@ mod tests {
             registry.get_credential(&forged_id).is_none(),
             "forged delegated credential id must remain absent"
         );
+    }
+
+    #[tokio::test]
+    async fn delegate_registers_valid_child_credential() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let mut draft = baseline_draft();
+        let parent_id = Hash256::from_bytes([0x42; 32]);
+        draft.parent_avc_id = Some(parent_id);
+        let credential = {
+            let kp = issuer_keypair();
+            issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
+        };
+        let credential_id = credential.id().unwrap();
+        let body = serde_json::to_vec(&DelegateRequest {
+            child_credential: credential,
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/delegate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: DelegateResponse = serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.credential_id, format!("{credential_id}"));
+        assert_eq!(parsed.parent_avc_id, Some(format!("{parent_id}")));
+        assert_eq!(parsed.status, "registered");
+        assert_eq!(state.registry.lock().unwrap().credential_count(), 1);
     }
 
     #[tokio::test]
@@ -1623,6 +1847,78 @@ mod tests {
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
     }
 
+    #[test]
+    fn duplicate_same_receipt_is_idempotent() {
+        let mut registry = InMemoryAvcRegistry::new();
+        registry.put_public_key(Did::new("did:exo:issuer").unwrap(), issuer_keypair().public);
+        let credential = baseline_credential();
+        let credential_id = registry.put_credential(credential).unwrap();
+        let validation = AvcValidationResult {
+            credential_id,
+            decision: AvcDecision::Allow,
+            reason_codes: Vec::new(),
+            normalized_holder_did: Did::new("did:exo:agent").unwrap(),
+            valid_until: Some(Timestamp::new(2_000_000, 0)),
+            receipt: None,
+        };
+        let receipt = create_trust_receipt(
+            &validation,
+            Some(Hash256::from_bytes([0x55; 32])),
+            validator_did(),
+            Timestamp::new(1_500_000, 0),
+            |bytes| validator_keypair().sign(bytes),
+        )
+        .unwrap();
+
+        store_receipt_idempotent(&mut registry, receipt.clone()).unwrap();
+        store_receipt_idempotent(&mut registry, receipt).unwrap();
+        assert_eq!(registry.receipt_count(), 1);
+    }
+
+    #[test]
+    fn invalid_receipt_storage_maps_to_client_error_without_state_change() {
+        let validation = AvcValidationResult {
+            credential_id: Hash256::from_bytes([0x88; 32]),
+            decision: AvcDecision::Allow,
+            reason_codes: Vec::new(),
+            normalized_holder_did: Did::new("did:exo:agent").unwrap(),
+            valid_until: Some(Timestamp::new(2_000_000, 0)),
+            receipt: None,
+        };
+        let receipt = create_trust_receipt(
+            &validation,
+            None,
+            validator_did(),
+            Timestamp::new(1_500_000, 0),
+            |bytes| validator_keypair().sign(bytes),
+        )
+        .unwrap();
+        let mut registry = InMemoryAvcRegistry::new();
+
+        let error = store_receipt_idempotent(&mut registry, receipt).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(registry.receipt_count(), 0);
+    }
+
+    #[test]
+    fn internal_avc_errors_are_redacted_for_clients() {
+        let registry_error = map_avc_error(exo_avc::AvcError::Registry {
+            reason: "duplicate".into(),
+        });
+        assert_eq!(
+            registry_error,
+            (StatusCode::INTERNAL_SERVER_ERROR, "AVC error".into())
+        );
+
+        let serialization_error = map_avc_error(exo_avc::AvcError::Serialization {
+            reason: "cbor".into(),
+        });
+        assert_eq!(
+            serialization_error,
+            (StatusCode::INTERNAL_SERVER_ERROR, "AVC error".into())
+        );
+    }
+
     #[tokio::test]
     async fn receipt_emit_registry_subject_key_wins_over_supplied_public_key() {
         let state = fresh_state();
@@ -1643,6 +1939,86 @@ mod tests {
             validation: request.clone(),
             subject_signature: sign_action(&request, &attacker_keypair),
             subject_public_key: Some(*attacker_keypair.public_key()),
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_missing_subject_public_key_without_receipt() {
+        let state = fresh_state();
+        let subject = crate::identity::did_from_public_key(subject_keypair().public_key()).unwrap();
+        let credential = credential_for_subject(subject.clone());
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(subject)),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request,
+            subject_signature: Signature::from_bytes([0x77; 64]),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_mismatched_supplied_subject_key_without_receipt() {
+        let state = fresh_state();
+        let subject = Did::new("did:exo:detached-agent").unwrap();
+        let credential = credential_for_subject(subject.clone());
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(subject)),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: Some(*subject_keypair().public_key()),
         })
         .unwrap();
 
@@ -1732,6 +2108,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_empty_subject_signature_without_receipt() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request,
+            subject_signature: Signature::empty(),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
@@ -1975,6 +2390,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_returns_400_for_short_hex() {
+        let state = fresh_state();
+        let app = avc_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/avc/11")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn get_returns_credential_when_known() {
         let state = fresh_state();
         let credential = baseline_credential();
@@ -2061,6 +2493,18 @@ mod tests {
         let parsed: ListAvcResponse = serde_json::from_slice(&read_body(response).await).unwrap();
         assert_eq!(parsed.did, "did:exo:agent");
         assert_eq!(parsed.credentials.len(), 1);
+    }
+
+    #[test]
+    fn expected_root_trust_constants_reject_wrong_lengths() {
+        let hash_error = parse_expected_hash("00", "test hash")
+            .unwrap_err()
+            .to_string();
+        assert!(hash_error.contains("expected 32 bytes"));
+        let key_error = parse_expected_public_key("00", "test key")
+            .unwrap_err()
+            .to_string();
+        assert!(key_error.contains("expected 32 bytes"));
     }
 
     #[test]
@@ -2206,6 +2650,21 @@ mod avc_root_trust_tests {
             error
                 .to_string()
                 .contains("failed to read AVC root trust bundle")
+        );
+    }
+
+    #[test]
+    fn avc_root_trust_bundle_malformed_json_fails_closed() {
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(temp.path(), b"not json").expect("write malformed bundle");
+
+        let state = avc_state_for_root_trust_test();
+        let error = load_root_trust_bundle_from_path(&state, temp.path())
+            .expect_err("malformed configured bundle must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse AVC root trust bundle")
         );
     }
 }
