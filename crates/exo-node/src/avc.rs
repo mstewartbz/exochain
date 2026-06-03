@@ -569,6 +569,16 @@ fn parse_did(raw: &str) -> ApiResult<Did> {
 }
 
 fn parse_hash(raw: &str) -> ApiResult<Hash256> {
+    if !raw
+        .as_bytes()
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "credential id must be lowercase hex".into(),
+        ));
+    }
     let bytes = hex::decode(raw).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -1373,6 +1383,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_registry_startup_rejects_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(AVC_REGISTRY_DURABLE_STATE_FILE), []).unwrap();
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+
+        let error =
+            match AvcApiState::with_durable_registry(dir.path(), validator_did(), signer, None)
+                .await
+            {
+                Ok(_) => panic!("empty AVC durable registry file must fail closed at startup"),
+                Err(error) => error.to_string(),
+            };
+
+        assert!(error.contains("AVC durable registry"));
+        assert!(error.contains("is empty"));
+    }
+
+    #[tokio::test]
+    async fn durable_registry_file_wrapper_restores_successful_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fresh_durable_state(dir.path()).await;
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+
+        let stored_id = with_registry_blocking(Arc::clone(&state), true, move |registry| {
+            registry.put_credential(credential).map_err(map_avc_error)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(stored_id, credential_id);
+        let reloaded = fresh_durable_state(dir.path()).await;
+        let registry = reloaded.registry.lock().unwrap();
+        assert_eq!(registry.credential_count(), 1);
+        assert!(
+            registry.get_credential(&credential_id).is_some(),
+            "file durability wrapper must persist accepted registry mutations"
+        );
+        assert_eq!(
+            registry.resolve_public_key(&Did::new("did:exo:issuer").unwrap()),
+            Some(issuer_keypair().public),
+            "startup trust seeding remains separate from durable records"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_registry_read_only_access_does_not_create_runtime_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fresh_durable_state(dir.path()).await;
+        let file_path = dir.path().join(AVC_REGISTRY_DURABLE_STATE_FILE);
+
+        let count = with_registry_blocking(Arc::clone(&state), false, |registry| {
+            Ok(registry.credential_count())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(count, 0);
+        assert!(
+            !file_path.exists(),
+            "read-only registry access must not create an empty durable runtime file"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_durable_registry_fails_closed_when_database_is_unreachable() {
         let dir = tempfile::tempdir().unwrap();
         let pool = unreachable_postgres_pool();
@@ -1733,6 +1808,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegate_response_omits_parent_when_credential_is_root() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        let body = serde_json::to_vec(&DelegateRequest {
+            child_credential: credential,
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/delegate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: DelegateResponse = serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.credential_id, format!("{credential_id}"));
+        assert_eq!(parsed.parent_avc_id, None);
+        assert_eq!(parsed.status, "registered");
+    }
+
+    #[tokio::test]
     async fn validate_returns_allow_for_valid_credential() {
         let state = fresh_state();
         let app = avc_router(Arc::clone(&state));
@@ -1758,6 +1863,37 @@ mod tests {
         let resp_bytes = read_body(response).await;
         let parsed: AvcValidationResult = serde_json::from_slice(&resp_bytes).unwrap();
         assert_eq!(parsed.decision, AvcDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn validate_returns_structured_deny_for_unsigned_credential() {
+        let state = fresh_state();
+        let app = avc_router(Arc::clone(&state));
+        let mut credential = baseline_credential();
+        credential.signature = Signature::empty();
+        let request = AvcValidationRequest {
+            credential,
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&request).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/validate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: AvcValidationResult =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.decision, AvcDecision::Deny);
     }
 
     #[tokio::test]
@@ -1817,6 +1953,62 @@ mod tests {
             validator_keypair().public_key()
         ));
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_is_idempotent_for_identical_request() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+        let app = avc_router(Arc::clone(&state));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            state.registry.lock().unwrap().receipt_count(),
+            1,
+            "identical receipt emission requests must remain idempotent"
+        );
     }
 
     #[tokio::test]
@@ -1932,6 +2124,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn client_avc_errors_preserve_rejection_context() {
+        let cases = vec![
+            exo_avc::AvcError::EmptyField { field: "purpose" },
+            exo_avc::AvcError::UnsupportedSchema {
+                got: 99,
+                supported: 1,
+            },
+            exo_avc::AvcError::BasisPointOutOfRange {
+                field: "risk",
+                value: 10_001,
+            },
+            exo_avc::AvcError::InvalidTimestamp {
+                reason: "expired".into(),
+            },
+            exo_avc::AvcError::DelegationWidens {
+                dimension: "permissions",
+            },
+            exo_avc::AvcError::DelegationRejected {
+                reason: "missing parent".into(),
+            },
+            exo_avc::AvcError::InvalidInput {
+                reason: "malformed".into(),
+            },
+        ];
+
+        for err in cases {
+            let (status, body) = map_avc_error(err);
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!body.is_empty());
+        }
+    }
+
+    #[test]
+    fn hash_parser_requires_canonical_lowercase_hex() {
+        let uppercase_id = "AA".repeat(32);
+        let uppercase_error = parse_hash(&uppercase_id).unwrap_err();
+        assert_eq!(
+            uppercase_error,
+            (
+                StatusCode::BAD_REQUEST,
+                "credential id must be lowercase hex".into()
+            )
+        );
+
+        let short_error = parse_hash("11").unwrap_err();
+        assert_eq!(
+            short_error,
+            (
+                StatusCode::BAD_REQUEST,
+                "credential id must be 32 bytes (64 hex chars)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn receipt_signature_requires_action_before_key_resolution() {
+        let request = AvcValidationRequest {
+            credential: baseline_credential(),
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let registry = InMemoryAvcRegistry::new();
+
+        let error = verify_subject_action_signature(
+            &registry,
+            &request,
+            &Signature::from_bytes([0x44; 64]),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            (
+                StatusCode::BAD_REQUEST,
+                "receipt emission requires an action".into()
+            )
+        );
+    }
+
+    #[test]
+    fn api_error_helpers_are_deterministic_and_redacted() {
+        let credential = baseline_credential();
+        let id = credential.id().unwrap();
+        let summary = summary_of(&credential).unwrap();
+        assert_eq!(summary.credential_id, format!("{id}"));
+        assert_eq!(summary.subject_did, "did:exo:agent");
+        assert_eq!(summary.issuer_did, "did:exo:issuer");
+        assert_eq!(summary.principal_did, "did:exo:issuer");
+
+        let persistence = persistence_error(anyhow::anyhow!("database DSN"));
+        assert_eq!(
+            persistence,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "AVC registry persistence failed".into()
+            )
+        );
+    }
+
     #[tokio::test]
     async fn receipt_emit_registry_subject_key_wins_over_supplied_public_key() {
         let state = fresh_state();
@@ -1969,6 +2262,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_missing_action_without_receipt() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request,
+            subject_signature: Signature::from_bytes([0x77; 64]),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
@@ -2465,6 +2797,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_returns_400_for_uppercase_hex() {
+        let state = fresh_state();
+        let app = avc_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/avc/{}", "AA".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn list_returns_400_for_invalid_did() {
         let state = fresh_state();
         let app = avc_router(state);
@@ -2479,6 +2828,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_returns_empty_credentials_for_subject_without_records() {
+        let state = fresh_state();
+        let app = avc_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/agents/did:exo:agent/avcs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: ListAvcResponse = serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.did, "did:exo:agent");
+        assert!(parsed.credentials.is_empty());
     }
 
     #[tokio::test]
@@ -2506,6 +2876,42 @@ mod tests {
         let parsed: ListAvcResponse = serde_json::from_slice(&read_body(response).await).unwrap();
         assert_eq!(parsed.did, "did:exo:agent");
         assert_eq!(parsed.credentials.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_returns_credentials_in_deterministic_id_order() {
+        let state = fresh_state();
+        let first = credential_with_purpose("deterministic order first");
+        let second = credential_with_purpose("deterministic order second");
+        let first_id = first.id().unwrap();
+        let second_id = second.id().unwrap();
+        {
+            let mut registry = state.registry.lock().unwrap();
+            registry.put_credential(second).unwrap();
+            registry.put_credential(first).unwrap();
+        }
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/agents/did:exo:agent/avcs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: ListAvcResponse = serde_json::from_slice(&read_body(response).await).unwrap();
+        let mut expected = vec![format!("{first_id}"), format!("{second_id}")];
+        expected.sort();
+        let actual = parsed
+            .credentials
+            .into_iter()
+            .map(|summary| summary.credential_id)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
