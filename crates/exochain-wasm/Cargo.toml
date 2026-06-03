@@ -28,8 +28,9 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# ExoChain crates (14 of 15 — excludes exo-gateway which is server-only)
+# ExoChain crates (excludes exo-gateway which is server-only)
 exo-core       = { path = "../exo-core" }
+exo-avc        = { path = "../exo-avc" }
 exo-identity   = { path = "../exo-identity" }
 exo-consent    = { path = "../exo-consent" }
 exo-authority  = { path = "../exo-authority" }
