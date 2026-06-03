@@ -835,6 +835,102 @@ mod tests {
     }
 
     #[test]
+    fn durable_state_rejects_mismatched_credential_key() {
+        let mut state = AvcRegistryDurableState::default();
+        state.credentials.insert(h256(0x99), sample_credential());
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+        match err {
+            AvcError::Registry { reason } => {
+                assert!(reason.contains("does not match computed id"));
+            }
+            other => panic!("expected durable credential key mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn durable_state_rejects_invalid_revocation_records() {
+        let mut reg = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let valid_revocation = sample_issuer_revocation(id, &issuer_keypair);
+
+        let mut mismatched_key = reg.durable_state();
+        mismatched_key
+            .revocations
+            .insert(h256(0x44), valid_revocation.clone());
+        let err = InMemoryAvcRegistry::from_durable_state(mismatched_key).unwrap_err();
+        assert!(
+            matches!(err, AvcError::Registry { reason } if reason.contains("durable revocation key"))
+        );
+
+        let mut unsigned = valid_revocation.clone();
+        unsigned.signature = Signature::empty();
+        let mut unsigned_state = reg.durable_state();
+        unsigned_state.revocations.insert(id, unsigned);
+        let err = InMemoryAvcRegistry::from_durable_state(unsigned_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("empty signature"))
+        );
+
+        let unknown_id = h256(0x66);
+        let mut unknown_state = AvcRegistryDurableState::default();
+        unknown_state.revocations.insert(
+            unknown_id,
+            signed_revocation(unknown_id, did("issuer"), &issuer_keypair),
+        );
+        let err = InMemoryAvcRegistry::from_durable_state(unknown_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("unknown credential"))
+        );
+
+        let attacker_keypair = keypair(0x22);
+        let mut unauthorized_state = reg.durable_state();
+        unauthorized_state.revocations.insert(
+            id,
+            signed_revocation(id, did("attacker"), &attacker_keypair),
+        );
+        let err = InMemoryAvcRegistry::from_durable_state(unauthorized_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("not authorized"))
+        );
+    }
+
+    #[test]
+    fn durable_state_rejects_invalid_receipt_records() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let receipt = receipt_for_credential(id);
+
+        let mut mismatched_key = reg.durable_state();
+        mismatched_key.receipts.insert(h256(0x77), receipt.clone());
+        let err = InMemoryAvcRegistry::from_durable_state(mismatched_key).unwrap_err();
+        assert!(
+            matches!(err, AvcError::Registry { reason } if reason.contains("durable receipt key"))
+        );
+
+        let mut unsigned = receipt.clone();
+        unsigned.signature = Signature::empty();
+        let mut unsigned_state = reg.durable_state();
+        unsigned_state
+            .receipts
+            .insert(unsigned.receipt_id, unsigned);
+        let err = InMemoryAvcRegistry::from_durable_state(unsigned_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("empty signature"))
+        );
+
+        let unknown_receipt = receipt_for_credential(h256(0xAA));
+        let mut unknown_state = AvcRegistryDurableState::default();
+        unknown_state
+            .receipts
+            .insert(unknown_receipt.receipt_id, unknown_receipt);
+        let err = InMemoryAvcRegistry::from_durable_state(unknown_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("unknown credential"))
+        );
+    }
+
+    #[test]
     fn apply_durable_state_preserves_trust_anchors_and_validation_context() {
         let mut durable_source = fresh_registry();
         let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut durable_source);

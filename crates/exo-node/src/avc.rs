@@ -1577,6 +1577,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_task_panic_fails_closed() {
+        let state = fresh_state();
+        let error = with_registry_blocking(state, false, |_registry| -> ApiResult<()> {
+            panic!("synthetic AVC registry worker panic")
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.1, "AVC registry task failed");
+    }
+
+    #[tokio::test]
     async fn issue_rejects_invalid_issuer_signature_without_storing_credential() {
         let state = fresh_state();
         let app = avc_router(Arc::clone(&state));
