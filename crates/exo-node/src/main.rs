@@ -893,11 +893,38 @@ async fn start_node(
         drop(alert_rx);
     }
 
+    let gateway_pool = match std::env::var("DATABASE_URL") {
+        Ok(database_url) => {
+            tracing::info!("DATABASE_URL configured - initializing gateway readiness pool");
+            Some(
+                exo_gateway::db::init_pool(&database_url)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("gateway database initialization failed: {error}")
+                    })?,
+            )
+        }
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "DATABASE_URL not configured - /ready will remain unavailable until a database is configured"
+            );
+            None
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("DATABASE_URL is not valid Unicode");
+        }
+    };
+
     // Build the AVC API router (Autonomous Volition Credentials).
-    let avc_state = Arc::new(avc::AvcApiState::new(
-        node_identity.did.clone(),
-        Arc::clone(&sign_fn),
-    ));
+    let avc_state = Arc::new(
+        avc::AvcApiState::with_durable_registry(
+            data_dir,
+            node_identity.did.clone(),
+            Arc::clone(&sign_fn),
+            gateway_pool.clone(),
+        )
+        .await?,
+    );
     match avc::load_configured_root_trust_bundle(avc_state.as_ref())? {
         Some(registration) => {
             tracing::info!(
@@ -991,28 +1018,6 @@ async fn start_node(
         bind_address: bind_address.clone(),
         ..exo_gateway::server::GatewayConfig::default()
     };
-    let gateway_pool = match std::env::var("DATABASE_URL") {
-        Ok(database_url) => {
-            tracing::info!("DATABASE_URL configured - initializing gateway readiness pool");
-            Some(
-                exo_gateway::db::init_pool(&database_url)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("gateway database initialization failed: {error}")
-                    })?,
-            )
-        }
-        Err(std::env::VarError::NotPresent) => {
-            tracing::warn!(
-                "DATABASE_URL not configured - /ready will remain unavailable until a database is configured"
-            );
-            None
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("DATABASE_URL is not valid Unicode");
-        }
-    };
-
     if is_join {
         tracing::info!(
             %bind_address,
@@ -1496,6 +1501,26 @@ mod tests {
         assert!(
             loader_index < router_index,
             "AVC root trust issuer must be registered before AVC router construction"
+        );
+    }
+
+    #[test]
+    fn avc_registry_uses_gateway_database_pool_when_configured() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let pool_index = production
+            .find("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .expect("gateway pool initialization present");
+        let avc_index = production
+            .find("AvcApiState::with_durable_registry")
+            .expect("AVC durable registry construction present");
+        assert!(
+            pool_index < avc_index,
+            "DATABASE_URL-backed pool must be initialized before AVC durable registry startup"
+        );
+        assert!(
+            production[avc_index..].contains("gateway_pool.clone()"),
+            "AVC durable registry must reuse the gateway database pool instead of requiring a separate /data-backed store"
         );
     }
 

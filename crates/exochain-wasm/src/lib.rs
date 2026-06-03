@@ -67,6 +67,7 @@ mod source_guard_tests {
                 include_str!("governance_bindings.rs"),
             ),
             ("economy_bindings.rs", include_str!("economy_bindings.rs")),
+            ("avc_bindings.rs", include_str!("avc_bindings.rs")),
         ];
 
         for (path, source) in binding_sources {
@@ -783,6 +784,44 @@ mod source_guard_tests {
             production.contains("raw secret-key event signing is disabled at the WASM boundary"),
             "legacy raw-secret event creation entrypoint must fail closed"
         );
+    }
+
+    #[test]
+    fn wasm_avc_bindings_externalize_subject_signing() {
+        let source = include_str!("avc_bindings.rs");
+        let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
+
+        assert!(
+            production.contains("wasm_avc_action_signing_payload"),
+            "AVC WASM bindings must expose canonical action bytes for external signers"
+        );
+        assert!(
+            production.contains("wasm_avc_build_emit_request_from_signature"),
+            "AVC WASM bindings must accept externally produced signatures"
+        );
+        assert!(
+            production.contains("raw AVC subject-key signing is disabled at the WASM boundary"),
+            "legacy AVC raw subject-key signing must fail closed"
+        );
+        assert!(
+            production.contains(
+                "raw AVC subject-key emit request building is disabled at the WASM boundary"
+            ),
+            "legacy AVC raw subject-key request building must fail closed"
+        );
+
+        for pattern in [
+            "subject_secret_hex",
+            "raw_subject_key_material",
+            "SecretKey::from_bytes",
+            "KeyPair::from_secret_bytes",
+            "crypto::sign(",
+        ] {
+            assert!(
+                !production.contains(pattern),
+                "AVC WASM production bindings must not decode, derive, or use raw subject keys via {pattern}"
+            );
+        }
     }
 
     #[test]

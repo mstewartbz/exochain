@@ -29,17 +29,16 @@
 //! (domain `exo.avc.action.v1`, canonical CBOR). This bridge **calls that
 //! exact function** — it never reimplements the encoding — so the bytes a
 //! JS caller signs are identical to the bytes the node verifies. The
-//! `#[cfg(test)]` block below pins this against drift by signing through
-//! this bridge and verifying through the node's own verification path
-//! ([`exo_core::crypto::verify`] over the same payload).
+//! `#[cfg(test)]` block below pins this against drift by returning bytes from
+//! this bridge, signing them externally, and verifying through the node's own
+//! verification path ([`exo_core::crypto::verify`] over the same payload).
 
 use exo_avc::{
     AutonomousVolitionCredential, AvcActionRequest, AvcValidationRequest,
     avc_action_signature_payload,
 };
-use exo_core::{Signature, Timestamp, crypto};
+use exo_core::{PublicKey, Signature, Timestamp};
 use wasm_bindgen::prelude::*;
-use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Core logic — returns `Result<_, String>` so it is fully testable on the
@@ -49,35 +48,19 @@ use zeroize::Zeroizing;
 // exercised by the native test block.
 // ---------------------------------------------------------------------------
 
-/// Parse a 32-byte Ed25519 secret from hex. The decoded bytes are held in
-/// `Zeroizing` wrappers so they are wiped from memory on drop; the value is
-/// never logged, returned, or echoed.
-fn parse_subject_secret(label: &str, value: &str) -> Result<exo_core::SecretKey, String> {
-    let bytes = Zeroizing::new(hex::decode(value).map_err(|e| format!("{label}: {e}"))?);
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("{label} must be 32 bytes"))?;
-    if arr.iter().all(|byte| *byte == 0) {
-        return Err(format!("{label} must not be all-zero"));
+fn parse_subject_public_key_hex(value: &str) -> Result<Option<PublicKey>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
     }
-    let arr = Zeroizing::new(arr);
-    Ok(exo_core::SecretKey::from_bytes(*arr))
-}
-
-/// Derive the subject public key from the secret hex (only when the caller
-/// asks to include it). Bytes are zeroized.
-fn derive_subject_public_key(secret_hex: &str) -> Result<exo_core::PublicKey, String> {
-    let bytes =
-        Zeroizing::new(hex::decode(secret_hex).map_err(|e| format!("subject_secret_hex: {e}"))?);
+    let bytes = hex::decode(value).map_err(|e| format!("subject_public_key_hex: {e}"))?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "subject_secret_hex must be 32 bytes".to_string())?;
-    let arr = Zeroizing::new(arr);
-    let keypair =
-        crypto::KeyPair::from_secret_bytes(*arr).map_err(|e| format!("subject keypair: {e}"))?;
-    Ok(*keypair.public_key())
+        .map_err(|_| "subject_public_key_hex must be 32 bytes".to_string())?;
+    if arr.iter().all(|byte| *byte == 0) {
+        return Err("subject_public_key_hex must not be all-zero".to_string());
+    }
+    Ok(Some(PublicKey::from_bytes(arr)))
 }
 
 /// Build a caller-supplied HLC timestamp; reject the zero sentinel (the
@@ -91,64 +74,49 @@ fn parse_now(physical_ms: u64, logical: u32) -> Result<Timestamp, String> {
     Ok(Timestamp::new(physical_ms, logical))
 }
 
-/// Produce the subject action signature over the canonical action payload.
-///
-/// Calls [`avc_action_signature_payload`] directly — the same function the
-/// node uses to reconstruct the bytes it verifies. This is the byte-parity
-/// guarantee: do not replace this with a hand-rolled encoding.
-fn sign_action_internal(
-    credential: &AutonomousVolitionCredential,
-    action: &AvcActionRequest,
-    now: &Timestamp,
-    secret: &exo_core::SecretKey,
-) -> Result<Signature, String> {
-    let payload = avc_action_signature_payload(credential, action, now)
+/// Core of [`wasm_avc_action_signing_payload`] — returns canonical CBOR bytes
+/// for signing by external key management.
+fn action_signing_payload_core(
+    credential_json: &str,
+    action_json: &str,
+    now_physical_ms: u64,
+    now_logical: u32,
+) -> Result<Vec<u8>, String> {
+    let credential: AutonomousVolitionCredential =
+        serde_json::from_str(credential_json).map_err(|e| format!("credential json: {e}"))?;
+    let action: AvcActionRequest =
+        serde_json::from_str(action_json).map_err(|e| format!("action json: {e}"))?;
+    let now = parse_now(now_physical_ms, now_logical)?;
+    avc_action_signature_payload(&credential, &action, &now)
+        .map_err(|e| format!("avc action signature payload: {e}"))
+}
+
+/// Core of [`wasm_avc_build_emit_request_from_signature`] — returns the full
+/// POST body JSON after the caller signs the canonical payload outside WASM.
+fn build_emit_request_from_signature_core(
+    credential_json: &str,
+    action_json: &str,
+    now_physical_ms: u64,
+    now_logical: u32,
+    subject_signature_json: &str,
+    subject_public_key_hex: &str,
+) -> Result<String, String> {
+    let credential: AutonomousVolitionCredential =
+        serde_json::from_str(credential_json).map_err(|e| format!("credential json: {e}"))?;
+    let action: AvcActionRequest =
+        serde_json::from_str(action_json).map_err(|e| format!("action json: {e}"))?;
+    let now = parse_now(now_physical_ms, now_logical)?;
+    let signature: Signature =
+        serde_json::from_str(subject_signature_json).map_err(|e| format!("signature json: {e}"))?;
+    if signature.is_empty() {
+        return Err("subject_signature_json must not be empty".to_string());
+    }
+
+    // Reconstruct the canonical payload so request building fails before
+    // transport if the credential/action/timestamp tuple cannot be signed.
+    avc_action_signature_payload(&credential, &action, &now)
         .map_err(|e| format!("avc action signature payload: {e}"))?;
-    Ok(crypto::sign(&payload, secret))
-}
-
-/// Core of [`wasm_avc_sign_action`] — returns the signature as canonical serde
-/// JSON (the shape `EmitReceiptRequest.subject_signature` deserializes).
-fn sign_action_core(
-    credential_json: &str,
-    action_json: &str,
-    now_physical_ms: u64,
-    now_logical: u32,
-    subject_secret_hex: &str,
-) -> Result<String, String> {
-    let credential: AutonomousVolitionCredential =
-        serde_json::from_str(credential_json).map_err(|e| format!("credential json: {e}"))?;
-    let action: AvcActionRequest =
-        serde_json::from_str(action_json).map_err(|e| format!("action json: {e}"))?;
-    let now = parse_now(now_physical_ms, now_logical)?;
-    let secret = parse_subject_secret("subject_secret_hex", subject_secret_hex)?;
-    let signature = sign_action_internal(&credential, &action, &now, &secret)?;
-    serde_json::to_string(&signature).map_err(|e| format!("signature json: {e}"))
-}
-
-/// Core of [`wasm_avc_build_emit_request`] — returns the full POST body JSON.
-fn build_emit_request_core(
-    credential_json: &str,
-    action_json: &str,
-    now_physical_ms: u64,
-    now_logical: u32,
-    subject_secret_hex: &str,
-    include_public_key: bool,
-) -> Result<String, String> {
-    let credential: AutonomousVolitionCredential =
-        serde_json::from_str(credential_json).map_err(|e| format!("credential json: {e}"))?;
-    let action: AvcActionRequest =
-        serde_json::from_str(action_json).map_err(|e| format!("action json: {e}"))?;
-    let now = parse_now(now_physical_ms, now_logical)?;
-    let secret = parse_subject_secret("subject_secret_hex", subject_secret_hex)?;
-
-    let signature = sign_action_internal(&credential, &action, &now, &secret)?;
-
-    let subject_public_key = if include_public_key {
-        Some(derive_subject_public_key(subject_secret_hex)?)
-    } else {
-        None
-    };
+    let subject_public_key = parse_subject_public_key_hex(subject_public_key_hex)?;
 
     // Inner validation request reuses the canonical exo-avc struct so its
     // shape never drifts from what the node deserializes.
@@ -184,54 +152,77 @@ fn build_emit_request_core(
 // WASM boundary — thin wrappers. JsValue only constructed here.
 // ---------------------------------------------------------------------------
 
-/// Sign an AVC action with the subject key. Returns the signature as its
-/// canonical serde-JSON form — exactly the shape the node's
-/// `EmitReceiptRequest.subject_signature` field deserializes.
+/// Legacy raw subject-secret signing entry point.
 ///
-/// `credential_json` must be the credential **exactly as issued** (no
-/// reshaping) — the node compares it against the registered credential
-/// byte-for-byte.
+/// This fails closed because public WASM cannot be the subject-key custody
+/// boundary for AVC receipts. Use [`wasm_avc_action_signing_payload`], sign the
+/// returned canonical CBOR bytes with external key management, then call
+/// [`wasm_avc_build_emit_request_from_signature`].
 #[wasm_bindgen]
 pub fn wasm_avc_sign_action(
+    _credential_json: &str,
+    _action_json: &str,
+    _now_physical_ms: u64,
+    _now_logical: u32,
+) -> Result<String, JsValue> {
+    Err(JsValue::from_str(
+        "raw AVC subject-key signing is disabled at the WASM boundary; use wasm_avc_action_signing_payload, sign externally, then call wasm_avc_build_emit_request_from_signature",
+    ))
+}
+
+/// Return the canonical `exo.avc.action.v1` CBOR payload bytes for an AVC
+/// subject action. The caller signs these bytes outside WASM.
+#[wasm_bindgen]
+pub fn wasm_avc_action_signing_payload(
     credential_json: &str,
     action_json: &str,
     now_physical_ms: u64,
     now_logical: u32,
-    subject_secret_hex: &str,
-) -> Result<String, JsValue> {
-    sign_action_core(
-        credential_json,
-        action_json,
-        now_physical_ms,
-        now_logical,
-        subject_secret_hex,
-    )
-    .map_err(|e| JsValue::from_str(&e))
+) -> Result<Vec<u8>, JsValue> {
+    action_signing_payload_core(credential_json, action_json, now_physical_ms, now_logical)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Build the full `POST /api/v1/avc/receipts/emit` request body:
+/// Legacy raw subject-secret request builder.
+///
+/// This fails closed for the same reason as [`wasm_avc_sign_action`].
+#[wasm_bindgen]
+pub fn wasm_avc_build_emit_request(
+    _credential_json: &str,
+    _action_json: &str,
+    _now_physical_ms: u64,
+    _now_logical: u32,
+    _include_public_key: bool,
+) -> Result<String, JsValue> {
+    Err(JsValue::from_str(
+        "raw AVC subject-key emit request building is disabled at the WASM boundary; use wasm_avc_action_signing_payload, sign externally, then call wasm_avc_build_emit_request_from_signature",
+    ))
+}
+
+/// Build the full `POST /api/v1/avc/receipts/emit` request body from an
+/// externally produced signature:
 /// `{ validation: { credential, action, now }, subject_signature,
 /// subject_public_key? }`. The app POSTs this JSON verbatim.
 ///
-/// When `include_public_key` is false (recommended for a registered
-/// credential — the node resolves the subject key from the registry), the
-/// `subject_public_key` field is omitted.
+/// `subject_public_key_hex` is optional; pass an empty string to omit it. For
+/// registered credentials this should be omitted so the node resolves the actor
+/// key from its registry.
 #[wasm_bindgen]
-pub fn wasm_avc_build_emit_request(
+pub fn wasm_avc_build_emit_request_from_signature(
     credential_json: &str,
     action_json: &str,
     now_physical_ms: u64,
     now_logical: u32,
-    subject_secret_hex: &str,
-    include_public_key: bool,
+    subject_signature_json: &str,
+    subject_public_key_hex: &str,
 ) -> Result<String, JsValue> {
-    build_emit_request_core(
+    build_emit_request_from_signature_core(
         credential_json,
         action_json,
         now_physical_ms,
         now_logical,
-        subject_secret_hex,
-        include_public_key,
+        subject_signature_json,
+        subject_public_key_hex,
     )
     .map_err(|e| JsValue::from_str(&e))
 }
@@ -310,79 +301,79 @@ mod tests {
         }
     }
 
-    /// THE byte-parity proof. The bridge signs an action; we independently
-    /// reconstruct the canonical payload via `avc_action_signature_payload`
-    /// (the node's function) and verify the bridge's signature against the
-    /// subject public key. If the bridge ever reimplemented the encoding,
-    /// the bytes would diverge and `crypto::verify` would fail.
+    fn signature_json_for_payload(payload: &[u8], subject_sk: &exo_core::SecretKey) -> String {
+        serde_json::to_string(&crypto::sign(payload, subject_sk)).expect("signature json")
+    }
+
+    /// THE byte-parity proof. The bridge returns exactly the canonical payload
+    /// reconstructed by the node's `avc_action_signature_payload`.
     #[test]
-    fn bridge_action_signature_is_accepted_by_node_verification_path() {
-        let (subject_pk, subject_sk) = crypto::generate_keypair();
+    fn bridge_action_payload_matches_node_verification_path() {
+        let (_subject_pk, subject_sk) = crypto::generate_keypair();
         let subject_did = did("byte-parity-subject");
         let credential = test_credential(&subject_did, &subject_sk);
         let action = test_action(&subject_did);
         let now = Timestamp::new(1_500_000, 0);
 
-        // Sign through the bridge's internal path.
-        let signature =
-            sign_action_internal(&credential, &action, &now, &subject_sk).expect("bridge signs");
-
-        // Reconstruct the canonical payload the NODE verifies and check the
-        // bridge's signature against the subject key — exactly what
-        // exo-node's verify_subject_action_signature does.
         let node_payload =
             avc_action_signature_payload(&credential, &action, &now).expect("node payload");
-        assert!(
-            crypto::verify(&node_payload, &signature, &subject_pk),
-            "bridge signature must verify against the node's canonical action payload"
+        let bridge_payload = action_signing_payload_core(
+            &serde_json::to_string(&credential).unwrap(),
+            &serde_json::to_string(&action).unwrap(),
+            now.physical_ms,
+            now.logical,
+        )
+        .expect("bridge payload");
+        assert_eq!(
+            bridge_payload, node_payload,
+            "bridge payload bytes must match the node's canonical action payload"
         );
     }
 
-    /// The public `wasm_avc_sign_action` entry point round-trips through JSON and
-    /// produces a signature accepted by the node verification path.
+    /// The payload entry point round-trips through JSON and can be signed by an
+    /// external signer for node acceptance.
     #[test]
-    fn avc_sign_action_entrypoint_matches_node_payload() {
+    fn avc_action_payload_entrypoint_supports_external_signature() {
         let (subject_pk, subject_sk) = crypto::generate_keypair();
         let subject_did = did("entrypoint-subject");
         let credential = test_credential(&subject_did, &subject_sk);
         let action = test_action(&subject_did);
-        let now = Timestamp::new(2_000_000, 0);
 
         let credential_json = serde_json::to_string(&credential).unwrap();
         let action_json = serde_json::to_string(&action).unwrap();
-        let secret_hex = hex::encode(subject_sk.as_bytes());
+        let payload = action_signing_payload_core(&credential_json, &action_json, 2_000_000, 0)
+            .expect("action payload");
+        let signature: Signature =
+            serde_json::from_str(&signature_json_for_payload(&payload, &subject_sk))
+                .expect("sig parse");
 
-        let sig_json = sign_action_core(&credential_json, &action_json, 2_000_000, 0, &secret_hex)
-            .expect("sign_action_core");
-        let signature: Signature = serde_json::from_str(&sig_json).expect("sig parse");
-
-        let node_payload =
-            avc_action_signature_payload(&credential, &action, &now).expect("node payload");
         assert!(
-            crypto::verify(&node_payload, &signature, &subject_pk),
-            "wasm_avc_sign_action output must verify against the node payload"
+            crypto::verify(&payload, &signature, &subject_pk),
+            "externally signed wasm_avc_action_signing_payload output must verify"
         );
     }
 
-    /// `wasm_avc_build_emit_request` emits the 3-field wrapper the node expects.
+    /// `wasm_avc_build_emit_request_from_signature` emits the wrapper the node expects.
     #[test]
     fn emit_request_has_expected_shape() {
-        let (_pk, subject_sk) = crypto::generate_keypair();
+        let (subject_pk, subject_sk) = crypto::generate_keypair();
         let subject_did = did("emit-shape-subject");
         let credential = test_credential(&subject_did, &subject_sk);
         let action = test_action(&subject_did);
 
         let credential_json = serde_json::to_string(&credential).unwrap();
         let action_json = serde_json::to_string(&action).unwrap();
-        let secret_hex = hex::encode(subject_sk.as_bytes());
+        let payload = action_signing_payload_core(&credential_json, &action_json, 3_000_000, 0)
+            .expect("action payload");
+        let signature_json = signature_json_for_payload(&payload, &subject_sk);
 
-        let body = build_emit_request_core(
+        let body = build_emit_request_from_signature_core(
             &credential_json,
             &action_json,
             3_000_000,
             0,
-            &secret_hex,
-            false,
+            &signature_json,
+            "",
         )
         .expect("build emit request");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -401,6 +392,22 @@ mod tests {
         );
         assert!(v["validation"].get("action").is_some(), "validation.action");
         assert!(v["validation"].get("now").is_some(), "validation.now");
+        assert_eq!(v["subject_signature"].to_string(), signature_json);
+
+        let body_with_key = build_emit_request_from_signature_core(
+            &credential_json,
+            &action_json,
+            3_000_000,
+            0,
+            &signature_json,
+            &hex::encode(subject_pk.as_bytes()),
+        )
+        .expect("build emit request with key");
+        let with_key: serde_json::Value = serde_json::from_str(&body_with_key).unwrap();
+        assert!(
+            with_key.get("subject_public_key").is_some(),
+            "includes subject_public_key when explicitly supplied"
+        );
     }
 
     /// Deterministic vector emitter. Ed25519 is deterministic (RFC 8032),
@@ -421,21 +428,21 @@ mod tests {
 
         let credential_json = serde_json::to_string(&credential).unwrap();
         let action_json = serde_json::to_string(&action).unwrap();
-        let secret_hex = hex::encode([0x11u8; 32]);
-        let sig_json =
-            sign_action_core(&credential_json, &action_json, 1_700_000, 5, &secret_hex).unwrap();
+        let payload =
+            action_signing_payload_core(&credential_json, &action_json, 1_700_000, 5).unwrap();
+        let sig_json = signature_json_for_payload(&payload, &subject_sk);
 
         let vector = serde_json::json!({
-            "_comment": "Byte-parity vector for wasm_avc_sign_action. Inputs are fixed; \
+            "_comment": "Byte-parity vector for wasm_avc_action_signing_payload. Inputs are fixed; \
                          Ed25519 is deterministic so expected_signature is exact. \
-                         Both the Rust test and bridge_verification.mjs assert the \
-                         binding reproduces expected_signature AND it verifies against \
-                         the node's avc_action_signature_payload.",
+                         Rust and bridge_verification.mjs assert the binding reproduces \
+                         the node's avc_action_signature_payload bytes and an external \
+                         signature verifies against those bytes.",
             "credential_json": credential_json,
             "action_json": action_json,
             "now_physical_ms": 1_700_000u64,
             "now_logical": 5u32,
-            "subject_secret_hex": secret_hex,
+            "expected_payload_hex": hex::encode(&payload),
             "subject_public_key_hex": hex::encode(subject_pk.as_bytes()),
             "expected_signature_json": sig_json,
         });
@@ -443,15 +450,11 @@ mod tests {
             "AVC_VECTOR_JSON={}",
             serde_json::to_string_pretty(&vector).unwrap()
         );
-        let _ = subject_sk;
     }
 
-    /// Consume the checked-in vector: the binding must reproduce
-    /// `expected_signature_json` exactly, AND that signature must verify
-    /// against the node's canonical action payload. This is the literal
-    /// "checked-in test vector proves the binding produces a node-accepted
-    /// signature" guarantee. `bridge_verification.mjs` asserts the same
-    /// vector against the compiled wasm artifact in CI.
+    /// Consume the checked-in vector: the binding must reproduce the node's
+    /// canonical action payload, and an external signature over those bytes must
+    /// match the checked-in signature and verify.
     #[test]
     fn checked_in_vector_reproduces_and_verifies() {
         let raw = include_str!("../test/avc_action_vector.json");
@@ -461,61 +464,77 @@ mod tests {
         let action_json = v["action_json"].as_str().unwrap();
         let now_ms = v["now_physical_ms"].as_u64().unwrap();
         let now_logical = v["now_logical"].as_u64().unwrap() as u32;
-        let secret_hex = v["subject_secret_hex"].as_str().unwrap();
+        let expected_payload_hex = v["expected_payload_hex"].as_str().unwrap();
         let expected_sig_json = v["expected_signature_json"].as_str().unwrap();
         let subject_pk_hex = v["subject_public_key_hex"].as_str().unwrap();
 
-        // 1. Exact reproduction (determinism).
-        let produced = sign_action_core(
-            credential_json,
-            action_json,
-            now_ms,
-            now_logical,
-            secret_hex,
-        )
-        .expect("sign");
-        assert_eq!(
-            produced, expected_sig_json,
-            "binding must reproduce the checked-in expected signature exactly"
-        );
-
-        // 2. Node acceptance: verify against avc_action_signature_payload.
         let credential: AutonomousVolitionCredential =
             serde_json::from_str(credential_json).unwrap();
         let action: AvcActionRequest = serde_json::from_str(action_json).unwrap();
         let now = Timestamp::new(now_ms, now_logical);
+        let bridge_payload =
+            action_signing_payload_core(credential_json, action_json, now_ms, now_logical)
+                .expect("payload");
+        let node_payload = avc_action_signature_payload(&credential, &action, &now).unwrap();
+        assert_eq!(
+            bridge_payload, node_payload,
+            "binding must reproduce the node's checked-in action payload exactly"
+        );
+        assert_eq!(
+            hex::encode(&bridge_payload),
+            expected_payload_hex,
+            "bridge payload must match the checked-in expected payload bytes"
+        );
+
         let signature: Signature = serde_json::from_str(expected_sig_json).unwrap();
         let pk_bytes: [u8; 32] = hex::decode(subject_pk_hex).unwrap().try_into().unwrap();
         let subject_pk = exo_core::PublicKey::from_bytes(pk_bytes);
-        let node_payload = avc_action_signature_payload(&credential, &action, &now).unwrap();
         assert!(
             crypto::verify(&node_payload, &signature, &subject_pk),
             "checked-in vector signature must verify against the node payload"
         );
     }
 
-    /// Zero/empty inputs are rejected loudly, never silently signed.
+    /// Zero/empty inputs are rejected loudly, never silently request-built.
     #[test]
-    fn rejects_zero_timestamp_and_bad_secret() {
+    fn rejects_zero_timestamp_and_bad_signature_or_public_key() {
         let (_pk, subject_sk) = crypto::generate_keypair();
         let subject_did = did("reject-subject");
         let credential = test_credential(&subject_did, &subject_sk);
         let action = test_action(&subject_did);
         let credential_json = serde_json::to_string(&credential).unwrap();
         let action_json = serde_json::to_string(&action).unwrap();
-        let secret_hex = hex::encode(subject_sk.as_bytes());
+        let payload =
+            action_signing_payload_core(&credential_json, &action_json, 1_000, 0).expect("payload");
+        let signature_json = signature_json_for_payload(&payload, &subject_sk);
 
         assert!(
-            sign_action_core(&credential_json, &action_json, 0, 0, &secret_hex).is_err(),
+            action_signing_payload_core(&credential_json, &action_json, 0, 0).is_err(),
             "zero timestamp must be rejected"
         );
         assert!(
-            sign_action_core(&credential_json, &action_json, 1_000, 0, "00").is_err(),
-            "short secret must be rejected"
+            build_emit_request_from_signature_core(
+                &credential_json,
+                &action_json,
+                1_000,
+                0,
+                r#""Empty""#,
+                "",
+            )
+            .is_err(),
+            "bad signature JSON must be rejected"
         );
         assert!(
-            sign_action_core(&credential_json, &action_json, 1_000, 0, &"0".repeat(64)).is_err(),
-            "all-zero secret must be rejected"
+            build_emit_request_from_signature_core(
+                &credential_json,
+                &action_json,
+                1_000,
+                0,
+                &signature_json,
+                "00",
+            )
+            .is_err(),
+            "short subject public key must be rejected"
         );
     }
 }

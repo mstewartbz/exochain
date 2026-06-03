@@ -60,6 +60,7 @@ toml = "0.8"
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

@@ -21,3 +21,37 @@ pub fn generate_advocate_prompt(question: &str, consensus: &str) -> String {
         question, consensus
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_includes_question_consensus_and_adversarial_instruction() {
+        let prompt = generate_advocate_prompt(
+            "Should AVC receipts emit after verification?",
+            "Emit only after subject-signed action verification.",
+        );
+
+        assert!(prompt.contains("Question: Should AVC receipts emit after verification?"));
+        assert!(prompt.contains("Consensus: Emit only after subject-signed action verification."));
+        assert!(prompt.contains("strongest counterarguments"));
+        assert!(prompt.contains("Be adversarial but strictly logical."));
+    }
+
+    #[test]
+    fn prompt_is_deterministic_for_same_inputs() {
+        let first = generate_advocate_prompt("question", "consensus");
+        let second = generate_advocate_prompt("question", "consensus");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn prompt_changes_when_consensus_changes() {
+        let first = generate_advocate_prompt("question", "first consensus");
+        let second = generate_advocate_prompt("question", "second consensus");
+
+        assert_ne!(first, second);
+    }
+}

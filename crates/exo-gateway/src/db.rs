@@ -1864,6 +1864,7 @@ mod tests {
                 "../migrations/20260505000001_add_audit_decision_tenant_sequence_index.sql"
             ),
             include_str!("../migrations/20260510000001_scope_decision_ids_by_tenant.sql"),
+            include_str!("../migrations/20260602000001_create_avc_registry_state.sql"),
         ]
         .join("\n")
     }
@@ -1978,6 +1979,12 @@ mod tests {
                 include_bytes!("../migrations/20260510000001_scope_decision_ids_by_tenant.sql")
                     .as_slice(),
                 "8de5b45554e6c821e34b575aac7479ff5b147b86254e8bee58596118b71c679f2e65db909193ce033613dc74e5efd024",
+            ),
+            (
+                "20260602000001_create_avc_registry_state.sql",
+                include_bytes!("../migrations/20260602000001_create_avc_registry_state.sql")
+                    .as_slice(),
+                "ca6b6fec1b15574ccbc6498836cd2ca4784b1f8c2376e873140a12bea56c49588e05769d80fe88c8374097025e8efa1f",
             ),
         ]
     }
