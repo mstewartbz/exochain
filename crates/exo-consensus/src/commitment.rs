@@ -65,3 +65,26 @@ pub fn verify_response_commitment(
 ) -> Result<bool> {
     Ok(commit_response(response)? == *commitment)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_position_commitment_is_deterministic_and_bound_to_text() {
+        let first = commit("allow subject-signed AVC receipts");
+        let second = commit("allow subject-signed AVC receipts");
+        let changed = commit("deny unsigned AVC receipts");
+
+        assert_eq!(first, second);
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn raw_position_commitment_verification_rejects_changed_text() {
+        let commitment = commit("canonical position");
+
+        assert!(verify_commitment("canonical position", &commitment));
+        assert!(!verify_commitment("different position", &commitment));
+    }
+}
