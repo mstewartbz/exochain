@@ -675,6 +675,21 @@ mod tests {
     }
 
     #[test]
+    fn allows_credential_scope_within_registered_issuer_grant() {
+        let mut h = Harness::new();
+        h.registry
+            .put_issuer_permission_grant(did("issuer"), vec![Permission::Read]);
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Read];
+        let cred = h.issue(draft);
+
+        let result = validate_avc(&baseline_request(cred, ts(1_500_000)), &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
     fn action_signature_payload_is_domain_separated_and_context_bound() {
         let h = Harness::new();
         let cred = h.issue(baseline_draft());

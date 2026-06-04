@@ -617,6 +617,28 @@ mod tests {
     }
 
     #[test]
+    fn put_credential_accepts_scope_within_registered_issuer_grant() {
+        let mut reg = fresh_registry();
+        let issuer = put_issuer_key(&mut reg);
+        reg.put_issuer_permission_grant(did("issuer"), vec![Permission::Read]);
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Read];
+        let cred = issue_avc(draft, |bytes| issuer.sign(bytes)).unwrap();
+        let id = cred.id().unwrap();
+
+        let stored_id = reg
+            .put_credential(cred)
+            .expect("credential inside root issuer grant must store");
+
+        assert_eq!(stored_id, id);
+        assert_eq!(
+            reg.resolve_issuer_permission_grant(&did("issuer")),
+            Some(vec![Permission::Read])
+        );
+        assert_eq!(reg.credential_count(), 1);
+    }
+
+    #[test]
     fn put_credential_rejects_scope_wider_than_registered_issuer_grant() {
         let mut reg = fresh_registry();
         let issuer = put_issuer_key(&mut reg);
