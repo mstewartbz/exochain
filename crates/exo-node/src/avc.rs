@@ -426,6 +426,14 @@ pub fn load_configured_root_trust_bundle(
     state: &AvcApiState,
 ) -> anyhow::Result<Option<RootTrustIssuerRegistration>> {
     let Some(path) = std::env::var_os(AVC_ROOT_TRUST_BUNDLE_ENV) else {
+        let registry = state.registry.lock().map_err(|_| {
+            anyhow::anyhow!("AVC registry unavailable while checking durable revocations")
+        })?;
+        if registry.revocation_count() > 0 {
+            anyhow::bail!(
+                "AVC durable registry contains revocations but {AVC_ROOT_TRUST_BUNDLE_ENV} is not configured; durable revocation signatures cannot be verified"
+            );
+        }
         return Ok(None);
     };
     if path.is_empty() {
@@ -506,10 +514,17 @@ pub fn load_root_trust_bundle_from_path(
     let mut registry = state.registry.lock().map_err(|_| {
         anyhow::anyhow!("AVC registry unavailable while registering root trust issuer")
     })?;
-    registry.put_public_key(
+    let mut candidate = registry.clone();
+    candidate.put_public_key(
         registration.issuer_did.clone(),
         registration.issuer_public_key,
     );
+    candidate.validate_loaded_revocations().map_err(|error| {
+        anyhow::anyhow!(
+            "AVC durable revocation validation failed after root trust issuer registration: {error}"
+        )
+    })?;
+    *registry = candidate;
 
     Ok(registration)
 }
@@ -3136,7 +3151,12 @@ mod tests {
 
 #[cfg(test)]
 mod avc_root_trust_tests {
-    use exo_avc::AvcRegistryRead;
+    use exo_authority::permission::Permission;
+    use exo_avc::{
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDraft,
+        AvcRegistryDurableState, AvcRegistryRead, AvcRevocationReason, AvcSubjectKind,
+        DelegatedIntent, issue_avc, revoke_avc,
+    };
 
     use super::*;
 
@@ -3146,6 +3166,17 @@ mod avc_root_trust_tests {
             Did::new("did:exo:test-validator").expect("test DID"),
             signer,
         )
+    }
+
+    fn avc_state_with_registry(registry: InMemoryAvcRegistry) -> AvcApiState {
+        let signer: AvcReceiptSigner = Arc::new(|_| Signature::empty());
+        AvcApiState {
+            registry: Arc::new(Mutex::new(registry)),
+            validator_did: Did::new("did:exo:test-validator").expect("test DID"),
+            receipt_signer: signer,
+            receipt_timestamp_source: Arc::new(|| Ok(Timestamp::new(1_700_000, 0))),
+            durability: AvcRegistryDurability::None,
+        }
     }
 
     fn repo_root() -> std::path::PathBuf {
@@ -3158,6 +3189,70 @@ mod avc_root_trust_tests {
 
     fn installed_bundle_path() -> std::path::PathBuf {
         repo_root().join("artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json")
+    }
+
+    fn root_issuer_did() -> Did {
+        Did::new(AVC_ROOT_TRUST_ISSUER_DID).expect("expected issuer DID")
+    }
+
+    fn forged_root_issuer_revocation_registry() -> InMemoryAvcRegistry {
+        let issuer_did = root_issuer_did();
+        let credential = issue_avc(
+            AvcDraft {
+                schema_version: AVC_SCHEMA_VERSION,
+                issuer_did: issuer_did.clone(),
+                principal_did: issuer_did.clone(),
+                subject_did: Did::new("did:exo:agent").expect("agent DID"),
+                holder_did: None,
+                subject_kind: AvcSubjectKind::AiAgent {
+                    model_id: "alpha".into(),
+                    agent_version: None,
+                },
+                created_at: Timestamp::new(1_000_000, 0),
+                expires_at: Some(Timestamp::new(2_000_000, 0)),
+                delegated_intent: DelegatedIntent {
+                    intent_id: Hash256::from_bytes([0xAA; 32]),
+                    purpose: "research".into(),
+                    allowed_objectives: vec!["primary".into()],
+                    prohibited_objectives: vec![],
+                    autonomy_level: AutonomyLevel::Draft,
+                    delegation_allowed: false,
+                },
+                authority_scope: AuthorityScope {
+                    permissions: vec![Permission::Read],
+                    tools: vec![],
+                    data_classes: vec![],
+                    counterparties: vec![],
+                    jurisdictions: vec!["US".into()],
+                },
+                constraints: AvcConstraints::permissive(),
+                authority_chain: None,
+                consent_refs: vec![],
+                policy_refs: vec![],
+                parent_avc_id: None,
+            },
+            |_| Signature::from_bytes([0x41; 64]),
+        )
+        .expect("test credential");
+        let credential_id = credential.id().expect("credential id");
+        let forged_revocation = revoke_avc(
+            credential_id,
+            issuer_did,
+            AvcRevocationReason::IssuerRevoked,
+            Timestamp::new(1_100_000, 0),
+            |_| Signature::from_bytes([0x42; 64]),
+        )
+        .expect("forged revocation");
+
+        let mut durable_state = AvcRegistryDurableState::default();
+        durable_state
+            .credentials
+            .insert(credential_id, credential.clone());
+        durable_state
+            .revocations
+            .insert(credential_id, forged_revocation);
+        InMemoryAvcRegistry::from_durable_state(durable_state)
+            .expect("current durable structural checks accept forged signature")
     }
 
     #[test]
@@ -3202,6 +3297,24 @@ mod avc_root_trust_tests {
         let expected_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID).expect("expected issuer DID");
         let registry = state.registry.lock().expect("registry lock");
         assert_eq!(registry.resolve_public_key(&expected_did), None);
+    }
+
+    #[test]
+    fn avc_root_trust_bundle_loader_revalidates_loaded_durable_revocations() {
+        let state = avc_state_with_registry(forged_root_issuer_revocation_registry());
+        let error = load_root_trust_bundle_from_path(&state, &installed_bundle_path())
+            .expect_err("forged durable revocation must fail closed after issuer key registration");
+        assert!(
+            error.to_string().contains("revocation signature"),
+            "root trust startup must surface durable revocation signature validation failure: {error}"
+        );
+
+        let registry = state.registry.lock().expect("registry lock");
+        assert_eq!(
+            registry.resolve_public_key(&root_issuer_did()),
+            None,
+            "root trust issuer key registration must roll back when durable revocation validation fails"
+        );
     }
 
     #[test]
