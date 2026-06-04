@@ -55,6 +55,7 @@ struct RootArtifactPayload<'a> {
     transcript_hash: Hash256,
     issuer_delegation_hash: Hash256,
     issuer_did: &'a Did,
+    signer_ids: &'a [u16],
 }
 
 #[derive(Serialize)]
@@ -81,14 +82,33 @@ fn canonical_encoding_error(error: impl Display) -> RootError {
 }
 
 impl RootIssuerDelegation {
-    /// Canonical payload signed by the root threshold authority.
+    /// Canonical payload signed by the root threshold authority for the
+    /// predeclared deterministic signing set.
     pub fn root_artifact_payload(
         &self,
         config: &GenesisCeremonyConfig,
         public_key_package: &RootPublicKeyPackage,
         transcript_hash: Hash256,
     ) -> Result<Vec<u8>> {
+        self.root_artifact_payload_for_signers(
+            config,
+            public_key_package,
+            transcript_hash,
+            config.signing_set.as_slice(),
+        )
+    }
+
+    /// Canonical payload signed by the root threshold authority for the exact
+    /// signer metadata carried by a root signature.
+    pub fn root_artifact_payload_for_signers(
+        &self,
+        config: &GenesisCeremonyConfig,
+        public_key_package: &RootPublicKeyPackage,
+        transcript_hash: Hash256,
+        signer_ids: &[u16],
+    ) -> Result<Vec<u8>> {
         config.validate()?;
+        validate_root_signer_ids(config, signer_ids)?;
         if self.purpose.trim().is_empty() {
             return Err(RootError::BundleRejected {
                 reason: "issuer delegation purpose must not be empty".to_owned(),
@@ -106,6 +126,7 @@ impl RootIssuerDelegation {
             transcript_hash,
             issuer_delegation_hash: structured_hash(self)?,
             issuer_did: &self.issuer_did,
+            signer_ids,
         };
         canonical_bytes(&payload)
     }
@@ -118,8 +139,12 @@ fn bundle_id(
     transcript_hash: Hash256,
     root_signature: &RootSignature,
 ) -> Result<Hash256> {
-    let artifact_payload =
-        delegation.root_artifact_payload(config, public_key_package, transcript_hash)?;
+    let artifact_payload = delegation.root_artifact_payload_for_signers(
+        config,
+        public_key_package,
+        transcript_hash,
+        root_signature.signer_ids.as_slice(),
+    )?;
     let id_payload = RootBundleIdPayload {
         domain: "EXOCHAIN_ROOT_BUNDLE_V1",
         artifact_payload_hash: Hash256::digest(&artifact_payload),
@@ -138,8 +163,12 @@ pub fn assemble_root_bundle(
 ) -> Result<RootTrustBundle> {
     validate_public_key_package(&config, &public_key_package)?;
     validate_root_signer_ids(&config, root_signature.signer_ids.as_slice())?;
-    let payload =
-        issuer_delegation.root_artifact_payload(&config, &public_key_package, transcript_hash)?;
+    let payload = issuer_delegation.root_artifact_payload_for_signers(
+        &config,
+        &public_key_package,
+        transcript_hash,
+        root_signature.signer_ids.as_slice(),
+    )?;
     verify_root_signature(
         &public_key_package.root_public_key,
         &payload,
@@ -167,10 +196,11 @@ pub fn verify_root_bundle(bundle: &RootTrustBundle) -> Result<()> {
     bundle.config.validate()?;
     validate_public_key_package(&bundle.config, &bundle.public_key_package)?;
     validate_root_signer_ids(&bundle.config, bundle.root_signature.signer_ids.as_slice())?;
-    let payload = bundle.issuer_delegation.root_artifact_payload(
+    let payload = bundle.issuer_delegation.root_artifact_payload_for_signers(
         &bundle.config,
         &bundle.public_key_package,
         bundle.transcript_hash,
+        bundle.root_signature.signer_ids.as_slice(),
     )?;
     verify_root_signature(
         &bundle.public_key_package.root_public_key,
@@ -194,11 +224,178 @@ pub fn verify_root_bundle(bundle: &RootTrustBundle) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use exo_core::{Did, PublicKey};
+    use frost_ristretto255 as frost;
+    use rand::{SeedableRng, rngs::StdRng};
+
     use super::*;
+    use crate::{
+        CertifierContact, RootKeyPackage,
+        dkg::{deserialize_frost, serialize_frost},
+        run_complete_dkg,
+    };
+
+    #[derive(Serialize)]
+    struct LegacyRootArtifactPayload<'a> {
+        domain: &'static str,
+        config_hash: Hash256,
+        public_key_package_hash: Hash256,
+        transcript_hash: Hash256,
+        issuer_delegation_hash: Hash256,
+        issuer_did: &'a Did,
+    }
+
+    fn test_config() -> GenesisCeremonyConfig {
+        let certifiers = (1..=13)
+            .map(|identifier| {
+                let byte = u8::try_from(identifier).expect("identifier fits");
+                CertifierContact {
+                    did: Did::new(&format!("did:exo:bundle-unit-{identifier:02}"))
+                        .expect("valid did"),
+                    frost_identifier: identifier,
+                    signing_public_key: PublicKey::from_bytes([byte; 32]),
+                    transport_public_key: [byte; 32],
+                }
+            })
+            .collect();
+        GenesisCeremonyConfig {
+            ceremony_id: "bundle-root".into(),
+            network_id: "unit-net".into(),
+            repo_commit: "d8927686a34bdc28ba36d53938f665685d2c4c04".into(),
+            constitution_hash: Hash256::digest(b"constitution"),
+            threshold: 7,
+            max_signers: 13,
+            created_at: Timestamp::new(1, 0),
+            certifiers,
+            signing_set: (1..=7).collect(),
+        }
+    }
+
+    fn issuer_delegation() -> RootIssuerDelegation {
+        RootIssuerDelegation {
+            issuer_did: Did::new("did:exo:bundle-avc-issuer").expect("valid did"),
+            issuer_public_key: PublicKey::from_bytes([0x44; 32]),
+            granted_permissions: vec![Permission::Govern, Permission::Delegate],
+            effective_at: Timestamp::new(1_785_000_010_000, 0),
+            expires_at: None,
+            purpose: "Delegate operational AVC issuing authority".into(),
+        }
+    }
+
+    fn legacy_unbound_root_artifact_payload(
+        delegation: &RootIssuerDelegation,
+        config: &GenesisCeremonyConfig,
+        public_key_package: &RootPublicKeyPackage,
+        transcript_hash: Hash256,
+    ) -> Result<Vec<u8>> {
+        let payload = LegacyRootArtifactPayload {
+            domain: "EXOCHAIN_ROOT_ARTIFACT_V1",
+            config_hash: structured_hash(config)?,
+            public_key_package_hash: structured_hash(public_key_package)?,
+            transcript_hash,
+            issuer_delegation_hash: structured_hash(delegation)?,
+            issuer_did: &delegation.issuer_did,
+        };
+        canonical_bytes(&payload)
+    }
+
+    fn raw_threshold_signature_without_signer_policy<R>(
+        public_key_package: &RootPublicKeyPackage,
+        shares: BTreeMap<u16, RootKeyPackage>,
+        message: &[u8],
+        rng: &mut R,
+    ) -> RootSignature
+    where
+        R: frost::rand_core::RngCore + frost::rand_core::CryptoRng,
+    {
+        let public: frost::keys::PublicKeyPackage =
+            deserialize_frost(public_key_package.public_key_package.as_slice())
+                .expect("public key package");
+        let mut key_packages = BTreeMap::new();
+        let mut signing_nonces = BTreeMap::new();
+        let mut signing_commitments = BTreeMap::new();
+
+        for (identifier, share) in &shares {
+            let frost_identifier = frost::Identifier::try_from(*identifier).expect("frost id");
+            let key_package: frost::keys::KeyPackage =
+                deserialize_frost(share.key_package.as_slice()).expect("key package");
+            let (nonces, commitments) = frost::round1::commit(key_package.signing_share(), rng);
+            signing_nonces.insert(frost_identifier, nonces);
+            signing_commitments.insert(frost_identifier, commitments);
+            key_packages.insert(frost_identifier, key_package);
+        }
+
+        let signing_package = frost::SigningPackage::new(signing_commitments, message);
+        let mut signature_shares = BTreeMap::new();
+        for (identifier, key_package) in &key_packages {
+            let share =
+                frost::round2::sign(&signing_package, &signing_nonces[identifier], key_package)
+                    .expect("signature share");
+            signature_shares.insert(*identifier, share);
+        }
+        let aggregate =
+            frost::aggregate(&signing_package, &signature_shares, &public).expect("aggregate");
+        let signer_ids = shares.keys().copied().collect();
+        RootSignature {
+            signature: serialize_frost(&aggregate).expect("signature encoding"),
+            signer_ids,
+        }
+    }
 
     #[test]
     fn canonical_error_conversion_is_diagnostic() {
         let error = canonical_encoding_error("encoder failed");
         assert!(error.to_string().contains("encoder failed"));
+    }
+
+    #[test]
+    fn root_bundle_rejects_relabelled_signature_when_signer_metadata_was_unsigned() {
+        let config = test_config();
+        let mut rng = StdRng::seed_from_u64(700);
+        let dkg = run_complete_dkg(&config, &mut rng).expect("dkg");
+        let delegation = issuer_delegation();
+        let transcript_hash = Hash256::digest(b"transcript");
+        let legacy_payload = legacy_unbound_root_artifact_payload(
+            &delegation,
+            &config,
+            &dkg.public_key_package,
+            transcript_hash,
+        )
+        .expect("legacy payload");
+        let actual_signers = [1, 2, 3, 4, 5, 6, 8]
+            .into_iter()
+            .map(|identifier| {
+                (
+                    identifier,
+                    dkg.key_packages
+                        .get(&identifier)
+                        .expect("key package")
+                        .clone(),
+                )
+            })
+            .collect();
+        let mut root_signature = raw_threshold_signature_without_signer_policy(
+            &dkg.public_key_package,
+            actual_signers,
+            &legacy_payload,
+            &mut rng,
+        );
+        assert_eq!(root_signature.signer_ids, vec![1, 2, 3, 4, 5, 6, 8]);
+
+        root_signature.signer_ids = config.signing_set.clone();
+
+        assert!(
+            assemble_root_bundle(
+                config,
+                dkg.public_key_package,
+                delegation,
+                transcript_hash,
+                root_signature,
+            )
+            .is_err(),
+            "bundle assembly must reject a threshold signature whose claimed signer metadata was not covered by the signed artifact"
+        );
     }
 }

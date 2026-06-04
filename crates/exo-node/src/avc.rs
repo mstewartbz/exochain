@@ -62,8 +62,10 @@ use exo_avc::{
     AvcValidationResult, InMemoryAvcRegistry, avc_action_signature_payload, create_trust_receipt,
     validate_avc,
 };
-use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hlc::HybridClock};
-use exo_root::{RootTrustBundle, verify_root_bundle};
+use exo_core::{
+    Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured, hlc::HybridClock,
+};
+use exo_root::{RootSignature, RootTrustBundle, verify_root_bundle, verify_root_signature};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use tower::limit::ConcurrencyLimitLayer;
@@ -418,6 +420,112 @@ fn parse_expected_public_key(hex_value: &str, label: &str) -> anyhow::Result<Pub
     Ok(PublicKey::from_bytes(buf))
 }
 
+#[derive(Serialize)]
+struct LegacyRootArtifactPayload<'a> {
+    domain: &'static str,
+    config_hash: Hash256,
+    public_key_package_hash: Hash256,
+    transcript_hash: Hash256,
+    issuer_delegation_hash: Hash256,
+    issuer_did: &'a Did,
+}
+
+#[derive(Serialize)]
+struct LegacyRootBundleIdPayload<'a> {
+    domain: &'static str,
+    artifact_payload_hash: Hash256,
+    root_signature: &'a RootSignature,
+}
+
+fn avc_root_canonical_bytes<T: Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|error| anyhow::anyhow!("AVC root trust canonical encoding failed: {error}"))?;
+    Ok(bytes)
+}
+
+fn avc_root_structured_hash<T: Serialize>(value: &T) -> anyhow::Result<Hash256> {
+    hash_structured(value)
+        .map_err(|error| anyhow::anyhow!("AVC root trust structured hash failed: {error}"))
+}
+
+fn legacy_avc_root_artifact_payload(bundle: &RootTrustBundle) -> anyhow::Result<Vec<u8>> {
+    let payload = LegacyRootArtifactPayload {
+        domain: "EXOCHAIN_ROOT_ARTIFACT_V1",
+        config_hash: avc_root_structured_hash(&bundle.config)?,
+        public_key_package_hash: avc_root_structured_hash(&bundle.public_key_package)?,
+        transcript_hash: bundle.transcript_hash,
+        issuer_delegation_hash: avc_root_structured_hash(&bundle.issuer_delegation)?,
+        issuer_did: &bundle.issuer_delegation.issuer_did,
+    };
+    avc_root_canonical_bytes(&payload)
+}
+
+fn legacy_avc_root_bundle_id(bundle: &RootTrustBundle) -> anyhow::Result<Hash256> {
+    let artifact_payload = legacy_avc_root_artifact_payload(bundle)?;
+    let payload = LegacyRootBundleIdPayload {
+        domain: "EXOCHAIN_ROOT_BUNDLE_V1",
+        artifact_payload_hash: Hash256::digest(&artifact_payload),
+        root_signature: &bundle.root_signature,
+    };
+    avc_root_structured_hash(&payload)
+}
+
+fn verify_pinned_legacy_avc_root_bundle(
+    bundle: &RootTrustBundle,
+    expected_bundle_id: Hash256,
+) -> anyhow::Result<()> {
+    if bundle.bundle_id != expected_bundle_id {
+        anyhow::bail!(
+            "legacy AVC root trust bundle id mismatch: expected {}, got {}",
+            expected_bundle_id,
+            bundle.bundle_id
+        );
+    }
+    bundle
+        .config
+        .validate()
+        .map_err(|error| anyhow::anyhow!("legacy AVC root trust config invalid: {error}"))?;
+    if bundle.root_signature.signer_ids != bundle.config.signing_set {
+        anyhow::bail!(
+            "legacy AVC root trust signer metadata mismatch: root_signature.signer_ids must equal config.signing_set"
+        );
+    }
+    let recomputed_bundle_id = legacy_avc_root_bundle_id(bundle)?;
+    if recomputed_bundle_id != expected_bundle_id {
+        anyhow::bail!(
+            "legacy AVC root trust recomputed bundle id mismatch: expected {}, got {}",
+            expected_bundle_id,
+            recomputed_bundle_id
+        );
+    }
+    let payload = legacy_avc_root_artifact_payload(bundle)?;
+    verify_root_signature(
+        &bundle.public_key_package.root_public_key,
+        &payload,
+        bundle.root_signature.signature.as_slice(),
+    )
+    .map_err(|error| anyhow::anyhow!("legacy AVC root trust signature rejected: {error}"))
+}
+
+fn verify_current_or_pinned_legacy_avc_root_bundle(
+    bundle: &RootTrustBundle,
+    expected_bundle_id: Hash256,
+) -> anyhow::Result<()> {
+    match verify_root_bundle(bundle) {
+        Ok(()) => Ok(()),
+        Err(strict_error) => {
+            verify_pinned_legacy_avc_root_bundle(bundle, expected_bundle_id).map_err(
+                |legacy_error| {
+                    anyhow::anyhow!(
+                        "strict root trust verification failed: {strict_error}; pinned legacy AVC root trust verification failed: {legacy_error}"
+                    )
+                },
+            )
+        }
+    }
+}
+
 /// Load the configured AVC root trust bundle, verify it in-process, and
 /// register the delegated operational issuer public key.
 ///
@@ -460,12 +568,16 @@ pub fn load_root_trust_bundle_from_path(
             path.display()
         )
     })?;
-    verify_root_bundle(&bundle).map_err(|error| {
-        anyhow::anyhow!(
-            "AVC root trust bundle verification failed for {}: {error}",
-            path.display()
-        )
-    })?;
+    let expected_bundle_id =
+        parse_expected_hash(AVC_ROOT_TRUST_BUNDLE_ID_HEX, "AVC root trust bundle id")?;
+    verify_current_or_pinned_legacy_avc_root_bundle(&bundle, expected_bundle_id).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "AVC root trust bundle verification failed for {}: {error}",
+                path.display()
+            )
+        },
+    )?;
 
     if bundle.config.ceremony_id != AVC_ROOT_TRUST_CEREMONY_ID {
         anyhow::bail!(
@@ -475,8 +587,6 @@ pub fn load_root_trust_bundle_from_path(
         );
     }
 
-    let expected_bundle_id =
-        parse_expected_hash(AVC_ROOT_TRUST_BUNDLE_ID_HEX, "AVC root trust bundle id")?;
     if bundle.bundle_id != expected_bundle_id {
         anyhow::bail!(
             "AVC root trust bundle id mismatch: expected {}, got {}",
@@ -3317,6 +3427,31 @@ mod avc_root_trust_tests {
         assert_eq!(registry.resolve_public_key(&expected_did), None);
         assert_eq!(
             registry.resolve_issuer_permission_grant(&expected_did),
+            None
+        );
+    }
+
+    #[test]
+    fn avc_root_trust_legacy_bundle_rejects_relabelled_signer_metadata() {
+        let mut bundle: RootTrustBundle =
+            serde_json::from_slice(&std::fs::read(installed_bundle_path()).expect("read bundle"))
+                .expect("parse bundle");
+        bundle.root_signature.signer_ids = vec![1, 2, 3, 4, 5, 6, 8];
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        serde_json::to_writer(temp.as_file(), &bundle).expect("write relabelled bundle");
+
+        let state = avc_state_for_root_trust_test();
+        let error = load_root_trust_bundle_from_path(&state, temp.path())
+            .expect_err("legacy compatibility must not accept relabelled signer metadata");
+        assert!(
+            error.to_string().contains("signer metadata"),
+            "expected signer metadata rejection, got: {error}"
+        );
+
+        let registry = state.registry.lock().expect("registry lock");
+        assert_eq!(registry.resolve_public_key(&root_issuer_did()), None);
+        assert_eq!(
+            registry.resolve_issuer_permission_grant(&root_issuer_did()),
             None
         );
     }
