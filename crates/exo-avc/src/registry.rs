@@ -617,6 +617,44 @@ mod tests {
     }
 
     #[test]
+    fn resolve_issuer_permission_grant_returns_none_for_unregistered_issuer() {
+        let reg = fresh_registry();
+
+        assert_eq!(reg.resolve_issuer_permission_grant(&did("issuer")), None);
+    }
+
+    #[test]
+    fn put_issuer_permission_grant_deduplicates_and_sorts_permissions() {
+        let mut reg = fresh_registry();
+
+        reg.put_issuer_permission_grant(
+            did("issuer"),
+            vec![Permission::Write, Permission::Read, Permission::Write],
+        );
+
+        assert_eq!(
+            reg.resolve_issuer_permission_grant(&did("issuer")),
+            Some(vec![Permission::Read, Permission::Write])
+        );
+    }
+
+    #[test]
+    fn put_credential_accepts_without_registered_issuer_grant() {
+        let mut reg = fresh_registry();
+        put_issuer_key(&mut reg);
+        let cred = sample_credential();
+        let id = cred.id().unwrap();
+
+        let stored_id = reg
+            .put_credential(cred)
+            .expect("credential must store when no issuer grant is registered");
+
+        assert_eq!(stored_id, id);
+        assert_eq!(reg.resolve_issuer_permission_grant(&did("issuer")), None);
+        assert_eq!(reg.credential_count(), 1);
+    }
+
+    #[test]
     fn put_credential_accepts_scope_within_registered_issuer_grant() {
         let mut reg = fresh_registry();
         let issuer = put_issuer_key(&mut reg);
