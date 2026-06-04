@@ -3743,8 +3743,11 @@ async fn trusted_session_validation_time_ms(state: &AppState) -> Result<i64> {
 }
 
 async fn trusted_gateway_rate_limit_time_ms(state: &AppState) -> Result<u64> {
+    let hlc_now_ms = trusted_gateway_rate_limit_time_ms_from_hlc(state)?;
     if let Some(cached_now_ms) = state.cached_trusted_rate_limit_time_ms() {
-        return Ok(cached_now_ms);
+        let trusted_now_ms = cached_now_ms.max(hlc_now_ms);
+        state.store_trusted_rate_limit_time_ms(trusted_now_ms);
+        return Ok(trusted_now_ms);
     }
 
     if state.pool.is_some() {
@@ -3753,7 +3756,8 @@ async fn trusted_gateway_rate_limit_time_ms(state: &AppState) -> Result<u64> {
         ));
     }
 
-    trusted_gateway_rate_limit_time_ms_from_hlc(state)
+    state.store_trusted_rate_limit_time_ms(hlc_now_ms);
+    Ok(hlc_now_ms)
 }
 
 async fn refresh_gateway_rate_limit_clock_from_database(
@@ -4576,23 +4580,6 @@ async fn enforce_gateway_rate_limit(
     next: Next,
 ) -> Response {
     let client_key = gateway_rate_limit_key(&request, &state.trusted_rate_limit_proxy_ips);
-    if let Some(preflight_now_ms) = state.cached_trusted_rate_limit_time_ms() {
-        let preflight_outcome = match state.rate_limiter.lock() {
-            Ok(mut limiter) => limiter.preflight_limit(&client_key, preflight_now_ms),
-            Err(_) => {
-                tracing::error!("Gateway rate limiter mutex poisoned");
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "gateway rate limiter unavailable",
-                )
-                    .into_response();
-            }
-        };
-        if let Some(GatewayRateLimitOutcome::Limited { retry_after_ms }) = preflight_outcome {
-            return gateway_rate_limit_response(retry_after_ms);
-        }
-    }
-
     let now_ms = match trusted_gateway_rate_limit_time_ms(&state).await {
         Ok(now_ms) => now_ms,
         Err(error) => {
@@ -4604,6 +4591,21 @@ async fn enforce_gateway_rate_limit(
                 .into_response();
         }
     };
+
+    let preflight_outcome = match state.rate_limiter.lock() {
+        Ok(mut limiter) => limiter.preflight_limit(&client_key, now_ms),
+        Err(_) => {
+            tracing::error!("Gateway rate limiter mutex poisoned");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway rate limiter unavailable",
+            )
+                .into_response();
+        }
+    };
+    if let Some(GatewayRateLimitOutcome::Limited { retry_after_ms }) = preflight_outcome {
+        return gateway_rate_limit_response(retry_after_ms);
+    }
 
     let outcome = match state.rate_limiter.lock() {
         Ok(mut limiter) => limiter.check(&client_key, now_ms),
@@ -5309,8 +5311,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_rate_limit_trusted_time_uses_cached_database_clock_sample() {
-        let state = state();
+    async fn gateway_rate_limit_trusted_time_does_not_regress_below_cached_database_clock_sample() {
+        let wall = Arc::new(AtomicU64::new(80_000));
+        let wall_for_clock = Arc::clone(&wall);
+        let state = AppState::new_with_clock(
+            None,
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+            HybridClock::with_wall_clock(move || wall_for_clock.load(Ordering::Relaxed)),
+        );
         state.store_trusted_rate_limit_time_ms(88_000);
 
         let now_ms = trusted_gateway_rate_limit_time_ms(&state)
@@ -5422,6 +5430,50 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gateway_build_router_rate_limit_window_advances_without_refresh_task() {
+        let wall = Arc::new(AtomicU64::new(10_000));
+        let state = rate_limited_state(1, 60_000, Arc::clone(&wall));
+        let app = build_router(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        wall.store(70_005, Ordering::Relaxed);
+
+        let third = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5647,15 +5699,15 @@ mod tests {
             "async fn enforce_gateway_rate_limit",
             "fn apply_gateway_layers",
         );
-        let preflight_index = rate_limit_middleware
-            .find("preflight_limit(&client_key, preflight_now_ms)")
-            .expect("production rate limiting must preflight known over-budget clients");
         let trusted_time_index = rate_limit_middleware
             .find("trusted_gateway_rate_limit_time_ms(&state).await")
-            .expect("production rate limiting must request trusted time for admitted clients");
+            .expect("production rate limiting must sample trusted time before admission checks");
+        let preflight_index = rate_limit_middleware
+            .find("preflight_limit(&client_key, now_ms)")
+            .expect("production rate limiting must preflight known over-budget clients");
         assert!(
-            preflight_index < trusted_time_index,
-            "production rate limiting must reject known over-budget clients before DB-backed time lookup"
+            trusted_time_index < preflight_index,
+            "production rate limiting must advance trusted time before preflight so stale cache cannot freeze windows"
         );
         assert!(
             rate_limit_middleware.contains("trusted_gateway_rate_limit_time_ms(&state).await"),
