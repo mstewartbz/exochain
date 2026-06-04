@@ -34,11 +34,13 @@
 //! verification path ([`exo_core::crypto::verify`] over the same payload).
 
 use exo_avc::{
-    AutonomousVolitionCredential, AvcActionRequest, AvcValidationRequest,
-    avc_action_signature_payload,
+    AutonomousVolitionCredential, AvcActionRequest, AvcSubjectKind, AvcValidationRequest,
+    DataClass, avc_action_signature_payload,
 };
 use exo_core::{PublicKey, Signature, Timestamp};
 use wasm_bindgen::prelude::*;
+
+use crate::serde_bridge::{MAX_JSON_INPUT_BYTES, from_json_str};
 
 // ---------------------------------------------------------------------------
 // Core logic — returns `Result<_, String>` so it is fully testable on the
@@ -48,11 +50,212 @@ use wasm_bindgen::prelude::*;
 // exercised by the native test block.
 // ---------------------------------------------------------------------------
 
+const SUBJECT_PUBLIC_KEY_HEX_LEN: usize = 64;
+const MAX_WASM_AVC_COLLECTION_ITEMS: usize = 256;
+const MAX_WASM_AVC_STRING_BYTES: usize = 4_096;
+const MAX_WASM_AVC_DID_BYTES: usize = 512;
+
+fn ensure_json_input_at_most(value: &str, label: &str) -> Result<(), String> {
+    if value.len() > MAX_JSON_INPUT_BYTES {
+        return Err(format!("{label} json exceeds maximum size"));
+    }
+    Ok(())
+}
+
+fn parse_credential_json(value: &str) -> Result<AutonomousVolitionCredential, String> {
+    ensure_json_input_at_most(value, "credential")?;
+    from_json_str::<AutonomousVolitionCredential>(value)
+        .map_err(|_| "credential json: JSON parse error".to_string())
+}
+
+fn parse_action_json(value: &str) -> Result<AvcActionRequest, String> {
+    ensure_json_input_at_most(value, "action")?;
+    from_json_str::<AvcActionRequest>(value)
+        .map_err(|_| "action json: JSON parse error".to_string())
+}
+
+fn parse_signature_json(value: &str) -> Result<Signature, String> {
+    ensure_json_input_at_most(value, "signature")?;
+    from_json_str::<Signature>(value).map_err(|_| "signature json: JSON parse error".to_string())
+}
+
+fn ensure_len_at_most(label: &str, len: usize, max: usize) -> Result<(), String> {
+    if len > max {
+        return Err(format!("{label} contains {len} bytes, maximum is {max}"));
+    }
+    Ok(())
+}
+
+fn ensure_items_at_most(label: &str, len: usize) -> Result<(), String> {
+    if len > MAX_WASM_AVC_COLLECTION_ITEMS {
+        return Err(format!(
+            "{label} contains {len} items, maximum is {MAX_WASM_AVC_COLLECTION_ITEMS}"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_string_shape(label: &str, value: &str) -> Result<(), String> {
+    ensure_len_at_most(label, value.len(), MAX_WASM_AVC_STRING_BYTES)
+}
+
+fn ensure_optional_string_shape(label: &str, value: Option<&String>) -> Result<(), String> {
+    if let Some(value) = value {
+        ensure_string_shape(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_did_shape(label: &str, value: &exo_core::Did) -> Result<(), String> {
+    ensure_len_at_most(label, value.as_str().len(), MAX_WASM_AVC_DID_BYTES)
+}
+
+fn ensure_optional_did_shape(label: &str, value: Option<&exo_core::Did>) -> Result<(), String> {
+    if let Some(value) = value {
+        ensure_did_shape(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_string_items_shape(label: &str, values: &[String]) -> Result<(), String> {
+    ensure_items_at_most(label, values.len())?;
+    for value in values {
+        ensure_string_shape(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_did_items_shape(label: &str, values: &[exo_core::Did]) -> Result<(), String> {
+    ensure_items_at_most(label, values.len())?;
+    for value in values {
+        ensure_did_shape(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_data_class_shape(label: &str, value: &DataClass) -> Result<(), String> {
+    if let DataClass::Custom(name) = value {
+        ensure_string_shape(label, name)?;
+    }
+    Ok(())
+}
+
+fn ensure_optional_data_class_shape(label: &str, value: Option<&DataClass>) -> Result<(), String> {
+    if let Some(value) = value {
+        ensure_data_class_shape(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_data_class_items_shape(label: &str, values: &[DataClass]) -> Result<(), String> {
+    ensure_items_at_most(label, values.len())?;
+    for value in values {
+        ensure_data_class_shape(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_subject_kind_shape(value: &AvcSubjectKind) -> Result<(), String> {
+    match value {
+        AvcSubjectKind::AiAgent {
+            model_id,
+            agent_version,
+        } => {
+            ensure_string_shape("subject_kind.model_id", model_id)?;
+            ensure_optional_string_shape("subject_kind.agent_version", agent_version.as_ref())
+        }
+        AvcSubjectKind::AgentSwarm { swarm_id } => {
+            ensure_string_shape("subject_kind.swarm_id", swarm_id)
+        }
+        AvcSubjectKind::Workflow { workflow_id } => {
+            ensure_string_shape("subject_kind.workflow_id", workflow_id)
+        }
+        AvcSubjectKind::Service { service_id } => {
+            ensure_string_shape("subject_kind.service_id", service_id)
+        }
+        AvcSubjectKind::Holon { holon_id } => {
+            ensure_string_shape("subject_kind.holon_id", holon_id)
+        }
+        AvcSubjectKind::OrganizationUnit { unit_id } => {
+            ensure_string_shape("subject_kind.unit_id", unit_id)
+        }
+        AvcSubjectKind::Unknown => Ok(()),
+    }
+}
+
+fn ensure_credential_shape(value: &AutonomousVolitionCredential) -> Result<(), String> {
+    ensure_did_shape("issuer_did", &value.issuer_did)?;
+    ensure_did_shape("principal_did", &value.principal_did)?;
+    ensure_did_shape("subject_did", &value.subject_did)?;
+    ensure_optional_did_shape("holder_did", value.holder_did.as_ref())?;
+    ensure_subject_kind_shape(&value.subject_kind)?;
+
+    ensure_string_shape("delegated_intent.purpose", &value.delegated_intent.purpose)?;
+    ensure_string_items_shape(
+        "delegated_intent.allowed_objectives",
+        &value.delegated_intent.allowed_objectives,
+    )?;
+    ensure_string_items_shape(
+        "delegated_intent.prohibited_objectives",
+        &value.delegated_intent.prohibited_objectives,
+    )?;
+
+    ensure_items_at_most(
+        "authority_scope.permissions",
+        value.authority_scope.permissions.len(),
+    )?;
+    ensure_string_items_shape("authority_scope.tools", &value.authority_scope.tools)?;
+    ensure_data_class_items_shape(
+        "authority_scope.data_classes",
+        &value.authority_scope.data_classes,
+    )?;
+    ensure_did_items_shape(
+        "authority_scope.counterparties",
+        &value.authority_scope.counterparties,
+    )?;
+    ensure_string_items_shape(
+        "authority_scope.jurisdictions",
+        &value.authority_scope.jurisdictions,
+    )?;
+
+    ensure_optional_string_shape(
+        "constraints.currency_code",
+        value.constraints.currency_code.as_ref(),
+    )?;
+    ensure_string_items_shape(
+        "constraints.forbidden_actions",
+        &value.constraints.forbidden_actions,
+    )?;
+    ensure_string_items_shape(
+        "constraints.emergency_stop_refs",
+        &value.constraints.emergency_stop_refs,
+    )?;
+    ensure_items_at_most("consent_refs", value.consent_refs.len())?;
+    ensure_items_at_most("policy_refs", value.policy_refs.len())?;
+    Ok(())
+}
+
+fn ensure_action_shape(value: &AvcActionRequest) -> Result<(), String> {
+    ensure_did_shape("action.actor_did", &value.actor_did)?;
+    ensure_optional_string_shape("action.tool", value.tool.as_ref())?;
+    ensure_optional_did_shape("action.target_did", value.target_did.as_ref())?;
+    ensure_optional_data_class_shape("action.data_class", value.data_class.as_ref())?;
+    ensure_optional_string_shape("action.action_name", value.action_name.as_ref())?;
+    if let Some(approval) = &value.human_approval {
+        ensure_did_shape("action.human_approval.approver_did", &approval.approver_did)?;
+    }
+    Ok(())
+}
+
 fn parse_subject_public_key_hex(value: &str) -> Result<Option<PublicKey>, String> {
-    if value.trim().is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Ok(None);
     }
-    let bytes = hex::decode(value).map_err(|e| format!("subject_public_key_hex: {e}"))?;
+    if trimmed.len() != SUBJECT_PUBLIC_KEY_HEX_LEN {
+        return Err("subject_public_key_hex must be 64 hex characters".to_string());
+    }
+    let bytes = hex::decode(trimmed).map_err(|e| format!("subject_public_key_hex: {e}"))?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
@@ -82,10 +285,10 @@ fn action_signing_payload_core(
     now_physical_ms: u64,
     now_logical: u32,
 ) -> Result<Vec<u8>, String> {
-    let credential: AutonomousVolitionCredential =
-        serde_json::from_str(credential_json).map_err(|e| format!("credential json: {e}"))?;
-    let action: AvcActionRequest =
-        serde_json::from_str(action_json).map_err(|e| format!("action json: {e}"))?;
+    let credential = parse_credential_json(credential_json)?;
+    let action = parse_action_json(action_json)?;
+    ensure_credential_shape(&credential)?;
+    ensure_action_shape(&action)?;
     let now = parse_now(now_physical_ms, now_logical)?;
     avc_action_signature_payload(&credential, &action, &now)
         .map_err(|e| format!("avc action signature payload: {e}"))
@@ -101,22 +304,21 @@ fn build_emit_request_from_signature_core(
     subject_signature_json: &str,
     subject_public_key_hex: &str,
 ) -> Result<String, String> {
-    let credential: AutonomousVolitionCredential =
-        serde_json::from_str(credential_json).map_err(|e| format!("credential json: {e}"))?;
-    let action: AvcActionRequest =
-        serde_json::from_str(action_json).map_err(|e| format!("action json: {e}"))?;
+    let credential = parse_credential_json(credential_json)?;
+    let action = parse_action_json(action_json)?;
+    ensure_credential_shape(&credential)?;
+    ensure_action_shape(&action)?;
     let now = parse_now(now_physical_ms, now_logical)?;
-    let signature: Signature =
-        serde_json::from_str(subject_signature_json).map_err(|e| format!("signature json: {e}"))?;
+    let signature = parse_signature_json(subject_signature_json)?;
     if signature.is_empty() {
         return Err("subject_signature_json must not be empty".to_string());
     }
+    let subject_public_key = parse_subject_public_key_hex(subject_public_key_hex)?;
 
     // Reconstruct the canonical payload so request building fails before
     // transport if the credential/action/timestamp tuple cannot be signed.
     avc_action_signature_payload(&credential, &action, &now)
         .map_err(|e| format!("avc action signature payload: {e}"))?;
-    let subject_public_key = parse_subject_public_key_hex(subject_public_key_hex)?;
 
     // Inner validation request reuses the canonical exo-avc struct so its
     // shape never drifts from what the node deserializes.
@@ -303,6 +505,16 @@ mod tests {
 
     fn signature_json_for_payload(payload: &[u8], subject_sk: &exo_core::SecretKey) -> String {
         serde_json::to_string(&crypto::sign(payload, subject_sk)).expect("signature json")
+    }
+
+    fn assert_error_contains<T>(result: Result<T, String>, needle: &str) {
+        match result {
+            Ok(_) => panic!("operation must fail closed"),
+            Err(err) => assert!(
+                err.contains(needle),
+                "expected error to contain {needle:?}, got {err:?}"
+            ),
+        }
     }
 
     /// THE byte-parity proof. The bridge returns exactly the canonical payload
@@ -535,6 +747,107 @@ mod tests {
             )
             .is_err(),
             "short subject public key must be rejected"
+        );
+    }
+
+    #[test]
+    fn avc_action_payload_rejects_oversized_credential_json_before_parse() {
+        let oversized_credential_json = format!(
+            "{{\"pad\":\"{}\"}}",
+            "x".repeat(crate::serde_bridge::MAX_JSON_INPUT_BYTES)
+        );
+        assert_error_contains(
+            action_signing_payload_core(&oversized_credential_json, "{}", 1_000, 0),
+            "credential json exceeds maximum size",
+        );
+    }
+
+    #[test]
+    fn avc_emit_request_rejects_oversized_signature_json_before_parse() {
+        let (_subject_pk, subject_sk) = crypto::generate_keypair();
+        let subject_did = did("oversized-signature-subject");
+        let credential = test_credential(&subject_did, &subject_sk);
+        let action = test_action(&subject_did);
+        let credential_json = serde_json::to_string(&credential).unwrap();
+        let action_json = serde_json::to_string(&action).unwrap();
+        let oversized_signature_json = format!(
+            "\"{}\"",
+            "a".repeat(crate::serde_bridge::MAX_JSON_INPUT_BYTES)
+        );
+
+        assert_error_contains(
+            build_emit_request_from_signature_core(
+                &credential_json,
+                &action_json,
+                1_000,
+                0,
+                &oversized_signature_json,
+                "",
+            ),
+            "signature json exceeds maximum size",
+        );
+    }
+
+    #[test]
+    fn avc_action_payload_rejects_unbounded_collection_counts() {
+        let (_subject_pk, subject_sk) = crypto::generate_keypair();
+        let subject_did = did("collection-bound-subject");
+        let mut credential = test_credential(&subject_did, &subject_sk);
+        credential.authority_scope.tools = (0..257).map(|idx| format!("tool-{idx}")).collect();
+        let action = test_action(&subject_did);
+
+        assert_error_contains(
+            action_signing_payload_core(
+                &serde_json::to_string(&credential).unwrap(),
+                &serde_json::to_string(&action).unwrap(),
+                1_000,
+                0,
+            ),
+            "authority_scope.tools",
+        );
+    }
+
+    #[test]
+    fn avc_action_payload_rejects_unbounded_free_form_strings() {
+        let (_subject_pk, subject_sk) = crypto::generate_keypair();
+        let subject_did = did("string-bound-subject");
+        let mut credential = test_credential(&subject_did, &subject_sk);
+        credential.delegated_intent.purpose = "x".repeat(4_097);
+        let action = test_action(&subject_did);
+
+        assert_error_contains(
+            action_signing_payload_core(
+                &serde_json::to_string(&credential).unwrap(),
+                &serde_json::to_string(&action).unwrap(),
+                1_000,
+                0,
+            ),
+            "delegated_intent.purpose",
+        );
+    }
+
+    #[test]
+    fn avc_emit_request_rejects_oversized_subject_public_key_hex_before_decode() {
+        let (_subject_pk, subject_sk) = crypto::generate_keypair();
+        let subject_did = did("public-key-bound-subject");
+        let credential = test_credential(&subject_did, &subject_sk);
+        let action = test_action(&subject_did);
+        let credential_json = serde_json::to_string(&credential).unwrap();
+        let action_json = serde_json::to_string(&action).unwrap();
+        let payload =
+            action_signing_payload_core(&credential_json, &action_json, 1_000, 0).expect("payload");
+        let signature_json = signature_json_for_payload(&payload, &subject_sk);
+
+        assert_error_contains(
+            build_emit_request_from_signature_core(
+                &credential_json,
+                &action_json,
+                1_000,
+                0,
+                &signature_json,
+                &"ab".repeat(65),
+            ),
+            "subject_public_key_hex must be 64 hex characters",
         );
     }
 }
