@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use exo_authority::permission::Permission;
 use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,7 @@ use crate::{
 /// Read-only registry interface used by validation.
 pub trait AvcRegistryRead {
     fn resolve_public_key(&self, did: &Did) -> Option<PublicKey>;
+    fn resolve_issuer_permission_grant(&self, did: &Did) -> Option<Vec<Permission>>;
     fn resolve_human_approval_key(&self, did: &Did) -> Option<PublicKey>;
     fn is_revoked(&self, credential_id: &Hash256) -> bool;
     fn get_revocation(&self, credential_id: &Hash256) -> Option<AvcRevocation>;
@@ -61,6 +63,7 @@ pub trait AvcRegistryWrite: AvcRegistryRead {
     fn put_revocation(&mut self, revocation: AvcRevocation) -> Result<(), AvcError>;
     fn put_receipt(&mut self, receipt: AvcTrustReceipt) -> Result<(), AvcError>;
     fn put_public_key(&mut self, did: Did, public_key: PublicKey);
+    fn put_issuer_permission_grant(&mut self, did: Did, granted_permissions: Vec<Permission>);
     fn put_human_approval_key(&mut self, did: Did, public_key: PublicKey);
     fn add_consent_ref(&mut self, consent_id: Hash256);
     fn add_policy_ref(&mut self, policy_id: Hash256, policy_version: u16);
@@ -88,6 +91,7 @@ pub struct InMemoryAvcRegistry {
     revocations: BTreeMap<Hash256, AvcRevocation>,
     receipts: BTreeMap<Hash256, AvcTrustReceipt>,
     public_keys: BTreeMap<Did, PublicKey>,
+    issuer_permission_grants: BTreeMap<Did, BTreeSet<Permission>>,
     human_approval_keys: BTreeMap<Did, PublicKey>,
     consent_refs: BTreeSet<Hash256>,
     policy_refs: BTreeSet<(Hash256, u16)>,
@@ -337,6 +341,27 @@ impl InMemoryAvcRegistry {
         Ok(())
     }
 
+    fn validate_issuer_permission_grant(
+        &self,
+        credential: &AutonomousVolitionCredential,
+    ) -> Result<(), AvcError> {
+        let Some(granted_permissions) = self.issuer_permission_grants.get(&credential.issuer_did)
+        else {
+            return Ok(());
+        };
+        for permission in &credential.authority_scope.permissions {
+            if !granted_permissions.contains(permission) {
+                return Err(AvcError::InvalidInput {
+                    reason: format!(
+                        "credential issuer {} declares permission {permission:?} outside issuer permission grant",
+                        credential.issuer_did
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_credential(
         &self,
         credential: &AutonomousVolitionCredential,
@@ -368,6 +393,7 @@ impl InMemoryAvcRegistry {
                 ),
             });
         }
+        self.validate_issuer_permission_grant(credential)?;
 
         Ok(())
     }
@@ -382,6 +408,12 @@ impl InMemoryAvcRegistry {
 impl AvcRegistryRead for InMemoryAvcRegistry {
     fn resolve_public_key(&self, did: &Did) -> Option<PublicKey> {
         self.public_keys.get(did).copied()
+    }
+
+    fn resolve_issuer_permission_grant(&self, did: &Did) -> Option<Vec<Permission>> {
+        self.issuer_permission_grants
+            .get(did)
+            .map(|permissions| permissions.iter().copied().collect())
     }
 
     fn resolve_human_approval_key(&self, did: &Did) -> Option<PublicKey> {
@@ -465,6 +497,11 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
         self.public_keys.insert(did, public_key);
     }
 
+    fn put_issuer_permission_grant(&mut self, did: Did, granted_permissions: Vec<Permission>) {
+        self.issuer_permission_grants
+            .insert(did, granted_permissions.into_iter().collect());
+    }
+
     fn put_human_approval_key(&mut self, did: Did, public_key: PublicKey) {
         self.human_approval_keys.insert(did, public_key);
     }
@@ -488,6 +525,7 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
 
 #[cfg(test)]
 mod tests {
+    use exo_authority::permission::Permission;
     use exo_core::{Signature, crypto::KeyPair};
 
     use super::*;
@@ -576,6 +614,36 @@ mod tests {
         let id = reg.put_credential(cred.clone()).unwrap();
         assert_eq!(reg.get_credential(&id).unwrap(), cred);
         assert_eq!(reg.credential_count(), 1);
+    }
+
+    #[test]
+    fn put_credential_rejects_scope_wider_than_registered_issuer_grant() {
+        let mut reg = fresh_registry();
+        let issuer = put_issuer_key(&mut reg);
+        reg.put_issuer_permission_grant(
+            did("issuer"),
+            vec![
+                Permission::Read,
+                Permission::Write,
+                Permission::Execute,
+                Permission::Delegate,
+            ],
+        );
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Govern];
+        let cred = issue_avc(draft, |bytes| issuer.sign(bytes)).unwrap();
+        let id = cred.id().unwrap();
+
+        let error = reg
+            .put_credential(cred)
+            .expect_err("credential widening beyond root issuer grant must fail closed");
+
+        assert!(
+            error.to_string().contains("issuer permission grant"),
+            "error must identify issuer grant boundary: {error}"
+        );
+        assert_eq!(reg.credential_count(), 0);
+        assert!(reg.get_credential(&id).is_none());
     }
 
     #[test]
