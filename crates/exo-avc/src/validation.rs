@@ -234,6 +234,7 @@ pub fn validate_avc<R: AvcRegistryRead>(
             }
         }
     }
+    enforce_registered_issuer_grant(credential, registry, &mut reasons);
 
     // Revocation.
     if registry.is_revoked(&credential_id) {
@@ -303,6 +304,26 @@ fn verify_signature(
     // simply rejected rather than producing a false positive.
     let payload = credential.signing_payload()?;
     Ok(crypto::verify(&payload, &credential.signature, pubkey))
+}
+
+fn enforce_registered_issuer_grant<R: AvcRegistryRead>(
+    credential: &AutonomousVolitionCredential,
+    registry: &R,
+    reasons: &mut BTreeSet<AvcReasonCode>,
+) {
+    let Some(granted_permissions) =
+        registry.resolve_issuer_permission_grant(&credential.issuer_did)
+    else {
+        return;
+    };
+    if credential
+        .authority_scope
+        .permissions
+        .iter()
+        .any(|permission| !granted_permissions.contains(permission))
+    {
+        reasons.insert(AvcReasonCode::ScopeWidening);
+    }
 }
 
 /// Compute the canonical signing payload for a human approval over a
@@ -654,6 +675,51 @@ mod tests {
     }
 
     #[test]
+    fn allows_credential_when_issuer_has_no_registered_grant() {
+        let h = Harness::new();
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Read, Permission::Write];
+        let cred = h.issue(draft);
+
+        let result = validate_avc(&baseline_request(cred, ts(1_500_000)), &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
+    fn allows_credential_scope_within_registered_issuer_grant() {
+        let mut h = Harness::new();
+        h.registry
+            .put_issuer_permission_grant(did("issuer"), vec![Permission::Read]);
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Read];
+        let cred = h.issue(draft);
+
+        let result = validate_avc(&baseline_request(cred, ts(1_500_000)), &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
+    fn allows_credential_scope_with_duplicate_registered_grant_entries() {
+        let mut h = Harness::new();
+        h.registry.put_issuer_permission_grant(
+            did("issuer"),
+            vec![Permission::Write, Permission::Read, Permission::Write],
+        );
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Read, Permission::Write];
+        let cred = h.issue(draft);
+
+        let result = validate_avc(&baseline_request(cred, ts(1_500_000)), &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Allow);
+        assert_eq!(result.reason_codes, vec![AvcReasonCode::Valid]);
+    }
+
+    #[test]
     fn action_signature_payload_is_domain_separated_and_context_bound() {
         let h = Harness::new();
         let cred = h.issue(baseline_draft());
@@ -889,6 +955,54 @@ mod tests {
             result
                 .reason_codes
                 .contains(&AvcReasonCode::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn denies_credential_scope_wider_than_registered_issuer_grant() {
+        let mut h = Harness::new();
+        h.registry.put_issuer_permission_grant(
+            did("issuer"),
+            vec![
+                Permission::Read,
+                Permission::Write,
+                Permission::Execute,
+                Permission::Delegate,
+            ],
+        );
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Govern];
+        let cred = h.issue(draft);
+        let actor = cred.subject_did.clone();
+        let mut action = baseline_action(actor);
+        action.requested_permission = Permission::Govern;
+        let mut request = baseline_request(cred, ts(1_500_000));
+        request.action = Some(action);
+
+        let result = validate_avc(&request, &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert!(
+            result.reason_codes.contains(&AvcReasonCode::ScopeWidening),
+            "root issuer grants must cap credential-declared permissions"
+        );
+    }
+
+    #[test]
+    fn denies_any_credential_permission_outside_registered_issuer_grant() {
+        let mut h = Harness::new();
+        h.registry
+            .put_issuer_permission_grant(did("issuer"), vec![Permission::Read]);
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![Permission::Read, Permission::Write];
+        let cred = h.issue(draft);
+
+        let result = validate_avc(&baseline_request(cred, ts(1_500_000)), &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert!(
+            result.reason_codes.contains(&AvcReasonCode::ScopeWidening),
+            "any credential permission outside the issuer grant must fail closed"
         );
     }
 

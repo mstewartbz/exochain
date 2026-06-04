@@ -55,6 +55,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use exo_authority::permission::Permission;
 use exo_avc::{
     AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcRegistryDurableState,
     AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt, AvcValidationRequest,
@@ -386,6 +387,7 @@ pub struct RootTrustIssuerRegistration {
     pub ceremony_id: String,
     pub issuer_did: Did,
     pub issuer_public_key: PublicKey,
+    pub granted_permissions: Vec<Permission>,
 }
 
 fn parse_expected_hash(hex_value: &str, label: &str) -> anyhow::Result<Hash256> {
@@ -509,6 +511,7 @@ pub fn load_root_trust_bundle_from_path(
         ceremony_id: bundle.config.ceremony_id.clone(),
         issuer_did: bundle.issuer_delegation.issuer_did.clone(),
         issuer_public_key: bundle.issuer_delegation.issuer_public_key,
+        granted_permissions: bundle.issuer_delegation.granted_permissions.clone(),
     };
 
     let mut registry = state.registry.lock().map_err(|_| {
@@ -518,6 +521,10 @@ pub fn load_root_trust_bundle_from_path(
     candidate.put_public_key(
         registration.issuer_did.clone(),
         registration.issuer_public_key,
+    );
+    candidate.put_issuer_permission_grant(
+        registration.issuer_did.clone(),
+        registration.granted_permissions.clone(),
     );
     candidate.validate_loaded_revocations().map_err(|error| {
         anyhow::anyhow!(
@@ -3264,15 +3271,26 @@ mod avc_root_trust_tests {
         let expected_public_key =
             parse_expected_public_key(AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX, "expected issuer key")
                 .expect("expected issuer key");
+        let expected_permissions = vec![
+            Permission::Read,
+            Permission::Write,
+            Permission::Execute,
+            Permission::Delegate,
+        ];
 
         assert_eq!(registration.ceremony_id, AVC_ROOT_TRUST_CEREMONY_ID);
         assert_eq!(registration.issuer_did, expected_did);
         assert_eq!(registration.issuer_public_key, expected_public_key);
+        assert_eq!(registration.granted_permissions, expected_permissions);
 
         let registry = state.registry.lock().expect("registry lock");
         assert_eq!(
             registry.resolve_public_key(&expected_did),
             Some(expected_public_key)
+        );
+        assert_eq!(
+            registry.resolve_issuer_permission_grant(&expected_did),
+            Some(expected_permissions)
         );
     }
 
@@ -3297,6 +3315,10 @@ mod avc_root_trust_tests {
         let expected_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID).expect("expected issuer DID");
         let registry = state.registry.lock().expect("registry lock");
         assert_eq!(registry.resolve_public_key(&expected_did), None);
+        assert_eq!(
+            registry.resolve_issuer_permission_grant(&expected_did),
+            None
+        );
     }
 
     #[test]
@@ -3314,6 +3336,11 @@ mod avc_root_trust_tests {
             registry.resolve_public_key(&root_issuer_did()),
             None,
             "root trust issuer key registration must roll back when durable revocation validation fails"
+        );
+        assert_eq!(
+            registry.resolve_issuer_permission_grant(&root_issuer_did()),
+            None,
+            "root trust issuer permission grant must roll back when durable revocation validation fails"
         );
     }
 
