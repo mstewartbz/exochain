@@ -895,6 +895,44 @@ mod tests {
         config
     }
 
+    fn valid_root_trust_bundle() -> RootTrustBundle {
+        let config = rostered_config();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(9683);
+        let dkg = exo_root::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let delegation = RootIssuerDelegation {
+            issuer_did: Did::new("did:exo:root-cli-avc-issuer").expect("issuer DID"),
+            issuer_public_key: PublicKey::from_bytes([0x44; 32]),
+            granted_permissions: vec![Permission::Read, Permission::Write, Permission::Delegate],
+            effective_at: Timestamp::new(1_785_000_010_000, 0),
+            expires_at: None,
+            purpose: "Delegate operational AVC issuing authority".to_owned(),
+        };
+        let transcript_hash = Hash256::digest(b"root-cli-verifier-policy-transcript");
+        let payload = delegation
+            .root_artifact_payload(&config, &dkg.public_key_package, transcript_hash)
+            .expect("payload");
+        let root_signature = threshold_sign(
+            &config,
+            &dkg.public_key_package,
+            dkg.key_packages
+                .iter()
+                .take(7)
+                .map(|(identifier, key_package)| (*identifier, key_package.clone()))
+                .collect(),
+            &payload,
+            &mut rng,
+        )
+        .expect("signature");
+        assemble_root_bundle(
+            config,
+            dkg.public_key_package,
+            delegation,
+            transcript_hash,
+            root_signature,
+        )
+        .expect("bundle")
+    }
+
     /// A schema-valid round-one package payload (the portal now decodes these to a
     /// concrete FROST type, so placeholder bytes no longer pass).
     fn valid_round1_package(config: &GenesisCeremonyConfig) -> Vec<u8> {
@@ -1101,6 +1139,24 @@ mod tests {
         let mut packages = BTreeMap::new();
         packages.insert(7, "not-hex".to_owned());
         assert!(decode_package_map(packages).is_err());
+    }
+
+    #[test]
+    fn verify_bundle_command_outputs_success_record() {
+        let directory = tempdir().expect("temporary directory");
+        let input_path = directory.path().join("verify-bundle-in.json");
+        let output_path = directory.path().join("verify-bundle-out.json");
+        write_json(
+            &input_path,
+            &VerifyBundleCommandInput {
+                bundle: valid_root_trust_bundle(),
+            },
+        )
+        .expect("write verify input");
+
+        run_verify_bundle(io_args(input_path, output_path.clone())).expect("verify bundle");
+        let output: serde_json::Value = read_json(&output_path).expect("read verify output");
+        assert_eq!(output, serde_json::json!({ "verified": true }));
     }
 
     #[test]
