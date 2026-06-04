@@ -61,7 +61,7 @@ use exo_avc::{
     AvcValidationResult, InMemoryAvcRegistry, avc_action_signature_payload, create_trust_receipt,
     validate_avc,
 };
-use exo_core::{Did, Hash256, PublicKey, Signature, crypto};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hlc::HybridClock};
 use exo_root::{RootTrustBundle, verify_root_bundle};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -82,6 +82,7 @@ const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
 const AVC_REGISTRY_POSTGRES_LOCK_KEY: i64 = 0x4156_435F_5245_4749;
 
 pub type AvcReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
+type AvcReceiptTimestampSource = Arc<dyn Fn() -> anyhow::Result<Timestamp> + Send + Sync>;
 
 #[derive(Clone)]
 enum AvcRegistryDurability {
@@ -97,6 +98,7 @@ pub struct AvcApiState {
     pub registry: Arc<Mutex<InMemoryAvcRegistry>>,
     validator_did: Did,
     receipt_signer: AvcReceiptSigner,
+    receipt_timestamp_source: AvcReceiptTimestampSource,
     durability: AvcRegistryDurability,
 }
 
@@ -105,10 +107,24 @@ impl AvcApiState {
     #[cfg(test)]
     #[must_use]
     pub fn new(validator_did: Did, receipt_signer: AvcReceiptSigner) -> Self {
+        Self::new_with_receipt_timestamp_source(
+            validator_did,
+            receipt_signer,
+            receipt_timestamp_source_from_clock(HybridClock::new()),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_receipt_timestamp_source(
+        validator_did: Did,
+        receipt_signer: AvcReceiptSigner,
+        receipt_timestamp_source: AvcReceiptTimestampSource,
+    ) -> Self {
         Self {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did,
             receipt_signer,
+            receipt_timestamp_source,
             durability: AvcRegistryDurability::None,
         }
     }
@@ -142,9 +158,22 @@ impl AvcApiState {
             registry: Arc::new(Mutex::new(registry)),
             validator_did,
             receipt_signer,
+            receipt_timestamp_source: receipt_timestamp_source_from_clock(HybridClock::new()),
             durability,
         })
     }
+}
+
+fn receipt_timestamp_source_from_clock(clock: HybridClock) -> AvcReceiptTimestampSource {
+    let clock = Arc::new(Mutex::new(clock));
+    Arc::new(move || {
+        let mut clock = clock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("AVC receipt HLC mutex poisoned"))?;
+        clock
+            .now()
+            .map_err(|error| anyhow::anyhow!("AVC receipt HLC unavailable: {error}"))
+    })
 }
 
 fn load_file_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
@@ -604,6 +633,18 @@ fn persistence_error(err: anyhow::Error) -> ApiError {
     )
 }
 
+fn receipt_timestamp_error(err: anyhow::Error) -> ApiError {
+    tracing::error!(err = %err, "AVC receipt timestamp unavailable");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AVC receipt timestamp unavailable".into(),
+    )
+}
+
+fn trusted_receipt_timestamp(state: &AvcApiState) -> ApiResult<Timestamp> {
+    (state.receipt_timestamp_source)().map_err(receipt_timestamp_error)
+}
+
 fn mutate_postgres_registry_blocking<T, F>(
     pool: &PgPool,
     guard: &mut InMemoryAvcRegistry,
@@ -868,17 +909,20 @@ async fn handle_emit_receipt(
 ) -> ApiResult<Json<EmitReceiptResponse>> {
     let validator_did = state.validator_did.clone();
     let receipt_signer = Arc::clone(&state.receipt_signer);
+    let trusted_now = trusted_receipt_timestamp(&state)?;
     let response = with_registry_blocking(state, true, move |registry| {
-        let request = payload.validation;
-        let action_id = require_action(&request)?.action_id;
-        require_registered_credential(registry, &request)?;
+        let submitted_request = payload.validation;
+        let action_id = require_action(&submitted_request)?.action_id;
+        require_registered_credential(registry, &submitted_request)?;
         verify_subject_action_signature(
             registry,
-            &request,
+            &submitted_request,
             &payload.subject_signature,
             payload.subject_public_key,
         )?;
-        let validation = validate_avc(&request, registry).map_err(map_avc_error)?;
+        let mut validation_request = submitted_request;
+        validation_request.now = trusted_now;
+        let validation = validate_avc(&validation_request, registry).map_err(map_avc_error)?;
         if validation.decision != AvcDecision::Allow {
             return Err((
                 StatusCode::FORBIDDEN,
@@ -889,7 +933,7 @@ async fn handle_emit_receipt(
             &validation,
             Some(action_id),
             validator_did,
-            request.now,
+            trusted_now,
             |bytes| (receipt_signer)(bytes),
         )
         .map_err(map_avc_error)?;
@@ -1046,9 +1090,17 @@ mod tests {
         registry.put_public_key(Did::new("did:exo:agent").unwrap(), subject_keypair().public);
     }
 
+    fn fixed_receipt_timestamp_source(timestamp: Timestamp) -> AvcReceiptTimestampSource {
+        Arc::new(move || Ok(timestamp))
+    }
+
     fn fresh_state() -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let state = AvcApiState::new(validator_did(), signer);
+        let state = AvcApiState::new_with_receipt_timestamp_source(
+            validator_did(),
+            signer,
+            fixed_receipt_timestamp_source(Timestamp::new(1_600_000, 0)),
+        );
         // Seed the issuer key so validate paths succeed.
         seed_avc_trust_keys(&state);
         Arc::new(state)
@@ -1138,6 +1190,13 @@ mod tests {
     fn credential_with_purpose(purpose: &str) -> AutonomousVolitionCredential {
         let mut draft = baseline_draft();
         draft.delegated_intent.purpose = purpose.into();
+        let kp = issuer_keypair();
+        issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
+    }
+
+    fn credential_expiring_at(expires_at: Timestamp) -> AutonomousVolitionCredential {
+        let mut draft = baseline_draft();
+        draft.expires_at = Some(expires_at);
         let kp = issuer_keypair();
         issue_avc(draft, |bytes| kp.sign(bytes)).unwrap()
     }
@@ -1469,6 +1528,7 @@ mod tests {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did: validator_did(),
             receipt_signer: signer,
+            receipt_timestamp_source: fixed_receipt_timestamp_source(Timestamp::new(1_600_000, 0)),
             durability: AvcRegistryDurability::Postgres(pool.clone()),
         };
         seed_avc_trust_keys(&state);
@@ -1953,6 +2013,91 @@ mod tests {
             validator_keypair().public_key()
         ));
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_does_not_stamp_receipt_with_caller_validation_time() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let caller_supplied_now = Timestamp::new(1_500_000, 0);
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: caller_supplied_now,
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert!(
+            parsed.receipt.created_at > caller_supplied_now,
+            "node-signed receipts must use a trusted node HLC timestamp, not caller validation.now"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_credential_expired_at_trusted_node_time() {
+        let state = fresh_state();
+        let credential = credential_expiring_at(Timestamp::new(1_550_000, 0));
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let backdated_now = Timestamp::new(1_500_000, 0);
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: backdated_now,
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
     #[tokio::test]
