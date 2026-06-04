@@ -792,6 +792,30 @@ mod source_guard_tests {
         let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
 
         assert!(
+            production.contains("from_json_str::<AutonomousVolitionCredential>"),
+            "AVC WASM credential inputs must use the bounded JSON bridge"
+        );
+        assert!(
+            production.contains("from_json_str::<AvcActionRequest>"),
+            "AVC WASM action inputs must use the bounded JSON bridge"
+        );
+        assert!(
+            production.contains("from_json_str::<Signature>"),
+            "AVC WASM signature inputs must use the bounded JSON bridge"
+        );
+        for pattern in [
+            "serde_json::from_str(credential_json)",
+            "serde_json::from_str(action_json)",
+            "serde_json::from_str(subject_signature_json)",
+            "hex::decode(value)",
+        ] {
+            assert!(
+                !production.contains(pattern),
+                "AVC WASM production bindings must not bypass input bounds via {pattern}"
+            );
+        }
+
+        assert!(
             production.contains("wasm_avc_action_signing_payload"),
             "AVC WASM bindings must expose canonical action bytes for external signers"
         );
