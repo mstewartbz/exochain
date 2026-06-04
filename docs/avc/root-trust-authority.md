@@ -53,5 +53,9 @@ adjacent-surface install flow in this repository:
 
 Do not treat imported ceremony artifacts as live EXOCHAIN trust signals.
 The artifact is considered active only when a consuming path validates:
-- `exo-node genesis verify-bundle` succeeds for the bundle exactly as emitted, using the ceremony `repo_commit` recorded in the bundle, and
-- the adjacent manifest/pointer record reports `verification_status = verified` and the recorded checksum matches the stored canonical bundle.
+- `exo-node genesis verify-bundle` succeeds for the bundle exactly as emitted,
+  using an operator-trusted verifier commit rather than code selected by the
+  imported bundle, and
+- the adjacent manifest/pointer record reports `verification_status = verified`,
+  `trusted_verifier_commit`, `source_bundle_repo_commit`, and a checksum that
+  matches the stored canonical bundle.

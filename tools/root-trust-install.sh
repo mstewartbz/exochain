@@ -35,7 +35,7 @@ usage() {
 Usage: tools/root-trust-install.sh [options]
 
 Install and publish a ceremony-root trust bundle only after strict exo-node
-verification at the bundle's declared ceremony repo commit.
+verification by a trusted operator-selected verifier commit.
 
 Options:
   --source <path>      Source ceremony artifact path
@@ -44,12 +44,18 @@ Options:
                        (default: avc-exo-ceremony-2026)
   --publish-root <dir> Directory for immutable published artifact
                        (default: <repo>/artifacts/trust/<artifact-id>)
+  --trusted-verifier-commit <commit>
+                       Trusted 40-character verifier commit to execute.
+                       Defaults to EXO_ROOT_TRUST_VERIFIER_COMMIT when set,
+                       otherwise the current repository HEAD.
   --help               Show this help text
 
 This adjacent-surface process:
 - treats the source bundle as imported evidence
 - preserves the bundle exactly as emitted by assemble-bundle
-- verifies with the exo-node version named by config.repo_commit
+- verifies with an operator-trusted exo-node commit, not with code selected by
+  imported bundle contents
+- records the bundle's config.repo_commit only as signed source-bundle data
 - publishes a read-only canonical artifact only on verification success
 - writes append-only installation metadata and pointer records
 EOF_USAGE
@@ -59,6 +65,11 @@ source_path="$DEFAULT_SOURCE"
 publish_root="$DEFAULT_PUBLISH_ROOT"
 artifact_id="$ARTIFACT_ID"
 publish_root_set=0
+trusted_verifier_commit="${EXO_ROOT_TRUST_VERIFIER_COMMIT:-}"
+trusted_verifier_commit_source="current repository HEAD"
+if [[ -n "$trusted_verifier_commit" ]]; then
+  trusted_verifier_commit_source="EXO_ROOT_TRUST_VERIFIER_COMMIT"
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -78,6 +89,11 @@ while [[ $# -gt 0 ]]; do
       publish_root_set=1
       shift 2
       ;;
+    --trusted-verifier-commit)
+      trusted_verifier_commit="$2"
+      trusted_verifier_commit_source="--trusted-verifier-commit"
+      shift 2
+      ;;
     --help)
       usage
       exit 0
@@ -93,6 +109,14 @@ done
 command -v cargo >/dev/null 2>&1 || fail "Required command missing: cargo"
 command -v git >/dev/null 2>&1 || fail "Required command missing: git"
 command -v python3 >/dev/null 2>&1 || fail "Required command missing: python3"
+
+if [[ -z "$trusted_verifier_commit" ]]; then
+  trusted_verifier_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)" \
+    || fail "Failed to resolve trusted verifier commit from current HEAD"
+fi
+if [[ ! "$trusted_verifier_commit" =~ ^[0-9a-f]{40}$ ]]; then
+  fail "trusted verifier commit must be a 40-character lowercase hex commit"
+fi
 
 if ! python3 - <<'PY_CHECK'
 import importlib.util
@@ -117,7 +141,7 @@ verifier_source="$tmp_dir/verifier-source"
 publish_bundle="$publish_root/root-trust-bundle.canonical.json"
 manifest_path="$publish_root/install-manifest.json"
 
-python3 - "$source_path" "$canonical_bundle" "$verify_input" "$metadata_path" "$artifact_id" <<'PY'
+python3 - "$source_path" "$canonical_bundle" "$verify_input" "$metadata_path" "$artifact_id" "$trusted_verifier_commit" "$trusted_verifier_commit_source" <<'PY'
 import json
 import re
 import sys
@@ -129,6 +153,8 @@ canonical_bundle_path = Path(sys.argv[2])
 verify_input_path = Path(sys.argv[3])
 metadata_path = Path(sys.argv[4])
 artifact_id = sys.argv[5]
+trusted_verifier_commit = sys.argv[6]
+trusted_verifier_commit_source = sys.argv[7]
 
 source_bundle = json.loads(source_path.read_text(encoding="utf-8"))
 
@@ -152,6 +178,10 @@ for key in ("ceremony_id", "network_id", "repo_commit", "threshold", "max_signer
 repo_commit = config["repo_commit"]
 if not isinstance(repo_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", repo_commit):
     raise SystemExit("config.repo_commit must be a 40-character lowercase hex commit")
+source_bundle_repo_commit = repo_commit
+
+if not re.fullmatch(r"[0-9a-f]{40}", trusted_verifier_commit):
+    raise SystemExit("trusted verifier commit must be a 40-character lowercase hex commit")
 
 if config["threshold"] != 7 or config["max_signers"] != 13:
     raise SystemExit("expected 7-of-13 configuration")
@@ -190,7 +220,10 @@ metadata = {
     "artifact_id": artifact_id,
     "source_path": str(source_path),
     "bundle_format": "emitted_root_signature_object",
-    "verifier_commit": repo_commit,
+    "source_bundle_repo_commit": source_bundle_repo_commit,
+    "trusted_verifier_commit": trusted_verifier_commit,
+    "trusted_verifier_commit_source": trusted_verifier_commit_source,
+    "verifier_commit": trusted_verifier_commit,
     "source_checksum": {
         "algorithm": "BLAKE3",
         "value": blake3(source_path.read_bytes()).hexdigest(),
@@ -205,7 +238,7 @@ metadata = {
         "bundle_id_hex": "".join(f"{value:02x}" for value in bundle_id),
         "ceremony_id": config["ceremony_id"],
         "network_id": config["network_id"],
-        "repo_commit": repo_commit,
+        "repo_commit": source_bundle_repo_commit,
         "constitution_hash": config.get("constitution_hash"),
         "threshold": config["threshold"],
         "max_signers": config["max_signers"],
@@ -221,7 +254,14 @@ verifier_commit="$(python3 - "$metadata_path" <<'PY'
 import json
 import sys
 from pathlib import Path
-print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["verifier_commit"])
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["trusted_verifier_commit"])
+PY
+)"
+source_bundle_repo_commit="$(python3 - "$metadata_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["source_bundle_repo_commit"])
 PY
 )"
 verifier_short="${verifier_commit:0:12}"
@@ -325,6 +365,9 @@ pointer = {
     "verification_status": "verified",
     "verification_command": verification_command,
     "verifier_commit": verifier_commit,
+    "trusted_verifier_commit": verifier_commit,
+    "trusted_verifier_commit_source": metadata["trusted_verifier_commit_source"],
+    "source_bundle_repo_commit": metadata["source_bundle_repo_commit"],
     "verifier_version": cargo_version,
     "artifact_uri": bundle_uri,
     "bundle_checksum": {
@@ -379,11 +422,17 @@ record = {
         "command_toolchain": cargo_version,
         "result": "verified",
         "pointer_file": pointer_path.name,
+        "source_bundle_repo_commit": metadata["source_bundle_repo_commit"],
+        "trusted_verifier_commit": verifier_commit,
+        "trusted_verifier_commit_source": metadata["trusted_verifier_commit_source"],
     },
     "policy": {
         "source_type": "imported evidence",
         "fail_closed": True,
-        "allowed_exochain_trust_claims": ["only after downstream equivalent verification at verifier_commit"],
+        "verifier_commit_authority": "operator trusted policy, never imported bundle contents",
+        "allowed_exochain_trust_claims": [
+            "only after downstream equivalent verification by a trusted verifier commit"
+        ],
         "rollback_path": "delete artifact/pointer and re-run install with replacement manifest",
     },
 }
@@ -403,7 +452,8 @@ else:
             "append_only": True,
             "trust_source": "imported evidence",
             "allowed_exochain_claims": "none until downstream runtime verifier re-checks",
-            "required_runtime_check": "exo-node verify-bundle at verifier_commit",
+            "required_runtime_check": "exo-node verify-bundle with trusted verifier commit",
+            "verifier_commit_authority": "operator trusted policy, never imported bundle contents",
         },
     }
 
@@ -455,6 +505,7 @@ record-id: $record_id
 bundle-id: $bundle_id_hex
 bundle-blake3: $bundle_checksum
 verifier-commit: $verifier_commit
+source-bundle-repo-commit: $source_bundle_repo_commit
 published-at: $install_timestamp
 artifact-uri: file://$publish_bundle
 publish-root: $publish_root
