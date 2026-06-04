@@ -149,6 +149,12 @@ impl InMemoryAvcRegistry {
                     ),
                 });
             }
+            if revocation.schema_version != crate::credential::AVC_SCHEMA_VERSION {
+                return Err(AvcError::UnsupportedSchema {
+                    got: revocation.schema_version,
+                    supported: crate::credential::AVC_SCHEMA_VERSION,
+                });
+            }
             if revocation.signature.is_empty() {
                 return Err(AvcError::InvalidInput {
                     reason: format!(
@@ -199,10 +205,34 @@ impl InMemoryAvcRegistry {
     /// verified startup configuration or live runtime registration.
     pub fn apply_durable_state(&mut self, state: AvcRegistryDurableState) -> Result<(), AvcError> {
         let durable = Self::from_durable_state(state)?;
-        self.credentials = durable.credentials;
-        self.by_subject = durable.by_subject;
-        self.revocations = durable.revocations;
-        self.receipts = durable.receipts;
+        let mut candidate = self.clone();
+        candidate.credentials = durable.credentials;
+        candidate.by_subject = durable.by_subject;
+        candidate.revocations.clear();
+        candidate.receipts = durable.receipts;
+
+        for revocation in durable.revocations.into_values() {
+            candidate.validate_revocation(&revocation)?;
+            candidate
+                .revocations
+                .insert(revocation.credential_id, revocation);
+        }
+
+        self.credentials = candidate.credentials;
+        self.by_subject = candidate.by_subject;
+        self.revocations = candidate.revocations;
+        self.receipts = candidate.receipts;
+        Ok(())
+    }
+
+    /// Revalidate durable revocations after startup trust anchors have been
+    /// registered. This lets runtime adapters load durable records before
+    /// verified configuration is available while still failing closed before
+    /// those revocations are trusted for validation.
+    pub fn validate_loaded_revocations(&self) -> Result<(), AvcError> {
+        for revocation in self.revocations.values() {
+            self.validate_revocation(revocation)?;
+        }
         Ok(())
     }
 
@@ -896,6 +926,28 @@ mod tests {
     }
 
     #[test]
+    fn durable_state_rejects_revocation_with_unsupported_schema() {
+        let mut reg = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let mut unsupported_schema = sample_issuer_revocation(id, &issuer_keypair);
+        unsupported_schema.schema_version = crate::credential::AVC_SCHEMA_VERSION + 1;
+
+        let mut state = reg.durable_state();
+        state.revocations.insert(id, unsupported_schema);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AvcError::UnsupportedSchema { got, supported }
+                    if got == crate::credential::AVC_SCHEMA_VERSION + 1
+                        && supported == crate::credential::AVC_SCHEMA_VERSION
+            ),
+            "durable revocation schema must be validated before tombstone import"
+        );
+    }
+
+    #[test]
     fn durable_state_rejects_invalid_receipt_records() {
         let mut reg = fresh_registry();
         let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
@@ -975,6 +1027,30 @@ mod tests {
         assert!(live.consent_ref_exists(&consent_ref));
         assert!(live.policy_ref_exists(&policy_ref, 7));
         assert!(live.authority_chain_valid(&authority_chain, &ts(9)));
+    }
+
+    #[test]
+    fn apply_durable_state_rejects_forged_revocation_signature_with_live_trust_anchor() {
+        let mut durable_source = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut durable_source);
+        let attacker_keypair = keypair(0x44);
+        let forged_revocation = signed_revocation(id, did("issuer"), &attacker_keypair);
+        let mut state = durable_source.durable_state();
+        state.revocations.insert(id, forged_revocation);
+
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+
+        let err = live.apply_durable_state(state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("signature") && reason.contains("invalid")),
+            "durable revocation signatures must be verified with live startup trust anchors"
+        );
+        assert_eq!(live.credential_count(), 0);
+        assert!(
+            !live.is_revoked(&id),
+            "forged durable revocation must not create a tombstone"
+        );
     }
 
     #[test]
