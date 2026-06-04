@@ -75,6 +75,45 @@ print(manifest['latest_record_id'])
 PY
 }
 
+assert_verifier_policy_recorded() {
+  local source="$1"
+  local publish_root="$2"
+
+  python3 - "$source" "$publish_root/install-manifest.json" "$REPO_ROOT" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+source = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+repo_root = sys.argv[3]
+trusted_head = subprocess.check_output(
+    ["git", "-C", repo_root, "rev-parse", "HEAD"],
+    text=True,
+).strip()
+source_bundle_repo_commit = source["config"]["repo_commit"]
+
+record = manifest["records"][-1]
+verification = record["verification"]
+policy = record["policy"]
+
+if verification["trusted_verifier_commit"] != trusted_head:
+    raise SystemExit("trusted verifier commit was not current HEAD")
+if verification["source_bundle_repo_commit"] != source_bundle_repo_commit:
+    raise SystemExit("source bundle repo commit was not preserved")
+if policy["verifier_commit_authority"] != "operator trusted policy, never imported bundle contents":
+    raise SystemExit("verifier commit authority policy missing")
+
+pointer_path = Path(sys.argv[2]).parent / verification["pointer_file"]
+pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+if pointer["trusted_verifier_commit"] != trusted_head:
+    raise SystemExit("pointer trusted verifier commit mismatch")
+if pointer["source_bundle_repo_commit"] != source_bundle_repo_commit:
+    raise SystemExit("pointer source bundle repo commit mismatch")
+PY
+}
+
 consumer_must_fail_if_missing_bundle() {
   local publish_root="$1"
   local record_id
@@ -119,6 +158,46 @@ PY
 
 tmp_root="$(mktemp -d -t exo-root-trust-plan.XXXXXX)"
 
+# 0) Verifier executable policy guard
+python3 - "$INSTALL_SCRIPT" <<'PY'
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+required_fragments = [
+    "--trusted-verifier-commit",
+    "EXO_ROOT_TRUST_VERIFIER_COMMIT",
+    "trusted_verifier_commit",
+    "source_bundle_repo_commit",
+]
+missing = [fragment for fragment in required_fragments if fragment not in script]
+if missing:
+    raise SystemExit(
+        "installer is missing trusted verifier policy fragments: "
+        + ", ".join(missing)
+    )
+
+forbidden_fragments = [
+    '"verifier_commit": repo_commit',
+    '["verifier_commit"])',
+    "verifier_commit = metadata[\"verifier_commit\"]",
+]
+present = [fragment for fragment in forbidden_fragments if fragment in script]
+if present:
+    raise SystemExit(
+        "installer still derives executable verifier commit from imported bundle metadata: "
+        + ", ".join(present)
+    )
+PY
+
+# Invalid verifier policy must fail before install or publication.
+if EXO_ROOT_TRUST_VERIFIER_COMMIT=not-a-commit \
+  "$INSTALL_SCRIPT" --source "$SOURCE_ARTIFACT" --publish-root "$tmp_root/fail-verifier-policy" \
+  >/tmp/root-trust-install.out.txt 2>/tmp/root-trust-install.err.txt; then
+  fail "expected invalid trusted verifier commit to fail closed"
+fi
+
 # 1) Happy-path install validation
 install_root="$tmp_root/happy"
 expect_success "$SOURCE_ARTIFACT" "$install_root"
@@ -129,6 +208,7 @@ record_id="$(latest_record_id "$install_root/install-manifest.json")"
 bundle_hex="$(bundle_id_hex "$install_root/root-trust-bundle.canonical.json")"
 expected_hex="$(bundle_id_hex "$SOURCE_ARTIFACT")"
 [ "$bundle_hex" = "$expected_hex" ] || fail "bundle-id mismatch"
+assert_verifier_policy_recorded "$SOURCE_ARTIFACT" "$install_root"
 
 # 2) Missing field failure
 missing_field_artifact="$tmp_root/missing-field.json"

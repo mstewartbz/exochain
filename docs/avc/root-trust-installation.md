@@ -8,7 +8,7 @@ This runbook installs the imported ceremony artifact at `/Users/bobstewart/exo-c
 The installer performs:
 
 1. preservation of the bundle exactly as `assemble-bundle` emitted it,
-2. strict EXOCHAIN verification via `exo-node` at the bundle's declared `config.repo_commit`,
+2. strict EXOCHAIN verification via `exo-node` from an operator-trusted verifier commit,
 3. immutable publish of the verified emitted artifact,
 4. manifest/pointer write for audit and fail-closed consumption.
 
@@ -17,6 +17,10 @@ The installer performs:
 - `cargo` available on PATH.
 - `python3` and Python module `blake3`.
 - Source artifact at `/Users/bobstewart/exo-ceremony/bundle.json`.
+- A trusted verifier commit selected by the operator. If omitted, the installer
+  uses the current repository `HEAD`. To pin it explicitly, pass
+  `--trusted-verifier-commit <40-char-commit>` or set
+  `EXO_ROOT_TRUST_VERIFIER_COMMIT`.
 
 ## Installation command
 
@@ -30,8 +34,13 @@ Equivalent with explicit arguments:
 tools/root-trust-install.sh \
   --source /Users/bobstewart/exo-ceremony/bundle.json \
   --artifact-id avc-exo-ceremony-2026 \
-  --publish-root artifacts/trust/avc-exo-ceremony-2026
+  --publish-root artifacts/trust/avc-exo-ceremony-2026 \
+  --trusted-verifier-commit "$(git rev-parse HEAD)"
 ```
+
+The imported bundle's `config.repo_commit` is signed source-bundle data. It is
+recorded and compared as policy evidence, but it never selects which verifier
+code the installer executes.
 
 ## Verification summary
 
@@ -40,7 +49,9 @@ On success, verify:
 - `install-manifest.json` exists and is writable only after install.
 - verified emitted bundle appears at `root-trust-bundle.canonical.json`.
 - bundle pointer appears at `root-trust-pointer.<record-id>.json`.
-- manifest record and pointer report `verification_status = "verified"` and the ceremony `repo_commit` used as the verifier commit.
+- manifest record and pointer report `verification_status = "verified"`,
+  `source_bundle_repo_commit`, and the operator-selected
+  `trusted_verifier_commit`.
 
 ## Fail-closed consumer rule
 
@@ -64,8 +75,9 @@ tools/test_root_trust_install_plan.sh
 
 Scenarios covered:
 
-1. Happy-path install validation.
-2. Missing field failure for `transcript_hash`.
-3. Signature tamper failure.
-4. Identity/certificate tamper failure (`signer_ids`, `config.threshold`, or `config.ceremony_id`).
-5. Deployment fail-closed check when published bundle is missing.
+1. Verifier executable policy source guard.
+2. Happy-path install validation.
+3. Missing field failure for `transcript_hash`.
+4. Signature tamper failure.
+5. Identity/certificate tamper failure (`signer_ids`, `config.threshold`, or `config.ceremony_id`).
+6. Deployment fail-closed check when published bundle is missing.
