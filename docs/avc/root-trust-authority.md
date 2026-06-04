@@ -24,10 +24,15 @@ A valid root trust bundle binds:
 - 7-of-13 threshold policy;
 - FROST public key package hash;
 - transcript hash;
+- exact predeclared root signer identifiers;
 - root signature;
 - AVC issuer delegation.
 
-Bundle verification recomputes the canonical CBOR payload and verifies the FROST root signature against the bundled root public key.
+Bundle verification recomputes the canonical CBOR payload with the signer
+identifiers carried by the root signature and verifies the FROST root signature
+against the bundled root public key. A signature over legacy payload bytes that
+omitted the signer identifiers is rejected even when the aggregate signature
+bytes verify against the root public key.
 
 ## Rejection Rules
 
