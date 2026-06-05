@@ -2676,6 +2676,29 @@ test('wasm_avc_action_signing_payload supports the checked-in byte-parity vector
   return { payloadBytes: payload.length, payloadHex };
 });
 
+test('wasm_avc_protocol_info exposes AVC protocol and package metadata', () => {
+  const info = JSON.parse(wasm.wasm_avc_protocol_info());
+  if (info.protocol_version !== 1) {
+    throw new Error('AVC protocol_version must be current v1');
+  }
+  if (info.min_supported_protocol_version !== 1 || info.max_supported_protocol_version !== 1) {
+    throw new Error('AVC supported protocol range must be explicit and bounded to v1');
+  }
+  if (info.schema_version !== 1) {
+    throw new Error('AVC schema_version must be exposed as v1');
+  }
+  if (info.wasm_package_name !== '@exochain/exochain-wasm') {
+    throw new Error('WASM package name must be the scoped public npm package name');
+  }
+  if (typeof info.wasm_package_version !== 'string' || info.wasm_package_version.length === 0) {
+    throw new Error('WASM package version must be explicit');
+  }
+  if (!Number.isInteger(info.deprecation_window_days) || info.deprecation_window_days <= 0) {
+    throw new Error('AVC deprecation window must be a positive integer day count');
+  }
+  return info;
+});
+
 test('wasm_avc_action_signing_payload rejects a zero (non-caller-supplied) timestamp', () =>
   expectErrorContains(
     'wasm_avc_action_signing_payload zero-ts',

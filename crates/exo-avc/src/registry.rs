@@ -403,6 +403,29 @@ impl InMemoryAvcRegistry {
     pub fn get_receipt(&self, receipt_hash: &Hash256) -> Option<AvcTrustReceipt> {
         self.receipts.get(receipt_hash).cloned()
     }
+
+    /// List receipts whose referenced credential belongs to `subject_did`.
+    ///
+    /// Receipts are stored in a `BTreeMap`, so iteration order is the
+    /// canonical receipt hash order. Missing or deleted credentials are not
+    /// surfaced as actor-owned receipts because the subject cannot be proven.
+    #[must_use]
+    pub fn list_receipts_for_subject(
+        &self,
+        subject_did: &Did,
+        limit: usize,
+    ) -> Vec<AvcTrustReceipt> {
+        self.receipts
+            .values()
+            .filter(|receipt| {
+                self.credentials
+                    .get(&receipt.credential_id)
+                    .is_some_and(|credential| credential.subject_did == *subject_did)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
 }
 
 impl AvcRegistryRead for InMemoryAvcRegistry {
@@ -968,6 +991,49 @@ mod tests {
             other => panic!("expected invalid receipt credential reference, got {other:?}"),
         }
         assert_eq!(reg.receipt_count(), 0);
+    }
+
+    #[test]
+    fn list_receipts_for_subject_filters_by_credential_subject_and_limit() {
+        let mut reg = fresh_registry();
+        let issuer_keypair = put_issuer_key(&mut reg);
+
+        let mut first_draft = baseline_draft();
+        first_draft.subject_did = did("agent-one");
+        first_draft.delegated_intent.intent_id = h256(0x31);
+        let first = issue_avc(first_draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        let first_id = reg.put_credential(first).unwrap();
+
+        let mut second_draft = baseline_draft();
+        second_draft.subject_did = did("agent-one");
+        second_draft.delegated_intent.intent_id = h256(0x32);
+        let second = issue_avc(second_draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        let second_id = reg.put_credential(second).unwrap();
+
+        let mut other_draft = baseline_draft();
+        other_draft.subject_did = did("agent-two");
+        other_draft.delegated_intent.intent_id = h256(0x33);
+        let other = issue_avc(other_draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        let other_id = reg.put_credential(other).unwrap();
+
+        let first_receipt = receipt_for_credential(first_id);
+        let second_receipt = receipt_for_credential(second_id);
+        let other_receipt = receipt_for_credential(other_id);
+        reg.put_receipt(first_receipt.clone()).unwrap();
+        reg.put_receipt(other_receipt).unwrap();
+        reg.put_receipt(second_receipt.clone()).unwrap();
+
+        let mut expected = [first_receipt.clone(), second_receipt.clone()];
+        expected.sort_by_key(|receipt| receipt.receipt_id);
+
+        let listed = reg.list_receipts_for_subject(&did("agent-one"), 10);
+        assert_eq!(listed, expected);
+
+        let limited = reg.list_receipts_for_subject(&did("agent-one"), 1);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0], expected[0]);
+
+        assert!(reg.list_receipts_for_subject(&did("nobody"), 10).is_empty());
     }
 
     #[test]
