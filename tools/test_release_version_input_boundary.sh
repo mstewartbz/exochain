@@ -71,7 +71,7 @@ grep -F '${{ needs.validate-release-inputs.outputs.version }}' "$workflow" >/dev
 grep -F '${{ needs.validate-release-inputs.outputs.tag }}' "$workflow" >/dev/null \
   || fail "release jobs must consume the sanitized tag output"
 
-for job in approve verify-signed-tag release-build sbom-and-attest publish github-release; do
+for job in approve verify-signed-tag release-build sbom-and-attest publish publish-wasm-npm github-release; do
   block=$(job_block "$job")
   [[ -n "$block" ]] || fail "job $job is missing"
   grep -F 'validate-release-inputs' <<<"$block" >/dev/null \

@@ -49,6 +49,7 @@ done
 
 sbom_block=$(job_block "sbom-and-attest")
 github_release_block=$(job_block "github-release")
+wasm_publish_block=$(job_block "publish-wasm-npm")
 
 grep -F 'attestations: write' <<<"$sbom_block" >/dev/null \
   || fail "sbom-and-attest must remain the only attestation-writing job"
@@ -58,6 +59,10 @@ grep -F 'contents: write' <<<"$github_release_block" >/dev/null \
   || fail "github-release must retain release publishing permission for real releases"
 grep -F 'softprops/action-gh-release@' <<<"$github_release_block" >/dev/null \
   || fail "github-release must remain the GitHub Release job for real releases"
+grep -F 'npm pack --dry-run' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must dry-pack the WASM package"
+grep -F 'if: ${{ !inputs.dry_run }}' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must guard npm publish for dry-run releases"
 
 if grep -F 'draft: ${{ inputs.dry_run }}' "$workflow" >/dev/null; then
   fail "dry-run releases must not create draft GitHub Releases"

@@ -112,9 +112,12 @@ pub mod revocation;
 pub mod validation;
 
 pub use credential::{
-    AVC_CREDENTIAL_SIGNING_DOMAIN, AVC_SCHEMA_VERSION, AuthorityChainRef, AuthorityScope,
-    AutonomousVolitionCredential, AutonomyLevel, AvcConstraints, AvcDraft, AvcSubjectKind,
-    ConsentRef, DataClass, DelegatedIntent, MAX_BASIS_POINTS, PolicyRef, TimeWindow, issue_avc,
+    AVC_CREDENTIAL_SIGNING_DOMAIN, AVC_MAX_SUPPORTED_PROTOCOL_VERSION,
+    AVC_MIN_SUPPORTED_PROTOCOL_VERSION, AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION,
+    AVC_SCHEMA_VERSION, AuthorityChainRef, AuthorityScope, AutonomousVolitionCredential,
+    AutonomyLevel, AvcConstraints, AvcDraft, AvcSubjectKind, ConsentRef, DataClass,
+    DelegatedIntent, MAX_BASIS_POINTS, PolicyRef, TimeWindow, issue_avc,
+    require_supported_avc_protocol_version,
 };
 pub use delegation::{delegate_avc, parent_id_of};
 pub use error::AvcError;

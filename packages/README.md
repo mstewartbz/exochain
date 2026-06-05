@@ -30,7 +30,7 @@ environments.
 | ----------------------------------------- | ------------------------ | ----------------------------------------- | ----------------------------------------------------------------------- |
 | [`exochain-sdk`](./exochain-sdk/)         | TypeScript / JavaScript  | `npm install @exochain/sdk`               | Pure-JS client SDK for browsers and Node 20+; HTTP transport to gateway. |
 | [`exochain-py`](./exochain-py/)           | Python 3.11+             | `pip install exochain`                    | Python client SDK with `httpx` async transport and pydantic v2 models. |
-| [`exochain-wasm`](./exochain-wasm/)       | WebAssembly + TS shim    | `npm install exochain-wasm`               | Precompiled WASM build of the Rust governance engine for embedding.     |
+| [`exochain-wasm`](./exochain-wasm/)       | WebAssembly + TS shim    | `npm install @exochain/exochain-wasm`     | Precompiled WASM build of the Rust governance engine for embedding.     |
 
 The canonical Rust SDK lives at
 [`../crates/exochain-sdk`](../crates/exochain-sdk/). All three client SDKs
@@ -54,7 +54,7 @@ Pick by deployment target first, then by language preference:
   [`../crates/exochain-sdk`](../crates/exochain-sdk/) directly. It is the
   reference implementation.
 - **Browser or Node app that wants the full kernel in-process** —
-  `exochain-wasm`. Runs the Rust governance engine as WebAssembly.
+  `@exochain/exochain-wasm`. Runs the Rust governance engine as WebAssembly.
 
 ## Cross-language compatibility notes
 

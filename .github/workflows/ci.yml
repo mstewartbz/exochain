@@ -270,6 +270,8 @@ jobs:
         run: bash tools/test_release_dry_run_boundaries.sh
       - name: Release publish completion boundary
         run: bash tools/test_release_publish_boundaries.sh
+      - name: WASM npm package boundary
+        run: bash tools/test_wasm_npm_package_boundary.sh
       - name: Repo truth and public claims
         run: bash tools/test_repo_truth.sh
       - name: Sybil CLI secret boundary
@@ -646,12 +648,22 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
       - name: Install wasm-pack
         run: bash tools/ci_cargo_retry.sh cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM
-        run: bash tools/ci_cargo_retry.sh wasm-pack build crates/exochain-wasm --target nodejs --out-dir ../../packages/exochain-wasm/wasm
+        run: bash tools/ci_cargo_retry.sh wasm-pack build crates/exochain-wasm --target nodejs --scope exochain --out-dir ../../packages/exochain-wasm/wasm
+      - name: Prepare scoped WASM npm package
+        run: |
+          cp LICENSE packages/exochain-wasm/wasm/LICENSE
+          node tools/prepare_wasm_npm_package.mjs packages/exochain-wasm/wasm
+      - name: Dry-pack WASM npm package
+        run: npm pack --dry-run
+        working-directory: packages/exochain-wasm/wasm
       - name: Verify WASM exports
-        # Expected export count = 164. Baseline was 110 before
+        # Expected export count = 165. Baseline was 110 before
         # decision-forum, messaging, death-trigger, and franchise/NewCo
         # scaffold were added; the adjudicated decision transition bridge
         # adds the current security boundary, and the HonorGood economy bridge
@@ -660,11 +672,12 @@ jobs:
         # the forum authority bridge adds trusted-root-key verification,
         # messaging adds caller-managed X25519 public-key derivation, and the
         # AVC bridge keeps legacy raw-subject-key entrypoints fail-closed and
-        # adds external-signature payload/request builders for trust receipts.
+        # adds external-signature payload/request builders plus explicit AVC
+        # protocol/package metadata for trust receipts.
         run: |
           COUNT=$(grep -c "module.exports.wasm_" packages/exochain-wasm/wasm/exochain_wasm.js)
           echo "Found $COUNT WASM exports"
-          [ "$COUNT" -eq 164 ] || (echo "Expected 164 exports, got $COUNT" && exit 1)
+          [ "$COUNT" -eq 165 ] || (echo "Expected 165 exports, got $COUNT" && exit 1)
       - name: Upload WASM artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -699,7 +712,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Verify Rust exports match JS expectations
-        # Expected #[wasm_bindgen] count = 164. Baseline was 110 before the
+        # Expected #[wasm_bindgen] count = 165. Baseline was 110 before the
         # Sprint-4 additions (decision-forum, messaging, death-trigger,
         # franchise/NewCo scaffold); the adjudicated decision transition bridge
         # adds the current security boundary, the HonorGood economy bridge
@@ -709,11 +722,12 @@ jobs:
         # messaging bridge adds a caller-managed X25519 public-key derivation
         # path, and the AVC bridge keeps legacy raw-subject-key entrypoints
         # fail-closed while adding external-signature payload/request builders
-        # for trust-receipt emission.
+        # plus explicit AVC protocol/package metadata for trust-receipt
+        # emission.
         run: |
           RUST_COUNT=$(grep -r '#\[wasm_bindgen\]' crates/exochain-wasm/src/ | wc -l | tr -d ' ')
           echo "Rust #[wasm_bindgen] exports: $RUST_COUNT"
-          [ "$RUST_COUNT" -eq 164 ] || (echo "WASM export count changed from 164 to $RUST_COUNT — update bridge tests" && exit 1)
+          [ "$RUST_COUNT" -eq 165 ] || (echo "WASM export count changed from 165 to $RUST_COUNT — update bridge tests" && exit 1)
 
   # -----------------------------------------------------------------------
   # Constitutional gate: all must pass

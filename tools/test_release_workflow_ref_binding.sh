@@ -34,7 +34,7 @@ job_block() {
   ' "$workflow"
 }
 
-for job in release-build sbom-and-attest publish; do
+for job in release-build sbom-and-attest publish publish-wasm-npm; do
   block=$(job_block "$job")
   [[ -n "$block" ]] || fail "job $job is missing"
   grep -F 'id: release-ref' <<<"$block" >/dev/null \

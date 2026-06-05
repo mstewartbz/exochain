@@ -30,6 +30,9 @@
 //! | `POST` | `/api/v1/avc/issue` | Register a signed credential. |
 //! | `POST` | `/api/v1/avc/validate` | Validate a credential and optional action. |
 //! | `POST` | `/api/v1/avc/receipts/emit` | Validate a subject-signed action and mint a node-signed receipt. |
+//! | `GET`  | `/api/v1/avc/receipts/:hash` | Fetch a stored AVC trust receipt by hash. |
+//! | `GET`  | `/api/v1/avc/receipts?actor=<did>&limit=N` | List stored AVC trust receipts for a subject DID. |
+//! | `GET`  | `/api/v1/avc/protocol` | Discover node AVC protocol compatibility metadata. |
 //! | `POST` | `/api/v1/avc/delegate` | Register a signed child credential. |
 //! | `POST` | `/api/v1/avc/revoke` | Register a signed revocation. |
 //! | `GET`  | `/api/v1/avc/:id` | Fetch a registered credential by hex ID. |
@@ -51,16 +54,18 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
 use exo_authority::permission::Permission;
 use exo_avc::{
+    AVC_MAX_SUPPORTED_PROTOCOL_VERSION, AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
+    AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION, AVC_SCHEMA_VERSION,
     AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcRegistryDurableState,
     AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt, AvcValidationRequest,
     AvcValidationResult, InMemoryAvcRegistry, avc_action_signature_payload, create_trust_receipt,
-    validate_avc,
+    require_supported_avc_protocol_version, validate_avc,
 };
 use exo_core::{
     Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured, hlc::HybridClock,
@@ -83,9 +88,38 @@ const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
 const AVC_REGISTRY_POSTGRES_TABLE: &str = "avc_registry_state";
 const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
 const AVC_REGISTRY_POSTGRES_LOCK_KEY: i64 = 0x4156_435F_5245_4749;
+const DEFAULT_AVC_RECEIPT_LIST_LIMIT: u32 = 50;
+const MAX_AVC_RECEIPT_LIST_LIMIT: u32 = 500;
+const WASM_PACKAGE_NAME: &str = "@exochain/exochain-wasm";
+const WASM_PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub type AvcReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
-type AvcReceiptTimestampSource = Arc<dyn Fn() -> anyhow::Result<Timestamp> + Send + Sync>;
+
+#[derive(Clone)]
+enum AvcReceiptTimestampSource {
+    HybridLogicalClock(Arc<Mutex<HybridClock>>),
+    Postgres(PgPool),
+    #[cfg(test)]
+    Fixed(Arc<dyn Fn() -> anyhow::Result<Timestamp> + Send + Sync>),
+}
+
+impl AvcReceiptTimestampSource {
+    async fn now(&self) -> anyhow::Result<Timestamp> {
+        match self {
+            Self::HybridLogicalClock(clock) => {
+                let mut clock = clock
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("AVC receipt HLC mutex poisoned"))?;
+                clock
+                    .now()
+                    .map_err(|error| anyhow::anyhow!("AVC receipt HLC unavailable: {error}"))
+            }
+            Self::Postgres(pool) => trusted_postgres_receipt_timestamp(pool).await,
+            #[cfg(test)]
+            Self::Fixed(source) => source(),
+        }
+    }
+}
 
 #[derive(Clone)]
 enum AvcRegistryDurability {
@@ -145,38 +179,51 @@ impl AvcApiState {
         database_pool: Option<PgPool>,
     ) -> anyhow::Result<Self> {
         let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
-        let (registry, durability) = match database_pool {
+        let (registry, durability, receipt_timestamp_source) = match database_pool {
             Some(pool) => {
                 let registry =
                     load_postgres_durable_registry_or_import_file(&pool, &durable_state_path)
                         .await?;
-                (registry, AvcRegistryDurability::Postgres(pool))
+                (
+                    registry,
+                    AvcRegistryDurability::Postgres(pool.clone()),
+                    AvcReceiptTimestampSource::Postgres(pool),
+                )
             }
             None => (
                 load_file_durable_registry(&durable_state_path)?,
                 AvcRegistryDurability::File(Arc::new(durable_state_path)),
+                receipt_timestamp_source_from_clock(HybridClock::new()),
             ),
         };
         Ok(Self {
             registry: Arc::new(Mutex::new(registry)),
             validator_did,
             receipt_signer,
-            receipt_timestamp_source: receipt_timestamp_source_from_clock(HybridClock::new()),
+            receipt_timestamp_source,
             durability,
         })
     }
 }
 
 fn receipt_timestamp_source_from_clock(clock: HybridClock) -> AvcReceiptTimestampSource {
-    let clock = Arc::new(Mutex::new(clock));
-    Arc::new(move || {
-        let mut clock = clock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("AVC receipt HLC mutex poisoned"))?;
-        clock
-            .now()
-            .map_err(|error| anyhow::anyhow!("AVC receipt HLC unavailable: {error}"))
-    })
+    AvcReceiptTimestampSource::HybridLogicalClock(Arc::new(Mutex::new(clock)))
+}
+
+async fn trusted_postgres_receipt_timestamp(pool: &PgPool) -> anyhow::Result<Timestamp> {
+    let physical_ms: i64 =
+        sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT")
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to read trusted AVC receipt timestamp from Postgres: {error}"
+                )
+            })?;
+    let physical_ms = u64::try_from(physical_ms).map_err(|_| {
+        anyhow::anyhow!("Postgres returned a negative AVC receipt timestamp: {physical_ms}")
+    })?;
+    Ok(Timestamp::new(physical_ms, 0))
 }
 
 fn load_file_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
@@ -702,6 +749,34 @@ pub struct EmitReceiptResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ListAvcReceiptsResponse {
+    pub did: String,
+    pub receipts: Vec<AvcTrustReceipt>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAvcReceiptsQuery {
+    actor: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AvcProtocolQuery {
+    protocol_version: Option<u16>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AvcProtocolInfo {
+    pub protocol_version: u16,
+    pub min_supported_protocol_version: u16,
+    pub max_supported_protocol_version: u16,
+    pub schema_version: u16,
+    pub wasm_package_name: String,
+    pub wasm_package_version: String,
+    pub deprecation_window_days: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AvcSummary {
     pub credential_id: String,
     pub subject_did: String,
@@ -773,8 +848,34 @@ fn receipt_timestamp_error(err: anyhow::Error) -> ApiError {
     )
 }
 
-fn trusted_receipt_timestamp(state: &AvcApiState) -> ApiResult<Timestamp> {
-    (state.receipt_timestamp_source)().map_err(receipt_timestamp_error)
+async fn trusted_receipt_timestamp(state: &AvcApiState) -> ApiResult<Timestamp> {
+    state
+        .receipt_timestamp_source
+        .now()
+        .await
+        .map_err(receipt_timestamp_error)
+}
+
+fn avc_receipt_list_limit(limit: Option<u32>) -> usize {
+    let capped = limit
+        .unwrap_or(DEFAULT_AVC_RECEIPT_LIST_LIMIT)
+        .min(MAX_AVC_RECEIPT_LIST_LIMIT);
+    match usize::try_from(capped) {
+        Ok(value) => value,
+        Err(_) => usize::from(u16::MAX),
+    }
+}
+
+fn avc_protocol_info() -> AvcProtocolInfo {
+    AvcProtocolInfo {
+        protocol_version: AVC_PROTOCOL_VERSION,
+        min_supported_protocol_version: AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
+        max_supported_protocol_version: AVC_MAX_SUPPORTED_PROTOCOL_VERSION,
+        schema_version: AVC_SCHEMA_VERSION,
+        wasm_package_name: WASM_PACKAGE_NAME.into(),
+        wasm_package_version: WASM_PACKAGE_VERSION.into(),
+        deprecation_window_days: AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS,
+    }
 }
 
 fn mutate_postgres_registry_blocking<T, F>(
@@ -888,6 +989,7 @@ fn map_avc_error(err: exo_avc::AvcError) -> ApiError {
     match err {
         exo_avc::AvcError::EmptyField { .. }
         | exo_avc::AvcError::UnsupportedSchema { .. }
+        | exo_avc::AvcError::UnsupportedProtocol { .. }
         | exo_avc::AvcError::BasisPointOutOfRange { .. }
         | exo_avc::AvcError::InvalidTimestamp { .. }
         | exo_avc::AvcError::DelegationWidens { .. }
@@ -1041,7 +1143,7 @@ async fn handle_emit_receipt(
 ) -> ApiResult<Json<EmitReceiptResponse>> {
     let validator_did = state.validator_did.clone();
     let receipt_signer = Arc::clone(&state.receipt_signer);
-    let trusted_now = trusted_receipt_timestamp(&state)?;
+    let trusted_now = trusted_receipt_timestamp(&state).await?;
     let response = with_registry_blocking(state, true, move |registry| {
         let submitted_request = payload.validation;
         let action_id = require_action(&submitted_request)?.action_id;
@@ -1078,6 +1180,55 @@ async fn handle_emit_receipt(
     })
     .await?;
     Ok(Json(response))
+}
+
+async fn handle_get_receipt(
+    State(state): State<Arc<AvcApiState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AvcTrustReceipt>> {
+    let hash = parse_hash(&id)?;
+    let receipt = with_registry_blocking(state, false, move |registry| {
+        registry
+            .get_receipt(&hash)
+            .ok_or((StatusCode::NOT_FOUND, "receipt not found".into()))
+    })
+    .await?;
+    Ok(Json(receipt))
+}
+
+async fn handle_list_receipts(
+    State(state): State<Arc<AvcApiState>>,
+    Query(query): Query<ListAvcReceiptsQuery>,
+) -> ApiResult<Json<ListAvcReceiptsResponse>> {
+    let actor = query.actor.ok_or((
+        StatusCode::BAD_REQUEST,
+        "actor query parameter is required".into(),
+    ))?;
+    let did = parse_did(&actor)?;
+    let did_for_response = did.to_string();
+    let did_for_lookup = did.clone();
+    let limit = avc_receipt_list_limit(query.limit);
+    let receipts = with_registry_blocking(state, false, move |registry| {
+        Ok(registry.list_receipts_for_subject(&did_for_lookup, limit))
+    })
+    .await?;
+    Ok(Json(ListAvcReceiptsResponse {
+        did: did_for_response,
+        receipts,
+    }))
+}
+
+async fn handle_protocol_info(
+    Query(query): Query<AvcProtocolQuery>,
+) -> ApiResult<Json<AvcProtocolInfo>> {
+    if query.protocol_version.is_none() {
+        tracing::info!(
+            protocol_version = AVC_PROTOCOL_VERSION,
+            "served legacy AVC protocol discovery without explicit requested version"
+        );
+    }
+    require_supported_avc_protocol_version(query.protocol_version).map_err(map_avc_error)?;
+    Ok(Json(avc_protocol_info()))
 }
 
 async fn handle_delegate(
@@ -1164,6 +1315,9 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
         .route("/api/v1/avc/issue", post(handle_issue))
         .route("/api/v1/avc/validate", post(handle_validate))
         .route("/api/v1/avc/receipts/emit", post(handle_emit_receipt))
+        .route("/api/v1/avc/receipts", get(handle_list_receipts))
+        .route("/api/v1/avc/receipts/:hash", get(handle_get_receipt))
+        .route("/api/v1/avc/protocol", get(handle_protocol_info))
         .route("/api/v1/avc/delegate", post(handle_delegate))
         .route("/api/v1/avc/revoke", post(handle_revoke))
         .route("/api/v1/avc/:id", get(handle_get))
@@ -1223,7 +1377,7 @@ mod tests {
     }
 
     fn fixed_receipt_timestamp_source(timestamp: Timestamp) -> AvcReceiptTimestampSource {
-        Arc::new(move || Ok(timestamp))
+        AvcReceiptTimestampSource::Fixed(Arc::new(move || Ok(timestamp)))
     }
 
     fn fresh_state() -> Arc<AvcApiState> {
@@ -1705,8 +1859,23 @@ mod tests {
         let state = Arc::new(state);
         let app = avc_router(Arc::clone(&state));
 
-        let first = credential_with_purpose("postgres anchor persistence one");
-        let second = credential_with_purpose("postgres anchor persistence two");
+        let trusted_now = trusted_receipt_timestamp(&state)
+            .await
+            .expect("trusted Postgres receipt timestamp");
+        let mut first_draft = baseline_draft();
+        first_draft.delegated_intent.purpose = "postgres anchor persistence one".into();
+        first_draft.expires_at = Some(Timestamp::new(trusted_now.physical_ms + 1_000_000, 0));
+        let first = {
+            let kp = issuer_keypair();
+            issue_avc(first_draft, |bytes| kp.sign(bytes)).unwrap()
+        };
+        let mut second_draft = baseline_draft();
+        second_draft.delegated_intent.purpose = "postgres anchor persistence two".into();
+        second_draft.expires_at = Some(Timestamp::new(trusted_now.physical_ms + 1_000_000, 0));
+        let second = {
+            let kp = issuer_keypair();
+            issue_avc(second_draft, |bytes| kp.sign(bytes)).unwrap()
+        };
         assert_eq!(
             issue_credential(app.clone(), first).await,
             StatusCode::OK,
@@ -2148,6 +2317,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_readback_returns_stored_avc_receipt_by_hash() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let emitted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(emitted.status(), StatusCode::OK);
+        let emitted: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(emitted).await).unwrap();
+
+        let read_back = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/avc/receipts/{}", emitted.receipt_hash))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_back.status(), StatusCode::OK);
+        let parsed: AvcTrustReceipt = serde_json::from_slice(&read_body(read_back).await).unwrap();
+        assert_eq!(parsed, emitted.receipt);
+
+        let non_avc_receipt_route = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/receipts/{}", emitted.receipt_hash))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            non_avc_receipt_route.status(),
+            StatusCode::NOT_FOUND,
+            "AVC receipt read-back must not fall through to the DAG receipt store route"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_readback_rejects_invalid_and_unknown_hashes() {
+        let state = fresh_state();
+        let app = avc_router(state);
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/avc/receipts/not-hex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let uppercase = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/avc/receipts/{}", "AA".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uppercase.status(), StatusCode::BAD_REQUEST);
+
+        let unknown = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/v1/avc/receipts/{}", "11".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn receipt_list_filters_by_actor_caps_limit_and_orders_deterministically() {
+        let state = fresh_state();
+        let first = credential_with_purpose("receipt list first");
+        let second = credential_with_purpose("receipt list second");
+        let other = credential_for_subject(Did::new("did:exo:other-agent").unwrap());
+        let first_id = first.id().unwrap();
+        let second_id = second.id().unwrap();
+        let other_id = other.id().unwrap();
+
+        let make_receipt = |credential_id: Hash256, action_byte: u8| {
+            let validation = AvcValidationResult {
+                credential_id,
+                decision: AvcDecision::Allow,
+                reason_codes: Vec::new(),
+                normalized_holder_did: Did::new("did:exo:agent").unwrap(),
+                valid_until: Some(Timestamp::new(2_000_000, 0)),
+                receipt: None,
+            };
+            create_trust_receipt(
+                &validation,
+                Some(Hash256::from_bytes([action_byte; 32])),
+                validator_did(),
+                Timestamp::new(1_600_000, 0),
+                |bytes| validator_keypair().sign(bytes),
+            )
+            .unwrap()
+        };
+        let first_receipt = make_receipt(first_id, 0x21);
+        let second_receipt = make_receipt(second_id, 0x22);
+        let other_receipt = make_receipt(other_id, 0x23);
+        {
+            let mut registry = state.registry.lock().unwrap();
+            registry.put_credential(second).unwrap();
+            registry.put_credential(other).unwrap();
+            registry.put_credential(first).unwrap();
+            registry.put_receipt(second_receipt.clone()).unwrap();
+            registry.put_receipt(other_receipt).unwrap();
+            registry.put_receipt(first_receipt.clone()).unwrap();
+        }
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/avc/receipts?actor=did:exo:agent&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: ListAvcReceiptsResponse =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(parsed.did, "did:exo:agent");
+        assert_eq!(parsed.receipts.len(), 1);
+        let mut expected = [first_receipt, second_receipt];
+        expected.sort_by_key(|receipt| receipt.receipt_id);
+        assert_eq!(parsed.receipts[0], expected[0]);
+
+        let missing_actor = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/avc/receipts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_actor.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn protocol_discovery_accepts_legacy_and_current_rejects_future_version() {
+        let state = fresh_state();
+        let app = avc_router(state);
+
+        let legacy = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/avc/protocol")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), StatusCode::OK);
+        let legacy_info: AvcProtocolInfo =
+            serde_json::from_slice(&read_body(legacy).await).unwrap();
+        assert_eq!(legacy_info.protocol_version, AVC_PROTOCOL_VERSION);
+        assert_eq!(
+            legacy_info.min_supported_protocol_version,
+            AVC_MIN_SUPPORTED_PROTOCOL_VERSION
+        );
+        assert_eq!(legacy_info.wasm_package_name, WASM_PACKAGE_NAME);
+
+        let current = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/v1/avc/protocol?protocol_version={AVC_PROTOCOL_VERSION}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(current.status(), StatusCode::OK);
+
+        let future = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/v1/avc/protocol?protocol_version={}",
+                        AVC_MAX_SUPPORTED_PROTOCOL_VERSION + 1
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(future.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn receipt_emit_does_not_stamp_receipt_with_caller_validation_time() {
         let state = fresh_state();
         let credential = baseline_credential();
@@ -2408,6 +2824,11 @@ mod tests {
             exo_avc::AvcError::UnsupportedSchema {
                 got: 99,
                 supported: 1,
+            },
+            exo_avc::AvcError::UnsupportedProtocol {
+                got: 99,
+                min_supported: 1,
+                max_supported: 1,
             },
             exo_avc::AvcError::BasisPointOutOfRange {
                 field: "risk",
@@ -3236,8 +3657,21 @@ mod tests {
             "AVC durable registry must accept the existing gateway Postgres pool"
         );
         assert!(
-            production.contains("AvcRegistryDurability::Postgres(pool)"),
+            production.contains("AvcRegistryDurability::Postgres(pool.clone())"),
             "AVC durable registry must persist to Postgres when DATABASE_URL is configured"
+        );
+        assert!(
+            production.contains("AvcReceiptTimestampSource::Postgres(pool)"),
+            "Postgres-backed AVC runtime receipts must use the trusted database timestamp source"
+        );
+        assert!(
+            production
+                .contains("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
+            "AVC production receipt timestamps must come from trusted Postgres clock_timestamp()"
+        );
+        assert!(
+            !production.contains("SystemTime::now") && !production.contains("Instant::now"),
+            "AVC production receipt emission must not read Rust system time directly"
         );
         assert!(
             production.contains("pg_advisory_xact_lock"),
@@ -3291,7 +3725,9 @@ mod avc_root_trust_tests {
             registry: Arc::new(Mutex::new(registry)),
             validator_did: Did::new("did:exo:test-validator").expect("test DID"),
             receipt_signer: signer,
-            receipt_timestamp_source: Arc::new(|| Ok(Timestamp::new(1_700_000, 0))),
+            receipt_timestamp_source: AvcReceiptTimestampSource::Fixed(Arc::new(|| {
+                Ok(Timestamp::new(1_700_000, 0))
+            })),
             durability: AvcRegistryDurability::None,
         }
     }

@@ -35,8 +35,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 23 | `ls -d crates/*/` |
 | Rust source files | 313 | `find crates -name '*.rs'` |
-| Rust LOC | 212650 | `wc -l` |
-| Workspace tests | 4,699 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 213277 | `wc -l` |
+| Workspace tests | 4,706 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -113,12 +113,12 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 23 crates, 212650 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 23 crates, 213277 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 4,699 listed workspace tests
+         cryptographic proofs, 4,706 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
-         171 verified bridge exports — Rust -> WebAssembly -> JavaScript
+         165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
 
 Layer 3: CommandBase.ai     (command-base/)
          Adjacent cockpit adapter for cognitiveplane.ai

@@ -319,12 +319,89 @@ jobs:
           done
 
   # -----------------------------------------------------------------------
+  # Publish versioned WASM package to npm (unless dry run)
+  # -----------------------------------------------------------------------
+  publish-wasm-npm:
+    name: "Package and publish WASM npm package"
+    runs-on: ubuntu-latest
+    needs: [approve, verify-signed-tag, validate-release-inputs]
+    permissions:
+      id-token: write
+    steps:
+      - name: Resolve release source ref
+        id: release-ref
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_TAG: ${{ needs.validate-release-inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            printf 'ref=%s\n' "${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            printf 'ref=refs/tags/%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ steps.release-ref.outputs.ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install wasm-pack
+        run: bash tools/ci_cargo_retry.sh cargo install wasm-pack --version 0.14.0 --locked
+
+      - name: Build scoped WASM npm package
+        run: bash tools/ci_cargo_retry.sh wasm-pack build crates/exochain-wasm --target nodejs --scope exochain --out-dir ../../packages/exochain-wasm/wasm
+
+      - name: Prepare scoped WASM npm package
+        run: |
+          cp LICENSE packages/exochain-wasm/wasm/LICENSE
+          node tools/prepare_wasm_npm_package.mjs packages/exochain-wasm/wasm
+
+      - name: Verify WASM npm package release metadata
+        env:
+          RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync('packages/exochain-wasm/wasm/package.json', 'utf8'));
+          if (manifest.name !== '@exochain/exochain-wasm') {
+            throw new Error(`unexpected WASM package name ${manifest.name}`);
+          }
+          if (manifest.version !== process.env.RELEASE_VERSION) {
+            throw new Error(`WASM package version ${manifest.version} must match release ${process.env.RELEASE_VERSION}`);
+          }
+          if (!manifest.files.includes('LICENSE')) {
+            throw new Error('WASM package must include LICENSE in npm files');
+          }
+          NODE
+
+      - name: Dry-pack WASM npm package
+        run: npm pack --dry-run
+        working-directory: packages/exochain-wasm/wasm
+
+      - name: Publish WASM npm package
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+        working-directory: packages/exochain-wasm/wasm
+
+  # -----------------------------------------------------------------------
   # Create GitHub Release
   # -----------------------------------------------------------------------
   github-release:
     name: "Create GitHub Release"
     runs-on: ubuntu-latest
-    needs: [release-build, sbom-and-attest, publish, validate-release-inputs]
+    needs: [release-build, sbom-and-attest, publish, publish-wasm-npm, validate-release-inputs]
     if: ${{ !inputs.dry_run }}
     permissions:
       contents: write

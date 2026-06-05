@@ -34,10 +34,13 @@
 //! verification path ([`exo_core::crypto::verify`] over the same payload).
 
 use exo_avc::{
+    AVC_MAX_SUPPORTED_PROTOCOL_VERSION, AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
+    AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION, AVC_SCHEMA_VERSION,
     AutonomousVolitionCredential, AvcActionRequest, AvcSubjectKind, AvcValidationRequest,
     DataClass, avc_action_signature_payload,
 };
 use exo_core::{PublicKey, Signature, Timestamp};
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::serde_bridge::{MAX_JSON_INPUT_BYTES, from_json_str};
@@ -54,6 +57,19 @@ const SUBJECT_PUBLIC_KEY_HEX_LEN: usize = 64;
 const MAX_WASM_AVC_COLLECTION_ITEMS: usize = 256;
 const MAX_WASM_AVC_STRING_BYTES: usize = 4_096;
 const MAX_WASM_AVC_DID_BYTES: usize = 512;
+const WASM_PACKAGE_NAME: &str = "@exochain/exochain-wasm";
+const WASM_PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Serialize)]
+struct WasmAvcProtocolInfo {
+    protocol_version: u16,
+    min_supported_protocol_version: u16,
+    max_supported_protocol_version: u16,
+    schema_version: u16,
+    wasm_package_name: &'static str,
+    wasm_package_version: &'static str,
+    deprecation_window_days: u16,
+}
 
 fn ensure_json_input_at_most(value: &str, label: &str) -> Result<(), String> {
     if value.len() > MAX_JSON_INPUT_BYTES {
@@ -66,6 +82,19 @@ fn parse_credential_json(value: &str) -> Result<AutonomousVolitionCredential, St
     ensure_json_input_at_most(value, "credential")?;
     from_json_str::<AutonomousVolitionCredential>(value)
         .map_err(|_| "credential json: JSON parse error".to_string())
+}
+
+fn avc_protocol_info_json_core() -> Result<String, String> {
+    let info = WasmAvcProtocolInfo {
+        protocol_version: AVC_PROTOCOL_VERSION,
+        min_supported_protocol_version: AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
+        max_supported_protocol_version: AVC_MAX_SUPPORTED_PROTOCOL_VERSION,
+        schema_version: AVC_SCHEMA_VERSION,
+        wasm_package_name: WASM_PACKAGE_NAME,
+        wasm_package_version: WASM_PACKAGE_VERSION,
+        deprecation_window_days: AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS,
+    };
+    serde_json::to_string(&info).map_err(|e| format!("avc protocol info json: {e}"))
 }
 
 fn parse_action_json(value: &str) -> Result<AvcActionRequest, String> {
@@ -385,6 +414,12 @@ pub fn wasm_avc_action_signing_payload(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// Return explicit AVC protocol/package compatibility metadata for clients.
+#[wasm_bindgen]
+pub fn wasm_avc_protocol_info() -> Result<String, JsValue> {
+    avc_protocol_info_json_core().map_err(|e| JsValue::from_str(&e))
+}
+
 /// Legacy raw subject-secret request builder.
 ///
 /// This fails closed for the same reason as [`wasm_avc_sign_action`].
@@ -562,6 +597,29 @@ mod tests {
         assert!(
             crypto::verify(&payload, &signature, &subject_pk),
             "externally signed wasm_avc_action_signing_payload output must verify"
+        );
+    }
+
+    #[test]
+    fn avc_protocol_info_exposes_supported_range_and_package_name() {
+        let info: serde_json::Value =
+            serde_json::from_str(&avc_protocol_info_json_core().expect("protocol info json"))
+                .expect("protocol info parses");
+        assert_eq!(info["protocol_version"], AVC_PROTOCOL_VERSION);
+        assert_eq!(
+            info["min_supported_protocol_version"],
+            AVC_MIN_SUPPORTED_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            info["max_supported_protocol_version"],
+            AVC_MAX_SUPPORTED_PROTOCOL_VERSION
+        );
+        assert_eq!(info["schema_version"], AVC_SCHEMA_VERSION);
+        assert_eq!(info["wasm_package_name"], WASM_PACKAGE_NAME);
+        assert_eq!(info["wasm_package_version"], WASM_PACKAGE_VERSION);
+        assert_eq!(
+            info["deprecation_window_days"],
+            AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS
         );
     }
 

@@ -32,8 +32,35 @@ use crate::error::AvcError;
 pub const AVC_CREDENTIAL_SIGNING_DOMAIN: &str = "exo.avc.credential.v1";
 /// Schema version supported by this binary.
 pub const AVC_SCHEMA_VERSION: u16 = 1;
+/// Current AVC wire protocol version exposed by node and WASM adapters.
+pub const AVC_PROTOCOL_VERSION: u16 = 1;
+/// Oldest AVC wire protocol version this binary accepts.
+pub const AVC_MIN_SUPPORTED_PROTOCOL_VERSION: u16 = 1;
+/// Newest AVC wire protocol version this binary accepts.
+pub const AVC_MAX_SUPPORTED_PROTOCOL_VERSION: u16 = AVC_PROTOCOL_VERSION;
+/// Compatibility runway advertised to clients before an AVC protocol removal.
+pub const AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS: u16 = 180;
 /// Maximum value (in basis points) that any AVC bp field may hold.
 pub const MAX_BASIS_POINTS: u32 = 10_000;
+
+/// Normalize an optional caller protocol version and reject unsupported ranges.
+///
+/// Missing protocol metadata is treated as legacy current-v1 traffic so
+/// existing AVC callers remain compatible while new clients can probe the
+/// explicit supported range through node/WASM discovery.
+pub fn require_supported_avc_protocol_version(
+    requested_protocol_version: Option<u16>,
+) -> Result<u16, AvcError> {
+    let got = requested_protocol_version.unwrap_or(AVC_PROTOCOL_VERSION);
+    if !(AVC_MIN_SUPPORTED_PROTOCOL_VERSION..=AVC_MAX_SUPPORTED_PROTOCOL_VERSION).contains(&got) {
+        return Err(AvcError::UnsupportedProtocol {
+            got,
+            min_supported: AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
+            max_supported: AVC_MAX_SUPPORTED_PROTOCOL_VERSION,
+        });
+    }
+    Ok(got)
+}
 
 // ---------------------------------------------------------------------------
 // Subject kind
@@ -687,6 +714,28 @@ mod tests {
         draft.schema_version = 99;
         let err = issue_avc(draft, |_| fixed_signature()).unwrap_err();
         assert!(matches!(err, AvcError::UnsupportedSchema { got: 99, .. }));
+    }
+
+    #[test]
+    fn protocol_version_support_accepts_legacy_and_current_rejects_future() {
+        assert_eq!(
+            require_supported_avc_protocol_version(None).unwrap(),
+            AVC_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            require_supported_avc_protocol_version(Some(AVC_PROTOCOL_VERSION)).unwrap(),
+            AVC_PROTOCOL_VERSION
+        );
+        let err = require_supported_avc_protocol_version(Some(AVC_PROTOCOL_VERSION + 1))
+            .expect_err("future AVC protocol version must fail closed");
+        assert!(matches!(
+            err,
+            AvcError::UnsupportedProtocol {
+                got,
+                min_supported: AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
+                max_supported: AVC_MAX_SUPPORTED_PROTOCOL_VERSION,
+            } if got == AVC_PROTOCOL_VERSION + 1
+        ));
     }
 
     #[test]

@@ -38,6 +38,16 @@ pub enum AvcError {
     #[error("AVC schema version {got} is unsupported (supported: {supported})")]
     UnsupportedSchema { got: u16, supported: u16 },
 
+    /// Protocol version is outside the supported compatibility range.
+    #[error(
+        "AVC protocol version {got} is unsupported (supported: {min_supported}..={max_supported})"
+    )]
+    UnsupportedProtocol {
+        got: u16,
+        min_supported: u16,
+        max_supported: u16,
+    },
+
     /// A basis point value was outside the legal `0..=10_000` range.
     #[error("AVC basis point field `{field}` value {value} exceeds 10_000")]
     BasisPointOutOfRange { field: &'static str, value: u32 },
@@ -104,6 +114,11 @@ mod tests {
             AvcError::UnsupportedSchema {
                 got: 99,
                 supported: 1,
+            },
+            AvcError::UnsupportedProtocol {
+                got: 99,
+                min_supported: 1,
+                max_supported: 1,
             },
             AvcError::BasisPointOutOfRange {
                 field: "risk",
