@@ -1,0 +1,847 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ExoChain DAG DB HTTP API",
+    "version": "1.0.0",
+    "description": "Machine contract for the governed agent-memory DAG DB HTTP surface served under /api/v1/dag-db. Every response schema carries a stable `schema_version` const so a non-Rust integrator can detect the wire-contract version directly from a response body. This document is the single artifact a non-Rust consumer codegens from. It is generated-by-hand from the `exo-api` Rust DTOs (crates/exo-api/src/dagdb.rs) and CI-asserted to stay in sync by the `openapi_spec_matches_dtos` test in crates/exo-api/tests/openapi_sync.rs (every response fixture in crates/exo-dag-db-api/fixtures/json/all_dto_fixtures.json validates against the matching response schema here, and each documented `schema_version` const equals the Rust constant). Response DTOs are strict: `additionalProperties: false` mirrors `#[serde(deny_unknown_fields)]`.",
+    "license": { "name": "Apache-2.0", "identifier": "Apache-2.0" }
+  },
+  "servers": [
+    { "url": "/api/v1/dag-db", "description": "DAG DB REST prefix (opt-in adapter; functional only under exo-gateway production-db + a configured Postgres pool)." }
+  ],
+  "paths": {
+    "/intake": {
+      "post": {
+        "summary": "Submit a memory candidate for governed intake.",
+        "operationId": "dagDbIntake",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbIntakeRequest" } } } },
+        "responses": {
+          "200": { "description": "Intake recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbIntakeResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/route": {
+      "post": {
+        "summary": "Create a governed retrieval route.",
+        "operationId": "dagDbRoute",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbRouteRequest" } } } },
+        "responses": {
+          "200": { "description": "Route created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbRouteResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/context-packet": {
+      "post": {
+        "summary": "Build a bounded, governed context packet for a task.",
+        "operationId": "dagDbContextPacket",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbContextPacketRequest" } } } },
+        "responses": {
+          "200": { "description": "Context packet built.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbContextPacketResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/validate": {
+      "post": {
+        "summary": "Record a governed validation decision.",
+        "operationId": "dagDbValidate",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbValidateRequest" } } } },
+        "responses": {
+          "200": { "description": "Validation recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbValidateResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/writeback": {
+      "post": {
+        "summary": "Write back an agent answer as a governed memory.",
+        "operationId": "dagDbWriteback",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbWritebackRequest" } } } },
+        "responses": {
+          "200": { "description": "Writeback recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbWritebackResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/import": {
+      "post": {
+        "summary": "Import a dry-run knowledge-graph batch into the governed store.",
+        "operationId": "dagDbImport",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbImportRequest" } } } },
+        "responses": {
+          "200": { "description": "Import recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbImportResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/export": {
+      "post": {
+        "summary": "Export a governed knowledge-graph slice.",
+        "operationId": "dagDbExport",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbExportRequest" } } } },
+        "responses": {
+          "200": { "description": "Export built.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbExportResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/trust-check": {
+      "post": {
+        "summary": "Run a governed inbound-agent trust check.",
+        "operationId": "dagDbTrustCheck",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbTrustCheckRequest" } } } },
+        "responses": {
+          "200": { "description": "Trust check recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbTrustCheckResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/council/decision": {
+      "post": {
+        "summary": "Record a governed council decision.",
+        "operationId": "dagDbCouncilDecision",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbCouncilDecisionRequest" } } } },
+        "responses": {
+          "200": { "description": "Council decision recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbCouncilDecisionResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/receipts/{receipt_hash}": {
+      "get": {
+        "summary": "Look up a receipt by hash.",
+        "operationId": "dagDbReceiptLookup",
+        "parameters": [
+          { "name": "receipt_hash", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "namespace", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "include_body", "in": "query", "required": false, "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Receipt found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbReceiptLookupResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/catalog/{catalog_id}": {
+      "get": {
+        "summary": "Look up a catalog entry by id.",
+        "operationId": "dagDbCatalogLookup",
+        "parameters": [
+          { "name": "catalog_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "namespace", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "include_children", "in": "query", "required": false, "schema": { "type": "boolean" } },
+          { "name": "include_routes", "in": "query", "required": false, "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Catalog entry found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbCatalogLookupResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    },
+    "/routes/{route_id}": {
+      "get": {
+        "summary": "Look up a route by id.",
+        "operationId": "dagDbRouteLookup",
+        "parameters": [
+          { "name": "route_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "namespace", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "include_memory_refs", "in": "query", "required": false, "schema": { "type": "boolean" } },
+          { "name": "include_validation", "in": "query", "required": false, "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Route found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbRouteLookupResponse" } } } },
+          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SafeMetadataDecision": { "type": "string", "enum": ["allow", "redact", "reject"] },
+      "RedactionCode": { "type": "string", "enum": ["ssn", "card", "confidential_marker", "phi", "customer_private", "code_excerpt", "length_truncation"] },
+      "ValidationStatus": { "type": "string", "enum": ["not_required", "pending", "passed", "failed", "contradictory", "expired", "needs_council"] },
+      "CouncilReviewStatus": { "type": "string", "enum": ["not_required", "required", "pending", "approved", "denied", "expired", "escalated"] },
+      "DagFinalityStatus": { "type": "string", "enum": ["pending", "committed", "failed", "compensated"] },
+      "RouteStatus": { "type": "string", "enum": ["pending", "active", "stale", "invalidated", "blocked"] },
+      "RiskClass": { "type": "string", "enum": ["R0", "R1", "R2", "R3", "R4", "R5"] },
+      "SubjectKind": { "type": "string", "enum": ["memory", "catalog", "route", "context_packet", "validation_report", "agent_safety_score", "inbound_agent_credential", "council_decision"] },
+      "ValidationDecision": { "type": "string", "enum": ["allow", "block", "needs_council", "invalidate", "revoke", "supersede"] },
+      "CredentialStatus": { "type": "string", "enum": ["pending", "active", "expired", "revoked", "blocked"] },
+      "CouncilDecisionStatus": { "type": "string", "enum": ["approved", "denied", "expired", "escalated", "revoked"] },
+      "ReceiptEventType": { "type": "string", "enum": ["intake_created", "duplicate_rejected", "validation_created", "validation_passed", "validation_failed", "memory_approved", "memory_routable", "memory_revoked", "memory_superseded", "route_created", "route_activated", "route_stale", "route_invalidated", "context_packet_created", "writeback_created", "trust_check_created", "council_decision_recorded", "dag_finality_committed", "dag_finality_failed", "dag_finality_compensated"] },
+      "MemoryStatus": { "type": "string", "enum": ["pending", "approved", "routable", "blocked", "revoked", "superseded", "rejected"] },
+      "MemoryEdgeKind": { "type": "string", "enum": ["derived_from", "summarizes", "supports", "contradicts", "supersedes", "replaces", "duplicate_of", "near_duplicate_of", "related_to", "alternative_summary_of", "depends_on", "part_of", "owned_by", "access_granted_by", "verified_by", "used_by_route", "included_in_context_packet", "revoked_by"] },
+      "MemoryGraphStyle": { "type": "string", "enum": ["provenance_receipt_dag", "canonical_memory_graph", "semantic_catalog_graph", "similarity_overlay_graph", "dependency_dag", "routing_view_graph", "contradiction_supersession_graph", "context_packet_graph"] },
+
+      "SafeMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision", "text", "redaction_codes", "original_hash", "truncated", "byte_len"],
+        "properties": {
+          "decision": { "$ref": "#/components/schemas/SafeMetadataDecision" },
+          "text": { "type": "string" },
+          "redaction_codes": { "type": "array", "items": { "$ref": "#/components/schemas/RedactionCode" } },
+          "original_hash": { "type": "string" },
+          "truncated": { "type": "boolean" },
+          "byte_len": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ContextPacketMemoryRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memory_id", "title", "summary", "keywords", "latest_receipt_hash"],
+        "properties": {
+          "memory_id": { "type": "string" },
+          "title": { "$ref": "#/components/schemas/SafeMetadata" },
+          "summary": { "$ref": "#/components/schemas/SafeMetadata" },
+          "keywords": { "type": "array", "items": { "$ref": "#/components/schemas/SafeMetadata" } },
+          "latest_receipt_hash": { "type": "string" }
+        }
+      },
+      "ContextPacketLayerRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["layer_id", "layer_path", "layer_depth", "layer_kind", "selected_ref_count"],
+        "properties": {
+          "layer_id": { "type": "string" },
+          "layer_path": { "type": "string" },
+          "layer_depth": { "type": "integer", "minimum": 0 },
+          "layer_kind": { "type": "string" },
+          "selected_ref_count": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ContextPacketLayerEdgeRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["layer_edge_id", "from_layer_id", "to_layer_id", "edge_kind"],
+        "properties": {
+          "layer_edge_id": { "type": "string" },
+          "from_layer_id": { "type": "string" },
+          "to_layer_id": { "type": "string" },
+          "edge_kind": { "type": "string" }
+        }
+      },
+      "ContextPacketLayerBudgetReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["layered_mode", "max_layer_depth", "required_layer_evidence", "budget_status"],
+        "properties": {
+          "layered_mode": { "type": "string" },
+          "max_layer_depth": { "type": "integer", "minimum": 0 },
+          "required_layer_evidence": { "type": "boolean" },
+          "budget_status": { "type": "string" }
+        }
+      },
+      "DagDbSelectedGraphEdgeRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["graph_edge_id", "from_memory_id", "to_memory_id", "edge_kind", "graph_style", "selection_reason"],
+        "properties": {
+          "graph_edge_id": { "type": "string" },
+          "from_memory_id": { "type": "string" },
+          "to_memory_id": { "type": "string" },
+          "edge_kind": { "$ref": "#/components/schemas/MemoryEdgeKind" },
+          "graph_style": { "$ref": "#/components/schemas/MemoryGraphStyle" },
+          "selection_reason": { "type": "string" }
+        }
+      },
+      "DagDbContextPacketCitationRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["citation_ref", "memory_id", "citation_status"],
+        "properties": {
+          "citation_ref": { "type": "string" },
+          "memory_id": { "type": "string" },
+          "citation_status": { "type": "string" }
+        }
+      },
+      "DagDbContextPacketMetrics": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["token_budget", "selected_token_estimate", "selected_memory_ref_count", "selected_graph_edge_count", "citation_ref_count", "end_to_end_savings_status", "cost_savings_status"],
+        "properties": {
+          "token_budget": { "type": "integer", "minimum": 0 },
+          "selected_token_estimate": { "type": "integer", "minimum": 0 },
+          "selected_memory_ref_count": { "type": "integer", "minimum": 0 },
+          "selected_graph_edge_count": { "type": "integer", "minimum": 0 },
+          "citation_ref_count": { "type": "integer", "minimum": 0 },
+          "end_to_end_savings_status": { "type": "string" },
+          "cost_savings_status": { "type": "string" }
+        }
+      },
+      "DagDbContextPacketBoundaries": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository_test_level_only", "production_runtime", "default_context_replacement", "citation_locator_status", "billing_savings"],
+        "properties": {
+          "repository_test_level_only": { "type": "boolean" },
+          "production_runtime": { "type": "string" },
+          "default_context_replacement": { "type": "string" },
+          "citation_locator_status": { "type": "string" },
+          "billing_savings": { "type": "string" }
+        }
+      },
+      "CatalogEntryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["catalog_id", "title", "summary"],
+        "properties": {
+          "catalog_id": { "type": "string" },
+          "title": { "$ref": "#/components/schemas/SafeMetadata" },
+          "summary": { "$ref": "#/components/schemas/SafeMetadata" }
+        }
+      },
+
+      "DagDbErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error_code", "message", "requires_council_review"],
+        "properties": {
+          "error_code": { "type": "string" },
+          "message": { "type": "string" },
+          "receipt_hash": { "type": ["string", "null"] },
+          "validation_report_id": { "type": ["string", "null"] },
+          "requires_council_review": { "type": "boolean" }
+        }
+      },
+
+      "DagDbIntakeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "source_type", "source_hash", "payload_hash", "owner_did", "controller_did", "submitted_by_did", "consent_purpose", "requested_action", "title_text", "summary_text"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "source_type": { "type": "string", "enum": ["public_web", "private_customer", "ip_sensitive", "generated", "open_source", "unknown_provenance", "benchmark_fixture"] },
+          "source_hash": { "type": "string" },
+          "payload_hash": { "type": "string" },
+          "owner_did": { "type": "string" },
+          "controller_did": { "type": "string" },
+          "submitted_by_did": { "type": "string" },
+          "consent_purpose": { "type": "string", "enum": ["retrieval", "validation", "writeback", "benchmark", "trust_check"] },
+          "requested_action": { "type": "string" },
+          "title_text": { "type": "string" },
+          "summary_text": { "type": "string" },
+          "payload_uri_hash": { "type": ["string", "null"] },
+          "parent_memory_ids": { "type": ["array", "null"], "items": { "type": "string" } },
+          "edge_types": { "type": ["array", "null"], "items": { "type": "string" } },
+          "access_policy_hash": { "type": ["string", "null"] },
+          "declared_rights_hash": { "type": ["string", "null"] },
+          "keyword_texts": { "type": ["array", "null"], "items": { "type": "string" } }
+        }
+      },
+
+      "DagDbIntakeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "memory_id", "receipt_hash", "validation_status", "council_status", "dag_finality_status", "risk_class", "risk_bp", "created_new", "title", "summary", "keywords"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_intake_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "memory_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "dag_finality_status": { "$ref": "#/components/schemas/DagFinalityStatus" },
+          "risk_class": { "$ref": "#/components/schemas/RiskClass" },
+          "risk_bp": { "type": "integer", "minimum": 0 },
+          "created_new": { "type": "boolean" },
+          "title": { "$ref": "#/components/schemas/SafeMetadata" },
+          "summary": { "$ref": "#/components/schemas/SafeMetadata" },
+          "keywords": { "type": "array", "items": { "$ref": "#/components/schemas/SafeMetadata" } },
+          "validation_report_id": { "type": ["string", "null"] },
+          "council_decision_id": { "type": ["string", "null"] },
+          "duplicate_of_memory_id": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbRouteResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "route_id", "receipt_hash", "validation_status", "council_status", "route_status", "dag_finality_status", "selected_memory_ids", "route_score_bp", "token_budget", "token_estimate", "stale_at", "created_new"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_route_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "route_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "route_status": { "$ref": "#/components/schemas/RouteStatus" },
+          "dag_finality_status": { "$ref": "#/components/schemas/DagFinalityStatus" },
+          "selected_memory_ids": { "type": "array", "items": { "type": "string" } },
+          "route_score_bp": { "type": "integer", "minimum": 0 },
+          "token_budget": { "type": "integer", "minimum": 0 },
+          "token_estimate": { "type": "integer", "minimum": 0 },
+          "stale_at": { "type": "string" },
+          "created_new": { "type": "boolean" },
+          "validation_report_id": { "type": ["string", "null"] },
+          "council_decision_id": { "type": ["string", "null"] },
+          "rejected_memory_ids": { "type": ["array", "null"], "items": { "type": "string" } }
+        }
+      },
+
+      "DagDbContextPacketResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "context_packet_id", "route_id", "receipt_hash", "validation_status", "council_status", "dag_finality_status", "memory_refs", "packet_hash", "token_budget", "token_estimate", "created_new"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_context_packet_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "context_packet_id": { "type": "string" },
+          "route_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "dag_finality_status": { "$ref": "#/components/schemas/DagFinalityStatus" },
+          "memory_refs": { "type": "array", "items": { "$ref": "#/components/schemas/ContextPacketMemoryRef" } },
+          "packet_hash": { "type": "string" },
+          "token_budget": { "type": "integer", "minimum": 0 },
+          "token_estimate": { "type": "integer", "minimum": 0 },
+          "created_new": { "type": "boolean" },
+          "validation_report_id": { "type": ["string", "null"] },
+          "council_decision_id": { "type": ["string", "null"] },
+          "context_packet_mode": { "type": "string" },
+          "selection_warning": { "type": "string" },
+          "layered_mode": { "type": "string" },
+          "selected_layers": { "type": "array", "items": { "$ref": "#/components/schemas/ContextPacketLayerRef" } },
+          "selected_layer_edges": { "type": "array", "items": { "$ref": "#/components/schemas/ContextPacketLayerEdgeRef" } },
+          "layer_budget_report": { "$ref": "#/components/schemas/ContextPacketLayerBudgetReport" },
+          "flat_fallback_used": { "type": "boolean" },
+          "layered_status": { "type": "string" },
+          "selected_graph_edges": { "type": "array", "items": { "$ref": "#/components/schemas/DagDbSelectedGraphEdgeRef" } },
+          "citation_refs": { "type": "array", "items": { "$ref": "#/components/schemas/DagDbContextPacketCitationRef" } },
+          "packet_metrics": { "$ref": "#/components/schemas/DagDbContextPacketMetrics" },
+          "boundaries": { "$ref": "#/components/schemas/DagDbContextPacketBoundaries" },
+          "packet_markdown": { "type": "string" }
+        }
+      },
+
+      "DagDbValidateResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "validation_report_id", "subject_kind", "subject_id", "receipt_hash", "validation_status", "council_status", "risk_class", "risk_bp", "decision", "created_new"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_validate_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "validation_report_id": { "type": "string" },
+          "subject_kind": { "$ref": "#/components/schemas/SubjectKind" },
+          "subject_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "risk_class": { "$ref": "#/components/schemas/RiskClass" },
+          "risk_bp": { "type": "integer", "minimum": 0 },
+          "decision": { "$ref": "#/components/schemas/ValidationDecision" },
+          "created_new": { "type": "boolean" },
+          "council_decision_id": { "type": ["string", "null"] },
+          "contradictory_report_ids": { "type": ["array", "null"], "items": { "type": "string" } },
+          "notes": { "oneOf": [ { "$ref": "#/components/schemas/SafeMetadata" }, { "type": "null" } ] }
+        }
+      },
+
+      "DagDbWritebackResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "memory_id", "receipt_hash", "validation_status", "council_status", "dag_finality_status", "risk_class", "risk_bp", "created_new"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_writeback_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "memory_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "dag_finality_status": { "$ref": "#/components/schemas/DagFinalityStatus" },
+          "risk_class": { "$ref": "#/components/schemas/RiskClass" },
+          "risk_bp": { "type": "integer", "minimum": 0 },
+          "created_new": { "type": "boolean" },
+          "validation_report_id": { "type": ["string", "null"] },
+          "council_decision_id": { "type": ["string", "null"] },
+          "summary": { "oneOf": [ { "$ref": "#/components/schemas/SafeMetadata" }, { "type": "null" } ] },
+          "keywords": { "type": ["array", "null"], "items": { "$ref": "#/components/schemas/SafeMetadata" } },
+          "target_layer_path": { "type": "string" },
+          "target_layer_depth": { "type": "integer", "minimum": 0 },
+          "target_layer_reason": { "type": "string" },
+          "created_child_layer_id": { "type": "string" },
+          "layered_writeback_status": { "type": "string" }
+        }
+      },
+
+      "DagDbImportResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "operation_id", "tenant_id", "namespace", "idempotency_key", "db_set_version", "import_status", "source_hash", "imported_record_count", "non_claims"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_import_response_v1" },
+          "operation_id": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "db_set_version": { "type": "string" },
+          "import_status": { "type": "string" },
+          "import_receipt_id": { "type": ["string", "null"] },
+          "source_hash": { "type": "string" },
+          "imported_record_count": { "type": "integer", "minimum": 0 },
+          "receipt_path": { "type": ["string", "null"] },
+          "non_claims": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+
+      "DagDbExportResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "operation_id", "tenant_id", "namespace", "idempotency_key", "db_set_version", "export_status", "exported_record_count", "non_claims"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_export_response_v1" },
+          "operation_id": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "db_set_version": { "type": "string" },
+          "export_status": { "type": "string" },
+          "export_artifact_id": { "type": ["string", "null"] },
+          "export_hash": { "type": ["string", "null"] },
+          "exported_record_count": { "type": "integer", "minimum": 0 },
+          "report_path": { "type": ["string", "null"] },
+          "non_claims": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+
+      "DagDbTrustCheckResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "credential_id", "safety_score_id", "receipt_hash", "validation_status", "council_status", "credential_status", "total_score_bp", "created_new"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_trust_check_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "credential_id": { "type": "string" },
+          "safety_score_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "credential_status": { "$ref": "#/components/schemas/CredentialStatus" },
+          "total_score_bp": { "type": "integer", "minimum": 0 },
+          "created_new": { "type": "boolean" },
+          "block_reason": { "type": ["string", "null"] },
+          "expires_at": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbCouncilDecisionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "idempotency_key", "decision_id", "subject_kind", "subject_id", "receipt_hash", "validation_status", "council_status", "decision_status", "approved_scope_hash", "risk_class", "expires_at", "created_new"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_council_decision_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "decision_id": { "type": "string" },
+          "subject_kind": { "$ref": "#/components/schemas/SubjectKind" },
+          "subject_id": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "decision_status": { "$ref": "#/components/schemas/CouncilDecisionStatus" },
+          "approved_scope_hash": { "type": "string" },
+          "risk_class": { "$ref": "#/components/schemas/RiskClass" },
+          "expires_at": { "type": "string" },
+          "created_new": { "type": "boolean" },
+          "validation_report_id": { "type": ["string", "null"] },
+          "route_id": { "type": ["string", "null"] },
+          "context_packet_id": { "type": ["string", "null"] },
+          "notes": { "oneOf": [ { "$ref": "#/components/schemas/SafeMetadata" }, { "type": "null" } ] }
+        }
+      },
+
+      "DagDbReceiptLookupResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "receipt_hash", "subject_kind", "subject_id", "prev_receipt_hash", "seq", "event_type", "actor_did", "event_hlc", "created_at"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_receipt_lookup_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "receipt_hash": { "type": "string" },
+          "subject_kind": { "$ref": "#/components/schemas/SubjectKind" },
+          "subject_id": { "type": "string" },
+          "prev_receipt_hash": { "type": "string" },
+          "seq": { "type": "integer", "minimum": 0 },
+          "event_type": { "$ref": "#/components/schemas/ReceiptEventType" },
+          "actor_did": { "type": "string" },
+          "event_hlc": { "type": "string" },
+          "created_at": { "type": "string" },
+          "receipt_body": { "type": ["object", "null"] },
+          "validation_report_id": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbCatalogLookupResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "catalog_id", "catalog_level", "title", "summary", "keywords", "status", "validation_status", "council_status", "dag_finality_status", "latest_receipt_hash"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_catalog_lookup_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "catalog_id": { "type": "string" },
+          "catalog_level": { "type": "integer", "minimum": 0 },
+          "title": { "$ref": "#/components/schemas/SafeMetadata" },
+          "summary": { "$ref": "#/components/schemas/SafeMetadata" },
+          "keywords": { "type": "array", "items": { "$ref": "#/components/schemas/SafeMetadata" } },
+          "status": { "$ref": "#/components/schemas/MemoryStatus" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "dag_finality_status": { "$ref": "#/components/schemas/DagFinalityStatus" },
+          "latest_receipt_hash": { "type": "string" },
+          "memory_id": { "type": ["string", "null"] },
+          "parent_catalog_id": { "type": ["string", "null"] },
+          "children": { "type": ["array", "null"], "items": { "$ref": "#/components/schemas/CatalogEntryResponse" } },
+          "routes": { "type": ["array", "null"], "items": { "type": "string" } }
+        }
+      },
+
+      "DagDbRouteLookupResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "tenant_id", "namespace", "route_id", "route_status", "validation_status", "council_status", "dag_finality_status", "selected_memory_ids", "route_score_bp", "token_budget", "token_estimate", "stale_at", "latest_receipt_hash"],
+        "properties": {
+          "schema_version": { "type": "string", "const": "dagdb_route_lookup_response_v1" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "route_id": { "type": "string" },
+          "route_status": { "$ref": "#/components/schemas/RouteStatus" },
+          "validation_status": { "$ref": "#/components/schemas/ValidationStatus" },
+          "council_status": { "$ref": "#/components/schemas/CouncilReviewStatus" },
+          "dag_finality_status": { "$ref": "#/components/schemas/DagFinalityStatus" },
+          "selected_memory_ids": { "type": "array", "items": { "type": "string" } },
+          "route_score_bp": { "type": "integer", "minimum": 0 },
+          "token_budget": { "type": "integer", "minimum": 0 },
+          "token_estimate": { "type": "integer", "minimum": 0 },
+          "stale_at": { "type": "string" },
+          "latest_receipt_hash": { "type": "string" },
+          "memory_refs": { "type": ["array", "null"], "items": { "$ref": "#/components/schemas/ContextPacketMemoryRef" } },
+          "validation_report": { "oneOf": [ { "$ref": "#/components/schemas/DagDbValidateResponse" }, { "type": "null" } ] }
+        }
+      },
+
+      "DagDbRouteRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "requesting_agent_did", "task_signature_hash", "approved_scope_hash", "token_budget"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "requesting_agent_did": { "type": "string" },
+          "task_signature_hash": { "type": "string" },
+          "approved_scope_hash": { "type": "string" },
+          "token_budget": { "type": "integer", "minimum": 0 },
+          "start_catalog_id": { "type": ["string", "null"] },
+          "requested_memory_ids": { "type": ["array", "null"], "items": { "type": "string" } },
+          "credential_id": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbContextPacketRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "request_id", "route_id", "task_hash", "requesting_agent_did", "token_budget", "force_revalidate", "max_memory_refs"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "request_id": { "type": "string" },
+          "route_id": { "type": "string" },
+          "task_hash": { "type": "string" },
+          "requesting_agent_did": { "type": "string" },
+          "token_budget": { "type": "integer", "minimum": 0 },
+          "force_revalidate": { "type": "boolean" },
+          "max_memory_refs": { "type": "integer", "minimum": 0 }
+        }
+      },
+
+      "DagDbValidateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "subject_kind", "subject_id", "validator_did"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "subject_kind": { "$ref": "#/components/schemas/SubjectKind" },
+          "subject_id": { "type": "string" },
+          "validator_did": { "type": "string" },
+          "requested_status": { "oneOf": [ { "$ref": "#/components/schemas/ValidationStatus" }, { "type": "null" } ] },
+          "council_decision_id": { "type": ["string", "null"] },
+          "validation_notes_text": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbWritebackRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "requesting_agent_did", "parent_memory_ids", "answer_hash", "route_id", "context_packet_id", "validation_report_id"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "requesting_agent_did": { "type": "string" },
+          "parent_memory_ids": { "type": "array", "items": { "type": "string" } },
+          "answer_hash": { "type": "string" },
+          "route_id": { "type": "string" },
+          "context_packet_id": { "type": "string" },
+          "validation_report_id": { "type": "string" },
+          "summary_text": { "type": ["string", "null"] },
+          "citation_hashes": { "type": ["array", "null"], "items": { "type": "string" } },
+          "safety_score_id": { "type": ["string", "null"] },
+          "keyword_texts": { "type": ["array", "null"], "items": { "type": "string" } },
+          "knowledge_class": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbImportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "db_set_version", "source_hash", "requester_did", "import_report"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "db_set_version": { "type": "string" },
+          "source_hash": { "type": "string" },
+          "requester_did": { "type": "string" },
+          "import_report": { "type": "object" }
+        }
+      },
+
+      "DagDbExportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "db_set_version", "requester_did", "included_memory_ids", "included_graph_styles", "included_writeback_idempotency_keys", "include_preview_context"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "db_set_version": { "type": "string" },
+          "requester_did": { "type": "string" },
+          "included_memory_ids": { "type": "array", "items": { "type": "string" } },
+          "included_graph_styles": { "type": "array", "items": { "type": "string" } },
+          "included_writeback_idempotency_keys": { "type": "array", "items": { "type": "string" } },
+          "source_commit_or_repo_ref": { "type": ["string", "null"] },
+          "include_preview_context": { "type": "boolean" }
+        }
+      },
+
+      "DagDbTrustCheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "agent_did", "operator_did", "model_name", "model_version", "provider_or_builder", "requested_action", "requested_scope_hash", "purpose", "autonomy_level", "nonce", "expires_at", "signature"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "agent_did": { "type": "string" },
+          "operator_did": { "type": "string" },
+          "model_name": { "type": "string" },
+          "model_version": { "type": "string" },
+          "provider_or_builder": { "type": "string" },
+          "requested_action": { "type": "string" },
+          "requested_scope_hash": { "type": "string" },
+          "purpose": { "$ref": "#/components/schemas/ConsentPurpose" },
+          "autonomy_level": { "type": "string" },
+          "nonce": { "type": "string" },
+          "expires_at": { "type": "string" },
+          "signature": { "type": "string" },
+          "checkpoint_hash": { "type": ["string", "null"] },
+          "attestation_hash": { "type": ["string", "null"] },
+          "evidence_receipt_hashes": { "type": ["array", "null"], "items": { "type": "string" } },
+          "prior_trust_receipt_hash": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbCouncilDecisionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenant_id", "namespace", "idempotency_key", "subject_kind", "subject_id", "requested_action", "approved_scope_hash", "risk_class", "approver_did", "decision_source", "decision_status", "reason_code", "created_at", "expires_at"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "idempotency_key": { "type": "string" },
+          "subject_kind": { "$ref": "#/components/schemas/SubjectKind" },
+          "subject_id": { "type": "string" },
+          "requested_action": { "type": "string" },
+          "approved_scope_hash": { "type": "string" },
+          "risk_class": { "$ref": "#/components/schemas/RiskClass" },
+          "approver_did": { "type": "string" },
+          "decision_source": { "type": "string", "enum": ["human", "automated", "council"] },
+          "decision_status": { "$ref": "#/components/schemas/CouncilDecisionStatus" },
+          "reason_code": { "type": "string" },
+          "created_at": { "type": "string" },
+          "expires_at": { "type": "string" },
+          "validation_report_id": { "type": ["string", "null"] },
+          "route_id": { "type": ["string", "null"] },
+          "context_packet_id": { "type": ["string", "null"] },
+          "notes_text": { "type": ["string", "null"] }
+        }
+      },
+
+      "DagDbReceiptLookupRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["receipt_hash", "tenant_id", "namespace"],
+        "properties": {
+          "receipt_hash": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "include_body": { "type": ["boolean", "null"] }
+        }
+      },
+
+      "DagDbCatalogLookupRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["catalog_id", "tenant_id", "namespace"],
+        "properties": {
+          "catalog_id": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "include_children": { "type": ["boolean", "null"] },
+          "include_routes": { "type": ["boolean", "null"] }
+        }
+      },
+
+      "DagDbRouteLookupRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["route_id", "tenant_id", "namespace"],
+        "properties": {
+          "route_id": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "include_memory_refs": { "type": ["boolean", "null"] },
+          "include_validation": { "type": ["boolean", "null"] }
+        }
+      },
+
+      "ConsentPurpose": { "type": "string", "enum": ["retrieval", "validation", "writeback", "benchmark", "trust_check"] }
+    }
+  }
+}

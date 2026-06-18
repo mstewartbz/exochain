@@ -18,6 +18,7 @@
 
 pub mod authority;
 pub mod consent;
+pub mod dagdb;
 pub mod escalation;
 pub mod governance;
 pub mod identity;
@@ -144,6 +145,11 @@ impl ToolRegistry {
         self.register(messaging::send_encrypted_definition());
         self.register(messaging::receive_encrypted_definition());
         self.register(messaging::configure_death_trigger_definition());
+        // DAG DB tools (4)
+        self.register(dagdb::get_context_packet_definition());
+        self.register(dagdb::submit_writeback_definition());
+        self.register(dagdb::import_definition());
+        self.register(dagdb::export_definition());
     }
 
     /// Execute a tool by name with the given params and runtime context.
@@ -246,6 +252,11 @@ impl ToolRegistry {
             "exochain_configure_death_trigger" => {
                 Ok(messaging::execute_configure_death_trigger(params, context))
             }
+            // DAG DB
+            "dagdb_get_context_packet" => Ok(dagdb::execute_get_context_packet(params, context)),
+            "dagdb_submit_writeback" => Ok(dagdb::execute_submit_writeback(params, context)),
+            "dagdb_import" => Ok(dagdb::execute_import(params, context)),
+            "dagdb_export" => Ok(dagdb::execute_export(params, context)),
             _ => Err(McpError::ToolNotFound(name.to_string())),
         }
     }
@@ -271,7 +282,7 @@ mod tests {
     fn registry_registers_and_lists() {
         let registry = ToolRegistry::default();
         let tools = registry.list();
-        assert_eq!(tools.len(), 40, "expected 3+5+4+5+4+4+4+4+4+3 = 40 tools");
+        assert_eq!(tools.len(), 44, "expected 3+5+4+5+4+4+4+4+4+3+4 = 44 tools");
     }
 
     #[test]
@@ -293,6 +304,10 @@ mod tests {
         assert!(registry.get("exochain_propose_bailment").is_some());
         assert!(registry.get("exochain_create_decision").is_some());
         assert!(registry.get("exochain_adjudicate_action").is_some());
+        assert!(registry.get("dagdb_get_context_packet").is_some());
+        assert!(registry.get("dagdb_submit_writeback").is_some());
+        assert!(registry.get("dagdb_import").is_some());
+        assert!(registry.get("dagdb_export").is_some());
     }
 
     #[test]

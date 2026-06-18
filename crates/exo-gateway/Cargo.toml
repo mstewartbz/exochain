@@ -31,6 +31,11 @@ workspace = true
 [dependencies]
 decision-forum = { path = "../decision-forum" }
 exo-core = { path = "../exo-core" }
+exo-api = { path = "../exo-api" }
+exo-dag-db-core = { path = "../exo-dag-db-core" }
+exo-dag-db-domain = { path = "../exo-dag-db-domain" }
+exo-dag-db-exchange = { path = "../exo-dag-db-exchange" }
+exo-dag-db-postgres = { path = "../exo-dag-db-postgres", default-features = false, optional = true }
 exo-identity = { path = "../exo-identity" }
 exo-consent = { path = "../exo-consent" }
 exo-gatekeeper = { path = "../exo-gatekeeper" }
@@ -46,8 +51,8 @@ tokio = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
 rustls = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
+tower = { workspace = true, features = ["load-shed"] }
+tower-http = { workspace = true, features = ["timeout"] }
 sqlx = { workspace = true }
 hex = { workspace = true }
 percent-encoding = { workspace = true }
@@ -61,6 +66,11 @@ async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 async-stream = { workspace = true }
 
+[[bin]]
+name = "dagdb_writeback_sign"
+path = "src/bin/dagdb_writeback_sign.rs"
+required-features = ["production-db"]
+
 [features]
 ## Enable the production DB-backed adjudication context resolver.
 ##
@@ -68,7 +78,8 @@ async-stream = { workspace = true }
 ## `agent_roles`, `consent_records`, and `authority_chains` instead of returning
 ## the WO-009 deny-all scaffold.  The scaffold remains the default so that
 ## dev/test environments do not need a live database.
-production-db = []
+production-db = ["dep:exo-dag-db-postgres", "exo-dag-db-postgres/postgres"]
+postgres = ["production-db"]
 
 ## Enable the unaudited GraphQL API surface.
 ##
@@ -79,5 +90,7 @@ unaudited-gateway-graphql-api = []
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 sha2 = { workspace = true }
+bs58 = { workspace = true }

@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "field": "title",
+      "input": "Safe title",
+      "stored": {
+        "decision": "allow",
+        "text": "Safe title",
+        "redaction_codes": [],
+        "original_hash": "caac13844969e521bb8bfcf8bc706ad54bcce3e3f260368eda31bdb0542d00e1",
+        "truncated": false,
+        "byte_len": 10
+      }
+    },
+    {
+      "field": "summary",
+      "input": "Customer SSN 123-45-6789",
+      "stored": {
+        "decision": "redact",
+        "text": "Customer SSN [REDACTED_SSN]",
+        "redaction_codes": ["ssn"],
+        "original_hash": "48aa306587b49f46e0c3ae834dec774ec19cb70d0539ef5250e69152680c0708",
+        "truncated": false,
+        "byte_len": 24
+      }
+    },
+    {
+      "field": "summary",
+      "input": "Use card 4111 1111 1111 1111",
+      "stored": {
+        "decision": "redact",
+        "text": "Use card [REDACTED_CARD]",
+        "redaction_codes": ["card"],
+        "original_hash": "25c001e4e05ab4b43547d3d7278dd35efd2a4a9b0dc280c614dcf51f9588835b",
+        "truncated": false,
+        "byte_len": 28
+      }
+    },
+    {
+      "field": "receipt_free_text",
+      "input": "CONFIDENTIAL private customer PHI: patient detail",
+      "stored": {
+        "decision": "redact",
+        "text": "[REDACTED_CONFIDENTIAL] [REDACTED_PHI] [REDACTED_CUSTOMER_PRIVATE]",
+        "redaction_codes": ["confidential_marker", "phi", "customer_private"],
+        "original_hash": "ac513039817a1a1e82641222ee715b43df5d6a8a3b4146a6ad8cefc6e6696cd3",
+        "truncated": false,
+        "byte_len": 49
+      }
+    },
+    {
+      "field": "summary",
+      "input": "fn main() { println!(\"secret\"); }",
+      "stored": {
+        "decision": "reject",
+        "text": "[REDACTED_CODE_EXCERPT]",
+        "redaction_codes": ["code_excerpt"],
+        "original_hash": "ed2b33053b592b3f4edc77bf7af44f984b04ae5337de5dd90c63a8bab533fdbe",
+        "truncated": false,
+        "byte_len": 33
+      }
+    }
+  ]
+}

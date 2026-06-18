@@ -1,0 +1,616 @@
+{
+  "requests": {
+    "intake": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-intake-1",
+      "source_type": "public_web",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "payload_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "owner_did": "did:exo:owner",
+      "controller_did": "did:exo:controller",
+      "submitted_by_did": "did:exo:submitter",
+      "consent_purpose": "retrieval",
+      "requested_action": "memory:intake",
+      "title_text": "Safe public title",
+      "summary_text": "Safe public summary",
+      "payload_uri_hash": null,
+      "parent_memory_ids": ["3333333333333333333333333333333333333333333333333333333333333333"],
+      "edge_types": ["parent"],
+      "access_policy_hash": null,
+      "declared_rights_hash": null,
+      "keyword_texts": ["public", "safe"]
+    },
+    "route": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-route-1",
+      "requesting_agent_did": "did:exo:agent",
+      "task_signature_hash": "1010101010101010101010101010101010101010101010101010101010101010",
+      "approved_scope_hash": "2020202020202020202020202020202020202020202020202020202020202020",
+      "token_budget": 4096,
+      "start_catalog_id": null,
+      "requested_memory_ids": ["3030303030303030303030303030303030303030303030303030303030303030"],
+      "credential_id": null
+    },
+    "context_packet": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-packet-1",
+      "request_id": "request-1",
+      "route_id": "4040404040404040404040404040404040404040404040404040404040404040",
+      "task_hash": "5050505050505050505050505050505050505050505050505050505050505050",
+      "requesting_agent_did": "did:exo:agent",
+      "token_budget": 2048,
+      "force_revalidate": false,
+      "max_memory_refs": 8
+    },
+    "validate": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-validate-1",
+      "subject_kind": "memory",
+      "subject_id": "6060606060606060606060606060606060606060606060606060606060606060",
+      "validator_did": "did:exo:validator",
+      "requested_status": "passed",
+      "council_decision_id": null,
+      "validation_notes_text": "Safe validation notes"
+    },
+    "writeback": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-writeback-1",
+      "requesting_agent_did": "did:exo:agent",
+      "parent_memory_ids": ["7070707070707070707070707070707070707070707070707070707070707070"],
+      "answer_hash": "8080808080808080808080808080808080808080808080808080808080808080",
+      "route_id": "9090909090909090909090909090909090909090909090909090909090909090",
+      "context_packet_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "validation_report_id": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "summary_text": "Safe answer summary",
+      "citation_hashes": ["c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"],
+      "safety_score_id": null,
+      "keyword_texts": ["answer"]
+    },
+    "trust_check": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-trust-1",
+      "agent_did": "did:exo:agent",
+      "operator_did": "did:exo:operator",
+      "model_name": "exo-agent",
+      "model_version": "1.0.0",
+      "provider_or_builder": "exo",
+      "requested_action": "memory:route",
+      "requested_scope_hash": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+      "purpose": "trust_check",
+      "autonomy_level": "supervised",
+      "nonce": "nonce-1",
+      "expires_at": "2000:0",
+      "signature": "signature-bytes",
+      "checkpoint_hash": null,
+      "attestation_hash": null,
+      "evidence_receipt_hashes": ["e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"],
+      "prior_trust_receipt_hash": null
+    },
+    "council_decision": {
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-council-1",
+      "subject_kind": "memory",
+      "subject_id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "requested_action": "memory:routable",
+      "approved_scope_hash": "1212121212121212121212121212121212121212121212121212121212121212",
+      "risk_class": "R3",
+      "approver_did": "did:exo:council",
+      "decision_source": "human",
+      "decision_status": "approved",
+      "reason_code": "operator_approved",
+      "created_at": "1000:0",
+      "expires_at": "2000:0",
+      "validation_report_id": null,
+      "route_id": null,
+      "context_packet_id": null,
+      "notes_text": "Safe approval notes"
+    },
+    "receipt_lookup": {
+      "receipt_hash": "abababababababababababababababababababababababababababababababab",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "include_body": true
+    },
+    "catalog_lookup": {
+      "catalog_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "include_children": true,
+      "include_routes": false
+    },
+    "route_lookup": {
+      "route_id": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "include_memory_refs": true,
+      "include_validation": false
+    }
+  },
+  "responses": {
+    "intake": {
+      "schema_version": "dagdb_intake_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-intake-1",
+      "memory_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "receipt_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "validation_status": "pending",
+      "council_status": "not_required",
+      "dag_finality_status": "pending",
+      "risk_class": "R1",
+      "risk_bp": 1200,
+      "created_new": true,
+      "title": {
+        "decision": "allow",
+        "text": "Safe public title",
+        "redaction_codes": [],
+        "original_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "truncated": false,
+        "byte_len": 17
+      },
+      "summary": {
+        "decision": "allow",
+        "text": "Safe public summary",
+        "redaction_codes": [],
+        "original_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "truncated": false,
+        "byte_len": 19
+      },
+      "keywords": [
+        {
+          "decision": "allow",
+          "text": "public",
+          "redaction_codes": [],
+          "original_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "truncated": false,
+          "byte_len": 6
+        }
+      ],
+      "validation_report_id": null,
+      "council_decision_id": null,
+      "duplicate_of_memory_id": null
+    },
+    "route": {
+      "schema_version": "dagdb_route_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-route-1",
+      "route_id": "4040404040404040404040404040404040404040404040404040404040404040",
+      "receipt_hash": "4141414141414141414141414141414141414141414141414141414141414141",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "route_status": "active",
+      "dag_finality_status": "committed",
+      "selected_memory_ids": ["3030303030303030303030303030303030303030303030303030303030303030"],
+      "route_score_bp": 8600,
+      "token_budget": 4096,
+      "token_estimate": 1024,
+      "stale_at": "86401000:0",
+      "created_new": true,
+      "validation_report_id": null,
+      "council_decision_id": null,
+      "rejected_memory_ids": []
+    },
+    "context_packet": {
+      "schema_version": "dagdb_context_packet_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-packet-1",
+      "context_packet_id": "5050505050505050505050505050505050505050505050505050505050505050",
+      "route_id": "4040404040404040404040404040404040404040404040404040404040404040",
+      "receipt_hash": "5151515151515151515151515151515151515151515151515151515151515151",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "dag_finality_status": "committed",
+      "memory_refs": [
+        {
+          "memory_id": "3030303030303030303030303030303030303030303030303030303030303030",
+          "title": {
+            "decision": "allow",
+            "text": "Safe public title",
+            "redaction_codes": [],
+            "original_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "truncated": false,
+            "byte_len": 17
+          },
+          "summary": {
+            "decision": "allow",
+            "text": "Safe public summary",
+            "redaction_codes": [],
+            "original_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "truncated": false,
+            "byte_len": 19
+          },
+          "keywords": [],
+          "latest_receipt_hash": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      ],
+      "packet_hash": "5252525252525252525252525252525252525252525252525252525252525252",
+      "token_budget": 2048,
+      "token_estimate": 800,
+      "created_new": true,
+      "validation_report_id": null,
+      "council_decision_id": null,
+      "selected_graph_edges": [
+        {
+          "graph_edge_id": "5353535353535353535353535353535353535353535353535353535353535353",
+          "from_memory_id": "3030303030303030303030303030303030303030303030303030303030303030",
+          "to_memory_id": "3131313131313131313131313131313131313131313131313131313131313131",
+          "edge_kind": "depends_on",
+          "graph_style": "context_packet_graph",
+          "selection_reason": "edge_selected_for_packet"
+        }
+      ],
+      "citation_refs": [
+        {
+          "citation_ref": "citation:packet:1",
+          "memory_id": "3030303030303030303030303030303030303030303030303030303030303030",
+          "citation_status": "repository_test_locator"
+        }
+      ],
+      "packet_metrics": {
+        "token_budget": 2048,
+        "selected_token_estimate": 800,
+        "selected_memory_ref_count": 1,
+        "selected_graph_edge_count": 1,
+        "citation_ref_count": 1,
+        "end_to_end_savings_status": "not_claimed_repository_test_level",
+        "cost_savings_status": "not_claimed_repository_test_level"
+      },
+      "boundaries": {
+        "repository_test_level_only": true,
+        "production_runtime": "not_approved",
+        "default_context_replacement": "not_claimed",
+        "citation_locator_status": "repository_test_level",
+        "billing_savings": "not_claimed"
+      },
+      "packet_markdown": "# Context Packet\n\nRepository-test-level packet."
+    },
+    "validate": {
+      "schema_version": "dagdb_validate_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-validate-1",
+      "validation_report_id": "6060606060606060606060606060606060606060606060606060606060606060",
+      "subject_kind": "memory",
+      "subject_id": "3030303030303030303030303030303030303030303030303030303030303030",
+      "receipt_hash": "6161616161616161616161616161616161616161616161616161616161616161",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "risk_class": "R1",
+      "risk_bp": 1200,
+      "decision": "allow",
+      "created_new": true,
+      "council_decision_id": null,
+      "contradictory_report_ids": [],
+      "notes": {
+        "decision": "allow",
+        "text": "Safe validation notes",
+        "redaction_codes": [],
+        "original_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "truncated": false,
+        "byte_len": 21
+      }
+    },
+    "writeback": {
+      "schema_version": "dagdb_writeback_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-writeback-1",
+      "memory_id": "7070707070707070707070707070707070707070707070707070707070707070",
+      "receipt_hash": "7171717171717171717171717171717171717171717171717171717171717171",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "dag_finality_status": "pending",
+      "risk_class": "R1",
+      "risk_bp": 1200,
+      "created_new": true,
+      "validation_report_id": "6060606060606060606060606060606060606060606060606060606060606060",
+      "council_decision_id": null,
+      "summary": {
+        "decision": "allow",
+        "text": "Safe answer summary",
+        "redaction_codes": [],
+        "original_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "truncated": false,
+        "byte_len": 19
+      },
+      "keywords": []
+    },
+    "import": {
+      "schema_version": "dagdb_import_response_v1",
+      "operation_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-import-1",
+      "db_set_version": "dag_db-project_memory_v3",
+      "import_status": "imported",
+      "import_receipt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "imported_record_count": 3,
+      "receipt_path": null,
+      "non_claims": ["repository_test_level_only"]
+    },
+    "export": {
+      "schema_version": "dagdb_export_response_v1",
+      "operation_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-export-1",
+      "db_set_version": "dag_db-project_memory_v3",
+      "export_status": "built",
+      "export_artifact_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+      "export_hash": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+      "exported_record_count": 3,
+      "report_path": null,
+      "non_claims": ["repository_test_level_only"]
+    },
+    "trust_check": {
+      "schema_version": "dagdb_trust_check_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-trust-1",
+      "credential_id": "8080808080808080808080808080808080808080808080808080808080808080",
+      "safety_score_id": "8181818181818181818181818181818181818181818181818181818181818181",
+      "receipt_hash": "8282828282828282828282828282828282828282828282828282828282828282",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "credential_status": "active",
+      "total_score_bp": 8200,
+      "created_new": true,
+      "block_reason": null,
+      "expires_at": "2000:0"
+    },
+    "council_decision": {
+      "schema_version": "dagdb_council_decision_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "idempotency_key": "idem-council-1",
+      "decision_id": "9090909090909090909090909090909090909090909090909090909090909090",
+      "subject_kind": "memory",
+      "subject_id": "3030303030303030303030303030303030303030303030303030303030303030",
+      "receipt_hash": "9191919191919191919191919191919191919191919191919191919191919191",
+      "validation_status": "needs_council",
+      "council_status": "approved",
+      "decision_status": "approved",
+      "approved_scope_hash": "1212121212121212121212121212121212121212121212121212121212121212",
+      "risk_class": "R3",
+      "expires_at": "2000:0",
+      "created_new": true,
+      "validation_report_id": null,
+      "route_id": null,
+      "context_packet_id": null,
+      "notes": {
+        "decision": "allow",
+        "text": "Safe approval notes",
+        "redaction_codes": [],
+        "original_hash": "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+        "truncated": false,
+        "byte_len": 19
+      }
+    },
+    "receipt_lookup": {
+      "schema_version": "dagdb_receipt_lookup_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "receipt_hash": "abababababababababababababababababababababababababababababababab",
+      "subject_kind": "memory",
+      "subject_id": "3030303030303030303030303030303030303030303030303030303030303030",
+      "prev_receipt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "seq": 1,
+      "event_type": "intake_created",
+      "actor_did": "did:exo:agent",
+      "event_hlc": "1000:0",
+      "created_at": "1000:0",
+      "receipt_body": {
+        "title": {
+          "decision": "allow",
+          "text": "Safe public title",
+          "redaction_codes": [],
+          "original_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "truncated": false,
+          "byte_len": 17
+        }
+      },
+      "validation_report_id": null
+    },
+    "catalog_lookup": {
+      "schema_version": "dagdb_catalog_lookup_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "catalog_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "catalog_level": 1,
+      "title": {
+        "decision": "allow",
+        "text": "Safe catalog title",
+        "redaction_codes": [],
+        "original_hash": "abababababababababababababababababababababababababababababababab",
+        "truncated": false,
+        "byte_len": 18
+      },
+      "summary": {
+        "decision": "allow",
+        "text": "Safe catalog summary",
+        "redaction_codes": [],
+        "original_hash": "babababababababababababababababababababababababababababababababa",
+        "truncated": false,
+        "byte_len": 20
+      },
+      "keywords": [],
+      "status": "routable",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "dag_finality_status": "committed",
+      "latest_receipt_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "memory_id": "3030303030303030303030303030303030303030303030303030303030303030",
+      "parent_catalog_id": null,
+      "children": [],
+      "routes": []
+    },
+    "route_lookup": {
+      "schema_version": "dagdb_route_lookup_response_v1",
+      "tenant_id": "tenant-a",
+      "namespace": "primary",
+      "route_id": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "route_status": "active",
+      "validation_status": "passed",
+      "council_status": "not_required",
+      "dag_finality_status": "committed",
+      "selected_memory_ids": ["3030303030303030303030303030303030303030303030303030303030303030"],
+      "route_score_bp": 8600,
+      "token_budget": 4096,
+      "token_estimate": 1024,
+      "stale_at": "86401000:0",
+      "latest_receipt_hash": "4141414141414141414141414141414141414141414141414141414141414141",
+      "memory_refs": [],
+      "validation_report": null
+    }
+  },
+  "graph": {
+    "memory_candidate": {
+      "type": "MemoryCandidate",
+      "source_request_id": "request-graph-1",
+      "candidate_kind": "decision",
+      "summary": "Keep graph organization in the system-side placement controller.",
+      "full_output_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+      "parent_context_packet_id": "0202020202020202020202020202020202020202020202020202020202020202",
+      "evidence_receipts": ["0303030303030303030303030303030303030303030303030303030303030303"],
+      "risk_hint": "R1",
+      "allowed_future_uses": ["routing", "audit"],
+      "reason_to_remember": "The task agent must not allocate memory graph nodes."
+    },
+    "similarity_result": {
+      "candidate_memory_id": "0404040404040404040404040404040404040404040404040404040404040404",
+      "similarity_type": "near_duplicate",
+      "similarity_bp": 9200,
+      "matched_fields": ["payload_hash", "summary"],
+      "reason": "same payload family and overlapping summary"
+    },
+    "canonicalization_decision": {
+      "decision_id": "0505050505050505050505050505050505050505050505050505050505050505",
+      "input_memory_id": "0606060606060606060606060606060606060606060606060606060606060606",
+      "canonical_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+      "matched_memory_ids": ["0707070707070707070707070707070707070707070707070707070707070707"],
+      "decision_kind": "near_duplicate",
+      "decision_reason": "near duplicate links to canonical memory without overwriting it",
+      "confidence_bp": 9200,
+      "risk_class": "R1",
+      "validator_status": "passed",
+      "required_edges_to_create": [
+        {
+          "from_memory_id": "0606060606060606060606060606060606060606060606060606060606060606",
+          "to_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+          "edge_kind": "near_duplicate_of"
+        }
+      ],
+      "receipt_intent": "canonicalization_decided",
+      "receipt_id": null
+    },
+    "graph_view": {
+      "view_id": "0808080808080808080808080808080808080808080808080808080808080808",
+      "graph_style": "routing_view_graph",
+      "source_root_id": "0707070707070707070707070707070707070707070707070707070707070707",
+      "included_node_ids": [
+        "0707070707070707070707070707070707070707070707070707070707070707",
+        "0909090909090909090909090909090909090909090909090909090909090909"
+      ],
+      "included_edge_ids": ["0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"],
+      "view_type": "routing_view",
+      "topological_order": [
+        "0707070707070707070707070707070707070707070707070707070707070707",
+        "0909090909090909090909090909090909090909090909090909090909090909"
+      ],
+      "transitive_reduction_edges": [
+        {
+          "from_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+          "to_memory_id": "0909090909090909090909090909090909090909090909090909090909090909",
+          "edge_kind": "depends_on"
+        }
+      ],
+      "omitted_edges": [
+        {
+          "from_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+          "to_memory_id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "edge_kind": "derived_from"
+        }
+      ],
+      "reason_edges_omitted": ["provenance edge available from source truth"]
+    },
+    "route_invalidation_receipt": {
+      "route_id": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+      "affected_memory_ids": ["0707070707070707070707070707070707070707070707070707070707070707"],
+      "trigger_type": "superseded",
+      "triggering_receipt_id": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+      "prior_route_status": "active",
+      "new_route_status": "superseded",
+      "invalidation_reason": "selected memory was superseded",
+      "created_at": "3000:0",
+      "validator_id": "did:exo:validator",
+      "validation_report_id": null,
+      "receipt_intent": "route_invalidated",
+      "receipt_id": null
+    },
+    "placement_result": {
+      "input_memory_id": "0606060606060606060606060606060606060606060606060606060606060606",
+      "canonicalization_decision": {
+        "decision_id": "0505050505050505050505050505050505050505050505050505050505050505",
+        "input_memory_id": "0606060606060606060606060606060606060606060606060606060606060606",
+        "canonical_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+        "matched_memory_ids": ["0707070707070707070707070707070707070707070707070707070707070707"],
+        "decision_kind": "near_duplicate",
+        "decision_reason": "near duplicate links to canonical memory without overwriting it",
+        "confidence_bp": 9200,
+        "risk_class": "R1",
+        "validator_status": "passed",
+        "required_edges_to_create": [
+          {
+            "from_memory_id": "0606060606060606060606060606060606060606060606060606060606060606",
+            "to_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+            "edge_kind": "near_duplicate_of"
+          }
+        ],
+        "receipt_intent": "canonicalization_decided",
+        "receipt_id": null
+      },
+      "similarity_results": [
+        {
+          "candidate_memory_id": "0404040404040404040404040404040404040404040404040404040404040404",
+          "similarity_type": "near_duplicate",
+          "similarity_bp": 9200,
+          "matched_fields": ["payload_hash", "summary"],
+          "reason": "same payload family and overlapping summary"
+        }
+      ],
+      "proposed_canonical_node": null,
+      "edges_to_create": [
+        {
+          "from_memory_id": "0606060606060606060606060606060606060606060606060606060606060606",
+          "to_memory_id": "0707070707070707070707070707070707070707070707070707070707070707",
+          "edge_kind": "near_duplicate_of"
+        }
+      ],
+      "catalog_updates": ["semantic_catalog_graph"],
+      "graph_views_to_refresh": ["routing_view_graph", "context_packet_graph"],
+      "route_invalidations": [],
+      "validator_report": "placement_validated",
+      "receipt_id": null,
+      "receipt_intent": "placement_completed"
+    }
+  },
+  "errors": {
+    "tenant_scope_mismatch": {
+      "error_code": "tenant_scope_mismatch",
+      "message": "tenant scope does not match authenticated identity",
+      "receipt_hash": null,
+      "validation_report_id": null,
+      "requires_council_review": false
+    }
+  }
+}

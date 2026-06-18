@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Traceability Matrix
 
-Updated 2026-05-09 after EXOCHAIN-REM-009 attestation true-up. Maps every spec requirement to code, tests, and status.
+Updated 2026-06-18 after DAG DB opt-in adapter gate review. Maps every spec requirement to code, tests, and status.
 
 **Status key:** 🟢 Implemented (tests passing) | 🟡 Partial | 🔴 Planned
 
@@ -162,6 +162,17 @@ Updated 2026-05-09 after EXOCHAIN-REM-009 attestation true-up. Maps every spec r
 | **MON-010** | Continuous-governance workflow DAG definition | `.archon/workflows/exochain-continuous-governance.yaml` | 🟢 (pre-existing) |
 | **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
 | **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
+
+## DAG DB Opt-In Adapter (GAP-012 PR-body candidate)
+
+GAP-012 is referenced by `README.md` and `INTEGRATION.md`; this repository copy
+does not contain a `GAP-012` section in `GAP-REGISTRY.md`. The spec section below
+is therefore a PR-body candidate from current repo docs and requires maintainer
+confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
+
+| Req | Spec Candidate | Requirement | Module / Evidence | Status |
+|---|---|---|---|---|
+| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | Opt-in DAG DB writeback must fail closed unless production DB authority is configured and each write passes tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export fail closed pending distinct import/export consent. | `exochain/exochain#694`; `INTEGRATION.md` DAG DB Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/crate-restructure/slice-status.md` | 🟡 Partial |
 
 ## Autonomous Volition Credential (AVC) Layer
 

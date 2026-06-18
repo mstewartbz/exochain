@@ -27,7 +27,7 @@ use exo_identity::{did::DidDocument, registry::MAX_LOCAL_DID_REGISTRY_DOCUMENTS}
 use serde_json::Value as JsonValue;
 use sqlx::{
     Executor, Postgres, Row, Transaction,
-    postgres::{PgPool, PgPoolOptions},
+    postgres::{PgConnectOptions, PgPool, PgPoolOptions},
 };
 use thiserror::Error;
 
@@ -41,6 +41,11 @@ const BLOCKING_CONFLICT_NATURE_PATTERNS: [&str; 4] =
 
 #[derive(Debug, Error)]
 pub enum DbInitError {
+    #[error("failed to parse the PostgreSQL connection string")]
+    ParseUrl {
+        #[source]
+        source: sqlx::Error,
+    },
     #[error("failed to connect to PostgreSQL")]
     Connect {
         #[source]
@@ -50,6 +55,15 @@ pub enum DbInitError {
     Migrate {
         #[source]
         source: sqlx::migrate::MigrateError,
+    },
+    /// The DAG DB schema migrations (run via the dag-db ledgered migrator) failed.
+    /// Startup aborts so the gateway never serves DAG DB routes against an
+    /// unprovisioned schema.
+    #[cfg(feature = "production-db")]
+    #[error("failed to provision the DAG DB schema")]
+    DagDbMigrate {
+        #[source]
+        source: exo_dag_db_postgres::postgres::DagDbPostgresError,
     },
 }
 
@@ -162,13 +176,38 @@ pub struct GatewayIdentityErasureSummary {
 // ---------------------------------------------------------------------------
 
 /// Create a connection pool and run migrations.
+///
+/// The gateway's own migrations are applied first, against the default `public`
+/// schema. When the `production-db` feature is active, the DAG DB schema is then
+/// provisioned by its own ledgered migrator into the dedicated
+/// `exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA` schema, and every pooled
+/// connection's `search_path` includes that schema so bare-named DAG DB queries
+/// resolve. If the DAG DB migration fails, startup aborts (fail closed) so the
+/// gateway never serves DAG DB routes against an unprovisioned schema.
 pub async fn init_pool(database_url: &str) -> Result<PgPool, DbInitError> {
+    let connect_options: PgConnectOptions = database_url
+        .parse()
+        .map_err(|source| DbInitError::ParseUrl { source })?;
+    // Resolve gateway tables in `public` (first on the path) and DAG DB tables in
+    // the dedicated DAG DB schema. The DAG DB schema is created by its ledgered
+    // migrator below; listing it here is harmless before it exists. The value
+    // must contain no spaces — Postgres splits the `-c` startup option string on
+    // whitespace — so the two schema names are comma-joined without a space.
+    #[cfg(feature = "production-db")]
+    let connect_options = connect_options.options([(
+        "search_path",
+        format!(
+            "public,{}",
+            exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA
+        ),
+    )]);
+
     let pool = PgPoolOptions::new()
         .max_connections(10)
         // SQLx 0.8 bounds both waiting for a pooled connection and opening a
         // new connection through acquire_timeout.
         .acquire_timeout(Duration::from_secs(DB_POOL_ACQUIRE_TIMEOUT_SECS))
-        .connect(database_url)
+        .connect_with(connect_options)
         .await
         .map_err(|source| DbInitError::Connect { source })?;
 
@@ -176,6 +215,22 @@ pub async fn init_pool(database_url: &str) -> Result<PgPool, DbInitError> {
         .run(&pool)
         .await
         .map_err(|source| DbInitError::Migrate { source })?;
+
+    // Provision the DAG DB schema through its own ledgered migrator so a deployed
+    // gateway no longer 500s on the first DAG DB call. The DAG DB migrator keeps
+    // its own `_sqlx_migrations` ledger inside the dedicated schema, so it cannot
+    // collide with the gateway's `public._sqlx_migrations` despite the two crates
+    // reusing the same integer migration versions.
+    #[cfg(feature = "production-db")]
+    {
+        exo_dag_db_postgres::postgres::run_migrations_in_schema(
+            &pool,
+            exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA,
+        )
+        .await
+        .map_err(|source| DbInitError::DagDbMigrate { source })?;
+        tracing::info!("DAG DB schema provisioned via the ledgered DAG DB migrator");
+    }
 
     tracing::info!("PostgreSQL connection pool ready and migrations applied");
     Ok(pool)
@@ -1583,25 +1638,50 @@ pub struct AuthorityChainRow {
     pub expires_at: Option<i64>,
 }
 
+/// Error from [`load_agent_roles`] — query failure or fail-closed refusal to
+/// return truncated authorization evidence.
+#[derive(Debug, Error)]
+pub enum AgentRoleLoadError {
+    #[error("agent roles query failed")]
+    Query {
+        #[from]
+        source: sqlx::Error,
+    },
+    #[error(
+        "agent role rows reached the bounded load cap; refusing truncated authorization evidence"
+    )]
+    TruncatedEvidence,
+}
+
 /// Load all non-expired roles for `actor_did` as of `now_ms`.
+///
+/// These rows are authorization evidence for the gatekeeper
+/// `SeparationOfPowers` invariant, so this loader fails closed when the
+/// bounded row cap is reached: an arbitrary subset could silently omit a
+/// cross-branch role and let the invariant pass.
 pub async fn load_agent_roles(
     pool: &PgPool,
     actor_did: &str,
     now_ms: i64,
-) -> Result<Vec<AgentRoleRow>, sqlx::Error> {
-    sqlx::query_as::<_, AgentRoleRow>(
+) -> Result<Vec<AgentRoleRow>, AgentRoleLoadError> {
+    let rows = sqlx::query_as::<_, AgentRoleRow>(
         "SELECT agent_did, role, branch, granted_by, valid_from, expires_at \
          FROM agent_roles \
          WHERE agent_did = $1 \
            AND valid_from <= $2 \
            AND (expires_at IS NULL OR expires_at > $2) \
+         ORDER BY role ASC \
          LIMIT $3",
     )
     .bind(actor_did)
     .bind(now_ms)
     .bind(MAX_DB_LIST_ROWS)
     .fetch_all(pool)
-    .await
+    .await?;
+    if i64::try_from(rows.len()).unwrap_or(i64::MAX) >= MAX_DB_LIST_ROWS {
+        return Err(AgentRoleLoadError::TruncatedEvidence);
+    }
+    Ok(rows)
 }
 
 /// Load all active, non-expired consent records for `actor_did` as of `now_ms`.
@@ -1835,12 +1915,44 @@ pub async fn update_feedback_issue_status(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use exo_core::{Did, Timestamp};
     use exo_governance::conflict::{ActionRequest, check_and_block, check_conflicts};
     use sha2::{Digest, Sha384};
 
     use super::*;
+
+    /// Guard for test database connections: gateway test fixtures seed
+    /// predictable session tokens, so test pools must refuse any ambient
+    /// `DATABASE_URL` that is not localhost-scoped or an explicitly
+    /// test-named (`*_test`) database. Shared/staging/production databases
+    /// must never receive committed fixture credentials.
+    pub(crate) fn is_test_scoped_database_url(url: &str) -> bool {
+        let Some((_, after_scheme)) = url.split_once("://") else {
+            return false;
+        };
+        let host_port_path = after_scheme
+            .rsplit_once('@')
+            .map_or(after_scheme, |(_, rest)| rest);
+        let (host_port, db_segment) = match host_port_path.split_once('/') {
+            Some((host_port, rest)) => (host_port, rest),
+            None => (host_port_path, ""),
+        };
+        let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+            bracketed
+                .split_once(']')
+                .map_or(bracketed, |(host, _)| host)
+        } else {
+            host_port
+                .rsplit_once(':')
+                .map_or(host_port, |(host, _)| host)
+        };
+        if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+            return true;
+        }
+        let db_name = db_segment.split('?').next().unwrap_or("");
+        db_name.ends_with("_test")
+    }
 
     fn production_source() -> &'static str {
         let source = include_str!("db.rs");
@@ -2056,6 +2168,10 @@ mod tests {
 
     async fn gateway_test_pool() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
+        assert!(
+            is_test_scoped_database_url(&url),
+            "refusing to seed gateway test fixtures: DATABASE_URL must point at localhost or a *_test database"
+        );
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)
@@ -2063,6 +2179,39 @@ mod tests {
             .ok()?;
         sqlx::migrate!("./migrations").run(&pool).await.ok()?;
         Some(pool)
+    }
+
+    #[test]
+    fn test_scoped_database_url_guard_accepts_local_and_test_databases() {
+        assert!(is_test_scoped_database_url(
+            "postgres://user:secret@localhost:5433/exochain"
+        ));
+        assert!(is_test_scoped_database_url(
+            "postgres://user:secret@127.0.0.1/exochain"
+        ));
+        assert!(is_test_scoped_database_url(
+            "postgres://user:secret@[::1]:5433/exochain?sslmode=disable"
+        ));
+        assert!(is_test_scoped_database_url(
+            "postgres://user:secret@db.internal:5432/exochain_test"
+        ));
+        assert!(is_test_scoped_database_url(
+            "postgres://user:secret@db.internal:5432/exochain_test?sslmode=require"
+        ));
+    }
+
+    #[test]
+    fn test_scoped_database_url_guard_rejects_shared_databases() {
+        assert!(!is_test_scoped_database_url(
+            "postgres://user:secret@db.prod.internal:5432/exochain"
+        ));
+        assert!(!is_test_scoped_database_url(
+            "postgres://db.prod.internal/exochain"
+        ));
+        assert!(!is_test_scoped_database_url(
+            "postgres://user:secret@staging.example.com/exochain_testing" // pragma-allowlist-secret (synthetic test connection string)
+        ));
+        assert!(!is_test_scoped_database_url("not-a-url"));
     }
 
     async fn cleanup_identity_erasure_fixture(pool: &PgPool, did: &str) -> Result<(), sqlx::Error> {
@@ -2343,6 +2492,52 @@ mod tests {
             .execute(&pool)
             .await
             .expect("clean recusal cap fixture after test");
+    }
+
+    #[tokio::test]
+    async fn load_agent_roles_fails_closed_when_row_cap_is_reached() {
+        let Some(pool) = gateway_test_pool().await else {
+            return;
+        };
+        let actor = "did:exo:role-cap-actor";
+        sqlx::query("DELETE FROM agent_roles WHERE agent_did = $1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .expect("clean role cap fixture before test");
+
+        sqlx::query(
+            "INSERT INTO agent_roles (agent_did, role, branch, granted_by, valid_from, expires_at) \
+             SELECT $1, 'role-cap-' || g, 'executive', 'did:exo:role-cap-granter', 0, NULL \
+             FROM generate_series(1, $2) AS g",
+        )
+        .bind(actor)
+        .bind(MAX_DB_LIST_ROWS)
+        .execute(&pool)
+        .await
+        .expect("seed capped active roles");
+
+        let capped = load_agent_roles(&pool, actor, 1_000).await;
+        assert!(
+            matches!(capped, Err(AgentRoleLoadError::TruncatedEvidence)),
+            "reaching the row cap must fail closed instead of returning a truncated role subset"
+        );
+
+        sqlx::query("DELETE FROM agent_roles WHERE agent_did = $1 AND role <> 'role-cap-1'")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .expect("trim role cap fixture below the cap");
+        let below_cap = load_agent_roles(&pool, actor, 1_000)
+            .await
+            .expect("below-cap role load must succeed");
+        assert_eq!(below_cap.len(), 1);
+
+        sqlx::query("DELETE FROM agent_roles WHERE agent_did = $1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .expect("clean role cap fixture after test");
     }
 
     #[test]

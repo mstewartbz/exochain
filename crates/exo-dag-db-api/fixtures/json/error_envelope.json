@@ -1,0 +1,7 @@
+{
+  "error_code": "tenant_scope_mismatch",
+  "message": "authorized tenant and namespace do not match request scope",
+  "receipt_hash": null,
+  "validation_report_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "requires_council_review": true
+}

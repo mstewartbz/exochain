@@ -33,24 +33,24 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Rust crates | 23 | `ls -d crates/*/` |
-| Rust source files | 313 | `find crates -name '*.rs'` |
-| Rust LOC | 213277 | `wc -l` |
-| Workspace tests | 4,706 listed | `cargo test --workspace -- --list` |
-| CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
+| Rust crates | 31 | `ls -d crates/*/` |
+| Rust source files | 452 | `find crates -name '*.rs'` |
+| Rust LOC | 338104 | `wc -l` |
+| Workspace tests | 5,764 listed | `cargo test --workspace -- --list` |
+| CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates, plus required aggregator |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
 | Live node health | Verified for https://exochain-production.up.railway.app/health on 2026-05-09 | `tools/verify_live_node_claim.sh` |
 
 ### What is verified today
 
-- **4,699 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **5,764 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **22 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
+- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
 - **Traceability matrix** maps 118 requirements — see `governance/traceability_matrix.md`
-- **Threat model** covers 16 threats tracked: 16 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
+- **Threat model** covers 17 threats tracked: 16 implemented, 1 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
 - **No floating-point arithmetic** — denied workspace-wide via `#[deny(clippy::float_arithmetic)]`
 - **Post-Quantum signatures** — NIST FIPS 204 ML-DSA-65 (CRYSTALS-Dilithium) via `ml-dsa` 0.1.0-rc.7, fully wired in `Signature::PostQuantum` and `Signature::Hybrid` with deterministic signing, tamper-rejection tests, proptest roundtrip coverage, and RUSTSEC-2025-0144 patch
@@ -113,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 23 crates, 213277 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 338104 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 4,706 listed workspace tests
+         cryptographic proofs, 5,764 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -145,6 +145,50 @@ Layer 5: ExoForge           (exoforge/)
 
 ## Repository Structure
 
+### DAG DB Opt-In Overlay
+
+This PR package uses upstream `exochain/exochain` as the substrate and adds DAG
+DB as an opt-in, default-off graph-governed memory adapter. Runtime ownership is
+split across [`crates/exo-dag-db-api`](crates/exo-dag-db-api/),
+[`crates/exo-dag-db-core`](crates/exo-dag-db-core/),
+[`crates/exo-dag-db-graph`](crates/exo-dag-db-graph/),
+[`crates/exo-dag-db-domain`](crates/exo-dag-db-domain/),
+[`crates/exo-dag-db-retrieval`](crates/exo-dag-db-retrieval/),
+[`crates/exo-dag-db-exchange`](crates/exo-dag-db-exchange/),
+[`crates/exo-dag-db-postgres`](crates/exo-dag-db-postgres/), and
+[`crates/exo-dag-db-lab`](crates/exo-dag-db-lab/), with shipped docs in
+[`docs/dagdb`](docs/dagdb/). The upstream substrate should remain synchronized
+with `exochain/exochain`; DAG DB bridge points live in `exo-api`, `exo-gateway`,
+`exo-node`, and `exochain-sdk`.
+
+#### Current `exo-dag-db` status
+
+`exo-dag-db` is **deterministic, graph-governed cross-agent retention and recall
+with measured context compression.** Agents draw bounded, citation-carrying
+context packets selected by deterministic graph policies (placement classifier,
+layer creation, integer-bp selection scoring) — never by agent judgment — and
+write provenance-preserving memories back without loading the whole repository.
+Narrow input-token compression probes measure roughly 95–99% reduction on the
+selected slice. This is what the component is delivered to do.
+
+`exo-dag-db` does **not** yet claim to be *cheaper AND better* than raw context —
+the core thesis is measured and **not** met. The rigorous 12-task benchmark
+(HEAD `a3279281`, 2026-06-14, blinded judge) records governed grounding `5,958`
+bp, which **reaches but does not exceed** the `6,250` bp full-packet plateau;
+cost-vs-neutral `0` bp (**FAIL** — governed input tokens dwarf the no-memory
+arm); input-token savings vs raw `27.1%` (**FAIL** vs the `80%` floor); blinded
+verdict `0-7-5` (governed won zero head-to-heads); and governed hallucinates more
+than raw (`1,292` bp unsupported claims vs raw `542` bp). End-to-end dollar
+savings are **not_calculable** (no provider billing receipts), and answer quality
+is **at best a tie**. The thesis proof gate returns **not_accepted**.
+
+This component is **pre-1.0, opt-in, and default-off**: integration into
+canonical ExoChain is tracked by **GAP-012** in
+[`GAP-REGISTRY.md`](GAP-REGISTRY.md). It is **not** production-ready, **not**
+production-approved, and the cost-and-quality win is **not** proven. See the
+adapter contract in [`INTEGRATION.md`](INTEGRATION.md) and the shipped DAG DB
+docs in [`docs/dagdb`](docs/dagdb/).
+
 ### Core Crates (22)
 
 | Crate | Description |
@@ -153,6 +197,7 @@ Layer 5: ExoForge           (exoforge/)
 | `exo-governance` | Constitutional governance engine, AEGIS framework, council process |
 | `exo-gatekeeper` | TEE/Enclave interfaces, attestation verification, kernel invariants, holon, MCP |
 | `exo-dag` | Directed Acyclic Graph engine, BFT consensus adapter, checkpointing, HLC |
+| `exo-dag-db-*` | Split opt-in DAG DB and graph-governed agent memory overlay crates |
 | `exo-gateway` | External gateway: REST, GraphQL, auth, health probes (28 endpoints) |
 | `exo-identity` | Decentralized Identity (DID), key management, Shamir secret sharing, vault |
 | `exo-proofs` | SNARK, STARK, ZKML proof systems, verifier infrastructure |
@@ -185,7 +230,7 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 ### Key Governance Artifacts
 
 * [Traceability Matrix](governance/traceability_matrix.md) — 118 requirements tracked
-* [Threat Model](governance/threat_matrix.md) — 16 implemented, 0 partial, 0 planned
+* [Threat Model](governance/threat_matrix.md) — 17 tracked: 16 implemented, 1 partial, 0 planned
 * [Quality Gates](governance/quality_gates.md) — 20 numbered CI gates plus required aggregator
 * [Sub-Agent Charters](governance/sub_agents.md) — 11 agent charters documented
 * [Council Resolutions](governance/resolutions/INDEX.md) — CR-001 DRAFT

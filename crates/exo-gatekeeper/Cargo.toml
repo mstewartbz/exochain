@@ -29,7 +29,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+exo-api = { path = "../exo-api" }
+exo-consent = { path = "../exo-consent" }
 exo-core = { path = "../exo-core" }
+exo-identity = { path = "../exo-identity" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 ciborium = { workspace = true }
@@ -37,12 +40,23 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 ed25519-dalek = { workspace = true }
+hex = { workspace = true }
 
 [features]
 allow-simulated-tee = []
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+exo-dag-db-core = { path = "../exo-dag-db-core" }
+exo-dag-db-domain = { path = "../exo-dag-db-domain" }
+exo-dag-db-exchange = { path = "../exo-dag-db-exchange" }
+exo-dag-db-postgres = { path = "../exo-dag-db-postgres", features = ["postgres"] }
+sqlx = { workspace = true }
+
 [dev-dependencies]
+exo-api = { path = "../exo-api" }
+exo-core = { path = "../exo-core" }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [package.metadata.cargo-machete]
 # Pre-existing deps used via feature flags or conditional compilation.

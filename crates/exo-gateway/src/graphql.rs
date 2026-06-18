@@ -2001,16 +2001,19 @@ mod tests {
         let registry = Arc::new(RwLock::new(LocalDidRegistry::new()));
         // Register a DID with one active verification method.
         {
+            let did = Did::new("did:exo:alice").unwrap();
+            let (pk, _) = exo_core::crypto::generate_keypair();
+            let multibase = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
             let mut reg = registry.write().unwrap();
             reg.register(DidDocument {
-                id: Did::new("did:exo:alice").unwrap(),
-                public_keys: vec![],
+                id: did.clone(),
+                public_keys: vec![pk],
                 authentication: vec![],
                 verification_methods: vec![VerificationMethod {
                     id: "did:exo:alice#key-1".into(),
-                    controller: Did::new("did:exo:alice").unwrap(),
+                    controller: did,
                     key_type: "Ed25519VerificationKey2020".into(),
-                    public_key_multibase: "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi".into(),
+                    public_key_multibase: multibase,
                     version: 1,
                     active: true,
                     valid_from: 0,

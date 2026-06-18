@@ -29,6 +29,7 @@ use std::{
 use axum::{
     Router,
     body::{Body, Bytes},
+    error_handling::HandleErrorLayer,
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
@@ -63,8 +64,8 @@ use exo_legal::{
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tower::limit::GlobalConcurrencyLimitLayer;
-use tower_http::trace::TraceLayer;
+use tower::{ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer};
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 
 /// Maximum accepted request body size, in bytes (1 MiB).
 ///
@@ -94,6 +95,11 @@ const CSRF_HEADER_NAME: &str = "x-csrf-token";
 #[cfg(test)]
 const AUTH_OBSERVED_AT_MS_HEADER: &str = "x-exo-auth-observed-at-ms";
 const GLOBAL_CONCURRENCY_LIMIT: usize = 1024;
+/// Upper bound on total request time (header-to-response, including slow
+/// body trickle) so held admission permits are always reclaimed. Generous
+/// enough for legitimate e-discovery exports, which are bounded by
+/// `MAX_DB_LIST_ROWS`-capped queries.
+const GATEWAY_REQUEST_TIMEOUT_SECS: u64 = 30;
 const GATEWAY_RATE_LIMIT_REQUESTS_PER_WINDOW: u32 = 120;
 const GATEWAY_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
 const GATEWAY_RATE_LIMIT_MAX_CLIENTS: usize = 16_384;
@@ -118,6 +124,7 @@ const MAX_EDISCOVERY_CUSTODIANS: usize = 128;
 const MAX_EDISCOVERY_SEARCH_TERMS: usize = 64;
 const MAX_EDISCOVERY_SEARCH_TERM_BYTES: usize = 256;
 const MAX_EDISCOVERY_CORPUS_DOCUMENTS: usize = 1_000;
+const DAGDB_TENANT_HEADER: &str = "x-exo-tenant-id";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayRateLimitOutcome {
@@ -579,11 +586,18 @@ impl AppState {
         }
     }
 
-    fn store_trusted_rate_limit_time_ms(&self, now_ms: u64) {
-        if now_ms != 0 {
-            self.trusted_rate_limit_epoch_ms
-                .store(now_ms, Ordering::Relaxed);
+    /// Atomically advance the trusted rate-limit clock cache to at least
+    /// `now_ms` and return the resulting cache value. Uses `fetch_max` so a
+    /// concurrent refresh writing a newer database sample can never be
+    /// regressed by a request thread storing an older computed value.
+    fn store_trusted_rate_limit_time_ms(&self, now_ms: u64) -> u64 {
+        if now_ms == 0 {
+            return self.trusted_rate_limit_epoch_ms.load(Ordering::Relaxed);
         }
+        let previous = self
+            .trusted_rate_limit_epoch_ms
+            .fetch_max(now_ms, Ordering::Relaxed);
+        previous.max(now_ms)
     }
 
     /// Return the DB pool or a 503 if none is configured.
@@ -2154,7 +2168,10 @@ fn effective_authority_permissions(
 }
 
 #[cfg(feature = "production-db")]
-fn active_did_document_ed25519_keys(doc: &DidDocument, key_context: &str) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn active_did_document_ed25519_keys(
+    doc: &DidDocument,
+    key_context: &str,
+) -> Result<Vec<Vec<u8>>> {
     let mut keys = Vec::new();
     for method in &doc.verification_methods {
         if !method.active {
@@ -3744,20 +3761,15 @@ async fn trusted_session_validation_time_ms(state: &AppState) -> Result<i64> {
 
 async fn trusted_gateway_rate_limit_time_ms(state: &AppState) -> Result<u64> {
     let hlc_now_ms = trusted_gateway_rate_limit_time_ms_from_hlc(state)?;
-    if let Some(cached_now_ms) = state.cached_trusted_rate_limit_time_ms() {
-        let trusted_now_ms = cached_now_ms.max(hlc_now_ms);
-        state.store_trusted_rate_limit_time_ms(trusted_now_ms);
-        return Ok(trusted_now_ms);
-    }
-
-    if state.pool.is_some() {
+    if state.cached_trusted_rate_limit_time_ms().is_none() && state.pool.is_some() {
         return Err(GatewayError::Internal(
             "gateway rate-limit database clock cache unavailable".to_owned(),
         ));
     }
 
-    state.store_trusted_rate_limit_time_ms(hlc_now_ms);
-    Ok(hlc_now_ms)
+    // Single atomic fetch_max replaces the old load/compute/store sequence so
+    // a concurrent DB refresh can never be overwritten with a stale value.
+    Ok(state.store_trusted_rate_limit_time_ms(hlc_now_ms))
 }
 
 async fn refresh_gateway_rate_limit_clock_from_database(
@@ -3786,7 +3798,9 @@ fn spawn_gateway_rate_limit_clock_refresh(
             match trusted_database_epoch_ms(&pool).await {
                 Ok(now_ms) => match u64::try_from(now_ms) {
                     Ok(now_ms) if now_ms != 0 => {
-                        trusted_rate_limit_epoch_ms.store(now_ms, Ordering::Relaxed);
+                        // fetch_max keeps the cache monotonic when this
+                        // refresh races request threads advancing via HLC.
+                        let _ = trusted_rate_limit_epoch_ms.fetch_max(now_ms, Ordering::Relaxed);
                     }
                     Ok(_) => {
                         tracing::error!("Gateway rate-limit database clock returned zero");
@@ -3814,7 +3828,9 @@ fn spawn_gateway_rate_limit_process_clock_refresh(trusted_rate_limit_epoch_ms: A
             if current != 0 {
                 let next = current.saturating_add(GATEWAY_RATE_LIMIT_PROCESS_CLOCK_TICK_MS);
                 if next != current {
-                    trusted_rate_limit_epoch_ms.store(next, Ordering::Relaxed);
+                    // fetch_max keeps the cache monotonic when this tick
+                    // races request threads advancing via HLC.
+                    let _ = trusted_rate_limit_epoch_ms.fetch_max(next, Ordering::Relaxed);
                 } else {
                     tracing::error!("Gateway rate-limit process clock saturated");
                 }
@@ -4506,6 +4522,30 @@ fn build_unlayered_router(state: AppState) -> Router {
             "/api/v1/feedback-issues/:id",
             axum::routing::patch(handle_feedback_issue_update),
         )
+        .merge({
+            let dagdb_ctx = std::sync::Arc::new(crate::dagdb::DagDbRouteContext::from_pool(
+                state.pool.clone(),
+            ));
+            // T1: the local-dev gatekeeper profile (fabricated consent + a single
+            // dev DID) is mounted ONLY in debug builds. A release binary compiles
+            // this block out entirely, so reaching the write gate with no
+            // DB-resolved authorization fails closed via the production resolver
+            // rather than authorizing as the dev identity.
+            #[cfg(all(debug_assertions, feature = "production-db"))]
+            if std::env::var(crate::dagdb::LOCAL_DEV_GATEKEEPER_ENV)
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                dagdb_ctx.install_local_dev_gatekeeper_profile();
+            }
+            crate::dagdb::dagdb_router()
+                .layer(axum::Extension(dagdb_ctx))
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    require_dagdb_authenticated_session,
+                ))
+        })
         .with_state(state)
         // GraphQL sub-router has its own state — merge after with_state()
         .merge(gql_router)
@@ -4627,6 +4667,101 @@ async fn enforce_gateway_rate_limit(
     }
 }
 
+async fn require_dagdb_authenticated_session(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if state.pool.is_none() {
+        return next.run(request).await;
+    }
+
+    let session =
+        match require_authenticated_session_user_from_header(&state, request.headers()).await {
+            Ok(session) => session,
+            Err(GatewayError::AuthenticationFailed { .. }) => {
+                return dagdb_auth_boundary_error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthenticated",
+                    "DAG DB route requires authenticated bearer session",
+                );
+            }
+            Err(GatewayError::Internal(reason)) if reason.contains("database unavailable") => {
+                return dagdb_auth_boundary_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database_unavailable",
+                    "DAG DB route requires configured authentication database",
+                );
+            }
+            Err(error) => return auth_boundary_error_response(error),
+        };
+    if session.status != "Active" {
+        return dagdb_auth_boundary_error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "DAG DB route requires active authenticated bearer session",
+        );
+    }
+
+    let Some(tenant_header) = request
+        .headers()
+        .get(DAGDB_TENANT_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return dagdb_auth_boundary_error_response(
+            StatusCode::FORBIDDEN,
+            "tenant_scope_mismatch",
+            "DAG DB route requires authenticated tenant scope",
+        );
+    };
+    if tenant_header != session.tenant_id {
+        return dagdb_auth_boundary_error_response(
+            StatusCode::FORBIDDEN,
+            "tenant_scope_mismatch",
+            "DAG DB route requires authenticated tenant scope",
+        );
+    }
+
+    next.run(request).await
+}
+
+fn dagdb_auth_boundary_error_response(
+    status: StatusCode,
+    error_code: &'static str,
+    message: &'static str,
+) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error_code": error_code,
+            "message": message,
+            "receipt_hash": null,
+            "validation_report_id": null,
+            "requires_council_review": false,
+        })),
+    )
+        .into_response()
+}
+
+/// Map admission-control layer errors to deterministic HTTP statuses: a
+/// saturated global concurrency limit sheds with 503 instead of queueing
+/// behind slow requests.
+async fn handle_gateway_admission_error(error: tower::BoxError) -> Response {
+    if error.is::<tower::load_shed::error::Overloaded>() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway concurrency limit saturated",
+        )
+            .into_response();
+    }
+    tracing::error!(%error, "Gateway admission control failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "gateway admission control failed",
+    )
+        .into_response()
+}
+
 fn apply_gateway_layers(router: Router, state: AppState, concurrency_limit: usize) -> Router {
     router
         .layer(middleware::from_fn(require_csrf_double_submit))
@@ -4640,8 +4775,21 @@ fn apply_gateway_layers(router: Router, state: AppState, concurrency_limit: usiz
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         // Emit structured tracing spans for every request/response.
         .layer(TraceLayer::new_for_http())
-        // Global concurrency ceiling as DoS admission control.
-        .layer(GlobalConcurrencyLimitLayer::new(concurrency_limit))
+        // Bound total request time (including slow-trickled bodies) so a held
+        // admission permit is always reclaimed; responds 408 on expiry.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(GATEWAY_REQUEST_TIMEOUT_SECS),
+        ))
+        // Global concurrency ceiling as DoS admission control: load-shed with
+        // 503 instead of queueing when the permit pool is saturated, so slow
+        // requests cannot head-of-line block /health and authenticated traffic.
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_gateway_admission_error))
+                .layer(LoadShedLayer::new())
+                .layer(GlobalConcurrencyLimitLayer::new(concurrency_limit)),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -5165,7 +5313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_global_concurrency_limit_queues_excess_requests() {
+    async fn gateway_global_concurrency_limit_sheds_excess_requests() {
         #[derive(Clone)]
         struct HoldState {
             entered: Arc<Notify>,
@@ -5201,8 +5349,8 @@ mod tests {
         );
         hold_state.entered.notified().await;
 
-        let queued = tokio::time::timeout(
-            Duration::from_millis(50),
+        let shed = tokio::time::timeout(
+            Duration::from_secs(1),
             app.clone().oneshot(
                 Request::builder()
                     .uri("/probe")
@@ -5210,10 +5358,13 @@ mod tests {
                     .unwrap(),
             ),
         )
-        .await;
-        assert!(
-            queued.is_err(),
-            "request must queue while the limit is held"
+        .await
+        .expect("saturated gateway must respond instead of queueing")
+        .unwrap();
+        assert_eq!(
+            shed.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "saturated gateway must shed excess requests instead of head-of-line queueing"
         );
 
         hold_state.release.notify_one();
@@ -5232,6 +5383,49 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        assert_eq!(next_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gateway_requests_time_out_and_release_admission_permits() {
+        async fn stall() -> StatusCode {
+            std::future::pending::<()>().await;
+            StatusCode::OK
+        }
+
+        let app = apply_gateway_layers(
+            Router::new()
+                .route("/stall", get(stall))
+                .route("/probe", get(probe)),
+            state(),
+            1,
+        );
+
+        let stalled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/stall")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stalled.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a stalled request must be timed out so its admission permit is reclaimed"
+        );
+
+        let next_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(next_response.status(), StatusCode::OK);
     }
 
@@ -5325,6 +5519,42 @@ mod tests {
             .await
             .expect("cached trusted rate-limit time should be available");
         assert_eq!(now_ms, 88_000);
+    }
+
+    #[test]
+    fn gateway_rate_limit_clock_cache_ignores_stale_concurrent_writes() {
+        let state = AppState::new_with_clock(
+            None,
+            Arc::new(RwLock::new(LocalDidRegistry::new())),
+            HybridClock::with_wall_clock(|| 50_000),
+        );
+        state.store_trusted_rate_limit_time_ms(90_000);
+        // A refresh task racing with a request must never regress the cache
+        // to an older clock sample.
+        state.store_trusted_rate_limit_time_ms(60_000);
+        assert_eq!(state.cached_trusted_rate_limit_time_ms(), Some(90_000));
+    }
+
+    #[test]
+    fn gateway_rate_limit_clock_refresh_writers_are_monotonic() {
+        let source = include_str!("server.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+        let refresh_tasks = source_between(
+            production,
+            "fn spawn_gateway_rate_limit_clock_refresh",
+            "fn trusted_gateway_rate_limit_time_ms_from_hlc",
+        );
+        assert!(
+            refresh_tasks.contains("fetch_max"),
+            "rate-limit clock refresh tasks must advance the cache with fetch_max"
+        );
+        assert!(
+            !refresh_tasks.contains(".store("),
+            "rate-limit clock refresh tasks must not plain-store samples that can regress the cache under races"
+        );
     }
 
     #[tokio::test]
@@ -5890,7 +6120,7 @@ mod tests {
     fn registration_request_body(
         doc: &DidDocument,
         public_key: &exo_core::PublicKey,
-        secret_key: &exo_core::SecretKey,
+        secret_key: &exo_core::SecretKey, // pragma-allowlist-secret (benign test-fixture/param, not a credential)
     ) -> String {
         let payload = TestDidRegistrationProofPayload {
             domain: "exo.identity.did_registry.registration.v1",
@@ -5964,6 +6194,10 @@ mod tests {
 
     async fn gateway_test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
+        assert!(
+            crate::db::tests::is_test_scoped_database_url(&url),
+            "refusing to seed gateway test fixtures: DATABASE_URL must point at localhost or a *_test database"
+        );
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)
@@ -5994,7 +6228,14 @@ mod tests {
         .unwrap()
     }
 
-    const TEST_ACTIVE_SESSION_EXPIRES_AT_MS: i64 = 4_102_444_800_000;
+    /// Bounded lifetime for seeded test sessions. Fixture tokens are
+    /// committed strings, so they must never outlive an interrupted test run
+    /// by more than this window (previously they were valid until 2100).
+    const TEST_ACTIVE_SESSION_TTL_MS: i64 = 3_600_000;
+
+    async fn test_active_session_expires_at_ms(pool: &sqlx::PgPool) -> i64 {
+        database_epoch_ms(pool).await + TEST_ACTIVE_SESSION_TTL_MS
+    }
 
     async fn insert_test_session(pool: &sqlx::PgPool, token: &str, actor_did: &str) {
         sqlx::query("DELETE FROM sessions WHERE token = $1")
@@ -6009,7 +6250,7 @@ mod tests {
         .bind(token)
         .bind(actor_did)
         .bind(10_000_i64)
-        .bind(TEST_ACTIVE_SESSION_EXPIRES_AT_MS)
+        .bind(test_active_session_expires_at_ms(pool).await)
         .execute(pool)
         .await
         .unwrap();
@@ -6714,7 +6955,7 @@ mod tests {
         .bind("auth-me-alice-token")
         .bind("did:exo:auth-me-alice")
         .bind(10_000_i64)
-        .bind(TEST_ACTIVE_SESSION_EXPIRES_AT_MS)
+        .bind(test_active_session_expires_at_ms(&pool).await)
         .execute(&pool)
         .await
         .unwrap();
@@ -6759,7 +7000,7 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        let token = "auth-me-expired-token";
+        let token = "auth-me-expired-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let did = "did:exo:auth-me-expired";
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -6811,7 +7052,7 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        let token = "auth-production-epoch-expired-token";
+        let token = "auth-production-epoch-expired-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let did = "did:exo:auth-production-expired";
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -7749,7 +7990,7 @@ mod tests {
         };
         let reader = "did:exo:agent-get-reader";
         let agent = "did:exo:agent-get";
-        let token = "agent-get-token";
+        let token = "agent-get-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let tenant = "tenant-agent-get";
         insert_test_user(&pool, reader, tenant).await;
         insert_test_session(&pool, token, reader).await;
@@ -7801,7 +8042,7 @@ mod tests {
             None => return,
         };
         let reader = "did:exo:agent-get-unknown-reader";
-        let token = "agent-get-unknown-token";
+        let token = "agent-get-unknown-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         insert_test_user(&pool, reader, "tenant-agent-get-unknown").await;
         insert_test_session(&pool, token, reader).await;
         let app = build_router(db_state_at(
@@ -8111,7 +8352,7 @@ mod tests {
         };
         let did = "did:exo:decision-create-no-provenance";
         let tenant_id = "tenant-create-no-provenance";
-        let token = "decision-create-no-provenance-token";
+        let token = "decision-create-no-provenance-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let title = "F-061 missing provenance create";
         insert_decision_create_authorization(&pool, did, tenant_id, token).await;
         sqlx::query("DELETE FROM decisions WHERE author = $1 AND title = $2")
@@ -8204,7 +8445,7 @@ mod tests {
         };
         let reader = "did:exo:identity-score-reader";
         let target = "did:exo:identity-score-target";
-        let token = "identity-score-reader-token";
+        let token = "identity-score-reader-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let tenant = "tenant-identity-score";
         cleanup_identity_erasure_route_fixture(&pool, reader).await;
         cleanup_identity_erasure_route_fixture(&pool, target).await;
@@ -8246,7 +8487,7 @@ mod tests {
         };
         let reader = "did:exo:identity-score-tenant-a-reader";
         let target = "did:exo:identity-score-tenant-b-target";
-        let token = "identity-score-tenant-a-token";
+        let token = "identity-score-tenant-a-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         cleanup_identity_erasure_route_fixture(&pool, reader).await;
         cleanup_identity_erasure_route_fixture(&pool, target).await;
         insert_test_user(&pool, reader, "tenant-identity-score-a").await;
@@ -9271,7 +9512,7 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        let token = "auth-refresh-expired-token";
+        let token = "auth-refresh-expired-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let did = "did:exo:auth-refresh-expired";
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -9328,7 +9569,7 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        let token = "auth-refresh-ttl-token";
+        let token = "auth-refresh-ttl-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let did = "did:exo:auth-refresh-ttl";
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
@@ -9786,7 +10027,7 @@ mod tests {
             None => return,
         };
         let did = "did:exo:layout-shape";
-        let token = "layout-shape-token";
+        let token = "layout-shape-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         let id = "layout-shape-regression";
         insert_test_session(&pool, token, did).await;
         sqlx::query("DELETE FROM layout_templates WHERE id = $1")
@@ -10517,7 +10758,7 @@ mod tests {
         };
         let reader = "did:exo:agent-get-tenant-b-reader";
         let agent = "did:exo:agent-get-tenant-a-agent";
-        let token = "agent-get-cross-tenant-token";
+        let token = "agent-get-cross-tenant-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         insert_test_user(&pool, reader, "tenant-agent-get-b").await;
         insert_test_session(&pool, token, reader).await;
         insert_test_agent(
@@ -10670,7 +10911,7 @@ mod tests {
             None => return,
         };
         let did = "did:exo:advance-pace-agent";
-        let token = "advance-pace-agent-token";
+        let token = "advance-pace-agent-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
 
         insert_advance_pace_authorization(&pool, did, token).await;
         insert_test_agent(
@@ -10724,7 +10965,7 @@ mod tests {
             None => return,
         };
         let did = "did:exo:advance-pace-user";
-        let token = "advance-pace-user-token";
+        let token = "advance-pace-user-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
 
         insert_advance_pace_authorization(&pool, did, token).await;
         insert_test_user(&pool, did, "tenant-pace-user").await;
@@ -10829,7 +11070,7 @@ mod tests {
             Some(pool) => pool,
             None => return,
         };
-        let token = "ediscovery-route-token";
+        let token = "ediscovery-route-token"; // pragma-allowlist-secret (benign test-fixture/param, not a credential)
         insert_test_session(&pool, token, "did:exo:counsel").await;
         let app = build_router(AppState::new(
             Some(pool.clone()),
@@ -11019,7 +11260,7 @@ mod tests {
                     .uri("/api/v1/auth/logout")
                     .header(
                         header::COOKIE,
-                        "session=abc; XSRF-TOKEN=tok%2Fwith%2Bspecial%3Dchars",
+                        "session=abc; XSRF-TOKEN=tok%2Fwith%2Bspecial%3Dchars", // pragma-allowlist-secret (benign test-fixture/param, not a credential)
                     )
                     .header(CSRF_HEADER_NAME, "tok/with+special=chars")
                     .body(Body::empty())
