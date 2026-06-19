@@ -33,7 +33,11 @@ import tomllib
 from pathlib import Path
 
 coverage_exclusion_categories = {
+    "Integration test harnesses": {
+        "crates/*/tests/*.rs": "integration tests are test-only harness code, not production/library code",
+    },
     "Gateway runtime adapters": {
+        "crates/exo-gateway/src/dagdb.rs": "DAG DB gateway Axum routes reach SQLx/live Postgres production-db paths",
         "crates/exo-gateway/src/db.rs": "gateway database persistence is a core runtime adapter",
         "crates/exo-gateway/src/server.rs": "gateway HTTP authentication and routing is a core runtime adapter",
         "crates/exo-gateway/src/handlers.rs": "gateway API handlers expose core runtime decisions",
