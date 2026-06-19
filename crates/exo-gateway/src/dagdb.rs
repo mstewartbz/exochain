@@ -77,7 +77,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 #[cfg(feature = "production-db")]
 use sqlx::Row;
-use tracing::{info, warn};
+#[cfg(any(feature = "production-db", debug_assertions))]
+use tracing::info;
+use tracing::warn;
 
 /// Public REST prefix reserved for ExoChain DAG DB.
 pub const DAGDB_REST_PREFIX: &str = "/api/v1/dag-db";
