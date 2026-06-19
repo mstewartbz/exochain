@@ -72,12 +72,17 @@ path = "src/bin/dagdb_writeback_sign.rs"
 required-features = ["production-db"]
 
 [features]
+default = ["production-db"]
+
 ## Enable the production DB-backed adjudication context resolver.
 ##
 ## When this feature is active, `AppState::build_adjudication_context` queries
 ## `agent_roles`, `consent_records`, and `authority_chains` instead of returning
-## the WO-009 deny-all scaffold.  The scaffold remains the default so that
-## dev/test environments do not need a live database.
+## the WO-009 deny-all scaffold, and the DAG DB persistence adapters compile
+## through `exo-dag-db-postgres/postgres`. Runtime DB configuration is still
+## explicit; missing DB/runtime state remains fail-closed instead of falling
+## back to fake or in-memory data. Use `--no-default-features` only for explicit
+## minimal test/dev builds that intentionally keep this production path out.
 production-db = ["dep:exo-dag-db-postgres", "exo-dag-db-postgres/postgres"]
 postgres = ["production-db"]
 

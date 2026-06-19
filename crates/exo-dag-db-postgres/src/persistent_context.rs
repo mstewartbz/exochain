@@ -456,6 +456,9 @@ async fn load_governed_child_layer_refs(
     // tenant_id/namespace so cross-tenant containment can never leak. The result
     // alias stays `root_memory_id` (the triggering selected ref) so the spend
     // walk and root-flag binding are unchanged.
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, tenant_id)
+        .await
+        .map_err(pg)?;
     let rows = sqlx::query(
         "SELECT root_node.memory_id AS root_memory_id, \
                 member_mem.memory_id AS member_memory_id, \
@@ -507,9 +510,10 @@ async fn load_governed_child_layer_refs(
     .bind(namespace)
     .bind(&root_id_bytes)
     .bind(depth_bound_i32)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(pg)?;
+    tx.commit().await.map_err(pg)?;
 
     let mut by_root: BTreeMap<String, Vec<DrilldownCandidate>> = BTreeMap::new();
     let mut seen_per_root: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();

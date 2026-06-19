@@ -6,9 +6,10 @@ use std::process;
 use exo_dag_db_postgres::postgres::{
     CATALOG_ROOT_HASH_SEMANTICS, DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL,
     DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL, DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL,
-    DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL, init_pool,
+    DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL, DAGDB_TENANT_RLS_SCHEMA_SQL,
+    bind_tenant_context, init_pool,
 };
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
 
 const EXPECTED_TABLES: &[&str] = &[
     "dagdb_agent_safety_scores",
@@ -37,6 +38,40 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_inbound_agent_credentials",
     "dagdb_lifecycle_actions",
     "dagdb_lifecycle_rollbacks",
+    "dagdb_memory_edges",
+    "dagdb_memory_objects",
+    "dagdb_receipts",
+    "dagdb_route_invalidation_events",
+    "dagdb_route_receipts",
+    "dagdb_subject_receipt_heads",
+    "dagdb_validation_reports",
+];
+
+const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
+    "dagdb_agent_safety_scores",
+    "dagdb_catalog_entries",
+    "dagdb_context_packet_records",
+    "dagdb_context_packets",
+    "dagdb_continuation_records",
+    "dagdb_council_decisions",
+    "dagdb_dag_outbox",
+    "dagdb_default_routes",
+    "dagdb_export_challenges",
+    "dagdb_exports",
+    "dagdb_graph_canonicalization_decisions",
+    "dagdb_graph_edge_tombstones",
+    "dagdb_graph_edges",
+    "dagdb_graph_layer_edges",
+    "dagdb_graph_layer_memberships",
+    "dagdb_graph_layers",
+    "dagdb_graph_nodes",
+    "dagdb_graph_placement_traces",
+    "dagdb_graph_route_invalidations",
+    "dagdb_graph_similarity_results",
+    "dagdb_graph_views",
+    "dagdb_idempotency_keys",
+    "dagdb_inbound_agent_credentials",
+    "dagdb_lifecycle_actions",
     "dagdb_memory_edges",
     "dagdb_memory_objects",
     "dagdb_receipts",
@@ -253,6 +288,91 @@ async fn schema_matches_declared_table_and_index_contract() {
     assert!(CATALOG_ROOT_HASH_SEMANTICS.contains("catalog material hashes"));
 }
 
+#[test]
+fn rls_migration_source_enables_forced_tenant_policy_for_expected_tables() {
+    let lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    let normalized_sql_literal = lower.replace("''", "'");
+    assert!(lower.contains("enable row level security"));
+    assert!(lower.contains("force row level security"));
+    assert!(lower.contains("create or replace function dagdb_current_tenant_id()"));
+    assert!(normalized_sql_literal.contains("bound_tenant_id := current_setting('exo.tenant_id')"));
+    assert!(lower.contains("raise exception 'exo.tenant_id is not set'"));
+    assert!(lower.contains("create policy dagdb_tenant_isolation"));
+    assert!(normalized_sql_literal.contains("using (tenant_id = dagdb_current_tenant_id())"));
+    assert!(normalized_sql_literal.contains("with check (tenant_id = dagdb_current_tenant_id())"));
+    assert!(!normalized_sql_literal.contains("current_setting('exo.tenant_id', true)"));
+
+    for table in EXPECTED_TENANT_RLS_TABLES {
+        assert!(
+            lower.contains(&format!("'{table}'")),
+            "RLS migration must enumerate tenant table {table}"
+        );
+    }
+    assert!(!lower.contains("'dagdb_benchmark_runs'"));
+    assert!(!lower.contains("'dagdb_lifecycle_rollbacks'"));
+}
+
+#[tokio::test]
+async fn rls_policies_fail_closed_without_tenant_context() {
+    let Some(mut db) = TestDb::maybe_new("rls_contract").await else {
+        return;
+    };
+    db.apply_schema().await;
+    sqlx::raw_sql(DAGDB_TENANT_RLS_SCHEMA_SQL)
+        .execute(&mut db.conn)
+        .await
+        .expect("apply DAG DB tenant RLS schema");
+
+    assert_rls_catalog_state(&mut db.conn).await;
+    let rls_test_role = assume_rls_checked_role(&mut db.conn, &db.schema).await;
+
+    let mut tx = db.conn.begin().await.expect("begin tenant-bound insert");
+    bind_tenant_context(&mut tx, "tenant-a")
+        .await
+        .expect("bind tenant-a context");
+    insert_idempotency_fixture_tx(&mut tx, "tenant-a", "idem-a")
+        .await
+        .expect("tenant-bound insert succeeds");
+    tx.commit().await.expect("commit tenant-bound insert");
+
+    let missing_context_count = idempotency_count_conn(&mut db.conn, "tenant-a").await;
+    assert!(
+        missing_context_count.is_err(),
+        "read without exo.tenant_id must error instead of returning zero rows"
+    );
+
+    let missing_insert =
+        insert_idempotency_fixture_conn(&mut db.conn, "tenant-a", "idem-missing").await;
+    assert!(
+        missing_insert.is_err(),
+        "insert without exo.tenant_id must be rejected by RLS WITH CHECK"
+    );
+
+    let mut tx = db.conn.begin().await.expect("begin cross-tenant read");
+    bind_tenant_context(&mut tx, "tenant-b")
+        .await
+        .expect("bind tenant-b context");
+    let cross_tenant_count = idempotency_count_tx(&mut tx, "tenant-a")
+        .await
+        .expect("cross-tenant read succeeds");
+    tx.commit().await.expect("commit cross-tenant read");
+    assert_eq!(cross_tenant_count, 0);
+
+    let mut tx = db.conn.begin().await.expect("begin same-tenant read");
+    bind_tenant_context(&mut tx, "tenant-a")
+        .await
+        .expect("bind tenant-a context");
+    let same_tenant_count = idempotency_count_tx(&mut tx, "tenant-a")
+        .await
+        .expect("same-tenant read succeeds");
+    tx.commit().await.expect("commit same-tenant read");
+    assert_eq!(same_tenant_count, 1);
+
+    if let Some(role_name) = rls_test_role {
+        cleanup_rls_checked_role(&mut db.conn, &role_name).await;
+    }
+}
+
 #[tokio::test]
 async fn migration_rollback_leaves_no_partial_schema() {
     let Some(mut db) = TestDb::maybe_new("rollback_contract").await else {
@@ -440,6 +560,173 @@ async fn assert_indexes(conn: &mut PgConnection) {
             "index {index_name} expected fragment {expected_fragment:?}, got {indexdef:?}"
         );
     }
+}
+
+async fn assert_rls_catalog_state(conn: &mut PgConnection) {
+    for table in EXPECTED_TENANT_RLS_TABLES {
+        let row = sqlx::query(
+            "SELECT relrowsecurity, relforcerowsecurity \
+             FROM pg_class rel \
+             JOIN pg_namespace ns ON ns.oid = rel.relnamespace \
+             WHERE ns.nspname = current_schema() AND rel.relname = $1",
+        )
+        .bind(table)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or_else(|err| panic!("query RLS flags for {table}: {err}"));
+        assert!(
+            row.get::<bool, _>("relrowsecurity"),
+            "{table} must enable RLS"
+        );
+        assert!(
+            row.get::<bool, _>("relforcerowsecurity"),
+            "{table} must force RLS"
+        );
+
+        let policy = sqlx::query(
+            "SELECT qual, with_check FROM pg_policies \
+             WHERE schemaname = current_schema() AND tablename = $1 \
+               AND policyname = 'dagdb_tenant_isolation'",
+        )
+        .bind(table)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or_else(|err| panic!("query tenant RLS policy for {table}: {err}"));
+        let qual = policy.get::<String, _>("qual").to_ascii_lowercase();
+        let with_check = policy.get::<String, _>("with_check").to_ascii_lowercase();
+        assert!(qual.contains("tenant_id = dagdb_current_tenant_id()"));
+        assert!(with_check.contains("tenant_id = dagdb_current_tenant_id()"));
+        assert!(!qual.contains("true"));
+        assert!(!with_check.contains("true"));
+    }
+}
+
+async fn assume_rls_checked_role(conn: &mut PgConnection, schema: &str) -> Option<String> {
+    let bypasses_rls: bool = sqlx::query_scalar(
+        "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("query current role RLS bypass state");
+    if !bypasses_rls {
+        return None;
+    }
+
+    let role_name = format!("dagdb_rls_test_{}", process::id());
+    sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {role_name}"))
+        .execute(&mut *conn)
+        .await
+        .expect("drop stale RLS test role");
+    sqlx::raw_sql(&format!("CREATE ROLE {role_name}"))
+        .execute(&mut *conn)
+        .await
+        .expect("create RLS test role");
+    sqlx::raw_sql(&format!("GRANT USAGE ON SCHEMA {schema} TO {role_name}"))
+        .execute(&mut *conn)
+        .await
+        .expect("grant schema usage to RLS test role");
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {role_name}"
+    ))
+    .execute(&mut *conn)
+    .await
+    .expect("grant table privileges to RLS test role");
+    sqlx::raw_sql(&format!(
+        "GRANT EXECUTE ON FUNCTION {schema}.dagdb_current_tenant_id() TO {role_name}"
+    ))
+    .execute(&mut *conn)
+    .await
+    .expect("grant tenant helper execution to RLS test role");
+    sqlx::raw_sql(&format!("SET ROLE {role_name}"))
+        .execute(conn)
+        .await
+        .expect("switch to RLS test role");
+    Some(role_name)
+}
+
+async fn cleanup_rls_checked_role(conn: &mut PgConnection, role_name: &str) {
+    sqlx::raw_sql("RESET ROLE")
+        .execute(&mut *conn)
+        .await
+        .expect("reset RLS test role");
+    sqlx::raw_sql(&format!("DROP OWNED BY {role_name}"))
+        .execute(&mut *conn)
+        .await
+        .expect("drop RLS test role privileges");
+    sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {role_name}"))
+        .execute(conn)
+        .await
+        .expect("drop RLS test role");
+}
+
+async fn insert_idempotency_fixture_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    idempotency_key: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dagdb_idempotency_keys \
+         (tenant_id, namespace, route_name, idempotency_key, request_hash, response_hash, response_body, \
+          status_code, cached_failure, created_at_physical_ms, created_at_logical, \
+          expires_at_physical_ms, expires_at_logical) \
+         VALUES ($1, 'dag-db', 'rls-test', $2, $3, $4, $5, 201, false, 1, 0, 2, 0)",
+    )
+    .bind(tenant_id)
+    .bind(idempotency_key)
+    .bind(vec![1_u8; 32])
+    .bind(vec![2_u8; 32])
+    .bind(serde_json::json!({"fixture": "rls"}))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_idempotency_fixture_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    idempotency_key: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dagdb_idempotency_keys \
+         (tenant_id, namespace, route_name, idempotency_key, request_hash, response_hash, response_body, \
+          status_code, cached_failure, created_at_physical_ms, created_at_logical, \
+          expires_at_physical_ms, expires_at_logical) \
+         VALUES ($1, 'dag-db', 'rls-test', $2, $3, $4, $5, 201, false, 1, 0, 2, 0)",
+    )
+    .bind(tenant_id)
+    .bind(idempotency_key)
+    .bind(vec![1_u8; 32])
+    .bind(vec![2_u8; 32])
+    .bind(serde_json::json!({"fixture": "rls"}))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+async fn idempotency_count_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+) -> std::result::Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM dagdb_idempotency_keys \
+         WHERE tenant_id = $1 AND namespace = 'dag-db' AND route_name = 'rls-test'",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+async fn idempotency_count_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+) -> std::result::Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM dagdb_idempotency_keys \
+         WHERE tenant_id = $1 AND namespace = 'dag-db' AND route_name = 'rls-test'",
+    )
+    .bind(tenant_id)
+    .fetch_one(conn)
+    .await
 }
 
 fn expected_constraint_snippets() -> &'static [(&'static str, &'static str)] {

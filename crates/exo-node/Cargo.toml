@@ -37,7 +37,7 @@ workspace = true
 exo-core = { path = "../exo-core" }
 exo-dag = { path = "../exo-dag" }
 exo-gatekeeper = { path = "../exo-gatekeeper" }
-exo-gateway = { path = "../exo-gateway" }
+exo-gateway = { path = "../exo-gateway", default-features = false }
 exo-api = { path = "../exo-api" }
 exo-governance = { path = "../exo-governance" }
 exo-identity = { path = "../exo-identity" }
@@ -49,11 +49,11 @@ exo-authority = { path = "../exo-authority" }
 exo-economy = { path = "../exo-economy" }
 exo-root = { path = "../exo-root" }
 
-# DAG DB gateway proxy client (P1-B SDK). Optional + behind the
-# `dagdb-gateway-proxy` feature so the default lean node never pulls the
-# SDK's async HTTP transport (`exochain-sdk/http-client`). The dag-db adapter
-# is opt-in (T6): only an operator who configures a gateway endpoint enables
-# the feature, and only then is the SDK transport compiled in.
+# DAG DB MCP gateway proxy client (P1-B SDK). The default node compiles the
+# governed gateway proxy transport so MCP DAG DB tools can call the production
+# gateway path when runtime config is present. Missing runtime config still
+# fails closed; it never falls back to fabricated packet/writeback/import/export
+# results.
 exochain-sdk = { path = "../exochain-sdk", optional = true }
 
 # CLI
@@ -140,17 +140,17 @@ tempfile = "3"
 ignored = ["ed25519-dalek", "exo-consent", "exo-governance", "exo-identity", "zeroize", "exochain-sdk"]
 
 [features]
-default = []
+# Default node builds compile the gateway production DB-backed DAG DB path and
+# the MCP gateway proxy transport. Explicit `--no-default-features` node builds
+# keep both paths out for minimal test/dev compatibility only.
+default = ["exo-gateway/default", "dagdb-gateway-proxy"]
 
-# GAP-012 P1-C: opt-in DAG DB gateway proxy. T6 keeps dag-db an opt-in adapter
-# the default node does NOT serve, so this feature is off by default. When OFF,
-# the `dagdb_*` MCP tools still register but fail closed with a structured
-# `dagdb_adapter_unconfigured` result, and the SDK's async HTTP transport
-# (reqwest via `exochain-sdk/http-client`) is NOT compiled into the node. When
-# ON, the node gains the `DagDbHttpClient` proxy path and `NodeContext` carries
-# the operator-configured gateway endpoint. Enabling this means: "I am an
-# operator opting this node into proxying governed DAG DB calls to a gateway I
-# configured and authorize."
+# GAP-012 P1-C: DAG DB MCP gateway proxy. When runtime config is absent, the
+# `dagdb_*` MCP tools still register but fail closed with a structured
+# `dagdb_adapter_unconfigured` result before any HTTP request. When runtime
+# config is present, the node uses the `DagDbHttpClient` proxy path and
+# `NodeContext` carries the operator-configured gateway endpoint, bearer token,
+# tenant, and namespace.
 dagdb-gateway-proxy = ["dep:exochain-sdk", "exochain-sdk/http-client"]
 
 # GAP (Onyx pass 3, RED #1): the HTTP endpoint

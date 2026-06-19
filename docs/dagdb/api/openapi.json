@@ -7,7 +7,7 @@
     "license": { "name": "Apache-2.0", "identifier": "Apache-2.0" }
   },
   "servers": [
-    { "url": "/api/v1/dag-db", "description": "DAG DB REST prefix (opt-in adapter; functional only under exo-gateway production-db + a configured Postgres pool)." }
+    { "url": "/api/v1/dag-db", "description": "DAG DB REST prefix for the gateway runtime; functional persistence requires a configured Postgres pool plus tenant/session authority, and missing runtime state fails closed." }
   ],
   "paths": {
     "/intake": {

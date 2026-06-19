@@ -396,18 +396,13 @@ impl DagDbGatekeeperService {
     /// gatekeeper chain as the other graph-mutating write paths instead of the
     /// prior `validate()`-only persistence.
     ///
-    /// DORMANT (no runtime caller): this method, together with
-    /// [`Self::persist_default_route`], [`Self::persist_continuation_record`],
-    /// and [`Self::persist_context_packet_record`], is GATED — it enforces the
-    /// full consent → Ed25519 → invariant-subset chain via `validate_write` —
-    /// but is NOT yet wired to a served gateway endpoint. No `/api/v1/dag-db/*`
-    /// route invokes it; the only callers are the gate's own route-contract
-    /// tests, which prove the chain is enforced (consented+signed reaches the DB
-    /// layer; forged/unconsented fail closed). The `gatekeeper-lifecycle-surfaces-gated`
-    /// security check asserts exactly that property — surfaces are gated at the
-    /// method boundary — and does NOT claim a live endpoint serves them. Wiring
-    /// these to REST endpoints is deferred (no requirement drives them yet); see
-    /// the dag-db INTEGRATION.md "Adapter boundary" note.
+    /// Runtime caller status: served gateway routes now invoke these gated D5
+    /// persistence methods when `production-db` is enabled and a governed pool is
+    /// configured. Default-route persistence calls [`Self::persist_default_route`],
+    /// context-packet persistence calls [`Self::persist_context_packet_record`],
+    /// and writeback calls this method plus
+    /// [`Self::persist_continuation_record`]. The method-boundary regression tests
+    /// still prove the shared gate chain independently of route plumbing.
     pub async fn persist_lifecycle_action(
         &self,
         action: &LifecycleAction,
@@ -432,7 +427,7 @@ impl DagDbGatekeeperService {
     /// PRD-D5: persist a default-route record after consent, signature, and
     /// optional invariant checks.
     ///
-    /// DORMANT (no runtime caller): see [`Self::persist_lifecycle_action`].
+    /// Runtime caller status: see [`Self::persist_lifecycle_action`].
     pub async fn persist_default_route(
         &self,
         route: &DefaultRouteRecord,
@@ -457,7 +452,7 @@ impl DagDbGatekeeperService {
     /// PRD-D5: persist a continuation record after consent, signature, and
     /// optional invariant checks.
     ///
-    /// DORMANT (no runtime caller): see [`Self::persist_lifecycle_action`].
+    /// Runtime caller status: see [`Self::persist_lifecycle_action`].
     pub async fn persist_continuation_record(
         &self,
         record: &ContinuationRecord,
@@ -483,7 +478,7 @@ impl DagDbGatekeeperService {
     /// PRD-D5: persist a context-packet record after consent, signature, and
     /// optional invariant checks.
     ///
-    /// DORMANT (no runtime caller): see [`Self::persist_lifecycle_action`].
+    /// Runtime caller status: see [`Self::persist_lifecycle_action`].
     pub async fn persist_context_packet_record(
         &self,
         record: &ContextPacketRecord,

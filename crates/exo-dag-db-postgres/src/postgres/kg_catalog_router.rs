@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use exo_dag_db_api::{SafeMetadata, SafeMetadataDecision};
 use serde_json::Value as JsonValue;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 
 use crate::{
@@ -145,12 +145,16 @@ pub async fn build_kg_catalog_router_preview(
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<KgCatalogRouterPreview> {
     task_input.validate_request()?;
-    let memories = load_memories(pool, task_input).await?;
-    let catalogs = load_catalogs(pool, task_input).await?;
-    let graph_nodes = load_graph_nodes(pool, task_input).await?;
-    let graph_edges = load_graph_edges(pool, task_input).await?;
-    let validation_reports = load_validation_reports(pool, task_input).await?;
-    let receipt_hashes = load_receipt_hashes(pool, task_input).await?;
+    let mut tx = super::begin_tenant_transaction(pool, &task_input.tenant_id)
+        .await
+        .map_err(pg)?;
+    let memories = load_memories(&mut tx, task_input).await?;
+    let catalogs = load_catalogs(&mut tx, task_input).await?;
+    let graph_nodes = load_graph_nodes(&mut tx, task_input).await?;
+    let graph_edges = load_graph_edges(&mut tx, task_input).await?;
+    let validation_reports = load_validation_reports(&mut tx, task_input).await?;
+    let receipt_hashes = load_receipt_hashes(&mut tx, task_input).await?;
+    tx.commit().await.map_err(pg)?;
 
     let preview = build_preview(
         task_input,
@@ -437,7 +441,7 @@ fn build_preview(
 }
 
 async fn load_memories(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<BTreeMap<String, RetrievedMemory>> {
     let rows = sqlx::query(
@@ -449,7 +453,7 @@ async fn load_memories(
     )
     .bind(&task_input.tenant_id)
     .bind(&task_input.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -480,7 +484,7 @@ async fn load_memories(
 }
 
 async fn load_catalogs(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<BTreeMap<String, RetrievedCatalog>> {
     let rows = sqlx::query(
@@ -491,7 +495,7 @@ async fn load_catalogs(
     )
     .bind(&task_input.tenant_id)
     .bind(&task_input.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -509,7 +513,7 @@ async fn load_catalogs(
 }
 
 async fn load_graph_nodes(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<BTreeMap<String, Vec<RetrievedGraphNode>>> {
     let rows = sqlx::query(
@@ -520,7 +524,7 @@ async fn load_graph_nodes(
     )
     .bind(&task_input.tenant_id)
     .bind(&task_input.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -549,7 +553,7 @@ async fn load_graph_nodes(
 }
 
 async fn load_graph_edges(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<Vec<RetrievedGraphEdge>> {
     let rows = sqlx::query(
@@ -566,7 +570,7 @@ async fn load_graph_edges(
     )
     .bind(&task_input.tenant_id)
     .bind(&task_input.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -597,7 +601,7 @@ async fn load_graph_edges(
 }
 
 async fn load_validation_reports(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<BTreeMap<String, Vec<String>>> {
     let rows = sqlx::query(
@@ -608,7 +612,7 @@ async fn load_validation_reports(
     )
     .bind(&task_input.tenant_id)
     .bind(&task_input.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -628,7 +632,7 @@ async fn load_validation_reports(
 }
 
 async fn load_receipt_hashes(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     task_input: &KgCatalogRouterTaskInput,
 ) -> Result<BTreeSet<String>> {
     let rows = sqlx::query(
@@ -639,7 +643,7 @@ async fn load_receipt_hashes(
     )
     .bind(&task_input.tenant_id)
     .bind(&task_input.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 

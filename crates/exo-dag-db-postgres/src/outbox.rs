@@ -135,6 +135,9 @@ pub type Result<T> = std::result::Result<T, OutboxError>;
 
 /// Insert a durable pending outbox row.
 pub async fn enqueue_outbox(pool: &PgPool, request: &OutboxEnqueueRequest) -> Result<bool> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &request.tenant_id)
+        .await
+        .map_err(pg)?;
     let rows = sqlx::query(
         "INSERT INTO dagdb_dag_outbox \
          (outbox_id, tenant_id, namespace, subject_kind, subject_id, dag_write_id, dag_payload_hash, \
@@ -151,9 +154,10 @@ pub async fn enqueue_outbox(pool: &PgPool, request: &OutboxEnqueueRequest) -> Re
     .bind(hash_bytes(request.dag_payload_hash))
     .bind(timestamp_i64(request.created_at.physical_ms)?)
     .bind(timestamp_i32(request.created_at.logical)?)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(pg)?;
+    tx.commit().await.map_err(pg)?;
 
     Ok(rows.rows_affected() == 1)
 }
@@ -205,6 +209,7 @@ pub async fn subject_is_context_eligible(
 /// be claimed here.
 pub async fn process_next_due_outbox(
     pool: &PgPool,
+    tenant_id: &str,
     store: &mut impl DagStore,
     now: Timestamp,
     actor_did: &str,
@@ -213,13 +218,17 @@ pub async fn process_next_due_outbox(
         .physical_ms
         .checked_add(OUTBOX_CLAIM_LEASE_MS)
         .ok_or(OutboxError::TimestampOutOfRange)?;
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, tenant_id)
+        .await
+        .map_err(pg)?;
     let outbox_id = sqlx::query_scalar::<_, Vec<u8>>(
         "UPDATE dagdb_dag_outbox \
          SET next_attempt_at_physical_ms = $3, next_attempt_at_logical = $2, \
              updated_at_physical_ms = $1, updated_at_logical = $2 \
-         WHERE outbox_id = ( \
+         WHERE tenant_id = $4 AND outbox_id = ( \
              SELECT outbox_id FROM dagdb_dag_outbox \
-             WHERE dag_finality_status IN ('pending','failed') \
+             WHERE tenant_id = $4 \
+               AND dag_finality_status IN ('pending','failed') \
                AND subject_kind IN ('memory','catalog','route','context_packet','validation_report', \
                                     'agent_safety_score','inbound_agent_credential','council_decision') \
                AND attempt_count < max_attempts \
@@ -234,13 +243,16 @@ pub async fn process_next_due_outbox(
     .bind(timestamp_i64(now.physical_ms)?)
     .bind(timestamp_i32(now.logical)?)
     .bind(timestamp_i64(lease_until_physical_ms)?)
-    .fetch_optional(pool)
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(pg)?;
+    tx.commit().await.map_err(pg)?;
 
     match outbox_id {
         Some(bytes) => process_outbox_by_id(
             pool,
+            tenant_id,
             store,
             hash_from_vec(bytes)?,
             now,
@@ -256,13 +268,14 @@ pub async fn process_next_due_outbox(
 /// Process a specific outbox row.
 pub async fn process_outbox_by_id(
     pool: &PgPool,
+    tenant_id: &str,
     store: &mut impl DagStore,
     outbox_id: Hash256,
     now: Timestamp,
     actor_did: &str,
     mode: DagWriteMode,
 ) -> Result<OutboxProcessResult> {
-    let row = load_outbox(pool, outbox_id).await?;
+    let row = load_outbox(pool, tenant_id, outbox_id).await?;
     match row.dag_finality_status {
         DagFinalityStatus::Committed | DagFinalityStatus::Compensated => {
             return Ok(OutboxProcessResult::AlreadyTerminal {
@@ -306,8 +319,12 @@ pub async fn process_outbox_by_id(
 }
 
 /// Compensated rows are terminal; operators must create a new recovery row.
-pub async fn operator_retry_compensated_row(pool: &PgPool, outbox_id: Hash256) -> Result<()> {
-    let row = load_outbox(pool, outbox_id).await?;
+pub async fn operator_retry_compensated_row(
+    pool: &PgPool,
+    tenant_id: &str,
+    outbox_id: Hash256,
+) -> Result<()> {
+    let row = load_outbox(pool, tenant_id, outbox_id).await?;
     if row.dag_finality_status == DagFinalityStatus::Compensated {
         return Err(OutboxError::CompensatedRowsAreTerminal);
     }
@@ -569,6 +586,9 @@ async fn head_receipt_matches_event(
     head_receipt_hash: Hash256,
     event_body_hash: Hash256,
 ) -> Result<bool> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &row.tenant_id)
+        .await
+        .map_err(pg)?;
     let matched = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM dagdb_receipts \
          WHERE tenant_id = $1 AND namespace = $2 AND subject_kind = $3 AND subject_id = $4 \
@@ -580,13 +600,17 @@ async fn head_receipt_matches_event(
     .bind(hash_bytes(row.subject_id))
     .bind(hash_bytes(head_receipt_hash))
     .bind(hash_bytes(event_body_hash))
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(pg)?;
+    tx.commit().await.map_err(pg)?;
     Ok(matched == 1)
 }
 
 async fn latest_subject_receipt_hash(pool: &PgPool, row: &OutboxRow) -> Result<Hash256> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &row.tenant_id)
+        .await
+        .map_err(pg)?;
     let receipt_hash = sqlx::query_scalar::<_, Vec<u8>>(
         "SELECT latest_receipt_hash FROM dagdb_subject_receipt_heads \
          WHERE tenant_id = $1 AND namespace = $2 AND subject_kind = $3 AND subject_id = $4",
@@ -595,10 +619,11 @@ async fn latest_subject_receipt_hash(pool: &PgPool, row: &OutboxRow) -> Result<H
     .bind(&row.namespace)
     .bind(subject_kind_sql(row.subject_kind))
     .bind(hash_bytes(row.subject_id))
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(pg)?
     .ok_or(OutboxError::OutboxNotFound)?;
+    tx.commit().await.map_err(pg)?;
     hash_from_vec(receipt_hash)
 }
 
@@ -608,20 +633,25 @@ async fn update_outbox_committed(
     dag_receipt_hash: Hash256,
     now: Timestamp,
 ) -> Result<()> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &row.tenant_id)
+        .await
+        .map_err(pg)?;
     sqlx::query(
         "UPDATE dagdb_dag_outbox \
          SET dag_finality_status = 'committed', dag_receipt_hash = $1, last_error_code = NULL, \
              next_attempt_at_physical_ms = NULL, next_attempt_at_logical = NULL, \
              updated_at_physical_ms = $2, updated_at_logical = $3 \
-         WHERE outbox_id = $4",
+         WHERE tenant_id = $4 AND outbox_id = $5",
     )
     .bind(hash_bytes(dag_receipt_hash))
     .bind(timestamp_i64(now.physical_ms)?)
     .bind(timestamp_i32(now.logical)?)
+    .bind(&row.tenant_id)
     .bind(hash_bytes(row.outbox_id))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(pg)?;
+    tx.commit().await.map_err(pg)?;
     Ok(())
 }
 
@@ -634,13 +664,16 @@ async fn update_outbox_failed(
     error_code: &str,
     now: Timestamp,
 ) -> Result<i32> {
-    sqlx::query_scalar::<_, i32>(
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &row.tenant_id)
+        .await
+        .map_err(pg)?;
+    let attempt_count = sqlx::query_scalar::<_, i32>(
         "UPDATE dagdb_dag_outbox \
          SET dag_finality_status = 'failed', attempt_count = attempt_count + 1, \
              last_error_code = $1, \
              next_attempt_at_physical_ms = $2, next_attempt_at_logical = $3, \
              updated_at_physical_ms = $4, updated_at_logical = $5 \
-         WHERE outbox_id = $6 AND attempt_count < max_attempts \
+         WHERE tenant_id = $6 AND outbox_id = $7 AND attempt_count < max_attempts \
          RETURNING attempt_count",
     )
     .bind(error_code)
@@ -648,11 +681,14 @@ async fn update_outbox_failed(
     .bind(timestamp_i32(next_attempt_at.logical)?)
     .bind(timestamp_i64(now.physical_ms)?)
     .bind(timestamp_i32(now.logical)?)
+    .bind(&row.tenant_id)
     .bind(hash_bytes(row.outbox_id))
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(pg)?
-    .ok_or(OutboxError::AttemptOutOfRange)
+    .ok_or(OutboxError::AttemptOutOfRange)?;
+    tx.commit().await.map_err(pg)?;
+    Ok(attempt_count)
 }
 
 /// Record the terminal compensation with a relative, budget-capped attempt
@@ -664,22 +700,27 @@ async fn update_outbox_compensated(
     compensation_receipt_hash: Hash256,
     now: Timestamp,
 ) -> Result<()> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &row.tenant_id)
+        .await
+        .map_err(pg)?;
     sqlx::query(
         "UPDATE dagdb_dag_outbox \
          SET dag_finality_status = 'compensated', \
              attempt_count = LEAST(attempt_count + 1, max_attempts), last_error_code = $1, \
              next_attempt_at_physical_ms = NULL, next_attempt_at_logical = NULL, \
              compensation_receipt_hash = $2, updated_at_physical_ms = $3, updated_at_logical = $4 \
-         WHERE outbox_id = $5",
+         WHERE tenant_id = $5 AND outbox_id = $6",
     )
     .bind(error_code)
     .bind(hash_bytes(compensation_receipt_hash))
     .bind(timestamp_i64(now.physical_ms)?)
     .bind(timestamp_i32(now.logical)?)
+    .bind(&row.tenant_id)
     .bind(hash_bytes(row.outbox_id))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(pg)?;
+    tx.commit().await.map_err(pg)?;
     Ok(())
 }
 
@@ -690,6 +731,9 @@ async fn update_subject_finality(
     receipt_hash: Hash256,
     now: Timestamp,
 ) -> Result<()> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, &row.tenant_id)
+        .await
+        .map_err(pg)?;
     let status = finality_status_sql(status);
     let subject_id = hash_bytes(row.subject_id);
     let receipt_hash = hash_bytes(receipt_hash);
@@ -708,7 +752,7 @@ async fn update_subject_finality(
             .bind(&row.tenant_id)
             .bind(&row.namespace)
             .bind(subject_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(pg)?;
         }
@@ -726,7 +770,7 @@ async fn update_subject_finality(
             .bind(&row.tenant_id)
             .bind(&row.namespace)
             .bind(subject_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(pg)?;
         }
@@ -741,7 +785,7 @@ async fn update_subject_finality(
             .bind(&row.tenant_id)
             .bind(&row.namespace)
             .bind(subject_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(pg)?;
         }
@@ -756,7 +800,7 @@ async fn update_subject_finality(
             .bind(&row.tenant_id)
             .bind(&row.namespace)
             .bind(subject_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(pg)?;
         }
@@ -765,6 +809,7 @@ async fn update_subject_finality(
         | SubjectKind::InboundAgentCredential
         | SubjectKind::CouncilDecision => {}
     }
+    tx.commit().await.map_err(pg)?;
     Ok(())
 }
 
@@ -775,6 +820,9 @@ async fn subject_finality_status(
     subject_kind: SubjectKind,
     subject_id: Hash256,
 ) -> Result<Option<DagFinalityStatus>> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, tenant_id)
+        .await
+        .map_err(pg)?;
     let subject_id = hash_bytes(subject_id);
     let status = match subject_kind {
         SubjectKind::Memory => sqlx::query_scalar::<_, String>(
@@ -784,7 +832,7 @@ async fn subject_finality_status(
         .bind(tenant_id)
         .bind(namespace)
         .bind(subject_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(pg)?,
         SubjectKind::Catalog => sqlx::query_scalar::<_, String>(
@@ -794,7 +842,7 @@ async fn subject_finality_status(
         .bind(tenant_id)
         .bind(namespace)
         .bind(subject_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(pg)?,
         SubjectKind::Route => sqlx::query_scalar::<_, String>(
@@ -804,7 +852,7 @@ async fn subject_finality_status(
         .bind(tenant_id)
         .bind(namespace)
         .bind(subject_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(pg)?,
         SubjectKind::ContextPacket => sqlx::query_scalar::<_, String>(
@@ -814,7 +862,7 @@ async fn subject_finality_status(
         .bind(tenant_id)
         .bind(namespace)
         .bind(subject_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(pg)?,
         SubjectKind::ValidationReport
@@ -822,23 +870,30 @@ async fn subject_finality_status(
         | SubjectKind::InboundAgentCredential
         | SubjectKind::CouncilDecision => None,
     };
-    status
+    let status = status
         .map(|value| parse_finality_status(&value))
-        .transpose()
+        .transpose()?;
+    tx.commit().await.map_err(pg)?;
+    Ok(status)
 }
 
-async fn load_outbox(pool: &PgPool, outbox_id: Hash256) -> Result<OutboxRow> {
+async fn load_outbox(pool: &PgPool, tenant_id: &str, outbox_id: Hash256) -> Result<OutboxRow> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, tenant_id)
+        .await
+        .map_err(pg)?;
     let row = sqlx::query(
         "SELECT outbox_id, tenant_id, namespace, subject_kind, subject_id, dag_write_id, \
                 dag_payload_hash, dag_finality_status, attempt_count, max_attempts, \
                 created_at_physical_ms, created_at_logical \
-         FROM dagdb_dag_outbox WHERE outbox_id = $1",
+         FROM dagdb_dag_outbox WHERE tenant_id = $1 AND outbox_id = $2",
     )
+    .bind(tenant_id)
     .bind(hash_bytes(outbox_id))
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(pg)?
     .ok_or(OutboxError::OutboxNotFound)?;
+    tx.commit().await.map_err(pg)?;
 
     Ok(OutboxRow {
         outbox_id: hash_from_vec(row.try_get("outbox_id").map_err(pg)?)?,

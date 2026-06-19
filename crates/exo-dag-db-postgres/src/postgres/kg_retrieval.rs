@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use exo_dag_db_api::SafeMetadata;
 use serde_json::Value as JsonValue;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{
     graph_context_selection::MAX_SELECTED_GRAPH_EDGES_PER_PACKET,
@@ -63,14 +63,17 @@ pub async fn retrieve_kg_context_packet(
     request: &KgRetrievalRequest,
 ) -> Result<KgContextPacketPreview> {
     request.validate()?;
-    let memories = load_memories(pool, request).await?;
-    let catalogs = load_catalogs(pool, request).await?;
-    let graph_nodes = load_graph_nodes(pool, request).await?;
-    let layer_plan = load_layer_selection_plan(pool, request).await?;
-    let validation_reports = load_validation_reports(pool, request).await?;
+    let mut tx = super::begin_tenant_transaction(pool, &request.tenant_id)
+        .await
+        .map_err(pg)?;
+    let memories = load_memories(&mut tx, request).await?;
+    let catalogs = load_catalogs(&mut tx, request).await?;
+    let graph_nodes = load_graph_nodes(&mut tx, request).await?;
+    let layer_plan = load_layer_selection_plan(&mut tx, request).await?;
+    let validation_reports = load_validation_reports(&mut tx, request).await?;
 
-    build_preview(
-        pool,
+    let preview = build_preview(
+        &mut tx,
         request,
         memories,
         catalogs,
@@ -78,11 +81,13 @@ pub async fn retrieve_kg_context_packet(
         layer_plan,
         validation_reports,
     )
-    .await
+    .await?;
+    tx.commit().await.map_err(pg)?;
+    Ok(preview)
 }
 
 async fn build_preview(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
     memories: BTreeMap<String, RetrievedMemory>,
     catalogs: BTreeMap<String, RetrievedCatalog>,
@@ -335,7 +340,7 @@ async fn build_preview(
         .map(|memory| memory.memory_id.clone())
         .collect::<Vec<_>>();
     let selected_memory_id_set = selected_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut graph_edges = load_graph_edges(pool, request, &selected_memory_ids).await?;
+    let mut graph_edges = load_graph_edges(tx, request, &selected_memory_ids).await?;
     if graph_edges.len() > MAX_SELECTED_GRAPH_EDGES_PER_PACKET {
         graph_edges.truncate(MAX_SELECTED_GRAPH_EDGES_PER_PACKET);
         push_warning(&mut warnings, "selected_graph_edges_truncated_by_budget");
@@ -927,11 +932,11 @@ fn usize_to_u32(value: usize, field: &str) -> Result<u32> {
 }
 
 async fn load_layer_selection_plan(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<LayerSelectionPlan> {
-    let mut layers = load_layers(pool, request).await?;
-    let all_layer_edges = load_layer_edges(pool, request).await?;
+    let mut layers = load_layers(tx, request).await?;
+    let all_layer_edges = load_layer_edges(tx, request).await?;
     let active_layer_edge_count = all_layer_edges
         .iter()
         .filter(|edge| edge.hygiene_state == LayerHygieneEdgeState::Active)
@@ -1081,7 +1086,7 @@ async fn load_layer_selection_plan(
     let layer_edge_budget_truncated = selected_layer_edges.len() > max_layer_edges;
     selected_layer_edges.truncate(max_layer_edges);
 
-    let mut memory_layers = load_layer_memberships(pool, request, &selected_ids).await?;
+    let mut memory_layers = load_layer_memberships(tx, request, &selected_ids).await?;
     let layer_rank = selected_layers
         .iter()
         .map(|layer| (layer.layer_id.clone(), layer.clone()))
@@ -1200,7 +1205,7 @@ fn build_rollup_summaries(
 }
 
 async fn load_memories(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<BTreeMap<String, RetrievedMemory>> {
     let rows = sqlx::query(
@@ -1212,7 +1217,7 @@ async fn load_memories(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
     let mut memories = BTreeMap::new();
@@ -1242,7 +1247,7 @@ async fn load_memories(
 }
 
 async fn load_catalogs(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<BTreeMap<String, RetrievedCatalog>> {
     let rows = sqlx::query(
@@ -1253,7 +1258,7 @@ async fn load_catalogs(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
     let mut catalogs = BTreeMap::new();
@@ -1270,7 +1275,7 @@ async fn load_catalogs(
 }
 
 async fn load_graph_nodes(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<BTreeMap<String, Vec<RetrievedGraphNode>>> {
     let rows = sqlx::query(
@@ -1281,7 +1286,7 @@ async fn load_graph_nodes(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
     let mut graph_nodes: BTreeMap<String, Vec<RetrievedGraphNode>> = BTreeMap::new();
@@ -1308,7 +1313,7 @@ async fn load_graph_nodes(
 }
 
 async fn load_layers(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<BTreeMap<String, RetrievedLayer>> {
     let rows = match sqlx::query(
@@ -1320,7 +1325,7 @@ async fn load_layers(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     {
         Ok(rows) => rows,
@@ -1384,7 +1389,7 @@ async fn load_layers(
 }
 
 async fn load_layer_edges(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<Vec<RetrievedLayerEdge>> {
     let rows = match sqlx::query(
@@ -1395,7 +1400,7 @@ async fn load_layer_edges(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     {
         Ok(rows) => rows,
@@ -1434,7 +1439,7 @@ async fn load_layer_edges(
 }
 
 async fn load_layer_memberships(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
     selected_layer_ids: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, Vec<RetrievedLayerMembership>>> {
@@ -1460,7 +1465,7 @@ async fn load_layer_memberships(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     {
         Ok(rows) => rows,
@@ -1512,7 +1517,7 @@ async fn load_layer_memberships(
 }
 
 async fn load_validation_reports(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
 ) -> Result<BTreeMap<String, Vec<String>>> {
     let rows = sqlx::query(
@@ -1523,7 +1528,7 @@ async fn load_validation_reports(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
     let mut reports: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1542,7 +1547,7 @@ async fn load_validation_reports(
 }
 
 async fn load_graph_edges(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &KgRetrievalRequest,
     selected_memory_ids: &[String],
 ) -> Result<Vec<KgGraphEdgeRef>> {
@@ -1564,7 +1569,7 @@ async fn load_graph_edges(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
     let mut edges = Vec::new();

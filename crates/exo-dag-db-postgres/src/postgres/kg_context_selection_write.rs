@@ -172,6 +172,9 @@ async fn persist_usage_event_in_transaction(
         .execute(&mut **tx)
         .await
         .map_err(pg)?;
+    super::bind_tenant_context(tx, &event.tenant_id)
+        .await
+        .map_err(pg)?;
 
     if let Some(summary) =
         fetch_idempotency_replay(tx, event, idempotency_key, request_hash, USAGE_EVENT_ROUTE)
@@ -220,6 +223,9 @@ async fn persist_context_packet_in_transaction(
 ) -> DomainResult<DbWriteSummary> {
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
         .execute(&mut **tx)
+        .await
+        .map_err(pg)?;
+    super::bind_tenant_context(tx, &packet.tenant_id)
         .await
         .map_err(pg)?;
 

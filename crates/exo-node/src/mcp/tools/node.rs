@@ -426,6 +426,7 @@ mod tests {
             reactor_state: Some(reactor_state),
             store: None,
             node_did: Some(this_did.to_string()),
+            ..NodeContext::empty()
         };
 
         let result = execute_node_status(&serde_json::json!({}), &context);

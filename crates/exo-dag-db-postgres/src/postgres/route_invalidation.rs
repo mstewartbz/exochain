@@ -42,6 +42,9 @@ pub async fn persist_route_invalidation_event(
             .execute(&mut *tx)
             .await
             .map_err(pg)?;
+        super::bind_tenant_context(&mut tx, &event.tenant_id)
+            .await
+            .map_err(pg)?;
 
         if let Some(row) = sqlx::query(
             "SELECT event_id, event_body FROM dagdb_route_invalidation_events \

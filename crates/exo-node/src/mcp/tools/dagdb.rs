@@ -7,39 +7,38 @@
 //! self-contained.
 //!
 //! Each tool's `input_schema` is BOUND to the versioned `exo-api` DAG DB
-//! request DTOs: the schema's `required`/optional property sets mirror the DTO
-//! fields, and a schema-drift test (`tests::schemas_stay_bound_to_exo_api_dtos`)
-//! validates the shared `exo-dag-db` JSON fixtures against the compiled schemas
-//! and round-trips them through the DTOs, so a DTO field add/remove/rename
-//! fails the test instead of silently drifting.
+//! request DTOs plus explicit gateway signature-header carrier fields. A
+//! schema-drift test (`tests::schemas_stay_bound_to_exo_api_dtos`) validates
+//! the shared `exo-dag-db` JSON fixtures against the compiled schemas and
+//! round-trips them through the DTOs, so a DTO field add/remove/rename fails
+//! the test instead of silently drifting. Signature carrier fields are stripped
+//! before DTO deserialization and are forwarded only as gateway headers.
 //!
-//! ## Opt-in adapter boundary (T6) and the proxy
+//! ## Runtime gateway boundary (T6) and the proxy
 //!
-//! dag-db is an OPT-IN adapter the default node does NOT serve. When no
-//! operator has configured a DAG DB gateway (the default), every tool FAILS
-//! CLOSED with a structured `dagdb_adapter_unconfigured` result — it never
-//! fabricates import/export/packet/writeback success. The opt-in path lives
-//! behind the `dagdb-gateway-proxy` feature, which pulls the P1-B SDK
-//! (`exochain-sdk` `DagDbHttpClient`, `http-client` feature) so the default
-//! lean node stays free of the async HTTP stack.
+//! Default node builds compile the DAG DB gateway proxy transport. When no
+//! operator has configured a DAG DB gateway, every tool FAILS CLOSED with a
+//! structured `dagdb_adapter_unconfigured` result before any HTTP request — it
+//! never fabricates import/export/packet/writeback success.
 //!
-//! ## DEFERRED: live gateway proxy wiring
-//!
-//! The actual proxy call (build a typed `DagDb*Request`, invoke
-//! `DagDbHttpClient`, map the typed `DagDbClientError` to a structured MCP
-//! error) is NOT yet wired. The MCP dispatch chain
-//! (`handler::dispatch` -> `handle_tools_call` -> `ToolRegistry::execute` ->
-//! `execute_*`) is fully synchronous, while `DagDbHttpClient` is async; wiring
-//! the proxy requires either making the dispatch chain async or blocking on a
-//! runtime handle inside the sync handler, plus threading the gateway auth
-//! material (`DagDbAuthConfig`) through `NodeContext`. That is a separate,
-//! larger refactor. This ticket lands: all 4 DTO-bound tools, the structured
-//! fail-closed result, the schema-drift test, the opt-in feature boundary, and
-//! the legacy sidecar demotion. When the proxy is wired, `execute_*` will gain
-//! an explicit configured-gateway path and call the SDK; until then it always
-//! returns the unconfigured result.
+//! When `NodeContext` carries a complete gateway config, the tools deserialize
+//! the validated MCP payload into the matching versioned DTO and invoke the SDK
+//! `DagDbHttpClient`. The SDK owns the gateway headers, including
+//! authorization, tenant, namespace, `{action}:{tenant}:{namespace}` authority
+//! scope, and validated per-call signature headers. Missing config, scope
+//! mismatches, or missing signature material fail closed with structured MCP
+//! errors before any HTTP request is attempted.
 
 use serde_json::{Value, json};
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+use std::{future::Future, thread};
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+use exochain_sdk::dagdb::{
+    BearerToken, DagDbAuthConfig, DagDbClientError, DagDbContextPacketRequest, DagDbExportRequest,
+    DagDbHttpClient, DagDbImportRequest, DagDbSignatureHeaders, DagDbWritebackRequest,
+};
 
 use crate::mcp::{
     context::NodeContext,
@@ -53,12 +52,41 @@ const SAFE_PATH_PATTERN: &str =
     "^(?!/)(?!~)(?!.*\\\\)(?!.*(^|/)\\.\\.?(/|$))[A-Za-z0-9][A-Za-z0-9._/:-]{0,255}$";
 const HASH256_PATTERN: &str = "^[0-9a-f]{64}$";
 const DAGDB_ADAPTER_UNCONFIGURED: &str = "dagdb_adapter_unconfigured";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_GATEWAY_URL_UNCONFIGURED: &str = "dagdb_gateway_url_unconfigured";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_AUTH_UNCONFIGURED: &str = "dagdb_auth_unconfigured";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_TENANT_UNCONFIGURED: &str = "dagdb_tenant_unconfigured";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_NAMESPACE_UNCONFIGURED: &str = "dagdb_namespace_unconfigured";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_REQUEST_TENANT_MISSING: &str = "dagdb_request_tenant_missing";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_REQUEST_NAMESPACE_MISSING: &str = "dagdb_request_namespace_missing";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_TENANT_SCOPE_MISMATCH: &str = "dagdb_tenant_scope_mismatch";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_REQUEST_DECODE_FAILED: &str = "dagdb_request_decode_failed";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_SIGNATURE_MATERIAL_MISSING: &str = "dagdb_signature_material_missing";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_SIGNATURE_MATERIAL_INVALID: &str = "dagdb_signature_material_invalid";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_GATEWAY_REQUEST_FAILED: &str = "dagdb_gateway_request_failed";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const DAGDB_RUNTIME_BRIDGE_FAILED: &str = "dagdb_runtime_bridge_failed";
 const DAGDB_GET_CONTEXT_PACKET_TOOL: &str = "dagdb_get_context_packet";
 const DAGDB_SUBMIT_WRITEBACK_TOOL: &str = "dagdb_submit_writeback";
 const DAGDB_IMPORT_TOOL: &str = "dagdb_import";
 const DAGDB_EXPORT_TOOL: &str = "dagdb_export";
 const MAX_ID_ARRAY_ITEMS: usize = 256;
 const MAX_TOKEN_BUDGET: u64 = 1_000_000;
+const SIGNATURE_HEX_CHARS: usize = 128;
+const SIGNATURE_PATTERN: &str = "^[0-9a-f]{128}$";
+const WRITE_SIGNATURE_HEADER: &str = "x-exo-write-signature";
+const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
+const CONTINUATION_SIGNATURE_HEADER: &str = "x-exo-continuation-signature";
 const KG_IMPORT_REPORT_SCHEMA: &str = "dagdb_kg_dry_run_import_report_v1";
 const KG_IMPORT_CANDIDATES_SCHEMA: &str = "dagdb_markdown_kg_import_candidates_v1";
 const ECHOED_STRING_FIELDS: &[(&str, &str)] = &[
@@ -80,7 +108,7 @@ const NON_CLAIMS: &[&str] = &[
     "no_runtime_dagdb_operation_was_performed",
     "no_persistence_receipt_was_created",
     "no_export_artifact_was_created",
-    "dagdb_adapter_is_opt_in_and_not_configured_on_this_node",
+    "dagdb_runtime_gateway_is_not_configured_on_this_node",
 ];
 
 fn safe_string_schema(description: &str) -> Value {
@@ -134,6 +162,16 @@ fn hash_schema(description: &str) -> Value {
     json!({
         "type": "string",
         "pattern": HASH256_PATTERN,
+        "description": description,
+    })
+}
+
+fn signature_schema(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "minLength": SIGNATURE_HEX_CHARS,
+        "maxLength": SIGNATURE_HEX_CHARS,
+        "pattern": SIGNATURE_PATTERN,
         "description": description,
     })
 }
@@ -352,10 +390,10 @@ fn echoed_field_with_forbidden_fragment(params: &Value) -> Option<&'static str> 
     None
 }
 
-/// Structured fail-closed result for the opt-in DAG DB adapter.
+/// Structured fail-closed result when the DAG DB runtime gateway is not configured.
 ///
-/// Returned whenever no DAG DB gateway is configured (the default, and the
-/// only path until the proxy is wired). Never claims any runtime effect.
+/// Returned whenever no DAG DB gateway is configured (the default). Never
+/// claims any runtime effect.
 fn mcp_json_error(message: &str, fields: Value) -> ToolResult {
     let mut body = match fields {
         Value::Object(map) => map,
@@ -379,11 +417,11 @@ fn adapter_unconfigured_response(tool_name: &str, params: &Value) -> ToolResult 
 
     tracing::warn!(
         tool = %tool_name,
-        "refusing DAG DB MCP call: no DAG DB gateway is configured (opt-in adapter unconfigured)"
+        "refusing DAG DB MCP call: no DAG DB gateway is configured"
     );
 
     mcp_json_error(
-        "DAG DB adapter is not configured on this node; no DAG DB operation was performed.",
+        "DAG DB runtime gateway is not configured on this node; no DAG DB operation was performed.",
         json!({
             "tool_status": DAGDB_ADAPTER_UNCONFIGURED,
             "tool": tool_name,
@@ -394,6 +432,465 @@ fn adapter_unconfigured_response(tool_name: &str, params: &Value) -> ToolResult 
             "non_claims": NON_CLAIMS,
         }),
     )
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn fail_closed_response(
+    tool_name: &str,
+    tool_status: &str,
+    message: &str,
+    fields: Value,
+) -> ToolResult {
+    let mut body = match fields {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    body.insert("tool_status".to_owned(), json!(tool_status));
+    body.insert("tool".to_owned(), json!(tool_name));
+    body.insert("success_claimed".to_owned(), json!(false));
+    mcp_json_error(message, Value::Object(body))
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+#[derive(Debug)]
+struct DagDbProxyScope {
+    base_url: String,
+    bearer_token: BearerToken,
+    tenant_id: String,
+    namespace: String,
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+#[derive(Debug)]
+enum DagDbRuntimeBridgeError {
+    RuntimeInit(String),
+    JoinPanic,
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn non_empty(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn non_empty_token(value: &Option<zeroize::Zeroizing<String>>) -> Option<BearerToken> {
+    let token = value.as_ref()?.as_str().trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(BearerToken::new(token.to_owned()))
+    }
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn require_request_scope<'a>(
+    tool_name: &str,
+    params: &'a Value,
+    field: &'static str,
+    missing_status: &'static str,
+) -> Result<&'a str, ToolResult> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            fail_closed_response(
+                tool_name,
+                missing_status,
+                "DAG DB request scope is incomplete; no DAG DB operation was performed.",
+                json!({
+                    "missing_field": field,
+                }),
+            )
+        })
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn is_signature_value(value: &str) -> bool {
+    value.len() == SIGNATURE_HEX_CHARS
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        DAGDB_SUBMIT_WRITEBACK_TOOL => &[
+            WRITE_SIGNATURE_HEADER,
+            LIFECYCLE_SIGNATURE_HEADER,
+            CONTINUATION_SIGNATURE_HEADER,
+        ],
+        DAGDB_GET_CONTEXT_PACKET_TOOL | DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
+            &[WRITE_SIGNATURE_HEADER]
+        }
+        _ => &[],
+    }
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn require_signature_param(
+    tool_name: &str,
+    params: &Value,
+    header: &'static str,
+) -> Result<String, ToolResult> {
+    let Some(value) = params.get(header).and_then(Value::as_str) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_MISSING,
+            "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+            json!({
+                "missing_signature_header": header,
+                "required_signature_headers": required_signature_headers(tool_name),
+            }),
+        ));
+    };
+
+    if value.trim().is_empty() {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_MISSING,
+            "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+            json!({
+                "missing_signature_header": header,
+                "required_signature_headers": required_signature_headers(tool_name),
+            }),
+        ));
+    }
+
+    if !is_signature_value(value) {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_INVALID,
+            "DAG DB gateway signature material is invalid; no DAG DB operation was performed.",
+            json!({
+                "invalid_signature_header": header,
+                "expected_signature_format": "128 lowercase hex characters",
+            }),
+        ));
+    }
+
+    Ok(value.to_owned())
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn signature_headers_for_tool(
+    tool_name: &str,
+    params: &Value,
+) -> Result<DagDbSignatureHeaders, ToolResult> {
+    match tool_name {
+        DAGDB_SUBMIT_WRITEBACK_TOOL => Ok(DagDbSignatureHeaders::writeback(
+            require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
+            require_signature_param(tool_name, params, LIFECYCLE_SIGNATURE_HEADER)?,
+            require_signature_param(tool_name, params, CONTINUATION_SIGNATURE_HEADER)?,
+        )),
+        DAGDB_GET_CONTEXT_PACKET_TOOL | DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
+            Ok(DagDbSignatureHeaders::write(require_signature_param(
+                tool_name,
+                params,
+                WRITE_SIGNATURE_HEADER,
+            )?))
+        }
+        _ => Err(fail_closed_response(
+            tool_name,
+            DAGDB_REQUEST_DECODE_FAILED,
+            "DAG DB tool dispatch target is unknown; no DAG DB operation was performed.",
+            json!({}),
+        )),
+    }
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn proxy_dto_params(params: &Value) -> Value {
+    let mut dto_params = params.clone();
+    if let Value::Object(map) = &mut dto_params {
+        for header in [
+            WRITE_SIGNATURE_HEADER,
+            LIFECYCLE_SIGNATURE_HEADER,
+            CONTINUATION_SIGNATURE_HEADER,
+        ] {
+            map.remove(header);
+        }
+    }
+    dto_params
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn configured_proxy_scope(
+    tool_name: &str,
+    params: &Value,
+    context: &NodeContext,
+) -> Result<DagDbProxyScope, ToolResult> {
+    let Some(config) = context.dagdb_gateway.as_ref() else {
+        return Err(adapter_unconfigured_response(tool_name, params));
+    };
+
+    let Some(base_url) = non_empty(&config.base_url) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_GATEWAY_URL_UNCONFIGURED,
+            "DAG DB gateway URL is not configured; no DAG DB operation was performed.",
+            json!({}),
+        ));
+    };
+    let Some(bearer_token) = non_empty_token(&config.bearer_token) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_AUTH_UNCONFIGURED,
+            "DAG DB gateway bearer auth is not configured; no DAG DB operation was performed.",
+            json!({}),
+        ));
+    };
+    let Some(tenant_id) = non_empty(&config.tenant_id) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_TENANT_UNCONFIGURED,
+            "DAG DB gateway tenant scope is not configured; no DAG DB operation was performed.",
+            json!({}),
+        ));
+    };
+    let Some(namespace) = non_empty(&config.namespace) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_NAMESPACE_UNCONFIGURED,
+            "DAG DB gateway namespace scope is not configured; no DAG DB operation was performed.",
+            json!({}),
+        ));
+    };
+
+    let request_tenant =
+        require_request_scope(tool_name, params, "tenant_id", DAGDB_REQUEST_TENANT_MISSING)?;
+    let request_namespace = require_request_scope(
+        tool_name,
+        params,
+        "namespace",
+        DAGDB_REQUEST_NAMESPACE_MISSING,
+    )?;
+
+    if request_tenant != tenant_id || request_namespace != namespace {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_TENANT_SCOPE_MISMATCH,
+            "DAG DB request tenant/namespace does not match the configured gateway auth scope; no DAG DB operation was performed.",
+            json!({
+                "request_tenant_id": request_tenant,
+                "request_namespace": request_namespace,
+                "configured_tenant_id": tenant_id,
+                "configured_namespace": namespace,
+            }),
+        ));
+    }
+
+    Ok(DagDbProxyScope {
+        base_url,
+        bearer_token,
+        tenant_id,
+        namespace,
+    })
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn parse_proxy_request<T>(tool_name: &str, params: &Value) -> Result<T, ToolResult>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(proxy_dto_params(params)).map_err(|error| {
+        fail_closed_response(
+            tool_name,
+            DAGDB_REQUEST_DECODE_FAILED,
+            "DAG DB request failed to decode into the SDK DTO; no DAG DB operation was performed.",
+            json!({
+                "decode_error": error.to_string(),
+            }),
+        )
+    })
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn runtime_bridge_error_response(tool_name: &str, error: DagDbRuntimeBridgeError) -> ToolResult {
+    let detail = match error {
+        DagDbRuntimeBridgeError::RuntimeInit(error) => json!({
+            "bridge_error": "runtime_init_failed",
+            "detail": error,
+        }),
+        DagDbRuntimeBridgeError::JoinPanic => json!({
+            "bridge_error": "runtime_thread_panicked",
+        }),
+    };
+
+    fail_closed_response(
+        tool_name,
+        DAGDB_RUNTIME_BRIDGE_FAILED,
+        "DAG DB async runtime bridge failed; no DAG DB success was claimed.",
+        detail,
+    )
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn client_error_response(tool_name: &str, error: DagDbClientError) -> ToolResult {
+    let fields = match error {
+        DagDbClientError::Transport(error) => json!({
+            "error_kind": "transport",
+            "detail": error.to_string(),
+        }),
+        DagDbClientError::Timeout(error) => json!({
+            "error_kind": "timeout",
+            "detail": error.to_string(),
+        }),
+        DagDbClientError::Server(error) => json!({
+            "error_kind": "server",
+            "status": error.status,
+            "error_code": error.error_code,
+            "gateway_message": error.message,
+            "receipt_hash": error.receipt_hash,
+            "validation_report_id": error.validation_report_id,
+            "requires_council_review": error.requires_council_review,
+        }),
+        DagDbClientError::UnexpectedStatus { status, body } => json!({
+            "error_kind": "unexpected_status",
+            "status": status,
+            "body_bytes": body.len(),
+        }),
+        DagDbClientError::Decode(error) => json!({
+            "error_kind": "decode",
+            "detail": error.to_string(),
+        }),
+        DagDbClientError::SchemaVersionMismatch { expected, actual } => json!({
+            "error_kind": "schema_version_mismatch",
+            "expected": expected,
+            "actual": actual,
+        }),
+        DagDbClientError::InvalidAuthHeader { header } => json!({
+            "error_kind": "invalid_auth_header",
+            "header": header,
+        }),
+        DagDbClientError::InvalidSignatureHeader { header } => json!({
+            "error_kind": "invalid_signature_header",
+            "header": header,
+        }),
+    };
+
+    fail_closed_response(
+        tool_name,
+        DAGDB_GATEWAY_REQUEST_FAILED,
+        "DAG DB gateway request failed; no DAG DB success was claimed.",
+        fields,
+    )
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn run_async_proxy_call<F, T>(
+    future: F,
+) -> Result<Result<T, DagDbClientError>, DagDbRuntimeBridgeError>
+where
+    F: Future<Output = Result<T, DagDbClientError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| DagDbRuntimeBridgeError::RuntimeInit(error.to_string()))?;
+            Ok(runtime.block_on(future))
+        })
+        .join()
+        .map_err(|_| DagDbRuntimeBridgeError::JoinPanic)?;
+    }
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| DagDbRuntimeBridgeError::RuntimeInit(error.to_string()))?;
+    Ok(runtime.block_on(future))
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn proxy_client(scope: DagDbProxyScope) -> Result<DagDbHttpClient, DagDbClientError> {
+    DagDbHttpClient::new(
+        scope.base_url,
+        DagDbAuthConfig::new(scope.bearer_token, scope.tenant_id, scope.namespace),
+    )
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn proxy_result<T>(
+    tool_name: &str,
+    call: impl Future<Output = Result<T, DagDbClientError>> + Send + 'static,
+) -> ToolResult
+where
+    T: serde::Serialize + Send + 'static,
+{
+    match run_async_proxy_call(call) {
+        Ok(Ok(response)) => ToolResult::json_success(&response),
+        Ok(Err(error)) => client_error_response(tool_name, error),
+        Err(error) => runtime_bridge_error_response(tool_name, error),
+    }
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn dispatch_configured(
+    tool_name: &str,
+    params: &Value,
+    scope: DagDbProxyScope,
+    signatures: DagDbSignatureHeaders,
+) -> ToolResult {
+    let client = match proxy_client(scope) {
+        Ok(client) => client,
+        Err(error) => return client_error_response(tool_name, error),
+    };
+
+    match tool_name {
+        DAGDB_GET_CONTEXT_PACKET_TOOL => {
+            let request: DagDbContextPacketRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(tool_name, async move {
+                client
+                    .context_packet_with_signatures(request, signatures)
+                    .await
+            })
+        }
+        DAGDB_SUBMIT_WRITEBACK_TOOL => {
+            let request: DagDbWritebackRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(tool_name, async move {
+                client.writeback_with_signatures(request, signatures).await
+            })
+        }
+        DAGDB_IMPORT_TOOL => {
+            let request: DagDbImportRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(tool_name, async move {
+                client
+                    .dagdb_import_with_signatures(request, signatures)
+                    .await
+            })
+        }
+        DAGDB_EXPORT_TOOL => {
+            let request: DagDbExportRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(tool_name, async move {
+                client
+                    .dagdb_export_with_signatures(request, signatures)
+                    .await
+            })
+        }
+        _ => fail_closed_response(
+            tool_name,
+            DAGDB_REQUEST_DECODE_FAILED,
+            "DAG DB tool dispatch target is unknown; no DAG DB operation was performed.",
+            json!({}),
+        ),
+    }
 }
 
 /// Tool definition for `dagdb_get_context_packet`.
@@ -462,10 +959,14 @@ pub fn get_context_packet_definition() -> ToolDefinition {
         "drilldown_reserve_bp".to_owned(),
         optional_token_budget_schema("Depth-on-demand reserve, in basis points of the budget."),
     );
+    properties.insert(
+        WRITE_SIGNATURE_HEADER.to_owned(),
+        signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
+    );
 
     ToolDefinition {
         name: DAGDB_GET_CONTEXT_PACKET_TOOL.to_owned(),
-        description: "Retrieve a graph-routed DAG DB context packet for a task through the runtime MCP surface. dag-db is an opt-in adapter; when no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating a packet.".to_owned(),
+        description: "Retrieve a graph-routed DAG DB context packet for a task through the runtime MCP surface. When no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating a packet.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": properties,
@@ -562,10 +1063,24 @@ pub fn submit_writeback_definition() -> ToolDefinition {
         "target_layer_reason".to_owned(),
         optional_safe_string_schema("Optional safe reason code for the target layer writeback."),
     );
+    properties.insert(
+        WRITE_SIGNATURE_HEADER.to_owned(),
+        signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
+    );
+    properties.insert(
+        LIFECYCLE_SIGNATURE_HEADER.to_owned(),
+        signature_schema("Gateway lifecycle signature forwarded as `x-exo-lifecycle-signature`."),
+    );
+    properties.insert(
+        CONTINUATION_SIGNATURE_HEADER.to_owned(),
+        signature_schema(
+            "Gateway continuation signature forwarded as `x-exo-continuation-signature`.",
+        ),
+    );
 
     ToolDefinition {
         name: DAGDB_SUBMIT_WRITEBACK_TOOL.to_owned(),
-        description: "Submit completed-task evidence to the DAG DB writeback endpoint through the runtime MCP surface, with context-packet lineage. dag-db is an opt-in adapter; when no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating a writeback receipt.".to_owned(),
+        description: "Submit completed-task evidence to the DAG DB writeback endpoint through the runtime MCP surface, with context-packet lineage. When no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating a writeback receipt.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": properties,
@@ -600,10 +1115,14 @@ pub fn import_definition() -> ToolDefinition {
         did_schema("DID requesting the import operation."),
     );
     properties.insert("import_report".to_owned(), import_report_schema());
+    properties.insert(
+        WRITE_SIGNATURE_HEADER.to_owned(),
+        signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
+    );
 
     ToolDefinition {
         name: DAGDB_IMPORT_TOOL.to_owned(),
-        description: "Request a governed DAG DB import through the runtime MCP surface. dag-db is an opt-in adapter; when no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating persistence.".to_owned(),
+        description: "Request a governed DAG DB import through the runtime MCP surface. When no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating persistence.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": properties,
@@ -654,10 +1173,14 @@ pub fn export_definition() -> ToolDefinition {
             "description": "Whether preview-only context sections are requested.",
         }),
     );
+    properties.insert(
+        WRITE_SIGNATURE_HEADER.to_owned(),
+        signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
+    );
 
     ToolDefinition {
         name: DAGDB_EXPORT_TOOL.to_owned(),
-        description: "Request a governed DAG DB export through the runtime MCP surface. dag-db is an opt-in adapter; when no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating export artifacts.".to_owned(),
+        description: "Request a governed DAG DB export through the runtime MCP surface. When no gateway is configured this node fails closed with a structured `dagdb_adapter_unconfigured` result instead of fabricating export artifacts.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": properties,
@@ -677,13 +1200,37 @@ pub fn export_definition() -> ToolDefinition {
     }
 }
 
-/// Dispatch a tool through the current fail-closed adapter boundary.
-///
-/// Until the async proxy and `NodeContext` gateway state are wired (see the
-/// module doc's DEFERRED note), this always returns the structured
-/// `dagdb_adapter_unconfigured` result.
+/// Dispatch a tool through the current adapter boundary.
+#[cfg(not(feature = "dagdb-gateway-proxy"))]
 fn dispatch(tool_name: &str, params: &Value, _context: &NodeContext) -> ToolResult {
     adapter_unconfigured_response(tool_name, params)
+}
+
+/// Dispatch a tool through the configured SDK gateway proxy, or fail closed.
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn dispatch(tool_name: &str, params: &Value, context: &NodeContext) -> ToolResult {
+    if let Some(field) = echoed_field_with_forbidden_fragment(params) {
+        return mcp_json_error(
+            "DAG DB request rejected before unsafe echo.",
+            json!({
+                "tool_status": "rejected_unsafe_echo_field",
+                "tool": tool_name,
+                "field": field,
+            }),
+        );
+    }
+
+    let scope = match configured_proxy_scope(tool_name, params, context) {
+        Ok(scope) => scope,
+        Err(result) => return result,
+    };
+
+    let signatures = match signature_headers_for_tool(tool_name, params) {
+        Ok(signatures) => signatures,
+        Err(result) => return result,
+    };
+
+    dispatch_configured(tool_name, params, scope, signatures)
 }
 
 /// Execute `dagdb_get_context_packet`.
@@ -714,6 +1261,16 @@ pub fn execute_export(params: &Value, context: &NodeContext) -> ToolResult {
 mod tests {
     use jsonschema::JSONSchema;
     use serde_json::Value;
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+        thread,
+    };
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    use crate::mcp::context::DagDbGatewayConfig;
 
     use super::*;
 
@@ -730,6 +1287,250 @@ mod tests {
             .and_then(|requests| requests.get(name))
             .unwrap_or_else(|| panic!("missing request fixture {name}"))
             .clone()
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn response_fixture(name: &str) -> String {
+        fixtures()
+            .get("responses")
+            .and_then(|responses| responses.get(name))
+            .unwrap_or_else(|| panic!("missing response fixture {name}"))
+            .to_string()
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn error_fixture(name: &str) -> String {
+        fixtures()
+            .get("errors")
+            .and_then(|errors| errors.get(name))
+            .unwrap_or_else(|| panic!("missing error fixture {name}"))
+            .to_string()
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    struct CapturedRequest {
+        request_line: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    impl CapturedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    struct TestServer {
+        base_url: String,
+        captured: mpsc::Receiver<CapturedRequest>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    impl TestServer {
+        fn spawn(status_line: &'static str, body: impl Into<String>) -> Self {
+            let body = body.into();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test gateway");
+            let addr = listener.local_addr().expect("test gateway addr");
+            let base_url = format!("http://{addr}");
+            let (tx, captured) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept test gateway request");
+                let request = read_request(&mut stream);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write test gateway response");
+                stream.flush().expect("flush test gateway response");
+                tx.send(request).expect("send captured request");
+            });
+            Self {
+                base_url,
+                captured,
+                handle,
+            }
+        }
+
+        fn captured(self) -> CapturedRequest {
+            let request = self.captured.recv().expect("captured request");
+            self.handle.join().expect("test gateway thread exits");
+            request
+        }
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn read_request(stream: &mut TcpStream) -> CapturedRequest {
+        let mut buf = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 1024];
+            let n = stream.read(&mut chunk).expect("read request bytes");
+            assert!(n > 0, "connection closed before request headers");
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                break pos;
+            }
+        };
+        let head = String::from_utf8(buf[..header_end].to_vec()).expect("utf8 request head");
+        let mut lines = head.split("\r\n");
+        let request_line = lines.next().unwrap_or_default().to_owned();
+        let mut headers = Vec::new();
+        let mut content_length = 0_usize;
+        for line in lines {
+            if let Some((key, value)) = line.split_once(": ") {
+                if key.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+                headers.push((key.to_owned(), value.to_owned()));
+            }
+        }
+        let mut body_bytes = buf[header_end + 4..].to_vec();
+        while body_bytes.len() < content_length {
+            let mut chunk = [0_u8; 1024];
+            let n = stream.read(&mut chunk).expect("read request body");
+            if n == 0 {
+                break;
+            }
+            body_bytes.extend_from_slice(&chunk[..n]);
+        }
+        let body = String::from_utf8(body_bytes).expect("utf8 request body");
+        CapturedRequest {
+            request_line,
+            headers,
+            body,
+        }
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn gateway_context(base_url: impl Into<String>) -> NodeContext {
+        NodeContext {
+            dagdb_gateway: Some(DagDbGatewayConfig::new(
+                base_url,
+                "super-secret-token-value",
+                "tenant-a",
+                "primary",
+            )),
+            ..NodeContext::empty()
+        }
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn signature_value(byte: char) -> String {
+        byte.to_string().repeat(SIGNATURE_HEX_CHARS)
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn add_write_signature(mut params: Value) -> Value {
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn add_writeback_signatures(mut params: Value) -> Value {
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[LIFECYCLE_SIGNATURE_HEADER] = json!(signature_value('b'));
+        params[CONTINUATION_SIGNATURE_HEADER] = json!(signature_value('c'));
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn write_signature_expectations() -> Vec<(&'static str, String)> {
+        vec![(WRITE_SIGNATURE_HEADER, signature_value('a'))]
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn writeback_signature_expectations() -> Vec<(&'static str, String)> {
+        vec![
+            (WRITE_SIGNATURE_HEADER, signature_value('a')),
+            (LIFECYCLE_SIGNATURE_HEADER, signature_value('b')),
+            (CONTINUATION_SIGNATURE_HEADER, signature_value('c')),
+        ]
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn scoped_import_params() -> Value {
+        let mut params = valid_import_params();
+        params["idempotency_key"] = json!("idem-import-1");
+        params["tenant_id"] = json!("tenant-a");
+        params["namespace"] = json!("primary");
+        params["db_set_version"] = json!("dag_db-project_memory_v3");
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn scoped_export_params() -> Value {
+        let mut params = valid_export_params();
+        params["idempotency_key"] = json!("idem-export-1");
+        params["tenant_id"] = json!("tenant-a");
+        params["namespace"] = json!("primary");
+        params["db_set_version"] = json!("dag_db-project_memory_v3");
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn assert_live_proxy(
+        execute: fn(&Value, &NodeContext) -> ToolResult,
+        params: Value,
+        response_fixture_name: &str,
+        expected_path: &str,
+        expected_scope: &str,
+        expected_signatures: Vec<(&'static str, String)>,
+    ) {
+        let server = TestServer::spawn("200 OK", response_fixture(response_fixture_name));
+        let context = gateway_context(server.base_url.clone());
+
+        let result = execute(&params, &context);
+        assert!(
+            !result.is_error,
+            "live proxy result was an error: {result:?}"
+        );
+        let body = result_json(&result);
+        assert!(
+            body["schema_version"]
+                .as_str()
+                .expect("schema_version")
+                .starts_with("dagdb_"),
+            "live proxy returned DTO JSON: {body}"
+        );
+
+        let request = server.captured();
+        assert!(
+            request.request_line.starts_with(expected_path),
+            "request line was {:?}",
+            request.request_line
+        );
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer super-secret-token-value")
+        );
+        assert_eq!(request.header("x-exo-tenant-id"), Some("tenant-a"));
+        assert_eq!(request.header("x-exo-namespace"), Some("primary"));
+        assert_eq!(
+            request.header("x-exo-authority-scope"),
+            Some(expected_scope)
+        );
+        for (header, expected) in expected_signatures {
+            assert_eq!(request.header(header), Some(expected.as_str()));
+        }
+        assert!(
+            request.body.contains("\"idempotency_key\""),
+            "request body should carry the DTO JSON body: {}",
+            request.body
+        );
     }
 
     fn valid_import_params() -> Value {
@@ -807,12 +1608,12 @@ mod tests {
     }
 
     #[test]
-    fn import_tool_fails_closed_with_unconfigured_adapter_result() {
+    fn import_tool_fails_closed_with_unconfigured_gateway_result() {
         let result = execute_import(&valid_import_params(), &NodeContext::empty());
         assert!(result.is_error);
         assert_eq!(
             result_json(&result)["message"],
-            "DAG DB adapter is not configured on this node; no DAG DB operation was performed."
+            "DAG DB runtime gateway is not configured on this node; no DAG DB operation was performed."
         );
         let body = result_json(&result);
         assert_eq!(body["tool_status"], DAGDB_ADAPTER_UNCONFIGURED);
@@ -846,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn export_tool_fails_closed_with_unconfigured_adapter_result() {
+    fn export_tool_fails_closed_with_unconfigured_gateway_result() {
         let result = execute_export(&valid_export_params(), &NodeContext::empty());
         assert!(result.is_error);
         let body = result_json(&result);
@@ -862,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn context_packet_tool_fails_closed_with_unconfigured_adapter_result() {
+    fn context_packet_tool_fails_closed_with_unconfigured_gateway_result() {
         let result =
             execute_get_context_packet(&request_fixture("context_packet"), &NodeContext::empty());
         assert!(result.is_error);
@@ -874,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn writeback_tool_fails_closed_with_unconfigured_adapter_result() {
+    fn writeback_tool_fails_closed_with_unconfigured_gateway_result() {
         let result = execute_submit_writeback(&request_fixture("writeback"), &NodeContext::empty());
         assert!(result.is_error);
         let body = result_json(&result);
@@ -882,6 +1683,219 @@ mod tests {
         assert_eq!(body["tool"], DAGDB_SUBMIT_WRITEBACK_TOOL);
         assert_eq!(body["operation_id"], "idem-writeback-1");
         assert_eq!(body["tenant_id"], "tenant-a");
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_proxies_all_dagdb_mcp_tools_with_auth_and_tenant_scope() {
+        assert_live_proxy(
+            execute_get_context_packet,
+            add_write_signature(request_fixture("context_packet")),
+            "context_packet",
+            "POST /api/v1/dag-db/context-packet ",
+            "dagdb:context_packet:tenant-a:primary",
+            write_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_submit_writeback,
+            add_writeback_signatures(request_fixture("writeback")),
+            "writeback",
+            "POST /api/v1/dag-db/writeback ",
+            "dagdb:writeback:tenant-a:primary",
+            writeback_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_import,
+            add_write_signature(scoped_import_params()),
+            "import",
+            "POST /api/v1/dag-db/import ",
+            "dagdb:import:tenant-a:primary",
+            write_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_export,
+            add_write_signature(scoped_export_params()),
+            "export",
+            "POST /api/v1/dag-db/export ",
+            "dagdb:export:tenant-a:primary",
+            write_signature_expectations(),
+        );
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_missing_auth_fails_closed_before_http() {
+        let context = NodeContext {
+            dagdb_gateway: Some(DagDbGatewayConfig {
+                base_url: Some("http://127.0.0.1:9".to_owned()),
+                bearer_token: None,
+                tenant_id: Some("tenant-a".to_owned()),
+                namespace: Some("primary".to_owned()),
+            }),
+            ..NodeContext::empty()
+        };
+
+        let result = execute_get_context_packet(
+            &add_write_signature(request_fixture("context_packet")),
+            &context,
+        );
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_AUTH_UNCONFIGURED);
+        assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_missing_tenant_fails_closed_before_http() {
+        let context = NodeContext {
+            dagdb_gateway: Some(DagDbGatewayConfig {
+                base_url: Some("http://127.0.0.1:9".to_owned()),
+                bearer_token: Some(zeroize::Zeroizing::new("token".to_owned())),
+                tenant_id: None,
+                namespace: Some("primary".to_owned()),
+            }),
+            ..NodeContext::empty()
+        };
+
+        let result = execute_get_context_packet(
+            &add_write_signature(request_fixture("context_packet")),
+            &context,
+        );
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_TENANT_UNCONFIGURED);
+        assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_scope_mismatch_fails_closed_before_http() {
+        let context = NodeContext {
+            dagdb_gateway: Some(DagDbGatewayConfig::new(
+                "http://127.0.0.1:9",
+                "token",
+                "tenant-b",
+                "primary",
+            )),
+            ..NodeContext::empty()
+        };
+
+        let result = execute_get_context_packet(
+            &add_write_signature(request_fixture("context_packet")),
+            &context,
+        );
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_TENANT_SCOPE_MISMATCH);
+        assert_eq!(body["request_tenant_id"], "tenant-a");
+        assert_eq!(body["configured_tenant_id"], "tenant-b");
+        assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn assert_missing_signature_fails_before_http(
+        execute: fn(&Value, &NodeContext) -> ToolResult,
+        params: Value,
+        expected_missing_header: &str,
+    ) {
+        let context = gateway_context("http://127.0.0.1:9");
+
+        let result = execute(&params, &context);
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_SIGNATURE_MATERIAL_MISSING);
+        assert_eq!(body["missing_signature_header"], expected_missing_header);
+        assert_eq!(body["success_claimed"], false);
+        assert_ne!(
+            body["tool_status"], DAGDB_GATEWAY_REQUEST_FAILED,
+            "missing signature must fail before any gateway request"
+        );
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_missing_signature_material_fails_closed_before_http() {
+        assert_missing_signature_fails_before_http(
+            execute_get_context_packet,
+            request_fixture("context_packet"),
+            WRITE_SIGNATURE_HEADER,
+        );
+        assert_missing_signature_fails_before_http(
+            execute_import,
+            scoped_import_params(),
+            WRITE_SIGNATURE_HEADER,
+        );
+        assert_missing_signature_fails_before_http(
+            execute_export,
+            scoped_export_params(),
+            WRITE_SIGNATURE_HEADER,
+        );
+
+        let mut writeback_without_lifecycle = request_fixture("writeback");
+        writeback_without_lifecycle[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        assert_missing_signature_fails_before_http(
+            execute_submit_writeback,
+            writeback_without_lifecycle,
+            LIFECYCLE_SIGNATURE_HEADER,
+        );
+
+        let mut writeback_without_continuation = request_fixture("writeback");
+        writeback_without_continuation[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        writeback_without_continuation[LIFECYCLE_SIGNATURE_HEADER] = json!(signature_value('b'));
+        assert_missing_signature_fails_before_http(
+            execute_submit_writeback,
+            writeback_without_continuation,
+            CONTINUATION_SIGNATURE_HEADER,
+        );
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_invalid_signature_material_fails_without_echoing_value() {
+        let mut params = request_fixture("context_packet");
+        let invalid_signature = "sk-proj-invalid-signature-value";
+        params[WRITE_SIGNATURE_HEADER] = json!(invalid_signature);
+        let result = execute_get_context_packet(&params, &gateway_context("http://127.0.0.1:9"));
+        assert!(result.is_error);
+
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_SIGNATURE_MATERIAL_INVALID);
+        assert_eq!(body["invalid_signature_header"], WRITE_SIGNATURE_HEADER);
+        assert_eq!(body["success_claimed"], false);
+        assert!(
+            !body.to_string().contains(invalid_signature),
+            "invalid signature value must not be echoed: {body}"
+        );
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn gateway_error_envelope_maps_to_typed_mcp_error() {
+        let server = TestServer::spawn("403 Forbidden", error_fixture("tenant_scope_mismatch"));
+        let context = gateway_context(server.base_url.clone());
+
+        let result = execute_get_context_packet(
+            &add_write_signature(request_fixture("context_packet")),
+            &context,
+        );
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_GATEWAY_REQUEST_FAILED);
+        assert_eq!(body["error_kind"], "server");
+        assert_eq!(body["status"], 403);
+        assert_eq!(body["error_code"], "tenant_scope_mismatch");
+        assert_eq!(body["success_claimed"], false);
+
+        let request = server.captured();
+        assert_eq!(
+            request.header("x-exo-authority-scope"),
+            Some("dagdb:context_packet:tenant-a:primary")
+        );
+        assert_eq!(
+            request.header(WRITE_SIGNATURE_HEADER),
+            Some(signature_value('a').as_str())
+        );
     }
 
     #[test]

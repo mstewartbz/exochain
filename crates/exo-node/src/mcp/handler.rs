@@ -156,6 +156,7 @@ impl McpServer {
     /// Create a new MCP server with a configured authority signer for
     /// constitutional adjudication.
     #[must_use]
+    #[allow(dead_code)]
     pub fn with_authority(
         actor_did: Did,
         authority_did: Did,

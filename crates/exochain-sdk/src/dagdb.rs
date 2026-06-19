@@ -202,6 +202,7 @@ fn optional_bool_query(name: &str, value: Option<bool>) -> String {
 #[cfg(feature = "http-client")]
 pub use transport::{
     BearerToken, DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbServerError,
+    DagDbSignatureHeaders,
 };
 
 /// Real async HTTP transport for the DAG DB REST surface.
@@ -244,6 +245,12 @@ mod transport {
     const NAMESPACE_HEADER: &str = "x-exo-namespace";
     /// Gateway header carrying the `{action}:{tenant}:{namespace}` authority scope.
     const AUTHORITY_SCOPE_HEADER: &str = "x-exo-authority-scope";
+    /// Gateway header carrying the signed write payload.
+    const WRITE_SIGNATURE_HEADER: &str = "x-exo-write-signature";
+    /// Gateway header carrying the signed lifecycle payload.
+    const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
+    /// Gateway header carrying the signed continuation payload.
+    const CONTINUATION_SIGNATURE_HEADER: &str = "x-exo-continuation-signature";
 
     /// Bearer token wrapper that never exposes its secret via [`fmt::Debug`].
     ///
@@ -326,6 +333,70 @@ mod transport {
         }
     }
 
+    /// Per-request DAG DB signature headers supplied by an operator-owned signer.
+    ///
+    /// Values are opaque to the SDK and are only revealed while constructing
+    /// HTTP headers. `Debug` is redacted so signatures cannot leak through
+    /// routine diagnostics.
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct DagDbSignatureHeaders {
+        write_signature: String,
+        lifecycle_signature: Option<String>,
+        continuation_signature: Option<String>,
+    }
+
+    impl DagDbSignatureHeaders {
+        /// Header set for routes that require only `x-exo-write-signature`.
+        #[must_use]
+        pub fn write(write_signature: impl Into<String>) -> Self {
+            Self {
+                write_signature: write_signature.into(),
+                lifecycle_signature: None,
+                continuation_signature: None,
+            }
+        }
+
+        /// Header set for writeback, which requires all three signature headers.
+        #[must_use]
+        pub fn writeback(
+            write_signature: impl Into<String>,
+            lifecycle_signature: impl Into<String>,
+            continuation_signature: impl Into<String>,
+        ) -> Self {
+            Self {
+                write_signature: write_signature.into(),
+                lifecycle_signature: Some(lifecycle_signature.into()),
+                continuation_signature: Some(continuation_signature.into()),
+            }
+        }
+
+        fn insert_into(&self, headers: &mut HeaderMap) -> Result<(), DagDbClientError> {
+            headers.insert(
+                HeaderName::from_static(WRITE_SIGNATURE_HEADER),
+                signature_header_value(&self.write_signature, WRITE_SIGNATURE_HEADER)?,
+            );
+            if let Some(signature) = self.lifecycle_signature.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(LIFECYCLE_SIGNATURE_HEADER),
+                    signature_header_value(signature, LIFECYCLE_SIGNATURE_HEADER)?,
+                );
+            }
+            if let Some(signature) = self.continuation_signature.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(CONTINUATION_SIGNATURE_HEADER),
+                    signature_header_value(signature, CONTINUATION_SIGNATURE_HEADER)?,
+                );
+            }
+            Ok(())
+        }
+    }
+
+    impl fmt::Debug for DagDbSignatureHeaders {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("DagDbSignatureHeaders(<redacted>)")
+        }
+    }
+
     /// Governed error returned by the gateway for a non-2xx DAG DB response.
     ///
     /// Carries the parsed [`DagDbErrorEnvelope`] fields so a caller can branch
@@ -400,6 +471,15 @@ mod transport {
             /// Name of the header that could not be constructed.
             header: &'static str,
         },
+
+        /// Per-request signature material contained bytes that are not a legal
+        /// HTTP header value, so the request was never sent. The signature value
+        /// itself is never included in this error.
+        #[error("DAG DB signature header `{header}` is not a valid HTTP header value")]
+        InvalidSignatureHeader {
+            /// Name of the header that could not be constructed.
+            header: &'static str,
+        },
     }
 
     impl DagDbClientError {
@@ -470,6 +550,7 @@ mod transport {
                 "dagdb:intake",
                 exo_dag_db_api::DAGDB_INTAKE_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbIntakeResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -484,6 +565,7 @@ mod transport {
                 "dagdb:route",
                 exo_dag_db_api::DAGDB_ROUTE_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbRouteResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -498,6 +580,23 @@ mod transport {
                 "dagdb:context_packet",
                 exo_dag_db_api::DAGDB_CONTEXT_PACKET_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbContextPacketResponse| r.schema_version.as_str(),
+                None,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/context-packet` with gateway write signature.
+        pub async fn context_packet_with_signatures(
+            &self,
+            request: DagDbContextPacketRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbContextPacketResponse, DagDbClientError> {
+            self.send(
+                self.specs.context_packet(request),
+                "dagdb:context_packet",
+                exo_dag_db_api::DAGDB_CONTEXT_PACKET_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbContextPacketResponse| r.schema_version.as_str(),
+                Some(signatures),
             )
             .await
         }
@@ -512,6 +611,7 @@ mod transport {
                 "dagdb:validate",
                 exo_dag_db_api::DAGDB_VALIDATE_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbValidateResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -526,6 +626,23 @@ mod transport {
                 "dagdb:writeback",
                 exo_dag_db_api::DAGDB_WRITEBACK_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbWritebackResponse| r.schema_version.as_str(),
+                None,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/writeback` with all gateway signature headers.
+        pub async fn writeback_with_signatures(
+            &self,
+            request: DagDbWritebackRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbWritebackResponse, DagDbClientError> {
+            self.send(
+                self.specs.writeback(request),
+                "dagdb:writeback",
+                exo_dag_db_api::DAGDB_WRITEBACK_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbWritebackResponse| r.schema_version.as_str(),
+                Some(signatures),
             )
             .await
         }
@@ -540,6 +657,23 @@ mod transport {
                 "dagdb:import",
                 exo_dag_db_api::DAGDB_IMPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbImportResponse| r.schema_version.as_str(),
+                None,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/import` with gateway write signature.
+        pub async fn dagdb_import_with_signatures(
+            &self,
+            request: DagDbImportRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbImportResponse, DagDbClientError> {
+            self.send(
+                self.specs.dagdb_import(request),
+                "dagdb:import",
+                exo_dag_db_api::DAGDB_IMPORT_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbImportResponse| r.schema_version.as_str(),
+                Some(signatures),
             )
             .await
         }
@@ -554,6 +688,23 @@ mod transport {
                 "dagdb:export",
                 exo_dag_db_api::DAGDB_EXPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbExportResponse| r.schema_version.as_str(),
+                None,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/export` with gateway write signature.
+        pub async fn dagdb_export_with_signatures(
+            &self,
+            request: DagDbExportRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbExportResponse, DagDbClientError> {
+            self.send(
+                self.specs.dagdb_export(request),
+                "dagdb:export",
+                exo_dag_db_api::DAGDB_EXPORT_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbExportResponse| r.schema_version.as_str(),
+                Some(signatures),
             )
             .await
         }
@@ -568,6 +719,7 @@ mod transport {
                 "dagdb:trust_check",
                 exo_dag_db_api::DAGDB_TRUST_CHECK_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbTrustCheckResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -582,6 +734,7 @@ mod transport {
                 "dagdb:council_decision",
                 exo_dag_db_api::DAGDB_COUNCIL_DECISION_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbCouncilDecisionResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -596,6 +749,7 @@ mod transport {
                 "dagdb:receipt_lookup",
                 exo_dag_db_api::DAGDB_RECEIPT_LOOKUP_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbReceiptLookupResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -610,6 +764,7 @@ mod transport {
                 "dagdb:catalog_lookup",
                 exo_dag_db_api::DAGDB_CATALOG_LOOKUP_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbCatalogLookupResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -624,6 +779,7 @@ mod transport {
                 "dagdb:route_lookup",
                 exo_dag_db_api::DAGDB_ROUTE_LOOKUP_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbRouteLookupResponse| r.schema_version.as_str(),
+                None,
             )
             .await
         }
@@ -641,6 +797,7 @@ mod transport {
             action: &str,
             expected: &'static str,
             schema_of: impl Fn(&Resp) -> &str,
+            signatures: Option<DagDbSignatureHeaders>,
         ) -> Result<Resp, DagDbClientError>
         where
             Body: Serialize,
@@ -651,7 +808,7 @@ mod transport {
                 DagDbHttpMethod::Get => self.http.get(url),
                 DagDbHttpMethod::Post => self.http.post(url),
             };
-            builder = builder.headers(self.auth_headers(action)?);
+            builder = builder.headers(self.auth_headers(action, signatures.as_ref())?);
             if let Some(body) = spec.body.as_ref() {
                 builder = builder.json(body);
             }
@@ -702,14 +859,19 @@ mod transport {
             }
         }
 
-        /// Assemble the four gateway auth headers for `action`.
+        /// Assemble the gateway auth headers for `action` and optional
+        /// per-request signature headers.
         ///
         /// Callers wanting a per-request deadline should build the
         /// `reqwest::Client` with [`reqwest::ClientBuilder::timeout`] and pass
         /// it to [`DagDbHttpClient::with_client`]; an elapsed deadline maps to
         /// [`DagDbClientError::Timeout`].
-        fn auth_headers(&self, action: &str) -> Result<HeaderMap, DagDbClientError> {
-            let mut headers = HeaderMap::with_capacity(4);
+        fn auth_headers(
+            &self,
+            action: &str,
+            signatures: Option<&DagDbSignatureHeaders>,
+        ) -> Result<HeaderMap, DagDbClientError> {
+            let mut headers = HeaderMap::with_capacity(if signatures.is_some() { 7 } else { 4 });
             headers.insert(
                 AUTHORIZATION,
                 header_value(
@@ -729,6 +891,9 @@ mod transport {
                 HeaderName::from_static(AUTHORITY_SCOPE_HEADER),
                 header_value(&self.auth.authority_scope(action), AUTHORITY_SCOPE_HEADER)?,
             );
+            if let Some(signatures) = signatures {
+                signatures.insert_into(&mut headers)?;
+            }
             Ok(headers)
         }
     }
@@ -742,6 +907,14 @@ mod transport {
 
     fn header_value(value: &str, header: &'static str) -> Result<HeaderValue, DagDbClientError> {
         HeaderValue::from_str(value).map_err(|_| DagDbClientError::InvalidAuthHeader { header })
+    }
+
+    fn signature_header_value(
+        value: &str,
+        header: &'static str,
+    ) -> Result<HeaderValue, DagDbClientError> {
+        HeaderValue::from_str(value)
+            .map_err(|_| DagDbClientError::InvalidSignatureHeader { header })
     }
 }
 
@@ -966,8 +1139,8 @@ mod transport_tests {
     };
 
     use super::{
-        DagDbIntakeRequest, DagDbReceiptLookupRequest,
-        transport::{DagDbAuthConfig, DagDbClientError, DagDbHttpClient},
+        DagDbIntakeRequest, DagDbReceiptLookupRequest, DagDbWritebackRequest,
+        transport::{DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbSignatureHeaders},
     };
 
     /// The raw HTTP request a [`TestServer`] captured from the SDK.
@@ -1113,6 +1286,14 @@ mod transport_tests {
         fixture_request("receipt_lookup")
     }
 
+    fn writeback_request() -> DagDbWritebackRequest {
+        fixture_request("writeback")
+    }
+
+    fn signature_value(byte: char) -> String {
+        byte.to_string().repeat(128)
+    }
+
     fn fixture_response(section: &str, name: &str) -> String {
         fixtures()
             .get(section)
@@ -1155,6 +1336,45 @@ mod transport_tests {
                 .contains("\"idempotency_key\":\"idem-intake-1\""),
             "body was {}",
             request.body
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_writeback_attaches_all_gateway_signature_headers() {
+        let body = fixture_response("responses", "writeback");
+        let server = TestServer::spawn("200 OK", body).await;
+        let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+        let _ = client
+            .writeback_with_signatures(
+                writeback_request(),
+                DagDbSignatureHeaders::writeback(
+                    signature_value('a'),
+                    signature_value('b'),
+                    signature_value('c'),
+                ),
+            )
+            .await;
+        let request = server.captured().await;
+
+        assert!(
+            request
+                .request_line
+                .starts_with("POST /api/v1/dag-db/writeback "),
+            "request line was {:?}",
+            request.request_line
+        );
+        assert_eq!(
+            request.header("x-exo-write-signature"),
+            Some(signature_value('a').as_str())
+        );
+        assert_eq!(
+            request.header("x-exo-lifecycle-signature"),
+            Some(signature_value('b').as_str())
+        );
+        assert_eq!(
+            request.header("x-exo-continuation-signature"),
+            Some(signature_value('c').as_str())
         );
     }
 

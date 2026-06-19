@@ -110,6 +110,9 @@ async fn append_receipt_in_transaction(
         .execute(&mut **tx)
         .await
         .map_err(pg)?;
+    crate::postgres::bind_tenant_context(tx, &request.tenant_id)
+        .await
+        .map_err(pg)?;
     lock_subject(tx, request).await?;
 
     let head = fetch_head(tx, request).await?;
@@ -138,6 +141,9 @@ pub async fn reconstruct_receipt_chain(
     subject_kind: SubjectKind,
     subject_id: Hash256,
 ) -> Result<Vec<ReceiptRecord>> {
+    let mut tx = crate::postgres::begin_tenant_transaction(pool, tenant_id)
+        .await
+        .map_err(pg)?;
     let subject_kind = subject_kind_sql(subject_kind);
     let subject_id_bytes = hash_bytes(subject_id);
     let row = sqlx::query(
@@ -148,7 +154,7 @@ pub async fn reconstruct_receipt_chain(
     .bind(namespace)
     .bind(subject_kind)
     .bind(subject_id_bytes)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(pg)?
     .ok_or(ReceiptStoreError::ReceiptChainNotFound)?;
@@ -166,7 +172,7 @@ pub async fn reconstruct_receipt_chain(
         .bind(subject_kind)
         .bind(hash_bytes(subject_id))
         .bind(hash_bytes(current))
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(pg)?
         .ok_or(ReceiptStoreError::ReceiptChainBroken)?;
@@ -181,6 +187,7 @@ pub async fn reconstruct_receipt_chain(
         records.push(record);
         if is_genesis {
             records.reverse();
+            tx.commit().await.map_err(pg)?;
             return Ok(records);
         }
     }

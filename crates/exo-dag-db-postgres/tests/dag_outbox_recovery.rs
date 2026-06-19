@@ -1,7 +1,7 @@
 #![cfg(feature = "postgres")]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::process;
+use std::{process, str::FromStr};
 
 use exo_core::{Hash256, Timestamp};
 use exo_dag::store::{DagStore, MemoryStore};
@@ -13,11 +13,18 @@ use exo_dag_db_postgres::{
         reconstruct_subject_receipts_after_recovery, subject_has_committed_finality,
         subject_is_context_eligible, subject_is_route_eligible,
     },
-    postgres::DAGDB_SCHEMA_SQL,
+    postgres::{
+        DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL, DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL,
+        DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL, DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL,
+        DAGDB_TENANT_RLS_SCHEMA_SQL, begin_tenant_transaction,
+    },
     receipt::{ReceiptAppendRequest, append_receipt},
 };
 use serde_json::json;
-use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{
+    Connection, PgConnection, PgPool, Row,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 
 #[tokio::test]
 async fn pending_outbox_subject_is_invisible_to_route_and_context() {
@@ -75,6 +82,7 @@ async fn postgres_success_plus_dag_failure_retries_and_recovers() {
     let now = Timestamp::new(10_000, 0);
     let failed = process_outbox_by_id(
         &db.pool,
+        "tenant-a",
         &mut store,
         outbox_id,
         now,
@@ -102,14 +110,21 @@ async fn postgres_success_plus_dag_failure_retries_and_recovers() {
         "failed"
     );
     assert!(
-        process_next_due_outbox(&db.pool, &mut store, now, "did:exo:outbox-worker")
-            .await
-            .expect("no due row before backoff")
-            .is_none()
+        process_next_due_outbox(
+            &db.pool,
+            "tenant-a",
+            &mut store,
+            now,
+            "did:exo:outbox-worker"
+        )
+        .await
+        .expect("no due row before backoff")
+        .is_none()
     );
 
     let committed = process_next_due_outbox(
         &db.pool,
+        "tenant-a",
         &mut store,
         Timestamp::new(11_000, 0),
         "did:exo:outbox-worker",
@@ -175,6 +190,7 @@ async fn dag_success_plus_postgres_update_failure_recovers_to_committed() {
     let mut store = MemoryStore::new();
     let err = process_outbox_by_id(
         &db.pool,
+        "tenant-a",
         &mut store,
         outbox_id,
         Timestamp::new(20_000, 0),
@@ -196,6 +212,7 @@ async fn dag_success_plus_postgres_update_failure_recovers_to_committed() {
 
     let recovered = process_outbox_by_id(
         &db.pool,
+        "tenant-a",
         &mut store,
         outbox_id,
         Timestamp::new(20_001, 0),
@@ -255,6 +272,7 @@ async fn max_retry_terminal_failure_compensates_and_blocks_operator_mutation() {
     let mut store = MemoryStore::new();
     let compensated = process_outbox_by_id(
         &db.pool,
+        "tenant-a",
         &mut store,
         outbox_id,
         Timestamp::new(30_000, 0),
@@ -285,7 +303,7 @@ async fn max_retry_terminal_failure_compensates_and_blocks_operator_mutation() {
         "compensated"
     );
     assert!(matches!(
-        operator_retry_compensated_row(&db.pool, outbox_id).await,
+        operator_retry_compensated_row(&db.pool, "tenant-a", outbox_id).await,
         Err(OutboxError::CompensatedRowsAreTerminal)
     ));
     assert!(
@@ -349,6 +367,7 @@ async fn duplicate_enqueue_missing_subject_and_terminal_replay_fail_closed() {
     let mut store = MemoryStore::new();
     let committed = process_outbox_by_id(
         &db.pool,
+        "tenant-a",
         &mut store,
         outbox_id,
         Timestamp::new(40_000, 0),
@@ -359,13 +378,14 @@ async fn duplicate_enqueue_missing_subject_and_terminal_replay_fail_closed() {
     .expect("commit outbox row");
     assert!(matches!(committed, OutboxProcessResult::Committed { .. }));
     assert!(
-        operator_retry_compensated_row(&db.pool, outbox_id)
+        operator_retry_compensated_row(&db.pool, "tenant-a", outbox_id)
             .await
             .is_ok()
     );
     assert_eq!(
         process_outbox_by_id(
             &db.pool,
+            "tenant-a",
             &mut store,
             outbox_id,
             Timestamp::new(40_001, 0),
@@ -382,6 +402,7 @@ async fn duplicate_enqueue_missing_subject_and_terminal_replay_fail_closed() {
     assert!(matches!(
         process_outbox_by_id(
             &db.pool,
+            "tenant-a",
             &mut store,
             h(0xff),
             Timestamp::new(40_001, 0),
@@ -412,8 +433,20 @@ async fn concurrent_workers_claim_one_due_row_exactly_once() {
     let mut store_a = MemoryStore::new();
     let mut store_b = MemoryStore::new();
     let (worker_a, worker_b) = tokio::join!(
-        process_next_due_outbox(&pool_a, &mut store_a, now, "did:exo:outbox-worker-a"),
-        process_next_due_outbox(&db.pool, &mut store_b, now, "did:exo:outbox-worker-b"),
+        process_next_due_outbox(
+            &pool_a,
+            "tenant-a",
+            &mut store_a,
+            now,
+            "did:exo:outbox-worker-a"
+        ),
+        process_next_due_outbox(
+            &db.pool,
+            "tenant-a",
+            &mut store_b,
+            now,
+            "did:exo:outbox-worker-b"
+        ),
     );
     let worker_a = worker_a.expect("worker a result");
     let worker_b = worker_b.expect("worker b result");
@@ -451,6 +484,88 @@ async fn concurrent_workers_claim_one_due_row_exactly_once() {
 }
 
 #[tokio::test]
+async fn forced_rls_scopes_due_outbox_claims_to_bound_tenant() {
+    let Some(db) = TestDb::maybe_new("outbox_rls_scope").await else {
+        return;
+    };
+    let subject_id = h(0x29);
+    let outbox_id = h(0xa9);
+    seed_memory_subject(&db.pool, subject_id, h(0x69))
+        .await
+        .expect("seed memory subject before RLS");
+    apply_tenant_rls_schema(&db.pool).await;
+    let rls_pool = RlsCheckedPool::new(&db).await;
+    enqueue_outbox(
+        &rls_pool.pool,
+        &outbox_request(subject_id, outbox_id, h(0xb9)),
+    )
+    .await
+    .expect("tenant-bound enqueue under RLS");
+
+    assert!(
+        unbound_outbox_claim(&rls_pool.pool, Timestamp::new(61_000, 0))
+            .await
+            .is_err(),
+        "claiming without exo.tenant_id must error instead of idling"
+    );
+
+    let mut wrong_tenant_store = MemoryStore::new();
+    assert!(matches!(
+        process_outbox_by_id(
+            &rls_pool.pool,
+            "tenant-b",
+            &mut wrong_tenant_store,
+            outbox_id,
+            Timestamp::new(61_001, 0),
+            "did:exo:outbox-worker",
+            DagWriteMode::Normal,
+        )
+        .await,
+        Err(OutboxError::OutboxNotFound)
+    ));
+    assert!(
+        process_next_due_outbox(
+            &rls_pool.pool,
+            "tenant-b",
+            &mut wrong_tenant_store,
+            Timestamp::new(61_002, 0),
+            "did:exo:outbox-worker"
+        )
+        .await
+        .expect("wrong tenant claim is isolated")
+        .is_none()
+    );
+    assert_eq!(
+        outbox_snapshot(&rls_pool.pool, outbox_id).await.status,
+        "pending"
+    );
+
+    let mut store = MemoryStore::new();
+    let committed = process_next_due_outbox(
+        &rls_pool.pool,
+        "tenant-a",
+        &mut store,
+        Timestamp::new(61_003, 0),
+        "did:exo:outbox-worker",
+    )
+    .await
+    .expect("tenant-bound claim succeeds")
+    .expect("due tenant-a row");
+    assert!(matches!(
+        committed,
+        OutboxProcessResult::Committed {
+            outbox_id: committed_id,
+            ..
+        } if committed_id == outbox_id
+    ));
+    assert_eq!(
+        outbox_snapshot(&rls_pool.pool, outbox_id).await.status,
+        "committed"
+    );
+    rls_pool.cleanup(&db.pool).await;
+}
+
+#[tokio::test]
 async fn export_outbox_rows_are_skipped_by_generic_finality_worker() {
     let Some(db) = TestDb::maybe_new("outbox_export_skip").await else {
         return;
@@ -466,10 +581,16 @@ async fn export_outbox_rows_are_skipped_by_generic_finality_worker() {
     let mut store = MemoryStore::new();
     let now = Timestamp::new(70_000, 0);
     assert!(
-        process_next_due_outbox(&db.pool, &mut store, now, "did:exo:outbox-worker")
-            .await
-            .expect("export rows belong to the export finality path, not the generic worker")
-            .is_none()
+        process_next_due_outbox(
+            &db.pool,
+            "tenant-a",
+            &mut store,
+            now,
+            "did:exo:outbox-worker"
+        )
+        .await
+        .expect("export rows belong to the export finality path, not the generic worker")
+        .is_none()
     );
     assert_eq!(outbox_snapshot(&db.pool, h(0xa7)).await.status, "pending");
 
@@ -486,6 +607,7 @@ async fn export_outbox_rows_are_skipped_by_generic_finality_worker() {
     .expect("enqueue memory outbox");
     let committed = process_next_due_outbox(
         &db.pool,
+        "tenant-a",
         &mut store,
         Timestamp::new(70_001, 0),
         "did:exo:outbox-worker",
@@ -539,6 +661,7 @@ async fn catalog_route_and_context_finality_updates_are_committed() {
             .expect("enqueue non-memory outbox");
         process_outbox_by_id(
             &db.pool,
+            "tenant-a",
             &mut store,
             outbox_id,
             Timestamp::new(50_000 + u64::try_from(index).expect("small index"), 0),
@@ -702,6 +825,61 @@ async fn insert_export_outbox_row(
     Ok(())
 }
 
+async fn apply_tenant_rls_schema(pool: &PgPool) {
+    sqlx::raw_sql(DAGDB_GRAPH_SCHEMA_SQL)
+        .execute(pool)
+        .await
+        .expect("apply DAG DB graph schema");
+    sqlx::raw_sql(DAGDB_EXPORT_SCHEMA_SQL)
+        .execute(pool)
+        .await
+        .expect("apply DAG DB export schema");
+    sqlx::raw_sql(DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL)
+        .execute(pool)
+        .await
+        .expect("apply PRD17 default-route schema");
+    sqlx::raw_sql(DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL)
+        .execute(pool)
+        .await
+        .expect("apply PRD17 context-packet schema");
+    sqlx::raw_sql(DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL)
+        .execute(pool)
+        .await
+        .expect("apply PRD17 lifecycle schema");
+    sqlx::raw_sql(DAGDB_TENANT_RLS_SCHEMA_SQL)
+        .execute(pool)
+        .await
+        .expect("apply DAG DB tenant RLS schema");
+}
+
+async fn unbound_outbox_claim(
+    pool: &PgPool,
+    now: Timestamp,
+) -> std::result::Result<Option<Vec<u8>>, sqlx::Error> {
+    let lease_until_physical_ms = now
+        .physical_ms
+        .checked_add(30_000)
+        .expect("fixture lease timestamp");
+    sqlx::query_scalar::<_, Vec<u8>>(
+        "UPDATE dagdb_dag_outbox \
+         SET next_attempt_at_physical_ms = $3, next_attempt_at_logical = $2, \
+             updated_at_physical_ms = $1, updated_at_logical = $2 \
+         WHERE outbox_id = ( \
+             SELECT outbox_id FROM dagdb_dag_outbox \
+             WHERE dag_finality_status IN ('pending','failed') \
+               AND attempt_count < max_attempts \
+             ORDER BY next_attempt_at_physical_ms ASC NULLS FIRST, next_attempt_at_logical ASC NULLS FIRST, attempt_count ASC \
+             LIMIT 1 \
+             FOR UPDATE SKIP LOCKED) \
+         RETURNING outbox_id",
+    )
+    .bind(i64::try_from(now.physical_ms).expect("fixture timestamp range"))
+    .bind(i32::try_from(now.logical).expect("fixture logical range"))
+    .bind(i64::try_from(lease_until_physical_ms).expect("fixture lease range"))
+    .fetch_optional(pool)
+    .await
+}
+
 async fn append_genesis_receipt(
     pool: &PgPool,
     subject_kind: SubjectKind,
@@ -764,14 +942,18 @@ struct OutboxSnapshot {
 }
 
 async fn outbox_snapshot(pool: &PgPool, outbox_id: Hash256) -> OutboxSnapshot {
+    let mut tx = begin_tenant_transaction(pool, "tenant-a")
+        .await
+        .expect("begin tenant-bound outbox snapshot");
     let row = sqlx::query(
         "SELECT dag_finality_status, attempt_count, next_attempt_at_physical_ms, next_attempt_at_logical, compensation_receipt_hash \
-         FROM dagdb_dag_outbox WHERE outbox_id = $1",
+         FROM dagdb_dag_outbox WHERE tenant_id = 'tenant-a' AND outbox_id = $1",
     )
     .bind(hb(outbox_id))
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .expect("load outbox snapshot");
+    tx.commit().await.expect("commit outbox snapshot");
     let next_physical: Option<i64> = row
         .try_get("next_attempt_at_physical_ms")
         .expect("next physical");
@@ -822,6 +1004,103 @@ struct TestDb {
     pool: PgPool,
     schema: String,
     database_url: String,
+}
+
+const RLS_TEST_ROLE_PASSWORD: &str = "dagdb_rls_test_password";
+
+struct RlsCheckedPool {
+    pool: PgPool,
+    role_name: Option<String>,
+}
+
+impl RlsCheckedPool {
+    async fn new(db: &TestDb) -> Self {
+        if !pool_role_bypasses_rls(&db.pool).await {
+            return Self {
+                pool: db.pool.clone(),
+                role_name: None,
+            };
+        }
+
+        let role_name = format!("dagdb_rls_pool_{}", process::id());
+        drop_rls_role_if_exists(&db.pool, &role_name).await;
+        sqlx::raw_sql(&format!(
+            "CREATE ROLE {role_name} LOGIN PASSWORD '{RLS_TEST_ROLE_PASSWORD}'"
+        ))
+        .execute(&db.pool)
+        .await
+        .expect("create RLS checked pool role");
+        sqlx::raw_sql(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {role_name}",
+            db.schema
+        ))
+        .execute(&db.pool)
+        .await
+        .expect("grant schema usage to RLS checked pool role");
+        sqlx::raw_sql(&format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {role_name}",
+            db.schema
+        ))
+        .execute(&db.pool)
+        .await
+        .expect("grant table privileges to RLS checked pool role");
+        sqlx::raw_sql(&format!(
+            "GRANT EXECUTE ON FUNCTION {}.dagdb_current_tenant_id() TO {role_name}",
+            db.schema
+        ))
+        .execute(&db.pool)
+        .await
+        .expect("grant tenant helper execution to RLS checked pool role");
+
+        let options = PgConnectOptions::from_str(&db.database_url)
+            .expect("parse RLS checked pool database URL")
+            .username(&role_name)
+            .password(RLS_TEST_ROLE_PASSWORD)
+            .options([("search_path", format!("{},public", db.schema))]);
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("connect RLS checked pool");
+        Self {
+            pool,
+            role_name: Some(role_name),
+        }
+    }
+
+    async fn cleanup(self, admin_pool: &PgPool) {
+        if let Some(role_name) = self.role_name {
+            self.pool.close().await;
+            drop_rls_role_if_exists(admin_pool, &role_name).await;
+        }
+    }
+}
+
+async fn pool_role_bypasses_rls(pool: &PgPool) -> bool {
+    sqlx::query_scalar("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        .fetch_one(pool)
+        .await
+        .expect("query pool role RLS bypass state")
+}
+
+async fn drop_rls_role_if_exists(pool: &PgPool, role_name: &str) {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
+            .bind(role_name)
+            .fetch_one(pool)
+            .await
+            .expect("query RLS checked pool role existence");
+    if !exists {
+        return;
+    }
+    sqlx::raw_sql(&format!("DROP OWNED BY {role_name}"))
+        .execute(pool)
+        .await
+        .expect("drop RLS checked pool role privileges");
+    sqlx::raw_sql(&format!("DROP ROLE {role_name}"))
+        .execute(pool)
+        .await
+        .expect("drop RLS checked pool role");
 }
 
 impl TestDb {

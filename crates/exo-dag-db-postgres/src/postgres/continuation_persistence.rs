@@ -42,6 +42,9 @@ pub async fn persist_continuation_record(
             .execute(&mut *tx)
             .await
             .map_err(pg)?;
+        super::bind_tenant_context(&mut tx, &record.tenant_id)
+            .await
+            .map_err(pg)?;
 
         if let Some(row) = sqlx::query(
             "SELECT continuation_id, record_body FROM dagdb_continuation_records \

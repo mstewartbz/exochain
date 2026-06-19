@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use sqlx::{
+    Postgres, Transaction,
     migrate::Migrator,
     postgres::{PgPool, PgPoolOptions},
 };
@@ -74,6 +75,10 @@ pub const DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL: &str =
 /// SQL migration source for additive PRD17C lifecycle tables.
 pub const DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL: &str =
     include_str!("../../migrations/20260607000003_create_prd17_lifecycle_schema.sql");
+
+/// SQL migration source for tenant-scoped row-level security policies.
+pub const DAGDB_TENANT_RLS_SCHEMA_SQL: &str =
+    include_str!("../../migrations/20260619000001_enable_dagdb_tenant_rls.sql");
 
 /// SQL migration source for the PRD-D4 telemetry-facet node_type extension.
 ///
@@ -191,6 +196,29 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
         .run(pool)
         .await
         .map_err(|source| DagDbPostgresError::Migrate { source })
+}
+
+/// Bind a tenant id for RLS-protected DAG DB tables inside the current
+/// transaction.
+pub async fn bind_tenant_context(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('exo.tenant_id', $1, true)")
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Begin a transaction and bind its tenant context before tenant-scoped reads.
+pub async fn begin_tenant_transaction<'a>(
+    pool: &'a PgPool,
+    tenant_id: &str,
+) -> std::result::Result<Transaction<'a, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
+    Ok(tx)
 }
 
 /// Validate that `schema` is a safe, unquoted Postgres identifier so it can be

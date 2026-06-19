@@ -11,7 +11,7 @@ use exo_dag_db_api::{
     SafeMetadataDecision, ValidationStatus,
 };
 use serde_json::Value as JsonValue;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{
     graph::MemoryGraphEdge,
@@ -58,12 +58,16 @@ pub async fn load_persistent_graph_context_state(
 ) -> DomainResult<LoadedPersistentGraphContext> {
     validate_selection_request(request)?;
 
-    let memories = load_memories(pool, request).await?;
-    let catalogs = load_catalogs(pool, request).await?;
-    let graph_nodes = load_graph_nodes(pool, request).await?;
-    let raw_edges = load_graph_edges(pool, request).await?;
-    let validation_reports = load_validation_reports(pool, request).await?;
-    let receipt_ids = load_receipt_ids(pool, request).await?;
+    let mut tx = super::begin_tenant_transaction(pool, &request.tenant_id)
+        .await
+        .map_err(pg)?;
+    let memories = load_memories(&mut tx, request).await?;
+    let catalogs = load_catalogs(&mut tx, request).await?;
+    let graph_nodes = load_graph_nodes(&mut tx, request).await?;
+    let raw_edges = load_graph_edges(&mut tx, request).await?;
+    let validation_reports = load_validation_reports(&mut tx, request).await?;
+    let receipt_ids = load_receipt_ids(&mut tx, request).await?;
+    tx.commit().await.map_err(pg)?;
 
     let memory_row_count = usize_to_u32(memories.len(), "memory_row_count")?;
     let catalog_row_count = usize_to_u32(catalogs.len(), "catalog_row_count")?;
@@ -185,7 +189,7 @@ fn build_memory_candidates(
 }
 
 async fn load_memories(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &DagDbGraphContextSelectionRequest,
 ) -> DomainResult<BTreeMap<String, RetrievedMemory>> {
     // PRD-D4: exclude the telemetry facet by STRUCTURE. Usage-event and
@@ -206,7 +210,7 @@ async fn load_memories(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -231,7 +235,7 @@ async fn load_memories(
 }
 
 async fn load_catalogs(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &DagDbGraphContextSelectionRequest,
 ) -> DomainResult<BTreeMap<String, RetrievedCatalog>> {
     let rows = sqlx::query(
@@ -242,7 +246,7 @@ async fn load_catalogs(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -258,7 +262,7 @@ async fn load_catalogs(
 }
 
 async fn load_graph_nodes(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &DagDbGraphContextSelectionRequest,
 ) -> DomainResult<BTreeMap<String, Vec<RetrievedGraphNode>>> {
     let rows = sqlx::query(
@@ -269,7 +273,7 @@ async fn load_graph_nodes(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -297,7 +301,7 @@ async fn load_graph_nodes(
 }
 
 async fn load_graph_edges(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &DagDbGraphContextSelectionRequest,
 ) -> DomainResult<Vec<RetrievedGraphEdge>> {
     let rows = sqlx::query(
@@ -314,7 +318,7 @@ async fn load_graph_edges(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -347,7 +351,7 @@ async fn load_graph_edges(
 }
 
 async fn load_validation_reports(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &DagDbGraphContextSelectionRequest,
 ) -> DomainResult<BTreeMap<String, Vec<String>>> {
     let rows = sqlx::query(
@@ -358,7 +362,7 @@ async fn load_validation_reports(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -378,7 +382,7 @@ async fn load_validation_reports(
 }
 
 async fn load_receipt_ids(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     request: &DagDbGraphContextSelectionRequest,
 ) -> DomainResult<Vec<Hash256>> {
     let rows = sqlx::query(
@@ -389,7 +393,7 @@ async fn load_receipt_ids(
     )
     .bind(&request.tenant_id)
     .bind(&request.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 

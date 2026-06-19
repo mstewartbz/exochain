@@ -35,8 +35,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 452 | `find crates -name '*.rs'` |
-| Rust LOC | 335601 | `wc -l` |
-| Workspace tests | 5,719 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 339173 | `wc -l` |
+| Workspace tests | 5,807 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -113,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 335601 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 339173 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 5,719 listed workspace tests
+         cryptographic proofs, 5,807 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -145,11 +145,11 @@ Layer 5: ExoForge           (exoforge/)
 
 ## Repository Structure
 
-### DAG DB Opt-In Overlay
+### DAG DB Runtime Adapter
 
 This PR package uses upstream `exochain/exochain` as the substrate and adds DAG
-DB as an opt-in, default-off graph-governed memory adapter. Runtime ownership is
-split across [`crates/exo-dag-db-api`](crates/exo-dag-db-api/),
+DB as a graph-governed memory runtime adapter. Runtime ownership is split across
+[`crates/exo-dag-db-api`](crates/exo-dag-db-api/),
 [`crates/exo-dag-db-core`](crates/exo-dag-db-core/),
 [`crates/exo-dag-db-graph`](crates/exo-dag-db-graph/),
 [`crates/exo-dag-db-domain`](crates/exo-dag-db-domain/),
@@ -160,6 +160,13 @@ split across [`crates/exo-dag-db-api`](crates/exo-dag-db-api/),
 [`docs/dagdb`](docs/dagdb/). The upstream substrate should remain synchronized
 with `exochain/exochain`; DAG DB bridge points live in `exo-api`, `exo-gateway`,
 `exo-node`, and `exochain-sdk`.
+
+The REST runtime surface is `/api/v1/dag-db/*`: `exo-gateway` defaults compile
+the `production-db` path, and `exo-node` defaults inherit that gateway feature
+set. Runtime database configuration remains explicit; missing Postgres state,
+tenant authority, or write signatures fail closed instead of fabricating
+persistence. The node MCP gateway proxy is a separate feature-gated surface that
+requires operator-supplied gateway configuration and separate evidence.
 
 #### Current `exo-dag-db` status
 
@@ -182,12 +189,12 @@ than raw (`1,292` bp unsupported claims vs raw `542` bp). End-to-end dollar
 savings are **not_calculable** (no provider billing receipts), and answer quality
 is **at best a tie**. The thesis proof gate returns **not_accepted**.
 
-This component is **pre-1.0, opt-in, and default-off**: integration into
-canonical ExoChain is tracked by **GAP-012** in
-[`GAP-REGISTRY.md`](GAP-REGISTRY.md). It is **not** production-ready, **not**
-production-approved, and the cost-and-quality win is **not** proven. See the
-adapter contract in [`INTEGRATION.md`](INTEGRATION.md) and the shipped DAG DB
-docs in [`docs/dagdb`](docs/dagdb/).
+The runtime activation claim is bounded to the governed gateway REST paths,
+tenant-bound Postgres persistence, and live node MCP gateway proxy described in
+[`INTEGRATION.md`](INTEGRATION.md). Operator rollout sequencing, canary rollback,
+and production observability are tracked in the DAG DB runtime activation runbook:
+[`docs/dagdb/runtime-activation/rollback-canary-observability.md`](docs/dagdb/runtime-activation/rollback-canary-observability.md).
+These runtime docs do not claim billing savings or thesis acceptance.
 
 ### Core Crates (22)
 
@@ -197,7 +204,7 @@ docs in [`docs/dagdb`](docs/dagdb/).
 | `exo-governance` | Constitutional governance engine, AEGIS framework, council process |
 | `exo-gatekeeper` | TEE/Enclave interfaces, attestation verification, kernel invariants, holon, MCP |
 | `exo-dag` | Directed Acyclic Graph engine, BFT consensus adapter, checkpointing, HLC |
-| `exo-dag-db-*` | Split opt-in DAG DB and graph-governed agent memory overlay crates |
+| `exo-dag-db-*` | Split DAG DB and graph-governed agent memory runtime crates |
 | `exo-gateway` | External gateway: REST, GraphQL, auth, health probes (28 endpoints) |
 | `exo-identity` | Decentralized Identity (DID), key management, Shamir secret sharing, vault |
 | `exo-proofs` | SNARK, STARK, ZKML proof systems, verifier infrastructure |

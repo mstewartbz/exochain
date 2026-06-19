@@ -53,6 +53,9 @@ pub async fn persist_context_packet_record_in_transaction(
         .execute(&mut **tx)
         .await
         .map_err(ContextPacketPostgresError::Sqlx)?;
+    super::bind_tenant_context(tx, &record.tenant_id)
+        .await
+        .map_err(ContextPacketPostgresError::Sqlx)?;
     let selected_memory_ids =
         to_value(&record.selected_memory_ids).map_err(ContextPacketPostgresError::Json)?;
     let selected_edge_ids =

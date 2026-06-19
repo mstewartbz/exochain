@@ -187,6 +187,9 @@ async fn persist_kg_writeback_report_in_transaction(
         .execute(&mut **tx)
         .await
         .map_err(pg)?;
+    super::bind_tenant_context(tx, &report.tenant_id)
+        .await
+        .map_err(pg)?;
 
     if let Some(summary) =
         fetch_idempotency_replay(tx, report, idempotency_key, request_hash).await?

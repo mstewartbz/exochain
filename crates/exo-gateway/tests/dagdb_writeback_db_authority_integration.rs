@@ -31,17 +31,18 @@
 //! (same env the route contract test uses) and run in an isolated schema. They
 //! are skipped when the env var is unset.
 //!
-//! ## Served level: gateway, not node (T6 / GAP-012)
+//! ## Served level: gateway DB authority (T6 / GAP-012)
 //!
 //! This drives the REAL served path — `exo_gateway::server::build_router` (a
 //! real axum router) + a real `PgPool` + the real `DagDbGatekeeperService`, with
 //! NO injected in-memory gatekeeper profile — into Postgres. It is **gateway-
-//! served, not node-served**, by design: `exo-node` depends on `exo-gateway`
-//! with default features and does NOT enable `production-db`, so a node build
-//! has no compiled dag-db DB-persistence path (the dag-db write surface is the
-//! opt-in adapter boundary; see INTEGRATION.md). Exercising the gated write path
-//! therefore requires the `production-db` gateway build, which is what this test
-//! is. Node-served end-to-end dag-db is intentionally not wired.
+//! served**, by design: this file proves the production `exo-gateway`
+//! persistence and authority route against live Postgres. `exo-node` now
+//! compiles the production gateway default and serves DAG DB through the live
+//! MCP gateway proxy when `EXO_DAGDB_GATEWAY_URL`, `EXO_DAGDB_GATEWAY_BEARER_TOKEN`,
+//! `EXO_DAGDB_TENANT_ID`, and `EXO_DAGDB_NAMESPACE` are configured; node proxy
+//! behavior is covered by the MCP DAG DB tool tests rather than this gateway DB
+//! authority integration.
 //!
 //! As of T6 this path also exercises the constitutional invariant subset
 //! (`dagdb_invariant_set`): the gateway now threads a real `InvariantContext`

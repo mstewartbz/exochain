@@ -18,9 +18,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Traceability Matrix
 
-Updated 2026-06-18 after DAG DB opt-in adapter gate review. Maps every spec requirement to code, tests, and status.
+Updated 2026-06-18 after DAG DB REST runtime activation evidence review. Maps every spec requirement to code, tests, and status.
 
-**Status key:** 🟢 Implemented (tests passing) | 🟡 Partial | 🔴 Planned
+**Status key:** 🟢 Implemented (tests passing) | 🟡 Partial or evidence pending | 🔴 Planned
 
 ## Core Infrastructure (Spec §9)
 
@@ -163,7 +163,7 @@ Updated 2026-06-18 after DAG DB opt-in adapter gate review. Maps every spec requ
 | **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
 | **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
 
-## DAG DB Opt-In Adapter (GAP-012 PR-body candidate)
+## DAG DB Runtime Adapter (GAP-012 PR-body candidate)
 
 GAP-012 is referenced by `README.md` and `INTEGRATION.md`; this repository copy
 does not contain a `GAP-012` section in `GAP-REGISTRY.md`. The spec section below
@@ -172,7 +172,7 @@ confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
 
 | Req | Spec Candidate | Requirement | Module / Evidence | Status |
 |---|---|---|---|---|
-| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | Opt-in DAG DB writeback must fail closed unless production DB authority is configured and each write passes tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export fail closed pending distinct import/export consent. | `exochain/exochain#694`; `INTEGRATION.md` DAG DB Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/crate-restructure/slice-status.md` | 🟡 Partial |
+| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | DAG DB REST route, context-packet, writeback, import, and export paths must be served by the gateway runtime when Postgres and tenant/session authority are configured; each write must pass tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export fail closed pending distinct import/export consent; RLS tenant policy and MCP gateway proxy proof are tracked as activation evidence. | `exochain/exochain#694`; `INTEGRATION.md` DAG DB Runtime Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `crates/exo-node/src/mcp/tools/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/runtime-activation/rollback-canary-observability.md` | 🟡 Evidence pending |
 
 ## Autonomous Volition Credential (AVC) Layer
 

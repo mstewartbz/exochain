@@ -116,16 +116,22 @@ exo-core
           -> decision-forum
 ```
 
-## DAG DB Opt-In Overlay
+## DAG DB Runtime Adapter
 
 This PR package keeps upstream `exochain/exochain` as the substrate and adds DAG
-DB as an opt-in, default-off graph-governed memory adapter. DAG DB runtime work
-is split across `crates/exo-dag-db-api`, `crates/exo-dag-db-core`,
+DB as a graph-governed memory runtime adapter. DAG DB runtime work is split
+across `crates/exo-dag-db-api`, `crates/exo-dag-db-core`,
 `crates/exo-dag-db-graph`, `crates/exo-dag-db-domain`,
 `crates/exo-dag-db-retrieval`, `crates/exo-dag-db-exchange`,
 `crates/exo-dag-db-postgres`, and `crates/exo-dag-db-lab`; shipped docs live in
 `docs/dagdb/`. Bridge code that exposes DAG DB through the substrate lives in
 `exo-api`, `exo-gateway`, `exo-node`, and `exochain-sdk`.
+
+The governed REST runtime is served by `exo-gateway` under `/api/v1/dag-db/*`
+when the gateway has a configured Postgres pool and tenant/session authority.
+Missing database state, authority, or write signatures fail closed. Rollback,
+canary, and observability evidence for this runtime lives in
+`docs/dagdb/runtime-activation/rollback-canary-observability.md`.
 
 ### DAG DB Planning And Anti-Duplication
 
@@ -139,17 +145,22 @@ implementation. Reuse or extend the canonical implementation unless there is a
 documented reason not to. Do not create parallel implementations of the same
 capability.
 
-### DAG DB MCP Surface (Opt-In)
+### DAG DB MCP Surface
 
 The canonical, versioned home of the DAG DB MCP tools in this PR package is the
 Rust node MCP surface (`crates/exo-node/src/mcp/tools/dagdb.rs`), with JSON
-Schemas bound to the `exo-api` DAG DB DTOs and structured output. DAG DB is an
-opt-in adapter there, so the Rust tools fail closed with a structured
-`dagdb_adapter_unconfigured` result until an operator configures a gateway (the
-`dagdb-gateway-proxy` feature).
+Schemas bound to the `exo-api` DAG DB DTOs and structured output. The MCP
+gateway proxy is separate from the REST runtime: without the
+`dagdb-gateway-proxy` feature or complete `NodeContext` gateway configuration,
+the Rust tools fail closed with a structured `dagdb_adapter_unconfigured`
+result; with the feature and configuration, they proxy through the SDK
+`DagDbHttpClient`.
 
-This package claims no production runtime, no billing savings, and no thesis
-acceptance for DAG DB.
+This package claims production-runtime activation only for the gateway REST
+paths described in `INTEGRATION.md`; MCP proxy, RLS, canary, and rollback
+evidence remain pending until main integration records the commands in
+`docs/dagdb/runtime-activation/rollback-canary-observability.md`. This package
+claims no billing savings and no thesis acceptance for DAG DB.
 
 ## Core vs Adjacent Surface Rules
 

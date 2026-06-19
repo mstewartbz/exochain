@@ -89,20 +89,24 @@ pub async fn build_kg_portable_export(
     context_packet_previews: &[KgContextPacketPreview],
 ) -> Result<KgPortableExport> {
     scope.validate()?;
-    let memory_records = load_memory_records(pool, scope).await?;
-    let catalog_entries = load_catalog_entries(pool, scope).await?;
-    let graph_nodes = load_graph_nodes(pool, scope).await?;
-    let graph_edges = load_graph_edges(pool, scope).await?;
-    let similarity_results = load_similarity_results(pool, scope).await?;
-    let canonicalization_decisions = load_canonicalization_decisions(pool, scope).await?;
-    let placement_traces = load_placement_traces(pool, scope).await?;
-    let validation_reports = load_validation_reports(pool, scope).await?;
-    let receipts = load_receipts(pool, scope).await?;
-    let subject_receipt_heads = load_subject_receipt_heads(pool, scope).await?;
-    let context_packet_records = load_context_packet_records(pool, scope).await?;
-    let route_receipts = load_route_receipts(pool, scope).await?;
-    let idempotency_references = load_idempotency_references(pool, scope).await?;
-    let writeback_summaries = load_writeback_summaries(pool, scope).await?;
+    let mut tx = super::begin_tenant_transaction(pool, &scope.tenant_id)
+        .await
+        .map_err(pg)?;
+    let memory_records = load_memory_records(&mut tx, scope).await?;
+    let catalog_entries = load_catalog_entries(&mut tx, scope).await?;
+    let graph_nodes = load_graph_nodes(&mut tx, scope).await?;
+    let graph_edges = load_graph_edges(&mut tx, scope).await?;
+    let similarity_results = load_similarity_results(&mut tx, scope).await?;
+    let canonicalization_decisions = load_canonicalization_decisions(&mut tx, scope).await?;
+    let placement_traces = load_placement_traces(&mut tx, scope).await?;
+    let validation_reports = load_validation_reports(&mut tx, scope).await?;
+    let receipts = load_receipts(&mut tx, scope).await?;
+    let subject_receipt_heads = load_subject_receipt_heads(&mut tx, scope).await?;
+    let context_packet_records = load_context_packet_records(&mut tx, scope).await?;
+    let route_receipts = load_route_receipts(&mut tx, scope).await?;
+    let idempotency_references = load_idempotency_references(&mut tx, scope).await?;
+    let writeback_summaries = load_writeback_summaries(&mut tx, scope).await?;
+    tx.commit().await.map_err(pg)?;
     let context_packet_previews = sanitize_context_packet_previews(scope, context_packet_previews)?;
     let citation_index = build_citation_index(scope, context_packet_previews.as_slice())?;
     let provenance_index = build_provenance_index(&memory_records, &validation_reports, &receipts);
@@ -270,21 +274,25 @@ pub async fn verify_persisted_kg_export(
         latest_receipt_hash,
     )?;
 
-    verify_export_record_row(pool, export, requester_did, latest_receipt_hash).await?;
-    let challenge_hashes = verify_export_challenge_rows(pool, export).await?;
-    verify_export_receipt_row(pool, export, requester_did, latest_receipt_hash).await?;
-    verify_export_subject_head_row(pool, export, latest_receipt_hash).await?;
-    verify_export_idempotency_response_row(pool, persisted_summary, request_hash).await?;
+    let mut tx = super::begin_tenant_transaction(pool, &export.tenant_id)
+        .await
+        .map_err(pg)?;
+    verify_export_record_row(&mut tx, export, requester_did, latest_receipt_hash).await?;
+    let challenge_hashes = verify_export_challenge_rows(&mut tx, export).await?;
+    verify_export_receipt_row(&mut tx, export, requester_did, latest_receipt_hash).await?;
+    verify_export_subject_head_row(&mut tx, export, latest_receipt_hash).await?;
+    verify_export_idempotency_response_row(&mut tx, persisted_summary, request_hash).await?;
 
-    let export_rows = count_export_rows(pool, export).await?;
-    let challenge_rows = count_export_challenge_rows(pool, export).await?;
-    let receipt_rows = count_export_receipt_rows(pool, export, latest_receipt_hash).await?;
-    let subject_receipt_head_rows = count_export_subject_head_rows(pool, export).await?;
+    let export_rows = count_export_rows(&mut tx, export).await?;
+    let challenge_rows = count_export_challenge_rows(&mut tx, export).await?;
+    let receipt_rows = count_export_receipt_rows(&mut tx, export, latest_receipt_hash).await?;
+    let subject_receipt_head_rows = count_export_subject_head_rows(&mut tx, export).await?;
     let idempotency_response_rows =
-        count_export_idempotency_rows(pool, export, &idempotency_key).await?;
-    let route_invalidation_rows = count_route_invalidation_rows(pool, export).await?;
-    let dagdb_dag_outbox_rows = count_dagdb_dag_outbox_rows(pool, export).await?;
-    let exo_dag_rows = count_exo_dag_rows(pool).await?;
+        count_export_idempotency_rows(&mut tx, export, &idempotency_key).await?;
+    let route_invalidation_rows = count_route_invalidation_rows(&mut tx, export).await?;
+    let dagdb_dag_outbox_rows = count_dagdb_dag_outbox_rows(&mut tx, export).await?;
+    let exo_dag_rows = count_exo_dag_rows(&mut tx).await?;
+    tx.commit().await.map_err(pg)?;
     let raw_artifact_rows = 0;
     let row_counts = KgExportPersistedRowCounts {
         export_rows,
@@ -424,6 +432,9 @@ async fn queue_kg_export_finality_outbox_in_transaction(
 ) -> Result<KgExportFinalityOutboxSummary> {
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
         .execute(&mut **tx)
+        .await
+        .map_err(pg)?;
+    super::bind_tenant_context(tx, &request.tenant_id)
         .await
         .map_err(pg)?;
 
@@ -1256,7 +1267,7 @@ fn ensure_summary_matches_export(
 }
 
 async fn verify_export_record_row(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     export: &KgPortableExport,
     requester_did: &str,
     latest_receipt_hash: Hash256,
@@ -1277,7 +1288,7 @@ async fn verify_export_record_row(
     .bind(hash_bytes(hash_from_hex("export_id", &export.export_id)?))
     .bind(&export.tenant_id)
     .bind(&export.namespace)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(pg)?
     .ok_or_else(|| KgExportError::Conflict {
@@ -1355,7 +1366,7 @@ async fn verify_export_record_row(
 }
 
 async fn verify_export_challenge_rows(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     export: &KgPortableExport,
 ) -> Result<BTreeMap<String, String>> {
     let rows = sqlx::query(
@@ -1368,7 +1379,7 @@ async fn verify_export_challenge_rows(
     .bind(&export.tenant_id)
     .bind(&export.namespace)
     .bind(hash_bytes(hash_from_hex("export_id", &export.export_id)?))
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
     let expected = challenge_specs(export)?
@@ -1406,7 +1417,7 @@ async fn verify_export_challenge_rows(
 }
 
 async fn verify_export_receipt_row(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     export: &KgPortableExport,
     requester_did: &str,
     receipt_hash: Hash256,
@@ -1419,7 +1430,7 @@ async fn verify_export_receipt_row(
     .bind(hash_bytes(receipt_hash))
     .bind(&export.tenant_id)
     .bind(&export.namespace)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(pg)?
     .ok_or_else(|| KgExportError::Conflict {
@@ -1460,7 +1471,7 @@ async fn verify_export_receipt_row(
 }
 
 async fn verify_export_subject_head_row(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     export: &KgPortableExport,
     receipt_hash: Hash256,
 ) -> Result<()> {
@@ -1472,7 +1483,7 @@ async fn verify_export_subject_head_row(
     .bind(&export.tenant_id)
     .bind(&export.namespace)
     .bind(hash_bytes(hash_from_hex("export_id", &export.export_id)?))
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(pg)?
     .ok_or_else(|| KgExportError::Conflict {
@@ -1484,7 +1495,7 @@ async fn verify_export_subject_head_row(
 }
 
 async fn verify_export_idempotency_response_row(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     persisted_summary: &KgExportPersistedSummary,
     request_hash: Hash256,
 ) -> Result<()> {
@@ -1498,7 +1509,7 @@ async fn verify_export_idempotency_response_row(
     .bind(&persisted_summary.namespace)
     .bind(KG_EXPORT_PERSISTED_ROUTE_NAME)
     .bind(&persisted_summary.idempotency_key)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(pg)?
     .ok_or_else(|| KgExportError::Conflict {
@@ -1548,18 +1559,24 @@ fn export_challenge_proof_hash(
     .map_err(Into::into)
 }
 
-async fn count_export_rows(pool: &PgPool, export: &KgPortableExport) -> Result<u32> {
+async fn count_export_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    export: &KgPortableExport,
+) -> Result<u32> {
     count_query(
-        pool,
+        tx,
         "SELECT count(*) FROM dagdb_exports WHERE tenant_id = $1 AND namespace = $2 AND export_id = $3",
         &[&export.tenant_id, &export.namespace, &export.export_id],
     )
     .await
 }
 
-async fn count_export_challenge_rows(pool: &PgPool, export: &KgPortableExport) -> Result<u32> {
+async fn count_export_challenge_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    export: &KgPortableExport,
+) -> Result<u32> {
     count_query(
-        pool,
+        tx,
         "SELECT count(*) FROM dagdb_export_challenges WHERE tenant_id = $1 AND namespace = $2 AND export_id = $3",
         &[&export.tenant_id, &export.namespace, &export.export_id],
     )
@@ -1567,7 +1584,7 @@ async fn count_export_challenge_rows(pool: &PgPool, export: &KgPortableExport) -
 }
 
 async fn count_export_receipt_rows(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     export: &KgPortableExport,
     receipt_hash: Hash256,
 ) -> Result<u32> {
@@ -1579,13 +1596,16 @@ async fn count_export_receipt_rows(
     .bind(&export.namespace)
     .bind(hash_bytes(hash_from_hex("export_id", &export.export_id)?))
     .bind(hash_bytes(receipt_hash))
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(pg)?;
     i64_to_u32(count)
 }
 
-async fn count_export_subject_head_rows(pool: &PgPool, export: &KgPortableExport) -> Result<u32> {
+async fn count_export_subject_head_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    export: &KgPortableExport,
+) -> Result<u32> {
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dagdb_subject_receipt_heads \
          WHERE tenant_id = $1 AND namespace = $2 AND subject_kind = 'export' AND subject_id = $3",
@@ -1593,14 +1613,14 @@ async fn count_export_subject_head_rows(pool: &PgPool, export: &KgPortableExport
     .bind(&export.tenant_id)
     .bind(&export.namespace)
     .bind(hash_bytes(hash_from_hex("export_id", &export.export_id)?))
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(pg)?;
     i64_to_u32(count)
 }
 
 async fn count_export_idempotency_rows(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     export: &KgPortableExport,
     idempotency_key: &str,
 ) -> Result<u32> {
@@ -1612,53 +1632,63 @@ async fn count_export_idempotency_rows(
     .bind(&export.namespace)
     .bind(KG_EXPORT_PERSISTED_ROUTE_NAME)
     .bind(idempotency_key)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(pg)?;
     i64_to_u32(count)
 }
 
-async fn count_route_invalidation_rows(pool: &PgPool, export: &KgPortableExport) -> Result<u32> {
+async fn count_route_invalidation_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    export: &KgPortableExport,
+) -> Result<u32> {
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dagdb_graph_route_invalidations WHERE tenant_id = $1 AND namespace = $2",
     )
     .bind(&export.tenant_id)
     .bind(&export.namespace)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(pg)?;
     i64_to_u32(count)
 }
 
-async fn count_dagdb_dag_outbox_rows(pool: &PgPool, export: &KgPortableExport) -> Result<u32> {
+async fn count_dagdb_dag_outbox_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    export: &KgPortableExport,
+) -> Result<u32> {
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dagdb_dag_outbox WHERE tenant_id = $1 AND namespace = $2",
     )
     .bind(&export.tenant_id)
     .bind(&export.namespace)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(pg)?;
     i64_to_u32(count)
 }
 
-async fn count_exo_dag_rows(pool: &PgPool) -> Result<u32> {
+async fn count_exo_dag_rows(tx: &mut Transaction<'_, Postgres>) -> Result<u32> {
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.tables \
          WHERE table_schema = current_schema() AND table_name IN ('dag_nodes','dag_committed')",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(pg)?;
     i64_to_u32(count)
 }
 
-async fn count_query(pool: &PgPool, sql: &str, scope_and_id: &[&String; 3]) -> Result<u32> {
+async fn count_query(
+    tx: &mut Transaction<'_, Postgres>,
+    sql: &str,
+    scope_and_id: &[&String; 3],
+) -> Result<u32> {
     let count: i64 = sqlx::query_scalar(sql)
         .bind(scope_and_id[0])
         .bind(scope_and_id[1])
         .bind(hash_bytes(hash_from_hex("export_id", scope_and_id[2])?))
-        .fetch_one(pool)
+        .fetch_one(&mut **tx)
         .await
         .map_err(pg)?;
     i64_to_u32(count)
@@ -1730,6 +1760,9 @@ async fn persist_kg_portable_export_in_transaction(
 ) -> Result<KgExportPersistedSummary> {
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
         .execute(&mut **tx)
+        .await
+        .map_err(pg)?;
+    super::bind_tenant_context(tx, &export.tenant_id)
         .await
         .map_err(pg)?;
 
@@ -2525,7 +2558,10 @@ fn json_value<T: Serialize>(value: &T) -> Result<JsonValue> {
     serde_json::to_value(value).map_err(json_error)
 }
 
-async fn load_memory_records(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExportRecord>> {
+async fn load_memory_records(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &KgExportScope,
+) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
         "SELECT encode(memory_id, 'hex') AS memory_id, tenant_id, namespace, node_type, source_type, \
          consent_purpose, encode(payload_hash, 'hex') AS payload_hash, encode(source_hash, 'hex') AS source_hash, \
@@ -2538,7 +2574,7 @@ async fn load_memory_records(pool: &PgPool, scope: &KgExportScope) -> Result<Vec
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -2679,7 +2715,10 @@ fn record_memory(
     checked_record(record).map(Some)
 }
 
-async fn load_catalog_entries(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExportRecord>> {
+async fn load_catalog_entries(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &KgExportScope,
+) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
         "SELECT encode(catalog_id, 'hex') AS catalog_id, tenant_id, namespace, \
          encode(memory_id, 'hex') AS memory_id, encode(parent_catalog_id, 'hex') AS parent_catalog_id, \
@@ -2691,7 +2730,7 @@ async fn load_catalog_entries(pool: &PgPool, scope: &KgExportScope) -> Result<Ve
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -2759,7 +2798,10 @@ fn record_catalog(
     checked_record(record).map(Some)
 }
 
-async fn load_graph_nodes(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExportRecord>> {
+async fn load_graph_nodes(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &KgExportScope,
+) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
         "SELECT encode(graph_node_id, 'hex') AS graph_node_id, tenant_id, namespace, \
          encode(memory_id, 'hex') AS memory_id, graph_style, node_kind, \
@@ -2769,7 +2811,7 @@ async fn load_graph_nodes(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<Kg
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -2829,7 +2871,10 @@ fn record_graph_node(
     checked_record(record).map(Some)
 }
 
-async fn load_graph_edges(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExportRecord>> {
+async fn load_graph_edges(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &KgExportScope,
+) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
         "SELECT encode(graph_edge_id, 'hex') AS graph_edge_id, tenant_id, namespace, graph_style, \
          encode(from_memory_id, 'hex') AS from_memory_id, encode(to_memory_id, 'hex') AS to_memory_id, \
@@ -2838,7 +2883,7 @@ async fn load_graph_edges(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<Kg
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -2894,7 +2939,7 @@ fn record_graph_edge(
 }
 
 async fn load_similarity_results(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -2905,7 +2950,7 @@ async fn load_similarity_results(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -2962,7 +3007,7 @@ fn record_similarity(
 }
 
 async fn load_canonicalization_decisions(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -2975,7 +3020,7 @@ async fn load_canonicalization_decisions(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3064,7 +3109,7 @@ fn record_canonicalization(
 }
 
 async fn load_placement_traces(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -3075,7 +3120,7 @@ async fn load_placement_traces(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3124,7 +3169,7 @@ fn record_placement_trace(
 }
 
 async fn load_validation_reports(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -3137,7 +3182,7 @@ async fn load_validation_reports(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3228,7 +3273,10 @@ fn record_validation(
     checked_record(record).map(Some)
 }
 
-async fn load_receipts(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExportRecord>> {
+async fn load_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &KgExportScope,
+) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
         "SELECT encode(receipt_hash, 'hex') AS receipt_hash, tenant_id, namespace, subject_kind, \
          encode(subject_id, 'hex') AS subject_id, encode(prev_receipt_hash, 'hex') AS prev_receipt_hash, \
@@ -3238,7 +3286,7 @@ async fn load_receipts(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExp
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3310,7 +3358,7 @@ fn record_receipt(
 }
 
 async fn load_subject_receipt_heads(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -3320,7 +3368,7 @@ async fn load_subject_receipt_heads(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3375,7 +3423,7 @@ fn record_subject_head(
 }
 
 async fn load_context_packet_records(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -3389,7 +3437,7 @@ async fn load_context_packet_records(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3467,7 +3515,10 @@ fn record_context_packet(row: sqlx::postgres::PgRow) -> Result<KgExportRecord> {
     checked_record(record)
 }
 
-async fn load_route_receipts(pool: &PgPool, scope: &KgExportScope) -> Result<Vec<KgExportRecord>> {
+async fn load_route_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &KgExportScope,
+) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
         "SELECT encode(route_id, 'hex') AS route_id, tenant_id, namespace, requesting_agent_did, \
          encode(task_signature_hash, 'hex') AS task_signature_hash, encode(approved_scope_hash, 'hex') AS approved_scope_hash, \
@@ -3479,7 +3530,7 @@ async fn load_route_receipts(pool: &PgPool, scope: &KgExportScope) -> Result<Vec
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3584,7 +3635,7 @@ fn record_route(row: sqlx::postgres::PgRow) -> Result<KgExportRecord> {
 }
 
 async fn load_idempotency_references(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -3595,7 +3646,7 @@ async fn load_idempotency_references(
     )
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 
@@ -3682,7 +3733,7 @@ fn record_idempotency(
 }
 
 async fn load_writeback_summaries(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     scope: &KgExportScope,
 ) -> Result<Vec<KgExportRecord>> {
     let rows = sqlx::query(
@@ -3692,7 +3743,7 @@ async fn load_writeback_summaries(
     .bind(&scope.tenant_id)
     .bind(&scope.namespace)
     .bind(KG_WRITEBACK_PERSISTED_ROUTE_NAME)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(pg)?;
 

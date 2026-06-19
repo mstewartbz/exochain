@@ -68,38 +68,43 @@ The audit API rejects missing, mismatched, or invalid attestations before any
 database write. This completes the T-14 adapter path and aligns the threat
 matrix with the implementation.
 
-## DAG DB Adapter Contract (split `exo-dag-db-*` crates)
+## DAG DB Runtime Adapter Contract (split `exo-dag-db-*` crates)
 
-**Status: in progress** — tracked as GAP-012 in `GAP-REGISTRY.md`.
-This section is the integration contract for the split `exo-dag-db-*`
-graph-governed agent-memory crates; it is not yet a closure claim.
+**Status: REST runtime activation evidence in progress** — tracked as GAP-012 in
+`GAP-REGISTRY.md`. This section is the integration contract for the split
+`exo-dag-db-*` graph-governed agent-memory crates; rollout evidence is tracked in
+[`docs/dagdb/runtime-activation/rollback-canary-observability.md`](docs/dagdb/runtime-activation/rollback-canary-observability.md).
 
-### Adapter boundary
+### Runtime boundary
 
-`exo-dag-db-*` is an **opt-in adapter surface**: the default node does not serve it. The
-node binary (`exo-node`) depends on `exo-gateway` with **default features**, so
-it is built *without* `production-db`. The `/api/v1/dag-db/*` routes are merged
-into the router unconditionally, but the gated DB-persistence path only compiles
-under the `exo-gateway/production-db` feature; in a default node build the write
-handlers have no DB-persistence branch and **fail closed (503)**. A functional,
-governed dag-db surface therefore exists only when `exo-gateway` is built with
-`production-db` **and** a Postgres pool is configured — that explicit build is
-the opt-in boundary. The served writeback persistence path is routed through the
-`DagDbGatekeeperService` (`crates/exo-gatekeeper/src/dagdb_gate.rs`) consent →
-Ed25519 → invariant chain. Import/export routes fail closed (`403`,
+`exo-dag-db-*` is the governed DAG DB runtime adapter surface. The
+`/api/v1/dag-db/*` routes are merged into the `exo-gateway` router; the
+`exo-gateway` default feature set includes `production-db`, and the `exo-node`
+default feature set inherits `exo-gateway/default`. A functional governed
+runtime still requires a configured Postgres pool and tenant/session authority.
+Without that runtime state the routes fail closed, normally with
+`503 database_unavailable`, rather than fabricating persistence.
+
+The served persistent REST paths are default route, context packet build,
+writeback, import, and export. The writeback persistence path is routed through the
+`DagDbGatekeeperService` (`crates/exo-gatekeeper/src/dagdb_gate.rs`) consent,
+Ed25519, and invariant chain. Import/export routes fail closed (`403`,
 `consent_denied`) until distinct import/export consent is configured, so
-writeback-only consent cannot authorize them.
+writeback-only consent cannot authorize them. Other route/lookup/scaffold
+endpoints expose the v1 DTO contract and return explicit runtime errors until
+their governed persistence path lands.
 Consumers must not write the `dagdb_*` tables directly; the raw
 `exo_dag_db_postgres::postgres::*` functions are not a public,
 governance-bearing surface.
 
 The four PRD-D5 gate methods (`persist_lifecycle_action`, `persist_default_route`,
-`persist_continuation_record`, `persist_context_packet_record`) are **GATED but
-DORMANT**: they enforce the full chain at the method boundary (proven by the
-`dagdb_gate` route-contract tests) but no served `/api/v1/dag-db/*` endpoint
-invokes them yet. Wiring them to REST endpoints is deferred (no requirement
-drives them). See their `DORMANT` doc-comments and the
-`gatekeeper-lifecycle-surfaces-gated` security-regression check.
+`persist_continuation_record`, `persist_context_packet_record`) are now reached
+from served REST paths: default route persistence calls
+`persist_default_route`, context packet build calls
+`persist_context_packet_record`, and writeback persists lifecycle plus
+continuation records. The method-boundary security-regression coverage remains
+the `gatekeeper-lifecycle-surfaces-gated` check; main integration still needs to
+record the route-level proof commands before docs mark that evidence complete.
 
 ### Fail-closed guarantees
 
@@ -192,32 +197,16 @@ tenant. P1-E hardened three layers:
   canonical `dag_db-local`, so no reconciliation is outstanding there; this
   procedure is the contract for any environment that already wrote the hyphen
   form.
-- **Row-Level Security (deferred — design below).** RLS is the strong
-  defense-in-depth layer and is **not** applied in P1-E because the gateway uses a
-  single shared `PgPool` (`max_connections = 10`) whose `search_path` is baked
-  into the connect options with **no per-request tenant binding**
-  (`exo_gateway::db::init_pool`). Applying RLS requires a per-request tenant GUC,
-  which is a connection-model refactor larger than this ticket and dangerous to
-  half-apply: enabling RLS with a `USING (tenant_id =
-  current_setting('app.tenant_id', true))` policy while any code path forgets to
-  set the GUC makes `current_setting` return NULL and **denies all rows on that
-  path** (fail-closed but functionally broken). The intended design, to be landed
-  as a dedicated slice:
-  1. Migration (idempotent): for each tenant-scoped table,
-     `ALTER TABLE <t> ENABLE ROW LEVEL SECURITY;`
-     `ALTER TABLE <t> FORCE ROW LEVEL SECURITY;`
-     `CREATE POLICY tenant_isolation ON <t> USING (tenant_id =
-     current_setting('app.tenant_id', true) AND namespace =
-     current_setting('app.namespace', true));`
-  2. App wiring: every request acquires a transaction and, as its first
-     statement, runs `SELECT set_config('app.tenant_id', $1, true),
-     set_config('app.namespace', $2, true)` (transaction-local `is_local = true`,
-     so the setting cannot leak across pool checkouts). All DAG DB queries on that
-     request must run inside that transaction.
-  3. Rollout gate: the GUC must be threaded through **every** `&PgPool` read/write
-     path before the policy is enabled, otherwise unmigrated paths deny all rows.
-     This is why P1-E lands predicate hardening + validation + the canonical split
-     fix and defers RLS rather than half-applying it.
+- **Row-Level Security (implementation present, evidence pending).** RLS is the
+  defense-in-depth layer for tenant isolation. The migration
+  `crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`
+  enables and forces RLS on the tenant-scoped DAG DB tables with a
+  `dagdb_tenant_isolation` policy keyed by `current_setting('exo.tenant_id',
+  true)`. Runtime code binds that tenant context inside transactions with
+  `bind_tenant_context` / `begin_tenant_transaction`; namespace remains enforced
+  by the existing query predicates and DTO scope. Main integration must still
+  record the migration/test outputs before this document marks RLS evidence
+  complete.
 
 ### Provisioning
 
@@ -284,7 +273,7 @@ Request bodies and the shared `DagDbErrorEnvelope` are **not** versioned in v1.
 `docs/dagdb/api/openapi.json` is an OpenAPI 3.1 document covering every route,
 request body, response body, and the error envelope. It is the artifact a
 non-Rust integrator codegens from. It is hand-authored from the `exo-api` DTOs
-and **CI-asserted to stay in sync** by `crates/exo-api/tests/openapi_sync.rs`:
+and covered by `crates/exo-api/tests/openapi_sync.rs` when main integration runs it:
 every fixture in `crates/exo-dag-db-api/fixtures/json/all_dto_fixtures.json`
 validates against its component schema (and each fixture is independently
 round-trip-asserted against its Rust DTO, so the spec's field set cannot drift

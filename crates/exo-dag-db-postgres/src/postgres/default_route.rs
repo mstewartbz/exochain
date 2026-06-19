@@ -51,6 +51,9 @@ pub async fn persist_default_route_in_transaction(
         .execute(&mut **tx)
         .await
         .map_err(DefaultRoutePostgresError::Sqlx)?;
+    super::bind_tenant_context(tx, &route.tenant_id)
+        .await
+        .map_err(DefaultRoutePostgresError::Sqlx)?;
     let selected_memory_refs =
         to_value(&route.selected_memory_refs).map_err(DefaultRoutePostgresError::Json)?;
     let result = sqlx::query(

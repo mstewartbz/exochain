@@ -79,6 +79,9 @@ async fn persist_lifecycle_action_in_transaction(
         .execute(&mut **tx)
         .await
         .map_err(pg)?;
+    super::bind_tenant_context(tx, &action.tenant_id)
+        .await
+        .map_err(pg)?;
 
     if let Some(row) = sqlx::query(
         "SELECT action_id, action_body FROM dagdb_lifecycle_actions \

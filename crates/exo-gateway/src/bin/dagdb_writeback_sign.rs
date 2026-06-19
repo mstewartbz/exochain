@@ -1,7 +1,8 @@
 //! Sign a DAG DB writeback request for local gateway submission.
 //!
 //! Reads a `DagDbWritebackRequest` JSON file path, builds the persistent graph
-//! selection payload hash, and prints `{"signature":"<hex>"}` to stdout.
+//! selection payload hash plus the derived D5 lifecycle/continuation payload
+//! hashes, and prints every required gateway signature header to stdout.
 
 use std::{env, fs, process};
 
@@ -9,7 +10,11 @@ use exo_api::dagdb::DagDbWritebackRequest;
 use exo_core::crypto::KeyPair;
 use exo_dag_db_postgres::persistent_context::build_persistent_graph_context_selection;
 use exo_gatekeeper::{sign_write_payload, usage_event_payload_hash};
-use exo_gateway::dagdb::selection_request_from_writeback;
+use exo_gateway::dagdb::{
+    selection_request_from_writeback, writeback_continuation_payload_hash,
+    writeback_lifecycle_payload_hash,
+};
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 
 const LOCAL_DEV_AGENT_DID: &str = "did:exo:cursor-mcp-agent";
@@ -23,6 +28,12 @@ const KEY_SOURCE_DETERMINISTIC_FALLBACK: &str = "deterministic_local_dev_fallbac
 struct LocalDevKeypair {
     keypair: KeyPair,
     source: &'static str,
+}
+
+struct WritebackSignatureSet {
+    writeback_signature: String,
+    lifecycle_signature: String,
+    continuation_signature: String,
 }
 
 #[tokio::main]
@@ -91,6 +102,20 @@ async fn main() {
             process::exit(1);
         }
     };
+    let lifecycle_payload_hash = match writeback_lifecycle_payload_hash(&request) {
+        Ok(hash) => hash,
+        Err(error) => {
+            eprintln!("writeback_lifecycle_payload_hash_failed: {error}");
+            process::exit(1);
+        }
+    };
+    let continuation_payload_hash = match writeback_continuation_payload_hash(&request) {
+        Ok(hash) => hash,
+        Err(error) => {
+            eprintln!("writeback_continuation_payload_hash_failed: {error}");
+            process::exit(1);
+        }
+    };
 
     let local_keypair = match load_local_dev_keypair() {
         Ok(local_keypair) => local_keypair,
@@ -100,8 +125,13 @@ async fn main() {
         }
     };
 
-    let signature = match sign_write_payload(&local_keypair.keypair, &payload_hash) {
-        Ok(signature) => signature,
+    let signatures = match sign_writeback_payloads(
+        &local_keypair.keypair,
+        &payload_hash,
+        &lifecycle_payload_hash,
+        &continuation_payload_hash,
+    ) {
+        Ok(signatures) => signatures,
         Err(error) => {
             eprintln!("writeback_sign_failed: {error}");
             process::exit(1);
@@ -110,9 +140,45 @@ async fn main() {
 
     pool.close().await;
     println!(
-        "{{\"signature\":\"{signature}\",\"agent_did\":\"{LOCAL_DEV_AGENT_DID}\",\"key_source\":\"{}\"}}",
-        local_keypair.source
+        "{}",
+        signature_output_json(LOCAL_DEV_AGENT_DID, local_keypair.source, &signatures)
     );
+}
+
+fn sign_writeback_payloads(
+    keypair: &KeyPair,
+    writeback_payload_hash: &[u8; 32],
+    lifecycle_payload_hash: &[u8; 32],
+    continuation_payload_hash: &[u8; 32],
+) -> Result<WritebackSignatureSet, String> {
+    Ok(WritebackSignatureSet {
+        writeback_signature: sign_write_payload(keypair, writeback_payload_hash)
+            .map_err(|error| error.to_string())?,
+        lifecycle_signature: sign_write_payload(keypair, lifecycle_payload_hash)
+            .map_err(|error| error.to_string())?,
+        continuation_signature: sign_write_payload(keypair, continuation_payload_hash)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+fn signature_output_json(
+    agent_did: &str,
+    key_source: &str,
+    signatures: &WritebackSignatureSet,
+) -> Value {
+    json!({
+        "signature": signatures.writeback_signature.clone(),
+        "writeback_signature": signatures.writeback_signature.clone(),
+        "lifecycle_signature": signatures.lifecycle_signature.clone(),
+        "continuation_signature": signatures.continuation_signature.clone(),
+        "headers": {
+            "x-exo-write-signature": signatures.writeback_signature.clone(),
+            "x-exo-lifecycle-signature": signatures.lifecycle_signature.clone(),
+            "x-exo-continuation-signature": signatures.continuation_signature.clone()
+        },
+        "agent_did": agent_did,
+        "key_source": key_source
+    })
 }
 
 fn load_local_dev_keypair() -> Result<LocalDevKeypair, String> {
@@ -176,7 +242,58 @@ fn load_local_dev_keypair_from_seed_path(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{KEY_SOURCE_ENV_SEED, load_local_dev_keypair_from_seed_path};
+    use exo_core::crypto::KeyPair;
+
+    use super::{
+        KEY_SOURCE_ENV_SEED, load_local_dev_keypair_from_seed_path, sign_writeback_payloads,
+        signature_output_json,
+    };
+
+    #[test]
+    fn dagdb_writeback_sign_outputs_all_required_gateway_headers() {
+        let keypair = KeyPair::generate();
+        let writeback_payload_hash = [1_u8; 32];
+        let lifecycle_payload_hash = [2_u8; 32];
+        let continuation_payload_hash = [3_u8; 32];
+        let signatures = sign_writeback_payloads(
+            &keypair,
+            &writeback_payload_hash,
+            &lifecycle_payload_hash,
+            &continuation_payload_hash,
+        )
+        .expect("sign all payloads");
+        let output = signature_output_json("did:exo:agent", "test_seed", &signatures);
+
+        assert_eq!(
+            output.get("signature"),
+            output.get("writeback_signature"),
+            "legacy signature field must remain the writeback signature"
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-write-signature")
+                .and_then(|value| value.as_str()),
+            Some(signatures.writeback_signature.as_str())
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-lifecycle-signature")
+                .and_then(|value| value.as_str()),
+            Some(signatures.lifecycle_signature.as_str())
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-continuation-signature")
+                .and_then(|value| value.as_str()),
+            Some(signatures.continuation_signature.as_str())
+        );
+        assert_eq!(
+            output.get("agent_did").and_then(|value| value.as_str()),
+            Some("did:exo:agent")
+        );
+        assert_eq!(output.get("seed"), None);
+        assert_eq!(output.get("private_key"), None);
+    }
 
     // Debug-only: the deterministic fallback exists ONLY in debug builds (T1).
     #[cfg(debug_assertions)]

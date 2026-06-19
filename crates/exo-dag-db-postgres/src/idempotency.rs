@@ -71,6 +71,9 @@ pub async fn store_idempotency_response(
         .execute(&mut *tx)
         .await
         .map_err(pg)?;
+    crate::postgres::bind_tenant_context(&mut tx, &request.tenant_id)
+        .await
+        .map_err(pg)?;
 
     if let Some(existing) = fetch_existing(request, &mut tx).await? {
         tx.commit().await.map_err(pg)?;
