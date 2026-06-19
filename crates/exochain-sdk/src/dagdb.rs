@@ -1139,8 +1139,11 @@ mod transport_tests {
     };
 
     use super::{
-        DagDbIntakeRequest, DagDbReceiptLookupRequest, DagDbWritebackRequest,
-        transport::{DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbSignatureHeaders},
+        DagDbContextPacketRequest, DagDbIntakeRequest, DagDbReceiptLookupRequest,
+        DagDbWritebackRequest,
+        transport::{
+            BearerToken, DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbSignatureHeaders,
+        },
     };
 
     /// The raw HTTP request a [`TestServer`] captured from the SDK.
@@ -1282,6 +1285,10 @@ mod transport_tests {
         fixture_request("intake")
     }
 
+    fn context_packet_request() -> DagDbContextPacketRequest {
+        fixture_request("context_packet")
+    }
+
     fn receipt_lookup_request() -> DagDbReceiptLookupRequest {
         fixture_request("receipt_lookup")
     }
@@ -1308,7 +1315,8 @@ mod transport_tests {
     async fn post_attaches_path_and_four_auth_headers_with_scope() {
         let body = fixture_response("responses", "intake");
         let server = TestServer::spawn("200 OK", body).await;
-        let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+        let client =
+            DagDbHttpClient::new(format!("{}///", server.base_url), auth()).expect("client");
 
         let _ = client.intake(intake_request()).await;
         let request = server.captured().await;
@@ -1336,6 +1344,104 @@ mod transport_tests {
                 .contains("\"idempotency_key\":\"idem-intake-1\""),
             "body was {}",
             request.body
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_methods_use_route_specific_paths_and_scopes() {
+        macro_rules! assert_post_route {
+            ($method:ident, $fixture:literal, $path:literal, $scope:literal) => {{
+                let body = fixture_response("responses", $fixture);
+                let server = TestServer::spawn("200 OK", body).await;
+                let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+                let _ = client
+                    .$method(fixture_request($fixture))
+                    .await
+                    .expect("route response");
+                let request = server.captured().await;
+
+                assert!(
+                    request
+                        .request_line
+                        .starts_with(concat!("POST ", $path, " ")),
+                    "request line was {:?}",
+                    request.request_line
+                );
+                assert_eq!(request.header("x-exo-authority-scope"), Some($scope));
+                assert!(!request.body.is_empty(), "POST body should not be empty");
+            }};
+        }
+
+        macro_rules! assert_get_route {
+            ($method:ident, $fixture:literal, $path_prefix:literal, $scope:literal) => {{
+                let body = fixture_response("responses", $fixture);
+                let server = TestServer::spawn("200 OK", body).await;
+                let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+                let _ = client
+                    .$method(fixture_request($fixture))
+                    .await
+                    .expect("route response");
+                let request = server.captured().await;
+
+                assert!(
+                    request.request_line.starts_with($path_prefix),
+                    "request line was {:?}",
+                    request.request_line
+                );
+                assert_eq!(request.header("x-exo-authority-scope"), Some($scope));
+                assert!(request.body.is_empty(), "GET body should be empty");
+            }};
+        }
+
+        assert_post_route!(
+            route,
+            "route",
+            "/api/v1/dag-db/route",
+            "dagdb:route:tenant-a:primary"
+        );
+        assert_post_route!(
+            context_packet,
+            "context_packet",
+            "/api/v1/dag-db/context-packet",
+            "dagdb:context_packet:tenant-a:primary"
+        );
+        assert_post_route!(
+            validate,
+            "validate",
+            "/api/v1/dag-db/validate",
+            "dagdb:validate:tenant-a:primary"
+        );
+        assert_post_route!(
+            writeback,
+            "writeback",
+            "/api/v1/dag-db/writeback",
+            "dagdb:writeback:tenant-a:primary"
+        );
+        assert_post_route!(
+            trust_check,
+            "trust_check",
+            "/api/v1/dag-db/trust-check",
+            "dagdb:trust_check:tenant-a:primary"
+        );
+        assert_post_route!(
+            council_decision,
+            "council_decision",
+            "/api/v1/dag-db/council/decision",
+            "dagdb:council_decision:tenant-a:primary"
+        );
+        assert_get_route!(
+            catalog_lookup,
+            "catalog_lookup",
+            "GET /api/v1/dag-db/catalog/",
+            "dagdb:catalog_lookup:tenant-a:primary"
+        );
+        assert_get_route!(
+            route_lookup,
+            "route_lookup",
+            "GET /api/v1/dag-db/routes/",
+            "dagdb:route_lookup:tenant-a:primary"
         );
     }
 
@@ -1376,6 +1482,35 @@ mod transport_tests {
             request.header("x-exo-continuation-signature"),
             Some(signature_value('c').as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn signed_context_packet_attaches_only_write_signature_header() {
+        let body = fixture_response("responses", "context_packet");
+        let server = TestServer::spawn("200 OK", body).await;
+        let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+        let _ = client
+            .context_packet_with_signatures(
+                context_packet_request(),
+                DagDbSignatureHeaders::write(signature_value('d')),
+            )
+            .await;
+        let request = server.captured().await;
+
+        assert!(
+            request
+                .request_line
+                .starts_with("POST /api/v1/dag-db/context-packet "),
+            "request line was {:?}",
+            request.request_line
+        );
+        assert_eq!(
+            request.header("x-exo-write-signature"),
+            Some(signature_value('d').as_str())
+        );
+        assert_eq!(request.header("x-exo-lifecycle-signature"), None);
+        assert_eq!(request.header("x-exo-continuation-signature"), None);
     }
 
     // (a) A GET builds the correct path + the four headers with the route's
@@ -1420,6 +1555,21 @@ mod transport_tests {
         assert_eq!(response.idempotency_key, "idem-intake-1");
     }
 
+    #[tokio::test]
+    async fn malformed_success_body_maps_to_decode_error() {
+        let server = TestServer::spawn("200 OK", "{\"schema_version\":").await;
+        let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+        let err = client
+            .intake(intake_request())
+            .await
+            .expect_err("malformed 2xx body is an error");
+        assert!(
+            matches!(err, DagDbClientError::Decode(_)),
+            "expected Decode, got {err:?}"
+        );
+    }
+
     // (c) A non-2xx body maps to the typed server error with error_code.
     #[tokio::test]
     async fn error_body_maps_to_typed_server_error() {
@@ -1435,6 +1585,12 @@ mod transport_tests {
             DagDbClientError::Server(server_err) => {
                 assert_eq!(server_err.status, 403);
                 assert_eq!(server_err.error_code, "tenant_scope_mismatch");
+                assert_eq!(
+                    server_err.message,
+                    "tenant scope does not match authenticated identity"
+                );
+                assert_eq!(server_err.receipt_hash, None);
+                assert_eq!(server_err.validation_report_id, None);
                 assert!(!server_err.requires_council_review);
             }
             other => panic!("expected Server error, got {other:?}"),
@@ -1500,6 +1656,52 @@ mod transport_tests {
         );
     }
 
+    #[tokio::test]
+    async fn invalid_auth_header_value_is_rejected_without_leaking_secret() {
+        let auth = DagDbAuthConfig::new("super-secret-token-value\n", "tenant-a", "primary");
+        let client = DagDbHttpClient::new("http://127.0.0.1:1", auth).expect("client");
+
+        let err = client
+            .intake(intake_request())
+            .await
+            .expect_err("invalid auth header is rejected before send");
+        match err {
+            DagDbClientError::InvalidAuthHeader { header } => {
+                assert_eq!(header, "authorization");
+            }
+            other => panic!("expected InvalidAuthHeader, got {other:?}"),
+        }
+        let rendered = format!("{err}");
+        assert!(
+            !rendered.contains("super-secret-token-value"),
+            "auth error leaked token: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_header_value_is_rejected_without_leaking_secret() {
+        let client = DagDbHttpClient::new("http://127.0.0.1:1", auth()).expect("client");
+
+        let err = client
+            .context_packet_with_signatures(
+                context_packet_request(),
+                DagDbSignatureHeaders::write("signature-secret\nvalue"),
+            )
+            .await
+            .expect_err("invalid signature header is rejected before send");
+        match err {
+            DagDbClientError::InvalidSignatureHeader { header } => {
+                assert_eq!(header, "x-exo-write-signature");
+            }
+            other => panic!("expected InvalidSignatureHeader, got {other:?}"),
+        }
+        let rendered = format!("{err:?}");
+        assert!(
+            !rendered.contains("signature-secret"),
+            "signature error leaked signature: {rendered}"
+        );
+    }
+
     // (d'') A 2xx body whose schema_version mismatches the SDK constant is
     // surfaced, not silently accepted.
     #[tokio::test]
@@ -1532,6 +1734,47 @@ mod transport_tests {
         assert!(
             !rendered.contains("super-secret-token-value"),
             "auth config Debug leaked the token: {rendered}"
+        );
+        assert!(
+            rendered.contains("redacted"),
+            "expected redaction marker: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_token_constructors_and_display_are_redacted() {
+        let token = BearerToken::new("constructor-secret");
+        let from_string: BearerToken = String::from("string-secret").into();
+
+        assert_eq!(format!("{token}"), "<redacted>");
+        assert_eq!(format!("{from_string}"), "<redacted>");
+        assert_eq!(format!("{token:?}"), "BearerToken(<redacted>)");
+        assert!(
+            !format!("{from_string:?}").contains("string-secret"),
+            "BearerToken Debug leaked string constructor value"
+        );
+    }
+
+    #[tokio::test]
+    async fn signature_headers_are_redacted_in_debug() {
+        let signatures = DagDbSignatureHeaders::writeback(
+            "write-signature-secret",
+            "lifecycle-signature-secret",
+            "continuation-signature-secret",
+        );
+
+        let rendered = format!("{signatures:?}");
+        assert!(
+            !rendered.contains("write-signature-secret"),
+            "signature Debug leaked write signature: {rendered}"
+        );
+        assert!(
+            !rendered.contains("lifecycle-signature-secret"),
+            "signature Debug leaked lifecycle signature: {rendered}"
+        );
+        assert!(
+            !rendered.contains("continuation-signature-secret"),
+            "signature Debug leaked continuation signature: {rendered}"
         );
         assert!(
             rendered.contains("redacted"),

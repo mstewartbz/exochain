@@ -58,6 +58,10 @@ coverage_exclusion_categories = {
         "crates/exo-dag-db-postgres/src/postgres/route_invalidation.rs": "route invalidation adapter requires Postgres migrations",
         "crates/exo-dag-db-postgres/src/receipt.rs": "SQLx receipt store requires a live Postgres schema",
     },
+    "DAG DB lab operator CLIs": {
+        "crates/exo-dag-db-lab/src/bin/dagdb_kg_export_manifest.rs": "lab export CLI parses process args and writes filesystem/stdout fixtures",
+        "crates/exo-dag-db-lab/src/bin/dagdb_kg_import_candidates.rs": "lab import CLI parses process args and reads filesystem fixtures",
+    },
 }
 
 tarpaulin_text = Path("tarpaulin.toml").read_text()

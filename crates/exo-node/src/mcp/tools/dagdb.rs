@@ -29,8 +29,6 @@
 //! mismatches, or missing signature material fail closed with structured MCP
 //! errors before any HTTP request is attempted.
 
-use serde_json::{Value, json};
-
 #[cfg(feature = "dagdb-gateway-proxy")]
 use std::{future::Future, thread};
 
@@ -39,6 +37,7 @@ use exochain_sdk::dagdb::{
     BearerToken, DagDbAuthConfig, DagDbClientError, DagDbContextPacketRequest, DagDbExportRequest,
     DagDbHttpClient, DagDbImportRequest, DagDbSignatureHeaders, DagDbWritebackRequest,
 };
+use serde_json::{Value, json};
 
 use crate::mcp::{
     context::NodeContext,
@@ -1259,8 +1258,6 @@ pub fn execute_export(params: &Value, context: &NodeContext) -> ToolResult {
 
 #[cfg(test)]
 mod tests {
-    use jsonschema::JSONSchema;
-    use serde_json::Value;
     #[cfg(feature = "dagdb-gateway-proxy")]
     use std::{
         io::{Read, Write},
@@ -1269,10 +1266,12 @@ mod tests {
         thread,
     };
 
-    #[cfg(feature = "dagdb-gateway-proxy")]
-    use crate::mcp::context::DagDbGatewayConfig;
+    use jsonschema::JSONSchema;
+    use serde_json::Value;
 
     use super::*;
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    use crate::mcp::context::DagDbGatewayConfig;
 
     const FIXTURES: &str =
         include_str!("../../../../exo-dag-db-api/fixtures/json/all_dto_fixtures.json");
@@ -1531,6 +1530,17 @@ mod tests {
             "request body should carry the DTO JSON body: {}",
             request.body
         );
+        for signature_header in [
+            WRITE_SIGNATURE_HEADER,
+            LIFECYCLE_SIGNATURE_HEADER,
+            CONTINUATION_SIGNATURE_HEADER,
+        ] {
+            assert!(
+                !request.body.contains(signature_header),
+                "signature transport header {signature_header} must not be forwarded in the DTO body: {}",
+                request.body
+            );
+        }
     }
 
     fn valid_import_params() -> Value {
@@ -1747,6 +1757,30 @@ mod tests {
 
     #[cfg(feature = "dagdb-gateway-proxy")]
     #[test]
+    fn configured_gateway_missing_base_url_fails_closed_before_http() {
+        let context = NodeContext {
+            dagdb_gateway: Some(DagDbGatewayConfig {
+                base_url: None,
+                bearer_token: Some(zeroize::Zeroizing::new("token".to_owned())),
+                tenant_id: Some("tenant-a".to_owned()),
+                namespace: Some("primary".to_owned()),
+            }),
+            ..NodeContext::empty()
+        };
+
+        let result = execute_get_context_packet(
+            &add_write_signature(request_fixture("context_packet")),
+            &context,
+        );
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_GATEWAY_URL_UNCONFIGURED);
+        assert_eq!(body["tool"], DAGDB_GET_CONTEXT_PACKET_TOOL);
+        assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
     fn configured_gateway_missing_tenant_fails_closed_before_http() {
         let context = NodeContext {
             dagdb_gateway: Some(DagDbGatewayConfig {
@@ -1766,6 +1800,53 @@ mod tests {
         let body = result_json(&result);
         assert_eq!(body["tool_status"], DAGDB_TENANT_UNCONFIGURED);
         assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_missing_namespace_fails_closed_before_http() {
+        let context = NodeContext {
+            dagdb_gateway: Some(DagDbGatewayConfig {
+                base_url: Some("http://127.0.0.1:9".to_owned()),
+                bearer_token: Some(zeroize::Zeroizing::new("token".to_owned())),
+                tenant_id: Some("tenant-a".to_owned()),
+                namespace: None,
+            }),
+            ..NodeContext::empty()
+        };
+
+        let result = execute_get_context_packet(
+            &add_write_signature(request_fixture("context_packet")),
+            &context,
+        );
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_NAMESPACE_UNCONFIGURED);
+        assert_eq!(body["tool"], DAGDB_GET_CONTEXT_PACKET_TOOL);
+        assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_missing_request_scope_fails_closed_before_http() {
+        for (field, expected_status) in [
+            ("tenant_id", DAGDB_REQUEST_TENANT_MISSING),
+            ("namespace", DAGDB_REQUEST_NAMESPACE_MISSING),
+        ] {
+            let mut params = add_write_signature(request_fixture("context_packet"));
+            params
+                .as_object_mut()
+                .expect("context packet params are an object")
+                .remove(field);
+
+            let result =
+                execute_get_context_packet(&params, &gateway_context("http://127.0.0.1:9"));
+            assert!(result.is_error);
+            let body = result_json(&result);
+            assert_eq!(body["tool_status"], expected_status);
+            assert_eq!(body["missing_field"], field);
+            assert_eq!(body["success_claimed"], false);
+        }
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
@@ -1852,6 +1933,30 @@ mod tests {
 
     #[cfg(feature = "dagdb-gateway-proxy")]
     #[test]
+    fn configured_gateway_blank_signature_material_fails_closed_with_required_headers() {
+        let mut params = request_fixture("writeback");
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[LIFECYCLE_SIGNATURE_HEADER] = json!("   ");
+        params[CONTINUATION_SIGNATURE_HEADER] = json!(signature_value('c'));
+
+        let result = execute_submit_writeback(&params, &gateway_context("http://127.0.0.1:9"));
+        assert!(result.is_error);
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_SIGNATURE_MATERIAL_MISSING);
+        assert_eq!(body["missing_signature_header"], LIFECYCLE_SIGNATURE_HEADER);
+        assert_eq!(
+            body["required_signature_headers"],
+            json!([
+                WRITE_SIGNATURE_HEADER,
+                LIFECYCLE_SIGNATURE_HEADER,
+                CONTINUATION_SIGNATURE_HEADER
+            ])
+        );
+        assert_eq!(body["success_claimed"], false);
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
     fn configured_gateway_invalid_signature_material_fails_without_echoing_value() {
         let mut params = request_fixture("context_packet");
         let invalid_signature = "sk-proj-invalid-signature-value";
@@ -1866,6 +1971,49 @@ mod tests {
         assert!(
             !body.to_string().contains(invalid_signature),
             "invalid signature value must not be echoed: {body}"
+        );
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_invalid_writeback_lifecycle_signature_fails_without_echoing_value() {
+        let mut params = request_fixture("writeback");
+        let invalid_signature = "invalid-lifecycle-signature";
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[LIFECYCLE_SIGNATURE_HEADER] = json!(invalid_signature);
+        params[CONTINUATION_SIGNATURE_HEADER] = json!(signature_value('c'));
+
+        let result = execute_submit_writeback(&params, &gateway_context("http://127.0.0.1:9"));
+        assert!(result.is_error);
+
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_SIGNATURE_MATERIAL_INVALID);
+        assert_eq!(body["invalid_signature_header"], LIFECYCLE_SIGNATURE_HEADER);
+        assert_eq!(body["success_claimed"], false);
+        assert!(
+            !body.to_string().contains(invalid_signature),
+            "invalid signature value must not be echoed: {body}"
+        );
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn configured_gateway_decode_failure_returns_structured_error_before_http() {
+        let mut params = add_write_signature(request_fixture("context_packet"));
+        params["token_budget"] = json!("not-a-token-budget");
+
+        let result = execute_get_context_packet(&params, &gateway_context("http://127.0.0.1:9"));
+        assert!(result.is_error);
+
+        let body = result_json(&result);
+        assert_eq!(body["tool_status"], DAGDB_REQUEST_DECODE_FAILED);
+        assert_eq!(body["tool"], DAGDB_GET_CONTEXT_PACKET_TOOL);
+        assert_eq!(body["success_claimed"], false);
+        assert!(
+            body["decode_error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()),
+            "decode failure should include a structured decode_error: {body}"
         );
     }
 

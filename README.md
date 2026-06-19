@@ -35,8 +35,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 452 | `find crates -name '*.rs'` |
-| Rust LOC | 339173 | `wc -l` |
-| Workspace tests | 5,807 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 339703 | `wc -l` |
+| Workspace tests | 5,825 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -44,7 +44,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **5,764 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **5,825 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
@@ -113,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 339173 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 339703 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 5,807 listed workspace tests
+         cryptographic proofs, 5,825 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -228,7 +228,7 @@ These runtime docs do not claim billing savings or thesis acceptance.
 
 * **`governance/`** — Council resolutions, sub-agent charters, traceability matrices, quality gates
 * **`docs/`** — Architecture, guides, council panel reports, proofs, reference documentation
-* **`.github/workflows/`** — CI pipeline (20 numbered quality gates plus required aggregator), release workflow, ExoForge triage
+* **`.github/workflows/`** — CI pipeline (22 numbered quality gates plus required aggregator), release workflow, ExoForge triage
 
 ## Governance & Compliance
 
@@ -236,9 +236,9 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 
 ### Key Governance Artifacts
 
-* [Traceability Matrix](governance/traceability_matrix.md) — 118 requirements tracked
+* [Traceability Matrix](governance/traceability_matrix.md) — 119 requirements tracked
 * [Threat Model](governance/threat_matrix.md) — 17 tracked: 16 implemented, 1 partial, 0 planned
-* [Quality Gates](governance/quality_gates.md) — 20 numbered CI gates plus required aggregator
+* [Quality Gates](governance/quality_gates.md) — 22 numbered CI gates plus required aggregator
 * [Sub-Agent Charters](governance/sub_agents.md) — 11 agent charters documented
 * [Council Resolutions](governance/resolutions/INDEX.md) — CR-001 DRAFT
 * [Tier-One Readiness Audit](docs/audit/TIER-ONE-READINESS-AUDIT.md) — capability model, gap analysis, exit checklist

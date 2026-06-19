@@ -85,13 +85,13 @@ use exo_dag_db_postgres::{
         kg_import::KgImportPersistenceError,
     },
 };
-use exo_gatekeeper::{ConsentEngine, IdentityRegistry};
 // `DagDbConsentRecord`/`BailmentState` are consumed only by the production-db DB
 // resolver and the `#[cfg(debug_assertions)]` dev gatekeeper profile; gate the
 // import to those configurations so a release build without `production-db` does
 // not warn on unused imports (T1 gated the dev profile out of release).
 #[cfg(feature = "production-db")]
 use exo_gatekeeper::invariants::InvariantContext;
+use exo_gatekeeper::{ConsentEngine, IdentityRegistry};
 #[cfg(any(feature = "production-db", debug_assertions))]
 use exo_gatekeeper::{DagDbConsentRecord, types::BailmentState};
 #[cfg(feature = "production-db")]
@@ -1651,11 +1651,13 @@ async fn gated_writeback_response(
         service,
         pool,
         request,
-        &lifecycle_action,
-        &continuation,
-        lifecycle_signature,
-        continuation_signature,
-        invariant_context.as_ref(),
+        WritebackD5Surfaces {
+            lifecycle_action: &lifecycle_action,
+            continuation: &continuation,
+            lifecycle_signature,
+            continuation_signature,
+            invariant_context: invariant_context.as_ref(),
+        },
     )
     .await?;
     match writeback_response_from_persisted(request, &summary, !summary.replayed) {
@@ -1665,22 +1667,27 @@ async fn gated_writeback_response(
 }
 
 #[cfg(feature = "production-db")]
+struct WritebackD5Surfaces<'a> {
+    lifecycle_action: &'a LifecycleAction,
+    continuation: &'a ContinuationRecord,
+    lifecycle_signature: &'a str,
+    continuation_signature: &'a str,
+    invariant_context: Option<&'a InvariantContext>,
+}
+
+#[cfg(feature = "production-db")]
 async fn persist_writeback_d5_surfaces(
     service: &DagDbGatekeeperService,
     pool: &sqlx::PgPool,
     request: &DagDbWritebackRequest,
-    lifecycle_action: &LifecycleAction,
-    continuation: &ContinuationRecord,
-    lifecycle_signature: &str,
-    continuation_signature: &str,
-    invariant_context: Option<&InvariantContext>,
+    surfaces: WritebackD5Surfaces<'_>,
 ) -> Result<(), DagDbHandlerError> {
     service
         .persist_lifecycle_action(
-            lifecycle_action,
+            surfaces.lifecycle_action,
             &request.requesting_agent_did,
-            lifecycle_signature,
-            invariant_context,
+            surfaces.lifecycle_signature,
+            surfaces.invariant_context,
         )
         .await
         .map_err(DagDbHandlerError::from_gatekeeper)?;
@@ -1688,11 +1695,11 @@ async fn persist_writeback_d5_surfaces(
     let now_epoch_seconds = trusted_gateway_epoch_seconds(pool).await?;
     service
         .persist_continuation_record(
-            continuation,
+            surfaces.continuation,
             now_epoch_seconds,
             &request.requesting_agent_did,
-            continuation_signature,
-            invariant_context,
+            surfaces.continuation_signature,
+            surfaces.invariant_context,
         )
         .await
         .map_err(DagDbHandlerError::from_gatekeeper)?;
@@ -3827,7 +3834,7 @@ async fn reserve_gateway_idempotency_key(
         operation,
     )
     .await?;
-    let decision = if insert_gateway_idempotency_reservation(
+    let reserved = insert_gateway_idempotency_reservation(
         &mut tx,
         tenant_id,
         namespace,
@@ -3839,31 +3846,29 @@ async fn reserve_gateway_idempotency_key(
         operation,
     )
     .await?
-    {
-        GatewayIdempotencyDecision::Reserved
-    } else if reclaim_expired_gateway_idempotency_reservation(
-        &mut tx,
-        tenant_id,
-        namespace,
-        route_name,
-        idempotency_key,
-        request_hash,
-        operation,
-    )
-    .await?
-        && insert_gateway_idempotency_reservation(
+        || (reclaim_expired_gateway_idempotency_reservation(
             &mut tx,
             tenant_id,
             namespace,
             route_name,
             idempotency_key,
             request_hash,
-            response_hash,
-            &response_body,
             operation,
         )
         .await?
-    {
+            && insert_gateway_idempotency_reservation(
+                &mut tx,
+                tenant_id,
+                namespace,
+                route_name,
+                idempotency_key,
+                request_hash,
+                response_hash,
+                &response_body,
+                operation,
+            )
+            .await?);
+    let decision = if reserved {
         GatewayIdempotencyDecision::Reserved
     } else {
         replay_gateway_idempotency_response_in_transaction(
@@ -7608,12 +7613,13 @@ mod tests {
         use exo_api::dagdb::DagDbContextPacketRequest;
         use exo_core::crypto::KeyPair;
         use exo_dag_db_domain::scoring::DomainError;
-        use exo_gatekeeper::dagdb_gate::{
-            context_packet_record_payload_hash, continuation_record_payload_hash,
-            default_route_payload_hash, lifecycle_action_payload_hash,
-        };
         use exo_gatekeeper::{
-            ConsentEngine, GatekeeperError, IdentityRegistry, sign_write_payload,
+            ConsentEngine, GatekeeperError, IdentityRegistry,
+            dagdb_gate::{
+                context_packet_record_payload_hash, continuation_record_payload_hash,
+                default_route_payload_hash, lifecycle_action_payload_hash,
+            },
+            sign_write_payload,
         };
         use sqlx::postgres::PgPoolOptions;
 

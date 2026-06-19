@@ -242,12 +242,22 @@ fn load_local_dev_keypair_from_seed_path(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use exo_core::crypto::KeyPair;
 
     use super::{
-        KEY_SOURCE_ENV_SEED, load_local_dev_keypair_from_seed_path, sign_writeback_payloads,
-        signature_output_json,
+        KEY_SOURCE_ENV_SEED, LOCAL_DEV_GATEKEEPER_ENV, load_local_dev_keypair_from_seed_path,
+        sign_writeback_payloads, signature_output_json,
     };
+
+    fn temp_seed_path(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "dagdb_writeback_sign_{test_name}_{}_{}.seed",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ))
+    }
 
     #[test]
     fn dagdb_writeback_sign_outputs_all_required_gateway_headers() {
@@ -293,6 +303,129 @@ mod tests {
         );
         assert_eq!(output.get("seed"), None);
         assert_eq!(output.get("private_key"), None);
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_signs_each_payload_distinctly() {
+        let keypair = KeyPair::from_secret_bytes([7_u8; 32]).expect("keypair from seed");
+        let signatures = sign_writeback_payloads(&keypair, &[1_u8; 32], &[2_u8; 32], &[3_u8; 32])
+            .expect("sign all payloads");
+
+        assert_ne!(
+            signatures.writeback_signature, signatures.lifecycle_signature,
+            "writeback and lifecycle payloads must not reuse a signature"
+        );
+        assert_ne!(
+            signatures.writeback_signature, signatures.continuation_signature,
+            "writeback and continuation payloads must not reuse a signature"
+        );
+        assert_ne!(
+            signatures.lifecycle_signature, signatures.continuation_signature,
+            "lifecycle and continuation payloads must not reuse a signature"
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_loads_seed_file_and_preserves_source() {
+        let seed_path = temp_seed_path("loads_seed_file");
+        let mut seed_file = vec![9_u8; 64];
+        seed_file[..32].copy_from_slice(&[4_u8; 32]);
+        fs::write(&seed_path, seed_file).expect("write seed file");
+
+        let loaded = load_local_dev_keypair_from_seed_path(
+            seed_path.to_str().expect("utf8 seed path"),
+            KEY_SOURCE_ENV_SEED,
+            false,
+        )
+        .expect("load keypair from seed");
+        let expected = KeyPair::from_secret_bytes([4_u8; 32]).expect("expected keypair");
+        let payload_hash = [5_u8; 32];
+        let loaded_signature =
+            sign_writeback_payloads(&loaded.keypair, &payload_hash, &[6_u8; 32], &[7_u8; 32])
+                .expect("sign with loaded keypair")
+                .writeback_signature;
+        let expected_signature =
+            sign_writeback_payloads(&expected, &payload_hash, &[6_u8; 32], &[7_u8; 32])
+                .expect("sign with expected keypair")
+                .writeback_signature;
+
+        assert_eq!(loaded.source, KEY_SOURCE_ENV_SEED);
+        assert_eq!(loaded_signature, expected_signature);
+
+        fs::remove_file(seed_path).expect("remove seed file");
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_rejects_too_short_seed_file() {
+        let seed_path = temp_seed_path("too_short_seed_file");
+        fs::write(&seed_path, [1_u8; 31]).expect("write short seed file");
+
+        let error = match load_local_dev_keypair_from_seed_path(
+            seed_path.to_str().expect("utf8 seed path"),
+            KEY_SOURCE_ENV_SEED,
+            true,
+        ) {
+            Ok(_) => panic!("short seed must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("is too short"),
+            "expected too-short seed error, got {error}"
+        );
+        assert!(
+            error.contains(seed_path.to_str().expect("utf8 seed path")),
+            "expected seed path in too-short error, got {error}"
+        );
+
+        fs::remove_file(seed_path).expect("remove seed file");
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_missing_seed_error_names_remediation() {
+        let missing_seed = "__missing_dagdb_writeback_sign_seed_for_error_text__";
+        let error =
+            match load_local_dev_keypair_from_seed_path(missing_seed, KEY_SOURCE_ENV_SEED, false) {
+                Ok(_) => panic!("missing seed must fail"),
+                Err(error) => error,
+            };
+
+        assert!(
+            error.contains(
+                "dev key seed unavailable at __missing_dagdb_writeback_sign_seed_for_error_text__"
+            ),
+            "expected missing seed path in error, got {error}"
+        );
+        assert!(
+            error.contains("provide a provisioned signing seed"),
+            "expected remediation text in error, got {error}"
+        );
+        assert!(
+            error.contains(LOCAL_DEV_GATEKEEPER_ENV),
+            "expected debug fallback env name in error, got {error}"
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_signature_output_does_not_leak_seed_material() {
+        let keypair = KeyPair::from_secret_bytes([11_u8; 32]).expect("keypair from seed");
+        let signatures = sign_writeback_payloads(&keypair, &[8_u8; 32], &[9_u8; 32], &[10_u8; 32])
+            .expect("sign all payloads");
+        let output = signature_output_json("did:exo:agent", KEY_SOURCE_ENV_SEED, &signatures);
+        let serialized = serde_json::to_string(&output).expect("serialize signature output");
+
+        assert_eq!(output.get("seed"), None);
+        assert_eq!(output.get("private_key"), None);
+        assert_eq!(output.get("secret_key"), None);
+        assert_eq!(output.get("keypair"), None);
+        assert!(
+            !serialized.contains("dagdb_secret_seed_should_not_leak"),
+            "signature output must not include seed paths or seed material"
+        );
+        assert!(
+            !serialized.contains("[11,11,11"),
+            "signature output must not include raw seed bytes"
+        );
     }
 
     // Debug-only: the deterministic fallback exists ONLY in debug builds (T1).
