@@ -88,7 +88,9 @@ POSTGRES_PASSWORD=<your-secret> docker compose -f docker-compose.prod.yml up -d
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes (production) | — | `postgres://<user>:<pass>@<host>:<port>/<db>` |
+| `DATABASE_URL` | Yes (production) | — | PostgreSQL URL; required for production AVC registry durability and `/ready` |
+| `EXO_AVC_REQUIRE_POSTGRES_DURABILITY` | Recommended (production) | `false` | Set to `true` or `1` to abort startup when `DATABASE_URL` is missing |
+| `EXO_AVC_ROOT_TRUST_BUNDLE` | Yes (production AVC root trust) | Docker image default | Verified root trust bundle path used to restore AVC public-key trust anchors at startup |
 | `BIND_ADDRESS` | No | `127.0.0.1:8443` | Host and port the gateway listens on |
 | `LOG_LEVEL` | No | `info` | Tracing filter: `trace`, `debug`, `info`, `warn`, `error` |
 
@@ -97,6 +99,18 @@ POSTGRES_PASSWORD=<your-secret> docker compose -f docker-compose.prod.yml up -d
 ```
 postgres://exochain:secret@localhost:5432/exochain
 ```
+
+For production AVC registry durability, `DATABASE_URL` must point to a reachable
+PostgreSQL instance. Without it, the node uses the local AVC file fallback under
+the node data directory and emits a production durability warning; that fallback
+is not a substitute for Postgres-backed production durability. Set
+`EXO_AVC_REQUIRE_POSTGRES_DURABILITY=true` in production to fail startup instead
+of accepting the fallback.
+
+AVC public-key trust anchors are not persisted in the AVC registry durable state.
+They are restored on every boot from the verified
+`EXO_AVC_ROOT_TRUST_BUNDLE` startup configuration, then durable revocations are
+revalidated against those live trust anchors.
 
 ---
 

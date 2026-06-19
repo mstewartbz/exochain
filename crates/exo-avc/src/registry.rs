@@ -63,6 +63,7 @@ pub trait AvcRegistryWrite: AvcRegistryRead {
     fn put_revocation(&mut self, revocation: AvcRevocation) -> Result<(), AvcError>;
     fn put_receipt(&mut self, receipt: AvcTrustReceipt) -> Result<(), AvcError>;
     fn put_public_key(&mut self, did: Did, public_key: PublicKey);
+    fn put_receipt_validator_public_key(&mut self, did: Did, public_key: PublicKey);
     fn put_issuer_permission_grant(&mut self, did: Did, granted_permissions: Vec<Permission>);
     fn put_human_approval_key(&mut self, did: Did, public_key: PublicKey);
     fn add_consent_ref(&mut self, consent_id: Hash256);
@@ -81,6 +82,8 @@ pub struct AvcRegistryDurableState {
     pub credentials: BTreeMap<Hash256, AutonomousVolitionCredential>,
     pub revocations: BTreeMap<Hash256, AvcRevocation>,
     pub receipts: BTreeMap<Hash256, AvcTrustReceipt>,
+    #[serde(default)]
+    pub receipt_chain_head: Option<Hash256>,
 }
 
 /// Deterministic in-memory implementation of the registry traits.
@@ -90,7 +93,9 @@ pub struct InMemoryAvcRegistry {
     by_subject: BTreeMap<Did, BTreeSet<Hash256>>,
     revocations: BTreeMap<Hash256, AvcRevocation>,
     receipts: BTreeMap<Hash256, AvcTrustReceipt>,
+    receipt_chain_head: Option<Hash256>,
     public_keys: BTreeMap<Did, PublicKey>,
+    receipt_validator_public_keys: BTreeMap<Did, PublicKey>,
     issuer_permission_grants: BTreeMap<Did, BTreeSet<Permission>>,
     human_approval_keys: BTreeMap<Did, PublicKey>,
     consent_refs: BTreeSet<Hash256>,
@@ -111,6 +116,7 @@ impl InMemoryAvcRegistry {
             credentials: self.credentials.clone(),
             revocations: self.revocations.clone(),
             receipts: self.receipts.clone(),
+            receipt_chain_head: self.receipt_chain_head,
         }
     }
 
@@ -193,9 +199,11 @@ impl InMemoryAvcRegistry {
                     ),
                 });
             }
-            registry.validate_receipt(&receipt)?;
+            registry.validate_receipt_structural(&receipt)?;
             registry.receipts.insert(stored_id, receipt);
         }
+        registry.validate_durable_receipt_evidence(state.receipt_chain_head)?;
+        registry.receipt_chain_head = state.receipt_chain_head;
 
         Ok(registry)
     }
@@ -214,6 +222,7 @@ impl InMemoryAvcRegistry {
         candidate.by_subject = durable.by_subject;
         candidate.revocations.clear();
         candidate.receipts = durable.receipts;
+        candidate.receipt_chain_head = durable.receipt_chain_head;
 
         for revocation in durable.revocations.into_values() {
             candidate.validate_revocation(&revocation)?;
@@ -221,11 +230,13 @@ impl InMemoryAvcRegistry {
                 .revocations
                 .insert(revocation.credential_id, revocation);
         }
+        candidate.validate_loaded_receipts()?;
 
         self.credentials = candidate.credentials;
         self.by_subject = candidate.by_subject;
         self.revocations = candidate.revocations;
         self.receipts = candidate.receipts;
+        self.receipt_chain_head = candidate.receipt_chain_head;
         Ok(())
     }
 
@@ -236,6 +247,16 @@ impl InMemoryAvcRegistry {
     pub fn validate_loaded_revocations(&self) -> Result<(), AvcError> {
         for revocation in self.revocations.values() {
             self.validate_revocation(revocation)?;
+        }
+        Ok(())
+    }
+
+    /// Revalidate durable receipts after validator trust anchors have been
+    /// registered. Durable import only performs structural checks because
+    /// startup trust anchors are intentionally restored out-of-band.
+    pub fn validate_loaded_receipts(&self) -> Result<(), AvcError> {
+        for receipt in self.receipts.values() {
+            self.validate_receipt(receipt)?;
         }
         Ok(())
     }
@@ -258,7 +279,140 @@ impl InMemoryAvcRegistry {
         self.receipts.len()
     }
 
-    fn validate_receipt(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
+    #[must_use]
+    pub fn receipt_chain_head(&self) -> Option<Hash256> {
+        self.receipt_chain_head
+    }
+
+    fn validate_unique_action_commitment(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
+        let Some(action_commitment_hash) = receipt.action_commitment_hash else {
+            return Ok(());
+        };
+        if let Some(existing) = self
+            .get_receipt_by_action_commitment_excluding(&action_commitment_hash, receipt.receipt_id)
+        {
+            return Err(AvcError::Registry {
+                reason: format!(
+                    "duplicate AVC receipt action commitment {action_commitment_hash} claimed by receipts {} and {}",
+                    existing.receipt_id, receipt.receipt_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_durable_receipt_evidence(
+        &self,
+        stored_chain_head: Option<Hash256>,
+    ) -> Result<(), AvcError> {
+        let mut commitments = BTreeMap::new();
+        let mut extended = BTreeMap::new();
+        for (receipt_id, receipt) in &self.receipts {
+            if let Some(action_commitment_hash) = receipt.action_commitment_hash {
+                if let Some(previous_receipt_id) =
+                    commitments.insert(action_commitment_hash, *receipt_id)
+                {
+                    return Err(AvcError::Registry {
+                        reason: format!(
+                            "duplicate durable AVC receipt action commitment {action_commitment_hash} claimed by receipts {previous_receipt_id} and {receipt_id}"
+                        ),
+                    });
+                }
+            }
+            if receipt.has_extended_evidence() {
+                extended.insert(*receipt_id, receipt);
+            }
+        }
+
+        if extended.is_empty() {
+            if let Some(head) = stored_chain_head {
+                return Err(AvcError::Registry {
+                    reason: format!(
+                        "durable receipt chain head {head} is set but no extended receipts are stored"
+                    ),
+                });
+            }
+            return Ok(());
+        }
+
+        let mut child_by_previous: BTreeMap<Option<Hash256>, Hash256> = BTreeMap::new();
+        for (receipt_id, receipt) in &extended {
+            if let Some(previous) = receipt.previous_receipt_hash {
+                if !extended.contains_key(&previous) {
+                    return Err(AvcError::Registry {
+                        reason: format!(
+                            "durable receipt {} references missing previous extended receipt {previous}",
+                            receipt.receipt_id
+                        ),
+                    });
+                }
+            }
+            if let Some(existing_child) =
+                child_by_previous.insert(receipt.previous_receipt_hash, *receipt_id)
+            {
+                return Err(AvcError::Registry {
+                    reason: format!(
+                        "durable receipt chain branches after previous head {:?}: receipts {existing_child} and {receipt_id}",
+                        receipt.previous_receipt_hash
+                    ),
+                });
+            }
+        }
+
+        let Some(mut current) = child_by_previous.get(&None).copied() else {
+            return Err(AvcError::Registry {
+                reason: "durable receipt chain has no genesis receipt".into(),
+            });
+        };
+        let mut visited = BTreeSet::new();
+        let terminal = loop {
+            if !visited.insert(current) {
+                return Err(AvcError::Registry {
+                    reason: format!("durable receipt chain contains a cycle at receipt {current}"),
+                });
+            }
+            let Some(next) = child_by_previous.get(&Some(current)).copied() else {
+                break current;
+            };
+            current = next;
+        };
+
+        if visited.len() != extended.len() {
+            return Err(AvcError::Registry {
+                reason: format!(
+                    "durable receipt chain is disconnected: visited {} of {} extended receipts",
+                    visited.len(),
+                    extended.len()
+                ),
+            });
+        }
+        if stored_chain_head != Some(terminal) {
+            return Err(AvcError::Registry {
+                reason: format!(
+                    "durable receipt chain head {:?} does not match computed terminal receipt {terminal}",
+                    stored_chain_head
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_receipt_chain_link(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
+        if !receipt.has_extended_evidence() {
+            return Ok(());
+        }
+        if receipt.previous_receipt_hash != self.receipt_chain_head {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "receipt {} previous_receipt_hash {:?} does not match current AVC receipt chain head {:?}",
+                    receipt.receipt_id, receipt.previous_receipt_hash, self.receipt_chain_head
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_receipt_structural(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
         if !receipt.verify_id()? {
             return Err(AvcError::InvalidInput {
                 reason: format!(
@@ -278,6 +432,26 @@ impl InMemoryAvcRegistry {
                     "receipt {} references unknown credential {}",
                     receipt.receipt_id, receipt.credential_id
                 ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_receipt(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
+        self.validate_receipt_structural(receipt)?;
+        let public_key = self
+            .receipt_validator_public_keys
+            .get(&receipt.validator_did)
+            .ok_or_else(|| AvcError::InvalidInput {
+                reason: format!(
+                    "receipt validator public key for {} is unresolved",
+                    receipt.validator_did
+                ),
+            })?;
+        let payload = receipt.signing_payload()?;
+        if !crypto::verify(&payload, &receipt.signature, public_key) {
+            return Err(AvcError::InvalidInput {
+                reason: format!("receipt signature for {} is invalid", receipt.receipt_id),
             });
         }
         Ok(())
@@ -404,6 +578,26 @@ impl InMemoryAvcRegistry {
         self.receipts.get(receipt_hash).cloned()
     }
 
+    #[must_use]
+    pub fn get_receipt_by_action_commitment(
+        &self,
+        action_commitment_hash: &Hash256,
+    ) -> Option<AvcTrustReceipt> {
+        self.get_receipt_by_action_commitment_excluding(action_commitment_hash, Hash256::ZERO)
+    }
+
+    fn get_receipt_by_action_commitment_excluding(
+        &self,
+        action_commitment_hash: &Hash256,
+        excluded_receipt_id: Hash256,
+    ) -> Option<AvcTrustReceipt> {
+        self.receipts
+            .values()
+            .filter(|receipt| receipt.receipt_id != excluded_receipt_id)
+            .find(|receipt| receipt.action_commitment_hash.as_ref() == Some(action_commitment_hash))
+            .cloned()
+    }
+
     /// List receipts whose referenced credential belongs to `subject_did`.
     ///
     /// Receipts are stored in a `BTreeMap`, so iteration order is the
@@ -512,12 +706,22 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
             });
         }
         self.validate_receipt(&receipt)?;
+        self.validate_unique_action_commitment(&receipt)?;
+        self.validate_receipt_chain_link(&receipt)?;
+        let advances_chain = receipt.has_extended_evidence();
         self.receipts.insert(key, receipt);
+        if advances_chain {
+            self.receipt_chain_head = Some(key);
+        }
         Ok(())
     }
 
     fn put_public_key(&mut self, did: Did, public_key: PublicKey) {
         self.public_keys.insert(did, public_key);
+    }
+
+    fn put_receipt_validator_public_key(&mut self, did: Did, public_key: PublicKey) {
+        self.receipt_validator_public_keys.insert(did, public_key);
     }
 
     fn put_issuer_permission_grant(&mut self, did: Did, granted_permissions: Vec<Permission>) {
@@ -560,10 +764,6 @@ mod tests {
         revocation::{AvcRevocation, AvcRevocationReason, revoke_avc},
     };
 
-    fn fixed_signature() -> Signature {
-        Signature::from_bytes([7u8; 64])
-    }
-
     fn keypair(seed: u8) -> KeyPair {
         KeyPair::from_secret_bytes([seed; 32]).unwrap()
     }
@@ -598,6 +798,12 @@ mod tests {
         issuer
     }
 
+    fn put_validator_key(reg: &mut InMemoryAvcRegistry) -> KeyPair {
+        let validator = keypair(0x33);
+        reg.put_receipt_validator_public_key(did("validator"), validator.public);
+        validator
+    }
+
     fn register_sample_credential_and_issuer_key(
         reg: &mut InMemoryAvcRegistry,
     ) -> (Hash256, KeyPair) {
@@ -612,21 +818,66 @@ mod tests {
         signed_revocation(id, did("issuer"), issuer_keypair)
     }
 
-    fn receipt_for_credential(credential_id: Hash256) -> AvcTrustReceipt {
+    fn receipt_for_credential(
+        credential_id: Hash256,
+        validator_keypair: &KeyPair,
+    ) -> AvcTrustReceipt {
         let mut receipt = AvcTrustReceipt {
             schema_version: crate::credential::AVC_SCHEMA_VERSION,
             receipt_id: Hash256::ZERO,
             credential_id,
             action_id: None,
+            action_commitment_hash: None,
+            previous_receipt_hash: None,
+            timestamp_provenance: None,
             validator_did: did("validator"),
             decision: crate::validation::AvcDecision::Allow,
             reason_codes: vec![crate::validation::AvcReasonCode::Valid],
             created_at: ts(3),
             validation_hash: h256(0xBB),
-            signature: fixed_signature(),
+            signature: Signature::empty(),
         };
-        receipt.receipt_id = receipt.recompute_id().unwrap();
+        let payload = receipt.signing_payload().unwrap();
+        receipt.receipt_id = Hash256::digest(&payload);
+        receipt.signature = validator_keypair.sign(&payload);
         receipt
+    }
+
+    fn chained_receipt_for_credential(
+        credential_id: Hash256,
+        validator_keypair: &KeyPair,
+        previous_receipt_hash: Option<Hash256>,
+        action_byte: u8,
+    ) -> AvcTrustReceipt {
+        let mut receipt = AvcTrustReceipt {
+            schema_version: crate::credential::AVC_SCHEMA_VERSION,
+            receipt_id: Hash256::ZERO,
+            credential_id,
+            action_id: Some(h256(action_byte)),
+            action_commitment_hash: Some(h256(action_byte.wrapping_add(1))),
+            previous_receipt_hash,
+            timestamp_provenance: Some(
+                crate::receipt::AvcReceiptTimestampProvenance::LocalHybridLogicalClock,
+            ),
+            validator_did: did("validator"),
+            decision: crate::validation::AvcDecision::Allow,
+            reason_codes: vec![crate::validation::AvcReasonCode::Valid],
+            created_at: ts(u64::from(action_byte) + 3),
+            validation_hash: h256(0xBB),
+            signature: Signature::empty(),
+        };
+        let payload = receipt.signing_payload().unwrap();
+        receipt.receipt_id = Hash256::digest(&payload);
+        receipt.signature = validator_keypair.sign(&payload);
+        receipt
+    }
+
+    fn resign_receipt(receipt: &mut AvcTrustReceipt, validator_keypair: &KeyPair) {
+        receipt.receipt_id = Hash256::ZERO;
+        receipt.signature = Signature::empty();
+        let payload = receipt.signing_payload().unwrap();
+        receipt.receipt_id = Hash256::digest(&payload);
+        receipt.signature = validator_keypair.sign(&payload);
     }
 
     #[test]
@@ -861,6 +1112,26 @@ mod tests {
     }
 
     #[test]
+    fn put_revocation_accepts_principal_revoker() {
+        let mut reg = fresh_registry();
+        let mut draft = baseline_draft();
+        draft.principal_did = did("principal");
+        let issuer_keypair = keypair(0x11);
+        let principal_keypair = keypair(0x22);
+        let credential = issue_avc(draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        let id = credential.id().unwrap();
+        reg.put_public_key(did("issuer"), issuer_keypair.public);
+        reg.put_public_key(did("principal"), principal_keypair.public);
+        reg.put_credential(credential).unwrap();
+        let revocation = signed_revocation(id, did("principal"), &principal_keypair);
+
+        reg.put_revocation(revocation.clone()).unwrap();
+
+        assert!(reg.is_revoked(&id));
+        assert_eq!(reg.get_revocation(&id).unwrap(), revocation);
+    }
+
+    #[test]
     fn put_revocation_rejects_revoker_that_is_not_issuer_or_principal() {
         let mut reg = fresh_registry();
         let cred = sample_credential();
@@ -971,7 +1242,8 @@ mod tests {
     fn put_receipt_rejects_duplicates() {
         let mut reg = fresh_registry();
         let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
-        let receipt = receipt_for_credential(id);
+        let validator_keypair = put_validator_key(&mut reg);
+        let receipt = receipt_for_credential(id, &validator_keypair);
         reg.put_receipt(receipt.clone()).unwrap();
         let err = reg.put_receipt(receipt.clone()).unwrap_err();
         assert!(matches!(err, AvcError::Registry { .. }));
@@ -980,9 +1252,207 @@ mod tests {
     }
 
     #[test]
+    fn put_receipt_accepts_validator_signed_receipt_with_registered_key() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+
+        reg.put_receipt(receipt.clone()).unwrap();
+
+        assert_eq!(reg.receipt_count(), 1);
+        assert_eq!(reg.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+    }
+
+    #[test]
+    fn put_receipt_accepts_scoped_validator_key_without_generic_issuer_trust() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        reg.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+
+        reg.put_receipt(receipt.clone()).unwrap();
+
+        assert_eq!(reg.receipt_count(), 1);
+        assert_eq!(reg.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+        assert_eq!(reg.resolve_public_key(&did("validator")), None);
+    }
+
+    #[test]
+    fn generic_public_key_does_not_validate_receipt_signature() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        reg.put_public_key(did("validator"), validator_keypair.public);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+
+        let err = reg.put_receipt(receipt.clone()).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("receipt validator public key") && reason.contains("unresolved"))
+        );
+        assert_eq!(
+            reg.resolve_public_key(&did("validator")),
+            Some(validator_keypair.public)
+        );
+        assert_eq!(reg.receipt_count(), 0);
+        assert!(reg.get_receipt(&receipt.receipt_id).is_none());
+    }
+
+    #[test]
+    fn receipt_validator_key_does_not_grant_credential_issuer_trust() {
+        let mut reg = fresh_registry();
+        let issuer_keypair = keypair(0x11);
+        reg.put_receipt_validator_public_key(did("issuer"), issuer_keypair.public);
+        let credential = sample_credential();
+
+        let err = reg.put_credential(credential).unwrap_err();
+
+        assert_eq!(reg.resolve_public_key(&did("issuer")), None);
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("credential issuer key") && reason.contains("unresolved"))
+        );
+        assert_eq!(reg.credential_count(), 0);
+    }
+
+    #[test]
+    fn receipt_chain_advances_for_extended_receipts() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+
+        reg.put_receipt(first.clone()).unwrap();
+        assert_eq!(reg.receipt_chain_head(), Some(first.receipt_id));
+
+        reg.put_receipt(second.clone()).unwrap();
+        assert_eq!(reg.receipt_chain_head(), Some(second.receipt_id));
+        assert_eq!(reg.receipt_count(), 2);
+        assert_eq!(reg.get_receipt(&second.receipt_id).unwrap(), second);
+    }
+
+    #[test]
+    fn receipt_chain_rejects_wrong_previous_hash_without_advancing() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        reg.put_receipt(first.clone()).unwrap();
+        let wrong_link =
+            chained_receipt_for_credential(id, &validator_keypair, Some(h256(0xFE)), 0x22);
+
+        let err = reg.put_receipt(wrong_link.clone()).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("previous_receipt_hash"))
+        );
+        assert_eq!(reg.receipt_chain_head(), Some(first.receipt_id));
+        assert_eq!(reg.receipt_count(), 1);
+        assert!(reg.get_receipt(&wrong_link.receipt_id).is_none());
+    }
+
+    #[test]
+    fn put_receipt_rejects_duplicate_action_commitment_without_advancing() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let mut duplicate_commitment =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        duplicate_commitment.action_commitment_hash = first.action_commitment_hash;
+        resign_receipt(&mut duplicate_commitment, &validator_keypair);
+
+        reg.put_receipt(first.clone()).unwrap();
+        let err = reg.put_receipt(duplicate_commitment.clone()).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::Registry { reason } if reason.contains("duplicate AVC receipt action commitment"))
+        );
+        assert_eq!(reg.receipt_chain_head(), Some(first.receipt_id));
+        assert_eq!(reg.receipt_count(), 1);
+        assert!(reg.get_receipt(&duplicate_commitment.receipt_id).is_none());
+    }
+
+    #[test]
+    fn get_receipt_by_action_commitment_finds_extended_receipts() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let legacy = receipt_for_credential(id, &validator_keypair);
+        let extended = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let action_commitment_hash = extended.action_commitment_hash.unwrap();
+        reg.put_receipt(legacy).unwrap();
+        reg.put_receipt(extended.clone()).unwrap();
+
+        assert_eq!(
+            reg.get_receipt_by_action_commitment(&action_commitment_hash),
+            Some(extended)
+        );
+        assert!(reg.get_receipt_by_action_commitment(&h256(0xFE)).is_none());
+    }
+
+    #[test]
+    fn legacy_receipts_do_not_advance_receipt_chain_head() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+
+        reg.put_receipt(receipt.clone()).unwrap();
+
+        assert_eq!(reg.receipt_count(), 1);
+        assert_eq!(reg.receipt_chain_head(), None);
+        assert_eq!(reg.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+    }
+
+    #[test]
+    fn put_receipt_rejects_forged_signature_without_storing() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let attacker_keypair = keypair(0x44);
+        let receipt = receipt_for_credential(id, &attacker_keypair);
+
+        let err = reg.put_receipt(receipt.clone()).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("signature"));
+                assert!(reason.contains("invalid"));
+            }
+            other => panic!("expected invalid input for forged receipt, got {other:?}"),
+        }
+        assert_eq!(reg.receipt_count(), 0);
+        assert!(reg.get_receipt(&receipt.receipt_id).is_none());
+        assert_ne!(validator_keypair.public, attacker_keypair.public);
+    }
+
+    #[test]
+    fn put_receipt_rejects_unresolved_validator_key_without_storing() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+
+        let err = reg.put_receipt(receipt.clone()).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => {
+                assert!(reason.contains("validator public key"));
+                assert!(reason.contains("unresolved"));
+            }
+            other => panic!("expected invalid input for unresolved validator, got {other:?}"),
+        }
+        assert_eq!(reg.receipt_count(), 0);
+        assert!(reg.get_receipt(&receipt.receipt_id).is_none());
+    }
+
+    #[test]
     fn put_receipt_rejects_unknown_credential_without_storing() {
         let mut reg = fresh_registry();
-        let receipt = receipt_for_credential(h256(0xAA));
+        let validator_keypair = put_validator_key(&mut reg);
+        let receipt = receipt_for_credential(h256(0xAA), &validator_keypair);
         let err = reg.put_receipt(receipt).unwrap_err();
         match err {
             AvcError::InvalidInput { reason } => {
@@ -997,6 +1467,7 @@ mod tests {
     fn list_receipts_for_subject_filters_by_credential_subject_and_limit() {
         let mut reg = fresh_registry();
         let issuer_keypair = put_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
 
         let mut first_draft = baseline_draft();
         first_draft.subject_did = did("agent-one");
@@ -1016,9 +1487,9 @@ mod tests {
         let other = issue_avc(other_draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
         let other_id = reg.put_credential(other).unwrap();
 
-        let first_receipt = receipt_for_credential(first_id);
-        let second_receipt = receipt_for_credential(second_id);
-        let other_receipt = receipt_for_credential(other_id);
+        let first_receipt = receipt_for_credential(first_id, &validator_keypair);
+        let second_receipt = receipt_for_credential(second_id, &validator_keypair);
+        let other_receipt = receipt_for_credential(other_id, &validator_keypair);
         reg.put_receipt(first_receipt.clone()).unwrap();
         reg.put_receipt(other_receipt).unwrap();
         reg.put_receipt(second_receipt.clone()).unwrap();
@@ -1042,7 +1513,8 @@ mod tests {
         let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
         let revocation = sample_issuer_revocation(id, &issuer_keypair);
         reg.put_revocation(revocation.clone()).unwrap();
-        let receipt = receipt_for_credential(id);
+        let validator_keypair = put_validator_key(&mut reg);
+        let receipt = receipt_for_credential(id, &validator_keypair);
         reg.put_receipt(receipt.clone()).unwrap();
 
         let restored = InMemoryAvcRegistry::from_durable_state(reg.durable_state()).unwrap();
@@ -1052,9 +1524,210 @@ mod tests {
         assert_eq!(restored.receipt_count(), 1);
         assert_eq!(restored.get_revocation(&id).unwrap(), revocation);
         assert_eq!(restored.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+        assert_eq!(restored.receipt_chain_head(), None);
         assert!(
             restored.resolve_public_key(&did("issuer")).is_none(),
             "key trust anchors must be reloaded from verified startup config"
+        );
+        assert!(
+            restored.resolve_public_key(&did("validator")).is_none(),
+            "validator trust anchors must be reloaded from verified startup config"
+        );
+    }
+
+    #[test]
+    fn durable_state_receipt_chain_head_round_trips() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        reg.put_receipt(first).unwrap();
+        reg.put_receipt(second.clone()).unwrap();
+
+        let state = reg.durable_state();
+        assert_eq!(state.receipt_chain_head, Some(second.receipt_id));
+        let restored = InMemoryAvcRegistry::from_durable_state(state).unwrap();
+
+        assert_eq!(restored.receipt_count(), 2);
+        assert_eq!(restored.receipt_chain_head(), Some(second.receipt_id));
+        assert_eq!(restored.get_receipt(&second.receipt_id).unwrap(), second);
+    }
+
+    #[test]
+    fn durable_state_accepts_legacy_only_receipts_with_no_chain_head() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+        let mut state = reg.durable_state();
+        state.receipts.insert(receipt.receipt_id, receipt.clone());
+        state.receipt_chain_head = None;
+
+        let restored = InMemoryAvcRegistry::from_durable_state(state).unwrap();
+
+        assert_eq!(restored.receipt_count(), 1);
+        assert_eq!(restored.receipt_chain_head(), None);
+        assert_eq!(restored.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+    }
+
+    #[test]
+    fn durable_state_rejects_legacy_receipt_chain_head_without_extended_receipts() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let receipt = receipt_for_credential(id, &validator_keypair);
+        let mut state = reg.durable_state();
+        state.receipts.insert(receipt.receipt_id, receipt.clone());
+        state.receipt_chain_head = Some(receipt.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+
+        match err {
+            AvcError::Registry { reason } => {
+                assert!(reason.contains("no extended receipts are stored"));
+            }
+            other => panic!("expected durable receipt chain head error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn durable_state_rejects_receipt_chain_missing_intermediate_prior() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let receipt =
+            chained_receipt_for_credential(id, &validator_keypair, Some(h256(0xEE)), 0x21);
+        let mut state = reg.durable_state();
+        state.receipts.insert(receipt.receipt_id, receipt.clone());
+        state.receipt_chain_head = Some(receipt.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+
+        match err {
+            AvcError::Registry { reason } => {
+                assert!(reason.contains("missing previous extended receipt"));
+            }
+            other => panic!("expected missing previous receipt error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn durable_state_rejects_receipt_chain_branch() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        let third =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x23);
+        let mut state = reg.durable_state();
+        state.receipts.insert(first.receipt_id, first);
+        state.receipts.insert(second.receipt_id, second.clone());
+        state.receipts.insert(third.receipt_id, third);
+        state.receipt_chain_head = Some(second.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::Registry { reason } if reason.contains("branches after previous head"))
+        );
+    }
+
+    #[test]
+    fn durable_receipt_evidence_rejects_extended_chain_with_no_genesis() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let mut first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        first.previous_receipt_hash = Some(second.receipt_id);
+        reg.receipts.insert(first.receipt_id, first);
+        reg.receipts.insert(second.receipt_id, second.clone());
+
+        let err = reg
+            .validate_durable_receipt_evidence(Some(second.receipt_id))
+            .unwrap_err();
+
+        match err {
+            AvcError::Registry { reason } => {
+                assert!(reason.contains("no genesis receipt"));
+            }
+            other => panic!("expected durable receipt chain genesis error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn durable_receipt_evidence_rejects_disconnected_chain() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        let mut third = chained_receipt_for_credential(id, &validator_keypair, None, 0x23);
+        let fourth =
+            chained_receipt_for_credential(id, &validator_keypair, Some(third.receipt_id), 0x24);
+        third.previous_receipt_hash = Some(fourth.receipt_id);
+        reg.receipts.insert(first.receipt_id, first);
+        reg.receipts.insert(second.receipt_id, second.clone());
+        reg.receipts.insert(third.receipt_id, third);
+        reg.receipts.insert(fourth.receipt_id, fourth);
+
+        let err = reg
+            .validate_durable_receipt_evidence(Some(second.receipt_id))
+            .unwrap_err();
+
+        match err {
+            AvcError::Registry { reason } => {
+                assert!(reason.contains("chain is disconnected"));
+            }
+            other => panic!("expected disconnected durable receipt chain error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn durable_state_rejects_receipt_chain_head_that_is_not_terminal() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        let mut state = reg.durable_state();
+        state.receipts.insert(first.receipt_id, first.clone());
+        state.receipts.insert(second.receipt_id, second);
+        state.receipt_chain_head = Some(first.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::Registry { reason } if reason.contains("computed terminal receipt"))
+        );
+    }
+
+    #[test]
+    fn durable_state_rejects_duplicate_action_commitments() {
+        let mut reg = fresh_registry();
+        let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = keypair(0x33);
+        let first = chained_receipt_for_credential(id, &validator_keypair, None, 0x21);
+        let mut second =
+            chained_receipt_for_credential(id, &validator_keypair, Some(first.receipt_id), 0x22);
+        second.action_commitment_hash = first.action_commitment_hash;
+        resign_receipt(&mut second, &validator_keypair);
+        let mut state = reg.durable_state();
+        state.receipts.insert(first.receipt_id, first);
+        state.receipts.insert(second.receipt_id, second.clone());
+        state.receipt_chain_head = Some(second.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::Registry { reason } if reason.contains("duplicate durable AVC receipt action commitment"))
         );
     }
 
@@ -1120,6 +1793,27 @@ mod tests {
     }
 
     #[test]
+    fn durable_state_accepts_principal_revocation() {
+        let mut reg = fresh_registry();
+        let mut draft = baseline_draft();
+        draft.principal_did = did("principal");
+        let issuer_keypair = keypair(0x11);
+        let principal_keypair = keypair(0x22);
+        let credential = issue_avc(draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        let id = credential.id().unwrap();
+        reg.put_public_key(did("issuer"), issuer_keypair.public);
+        reg.put_credential(credential).unwrap();
+        let revocation = signed_revocation(id, did("principal"), &principal_keypair);
+        let mut state = reg.durable_state();
+        state.revocations.insert(id, revocation.clone());
+
+        let restored = InMemoryAvcRegistry::from_durable_state(state).unwrap();
+
+        assert_eq!(restored.revocation_count(), 1);
+        assert_eq!(restored.get_revocation(&id).unwrap(), revocation);
+    }
+
+    #[test]
     fn durable_state_rejects_revocation_with_unsupported_schema() {
         let mut reg = fresh_registry();
         let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
@@ -1145,7 +1839,8 @@ mod tests {
     fn durable_state_rejects_invalid_receipt_records() {
         let mut reg = fresh_registry();
         let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
-        let receipt = receipt_for_credential(id);
+        let validator_keypair = keypair(0x33);
+        let receipt = receipt_for_credential(id, &validator_keypair);
 
         let mut mismatched_key = reg.durable_state();
         mismatched_key.receipts.insert(h256(0x77), receipt.clone());
@@ -1165,7 +1860,7 @@ mod tests {
             matches!(err, AvcError::InvalidInput { reason } if reason.contains("empty signature"))
         );
 
-        let unknown_receipt = receipt_for_credential(h256(0xAA));
+        let unknown_receipt = receipt_for_credential(h256(0xAA), &validator_keypair);
         let mut unknown_state = AvcRegistryDurableState::default();
         unknown_state
             .receipts
@@ -1182,7 +1877,8 @@ mod tests {
         let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut durable_source);
         let revocation = sample_issuer_revocation(id, &issuer_keypair);
         durable_source.put_revocation(revocation.clone()).unwrap();
-        let receipt = receipt_for_credential(id);
+        let validator_keypair = put_validator_key(&mut durable_source);
+        let receipt = receipt_for_credential(id, &validator_keypair);
         durable_source.put_receipt(receipt.clone()).unwrap();
 
         let subject_keypair = keypair(0x22);
@@ -1192,6 +1888,7 @@ mod tests {
         let authority_chain = h256(0xCC);
         let mut live = fresh_registry();
         live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
         live.put_public_key(did("subject"), subject_keypair.public);
         live.put_human_approval_key(did("human"), human_keypair.public);
         live.add_consent_ref(consent_ref);
@@ -1214,6 +1911,7 @@ mod tests {
             live.resolve_public_key(&did("subject")).unwrap(),
             subject_keypair.public
         );
+        assert_eq!(live.resolve_public_key(&did("validator")), None);
         assert_eq!(
             live.resolve_human_approval_key(&did("human")).unwrap(),
             human_keypair.public
@@ -1248,10 +1946,36 @@ mod tests {
     }
 
     #[test]
+    fn apply_durable_state_rejects_forged_receipt_signature_with_live_trust_anchor() {
+        let mut durable_source = fresh_registry();
+        let (id, issuer_keypair) = register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let attacker_keypair = keypair(0x44);
+        let forged_receipt = receipt_for_credential(id, &attacker_keypair);
+        let mut state = durable_source.durable_state();
+        state
+            .receipts
+            .insert(forged_receipt.receipt_id, forged_receipt);
+
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
+
+        let err = live.apply_durable_state(state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("signature") && reason.contains("invalid")),
+            "durable receipt signatures must be verified with live startup trust anchors"
+        );
+        assert_eq!(live.credential_count(), 0);
+        assert_eq!(live.receipt_count(), 0);
+    }
+
+    #[test]
     fn durable_state_rejects_receipt_with_invalid_content_id() {
         let mut reg = fresh_registry();
         let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
-        let mut receipt = receipt_for_credential(id);
+        let validator_keypair = keypair(0x33);
+        let mut receipt = receipt_for_credential(id, &validator_keypair);
         let stored_id = receipt.receipt_id;
         receipt.validation_hash = h256(0xCC);
 

@@ -39,12 +39,25 @@ pub struct AvcTrustReceipt {
     pub receipt_id: Hash256,
     pub credential_id: Hash256,
     pub action_id: Option<Hash256>,
+    #[serde(default)]
+    pub action_commitment_hash: Option<Hash256>,
+    #[serde(default)]
+    pub previous_receipt_hash: Option<Hash256>,
+    #[serde(default)]
+    pub timestamp_provenance: Option<AvcReceiptTimestampProvenance>,
     pub validator_did: Did,
     pub decision: AvcDecision,
     pub reason_codes: Vec<AvcReasonCode>,
     pub created_at: Timestamp,
     pub validation_hash: Hash256,
     pub signature: Signature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AvcReceiptTimestampProvenance {
+    PostgresClockTimestamp,
+    LocalHybridLogicalClock,
+    FixedTestTimestamp,
 }
 
 #[derive(Serialize)]
@@ -60,25 +73,66 @@ struct ReceiptSigningPayload<'a> {
     validation_hash: &'a Hash256,
 }
 
+#[derive(Serialize)]
+struct ExtendedReceiptSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    credential_id: &'a Hash256,
+    action_id: Option<&'a Hash256>,
+    action_commitment_hash: Option<&'a Hash256>,
+    previous_receipt_hash: Option<&'a Hash256>,
+    timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+    validator_did: &'a Did,
+    decision: &'a AvcDecision,
+    reason_codes: &'a [AvcReasonCode],
+    created_at: &'a Timestamp,
+    validation_hash: &'a Hash256,
+}
+
 impl AvcTrustReceipt {
+    #[must_use]
+    pub fn has_extended_evidence(&self) -> bool {
+        self.action_commitment_hash.is_some()
+            || self.previous_receipt_hash.is_some()
+            || self.timestamp_provenance.is_some()
+    }
+
     /// Compute the canonical signing payload bytes for this receipt.
     ///
     /// # Errors
     /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
     pub fn signing_payload(&self) -> Result<Vec<u8>, AvcError> {
-        let payload = ReceiptSigningPayload {
-            domain: AVC_RECEIPT_SIGNING_DOMAIN,
-            schema_version: self.schema_version,
-            credential_id: &self.credential_id,
-            action_id: self.action_id.as_ref(),
-            validator_did: &self.validator_did,
-            decision: &self.decision,
-            reason_codes: &self.reason_codes,
-            created_at: &self.created_at,
-            validation_hash: &self.validation_hash,
-        };
         let mut buf = Vec::new();
-        ciborium::ser::into_writer(&payload, &mut buf)?;
+        if self.has_extended_evidence() {
+            let payload = ExtendedReceiptSigningPayload {
+                domain: AVC_RECEIPT_SIGNING_DOMAIN,
+                schema_version: self.schema_version,
+                credential_id: &self.credential_id,
+                action_id: self.action_id.as_ref(),
+                action_commitment_hash: self.action_commitment_hash.as_ref(),
+                previous_receipt_hash: self.previous_receipt_hash.as_ref(),
+                timestamp_provenance: self.timestamp_provenance.as_ref(),
+                validator_did: &self.validator_did,
+                decision: &self.decision,
+                reason_codes: &self.reason_codes,
+                created_at: &self.created_at,
+                validation_hash: &self.validation_hash,
+            };
+            ciborium::ser::into_writer(&payload, &mut buf)?;
+        } else {
+            let payload = ReceiptSigningPayload {
+                domain: AVC_RECEIPT_SIGNING_DOMAIN,
+                schema_version: self.schema_version,
+                credential_id: &self.credential_id,
+                action_id: self.action_id.as_ref(),
+                validator_did: &self.validator_did,
+                decision: &self.decision,
+                reason_codes: &self.reason_codes,
+                created_at: &self.created_at,
+                validation_hash: &self.validation_hash,
+            };
+            ciborium::ser::into_writer(&payload, &mut buf)?;
+        }
         Ok(buf)
     }
 
@@ -119,6 +173,39 @@ pub fn create_trust_receipt<F>(
 where
     F: FnOnce(&[u8]) -> Signature,
 {
+    create_trust_receipt_with_evidence(
+        validation,
+        action_id,
+        None,
+        None,
+        None,
+        validator_did,
+        now,
+        sign,
+    )
+}
+
+/// Build and sign a trust receipt with local evidence fields.
+///
+/// When all evidence fields are absent, this preserves the legacy v1
+/// signing payload exactly. When any evidence field is present, all
+/// evidence fields are included in the signed payload and receipt ID.
+///
+/// # Errors
+/// Returns [`AvcError::Serialization`] when CBOR encoding fails.
+pub fn create_trust_receipt_with_evidence<F>(
+    validation: &AvcValidationResult,
+    action_id: Option<Hash256>,
+    action_commitment_hash: Option<Hash256>,
+    previous_receipt_hash: Option<Hash256>,
+    timestamp_provenance: Option<AvcReceiptTimestampProvenance>,
+    validator_did: Did,
+    now: Timestamp,
+    sign: F,
+) -> Result<AvcTrustReceipt, AvcError>
+where
+    F: FnOnce(&[u8]) -> Signature,
+{
     let validation_hash = hash_structured(validation).map_err(AvcError::from)?;
 
     // Build the receipt with an empty signature first so we can compute
@@ -128,6 +215,9 @@ where
         receipt_id: Hash256::ZERO,
         credential_id: validation.credential_id,
         action_id,
+        action_commitment_hash,
+        previous_receipt_hash,
+        timestamp_provenance,
         validator_did,
         decision: validation.decision,
         reason_codes: validation.reason_codes.clone(),
@@ -270,5 +360,113 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r1.action_id, Some(action_id));
+    }
+
+    #[test]
+    fn legacy_receipt_payload_stays_v1_when_evidence_absent() {
+        let (validation, _id) = sample_validation();
+        let receipt = create_trust_receipt(&validation, None, did("validator"), ts(2_000), |_| {
+            fixed_signature()
+        })
+        .unwrap();
+        assert!(!receipt.has_extended_evidence());
+
+        let legacy_payload = ReceiptSigningPayload {
+            domain: AVC_RECEIPT_SIGNING_DOMAIN,
+            schema_version: receipt.schema_version,
+            credential_id: &receipt.credential_id,
+            action_id: receipt.action_id.as_ref(),
+            validator_did: &receipt.validator_did,
+            decision: &receipt.decision,
+            reason_codes: &receipt.reason_codes,
+            created_at: &receipt.created_at,
+            validation_hash: &receipt.validation_hash,
+        };
+        let mut expected = Vec::new();
+        ciborium::ser::into_writer(&legacy_payload, &mut expected).unwrap();
+
+        assert_eq!(receipt.signing_payload().unwrap(), expected);
+        assert!(receipt.verify_id().unwrap());
+    }
+
+    #[test]
+    fn legacy_receipt_deserializes_with_absent_evidence_fields() {
+        #[derive(Serialize)]
+        struct LegacyReceiptWire<'a> {
+            schema_version: u16,
+            receipt_id: &'a Hash256,
+            credential_id: &'a Hash256,
+            action_id: Option<&'a Hash256>,
+            validator_did: &'a Did,
+            decision: &'a AvcDecision,
+            reason_codes: &'a [AvcReasonCode],
+            created_at: &'a Timestamp,
+            validation_hash: &'a Hash256,
+            signature: &'a Signature,
+        }
+
+        let (validation, _id) = sample_validation();
+        let receipt = create_trust_receipt(&validation, None, did("validator"), ts(2_000), |_| {
+            fixed_signature()
+        })
+        .unwrap();
+        let legacy_wire = LegacyReceiptWire {
+            schema_version: receipt.schema_version,
+            receipt_id: &receipt.receipt_id,
+            credential_id: &receipt.credential_id,
+            action_id: receipt.action_id.as_ref(),
+            validator_did: &receipt.validator_did,
+            decision: &receipt.decision,
+            reason_codes: &receipt.reason_codes,
+            created_at: &receipt.created_at,
+            validation_hash: &receipt.validation_hash,
+            signature: &receipt.signature,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&legacy_wire, &mut bytes).unwrap();
+
+        let decoded: AvcTrustReceipt = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+
+        assert_eq!(decoded.action_commitment_hash, None);
+        assert_eq!(decoded.previous_receipt_hash, None);
+        assert_eq!(decoded.timestamp_provenance, None);
+        assert_eq!(
+            decoded.signing_payload().unwrap(),
+            receipt.signing_payload().unwrap()
+        );
+        assert!(decoded.verify_id().unwrap());
+    }
+
+    #[test]
+    fn extended_evidence_changes_signed_receipt_payload_and_id() {
+        let (validation, _id) = sample_validation();
+        let action_id = Hash256::from_bytes([0x42; 32]);
+        let legacy = create_trust_receipt(
+            &validation,
+            Some(action_id),
+            did("validator"),
+            ts(2_000),
+            |_| fixed_signature(),
+        )
+        .unwrap();
+        let extended = create_trust_receipt_with_evidence(
+            &validation,
+            Some(action_id),
+            Some(Hash256::from_bytes([0xA1; 32])),
+            None,
+            Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
+            did("validator"),
+            ts(2_000),
+            |_| fixed_signature(),
+        )
+        .unwrap();
+
+        assert!(extended.has_extended_evidence());
+        assert_ne!(
+            legacy.signing_payload().unwrap(),
+            extended.signing_payload().unwrap()
+        );
+        assert_ne!(legacy.receipt_id, extended.receipt_id);
+        assert!(extended.verify_id().unwrap());
     }
 }

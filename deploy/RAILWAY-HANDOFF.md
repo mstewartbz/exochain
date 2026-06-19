@@ -63,7 +63,7 @@ Choose `production` environment when prompted.
 railway add --database postgres
 ```
 
-Railway provisions a Postgres 16 instance and auto-injects `DATABASE_URL` over the private network.
+Railway provisions a Postgres 16 instance and auto-injects `DATABASE_URL` over the private network. `DATABASE_URL` is required for production AVC registry durability; without it the node only has the local AVC file fallback and logs a production durability warning.
 
 ### 4. Add a service (the exochain node)
 
@@ -83,10 +83,11 @@ railway variables --service exochain \
   --set "JWT_SECRET=$(openssl rand -hex 32)" \
   --set "EXOCHAIN_DATA_DIR=/data" \
   --set "RUST_LOG=info" \
-  --set "IS_VALIDATOR=true"
+  --set "IS_VALIDATOR=true" \
+  --set "EXO_AVC_REQUIRE_POSTGRES_DURABILITY=true"
 ```
 
-(`PORT` is auto-injected by Railway. `DATABASE_URL` is auto-injected by the Postgres plugin.)
+(`PORT` is auto-injected by Railway. `DATABASE_URL` is auto-injected by the Postgres plugin. The root Dockerfile sets `EXO_AVC_ROOT_TRUST_BUNDLE` to the bundled verified root trust bundle; keep that startup configuration in place because AVC public-key trust anchors are reloaded from it, not from AVC durable state.)
 
 ### 6. Mount persistent volume at /data
 
@@ -187,6 +188,7 @@ Each environment gets its own Postgres + volume + URL. Promotion flow: branch `d
 |-------|-----------|----------|
 | `GET /health` | Every 30s (Railway healthcheck) | 200 OK |
 | `GET /api/v1/governance/status` | Manual | `is_validator: true`, `consensus_round` increments slowly |
+| AVC durability logs | Every deploy | No `PRODUCTION AVC DURABILITY WARNING`; `DATABASE_URL` must be present |
 | Memory usage | Dashboard | <500 MB at idle, grows with DAG size |
 | CPU | Dashboard | <5% at idle |
 | Volume usage | Dashboard | DAG grows ~10 KB per event |
