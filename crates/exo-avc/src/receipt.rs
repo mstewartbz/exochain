@@ -60,6 +60,17 @@ pub enum AvcReceiptTimestampProvenance {
     FixedTestTimestamp,
 }
 
+/// Optional local evidence included in extended trust receipt payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AvcTrustReceiptEvidence {
+    /// Hash committing to the credential action being receipted.
+    pub action_commitment_hash: Option<Hash256>,
+    /// Previous receipt hash used to link extended receipts in order.
+    pub previous_receipt_hash: Option<Hash256>,
+    /// Source of the trusted timestamp used for this receipt.
+    pub timestamp_provenance: Option<AvcReceiptTimestampProvenance>,
+}
+
 #[derive(Serialize)]
 struct ReceiptSigningPayload<'a> {
     domain: &'static str,
@@ -176,9 +187,7 @@ where
     create_trust_receipt_with_evidence(
         validation,
         action_id,
-        None,
-        None,
-        None,
+        AvcTrustReceiptEvidence::default(),
         validator_did,
         now,
         sign,
@@ -196,9 +205,7 @@ where
 pub fn create_trust_receipt_with_evidence<F>(
     validation: &AvcValidationResult,
     action_id: Option<Hash256>,
-    action_commitment_hash: Option<Hash256>,
-    previous_receipt_hash: Option<Hash256>,
-    timestamp_provenance: Option<AvcReceiptTimestampProvenance>,
+    evidence: AvcTrustReceiptEvidence,
     validator_did: Did,
     now: Timestamp,
     sign: F,
@@ -215,9 +222,9 @@ where
         receipt_id: Hash256::ZERO,
         credential_id: validation.credential_id,
         action_id,
-        action_commitment_hash,
-        previous_receipt_hash,
-        timestamp_provenance,
+        action_commitment_hash: evidence.action_commitment_hash,
+        previous_receipt_hash: evidence.previous_receipt_hash,
+        timestamp_provenance: evidence.timestamp_provenance,
         validator_did,
         decision: validation.decision,
         reason_codes: validation.reason_codes.clone(),
@@ -452,9 +459,11 @@ mod tests {
         let extended = create_trust_receipt_with_evidence(
             &validation,
             Some(action_id),
-            Some(Hash256::from_bytes([0xA1; 32])),
-            None,
-            Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(Hash256::from_bytes([0xA1; 32])),
+                previous_receipt_hash: None,
+                timestamp_provenance: Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
+            },
             did("validator"),
             ts(2_000),
             |_| fixed_signature(),

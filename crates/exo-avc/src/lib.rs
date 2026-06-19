@@ -123,7 +123,7 @@ pub use delegation::{delegate_avc, parent_id_of};
 pub use error::AvcError;
 pub use receipt::{
     AVC_RECEIPT_SIGNING_DOMAIN, AvcReceiptTimestampProvenance, AvcTrustReceipt,
-    create_trust_receipt, create_trust_receipt_with_evidence,
+    AvcTrustReceiptEvidence, create_trust_receipt, create_trust_receipt_with_evidence,
 };
 pub use registry::{
     AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, InMemoryAvcRegistry,

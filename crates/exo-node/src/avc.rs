@@ -64,8 +64,8 @@ use exo_avc::{
     AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION, AVC_SCHEMA_VERSION,
     AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcReceiptTimestampProvenance,
     AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt,
-    AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry, avc_action_commitment_hash,
-    avc_action_signature_payload, create_trust_receipt, create_trust_receipt_with_evidence,
+    AvcTrustReceiptEvidence, AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry,
+    avc_action_commitment_hash, avc_action_signature_payload, create_trust_receipt_with_evidence,
     require_supported_avc_protocol_version, validate_avc,
 };
 use exo_core::{
@@ -1267,9 +1267,11 @@ async fn handle_emit_receipt(
         let receipt = create_trust_receipt_with_evidence(
             &validation,
             Some(action_id),
-            Some(action_commitment_hash),
-            previous_receipt_hash,
-            Some(timestamp_provenance),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(action_commitment_hash),
+                previous_receipt_hash,
+                timestamp_provenance: Some(timestamp_provenance),
+            },
             validator_did,
             trusted_now,
             |bytes| (receipt_signer)(bytes),
@@ -1445,7 +1447,7 @@ mod tests {
     use exo_avc::{
         AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcActionRequest, AvcConstraints,
         AvcDecision, AvcDraft, AvcReasonCode, AvcRevocationReason, AvcSubjectKind, DelegatedIntent,
-        issue_avc, revoke_avc,
+        create_trust_receipt, issue_avc, revoke_avc,
     };
     use exo_core::{Hash256, Signature, Timestamp, crypto, crypto::KeyPair};
     use tower::ServiceExt;
@@ -2935,9 +2937,11 @@ mod tests {
             let conflicting_receipt = create_trust_receipt_with_evidence(
                 &validation,
                 Some(Hash256::from_bytes([0x99; 32])),
-                Some(action_commitment_hash),
-                None,
-                Some(AvcReceiptTimestampProvenance::FixedTestTimestamp),
+                AvcTrustReceiptEvidence {
+                    action_commitment_hash: Some(action_commitment_hash),
+                    previous_receipt_hash: None,
+                    timestamp_provenance: Some(AvcReceiptTimestampProvenance::FixedTestTimestamp),
+                },
                 validator_did(),
                 Timestamp::new(1_600_000, 0),
                 |bytes| validator_keypair().sign(bytes),
