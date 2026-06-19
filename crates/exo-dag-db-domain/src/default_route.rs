@@ -645,3 +645,553 @@ fn reject_forbidden(field: &'static str, value: &str) -> Result<(), DefaultRoute
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context_packet_persistence::{
+        ContextPacketError, PacketPersistenceStatus, PacketValidationStatus,
+    };
+
+    fn memory_ref(memory_id: &str) -> DefaultRouteMemoryRef {
+        DefaultRouteMemoryRef {
+            memory_id: memory_id.to_owned(),
+            latest_receipt_hash: format!("receipt-{memory_id}"),
+            validation_status: "accepted".to_owned(),
+            citation_ref: format!("citation-{memory_id}"),
+        }
+    }
+
+    fn accepted_route() -> DefaultRouteRecord {
+        DefaultRouteRecord {
+            schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
+            route_id: "route-default".to_owned(),
+            tenant_id: "tenant-alpha".to_owned(),
+            project_id: "project-dagdb".to_owned(),
+            memory_namespace: "namespace-main".to_owned(),
+            status: DefaultRouteStatus::Active,
+            route_source: DefaultRouteSource::Persisted,
+            policy_ref: "policy-proof-1".to_owned(),
+            freshness_ref: "freshness-proof-1".to_owned(),
+            policy_allowed: true,
+            freshness_status: RouteFreshnessStatus::Current,
+            invalidated: false,
+            production_default_route_approval_status: "accepted".to_owned(),
+            packet_quality_review_status: "accepted".to_owned(),
+            selected_memory_refs: vec![memory_ref("memory-1")],
+            created_at: "hlc-created-1".to_owned(),
+            updated_at: "hlc-updated-1".to_owned(),
+        }
+    }
+
+    fn accepted_request() -> ContextPacketRequest {
+        ContextPacketRequest {
+            packet_id: "packet-1".to_owned(),
+            query_hash: "query-hash-1".to_owned(),
+            selected_memory_ids: vec!["memory-1".to_owned()],
+            selected_edge_ids: vec!["edge-1".to_owned()],
+            token_budget: 1_000,
+            token_estimate: 250,
+            citation_coverage_bp: 10_000,
+            validation_coverage_bp: 10_000,
+            source_proof_refs: vec!["source-proof-1".to_owned()],
+            context_quality: DefaultContextQuality::UsableContext,
+            freshness_status: PacketFreshnessStatus::Current,
+            validation_status: PacketValidationStatus::Passed,
+            persistence_status: PacketPersistenceStatus::ProofBound,
+            fallback_reason: None,
+            raw_body_present: false,
+            created_at: "hlc-packet-1".to_owned(),
+        }
+    }
+
+    fn readiness_report(route: &DefaultRouteRecord) -> DefaultRouteReadinessReport {
+        evaluate_default_route_readiness(route).expect("route shape should validate")
+    }
+
+    fn has_reason(report: &DefaultRouteReadinessReport, reason: &str) -> bool {
+        report
+            .rejection_reasons
+            .iter()
+            .any(|actual| actual == reason)
+    }
+
+    fn rejected_packet_decision(request: ContextPacketRequest) -> DefaultContextPacketDecision {
+        let decision = build_default_context_packet(&accepted_route(), request)
+            .expect("accepted route should convert packet validation into a decision");
+        assert_eq!(
+            decision.readiness_status,
+            DefaultRuntimeReadinessStatus::Rejected
+        );
+        assert!(decision.packet_record.is_none());
+        decision
+    }
+
+    fn assert_packet_rejection(
+        request: ContextPacketRequest,
+        context_quality: DefaultContextQuality,
+        failure_code: DefaultRetrievalFailureCode,
+        fallback_fragment: &str,
+    ) {
+        let decision = rejected_packet_decision(request);
+        assert_eq!(decision.context_quality, context_quality);
+        assert_eq!(decision.failure_code, failure_code);
+        assert!(
+            decision
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(fallback_fragment)),
+            "fallback reason should mention {fallback_fragment:?}: {:?}",
+            decision.fallback_reason
+        );
+    }
+
+    #[test]
+    fn route_freshness_status_maps_to_packet_freshness_status() {
+        let cases = [
+            (
+                RouteFreshnessStatus::Current,
+                PacketFreshnessStatus::Current,
+            ),
+            (
+                RouteFreshnessStatus::StaleMemory,
+                PacketFreshnessStatus::StaleMemory,
+            ),
+            (
+                RouteFreshnessStatus::StaleCatalog,
+                PacketFreshnessStatus::StaleCatalog,
+            ),
+            (
+                RouteFreshnessStatus::StaleValidation,
+                PacketFreshnessStatus::StaleValidation,
+            ),
+            (
+                RouteFreshnessStatus::RouteInvalidated,
+                PacketFreshnessStatus::RouteInvalidated,
+            ),
+            (
+                RouteFreshnessStatus::Unknown,
+                PacketFreshnessStatus::Unknown,
+            ),
+        ];
+
+        for (route_freshness, packet_freshness) in cases {
+            assert_eq!(
+                PacketFreshnessStatus::from(route_freshness),
+                packet_freshness
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_route_builds_usable_packet_decision() {
+        let route = accepted_route();
+        let decision = build_default_context_packet(&route, accepted_request())
+            .expect("accepted route and packet should build");
+
+        assert_eq!(
+            decision.readiness_status,
+            DefaultRuntimeReadinessStatus::Accepted
+        );
+        assert_eq!(
+            decision.context_quality,
+            DefaultContextQuality::UsableContext
+        );
+        assert_eq!(decision.failure_code, DefaultRetrievalFailureCode::None);
+        assert!(decision.fallback_reason.is_none());
+
+        let record = decision.packet_record.expect("packet record should exist");
+        assert_eq!(record.route_id, route.route_id);
+        assert_eq!(record.tenant_id, route.tenant_id);
+        assert_eq!(record.project_id, route.project_id);
+        assert_eq!(record.memory_namespace, route.memory_namespace);
+        assert_eq!(record.selected_memory_ids, vec!["memory-1".to_owned()]);
+        assert_eq!(record.freshness_status, PacketFreshnessStatus::Current);
+    }
+
+    #[test]
+    fn non_persisted_route_sources_are_non_default() {
+        let cases = [
+            (
+                DefaultRouteSource::Preview,
+                DefaultRetrievalFailureCode::PreviewOnlyRoute,
+                "preview_only_route_not_default",
+            ),
+            (
+                DefaultRouteSource::DryRun,
+                DefaultRetrievalFailureCode::DryRunOnlyRoute,
+                "dry_run_or_target_only_route_not_default",
+            ),
+            (
+                DefaultRouteSource::TargetArtifact,
+                DefaultRetrievalFailureCode::DryRunOnlyRoute,
+                "dry_run_or_target_only_route_not_default",
+            ),
+        ];
+
+        for (route_source, failure_code, reason) in cases {
+            let mut route = accepted_route();
+            route.route_source = route_source;
+
+            let report = readiness_report(&route);
+            assert_eq!(
+                report.readiness_status,
+                DefaultRuntimeReadinessStatus::NonDefault
+            );
+            assert_eq!(report.route_source, route_source);
+            assert_eq!(report.primary_failure_code, failure_code);
+            assert_eq!(report.fallback_count, 1);
+            assert!(has_reason(&report, reason));
+        }
+    }
+
+    #[test]
+    fn route_status_rejections_and_non_default_statuses_are_reported() {
+        let cases = [
+            (
+                DefaultRouteStatus::Forbidden,
+                DefaultRuntimeReadinessStatus::Rejected,
+                DefaultRetrievalFailureCode::ForbiddenRoute,
+                "route_status_forbidden",
+                0,
+            ),
+            (
+                DefaultRouteStatus::Stale,
+                DefaultRuntimeReadinessStatus::Rejected,
+                DefaultRetrievalFailureCode::StaleRoute,
+                "route_status_stale",
+                0,
+            ),
+            (
+                DefaultRouteStatus::Invalidated,
+                DefaultRuntimeReadinessStatus::Rejected,
+                DefaultRetrievalFailureCode::RouteInvalidated,
+                "route_status_invalidated",
+                0,
+            ),
+            (
+                DefaultRouteStatus::PreviewOnly,
+                DefaultRuntimeReadinessStatus::NonDefault,
+                DefaultRetrievalFailureCode::PreviewOnlyRoute,
+                "route_status_preview_only",
+                1,
+            ),
+            (
+                DefaultRouteStatus::DryRunOnly,
+                DefaultRuntimeReadinessStatus::NonDefault,
+                DefaultRetrievalFailureCode::DryRunOnlyRoute,
+                "route_status_non_default",
+                1,
+            ),
+            (
+                DefaultRouteStatus::NonDefault,
+                DefaultRuntimeReadinessStatus::NonDefault,
+                DefaultRetrievalFailureCode::DryRunOnlyRoute,
+                "route_status_non_default",
+                1,
+            ),
+        ];
+
+        for (route_status, readiness_status, failure_code, reason, fallback_count) in cases {
+            let mut route = accepted_route();
+            route.status = route_status;
+
+            let report = readiness_report(&route);
+            assert_eq!(report.readiness_status, readiness_status);
+            assert_eq!(report.route_status, route_status);
+            assert_eq!(report.primary_failure_code, failure_code);
+            assert_eq!(report.fallback_count, fallback_count);
+            assert!(has_reason(&report, reason));
+        }
+    }
+
+    #[test]
+    fn freshness_policy_invalidation_and_empty_memory_gates_reject() {
+        let freshness_cases = [
+            (
+                RouteFreshnessStatus::StaleMemory,
+                DefaultRetrievalFailureCode::StaleRoute,
+                1,
+                0,
+            ),
+            (
+                RouteFreshnessStatus::StaleCatalog,
+                DefaultRetrievalFailureCode::StaleRoute,
+                1,
+                0,
+            ),
+            (
+                RouteFreshnessStatus::StaleValidation,
+                DefaultRetrievalFailureCode::StaleRoute,
+                1,
+                0,
+            ),
+            (
+                RouteFreshnessStatus::RouteInvalidated,
+                DefaultRetrievalFailureCode::RouteInvalidated,
+                1,
+                1,
+            ),
+            (
+                RouteFreshnessStatus::Unknown,
+                DefaultRetrievalFailureCode::MissingFreshness,
+                0,
+                0,
+            ),
+        ];
+
+        for (freshness_status, failure_code, stale_count, invalidated_count) in freshness_cases {
+            let mut route = accepted_route();
+            route.freshness_status = freshness_status;
+
+            let report = readiness_report(&route);
+            assert_eq!(
+                report.readiness_status,
+                DefaultRuntimeReadinessStatus::Rejected
+            );
+            assert_eq!(report.primary_failure_code, failure_code);
+            assert_eq!(report.stale_route_count, stale_count);
+            assert_eq!(report.invalidated_route_count, invalidated_count);
+            assert!(has_reason(&report, "freshness_not_current"));
+        }
+
+        let mut missing_policy = accepted_route();
+        missing_policy.policy_allowed = false;
+        let report = readiness_report(&missing_policy);
+        assert_eq!(
+            report.readiness_status,
+            DefaultRuntimeReadinessStatus::Rejected
+        );
+        assert_eq!(
+            report.primary_failure_code,
+            DefaultRetrievalFailureCode::MissingPolicy
+        );
+        assert!(has_reason(&report, "policy_not_allowed"));
+
+        let mut invalidated = accepted_route();
+        invalidated.invalidated = true;
+        let report = readiness_report(&invalidated);
+        assert_eq!(
+            report.primary_failure_code,
+            DefaultRetrievalFailureCode::RouteInvalidated
+        );
+        assert_eq!(report.invalidated_route_count, 1);
+        assert!(has_reason(&report, "route_invalidated"));
+
+        let mut empty_refs = accepted_route();
+        empty_refs.selected_memory_refs.clear();
+        let report = readiness_report(&empty_refs);
+        assert_eq!(
+            report.primary_failure_code,
+            DefaultRetrievalFailureCode::NoEligibleMemoryRefs
+        );
+        assert_eq!(report.selected_memory_ref_count, 0);
+        assert!(has_reason(&report, "no_eligible_memory_refs"));
+    }
+
+    #[test]
+    fn operator_review_gates_defer_without_accepting_default_runtime() {
+        let mut missing_packet_review = accepted_route();
+        missing_packet_review.packet_quality_review_status = "pending".to_owned();
+        let report = readiness_report(&missing_packet_review);
+        assert_eq!(
+            report.readiness_status,
+            DefaultRuntimeReadinessStatus::OperatorDeferred
+        );
+        assert_eq!(
+            report.primary_failure_code,
+            DefaultRetrievalFailureCode::MissingPacketQualityReview
+        );
+        assert!(has_reason(
+            &report,
+            "packet_quality_review_operator_deferred"
+        ));
+
+        let mut missing_both_operator_reviews = accepted_route();
+        missing_both_operator_reviews.production_default_route_approval_status =
+            "pending".to_owned();
+        missing_both_operator_reviews.packet_quality_review_status = "pending".to_owned();
+        let report = readiness_report(&missing_both_operator_reviews);
+        assert_eq!(
+            report.readiness_status,
+            DefaultRuntimeReadinessStatus::OperatorDeferred
+        );
+        assert_eq!(
+            report.primary_failure_code,
+            DefaultRetrievalFailureCode::MissingProductionApproval
+        );
+        assert!(has_reason(
+            &report,
+            "production_default_route_approval_missing"
+        ));
+        assert!(has_reason(
+            &report,
+            "packet_quality_review_operator_deferred"
+        ));
+    }
+
+    #[test]
+    fn non_accepted_route_builds_fallback_decision_without_packet() {
+        let mut route = accepted_route();
+        route.route_source = DefaultRouteSource::Preview;
+
+        let decision = build_default_context_packet(&route, accepted_request())
+            .expect("non-default route should produce fallback decision");
+        assert_eq!(
+            decision.readiness_status,
+            DefaultRuntimeReadinessStatus::NonDefault
+        );
+        assert_eq!(
+            decision.context_quality,
+            DefaultContextQuality::StaleContext
+        );
+        assert_eq!(
+            decision.failure_code,
+            DefaultRetrievalFailureCode::PreviewOnlyRoute
+        );
+        assert_eq!(
+            decision.fallback_reason.as_deref(),
+            Some("default_route_not_accepted")
+        );
+        assert!(decision.packet_record.is_none());
+    }
+
+    #[test]
+    fn accepted_route_rejects_unbound_memory_and_freshness_mismatch() {
+        let route = accepted_route();
+
+        let mut unbound_memory = accepted_request();
+        unbound_memory.selected_memory_ids = vec!["memory-other".to_owned()];
+        let error =
+            build_default_context_packet(&route, unbound_memory).expect_err("memory must bind");
+        assert_eq!(
+            error,
+            DefaultRouteError::SelectedMemoryNotInRoute {
+                memory_id: "memory-other".to_owned()
+            }
+        );
+
+        let mut stale_claim = accepted_request();
+        stale_claim.freshness_status = PacketFreshnessStatus::Unknown;
+        let error =
+            build_default_context_packet(&route, stale_claim).expect_err("freshness must bind");
+        assert_eq!(error, DefaultRouteError::RequestFreshnessOutranksRoute);
+    }
+
+    #[test]
+    fn packet_validation_errors_map_to_default_packet_decisions() {
+        let mut over_budget = accepted_request();
+        over_budget.token_estimate = over_budget.token_budget + 1;
+        assert_packet_rejection(
+            over_budget,
+            DefaultContextQuality::OverBudget,
+            DefaultRetrievalFailureCode::OverBudgetPacket,
+            "over_budget_packet",
+        );
+
+        let mut invalid_budget = accepted_request();
+        invalid_budget.token_budget = 0;
+        assert_packet_rejection(
+            invalid_budget,
+            DefaultContextQuality::OverBudget,
+            DefaultRetrievalFailureCode::OverBudgetPacket,
+            "invalid_token_budget",
+        );
+
+        let mut low_citation = accepted_request();
+        low_citation.citation_coverage_bp = 7_999;
+        assert_packet_rejection(
+            low_citation,
+            DefaultContextQuality::ForbiddenRoute,
+            DefaultRetrievalFailureCode::LowCitationCoverage,
+            "low_citation_coverage",
+        );
+
+        let mut raw_packet = accepted_request();
+        raw_packet.raw_body_present = true;
+        assert_packet_rejection(
+            raw_packet,
+            DefaultContextQuality::RawFallback,
+            DefaultRetrievalFailureCode::RawMaterialRejected,
+            "raw_material_rejected",
+        );
+
+        let mut duplicate_proof = accepted_request();
+        duplicate_proof
+            .source_proof_refs
+            .push("source-proof-1".to_owned());
+        assert_packet_rejection(
+            duplicate_proof,
+            DefaultContextQuality::ForbiddenRoute,
+            DefaultRetrievalFailureCode::PacketPersistenceRejected,
+            "duplicate_id",
+        );
+    }
+
+    #[test]
+    fn unreachable_packet_error_mappings_are_still_deterministic() {
+        assert_eq!(
+            context_quality_for_packet_error(&ContextPacketError::EmptyPacket),
+            DefaultContextQuality::EmptyContext
+        );
+        assert_eq!(
+            failure_code_for_packet_error(&ContextPacketError::EmptyPacket),
+            DefaultRetrievalFailureCode::EmptyPacket
+        );
+        assert_eq!(
+            context_quality_for_packet_error(&ContextPacketError::StalePacket),
+            DefaultContextQuality::StaleContext
+        );
+        assert_eq!(
+            failure_code_for_packet_error(&ContextPacketError::StalePacket),
+            DefaultRetrievalFailureCode::PacketPersistenceRejected
+        );
+    }
+
+    #[test]
+    fn route_validation_rejects_schema_duplicates_forbidden_and_missing_fields() {
+        let mut wrong_schema = accepted_route();
+        wrong_schema.schema_version = "dagdb_prd17_default_route_v2".to_owned();
+        assert_eq!(
+            validate_default_route_record(&wrong_schema),
+            Err(DefaultRouteError::MissingRequiredField {
+                field: "schema_version"
+            })
+        );
+
+        let mut duplicate_memory = accepted_route();
+        duplicate_memory
+            .selected_memory_refs
+            .push(memory_ref("memory-1"));
+        assert_eq!(
+            validate_default_route_record(&duplicate_memory),
+            Err(DefaultRouteError::DuplicateSelectedMemoryId)
+        );
+
+        let mut forbidden_route_field = accepted_route();
+        forbidden_route_field.policy_ref = "postgres://local-secret".to_owned();
+        assert_eq!(
+            validate_default_route_record(&forbidden_route_field),
+            Err(DefaultRouteError::RawMaterialRejected {
+                field: "policy_ref"
+            })
+        );
+
+        let mut forbidden_memory_ref = accepted_route();
+        forbidden_memory_ref.selected_memory_refs[0].citation_ref =
+            "source_excerpt: raw".to_owned();
+        assert_eq!(
+            validate_default_route_record(&forbidden_memory_ref),
+            Err(DefaultRouteError::RawMaterialRejected {
+                field: "citation_ref"
+            })
+        );
+
+        let mut missing_route_id = accepted_route();
+        missing_route_id.route_id = " ".to_owned();
+        assert_eq!(
+            validate_default_route_record(&missing_route_id),
+            Err(DefaultRouteError::MissingRequiredField { field: "route_id" })
+        );
+    }
+}

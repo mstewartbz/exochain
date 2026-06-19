@@ -15,7 +15,7 @@ use exo_gateway::dagdb::{
     writeback_lifecycle_payload_hash,
 };
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 
 const LOCAL_DEV_AGENT_DID: &str = "did:exo:cursor-mcp-agent";
 const DEV_KEY_SEED_REL: &str = "crates/exo-gatekeeper/tests/fixtures/dev_private_key.seed";
@@ -38,7 +38,7 @@ struct WritebackSignatureSet {
 
 #[tokio::main]
 async fn main() {
-    let request_path = match env::args().nth(1) {
+    let request_path = match request_path_from_args(env::args().skip(1)) {
         Some(path) => path,
         None => {
             eprintln!("usage: dagdb_writeback_sign <writeback-request.json>");
@@ -46,83 +46,54 @@ async fn main() {
         }
     };
 
-    let request_json = match fs::read_to_string(&request_path) {
-        Ok(text) => text,
+    match run_writeback_sign(&request_path).await {
+        Ok(output) => println!("{output}"),
         Err(error) => {
-            eprintln!("writeback_request_read_failed: {error}");
+            eprintln!("{error}");
             process::exit(1);
         }
-    };
+    }
+}
 
-    let request: DagDbWritebackRequest = match serde_json::from_str(&request_json) {
+async fn run_writeback_sign(request_path: &str) -> Result<Value, String> {
+    let request = match read_writeback_request(request_path) {
         Ok(request) => request,
-        Err(error) => {
-            eprintln!("writeback_request_json_invalid: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(error),
     };
 
-    let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-        eprintln!("gateway database unavailable");
-        process::exit(1);
-    });
+    let database_url = match database_url_from_env() {
+        Ok(database_url) => database_url,
+        Err(error) => return Err(error.to_owned()),
+    };
 
-    let pool = match PgPoolOptions::new()
-        .max_connections(2)
-        .connect(database_url.as_str())
-        .await
-    {
+    let pool = match connect_database_pool(database_url.as_str()).await {
         Ok(pool) => pool,
-        Err(error) => {
-            eprintln!("writeback_sign_connect_failed: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(error),
     };
 
     let selection_request = match selection_request_from_writeback(&request) {
         Ok(selection_request) => selection_request,
-        Err(error) => {
-            eprintln!("writeback_selection_request_failed: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(format!("writeback_selection_request_failed: {error}")),
     };
     let selection = match build_persistent_graph_context_selection(&pool, &selection_request).await
     {
         Ok(selection) => selection,
-        Err(error) => {
-            eprintln!("writeback_selection_failed: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(format!("writeback_selection_failed: {error}")),
     };
 
     let payload_hash = match usage_event_payload_hash(&selection.selection) {
         Ok(hash) => hash,
-        Err(error) => {
-            eprintln!("writeback_payload_hash_failed: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(format!("writeback_payload_hash_failed: {error}")),
     };
-    let lifecycle_payload_hash = match writeback_lifecycle_payload_hash(&request) {
-        Ok(hash) => hash,
-        Err(error) => {
-            eprintln!("writeback_lifecycle_payload_hash_failed: {error}");
-            process::exit(1);
-        }
-    };
-    let continuation_payload_hash = match writeback_continuation_payload_hash(&request) {
-        Ok(hash) => hash,
-        Err(error) => {
-            eprintln!("writeback_continuation_payload_hash_failed: {error}");
-            process::exit(1);
-        }
-    };
+    let (lifecycle_payload_hash, continuation_payload_hash) =
+        match writeback_d5_payload_hashes(&request) {
+            Ok(payload_hashes) => payload_hashes,
+            Err(error) => return Err(error),
+        };
 
     let local_keypair = match load_local_dev_keypair() {
         Ok(local_keypair) => local_keypair,
-        Err(error) => {
-            eprintln!("writeback_sign_key_failed: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(format!("writeback_sign_key_failed: {error}")),
     };
 
     let signatures = match sign_writeback_payloads(
@@ -132,17 +103,54 @@ async fn main() {
         &continuation_payload_hash,
     ) {
         Ok(signatures) => signatures,
-        Err(error) => {
-            eprintln!("writeback_sign_failed: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(format!("writeback_sign_failed: {error}")),
     };
 
     pool.close().await;
-    println!(
-        "{}",
-        signature_output_json(LOCAL_DEV_AGENT_DID, local_keypair.source, &signatures)
-    );
+    Ok(signature_output_json(
+        LOCAL_DEV_AGENT_DID,
+        local_keypair.source,
+        &signatures,
+    ))
+}
+
+fn request_path_from_args(args: impl IntoIterator<Item = String>) -> Option<String> {
+    args.into_iter().next()
+}
+
+fn read_writeback_request(request_path: &str) -> Result<DagDbWritebackRequest, String> {
+    let request_json = fs::read_to_string(request_path)
+        .map_err(|error| format!("writeback_request_read_failed: {error}"))?;
+    serde_json::from_str(&request_json)
+        .map_err(|error| format!("writeback_request_json_invalid: {error}"))
+}
+
+fn database_url_from_env() -> Result<String, &'static str> {
+    database_url_from_env_result(env::var("DATABASE_URL"))
+}
+
+fn database_url_from_env_result(
+    database_url: Result<String, env::VarError>,
+) -> Result<String, &'static str> {
+    database_url.map_err(|_| "gateway database unavailable")
+}
+
+async fn connect_database_pool(database_url: &str) -> Result<Pool<Postgres>, String> {
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(database_url)
+        .await
+        .map_err(|error| format!("writeback_sign_connect_failed: {error}"))
+}
+
+fn writeback_d5_payload_hashes(
+    request: &DagDbWritebackRequest,
+) -> Result<([u8; 32], [u8; 32]), String> {
+    let lifecycle_payload_hash = writeback_lifecycle_payload_hash(request)
+        .map_err(|error| format!("writeback_lifecycle_payload_hash_failed: {error}"))?;
+    let continuation_payload_hash = writeback_continuation_payload_hash(request)
+        .map_err(|error| format!("writeback_continuation_payload_hash_failed: {error}"))?;
+    Ok((lifecycle_payload_hash, continuation_payload_hash))
 }
 
 fn sign_writeback_payloads(
@@ -182,22 +190,23 @@ fn signature_output_json(
 }
 
 fn load_local_dev_keypair() -> Result<LocalDevKeypair, String> {
-    let env_seed = env::var("DAGDB_DEV_KEY_SEED").ok();
-    let seed_path = env_seed
-        .clone()
-        .unwrap_or_else(|| DEV_KEY_SEED_REL.to_owned());
-    let seed_source = if env_seed.is_some() {
-        KEY_SOURCE_ENV_SEED
-    } else {
-        KEY_SOURCE_DEFAULT_SEED
-    };
+    let (seed_path, seed_source) = keypair_seed_path_from_env(env::var("DAGDB_DEV_KEY_SEED").ok());
     load_local_dev_keypair_from_seed_path(&seed_path, seed_source, fallback_enabled())
 }
 
+fn keypair_seed_path_from_env(env_seed: Option<String>) -> (String, &'static str) {
+    match env_seed {
+        Some(seed_path) => (seed_path, KEY_SOURCE_ENV_SEED),
+        None => (DEV_KEY_SEED_REL.to_owned(), KEY_SOURCE_DEFAULT_SEED),
+    }
+}
+
 fn fallback_enabled() -> bool {
-    env::var(LOCAL_DEV_GATEKEEPER_ENV)
-        .map(|value| value == "1")
-        .unwrap_or(false)
+    fallback_enabled_from_env(env::var(LOCAL_DEV_GATEKEEPER_ENV))
+}
+
+fn fallback_enabled_from_env(value: Result<String, env::VarError>) -> bool {
+    value.map(|value| value == "1").unwrap_or(false)
 }
 
 // `fallback_enabled` only gates the debug-only deterministic fallback; in
@@ -244,11 +253,16 @@ fn load_local_dev_keypair_from_seed_path(
 mod tests {
     use std::{fs, path::PathBuf};
 
+    use exo_api::dagdb::DagDbWritebackRequest;
     use exo_core::crypto::KeyPair;
 
     use super::{
-        KEY_SOURCE_ENV_SEED, LOCAL_DEV_GATEKEEPER_ENV, load_local_dev_keypair_from_seed_path,
-        sign_writeback_payloads, signature_output_json,
+        DEV_KEY_SEED_REL, KEY_SOURCE_DEFAULT_SEED, KEY_SOURCE_ENV_SEED, LOCAL_DEV_AGENT_DID,
+        LOCAL_DEV_GATEKEEPER_ENV, connect_database_pool, database_url_from_env,
+        database_url_from_env_result, fallback_enabled, fallback_enabled_from_env,
+        keypair_seed_path_from_env, load_local_dev_keypair, load_local_dev_keypair_from_seed_path,
+        read_writeback_request, request_path_from_args, run_writeback_sign,
+        sign_writeback_payloads, signature_output_json, writeback_d5_payload_hashes,
     };
 
     fn temp_seed_path(test_name: &str) -> PathBuf {
@@ -257,6 +271,316 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("unnamed")
         ))
+    }
+
+    fn temp_request_path(test_name: &str) -> PathBuf {
+        temp_seed_path(test_name).with_extension("json")
+    }
+
+    fn fixture_writeback_value() -> serde_json::Value {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../exo-dag-db-api/fixtures/json/all_dto_fixtures.json"
+        ))
+        .expect("parse dagdb fixtures");
+        fixtures
+            .get("requests")
+            .and_then(|requests| requests.get("writeback"))
+            .expect("writeback fixture")
+            .clone()
+    }
+
+    fn fixture_writeback_json() -> String {
+        serde_json::to_string(&fixture_writeback_value()).expect("serialize writeback fixture")
+    }
+
+    fn fixture_writeback_request() -> DagDbWritebackRequest {
+        serde_json::from_value(fixture_writeback_value()).expect("parse writeback fixture")
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_accepts_first_request_path_argument() {
+        assert_eq!(
+            request_path_from_args(["request.json".to_owned(), "ignored.json".to_owned()]),
+            Some("request.json".to_owned())
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_requires_request_path_argument() {
+        assert_eq!(request_path_from_args(Vec::<String>::new()), None);
+    }
+
+    #[tokio::test]
+    async fn dagdb_writeback_sign_runner_returns_read_error_without_exiting() {
+        let request_path = temp_request_path("runner_missing_request_file");
+        let _ = fs::remove_file(&request_path);
+
+        let error = run_writeback_sign(request_path.to_str().expect("utf8 request path"))
+            .await
+            .expect_err("missing request file must fail");
+
+        assert!(
+            error.contains("writeback_request_read_failed"),
+            "expected read error prefix, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dagdb_writeback_sign_runner_returns_real_environment_or_database_result() {
+        let request_path = temp_request_path("runner_environment_or_database_result");
+        fs::write(&request_path, fixture_writeback_json()).expect("write request fixture");
+
+        let result = run_writeback_sign(request_path.to_str().expect("utf8 request path")).await;
+
+        match result {
+            Ok(output) => {
+                assert_eq!(
+                    output.get("agent_did").and_then(|value| value.as_str()),
+                    Some(LOCAL_DEV_AGENT_DID)
+                );
+                assert!(
+                    output
+                        .pointer("/headers/x-exo-write-signature")
+                        .and_then(|value| value.as_str())
+                        .is_some(),
+                    "successful signer output must include the write signature header"
+                );
+            }
+            Err(error) => assert_runner_error_intent(&error),
+        }
+
+        fs::remove_file(request_path).expect("remove request fixture");
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_reads_writeback_request_json_file() {
+        let request_path = temp_request_path("reads_writeback_request_json_file");
+        fs::write(&request_path, fixture_writeback_json()).expect("write request fixture");
+
+        let request = read_writeback_request(request_path.to_str().expect("utf8 request path"))
+            .expect("read writeback request");
+
+        assert_eq!(request.tenant_id, "tenant-a");
+        assert_eq!(request.namespace, "primary");
+        assert_eq!(request.idempotency_key, "idem-writeback-1");
+        assert_eq!(
+            request.parent_memory_ids,
+            vec!["7070707070707070707070707070707070707070707070707070707070707070"]
+        );
+        assert_eq!(request.knowledge_class, None);
+        assert_eq!(request.layered_mode, None);
+
+        fs::remove_file(request_path).expect("remove request fixture");
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_read_error_names_missing_request_path() {
+        let request_path = temp_request_path("missing_request_file");
+        let _ = fs::remove_file(&request_path);
+
+        let error = match read_writeback_request(request_path.to_str().expect("utf8 request path"))
+        {
+            Ok(_) => panic!("missing request file must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("writeback_request_read_failed"),
+            "expected read error prefix, got {error}"
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_rejects_malformed_request_json_file() {
+        let request_path = temp_request_path("malformed_request_json_file");
+        fs::write(&request_path, "{not valid json").expect("write malformed request");
+
+        let error = match read_writeback_request(request_path.to_str().expect("utf8 request path"))
+        {
+            Ok(_) => panic!("malformed request json must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("writeback_request_json_invalid"),
+            "expected json error prefix, got {error}"
+        );
+
+        fs::remove_file(request_path).expect("remove malformed request");
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_rejects_unknown_request_json_fields() {
+        let request_path = temp_request_path("unknown_request_json_fields");
+        let mut request = fixture_writeback_value();
+        request
+            .as_object_mut()
+            .expect("object fixture")
+            .insert("unexpected_field".to_owned(), serde_json::json!(true));
+        fs::write(
+            &request_path,
+            serde_json::to_string(&request).expect("serialize mutated request"),
+        )
+        .expect("write mutated request");
+
+        let error = match read_writeback_request(request_path.to_str().expect("utf8 request path"))
+        {
+            Ok(_) => panic!("unknown request field must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("writeback_request_json_invalid"),
+            "expected json error prefix, got {error}"
+        );
+        assert!(
+            error.contains("unexpected_field"),
+            "expected unknown field name in error, got {error}"
+        );
+
+        fs::remove_file(request_path).expect("remove mutated request");
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_parses_database_url_env_result() {
+        let database_url = "postgres://localhost/exochain".to_owned();
+        assert_eq!(
+            database_url_from_env_result(Ok(database_url.clone())).expect("database url"),
+            database_url
+        );
+        assert_eq!(
+            database_url_from_env_result(Err(std::env::VarError::NotPresent))
+                .expect_err("missing database url must fail"),
+            "gateway database unavailable"
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_process_env_wrappers_match_helper_results() {
+        match (database_url_from_env(), std::env::var("DATABASE_URL")) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
+            (Err(actual), Err(_)) => assert_eq!(actual, "gateway database unavailable"),
+            (actual, expected) => {
+                panic!("database env changed during test: {actual:?} {expected:?}")
+            }
+        }
+
+        assert_eq!(
+            fallback_enabled(),
+            fallback_enabled_from_env(std::env::var(LOCAL_DEV_GATEKEEPER_ENV))
+        );
+
+        let (seed_path, seed_source) =
+            keypair_seed_path_from_env(std::env::var("DAGDB_DEV_KEY_SEED").ok());
+        match load_local_dev_keypair() {
+            Ok(local_keypair) => {
+                if local_keypair.source != seed_source {
+                    assert!(
+                        fallback_enabled(),
+                        "only the explicit local-dev fallback may change the seed source"
+                    );
+                }
+            }
+            Err(error) => assert!(!error.is_empty(), "expected key load error text"),
+        }
+        assert!(!seed_path.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dagdb_writeback_sign_rejects_invalid_database_url() {
+        let error = match connect_database_pool("not a postgres database url").await {
+            Ok(_) => panic!("invalid database url must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.starts_with("writeback_sign_connect_failed: "),
+            "expected connect error prefix, got {error}"
+        );
+    }
+
+    fn assert_runner_error_intent(error: &str) {
+        let exact_messages = ["gateway database unavailable"];
+        let prefixed_messages = [
+            "writeback_sign_connect_failed: ",
+            "writeback_selection_request_failed: ",
+            "writeback_selection_failed: ",
+            "writeback_payload_hash_failed: ",
+            "writeback_lifecycle_payload_hash_failed: ",
+            "writeback_continuation_payload_hash_failed: ",
+            "writeback_sign_key_failed: ",
+            "writeback_sign_failed: ",
+        ];
+        assert!(
+            exact_messages.contains(&error)
+                || prefixed_messages
+                    .iter()
+                    .any(|prefix| error.starts_with(prefix)),
+            "runner must preserve a known CLI error intent, got {error}"
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_parses_key_seed_env_source() {
+        let (seed_path, seed_source) =
+            keypair_seed_path_from_env(Some("/tmp/dagdb-dev.seed".to_owned()));
+        assert_eq!(seed_path, "/tmp/dagdb-dev.seed");
+        assert_eq!(seed_source, KEY_SOURCE_ENV_SEED);
+
+        let (seed_path, seed_source) = keypair_seed_path_from_env(None);
+        assert_eq!(seed_path, DEV_KEY_SEED_REL);
+        assert_eq!(seed_source, KEY_SOURCE_DEFAULT_SEED);
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_parses_local_dev_fallback_env_gate() {
+        assert!(fallback_enabled_from_env(Ok("1".to_owned())));
+        assert!(!fallback_enabled_from_env(Ok("true".to_owned())));
+        assert!(!fallback_enabled_from_env(Err(
+            std::env::VarError::NotPresent
+        )));
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_derives_d5_payload_hashes_from_fixture_request() {
+        let request = fixture_writeback_request();
+        let payload_hashes =
+            writeback_d5_payload_hashes(&request).expect("derive d5 payload hashes");
+        let repeated_hashes =
+            writeback_d5_payload_hashes(&request).expect("derive repeated d5 payload hashes");
+
+        assert_eq!(
+            payload_hashes, repeated_hashes,
+            "D5 payload hash derivation must be deterministic"
+        );
+        assert_ne!(payload_hashes.0, [0_u8; 32]);
+        assert_ne!(payload_hashes.1, [0_u8; 32]);
+        assert_ne!(
+            payload_hashes.0, payload_hashes.1,
+            "lifecycle and continuation payloads must bind different records"
+        );
+    }
+
+    #[test]
+    fn dagdb_writeback_sign_rejects_d5_hashes_without_parent_memory() {
+        let request = DagDbWritebackRequest {
+            parent_memory_ids: Vec::new(),
+            ..fixture_writeback_request()
+        };
+
+        let error = match writeback_d5_payload_hashes(&request) {
+            Ok(_) => panic!("writeback with no parent memory must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("writeback_lifecycle_payload_hash_failed"),
+            "expected lifecycle hash prefix, got {error}"
+        );
+        assert!(
+            error.contains("lifecycle action request rejected"),
+            "expected lifecycle rejection detail, got {error}"
+        );
     }
 
     #[test]
@@ -287,6 +611,18 @@ mod tests {
         );
         assert_eq!(
             output
+                .get("lifecycle_signature")
+                .and_then(|value| value.as_str()),
+            Some(signatures.lifecycle_signature.as_str())
+        );
+        assert_eq!(
+            output
+                .get("continuation_signature")
+                .and_then(|value| value.as_str()),
+            Some(signatures.continuation_signature.as_str())
+        );
+        assert_eq!(
+            output
                 .pointer("/headers/x-exo-lifecycle-signature")
                 .and_then(|value| value.as_str()),
             Some(signatures.lifecycle_signature.as_str())
@@ -300,6 +636,10 @@ mod tests {
         assert_eq!(
             output.get("agent_did").and_then(|value| value.as_str()),
             Some("did:exo:agent")
+        );
+        assert_eq!(
+            output.get("key_source").and_then(|value| value.as_str()),
+            Some("test_seed")
         );
         assert_eq!(output.get("seed"), None);
         assert_eq!(output.get("private_key"), None);

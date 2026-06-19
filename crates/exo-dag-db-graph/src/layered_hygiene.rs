@@ -1403,6 +1403,189 @@ mod tests {
     }
 
     #[test]
+    fn layered_hygiene_stable_labels_and_scope_budgets_are_contracts() {
+        let policy = LayerHygienePolicy {
+            same_layer_active_edge_budget: 7,
+            cross_layer_active_edge_budget: 3,
+            ..LayerHygienePolicy::default()
+        };
+
+        assert_eq!(
+            policy.budget_for(LayerHygieneEdgeScope::SameLayerGraphEdge),
+            7
+        );
+        assert_eq!(
+            policy.budget_for(LayerHygieneEdgeScope::CrossLayerLayerEdge),
+            3
+        );
+
+        for (scope, label) in [
+            (
+                LayerHygieneEdgeScope::SameLayerGraphEdge,
+                "same_layer_graph_edge",
+            ),
+            (
+                LayerHygieneEdgeScope::CrossLayerLayerEdge,
+                "cross_layer_layer_edge",
+            ),
+        ] {
+            assert_eq!(scope.as_str(), label);
+        }
+
+        for (state, label) in [
+            (LayerHygieneEdgeState::Active, "active"),
+            (LayerHygieneEdgeState::Demoted, "demoted"),
+            (LayerHygieneEdgeState::Tombstoned, "tombstoned"),
+        ] {
+            assert_eq!(state.as_str(), label);
+        }
+
+        for (state, label) in [
+            (LayerHygieneEvidenceState::Current, "current"),
+            (LayerHygieneEvidenceState::Contradicted, "contradicted"),
+            (LayerHygieneEvidenceState::Superseded, "superseded"),
+            (
+                LayerHygieneEvidenceState::ContradictedAndSuperseded,
+                "contradicted_and_superseded",
+            ),
+        ] {
+            assert_eq!(state.as_str(), label);
+        }
+    }
+
+    #[test]
+    fn layered_hygiene_policy_validation_rejects_invalid_fields() {
+        let mut policy = LayerHygienePolicy {
+            same_layer_active_edge_budget: 0,
+            ..LayerHygienePolicy::default()
+        };
+        assert_invalid_policy(
+            policy,
+            "same_layer_active_edge_budget",
+            "budget_must_be_positive",
+        );
+
+        policy = LayerHygienePolicy {
+            cross_layer_active_edge_budget: 0,
+            ..LayerHygienePolicy::default()
+        };
+        assert_invalid_policy(
+            policy,
+            "cross_layer_active_edge_budget",
+            "budget_must_be_positive",
+        );
+
+        policy = LayerHygienePolicy {
+            retrieval_use_saturation_count: 0,
+            ..LayerHygienePolicy::default()
+        };
+        assert_invalid_policy(
+            policy,
+            "retrieval_use_saturation_count",
+            "saturation_must_be_positive",
+        );
+
+        policy = LayerHygienePolicy {
+            child_layer_selection_saturation_count: 0,
+            ..LayerHygienePolicy::default()
+        };
+        assert_invalid_policy(
+            policy,
+            "child_layer_selection_saturation_count",
+            "saturation_must_be_positive",
+        );
+
+        policy = LayerHygienePolicy {
+            low_score_demote_threshold_bps: MAX_BASIS_POINTS + 1,
+            ..LayerHygienePolicy::default()
+        };
+        assert_invalid_policy(
+            policy,
+            "low_score_demote_threshold_bps",
+            "basis_points_out_of_range",
+        );
+
+        policy = LayerHygienePolicy {
+            tombstone_score_threshold_bps: MAX_BASIS_POINTS + 1,
+            ..LayerHygienePolicy::default()
+        };
+        assert_invalid_policy(
+            policy,
+            "tombstone_score_threshold_bps",
+            "basis_points_out_of_range",
+        );
+    }
+
+    #[test]
+    fn layered_hygiene_errors_render_stable_messages() {
+        let cases = [
+            (
+                LayerHygieneError::InvalidPolicy {
+                    field: "same_layer_active_edge_budget",
+                    reason: "budget_must_be_positive",
+                },
+                "invalid_layer_hygiene_policy: same_layer_active_edge_budget: budget_must_be_positive",
+            ),
+            (
+                LayerHygieneError::MissingRequiredField { field: "layer_id" },
+                "missing_required_layer_hygiene_field: layer_id",
+            ),
+            (
+                LayerHygieneError::UnsafeField {
+                    field: "evidence_refs",
+                    reason: "duplicate_value",
+                },
+                "unsafe_layer_hygiene_field: evidence_refs: duplicate_value",
+            ),
+            (
+                LayerHygieneError::ScoreOutOfRange {
+                    field: "authority_score_bps",
+                    value: MAX_BASIS_POINTS + 1,
+                },
+                "layer_hygiene_score_out_of_range: authority_score_bps: 10001",
+            ),
+            (
+                LayerHygieneError::DuplicateEdgeId {
+                    edge_id: "edge-a".to_owned(),
+                },
+                "duplicate_layer_hygiene_edge_id: edge-a",
+            ),
+            (
+                LayerHygieneError::DuplicateLayerId {
+                    layer_id: "layer-a".to_owned(),
+                },
+                "duplicate_layer_hygiene_layer_id: layer-a",
+            ),
+            (
+                LayerHygieneError::LayerScopeMismatch {
+                    layer_id: "layer-a".to_owned(),
+                    edge_id: "edge-a".to_owned(),
+                },
+                "layer_hygiene_scope_mismatch: layer_id=layer-a edge_id=edge-a",
+            ),
+            (
+                LayerHygieneError::ProtectedRouteAnchorBudgetExceeded {
+                    layer_id: "layer-a".to_owned(),
+                    edge_scope: LayerHygieneEdgeScope::SameLayerGraphEdge,
+                    protected_count: 2,
+                    budget: 1,
+                },
+                "protected_route_anchor_budget_exceeded: layer_id=layer-a edge_scope=same_layer_graph_edge protected_count=2 budget=1",
+            ),
+            (
+                LayerHygieneError::InvalidHygieneState {
+                    state: "archived".to_owned(),
+                },
+                "invalid_layer_hygiene_state: archived",
+            ),
+        ];
+
+        for (error, expected_message) in cases {
+            assert_eq!(error.to_string(), expected_message);
+        }
+    }
+
+    #[test]
     fn layered_edge_scoring_planner_emits_all_non_destructive_actions() {
         let policy = LayerHygienePolicy {
             same_layer_active_edge_budget: 8,
@@ -1468,6 +1651,74 @@ mod tests {
         }
         assert!(plan.actions.iter().all(|action| action.preserves_history));
         assert!(plan.actions.iter().all(|action| !action.hard_delete()));
+    }
+
+    #[test]
+    fn layered_hygiene_plan_handles_existing_tombstones_and_demoted_relinks() {
+        let mut tombstoned = edge("edge-already-tombstoned");
+        tombstoned.state = LayerHygieneEdgeState::Tombstoned;
+
+        let mut demoted_relink = edge("edge-demoted-relink");
+        demoted_relink.state = LayerHygieneEdgeState::Demoted;
+        demoted_relink.evidence_state = LayerHygieneEvidenceState::Superseded;
+        demoted_relink.relink_target_edge_id = Some("edge-current".to_owned());
+
+        let plan = plan_layer_hygiene(
+            &[],
+            &[demoted_relink, tombstoned],
+            &LayerHygienePolicy::default(),
+        )
+        .expect("plan succeeds");
+
+        let tombstone_action = action_for_edge(&plan, "edge-already-tombstoned");
+        assert_eq!(tombstone_action.action_kind, LayerHygieneActionKind::NoOp);
+        assert_eq!(tombstone_action.reason, "already_tombstoned");
+
+        let relink_action = action_for_edge(&plan, "edge-demoted-relink");
+        assert_eq!(relink_action.action_kind, LayerHygieneActionKind::Relink);
+        assert_eq!(
+            relink_action.relink_target_edge_id.as_deref(),
+            Some("edge-current")
+        );
+        assert_eq!(relink_action.reason, "demoted_edge_has_superseding_relink");
+    }
+
+    #[test]
+    fn layered_hygiene_plan_demotes_superseded_and_contradicted_active_edges() {
+        let mut superseded = edge("edge-superseded-demote");
+        superseded.evidence_state = LayerHygieneEvidenceState::Superseded;
+        superseded.receipt_id = None;
+
+        let mut contradicted = edge("edge-contradicted-demote");
+        contradicted.evidence_state = LayerHygieneEvidenceState::Contradicted;
+
+        let plan = plan_layer_hygiene(
+            &[],
+            &[superseded, contradicted],
+            &LayerHygienePolicy::default(),
+        )
+        .expect("plan succeeds");
+
+        let superseded_action = action_for_edge(&plan, "edge-superseded-demote");
+        assert_eq!(
+            superseded_action.action_kind,
+            LayerHygieneActionKind::Demote
+        );
+        assert_eq!(superseded_action.reason, "superseded_edge_demote");
+
+        let contradicted_action = action_for_edge(&plan, "edge-contradicted-demote");
+        assert_eq!(
+            contradicted_action.action_kind,
+            LayerHygieneActionKind::Demote
+        );
+        assert_eq!(contradicted_action.reason, "contradicted_edge_demote");
+
+        let contradicted_score = plan
+            .scored_edges
+            .iter()
+            .find(|score| score.edge_id == "edge-contradicted-demote")
+            .expect("contradicted edge score");
+        assert_eq!(contradicted_score.contradiction_penalty_bps, 3_000);
     }
 
     #[test]
@@ -1549,6 +1800,23 @@ mod tests {
     }
 
     #[test]
+    fn layered_retrieval_hygiene_tie_breaks_equal_scores_by_edge_id() {
+        let policy = LayerHygienePolicy {
+            same_layer_active_edge_budget: 1,
+            cross_layer_active_edge_budget: 8,
+            ..LayerHygienePolicy::default()
+        };
+        let first_by_id = edge("edge-a");
+        let second_by_id = edge("edge-b");
+
+        let report = build_layered_retrieval_hygiene_report(&[second_by_id, first_by_id], &policy)
+            .expect("retrieval hygiene succeeds");
+
+        assert_eq!(report.selected_active_edge_ids, vec!["edge-a"]);
+        assert_eq!(report.excluded_over_budget_edge_ids, vec!["edge-b"]);
+    }
+
+    #[test]
     fn layered_retrieval_hygiene_fails_closed_on_missing_ids_and_unsafe_fields() {
         let policy = LayerHygienePolicy::default();
         let mut missing_layer = edge("edge-missing-layer");
@@ -1569,6 +1837,122 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn layered_hygiene_validation_rejects_duplicate_and_mismatched_scope_inputs() {
+        let policy = LayerHygienePolicy::default();
+
+        let duplicate_layer_error =
+            score_child_layer_health(&[layer("layer-a"), layer("layer-a")], &policy)
+                .expect_err("duplicate layer rejected");
+        assert_eq!(
+            duplicate_layer_error,
+            LayerHygieneError::DuplicateLayerId {
+                layer_id: "layer-a".to_owned()
+            }
+        );
+
+        let duplicate_edge_error =
+            build_layered_retrieval_hygiene_report(&[edge("edge-a"), edge("edge-a")], &policy)
+                .expect_err("duplicate edge rejected");
+        assert_eq!(
+            duplicate_edge_error,
+            LayerHygieneError::DuplicateEdgeId {
+                edge_id: "edge-a".to_owned()
+            }
+        );
+
+        let mut out_of_range_edge = edge("edge-out-of-range");
+        out_of_range_edge.authority_score_bps = MAX_BASIS_POINTS + 1;
+        let score_error = build_layered_retrieval_hygiene_report(&[out_of_range_edge], &policy)
+            .expect_err("out-of-range score rejected");
+        assert_eq!(
+            score_error,
+            LayerHygieneError::ScoreOutOfRange {
+                field: "authority_score_bps",
+                value: MAX_BASIS_POINTS + 1
+            }
+        );
+
+        let mut mismatched_layer = layer("layer-a");
+        mismatched_layer.tenant_id = "tenant-b".to_owned();
+        let scope_error = plan_layer_hygiene(&[mismatched_layer], &[edge("edge-a")], &policy)
+            .expect_err("scope mismatch rejected");
+        assert_eq!(
+            scope_error,
+            LayerHygieneError::LayerScopeMismatch {
+                layer_id: "layer-a".to_owned(),
+                edge_id: "edge-a".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn layered_hygiene_validation_rejects_unsafe_tokens_refs_and_paths() {
+        let mut duplicate_ref = edge("edge-duplicate-ref");
+        duplicate_ref.evidence_refs = vec!["evidence-a".to_owned(), "evidence-a".to_owned()];
+        assert_unsafe_edge(duplicate_ref, "evidence_refs", "duplicate_value");
+
+        let mut whitespace_receipt = edge("edge-whitespace-receipt");
+        whitespace_receipt.receipt_id = Some(" receipt-edge".to_owned());
+        assert_unsafe_edge(
+            whitespace_receipt,
+            "receipt_id",
+            "leading_or_trailing_whitespace",
+        );
+
+        let mut path_material = edge("edge-path-material");
+        path_material.relink_target_edge_id = Some("target/edge".to_owned());
+        assert_unsafe_edge(
+            path_material,
+            "relink_target_edge_id",
+            "unsafe_token_path_material",
+        );
+
+        let mut unsafe_character = edge("edge-unsafe-character");
+        unsafe_character.namespace = "default!".to_owned();
+        assert_unsafe_edge(unsafe_character, "namespace", "unsafe_token_character");
+
+        let mut too_long = edge("edge-too-long");
+        too_long.edge_id = "a".repeat(257);
+        assert_unsafe_edge(too_long, "edge_id", "value_too_long");
+
+        let mut control_character = edge("edge-control-character");
+        control_character.edge_id = "edge\ncontrol".to_owned();
+        assert_unsafe_edge(
+            control_character,
+            "edge_id",
+            "control_or_non_ascii_character",
+        );
+
+        assert_layer_path_error(
+            " ",
+            LayerHygieneError::MissingRequiredField {
+                field: "layer_path",
+            },
+        );
+        assert_layer_path_error(
+            " root/repository",
+            LayerHygieneError::UnsafeField {
+                field: "layer_path",
+                reason: "leading_or_trailing_whitespace",
+            },
+        );
+        assert_layer_path_error(
+            "/root/repository",
+            LayerHygieneError::UnsafeField {
+                field: "layer_path",
+                reason: "unsafe_relative_path_boundary",
+            },
+        );
+        assert_layer_path_error(
+            "root//repository",
+            LayerHygieneError::UnsafeField {
+                field: "layer_path",
+                reason: "unsafe_relative_path_separator",
+            },
+        );
     }
 
     #[test]
@@ -1593,6 +1977,57 @@ mod tests {
         assert!(health[0].orphan_risk);
         assert!(health[0].rollup_refresh_required);
         assert!(health[0].health_score_bps < 5_000);
+    }
+
+    fn assert_invalid_policy(
+        policy: LayerHygienePolicy,
+        expected_field: &'static str,
+        expected_reason: &'static str,
+    ) {
+        let error = score_layer_edges(&[], &policy).expect_err("invalid policy must fail closed");
+        assert_eq!(
+            error,
+            LayerHygieneError::InvalidPolicy {
+                field: expected_field,
+                reason: expected_reason
+            }
+        );
+    }
+
+    fn assert_unsafe_edge(
+        edge: LayerHygieneEdge,
+        expected_field: &'static str,
+        expected_reason: &'static str,
+    ) {
+        let policy = LayerHygienePolicy::default();
+        let error = build_layered_retrieval_hygiene_report(&[edge], &policy)
+            .expect_err("unsafe edge must fail closed");
+        assert_eq!(
+            error,
+            LayerHygieneError::UnsafeField {
+                field: expected_field,
+                reason: expected_reason
+            }
+        );
+    }
+
+    fn assert_layer_path_error(path: &str, expected_error: LayerHygieneError) {
+        let policy = LayerHygienePolicy::default();
+        let mut layer = layer("layer-path");
+        layer.layer_path = path.to_owned();
+
+        let error = score_child_layer_health(&[layer], &policy).expect_err("invalid path rejected");
+        assert_eq!(error, expected_error);
+    }
+
+    fn action_for_edge<'plan>(
+        plan: &'plan LayerHygienePlan,
+        edge_id: &str,
+    ) -> &'plan LayerHygieneAction {
+        plan.actions
+            .iter()
+            .find(|action| action.edge_id.as_deref() == Some(edge_id))
+            .expect("edge action")
     }
 
     fn action_edge_ids(plan: &LayerHygienePlan, kind: LayerHygieneActionKind) -> Vec<&str> {
@@ -1625,6 +2060,21 @@ mod tests {
             required_route_anchor: false,
             relink_target_edge_id: None,
             evidence_refs: vec![format!("evidence-{edge_id}")],
+        }
+    }
+
+    fn layer(layer_id: &str) -> LayerHygieneLayerSnapshot {
+        LayerHygieneLayerSnapshot {
+            tenant_id: "tenant-a".to_owned(),
+            namespace: "default".to_owned(),
+            layer_id: layer_id.to_owned(),
+            layer_path: "root/repository".to_owned(),
+            selected_ref_count: 1,
+            selected_edge_count: 1,
+            stale_retrieval_window_count: 0,
+            orphan_risk: false,
+            rollup_stale: false,
+            membership_changed: false,
         }
     }
 }

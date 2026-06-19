@@ -580,3 +580,373 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn to_u32(value: usize) -> Result<u32> {
     u32::try_from(value).map_err(|_| LifecycleActionError::CountOutOfRange)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TENANT: &str = "dag_db-local";
+    const PROJECT: &str = "dag_db";
+    const NAMESPACE: &str = "project_memory_v3";
+
+    fn digest(byte: &str) -> String {
+        byte.repeat(64)
+    }
+
+    fn memory_ref(memory_id: &str) -> LifecycleMemoryRef {
+        LifecycleMemoryRef {
+            tenant_id: TENANT.to_owned(),
+            project_id: PROJECT.to_owned(),
+            memory_namespace: NAMESPACE.to_owned(),
+            memory_id: memory_id.to_owned(),
+        }
+    }
+
+    fn evidence_ref(evidence_id: &str) -> LifecycleEvidenceRef {
+        LifecycleEvidenceRef {
+            evidence_id: evidence_id.to_owned(),
+            receipt_id: format!("receipt-{evidence_id}"),
+            digest: digest("a"),
+            summary_ref: format!("summary-{evidence_id}"),
+            preserved: true,
+        }
+    }
+
+    fn rollback_ref(
+        action_id: &str,
+        action_type: LifecycleActionType,
+        validation_report_id: &str,
+    ) -> LifecycleRollbackRef {
+        LifecycleRollbackRef {
+            rollback_id: format!("rollback-{action_id}"),
+            action_id: action_id.to_owned(),
+            inverse_action_type: action_type.inverse(),
+            before_refs: vec![memory_ref("memory-parent-a")],
+            after_refs: vec![memory_ref("memory-target-a")],
+            validation_ref: validation_report_id.to_owned(),
+            operator_required: true,
+        }
+    }
+
+    fn lifecycle_action(action_id: &str, action_type: LifecycleActionType) -> LifecycleAction {
+        let validation_report_id = format!("validation-{action_id}");
+        LifecycleAction {
+            schema_version: PRD17_LIFECYCLE_ACTION_SCHEMA.to_owned(),
+            action_id: action_id.to_owned(),
+            action_type,
+            tenant_id: TENANT.to_owned(),
+            project_id: PROJECT.to_owned(),
+            memory_namespace: NAMESPACE.to_owned(),
+            actor_id: "did:agent:codex-prd17c".to_owned(),
+            source_packet_id: "packet-prd17c-unit-001".to_owned(),
+            source_receipt_id: "receipt-prd17c-unit-001".to_owned(),
+            parent_memory_ids: vec![memory_ref("memory-parent-a")],
+            target_memory_ids: vec![memory_ref("memory-target-a")],
+            validation_report_id: validation_report_id.clone(),
+            policy_ref: "policy-prd17c-local-mutation".to_owned(),
+            rollback_ref: rollback_ref(action_id, action_type, &validation_report_id),
+            route_invalidation_event_ids: vec!["route-event-prd17c-unit-001".to_owned()],
+            evidence_refs: vec![evidence_ref("evidence-prd17c-unit-001")],
+            terminal_state: LifecycleTerminalState::OperatorDeferred,
+            production_lifecycle_approval: ProductionLifecycleApproval::OperatorDeferred,
+            created_at: "2026-06-07T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_action_type_wire_values_and_inverses_cover_all_variants() {
+        let cases = [
+            (
+                LifecycleActionType::Writeback,
+                "writeback",
+                LifecycleActionType::Archive,
+            ),
+            (
+                LifecycleActionType::Relink,
+                "relink",
+                LifecycleActionType::Relink,
+            ),
+            (
+                LifecycleActionType::Supersede,
+                "supersede",
+                LifecycleActionType::Restore,
+            ),
+            (
+                LifecycleActionType::Recycle,
+                "recycle",
+                LifecycleActionType::Restore,
+            ),
+            (
+                LifecycleActionType::Archive,
+                "archive",
+                LifecycleActionType::Restore,
+            ),
+            (
+                LifecycleActionType::Restore,
+                "restore",
+                LifecycleActionType::Archive,
+            ),
+            (
+                LifecycleActionType::RouteInvalidate,
+                "route_invalidate",
+                LifecycleActionType::RouteInvalidate,
+            ),
+        ];
+
+        for (action_type, wire_value, inverse) in cases {
+            assert_eq!(action_type.as_str(), wire_value);
+            assert_eq!(action_type.inverse(), inverse);
+        }
+    }
+
+    #[test]
+    fn lifecycle_action_parse_json_covers_success_json_errors_and_forbidden_material() {
+        let action = lifecycle_action("lifecycle-unit-parse-001", LifecycleActionType::Writeback);
+        let encoded = serde_json::to_string(&action).expect("serialize lifecycle action");
+        assert_eq!(
+            LifecycleAction::parse_json(&encoded).expect("parse valid lifecycle action"),
+            action
+        );
+
+        assert!(matches!(
+            LifecycleAction::parse_json("{"),
+            Err(LifecycleActionError::Json { .. })
+        ));
+
+        let mut missing_field = serde_json::to_value(lifecycle_action(
+            "lifecycle-unit-parse-002",
+            LifecycleActionType::Writeback,
+        ))
+        .expect("lifecycle action json value");
+        missing_field
+            .as_object_mut()
+            .expect("object")
+            .remove("rollback_ref");
+        assert!(matches!(
+            LifecycleAction::parse_json(&missing_field.to_string()),
+            Err(LifecycleActionError::Json { .. })
+        ));
+
+        let mut forbidden_key = serde_json::to_value(lifecycle_action(
+            "lifecycle-unit-parse-003",
+            LifecycleActionType::Writeback,
+        ))
+        .expect("lifecycle action json value");
+        forbidden_key.as_object_mut().expect("object").insert(
+            "raw_markdown".to_owned(),
+            JsonValue::String("raw".to_owned()),
+        );
+        assert!(matches!(
+            LifecycleAction::parse_json(&forbidden_key.to_string()),
+            Err(LifecycleActionError::ForbiddenMaterial { .. })
+        ));
+
+        let mut forbidden_value = serde_json::to_value(lifecycle_action(
+            "lifecycle-unit-parse-004",
+            LifecycleActionType::Writeback,
+        ))
+        .expect("lifecycle action json value");
+        forbidden_value.as_object_mut().expect("object").insert(
+            "policy_ref".to_owned(),
+            JsonValue::String("postgres://local-only".to_owned()),
+        );
+        assert!(matches!(
+            LifecycleAction::parse_json(&forbidden_value.to_string()),
+            Err(LifecycleActionError::ForbiddenMaterial { .. })
+        ));
+    }
+
+    #[test]
+    fn lifecycle_action_validation_rejects_schema_collections_digest_and_ordering() {
+        let mut wrong_schema = lifecycle_action(
+            "lifecycle-unit-validate-001",
+            LifecycleActionType::Writeback,
+        );
+        wrong_schema.schema_version = "dagdb_prd17_lifecycle_action_v0".to_owned();
+        assert_eq!(
+            wrong_schema.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "unsupported lifecycle action schema_version".to_owned(),
+            })
+        );
+
+        let mut missing_parent = lifecycle_action(
+            "lifecycle-unit-validate-002",
+            LifecycleActionType::Writeback,
+        );
+        missing_parent.parent_memory_ids.clear();
+        assert_eq!(
+            missing_parent.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "parent_memory_ids must not be empty".to_owned(),
+            })
+        );
+
+        let mut missing_target = lifecycle_action(
+            "lifecycle-unit-validate-003",
+            LifecycleActionType::Writeback,
+        );
+        missing_target.target_memory_ids.clear();
+        assert_eq!(
+            missing_target.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "target_memory_ids must not be empty".to_owned(),
+            })
+        );
+
+        let mut missing_evidence = lifecycle_action(
+            "lifecycle-unit-validate-004",
+            LifecycleActionType::Writeback,
+        );
+        missing_evidence.evidence_refs.clear();
+        assert_eq!(
+            missing_evidence.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "evidence_refs must not be empty".to_owned(),
+            })
+        );
+
+        let mut duplicate_evidence = lifecycle_action(
+            "lifecycle-unit-validate-005",
+            LifecycleActionType::Writeback,
+        );
+        duplicate_evidence
+            .evidence_refs
+            .push(evidence_ref("evidence-prd17c-unit-001"));
+        assert_eq!(
+            duplicate_evidence.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "evidence_refs must be unique".to_owned(),
+            })
+        );
+
+        let mut invalid_digest = lifecycle_action(
+            "lifecycle-unit-validate-006",
+            LifecycleActionType::Writeback,
+        );
+        invalid_digest.evidence_refs[0].digest = "not-a-digest".to_owned();
+        assert!(matches!(
+            invalid_digest.validate(),
+            Err(LifecycleActionError::InvalidAction { reason })
+                if reason == "evidence_refs[0].digest must be a 64-char hex digest"
+        ));
+
+        let mut unsorted_route_events = lifecycle_action(
+            "lifecycle-unit-validate-007",
+            LifecycleActionType::Writeback,
+        );
+        unsorted_route_events.route_invalidation_event_ids = vec![
+            "route-event-prd17c-unit-b".to_owned(),
+            "route-event-prd17c-unit-a".to_owned(),
+        ];
+        assert_eq!(
+            unsorted_route_events.validate(),
+            Err(LifecycleActionError::ListNotSortedUnique {
+                field: "route_invalidation_event_ids".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_action_rollback_ref_validation_rejects_mismatches_and_empty_refs() {
+        let mut action_id_mismatch = lifecycle_action(
+            "lifecycle-unit-rollback-001",
+            LifecycleActionType::Writeback,
+        );
+        action_id_mismatch.rollback_ref.action_id = "other-action".to_owned();
+        assert_eq!(
+            action_id_mismatch.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "rollback_ref.action_id must match action_id".to_owned(),
+            })
+        );
+
+        let mut inverse_mismatch = lifecycle_action(
+            "lifecycle-unit-rollback-002",
+            LifecycleActionType::Writeback,
+        );
+        inverse_mismatch.rollback_ref.inverse_action_type = LifecycleActionType::Restore;
+        assert_eq!(
+            inverse_mismatch.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "rollback_ref.inverse_action_type mismatch".to_owned(),
+            })
+        );
+
+        let mut validation_ref_mismatch = lifecycle_action(
+            "lifecycle-unit-rollback-003",
+            LifecycleActionType::Writeback,
+        );
+        validation_ref_mismatch.rollback_ref.validation_ref = "other-validation".to_owned();
+        assert_eq!(
+            validation_ref_mismatch.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "rollback_ref.validation_ref must match validation_report_id".to_owned(),
+            })
+        );
+
+        let mut empty_rollback_refs = lifecycle_action(
+            "lifecycle-unit-rollback-004",
+            LifecycleActionType::Writeback,
+        );
+        empty_rollback_refs.rollback_ref.before_refs.clear();
+        empty_rollback_refs.rollback_ref.after_refs.clear();
+        assert_eq!(
+            empty_rollback_refs.validate(),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "rollback_ref requires before_refs or after_refs".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_action_ledger_replays_and_rejects_duplicate_or_missing_entries() {
+        let action = lifecycle_action("lifecycle-unit-ledger-001", LifecycleActionType::Writeback);
+        let mut ledger = LifecycleActionLedger::default();
+        let first = ledger
+            .apply_lifecycle_action(action.clone())
+            .expect("first lifecycle action");
+        assert!(!first.replayed);
+        assert_eq!(ledger.committed_action_count(), 1);
+
+        let replay = ledger
+            .apply_lifecycle_action(action.clone())
+            .expect("exact lifecycle replay");
+        assert!(replay.replayed);
+        assert_eq!(ledger.committed_action_count(), 1);
+
+        let mut unsafe_replay = action.clone();
+        unsafe_replay.action_id = "lifecycle-unit-ledger-002".to_owned();
+        unsafe_replay.rollback_ref.action_id = unsafe_replay.action_id.clone();
+        unsafe_replay.rollback_ref.rollback_id = "rollback-lifecycle-unit-ledger-002".to_owned();
+        assert!(matches!(
+            ledger.apply_lifecycle_action(unsafe_replay),
+            Err(LifecycleActionError::DuplicateUnsafeReplay { .. })
+        ));
+
+        let mut duplicate_action_id = action.clone();
+        duplicate_action_id.source_receipt_id = "receipt-prd17c-unit-duplicate".to_owned();
+        assert!(matches!(
+            ledger.apply_lifecycle_action(duplicate_action_id),
+            Err(LifecycleActionError::DuplicateUnsafeReplay { .. })
+        ));
+
+        let missing = lifecycle_action(
+            "lifecycle-unit-ledger-missing",
+            LifecycleActionType::Writeback,
+        );
+        let missing_key = missing
+            .idempotency_key()
+            .expect("missing-entry action idempotency key");
+        let mut inconsistent_ledger = LifecycleActionLedger::default();
+        inconsistent_ledger
+            .idempotency_keys
+            .insert(missing_key, "missing-action".to_owned());
+        assert_eq!(
+            inconsistent_ledger.apply_lifecycle_action(missing),
+            Err(LifecycleActionError::InvalidAction {
+                reason: "idempotency key points at missing action".to_owned(),
+            })
+        );
+    }
+}

@@ -219,3 +219,197 @@ fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_dir(name: &str) -> PathBuf {
+        env::temp_dir()
+            .join("exo_dagdb_kg_markdown_manifest_tests")
+            .join(format!("{name}_{}", std::process::id()))
+    }
+
+    fn reset_dir(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+        fs::create_dir_all(path).expect("test manifest dir");
+    }
+
+    #[test]
+    fn kg_markdown_manifest_builds_sorted_manifest_from_markdown_tree() {
+        let root = fixture_dir("sorted_tree");
+        reset_dir(&root);
+        fs::create_dir_all(root.join("nested")).expect("nested dir");
+
+        let alpha = concat!(
+            "---\n",
+            "frontmatter_title: \"Alpha Frontmatter\"\n",
+            "owner: 'dagdb'\n",
+            "ignored line without colon\n",
+            "---\n",
+            "# Alpha Title\n",
+            "Links [[b-beta|Beta alias]] and [[nested/c-gamma#Details]].\n",
+            "Duplicate [[b-beta]] and empty [[#Only Heading]].\n",
+            "`inline [[ignored-inline]] code`\n",
+            "```rust\n",
+            "[[ignored-fence]]\n",
+            "```\n",
+            "## Details\n",
+            "#### Deep Cut\n",
+        );
+        let beta = "# Beta Title\nBody [[a-alpha]]\n";
+        let gamma = "preamble\n#### Gamma Deep\n";
+
+        fs::write(root.join("a-alpha.md"), alpha).expect("alpha markdown");
+        fs::write(root.join("b-beta.md"), beta).expect("beta markdown");
+        fs::write(root.join("nested").join("c-gamma.md"), gamma).expect("gamma markdown");
+        fs::write(root.join("ignored.txt"), "# Ignored\n").expect("ignored text");
+
+        let first = build_manifest(&root).expect("manifest");
+        let second = build_manifest(&root).expect("manifest again");
+
+        assert_eq!(
+            serde_json::to_value(&first).expect("first json"),
+            serde_json::to_value(&second).expect("second json")
+        );
+        assert_eq!(first.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert_eq!(first.file_count, 3);
+        assert!(
+            first
+                .graph_root
+                .ends_with(root.file_name().unwrap().to_str().unwrap())
+        );
+        assert_eq!(
+            first
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-alpha.md", "b-beta.md", "nested/c-gamma.md"]
+        );
+
+        let alpha_file = &first.files[0];
+        assert_eq!(alpha_file.byte_length, alpha.len());
+        assert_eq!(alpha_file.sha256, sha256_hex(alpha.as_bytes()));
+        assert_eq!(
+            alpha_file.frontmatter.get("frontmatter_title"),
+            Some(&"Alpha Frontmatter".to_owned())
+        );
+        assert_eq!(
+            alpha_file.frontmatter.get("owner"),
+            Some(&"dagdb".to_owned())
+        );
+        assert!(
+            !alpha_file
+                .frontmatter
+                .contains_key("ignored line without colon")
+        );
+        assert_eq!(alpha_file.title, "Alpha Title");
+        assert_eq!(
+            alpha_file
+                .headings
+                .iter()
+                .map(|heading| (heading.level, heading.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Alpha Title"), (2, "Details"), (4, "Deep Cut")]
+        );
+        assert_eq!(
+            alpha_file.wikilinks,
+            vec!["b-beta".to_owned(), "nested/c-gamma".to_owned()]
+        );
+
+        assert_eq!(first.files[1].title, "Beta Title");
+        assert_eq!(first.files[1].wikilinks, vec!["a-alpha".to_owned()]);
+        assert_eq!(first.files[2].title, "Gamma Deep");
+
+        fs::remove_dir_all(root).expect("cleanup manifest dir");
+    }
+
+    #[test]
+    fn kg_markdown_manifest_reports_invalid_roots_and_non_utf8_markdown() {
+        let missing_root = fixture_dir("missing_root");
+        let _ = fs::remove_dir_all(&missing_root);
+        let missing_error = build_manifest(&missing_root).expect_err("missing root");
+        assert!(missing_error.contains("graph root does not exist"));
+
+        let file_root = fixture_dir("file_root");
+        let _ = fs::remove_file(&file_root);
+        fs::create_dir_all(file_root.parent().expect("file root parent")).expect("parent dir");
+        fs::write(&file_root, b"not a directory").expect("file root");
+        let file_error = build_manifest(&file_root).expect_err("file root");
+        assert!(file_error.contains("graph root is not a directory"));
+        fs::remove_file(&file_root).expect("cleanup file root");
+
+        let invalid_utf8_root = fixture_dir("invalid_utf8");
+        reset_dir(&invalid_utf8_root);
+        fs::write(invalid_utf8_root.join("bad.md"), [0xff]).expect("bad markdown");
+        let utf8_error = build_manifest(&invalid_utf8_root).expect_err("utf8 markdown");
+        assert!(utf8_error.contains("markdown file is not UTF-8"));
+        fs::remove_dir_all(invalid_utf8_root).expect("cleanup invalid utf8 root");
+    }
+
+    #[test]
+    fn kg_markdown_manifest_parses_frontmatter_headings_and_wikilink_edges() {
+        let frontmatter = parse_frontmatter(concat!(
+            "---\n",
+            "title: 'Quoted Title'\n",
+            "owner: \"DAG DB\"\n",
+            "# comment\n",
+            "no colon\n",
+            ": missing key\n",
+            "spaced : value: with colon\n",
+            "---\n",
+            "# Body\n",
+        ));
+        assert_eq!(frontmatter.get("title"), Some(&"Quoted Title".to_owned()));
+        assert_eq!(frontmatter.get("owner"), Some(&"DAG DB".to_owned()));
+        assert_eq!(
+            frontmatter.get("spaced"),
+            Some(&"value: with colon".to_owned())
+        );
+        assert!(!frontmatter.contains_key("no colon"));
+        assert!(!frontmatter.contains_key(""));
+        assert!(parse_frontmatter("# Body\n").is_empty());
+        assert!(parse_frontmatter("---\ntitle: missing end\n# Body\n").is_empty());
+
+        let headings = extract_headings(concat!(
+            "preamble\n",
+            "# One\n",
+            "#### Four\n",
+            "####### Too Many\n",
+            "#NoSpace\n",
+            "##   \n",
+        ));
+        assert_eq!(
+            headings
+                .iter()
+                .map(|heading| (heading.level, heading.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "One"), (4, "Four")]
+        );
+
+        let wikilinks = extract_wikilinks(concat!(
+            "[[Alpha]] [[Alpha|alias]] [[Beta#Section]] [[ spaced ]] [[ ]] ",
+            "[[\n",
+            "nope]] `[[Code]]`\n",
+            "```\n",
+            "[[Fence]]\n",
+            "```\n",
+            "[[NoClose",
+        ));
+        assert_eq!(
+            wikilinks,
+            vec!["Alpha".to_owned(), "Beta".to_owned(), "spaced".to_owned()]
+        );
+        assert_eq!(strip_inline_code("a `hidden [[Link]]` b"), "a  b");
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            repo_relative_to(Path::new("outside.md"), &fixture_dir("root")),
+            "outside.md"
+        );
+        assert!(!display_root(Path::new(".")).contains('\\'));
+    }
+}
