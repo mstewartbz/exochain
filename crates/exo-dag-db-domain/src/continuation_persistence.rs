@@ -10,13 +10,21 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::lifecycle_action::{LifecycleMemoryRef, ProductionLifecycleApproval};
+use crate::lifecycle_action::{
+    LifecycleMemoryRef, PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX, ProductionLifecycleApproval,
+    ProductionLifecycleApprovalEvidence,
+};
 
 /// Schema for PRD17C continuation records.
 pub const PRD17_CONTINUATION_RECORD_SCHEMA: &str = "dagdb_prd17_continuation_record_v1";
 /// Schema for PRD17C continuation persistence reports.
 pub const PRD17_CONTINUATION_PERSISTENCE_REPORT_SCHEMA: &str =
     "dagdb_prd17_continuation_persistence_report_v1";
+
+const PRODUCTION_LIFECYCLE_DEFERRED_BLOCKER_REFS: &[&str] = &[
+    "blocker-production-lifecycle-approval-deferred",
+    "production_lifecycle_approval_deferred",
+];
 
 const RAW_BODY_KEYS: &[&str] = &[
     "body",
@@ -97,6 +105,11 @@ impl ContinuationRecord {
             serde_json::from_value(raw).map_err(|error| ContinuationPersistenceError::Json {
                 reason: error.to_string(),
             })?;
+        if record.production_lifecycle_approval == ProductionLifecycleApproval::Approved {
+            return Err(ContinuationPersistenceError::ProductionApprovalMissing {
+                continuation_id: record.continuation_id.clone(),
+            });
+        }
         record.validate(0)?;
         Ok(record)
     }
@@ -129,7 +142,9 @@ impl ContinuationRecord {
         }
         validate_sorted_unique_strings("blocker_refs", &self.blocker_refs)?;
         validate_sorted_unique_strings("validation_refs", &self.validation_refs)?;
-        if self.blocker_refs.is_empty() {
+        if self.blocker_refs.is_empty()
+            && self.production_lifecycle_approval != ProductionLifecycleApproval::Approved
+        {
             return Err(ContinuationPersistenceError::InvalidRecord {
                 reason: "blocker_refs must not be empty".to_owned(),
             });
@@ -143,6 +158,21 @@ impl ContinuationRecord {
             return Err(ContinuationPersistenceError::ExpiredContinuation {
                 continuation_id: self.continuation_id.clone(),
             });
+        }
+        if self.production_lifecycle_approval == ProductionLifecycleApproval::Approved {
+            if self.blocker_refs.iter().any(|blocker_ref| {
+                PRODUCTION_LIFECYCLE_DEFERRED_BLOCKER_REFS.contains(&blocker_ref.as_str())
+            }) {
+                return Err(ContinuationPersistenceError::InvalidRecord {
+                    reason: "approved continuations must not carry deferred production lifecycle blockers"
+                        .to_owned(),
+                });
+            }
+            if !self.has_production_approval_validation_ref() {
+                return Err(ContinuationPersistenceError::ProductionApprovalMissing {
+                    continuation_id: self.continuation_id.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -167,6 +197,48 @@ impl ContinuationRecord {
             memory_hash
         ))
     }
+
+    /// Return an approved copy only when production approval/finality evidence is present.
+    pub fn approved_with_evidence(
+        &self,
+        approval: &ProductionLifecycleApprovalEvidence,
+        now_epoch_seconds: u64,
+    ) -> Result<Self> {
+        self.validate(now_epoch_seconds)?;
+        if self.production_lifecycle_approval != ProductionLifecycleApproval::OperatorDeferred {
+            return Err(ContinuationPersistenceError::InvalidRecord {
+                reason: "production approval can only finalize operator_deferred continuations"
+                    .to_owned(),
+            });
+        }
+        approval
+            .validate()
+            .map_err(|error| ContinuationPersistenceError::InvalidRecord {
+                reason: error.to_string(),
+            })?;
+        let mut approved = self.clone();
+        let approval_evidence_id = approval.evidence_ref.evidence_id.clone();
+        let approval_receipt_id = approval.evidence_ref.receipt_id.clone();
+        if !approved.validation_refs.contains(&approval_evidence_id) {
+            approved.validation_refs.push(approval_evidence_id);
+        }
+        if !approved.validation_refs.contains(&approval_receipt_id) {
+            approved.validation_refs.push(approval_receipt_id);
+        }
+        approved.validation_refs.sort();
+        approved.blocker_refs.retain(|blocker_ref| {
+            !PRODUCTION_LIFECYCLE_DEFERRED_BLOCKER_REFS.contains(&blocker_ref.as_str())
+        });
+        approved.production_lifecycle_approval = ProductionLifecycleApproval::Approved;
+        approved.validate(now_epoch_seconds)?;
+        Ok(approved)
+    }
+
+    fn has_production_approval_validation_ref(&self) -> bool {
+        self.validation_refs.iter().any(|validation_ref| {
+            validation_ref.starts_with(PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX)
+        })
+    }
 }
 
 /// Result of persisting a continuation record.
@@ -189,6 +261,30 @@ pub struct ContinuationStore {
 impl ContinuationStore {
     /// Persist a continuation record, replaying exact idempotent duplicates.
     pub fn persist_continuation(
+        &mut self,
+        record: ContinuationRecord,
+        now_epoch_seconds: u64,
+    ) -> Result<ContinuationPersistResult> {
+        if record.production_lifecycle_approval == ProductionLifecycleApproval::Approved {
+            return Err(ContinuationPersistenceError::ProductionApprovalMissing {
+                continuation_id: record.continuation_id.clone(),
+            });
+        }
+        self.persist_continuation_internal(record, now_epoch_seconds)
+    }
+
+    /// Approve and persist a continuation after production approval/finality evidence is bound.
+    pub fn persist_approved_continuation(
+        &mut self,
+        record: ContinuationRecord,
+        approval: &ProductionLifecycleApprovalEvidence,
+        now_epoch_seconds: u64,
+    ) -> Result<ContinuationPersistResult> {
+        let approved = record.approved_with_evidence(approval, now_epoch_seconds)?;
+        self.persist_continuation_internal(approved, now_epoch_seconds)
+    }
+
+    fn persist_continuation_internal(
         &mut self,
         record: ContinuationRecord,
         now_epoch_seconds: u64,
@@ -264,10 +360,62 @@ impl ContinuationStore {
         Ok(record.clone())
     }
 
+    /// Retrieve only production-approved continuation records and mark them consumed.
+    pub fn retrieve_approved_for_task(
+        &mut self,
+        task_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+        namespace: &str,
+        now_epoch_seconds: u64,
+    ) -> Result<ContinuationRecord> {
+        let continuation_id =
+            self.find_continuation_id(task_id, tenant_id, project_id, namespace)?;
+        let record = self
+            .records_by_id
+            .get_mut(&continuation_id)
+            .ok_or_else(|| ContinuationPersistenceError::ContinuationNotFound {
+                task_id: task_id.to_owned(),
+            })?;
+        record.validate(now_epoch_seconds)?;
+        if record.production_lifecycle_approval != ProductionLifecycleApproval::Approved {
+            return Err(ContinuationPersistenceError::ProductionApprovalMissing {
+                continuation_id,
+            });
+        }
+        record.later_retrieval_status = ContinuationRetrievalStatus::Retrieved;
+        Ok(record.clone())
+    }
+
     /// Number of durable continuation records.
     #[must_use]
     pub fn record_count(&self) -> usize {
         self.records_by_id.len()
+    }
+
+    fn find_continuation_id(
+        &self,
+        task_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+        namespace: &str,
+    ) -> Result<String> {
+        validate_non_empty("task_id", task_id)?;
+        validate_non_empty("tenant_id", tenant_id)?;
+        validate_non_empty("project_id", project_id)?;
+        validate_non_empty("memory_namespace", namespace)?;
+        self.records_by_id
+            .iter()
+            .find(|(_id, record)| {
+                record.task_id == task_id
+                    && record.tenant_id == tenant_id
+                    && record.project_id == project_id
+                    && record.memory_namespace == namespace
+            })
+            .map(|(id, _record)| id.clone())
+            .ok_or_else(|| ContinuationPersistenceError::ContinuationNotFound {
+                task_id: task_id.to_owned(),
+            })
     }
 }
 
@@ -292,6 +440,8 @@ pub enum ContinuationPersistenceError {
     ContinuationNotFound { task_id: String },
     #[error("dagdb_prd17_continuation_duplicate_unsafe_replay: {idempotency_key}")]
     DuplicateUnsafeReplay { idempotency_key: String },
+    #[error("dagdb_prd17_continuation_production_approval_missing: {continuation_id}")]
+    ProductionApprovalMissing { continuation_id: String },
 }
 
 /// Result alias for continuation persistence.

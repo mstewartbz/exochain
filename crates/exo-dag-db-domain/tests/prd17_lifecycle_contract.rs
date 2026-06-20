@@ -8,7 +8,8 @@ use exo_dag_db_domain::{
     lifecycle_action::{
         LifecycleAction, LifecycleActionError, LifecycleActionLedger, LifecycleActionType,
         LifecycleEvidenceRef, LifecycleMemoryRef, LifecycleRollbackRef, LifecycleTerminalState,
-        PRD17_LIFECYCLE_ACTION_SCHEMA, ProductionLifecycleApproval,
+        PRD17_LIFECYCLE_ACTION_SCHEMA, PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX,
+        ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence,
     },
     route_invalidation::{
         PRD17_ROUTE_INVALIDATION_EVENT_SCHEMA, RouteFreshnessState, RouteInvalidationError,
@@ -42,6 +43,18 @@ fn evidence_ref(evidence_id: &str) -> LifecycleEvidenceRef {
         digest: digest("a"),
         summary_ref: format!("summary-{evidence_id}"),
         preserved: true,
+    }
+}
+
+fn approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
+    ProductionLifecycleApprovalEvidence {
+        evidence_ref: LifecycleEvidenceRef {
+            evidence_id: format!("{PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX}{suffix}"),
+            receipt_id: format!("finality-receipt-{suffix}"),
+            digest: digest("b"),
+            summary_ref: format!("summary-production-approval-{suffix}"),
+            preserved: true,
+        },
     }
 }
 
@@ -267,6 +280,75 @@ fn lifecycle_rejects_duplicate_unsafe_replay() {
 }
 
 #[test]
+fn lifecycle_approval_evidence_graduates_action_and_replays_idempotently() {
+    let action = lifecycle_action("lifecycle-approved-001", LifecycleActionType::Writeback);
+    let approval = approval_evidence("lifecycle-approved-001");
+
+    let accepted = action
+        .approved_with_evidence(&approval)
+        .expect("approval/finality evidence accepts lifecycle action");
+    assert_eq!(accepted.terminal_state, LifecycleTerminalState::Accepted);
+    assert_eq!(
+        accepted.production_lifecycle_approval,
+        ProductionLifecycleApproval::Approved
+    );
+    accepted.validate().expect("accepted action validates");
+
+    let mut ledger = LifecycleActionLedger::default();
+    let first = ledger
+        .apply_approved_lifecycle_action(action.clone(), &approval)
+        .expect("first approved lifecycle apply");
+    assert!(!first.replayed);
+    assert_eq!(first.terminal_state, LifecycleTerminalState::Accepted);
+
+    let replay = ledger
+        .apply_approved_lifecycle_action(action.clone(), &approval)
+        .expect("approved lifecycle replay");
+    assert!(replay.replayed);
+    assert_eq!(ledger.committed_action_count(), 1);
+
+    let changed_approval = approval_evidence("lifecycle-approved-001-changed");
+    assert!(matches!(
+        ledger.apply_approved_lifecycle_action(action, &changed_approval),
+        Err(LifecycleActionError::DuplicateUnsafeReplay { .. })
+    ));
+}
+
+#[test]
+fn lifecycle_approval_evidence_fails_closed_without_finality_binding() {
+    let action = lifecycle_action("lifecycle-approved-002", LifecycleActionType::Writeback);
+    let mut approval = approval_evidence("lifecycle-approved-002");
+    approval.evidence_ref.evidence_id = "self-asserted-production-approval".to_owned();
+
+    assert!(matches!(
+        action.approved_with_evidence(&approval),
+        Err(LifecycleActionError::ProductionApprovalMissing { .. })
+    ));
+}
+
+#[test]
+fn lifecycle_rejects_raw_accepted_state_with_caller_controlled_approval_evidence() {
+    let mut action = lifecycle_action("lifecycle-raw-accepted-001", LifecycleActionType::Writeback);
+    let approval = approval_evidence("lifecycle-raw-accepted-001");
+    action.evidence_refs.push(approval.evidence_ref);
+    action.terminal_state = LifecycleTerminalState::Accepted;
+    action.production_lifecycle_approval = ProductionLifecycleApproval::Approved;
+
+    action
+        .validate()
+        .expect("raw accepted action is structurally durable");
+    assert!(matches!(
+        LifecycleAction::parse_json(&serde_json::to_string(&action).expect("serialize action")),
+        Err(LifecycleActionError::ProductionApprovalMissing { .. })
+    ));
+    let mut ledger = LifecycleActionLedger::default();
+    assert!(matches!(
+        ledger.apply_lifecycle_action(action),
+        Err(LifecycleActionError::ProductionApprovalMissing { .. })
+    ));
+}
+
+#[test]
 fn lifecycle_rejects_colon_in_scope_fields_keeping_idempotency_keys_unambiguous() {
     // Regression: tenant "a" + project "b:c" and tenant "a:b" + project "c"
     // used to derive the same colon-joined idempotency key, so the second
@@ -445,6 +527,148 @@ fn continuation_persists_and_later_retrieval_consumes_current_record() {
         retrieved.later_retrieval_status,
         ContinuationRetrievalStatus::Retrieved
     );
+}
+
+#[test]
+fn approved_continuation_persists_replays_and_retrieves_as_accepted() {
+    let mut store = ContinuationStore::default();
+    let record = continuation();
+    let approval = approval_evidence("continuation-approved-001");
+    let approved = record
+        .approved_with_evidence(&approval, 1_000)
+        .expect("approve continuation");
+    assert!(
+        approved.blocker_refs.is_empty(),
+        "approval should remove the stale production approval deferred blocker"
+    );
+    assert!(
+        !approved
+            .blocker_refs
+            .contains(&"blocker-production-lifecycle-approval-deferred".to_owned())
+    );
+    assert!(
+        !approved
+            .blocker_refs
+            .contains(&"production_lifecycle_approval_deferred".to_owned())
+    );
+
+    let first = store
+        .persist_approved_continuation(record.clone(), &approval, 1_000)
+        .expect("persist approved continuation");
+    assert!(!first.replayed);
+
+    let replay = store
+        .persist_approved_continuation(record, &approval, 1_000)
+        .expect("approved continuation replay");
+    assert!(replay.replayed);
+
+    let retrieved = store
+        .retrieve_approved_for_task("task-prd17c-next-agent", TENANT, PROJECT, NAMESPACE, 1_000)
+        .expect("retrieve approved continuation");
+    assert_eq!(
+        retrieved.production_lifecycle_approval,
+        ProductionLifecycleApproval::Approved
+    );
+    assert_eq!(
+        retrieved.later_retrieval_status,
+        ContinuationRetrievalStatus::Retrieved
+    );
+    assert!(
+        !retrieved
+            .blocker_refs
+            .contains(&"blocker-production-lifecycle-approval-deferred".to_owned())
+    );
+    assert!(
+        !retrieved
+            .blocker_refs
+            .contains(&"production_lifecycle_approval_deferred".to_owned())
+    );
+    retrieved
+        .validate(1_000)
+        .expect("retrieved approved continuation remains valid");
+}
+
+#[test]
+fn approved_continuation_rejects_missing_approval_and_changed_replay_material() {
+    let mut store = ContinuationStore::default();
+    let record = continuation();
+    store
+        .persist_continuation(record.clone(), 1_000)
+        .expect("persist deferred continuation");
+    assert!(matches!(
+        store.retrieve_approved_for_task(
+            "task-prd17c-next-agent",
+            TENANT,
+            PROJECT,
+            NAMESPACE,
+            1_000
+        ),
+        Err(ContinuationPersistenceError::ProductionApprovalMissing { .. })
+    ));
+
+    let approval = approval_evidence("continuation-approved-002");
+    let mut approved_store = ContinuationStore::default();
+    approved_store
+        .persist_approved_continuation(record.clone(), &approval, 1_000)
+        .expect("persist approved continuation");
+    assert!(matches!(
+        approved_store.persist_approved_continuation(
+            record,
+            &approval_evidence("continuation-approved-002-changed"),
+            1_000,
+        ),
+        Err(ContinuationPersistenceError::DuplicateUnsafeReplay { .. })
+    ));
+}
+
+#[test]
+fn approved_continuation_preserves_unrelated_blockers() {
+    let mut record = continuation();
+    record.blocker_refs = vec![
+        "blocker-production-lifecycle-approval-deferred".to_owned(),
+        "blocker-route-readiness".to_owned(),
+        "production_lifecycle_approval_deferred".to_owned(),
+    ];
+    let approved = record
+        .approved_with_evidence(&approval_evidence("continuation-blockers-001"), 1_000)
+        .expect("approved continuation");
+
+    assert_eq!(
+        approved.blocker_refs,
+        vec!["blocker-route-readiness".to_owned()]
+    );
+    approved
+        .validate(1_000)
+        .expect("approved continuation keeps unrelated blocker valid");
+}
+
+#[test]
+fn continuation_rejects_raw_approved_state_with_caller_controlled_validation_refs() {
+    let mut record = continuation();
+    let approval = approval_evidence("continuation-raw-approved-001");
+    record
+        .validation_refs
+        .push(approval.evidence_ref.evidence_id.clone());
+    record
+        .validation_refs
+        .push(approval.evidence_ref.receipt_id.clone());
+    record.validation_refs.sort();
+    record.blocker_refs.clear();
+    record.production_lifecycle_approval = ProductionLifecycleApproval::Approved;
+
+    record
+        .validate(1_000)
+        .expect("raw approved continuation is structurally durable");
+    assert!(matches!(
+        ContinuationRecord::parse_json(&serde_json::to_string(&record).expect("serialize record")),
+        Err(ContinuationPersistenceError::ProductionApprovalMissing { .. })
+    ));
+
+    let mut store = ContinuationStore::default();
+    assert!(matches!(
+        store.persist_continuation(record, 1_000),
+        Err(ContinuationPersistenceError::ProductionApprovalMissing { .. })
+    ));
 }
 
 #[test]

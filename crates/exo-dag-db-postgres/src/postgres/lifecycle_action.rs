@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::lifecycle_action::{
     LifecycleAction, LifecycleActionError, LifecycleApplyResult, LifecycleTerminalState,
+    ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence,
 };
 
 /// Errors raised by PRD17C lifecycle Postgres persistence.
@@ -30,6 +31,22 @@ pub async fn persist_lifecycle_action(
     pool: &PgPool,
     action: &LifecycleAction,
 ) -> Result<LifecycleApplyResult> {
+    if action.terminal_state == LifecycleTerminalState::Accepted
+        || action.production_lifecycle_approval == ProductionLifecycleApproval::Approved
+    {
+        return Err(LifecycleActionError::ProductionApprovalMissing {
+            action_id: action.action_id.clone(),
+        }
+        .into());
+    }
+    persist_lifecycle_action_checked(pool, action, "persist_lifecycle_action").await
+}
+
+async fn persist_lifecycle_action_checked(
+    pool: &PgPool,
+    action: &LifecycleAction,
+    operation: &'static str,
+) -> Result<LifecycleApplyResult> {
     action.validate()?;
     let idempotency_key = action.idempotency_key()?;
     let action_body = serde_json::to_value(action).map_err(json)?;
@@ -52,7 +69,7 @@ pub async fn persist_lifecycle_action(
         Err(error) => {
             if let Err(rollback_error) = tx.rollback().await {
                 tracing::warn!(
-                    operation = "persist_lifecycle_action",
+                    operation = operation,
                     tenant_id = %action.tenant_id,
                     project_id = %action.project_id,
                     memory_namespace = %action.memory_namespace,
@@ -66,6 +83,16 @@ pub async fn persist_lifecycle_action(
             Err(error)
         }
     }
+}
+
+/// Accept and persist a lifecycle action after production approval/finality evidence is bound.
+pub async fn persist_approved_lifecycle_action(
+    pool: &PgPool,
+    action: &LifecycleAction,
+    approval: &ProductionLifecycleApprovalEvidence,
+) -> Result<LifecycleApplyResult> {
+    let accepted = action.approved_with_evidence(approval)?;
+    persist_lifecycle_action_checked(pool, &accepted, "persist_approved_lifecycle_action").await
 }
 
 async fn persist_lifecycle_action_in_transaction(

@@ -222,6 +222,18 @@ pub struct DefaultRouteRecord {
     pub updated_at: String,
 }
 
+/// Operator/finality evidence required to accept a deferred default route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultRouteAcceptanceEvidence {
+    /// Production/default-route approval ref.
+    pub production_default_route_approval_ref: String,
+    /// Packet-quality review ref.
+    pub packet_quality_review_ref: String,
+    /// Finality receipt or outbox ref.
+    pub finality_ref: String,
+}
+
 /// Readiness report consumed by PRD17A scoring later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -315,6 +327,12 @@ pub enum DefaultRouteError {
     /// The request claims fresher status than the route binding allows.
     #[error("request_freshness_outranks_route")]
     RequestFreshnessOutranksRoute,
+    /// Acceptance evidence was present but an existing readiness gate still rejected the route.
+    #[error("default_route_acceptance_gate_rejected: {failure_code:?}")]
+    AcceptanceGateRejected {
+        /// Existing readiness failure.
+        failure_code: DefaultRetrievalFailureCode,
+    },
 }
 
 /// Validate and evaluate a default route for PRD17B readiness.
@@ -550,6 +568,30 @@ pub fn build_default_context_packet(
     }
 }
 
+/// Return an accepted default route only when validation, approval, and finality gates pass.
+pub fn accept_default_route_record(
+    route: &DefaultRouteRecord,
+    evidence: &DefaultRouteAcceptanceEvidence,
+    updated_at: String,
+) -> Result<DefaultRouteRecord, DefaultRouteError> {
+    validate_default_route_record(route)?;
+    validate_acceptance_evidence(evidence)?;
+    validate_required("updated_at", &updated_at)?;
+    reject_forbidden("updated_at", &updated_at)?;
+
+    let mut accepted = route.clone();
+    accepted.production_default_route_approval_status = "accepted".to_owned();
+    accepted.packet_quality_review_status = "accepted".to_owned();
+    accepted.updated_at = updated_at;
+    let report = evaluate_default_route_readiness(&accepted)?;
+    if report.readiness_status != DefaultRuntimeReadinessStatus::Accepted {
+        return Err(DefaultRouteError::AcceptanceGateRejected {
+            failure_code: report.primary_failure_code,
+        });
+    }
+    Ok(accepted)
+}
+
 /// Validate route record shape before readiness evaluation.
 pub fn validate_default_route_record(route: &DefaultRouteRecord) -> Result<(), DefaultRouteError> {
     validate_required("schema_version", &route.schema_version)?;
@@ -593,6 +635,26 @@ pub fn validate_default_route_record(route: &DefaultRouteRecord) -> Result<(), D
         if !seen.insert(&selected.memory_id) {
             return Err(DefaultRouteError::DuplicateSelectedMemoryId);
         }
+    }
+    Ok(())
+}
+
+fn validate_acceptance_evidence(
+    evidence: &DefaultRouteAcceptanceEvidence,
+) -> Result<(), DefaultRouteError> {
+    for (field, value) in [
+        (
+            "production_default_route_approval_ref",
+            evidence.production_default_route_approval_ref.as_str(),
+        ),
+        (
+            "packet_quality_review_ref",
+            evidence.packet_quality_review_ref.as_str(),
+        ),
+        ("finality_ref", evidence.finality_ref.as_str()),
+    ] {
+        validate_required(field, value)?;
+        reject_forbidden(field, value)?;
     }
     Ok(())
 }

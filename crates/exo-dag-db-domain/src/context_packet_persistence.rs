@@ -129,6 +129,18 @@ pub struct ContextPacketRouteBinding {
     pub route_freshness_status: PacketFreshnessStatus,
 }
 
+/// Operator/finality evidence required to accept a deferred context packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPacketAcceptanceEvidence {
+    /// Production/default-route approval ref.
+    pub production_default_route_approval_ref: String,
+    /// Packet-quality review ref.
+    pub packet_quality_review_ref: String,
+    /// Finality receipt or outbox ref.
+    pub finality_ref: String,
+}
+
 /// Caller input for building a PRD17B packet record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -386,6 +398,35 @@ pub fn build_context_packet_record(
     Ok(record)
 }
 
+/// Return an accepted copy after binding approval/finality evidence into proof refs.
+pub fn accept_context_packet_record(
+    record: &ContextPacketRecord,
+    evidence: &ContextPacketAcceptanceEvidence,
+) -> Result<ContextPacketRecord, ContextPacketError> {
+    validate_context_packet_record(record)?;
+    validate_acceptance_evidence(evidence)?;
+    let mut accepted = record.clone();
+    push_unique_proof_ref(
+        &mut accepted.source_proof_refs,
+        "production_default_route_approval",
+        &evidence.production_default_route_approval_ref,
+    )?;
+    push_unique_proof_ref(
+        &mut accepted.source_proof_refs,
+        "packet_quality_review",
+        &evidence.packet_quality_review_ref,
+    )?;
+    push_unique_proof_ref(
+        &mut accepted.source_proof_refs,
+        "finality",
+        &evidence.finality_ref,
+    )?;
+    accepted.production_default_route_approval_status = "accepted".to_owned();
+    accepted.packet_quality_review_status = "accepted".to_owned();
+    validate_context_packet_record(&accepted)?;
+    Ok(accepted)
+}
+
 /// Validate a context packet record for default-runtime eligibility.
 pub fn validate_context_packet_record(
     record: &ContextPacketRecord,
@@ -538,6 +579,46 @@ fn validate_binding(route: &ContextPacketRouteBinding) -> Result<(), ContextPack
         validate_required(field, value)?;
         reject_forbidden(field, value)?;
     }
+    Ok(())
+}
+
+fn validate_acceptance_evidence(
+    evidence: &ContextPacketAcceptanceEvidence,
+) -> Result<(), ContextPacketError> {
+    validate_required(
+        "production_default_route_approval_ref",
+        &evidence.production_default_route_approval_ref,
+    )?;
+    validate_required(
+        "packet_quality_review_ref",
+        &evidence.packet_quality_review_ref,
+    )?;
+    validate_required("finality_ref", &evidence.finality_ref)?;
+    reject_forbidden(
+        "production_default_route_approval_ref",
+        &evidence.production_default_route_approval_ref,
+    )?;
+    reject_forbidden(
+        "packet_quality_review_ref",
+        &evidence.packet_quality_review_ref,
+    )?;
+    reject_forbidden("finality_ref", &evidence.finality_ref)?;
+    Ok(())
+}
+
+fn push_unique_proof_ref(
+    refs: &mut Vec<String>,
+    kind: &'static str,
+    value: &str,
+) -> Result<(), ContextPacketError> {
+    let proof_ref = format!("{kind}:{value}");
+    reject_forbidden("source_proof_refs", &proof_ref)?;
+    if refs.contains(&proof_ref) {
+        return Err(ContextPacketError::DuplicateId {
+            field: "source_proof_refs",
+        });
+    }
+    refs.push(proof_ref);
     Ok(())
 }
 

@@ -6,7 +6,10 @@
 use serde_json::to_value;
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::default_route::{DefaultRouteError, DefaultRouteRecord, validate_default_route_record};
+use crate::default_route::{
+    DefaultRouteAcceptanceEvidence, DefaultRouteError, DefaultRouteRecord,
+    accept_default_route_record, validate_default_route_record,
+};
 
 /// Persist a PRD17B default route in a serializable transaction.
 pub async fn persist_default_route(
@@ -39,6 +42,18 @@ pub async fn persist_default_route(
             Err(error)
         }
     }
+}
+
+/// Accept and persist a PRD17B default route after approval/finality gates pass.
+pub async fn persist_accepted_default_route(
+    pool: &PgPool,
+    route: &DefaultRouteRecord,
+    evidence: &DefaultRouteAcceptanceEvidence,
+    updated_at: String,
+) -> Result<u64, DefaultRoutePostgresError> {
+    let accepted = accept_default_route_record(route, evidence, updated_at)
+        .map_err(DefaultRoutePostgresError::Contract)?;
+    persist_default_route(pool, &accepted).await
 }
 
 /// Persist a PRD17B default route using an existing transaction.

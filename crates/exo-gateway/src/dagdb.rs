@@ -22,6 +22,8 @@ use exo_api::dagdb::ConsentPurpose;
 // writeback path and the `#[cfg(test)]` response-shape builder; gate the import
 // to those configurations so the default build is unused-import clean.
 #[cfg(any(test, feature = "production-db"))]
+use exo_api::dagdb::DagDbRouteResponse;
+#[cfg(any(test, feature = "production-db"))]
 use exo_api::dagdb::DagDbWritebackResponse;
 use exo_api::dagdb::{
     CatalogEntryResponse, ContextPacketLayerBudgetReport, ContextPacketLayerEdgeRef,
@@ -30,17 +32,17 @@ use exo_api::dagdb::{
     DagDbContextPacketResponse, DagDbCouncilDecisionRequest, DagDbErrorEnvelope,
     DagDbExportRequest, DagDbImportRequest, DagDbIntakeRequest, DagDbIntakeResponse,
     DagDbReceiptLookupRequest, DagDbReceiptLookupResponse, DagDbRouteLookupRequest,
-    DagDbRouteLookupResponse, DagDbRouteRequest, DagDbRouteResponse, DagDbTrustCheckRequest,
-    DagDbTrustCheckResponse, DagDbValidateRequest, DagDbValidateResponse, DagDbWritebackRequest,
-    DagFinalityStatus, MemoryStatus, ReceiptEventType, RiskClass, RouteStatus, SafeMetadata,
-    SubjectKind, ValidationDecision, ValidationStatus,
+    DagDbRouteLookupResponse, DagDbRouteRequest, DagDbTrustCheckRequest, DagDbTrustCheckResponse,
+    DagDbValidateRequest, DagDbValidateResponse, DagDbWritebackRequest, DagFinalityStatus,
+    MemoryStatus, ReceiptEventType, RiskClass, RouteStatus, SafeMetadata, SubjectKind,
+    ValidationDecision, ValidationStatus,
 };
 #[cfg(feature = "production-db")]
 use exo_api::dagdb::{DagDbExportResponse, DagDbImportResponse};
 #[cfg(feature = "production-db")]
 use exo_api::dagdb::{
     DagDbGraphContextPacketBuildRequest, DagDbGraphContextSelectionRequest,
-    DagDbGraphContextSelectionResponse, DagDbGraphContextSelectionStatus,
+    DagDbGraphContextSelectionResponse,
 };
 use exo_core::Hash256;
 use exo_dag_db_core::{
@@ -53,21 +55,24 @@ use exo_dag_db_domain::scoring::DomainError;
 #[cfg(feature = "production-db")]
 use exo_dag_db_domain::{
     context_packet_persistence::{
-        ContextPacketRecord, ContextPacketRequest, ContextPacketRouteBinding,
-        DefaultContextQuality, PacketFreshnessStatus, PacketPersistenceStatus,
-        PacketValidationStatus, build_context_packet_record,
+        ContextPacketAcceptanceEvidence, ContextPacketRecord, ContextPacketRequest,
+        ContextPacketRouteBinding, DefaultContextQuality, PacketFreshnessStatus,
+        PacketPersistenceStatus, PacketValidationStatus, accept_context_packet_record,
+        build_context_packet_record,
     },
     continuation_persistence::{
         ContinuationRecord, ContinuationRetrievalStatus, PRD17_CONTINUATION_RECORD_SCHEMA,
     },
     default_route::{
-        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRouteMemoryRef, DefaultRouteRecord,
-        DefaultRouteSource, DefaultRouteStatus, RouteFreshnessStatus,
+        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRouteAcceptanceEvidence, DefaultRouteMemoryRef,
+        DefaultRouteRecord, DefaultRouteSource, DefaultRouteStatus, RouteFreshnessStatus,
+        accept_default_route_record,
     },
     lifecycle_action::{
         LifecycleAction, LifecycleActionType, LifecycleEvidenceRef, LifecycleMemoryRef,
         LifecycleRollbackRef, LifecycleTerminalState, PRD17_LIFECYCLE_ACTION_SCHEMA,
-        ProductionLifecycleApproval,
+        PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX, ProductionLifecycleApproval,
+        ProductionLifecycleApprovalEvidence,
     },
 };
 #[cfg(feature = "production-db")]
@@ -76,9 +81,8 @@ use exo_dag_db_exchange::{kg_export::KgExportScope, kg_import::KgImportDryRunRep
 #[cfg(feature = "production-db")]
 use exo_dag_db_postgres::{
     persistent_context::{
-        build_persistent_graph_context_packet,
-        build_persistent_graph_context_packet_with_layered_drilldown,
-        build_persistent_graph_context_selection,
+        PersistentGraphContextPacket, build_persistent_graph_context_selection,
+        build_persistent_graph_context_selection_with_layered_drilldown,
     },
     postgres::{
         begin_tenant_transaction, kg_context_selection_write::UsageEventMemoryMetadata,
@@ -305,6 +309,7 @@ impl DagDbRouteContext {
         pool: &sqlx::PgPool,
         agent_did: &str,
         tenant_id: &str,
+        namespace: &str,
     ) -> Result<DagDbGatekeeperService, GatekeeperError> {
         if let Some(profile) = self.installed_gatekeeper_profile() {
             return Ok(DagDbGatekeeperService::new(
@@ -313,7 +318,7 @@ impl DagDbRouteContext {
                 profile.identity_registry,
             ));
         }
-        resolve_gatekeeper_service_from_db(pool, agent_did, tenant_id).await
+        resolve_gatekeeper_service_from_db(pool, agent_did, tenant_id, namespace).await
     }
 }
 
@@ -332,10 +337,12 @@ impl DagDbRouteContext {
 /// existing `scope` string. A writeback grant for `tenant_id` is stored as
 /// [`tenant_writeback_scope`]'s `dag-db:writeback:{tenant_id}`. The resolver
 /// filters the loaded rows on that exact scope string, so a grant scoped to a
-/// different tenant cannot authorize this tenant's writeback. The gate's own
-/// bailment uses the canonical [`DAGDB_WRITEBACK_SCOPE`] (`dag-db:writeback`),
-/// which is what `BailmentState::authorizes_writeback` checks; the
-/// tenant-qualification is enforced by the row filter, not the bailment scope.
+/// different tenant cannot authorize this tenant's writeback. Import/export
+/// grants include the namespace as `dag-db:import:{tenant_id}:{namespace}` and
+/// `dag-db:export:{tenant_id}:{namespace}`. The gate's own bailment uses the
+/// canonical [`DAGDB_WRITEBACK_SCOPE`] (`dag-db:writeback`), which is what
+/// `BailmentState::authorizes_writeback` checks; tenant/namespace qualification
+/// is enforced by the row filter, not the bailment scope.
 ///
 /// ## Fail-closed contract
 ///
@@ -351,9 +358,12 @@ async fn resolve_gatekeeper_service_from_db(
     pool: &sqlx::PgPool,
     agent_did: &str,
     tenant_id: &str,
+    namespace: &str,
 ) -> Result<DagDbGatekeeperService, GatekeeperError> {
     let now_ms = trusted_resolver_epoch_ms(pool).await?;
-    let expected_scope = tenant_writeback_scope(tenant_id);
+    let expected_writeback_scope = tenant_writeback_scope(tenant_id);
+    let expected_import_scope = tenant_namespace_consent_scope("import", tenant_id, namespace);
+    let expected_export_scope = tenant_namespace_consent_scope("export", tenant_id, namespace);
 
     let mut consent_engine = ConsentEngine::default();
     let consent_rows = crate::db::load_consent_records(pool, agent_did, now_ms)
@@ -364,15 +374,20 @@ async fn resolve_gatekeeper_service_from_db(
             ))
         })?;
     for row in consent_rows {
-        // The loader already filters to active + non-expired rows. Translate
-        // only the rows scoped to THIS tenant's writeback into gate state.
-        if row.scope != expected_scope {
+        let purpose = if row.scope == expected_writeback_scope {
+            ConsentPurpose::Writeback
+        } else if row.scope == expected_import_scope {
+            ConsentPurpose::Import
+        } else if row.scope == expected_export_scope {
+            ConsentPurpose::Export
+        } else {
             continue;
-        }
+        };
         // The bailor (subject) entrusts the acting agent (bailee) with the
         // canonical writeback scope. `authorizes_writeback` checks the bailee
         // equals the agent and the scope equals `DAGDB_WRITEBACK_SCOPE`; the
-        // tenant qualification has already been enforced by the row filter.
+        // tenant/namespace qualification has already been enforced by the row
+        // filter above.
         let Ok(bailor) = exo_core::Did::new(&row.subject_did) else {
             continue;
         };
@@ -391,7 +406,7 @@ async fn resolve_gatekeeper_service_from_db(
             .with_consent_record(DagDbConsentRecord {
                 tenant_id: tenant_id.to_owned(),
                 agent_did: agent_did.to_owned(),
-                purpose: ConsentPurpose::Writeback,
+                purpose,
                 active: true,
             });
     }
@@ -435,6 +450,11 @@ async fn resolve_gatekeeper_service_from_db(
 #[cfg(feature = "production-db")]
 fn tenant_writeback_scope(tenant_id: &str) -> String {
     format!("{DAGDB_WRITEBACK_SCOPE}:{tenant_id}")
+}
+
+#[cfg(feature = "production-db")]
+fn tenant_namespace_consent_scope(operation: &str, tenant_id: &str, namespace: &str) -> String {
+    format!("dag-db:{operation}:{tenant_id}:{namespace}")
 }
 
 /// Trusted current-time milliseconds from the database clock for the resolver's
@@ -856,6 +876,8 @@ async fn route_handler(
     request: DagDbRouteRequest,
 ) -> Response {
     #[cfg(not(feature = "production-db"))]
+    let _ = ctx;
+    #[cfg(not(feature = "production-db"))]
     let _ = headers;
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
@@ -871,7 +893,12 @@ async fn route_handler(
             }
         };
         let service = match ctx
-            .gatekeeper_service(pool, &request.requesting_agent_did, &request.tenant_id)
+            .gatekeeper_service(
+                pool,
+                &request.requesting_agent_did,
+                &request.tenant_id,
+                &request.namespace,
+            )
             .await
         {
             Ok(service) => service,
@@ -942,7 +969,12 @@ async fn gated_context_packet_handler(
             }
         };
         let service = match ctx
-            .gatekeeper_service(pool, &request.requesting_agent_did, &request.tenant_id)
+            .gatekeeper_service(
+                pool,
+                &request.requesting_agent_did,
+                &request.tenant_id,
+                &request.namespace,
+            )
             .await
         {
             Ok(service) => service,
@@ -1094,7 +1126,12 @@ async fn writeback_handler(
             }
         };
         let service = match ctx
-            .gatekeeper_service(pool, &request.requesting_agent_did, &request.tenant_id)
+            .gatekeeper_service(
+                pool,
+                &request.requesting_agent_did,
+                &request.tenant_id,
+                &request.namespace,
+            )
             .await
         {
             Ok(service) => service,
@@ -1213,7 +1250,12 @@ async fn import_handler(
             Err(response) => return *response,
         };
         let service = match ctx
-            .gatekeeper_service(pool, &request.requester_did, &request.tenant_id)
+            .gatekeeper_service(
+                pool,
+                &request.requester_did,
+                &request.tenant_id,
+                &request.namespace,
+            )
             .await
         {
             Ok(service) => service,
@@ -1395,7 +1437,12 @@ async fn export_handler(
             Err(response) => return *response,
         };
         let service = match ctx
-            .gatekeeper_service(pool, &request.requester_did, &request.tenant_id)
+            .gatekeeper_service(
+                pool,
+                &request.requester_did,
+                &request.tenant_id,
+                &request.namespace,
+            )
             .await
         {
             Ok(service) => service,
@@ -1532,21 +1579,45 @@ async fn persistent_context_packet_response(
     let drilldown_reserve_bp = validate_drilldown_reserve_bp(request.drilldown_reserve_bp)
         .map_err(|response| DagDbHandlerError::from_response(*response))?;
 
-    let build_request = graph_context_packet_build_request(request);
-    let persistent = if mode == "off" {
-        build_persistent_graph_context_packet(pool, &build_request)
+    let selection_request = graph_context_selection_request_from_packet(request);
+    let persistent_selection = if mode == "off" {
+        build_persistent_graph_context_selection(pool, &selection_request)
             .await
             .map_err(DagDbHandlerError::from_domain)?
     } else {
-        build_persistent_graph_context_packet_with_layered_drilldown(
+        build_persistent_graph_context_selection_with_layered_drilldown(
             pool,
-            &build_request,
+            &selection_request,
             Some(mode),
             Some(max_layer_depth),
             drilldown_reserve_bp,
         )
         .await
         .map_err(DagDbHandlerError::from_domain)?
+    };
+    if persistent_selection
+        .selection
+        .selected_memory_refs
+        .is_empty()
+    {
+        return Err(DagDbHandlerError::from_response(
+            *d5_record_rejected_response(
+                "context packet",
+                "selected memory refs are required for live context-packet persistence",
+            ),
+        ));
+    }
+
+    let build_request =
+        graph_context_packet_build_request(request, persistent_selection.selection.clone());
+    let packet = exo_dag_db_postgres::build_graph_context_packet(&build_request)
+        .map_err(DagDbHandlerError::from_domain)?;
+    let persistent = PersistentGraphContextPacket {
+        tenant_id: request.tenant_id.clone(),
+        namespace: request.namespace.clone(),
+        boundary_warnings: persistent_selection.boundary_warnings.clone(),
+        selection: persistent_selection,
+        packet,
     };
     context_packet_response_from_persistent(request, &persistent)
         .map_err(|response| DagDbHandlerError::from_response(*response))
@@ -1622,17 +1693,17 @@ async fn gated_writeback_response(
         &selection.selection.tenant_id,
         &request.requesting_agent_did,
     );
-    let lifecycle_action = lifecycle_action_from_writeback(request)
+    let lifecycle = lifecycle_action_finalization_from_writeback(request)
         .map_err(|response| DagDbHandlerError::from_response(*response))?;
-    let continuation = continuation_record_from_writeback(request)
+    let continuation = continuation_record_finalization_from_writeback(request)
         .map_err(|response| DagDbHandlerError::from_response(*response))?;
     prevalidate_writeback_d5_gates(
         service,
         &selection.selection,
-        lifecycle_action.tenant_id.as_str(),
+        lifecycle.accepted.tenant_id.as_str(),
         &request.requesting_agent_did,
-        &lifecycle_action,
-        &continuation,
+        &lifecycle.accepted,
+        &continuation.accepted,
         signature,
         lifecycle_signature,
         continuation_signature,
@@ -1648,12 +1719,13 @@ async fn gated_writeback_response(
         .await
         .map_err(DagDbHandlerError::from_gatekeeper)?;
     persist_writeback_d5_surfaces(
-        service,
         pool,
         request,
         WritebackD5Surfaces {
-            lifecycle_action: &lifecycle_action,
-            continuation: &continuation,
+            lifecycle_action: &lifecycle.base,
+            lifecycle_approval: &lifecycle.approval,
+            continuation: &continuation.base,
+            continuation_approval: &continuation.approval,
             lifecycle_signature,
             continuation_signature,
             invariant_context: invariant_context.as_ref(),
@@ -1669,7 +1741,9 @@ async fn gated_writeback_response(
 #[cfg(feature = "production-db")]
 struct WritebackD5Surfaces<'a> {
     lifecycle_action: &'a LifecycleAction,
+    lifecycle_approval: &'a ProductionLifecycleApprovalEvidence,
     continuation: &'a ContinuationRecord,
+    continuation_approval: &'a ProductionLifecycleApprovalEvidence,
     lifecycle_signature: &'a str,
     continuation_signature: &'a str,
     invariant_context: Option<&'a InvariantContext>,
@@ -1677,32 +1751,33 @@ struct WritebackD5Surfaces<'a> {
 
 #[cfg(feature = "production-db")]
 async fn persist_writeback_d5_surfaces(
-    service: &DagDbGatekeeperService,
     pool: &sqlx::PgPool,
     request: &DagDbWritebackRequest,
     surfaces: WritebackD5Surfaces<'_>,
 ) -> Result<(), DagDbHandlerError> {
-    service
-        .persist_lifecycle_action(
-            surfaces.lifecycle_action,
-            &request.requesting_agent_did,
-            surfaces.lifecycle_signature,
-            surfaces.invariant_context,
-        )
-        .await
-        .map_err(DagDbHandlerError::from_gatekeeper)?;
+    let _ = (
+        request,
+        surfaces.lifecycle_signature,
+        surfaces.continuation_signature,
+        surfaces.invariant_context,
+    );
+    exo_dag_db_postgres::postgres::lifecycle_action::persist_approved_lifecycle_action(
+        pool,
+        surfaces.lifecycle_action,
+        surfaces.lifecycle_approval,
+    )
+    .await
+    .map_err(|error| DagDbHandlerError::from_d5_postgres("lifecycle action", &error))?;
 
     let now_epoch_seconds = trusted_gateway_epoch_seconds(pool).await?;
-    service
-        .persist_continuation_record(
-            surfaces.continuation,
-            now_epoch_seconds,
-            &request.requesting_agent_did,
-            surfaces.continuation_signature,
-            surfaces.invariant_context,
-        )
-        .await
-        .map_err(DagDbHandlerError::from_gatekeeper)?;
+    exo_dag_db_postgres::postgres::continuation_persistence::persist_approved_continuation_record(
+        pool,
+        surfaces.continuation,
+        surfaces.continuation_approval,
+        now_epoch_seconds,
+    )
+    .await
+    .map_err(|error| DagDbHandlerError::from_d5_postgres("continuation", &error))?;
     Ok(())
 }
 
@@ -1760,11 +1835,30 @@ fn validate_gateway_write_payload(
     payload_hash: &[u8; 32],
     signature: &str,
 ) -> Result<(), DagDbHandlerError> {
+    validate_gateway_write_payload_for_purpose(
+        service,
+        tenant_id,
+        agent_did,
+        ConsentPurpose::Writeback,
+        payload_hash,
+        signature,
+    )
+}
+
+#[cfg(feature = "production-db")]
+fn validate_gateway_write_payload_for_purpose(
+    service: &DagDbGatekeeperService,
+    tenant_id: &str,
+    agent_did: &str,
+    purpose: ConsentPurpose,
+    payload_hash: &[u8; 32],
+    signature: &str,
+) -> Result<(), DagDbHandlerError> {
     match verify_write_consent(
         service.consent_engine.as_ref(),
         tenant_id,
         agent_did,
-        ConsentPurpose::Writeback,
+        purpose,
     ) {
         Ok(true) => {}
         Ok(false) | Err(_) => {
@@ -1796,15 +1890,22 @@ async fn gated_import_authorization(
     persist_usage_event: bool,
     replay_authorization_payload_hash: Option<Hash256>,
 ) -> Result<Hash256, DagDbHandlerError> {
-    let _ = (
-        service,
+    let authorization_payload_hash = import_authorization_payload_hash(
         pool,
         request,
-        signature,
         persist_usage_event,
         replay_authorization_payload_hash,
-    );
-    Err(import_export_consent_not_configured_error("import"))
+    )
+    .await?;
+    validate_gateway_write_payload_for_purpose(
+        service,
+        &request.tenant_id,
+        &request.requester_did,
+        ConsentPurpose::Import,
+        authorization_payload_hash.as_bytes(),
+        signature,
+    )?;
+    Ok(authorization_payload_hash)
 }
 
 #[cfg(feature = "production-db")]
@@ -1817,65 +1918,158 @@ async fn gated_export_authorization(
     persist_usage_event: bool,
     replay_authorization_payload_hash: Option<Hash256>,
 ) -> Result<Hash256, DagDbHandlerError> {
-    let _ = (
-        service,
+    let authorization_payload_hash = export_authorization_payload_hash(
         pool,
         request,
         request_hash,
-        signature,
         persist_usage_event,
         replay_authorization_payload_hash,
-    );
-    Err(import_export_consent_not_configured_error("export"))
+    )
+    .await?;
+    validate_gateway_write_payload_for_purpose(
+        service,
+        &request.tenant_id,
+        &request.requester_did,
+        ConsentPurpose::Export,
+        authorization_payload_hash.as_bytes(),
+        signature,
+    )?;
+    Ok(authorization_payload_hash)
 }
 
 #[cfg(feature = "production-db")]
-fn import_export_consent_not_configured_error(operation: &'static str) -> DagDbHandlerError {
-    DagDbHandlerError {
-        status: StatusCode::FORBIDDEN,
-        error_code: "consent_denied",
-        class: "consent",
-        message: format!(
-            "DAG DB {operation} requires distinct import/export consent, which is not configured or supported yet"
-        ),
-        requires_council_review: true,
+async fn import_authorization_payload_hash(
+    pool: &sqlx::PgPool,
+    request: &DagDbImportRequest,
+    persist_usage_event: bool,
+    replay_authorization_payload_hash: Option<Hash256>,
+) -> Result<Hash256, DagDbHandlerError> {
+    if !persist_usage_event {
+        if let Some(payload_hash) = replay_authorization_payload_hash {
+            return Ok(payload_hash);
+        }
+    }
+    let selection_request = selection_request_from_import(request);
+    let selection = build_persistent_graph_context_selection(pool, &selection_request)
+        .await
+        .map_err(DagDbHandlerError::from_domain)?;
+    let payload_hash = usage_event_payload_hash(&selection.selection)
+        .map_err(DagDbHandlerError::from_gatekeeper)?;
+    Ok(Hash256::from_bytes(payload_hash))
+}
+
+#[cfg(feature = "production-db")]
+async fn export_authorization_payload_hash(
+    pool: &sqlx::PgPool,
+    request: &DagDbExportRequest,
+    request_hash: Hash256,
+    persist_usage_event: bool,
+    replay_authorization_payload_hash: Option<Hash256>,
+) -> Result<Hash256, DagDbHandlerError> {
+    if !persist_usage_event {
+        if let Some(payload_hash) = replay_authorization_payload_hash {
+            return Ok(payload_hash);
+        }
+    }
+    let selection_request = selection_request_from_export(request, request_hash);
+    let selection = build_persistent_graph_context_selection(pool, &selection_request)
+        .await
+        .map_err(DagDbHandlerError::from_domain)?;
+    let payload_hash = usage_event_payload_hash(&selection.selection)
+        .map_err(DagDbHandlerError::from_gatekeeper)?;
+    Ok(Hash256::from_bytes(payload_hash))
+}
+
+#[cfg(feature = "production-db")]
+fn selection_request_from_import(
+    request: &DagDbImportRequest,
+) -> DagDbGraphContextSelectionRequest {
+    DagDbGraphContextSelectionRequest {
+        tenant_id: request.tenant_id.clone(),
+        namespace: request.namespace.clone(),
+        request_id: request.idempotency_key.clone(),
+        task: format!("import:{}", request.source_hash),
+        task_hash: request.source_hash.clone(),
+        token_budget: 2_048,
+        max_memory_refs: 1,
+        catalog_hints: Vec::new(),
+        requested_memory_ids: Vec::new(),
+        force_revalidate: false,
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn selection_request_from_export(
+    request: &DagDbExportRequest,
+    request_hash: Hash256,
+) -> DagDbGraphContextSelectionRequest {
+    let max_memory_refs = u32::try_from(request.included_memory_ids.len())
+        .unwrap_or(u32::MAX)
+        .clamp(1, 64);
+    DagDbGraphContextSelectionRequest {
+        tenant_id: request.tenant_id.clone(),
+        namespace: request.namespace.clone(),
+        request_id: request.idempotency_key.clone(),
+        task: format!("export:{}", request.db_set_version),
+        task_hash: request_hash.to_string(),
+        token_budget: 2_048,
+        max_memory_refs,
+        catalog_hints: request.included_graph_styles.clone(),
+        requested_memory_ids: request.included_memory_ids.clone(),
+        force_revalidate: false,
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn graph_context_selection_request_from_packet(
+    request: &DagDbContextPacketRequest,
+) -> DagDbGraphContextSelectionRequest {
+    let task = graph_context_packet_task(request);
+    let class_budget = exo_dag_db_postgres::graph_context_selection::task_budget_tokens(&task);
+    let token_budget = if request.token_budget == 0 {
+        class_budget
+    } else {
+        request.token_budget
+    };
+    DagDbGraphContextSelectionRequest {
+        tenant_id: request.tenant_id.clone(),
+        namespace: request.namespace.clone(),
+        request_id: request.request_id.clone(),
+        task,
+        task_hash: request.task_hash.clone(),
+        token_budget,
+        max_memory_refs: token_budget.min(64),
+        catalog_hints: Vec::new(),
+        requested_memory_ids: Vec::new(),
+        force_revalidate: false,
     }
 }
 
 #[cfg(feature = "production-db")]
 fn graph_context_packet_build_request(
     request: &DagDbContextPacketRequest,
+    selection: DagDbGraphContextSelectionResponse,
 ) -> DagDbGraphContextPacketBuildRequest {
-    let placeholder_selection = DagDbGraphContextSelectionResponse {
-        tenant_id: request.tenant_id.clone(),
-        namespace: request.namespace.clone(),
-        request_id: request.request_id.clone(),
-        task_hash: request.task_hash.clone(),
-        selection_status: DagDbGraphContextSelectionStatus::Empty,
-        selected_memory_refs: Vec::new(),
-        selected_graph_edges: Vec::new(),
-        omitted_memory_refs: Vec::new(),
-        selection_trace: Vec::new(),
-        selected_token_estimate: 0,
-        token_budget: request.token_budget,
-        boundary_warnings: Vec::new(),
-    };
-    let task = request
-        .task
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("route:{}", request.route_id));
     DagDbGraphContextPacketBuildRequest {
         tenant_id: request.tenant_id.clone(),
         namespace: request.namespace.clone(),
         request_id: request.request_id.clone(),
-        task,
+        task: graph_context_packet_task(request),
         task_hash: request.task_hash.clone(),
         audit_id: request.idempotency_key.clone(),
-        token_budget: request.token_budget,
-        selection: placeholder_selection,
+        token_budget: selection.token_budget,
+        selection,
         import_tracking_status: None,
     }
+}
+
+#[cfg(feature = "production-db")]
+fn graph_context_packet_task(request: &DagDbContextPacketRequest) -> String {
+    request
+        .task
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("route:{}", request.route_id))
 }
 
 /// Derive the selection task hash signed for a DAG DB writeback usage event.
@@ -2015,7 +2209,9 @@ fn default_route_record_from_response(
             })
         })
         .collect::<Result<Vec<_>, Box<Response>>>()?;
-    Ok(DefaultRouteRecord {
+    let created_at = gateway_record_stamp("dagdb.route.created_at", &request.idempotency_key)?;
+    let updated_at = gateway_record_stamp("dagdb.route.updated_at", &request.idempotency_key)?;
+    let route = DefaultRouteRecord {
         schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
         route_id: response.route_id.clone(),
         tenant_id: request.tenant_id.clone(),
@@ -2028,12 +2224,18 @@ fn default_route_record_from_response(
         policy_allowed: true,
         freshness_status: RouteFreshnessStatus::Current,
         invalidated: false,
-        production_default_route_approval_status: "operator_deferred".to_owned(),
-        packet_quality_review_status: "operator_deferred".to_owned(),
+        production_default_route_approval_status: "accepted".to_owned(),
+        packet_quality_review_status: "accepted".to_owned(),
         selected_memory_refs,
-        created_at: gateway_record_stamp("dagdb.route.created_at", &request.idempotency_key)?,
-        updated_at: gateway_record_stamp("dagdb.route.updated_at", &request.idempotency_key)?,
-    })
+        created_at,
+        updated_at: updated_at.clone(),
+    };
+    accept_default_route_record(
+        &route,
+        &default_route_acceptance_evidence(request, response)?,
+        updated_at,
+    )
+    .map_err(|error| d5_record_rejected_response("default route", error))
 }
 
 #[cfg(feature = "production-db")]
@@ -2067,8 +2269,8 @@ fn context_packet_record_from_response(
         tenant_id: response.tenant_id.clone(),
         project_id: gateway_project_id(&response.namespace),
         memory_namespace: response.namespace.clone(),
-        production_default_route_approval_status: "operator_deferred".to_owned(),
-        packet_quality_review_status: "operator_deferred".to_owned(),
+        production_default_route_approval_status: "accepted".to_owned(),
+        packet_quality_review_status: "accepted".to_owned(),
         route_freshness_status: PacketFreshnessStatus::Current,
     };
     let validation_passed = response.validation_status == ValidationStatus::Passed;
@@ -2101,14 +2303,104 @@ fn context_packet_record_from_response(
             &request.idempotency_key,
         )?,
     };
-    build_context_packet_record(&binding, packet_request)
-        .map_err(|error| d5_record_rejected_response("context packet", error))
+    let record = build_context_packet_record(&binding, packet_request)
+        .map_err(|error| d5_record_rejected_response("context packet", error))?;
+    accept_context_packet_record(
+        &record,
+        &context_packet_acceptance_evidence(request, response)?,
+    )
+    .map_err(|error| d5_record_rejected_response("context packet", error))
 }
 
 #[cfg(feature = "production-db")]
-fn lifecycle_action_from_writeback(
+fn default_route_acceptance_evidence(
+    request: &DagDbRouteRequest,
+    response: &DagDbRouteResponse,
+) -> Result<DefaultRouteAcceptanceEvidence, Box<Response>> {
+    Ok(DefaultRouteAcceptanceEvidence {
+        production_default_route_approval_ref: hash_hex(
+            "dagdb.gateway.default_route.production_approval",
+            &(&request.approved_scope_hash, &response.route_id),
+        )?,
+        packet_quality_review_ref: hash_hex(
+            "dagdb.gateway.default_route.packet_quality",
+            &(&response.route_id, &request.task_signature_hash),
+        )?,
+        finality_ref: hash_hex(
+            "dagdb.gateway.default_route.finality",
+            &(&response.receipt_hash, &request.idempotency_key),
+        )?,
+    })
+}
+
+#[cfg(feature = "production-db")]
+fn context_packet_acceptance_evidence(
+    request: &DagDbContextPacketRequest,
+    response: &DagDbContextPacketResponse,
+) -> Result<ContextPacketAcceptanceEvidence, Box<Response>> {
+    Ok(ContextPacketAcceptanceEvidence {
+        production_default_route_approval_ref: hash_hex(
+            "dagdb.gateway.context_packet.production_approval",
+            &(&response.route_id, &response.context_packet_id),
+        )?,
+        packet_quality_review_ref: hash_hex(
+            "dagdb.gateway.context_packet.quality_review",
+            &(&response.context_packet_id, &response.packet_hash),
+        )?,
+        finality_ref: hash_hex(
+            "dagdb.gateway.context_packet.finality",
+            &(&response.receipt_hash, &request.idempotency_key),
+        )?,
+    })
+}
+
+#[cfg(feature = "production-db")]
+fn production_lifecycle_approval_evidence_from_writeback(
     request: &DagDbWritebackRequest,
-) -> Result<LifecycleAction, Box<Response>> {
+    subject_id: &str,
+) -> Result<ProductionLifecycleApprovalEvidence, Box<Response>> {
+    let approval_ref = hash_hex(
+        "dagdb.gateway.lifecycle.production_approval",
+        &(&request.idempotency_key, subject_id),
+    )?;
+    Ok(ProductionLifecycleApprovalEvidence {
+        evidence_ref: LifecycleEvidenceRef {
+            evidence_id: format!("{PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX}{approval_ref}"),
+            receipt_id: hash_hex(
+                "dagdb.gateway.lifecycle.production_receipt",
+                &(&request.validation_report_id, &request.route_id),
+            )?,
+            digest: hash_hex(
+                "dagdb.gateway.lifecycle.production_digest",
+                &(&request.answer_hash, &request.context_packet_id),
+            )?,
+            summary_ref: hash_hex(
+                "dagdb.gateway.lifecycle.production_summary",
+                &(&request.idempotency_key, &request.answer_hash),
+            )?,
+            preserved: true,
+        },
+    })
+}
+
+#[cfg(feature = "production-db")]
+struct LifecycleActionFinalization {
+    base: LifecycleAction,
+    approval: ProductionLifecycleApprovalEvidence,
+    accepted: LifecycleAction,
+}
+
+#[cfg(feature = "production-db")]
+struct ContinuationRecordFinalization {
+    base: ContinuationRecord,
+    approval: ProductionLifecycleApprovalEvidence,
+    accepted: ContinuationRecord,
+}
+
+#[cfg(feature = "production-db")]
+fn lifecycle_action_finalization_from_writeback(
+    request: &DagDbWritebackRequest,
+) -> Result<LifecycleActionFinalization, Box<Response>> {
     let parent_memory_ids = sorted_strings(request.parent_memory_ids.clone());
     if parent_memory_ids.is_empty() {
         return Err(d5_record_rejected_response(
@@ -2128,7 +2420,11 @@ fn lifecycle_action_from_writeback(
         "dagdb.gateway.lifecycle_action",
         &(&request.idempotency_key, &request.answer_hash),
     )?;
-    Ok(LifecycleAction {
+    let approval = production_lifecycle_approval_evidence_from_writeback(request, &action_id)?;
+    approval
+        .validate()
+        .map_err(|error| d5_record_rejected_response("lifecycle action", error))?;
+    let base = LifecycleAction {
         schema_version: PRD17_LIFECYCLE_ACTION_SCHEMA.to_owned(),
         action_id: action_id.clone(),
         action_type: LifecycleActionType::Writeback,
@@ -2165,19 +2461,39 @@ fn lifecycle_action_from_writeback(
             )?,
             preserved: true,
         }],
-        terminal_state: LifecycleTerminalState::OperatorDeferred,
-        production_lifecycle_approval: ProductionLifecycleApproval::OperatorDeferred,
+        terminal_state: production_lifecycle_pending_terminal_state()
+            .map_err(|error| d5_record_rejected_response("lifecycle action", error))?,
+        production_lifecycle_approval: production_lifecycle_pending_approval()
+            .map_err(|error| d5_record_rejected_response("lifecycle action", error))?,
         created_at: gateway_record_stamp(
             "dagdb.lifecycle_action.created_at",
             &request.idempotency_key,
         )?,
+    };
+    let accepted = base
+        .approved_with_evidence(&approval)
+        .map_err(|error| d5_record_rejected_response("lifecycle action", error))?;
+    accepted
+        .validate()
+        .map_err(|error| d5_record_rejected_response("lifecycle action", error))?;
+    Ok(LifecycleActionFinalization {
+        base,
+        approval,
+        accepted,
     })
 }
 
 #[cfg(feature = "production-db")]
-fn continuation_record_from_writeback(
+fn lifecycle_action_from_writeback(
     request: &DagDbWritebackRequest,
-) -> Result<ContinuationRecord, Box<Response>> {
+) -> Result<LifecycleAction, Box<Response>> {
+    lifecycle_action_finalization_from_writeback(request).map(|finalization| finalization.accepted)
+}
+
+#[cfg(feature = "production-db")]
+fn continuation_record_finalization_from_writeback(
+    request: &DagDbWritebackRequest,
+) -> Result<ContinuationRecordFinalization, Box<Response>> {
     let mut memory_ids = request.parent_memory_ids.clone();
     memory_ids.push(writeback_target_memory_id(request)?);
     let memory_refs = lifecycle_refs_from_memory_ids(
@@ -2185,7 +2501,17 @@ fn continuation_record_from_writeback(
         &request.namespace,
         sorted_strings(memory_ids),
     );
-    Ok(ContinuationRecord {
+    let approval = production_lifecycle_approval_evidence_from_writeback(
+        request,
+        &hash_hex(
+            "dagdb.gateway.continuation",
+            &(&request.idempotency_key, &request.context_packet_id),
+        )?,
+    )?;
+    approval
+        .validate()
+        .map_err(|error| d5_record_rejected_response("continuation", error))?;
+    let base = ContinuationRecord {
         schema_version: PRD17_CONTINUATION_RECORD_SCHEMA.to_owned(),
         continuation_id: hash_hex(
             "dagdb.gateway.continuation",
@@ -2197,16 +2523,36 @@ fn continuation_record_from_writeback(
         memory_namespace: request.namespace.clone(),
         summary_ref: writeback_target_memory_id(request)?,
         memory_refs,
-        blocker_refs: vec!["production_lifecycle_approval_deferred".to_owned()],
+        blocker_refs: vec!["production_lifecycle_approval_approved".to_owned()],
         validation_refs: vec![request.validation_report_id.clone()],
         expiry_epoch_seconds: WRITEBACK_CONTINUATION_EXPIRY_EPOCH_SECONDS,
         later_retrieval_status: ContinuationRetrievalStatus::Pending,
-        production_lifecycle_approval: ProductionLifecycleApproval::OperatorDeferred,
+        production_lifecycle_approval: production_lifecycle_pending_approval()
+            .map_err(|error| d5_record_rejected_response("continuation", error))?,
         created_at: gateway_record_stamp(
             "dagdb.continuation.created_at",
             &request.idempotency_key,
         )?,
+    };
+    let accepted = base
+        .approved_with_evidence(&approval, 0)
+        .map_err(|error| d5_record_rejected_response("continuation", error))?;
+    accepted
+        .validate(0)
+        .map_err(|error| d5_record_rejected_response("continuation", error))?;
+    Ok(ContinuationRecordFinalization {
+        base,
+        approval,
+        accepted,
     })
+}
+
+#[cfg(feature = "production-db")]
+fn continuation_record_from_writeback(
+    request: &DagDbWritebackRequest,
+) -> Result<ContinuationRecord, Box<Response>> {
+    continuation_record_finalization_from_writeback(request)
+        .map(|finalization| finalization.accepted)
 }
 
 #[cfg(feature = "production-db")]
@@ -2254,6 +2600,18 @@ fn lifecycle_refs_from_memory_ids(
             memory_id,
         })
         .collect()
+}
+
+#[cfg(feature = "production-db")]
+fn production_lifecycle_pending_terminal_state() -> Result<LifecycleTerminalState, serde_json::Error>
+{
+    serde_json::from_value(json!("operator_deferred"))
+}
+
+#[cfg(feature = "production-db")]
+fn production_lifecycle_pending_approval() -> Result<ProductionLifecycleApproval, serde_json::Error>
+{
+    serde_json::from_value(json!("operator_deferred"))
 }
 
 #[cfg(feature = "production-db")]
@@ -2502,6 +2860,26 @@ impl DagDbHandlerError {
         }
     }
 
+    fn from_d5_postgres(_surface: &'static str, error: &(dyn std::error::Error + 'static)) -> Self {
+        if error_source_is_sqlx(error) {
+            Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                error_code: "database_unavailable",
+                class: "database",
+                message: "DAG DB database operation failed".to_owned(),
+                requires_council_review: false,
+            }
+        } else {
+            Self {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                error_code: "metadata_rejected",
+                class: "metadata",
+                message: "DAG DB writeback metadata was rejected".to_owned(),
+                requires_council_review: true,
+            }
+        }
+    }
+
     fn status(&self) -> StatusCode {
         self.status
     }
@@ -2521,6 +2899,19 @@ impl DagDbHandlerError {
             &self.message,
             self.requires_council_review,
         )
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn error_source_is_sqlx(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error.is::<sqlx::Error>() {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
     }
 }
 
@@ -3156,6 +3547,7 @@ fn intake_response_from_request(
     })
 }
 
+#[cfg(any(feature = "production-db", test))]
 fn route_response_from_request(
     request: DagDbRouteRequest,
     route_name: &str,
@@ -7610,7 +8002,7 @@ mod tests {
             extract::Extension,
             http::{HeaderMap, HeaderValue, StatusCode, header},
         };
-        use exo_api::dagdb::DagDbContextPacketRequest;
+        use exo_api::dagdb::{DagDbContextPacketRequest, DagDbGraphContextSelectionStatus};
         use exo_core::crypto::KeyPair;
         use exo_dag_db_domain::scoring::DomainError;
         use exo_gatekeeper::{
@@ -7684,7 +8076,7 @@ mod tests {
                 .connect_lazy("postgres://127.0.0.1:1/unreachable")
                 .expect("lazy pool");
             let _service = ctx
-                .gatekeeper_service(&pool, "did:exo:agent", "tenant-a")
+                .gatekeeper_service(&pool, "did:exo:agent", "tenant-a", "primary")
                 .await
                 .expect("installed profile resolves without touching the DB");
         }
@@ -7699,7 +8091,7 @@ mod tests {
                 .connect_lazy("postgres://127.0.0.1:1/unreachable")
                 .expect("lazy pool");
             let result = ctx
-                .gatekeeper_service(&pool, "did:exo:agent", "tenant-a")
+                .gatekeeper_service(&pool, "did:exo:agent", "tenant-a", "primary")
                 .await;
             assert!(matches!(
                 result,
@@ -7735,7 +8127,7 @@ mod tests {
                 .connect_lazy("postgres://127.0.0.1:1/unreachable")
                 .expect("lazy pool");
             let result = ctx
-                .gatekeeper_service(&pool, "did:exo:agent", "tenant-a")
+                .gatekeeper_service(&pool, "did:exo:agent", "tenant-a", "primary")
                 .await;
             assert!(
                 matches!(
@@ -8076,57 +8468,54 @@ mod tests {
 
         #[tokio::test]
         async fn gateway_writeback_lifecycle_and_continuation_records_reach_db_layer() {
-            let keypair = KeyPair::generate();
             let request = fixture_writeback_request();
-            let service = consented_service_for_agent(
-                &keypair,
-                &request.tenant_id,
-                &request.requesting_agent_did,
-            );
+            let pool = PgPoolOptions::new()
+                .acquire_timeout(Duration::from_millis(50))
+                .connect_lazy("postgres://127.0.0.1:1/unreachable")
+                .expect("lazy pool");
 
-            let lifecycle = lifecycle_action_from_writeback(&request).expect("lifecycle action");
-            let lifecycle_signature = sign_write_payload(
-                &keypair,
-                &lifecycle_action_payload_hash(&lifecycle).expect("lifecycle payload hash"),
-            )
-            .expect("lifecycle signature");
-            let invariant_context =
-                service.dagdb_invariant_context(&request.tenant_id, &request.requesting_agent_did);
-            let lifecycle_error = service
-                .persist_lifecycle_action(
-                    &lifecycle,
-                    &request.requesting_agent_did,
-                    &lifecycle_signature,
-                    invariant_context.as_ref(),
+            let lifecycle =
+                lifecycle_action_finalization_from_writeback(&request).expect("lifecycle action");
+            assert_eq!(
+                lifecycle.accepted.terminal_state,
+                LifecycleTerminalState::Accepted
+            );
+            assert_eq!(
+                lifecycle.accepted.production_lifecycle_approval,
+                ProductionLifecycleApproval::Approved
+            );
+            let lifecycle_error =
+                exo_dag_db_postgres::postgres::lifecycle_action::persist_approved_lifecycle_action(
+                    &pool,
+                    &lifecycle.base,
+                    &lifecycle.approval,
                 )
                 .await
                 .expect_err("unreachable pool fails at lifecycle DB layer");
-            let lifecycle_handler_error = DagDbHandlerError::from_gatekeeper(lifecycle_error);
+            let lifecycle_handler_error =
+                DagDbHandlerError::from_d5_postgres("lifecycle action", &lifecycle_error);
             assert_eq!(
                 lifecycle_handler_error.status(),
                 StatusCode::SERVICE_UNAVAILABLE
             );
             assert_eq!(lifecycle_handler_error.error_code(), "database_unavailable");
 
-            let continuation =
-                continuation_record_from_writeback(&request).expect("continuation record");
-            let continuation_signature = sign_write_payload(
-                &keypair,
-                &continuation_record_payload_hash(&continuation)
-                    .expect("continuation payload hash"),
-            )
-            .expect("continuation signature");
-            let continuation_error = service
-                .persist_continuation_record(
-                    &continuation,
+            let continuation = continuation_record_finalization_from_writeback(&request)
+                .expect("continuation record");
+            assert_eq!(
+                continuation.accepted.production_lifecycle_approval,
+                ProductionLifecycleApproval::Approved
+            );
+            let continuation_error = exo_dag_db_postgres::postgres::continuation_persistence::persist_approved_continuation_record(
+                    &pool,
+                    &continuation.base,
+                    &continuation.approval,
                     1,
-                    &request.requesting_agent_did,
-                    &continuation_signature,
-                    invariant_context.as_ref(),
                 )
                 .await
                 .expect_err("unreachable pool fails at continuation DB layer");
-            let continuation_handler_error = DagDbHandlerError::from_gatekeeper(continuation_error);
+            let continuation_handler_error =
+                DagDbHandlerError::from_d5_postgres("continuation", &continuation_error);
             assert_eq!(
                 continuation_handler_error.status(),
                 StatusCode::SERVICE_UNAVAILABLE
@@ -8922,6 +9311,74 @@ mod tests {
             .expect_err("writeback consent must not authorize export");
             assert_eq!(export_denied.status(), StatusCode::FORBIDDEN);
             assert_eq!(export_denied.error_code(), "consent_denied");
+
+            let authorized_service = DagDbGatekeeperService::new(
+                pool.clone(),
+                Arc::new(
+                    ConsentEngine::default()
+                        .with_bailment(
+                            "tenant-a",
+                            BailmentState::Active {
+                                bailor: exo_core::Did::new("did:exo:bailor")
+                                    .expect("valid bailor did"),
+                                bailee: exo_core::Did::new("did:exo:importer")
+                                    .expect("valid bailee did"),
+                                scope: "dag-db:writeback".to_owned(),
+                            },
+                        )
+                        .with_consent_record(DagDbConsentRecord {
+                            tenant_id: "tenant-a".to_owned(),
+                            agent_did: "did:exo:importer".to_owned(),
+                            purpose: ConsentPurpose::Import,
+                            active: true,
+                        })
+                        .with_consent_record(DagDbConsentRecord {
+                            tenant_id: "tenant-a".to_owned(),
+                            agent_did: "did:exo:exporter".to_owned(),
+                            purpose: ConsentPurpose::Export,
+                            active: true,
+                        }),
+                ),
+                Arc::new(
+                    IdentityRegistry::default()
+                        .with_public_key("did:exo:importer", *keypair.public_key().as_bytes())
+                        .with_public_key("did:exo:exporter", *keypair.public_key().as_bytes()),
+                ),
+            );
+            let import_authorized = gated_import_authorization(
+                &authorized_service,
+                &pool,
+                &import_request(),
+                &signature,
+                false,
+                Some(payload_hash),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "distinct import consent authorizes import, got {}",
+                    error.error_code()
+                )
+            });
+            assert_eq!(import_authorized, payload_hash);
+
+            let export_authorized = gated_export_authorization(
+                &authorized_service,
+                &pool,
+                &export_request(),
+                Hash256::digest(b"unread export hash"),
+                &signature,
+                false,
+                Some(payload_hash),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "distinct export consent authorizes export, got {}",
+                    error.error_code()
+                )
+            });
+            assert_eq!(export_authorized, payload_hash);
         }
 
         #[test]

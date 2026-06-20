@@ -841,7 +841,7 @@
         }
       },
 
-      "ConsentPurpose": { "type": "string", "enum": ["retrieval", "validation", "writeback", "benchmark", "trust_check"] }
+      "ConsentPurpose": { "type": "string", "enum": ["retrieval", "validation", "writeback", "import", "export", "benchmark", "trust_check"] }
     }
   }
 }

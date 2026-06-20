@@ -14,6 +14,8 @@ use thiserror::Error;
 pub const PRD17_LIFECYCLE_ACTION_SCHEMA: &str = "dagdb_prd17_lifecycle_action_v1";
 /// Schema for PRD17C lifecycle mutation reports.
 pub const PRD17_LIFECYCLE_MUTATION_REPORT_SCHEMA: &str = "dagdb_prd17_lifecycle_mutation_report_v1";
+/// Evidence id prefix required before a lifecycle action can claim production approval.
+pub const PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX: &str = "production-lifecycle-approval:";
 
 const RAW_BODY_KEYS: &[&str] = &[
     "body",
@@ -181,6 +183,36 @@ impl LifecycleEvidenceRef {
     }
 }
 
+/// Operator-owned approval/finality evidence for production lifecycle acceptance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductionLifecycleApprovalEvidence {
+    pub evidence_ref: LifecycleEvidenceRef,
+}
+
+impl ProductionLifecycleApprovalEvidence {
+    /// Validate the approval evidence independently of a lifecycle action.
+    pub fn validate(&self) -> Result<()> {
+        self.evidence_ref
+            .validate("production_lifecycle_approval")?;
+        if !self
+            .evidence_ref
+            .evidence_id
+            .starts_with(PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX)
+        {
+            return Err(LifecycleActionError::ProductionApprovalMissing {
+                action_id: self.evidence_ref.evidence_id.clone(),
+            });
+        }
+        if !self.evidence_ref.preserved {
+            return Err(LifecycleActionError::EvidenceWouldBeDeleted {
+                action_id: self.evidence_ref.evidence_id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Rollback reference required for every lifecycle mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -260,6 +292,11 @@ impl LifecycleAction {
             serde_json::from_value(raw).map_err(|error| LifecycleActionError::Json {
                 reason: error.to_string(),
             })?;
+        if action.claims_production_approval() {
+            return Err(LifecycleActionError::ProductionApprovalMissing {
+                action_id: action.action_id.clone(),
+            });
+        }
         action.validate()?;
         Ok(action)
     }
@@ -334,13 +371,11 @@ impl LifecycleAction {
 
         self.rollback_ref.validate(self)?;
 
-        // An `Accepted` terminal state asserts production approval, but this
-        // local repository/test layer carries no operator-authority binding
-        // (signature/session/receipt) over the action body — both approval
-        // values are self-asserted untrusted JSON. Reject `Accepted` for both
-        // so a deserialized `Approved` cannot mint a production-accepted action
-        // without verified operator authority that this layer cannot provide.
-        if self.terminal_state == LifecycleTerminalState::Accepted {
+        if self.claims_production_approval()
+            && (self.terminal_state != LifecycleTerminalState::Accepted
+                || self.production_lifecycle_approval != ProductionLifecycleApproval::Approved
+                || !self.has_production_approval_evidence())
+        {
             return Err(LifecycleActionError::ProductionApprovalMissing {
                 action_id: self.action_id.clone(),
             });
@@ -368,6 +403,52 @@ impl LifecycleAction {
             target_hash
         ))
     }
+
+    /// Return a production-accepted copy only when approval/finality evidence is bound.
+    pub fn approved_with_evidence(
+        &self,
+        approval: &ProductionLifecycleApprovalEvidence,
+    ) -> Result<Self> {
+        self.validate()?;
+        if self.terminal_state != LifecycleTerminalState::OperatorDeferred
+            || self.production_lifecycle_approval != ProductionLifecycleApproval::OperatorDeferred
+        {
+            return Err(LifecycleActionError::InvalidAction {
+                reason: "production approval can only finalize operator_deferred actions"
+                    .to_owned(),
+            });
+        }
+        approval.validate()?;
+        let mut accepted = self.clone();
+        if accepted
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.evidence_id == approval.evidence_ref.evidence_id)
+        {
+            return Err(LifecycleActionError::InvalidAction {
+                reason: "production approval evidence must be new evidence".to_owned(),
+            });
+        }
+        accepted.evidence_refs.push(approval.evidence_ref.clone());
+        accepted.terminal_state = LifecycleTerminalState::Accepted;
+        accepted.production_lifecycle_approval = ProductionLifecycleApproval::Approved;
+        accepted.validate()?;
+        Ok(accepted)
+    }
+
+    fn claims_production_approval(&self) -> bool {
+        self.terminal_state == LifecycleTerminalState::Accepted
+            || self.production_lifecycle_approval == ProductionLifecycleApproval::Approved
+    }
+
+    fn has_production_approval_evidence(&self) -> bool {
+        self.evidence_refs.iter().any(|evidence| {
+            evidence.preserved
+                && evidence
+                    .evidence_id
+                    .starts_with(PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX)
+        })
+    }
 }
 
 /// Result of applying a lifecycle action to a lifecycle ledger.
@@ -391,6 +472,18 @@ pub struct LifecycleActionLedger {
 impl LifecycleActionLedger {
     /// Apply a lifecycle action, replaying exact idempotent duplicates.
     pub fn apply_lifecycle_action(
+        &mut self,
+        action: LifecycleAction,
+    ) -> Result<LifecycleApplyResult> {
+        if action.claims_production_approval() {
+            return Err(LifecycleActionError::ProductionApprovalMissing {
+                action_id: action.action_id.clone(),
+            });
+        }
+        self.apply_lifecycle_action_internal(action)
+    }
+
+    fn apply_lifecycle_action_internal(
         &mut self,
         action: LifecycleAction,
     ) -> Result<LifecycleApplyResult> {
@@ -430,6 +523,16 @@ impl LifecycleActionLedger {
             .insert(idempotency_key, action.action_id.clone());
         self.actions_by_id.insert(action.action_id.clone(), action);
         Ok(result)
+    }
+
+    /// Apply a lifecycle action after binding production approval/finality evidence.
+    pub fn apply_approved_lifecycle_action(
+        &mut self,
+        action: LifecycleAction,
+        approval: &ProductionLifecycleApprovalEvidence,
+    ) -> Result<LifecycleApplyResult> {
+        let accepted = action.approved_with_evidence(approval)?;
+        self.apply_lifecycle_action_internal(accepted)
     }
 
     /// Number of committed non-replay lifecycle actions.

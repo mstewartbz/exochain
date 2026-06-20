@@ -4,7 +4,8 @@ use serde_json::to_value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::context_packet_persistence::{
-    ContextPacketError, ContextPacketRecord, validate_context_packet_record,
+    ContextPacketAcceptanceEvidence, ContextPacketError, ContextPacketRecord,
+    accept_context_packet_record, validate_context_packet_record,
 };
 
 /// Persist a PRD17B context packet record in a serializable transaction.
@@ -41,6 +42,17 @@ pub async fn persist_context_packet_record(
             Err(error)
         }
     }
+}
+
+/// Accept and persist a PRD17B context packet after approval/finality gates pass.
+pub async fn persist_accepted_context_packet_record(
+    pool: &PgPool,
+    record: &ContextPacketRecord,
+    evidence: &ContextPacketAcceptanceEvidence,
+) -> Result<u64, ContextPacketPostgresError> {
+    let accepted = accept_context_packet_record(record, evidence)
+        .map_err(ContextPacketPostgresError::Contract)?;
+    persist_context_packet_record(pool, &accepted).await
 }
 
 /// Persist a PRD17B context packet record using an existing transaction.

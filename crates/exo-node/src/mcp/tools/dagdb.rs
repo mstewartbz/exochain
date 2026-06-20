@@ -1487,6 +1487,7 @@ mod tests {
         response_fixture_name: &str,
         expected_path: &str,
         expected_scope: &str,
+        expected_operation_id: &str,
         expected_signatures: Vec<(&'static str, String)>,
     ) {
         let server = TestServer::spawn("200 OK", response_fixture(response_fixture_name));
@@ -1525,11 +1526,11 @@ mod tests {
         for (header, expected) in expected_signatures {
             assert_eq!(request.header(header), Some(expected.as_str()));
         }
-        assert!(
-            request.body.contains("\"idempotency_key\""),
-            "request body should carry the DTO JSON body: {}",
-            request.body
-        );
+        let request_body: Value =
+            serde_json::from_str(&request.body).expect("request body is DTO JSON");
+        assert_eq!(request_body["idempotency_key"], expected_operation_id);
+        assert_eq!(request_body["tenant_id"], "tenant-a");
+        assert_eq!(request_body["namespace"], "primary");
         for signature_header in [
             WRITE_SIGNATURE_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
@@ -1704,6 +1705,7 @@ mod tests {
             "context_packet",
             "POST /api/v1/dag-db/context-packet ",
             "dagdb:context_packet:tenant-a:primary",
+            "idem-packet-1",
             write_signature_expectations(),
         );
         assert_live_proxy(
@@ -1712,6 +1714,7 @@ mod tests {
             "writeback",
             "POST /api/v1/dag-db/writeback ",
             "dagdb:writeback:tenant-a:primary",
+            "idem-writeback-1",
             writeback_signature_expectations(),
         );
         assert_live_proxy(
@@ -1720,6 +1723,7 @@ mod tests {
             "import",
             "POST /api/v1/dag-db/import ",
             "dagdb:import:tenant-a:primary",
+            "idem-import-1",
             write_signature_expectations(),
         );
         assert_live_proxy(
@@ -1728,6 +1732,7 @@ mod tests {
             "export",
             "POST /api/v1/dag-db/export ",
             "dagdb:export:tenant-a:primary",
+            "idem-export-1",
             write_signature_expectations(),
         );
     }

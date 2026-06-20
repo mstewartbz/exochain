@@ -1139,8 +1139,8 @@ mod transport_tests {
     };
 
     use super::{
-        DagDbContextPacketRequest, DagDbIntakeRequest, DagDbReceiptLookupRequest,
-        DagDbWritebackRequest,
+        DagDbContextPacketRequest, DagDbExportRequest, DagDbImportRequest, DagDbIntakeRequest,
+        DagDbReceiptLookupRequest, DagDbWritebackRequest,
         transport::{
             BearerToken, DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbSignatureHeaders,
         },
@@ -1295,6 +1295,63 @@ mod transport_tests {
 
     fn writeback_request() -> DagDbWritebackRequest {
         fixture_request("writeback")
+    }
+
+    fn import_request() -> DagDbImportRequest {
+        DagDbImportRequest {
+            tenant_id: "tenant-a".to_owned(),
+            namespace: "primary".to_owned(),
+            idempotency_key: "idem-import-1".to_owned(),
+            db_set_version: "dag_db-project_memory_v3".to_owned(),
+            source_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            requester_did: "did:exo:importer".to_owned(),
+            import_report: serde_json::json!({
+                "schema_version": "dagdb_kg_dry_run_import_report_v1",
+                "source_candidates_schema_version": "dagdb_markdown_kg_import_candidates_v1",
+                "graph_root": "KnowledgeGraphs/dag-db",
+                "tenant_id": "tenant-a",
+                "namespace": "primary",
+                "actor_did": "did:exo:kg-importer",
+                "batch_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "dry_run_only": true,
+                "postgres_writes": false,
+                "raw_markdown_included": false,
+                "proposed_memory_records": [],
+                "proposed_catalog_entries": [],
+                "proposed_graph_nodes": [],
+                "proposed_graph_edges": [],
+                "proposed_required_edges": [],
+                "proposed_placement_decisions": [],
+                "proposed_receipt_intents": [],
+                "proposed_validation_reports": [],
+                "proposed_governance_reviews": [],
+                "proposed_graph_view_refreshes": [],
+                "proposed_route_invalidations": [],
+                "proposed_subdag_boundaries": [],
+                "rollback_plan": {},
+                "placement_governance_summary": {},
+                "review_items": [],
+                "warnings": []
+            }),
+        }
+    }
+
+    fn export_request() -> DagDbExportRequest {
+        DagDbExportRequest {
+            tenant_id: "tenant-a".to_owned(),
+            namespace: "primary".to_owned(),
+            idempotency_key: "idem-export-1".to_owned(),
+            db_set_version: "dag_db-project_memory_v3".to_owned(),
+            requester_did: "did:exo:exporter".to_owned(),
+            included_memory_ids: vec![
+                "2222222222222222222222222222222222222222222222222222222222222222".to_owned(),
+            ],
+            included_graph_styles: vec!["chronological".to_owned()],
+            included_writeback_idempotency_keys: vec!["idem-writeback-1".to_owned()],
+            source_commit_or_repo_ref: None,
+            include_preview_context: false,
+        }
     }
 
     fn signature_value(byte: char) -> String {
@@ -1511,6 +1568,71 @@ mod transport_tests {
         );
         assert_eq!(request.header("x-exo-lifecycle-signature"), None);
         assert_eq!(request.header("x-exo-continuation-signature"), None);
+    }
+
+    #[tokio::test]
+    async fn signed_import_and_export_attach_write_signature_header() {
+        for (response_fixture, path, scope, idempotency_key, call) in [
+            (
+                "import",
+                "/api/v1/dag-db/import",
+                "dagdb:import:tenant-a:primary",
+                "idem-import-1",
+                0_u8,
+            ),
+            (
+                "export",
+                "/api/v1/dag-db/export",
+                "dagdb:export:tenant-a:primary",
+                "idem-export-1",
+                1_u8,
+            ),
+        ] {
+            let body = fixture_response("responses", response_fixture);
+            let server = TestServer::spawn("200 OK", body).await;
+            let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+            let signature = signature_value('e');
+
+            match call {
+                0 => {
+                    let _ = client
+                        .dagdb_import_with_signatures(
+                            import_request(),
+                            DagDbSignatureHeaders::write(signature.clone()),
+                        )
+                        .await;
+                }
+                _ => {
+                    let _ = client
+                        .dagdb_export_with_signatures(
+                            export_request(),
+                            DagDbSignatureHeaders::write(signature.clone()),
+                        )
+                        .await;
+                }
+            }
+
+            let request = server.captured().await;
+            assert!(
+                request.request_line.starts_with(&format!("POST {path} ")),
+                "request line was {:?}",
+                request.request_line
+            );
+            assert_eq!(request.header("x-exo-authority-scope"), Some(scope));
+            assert_eq!(
+                request.header("x-exo-write-signature"),
+                Some(signature.as_str())
+            );
+            assert_eq!(request.header("x-exo-lifecycle-signature"), None);
+            assert_eq!(request.header("x-exo-continuation-signature"), None);
+            assert!(
+                request
+                    .body
+                    .contains(&format!("\"idempotency_key\":\"{idempotency_key}\"")),
+                "body was {}",
+                request.body
+            );
+        }
     }
 
     // (a) A GET builds the correct path + the four headers with the route's

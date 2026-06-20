@@ -119,6 +119,8 @@ pub enum ConsentPurpose {
     Retrieval,
     Validation,
     Writeback,
+    Import,
+    Export,
     Benchmark,
     TrustCheck,
 }

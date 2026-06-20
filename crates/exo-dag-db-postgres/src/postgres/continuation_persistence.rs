@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::continuation_persistence::{
     ContinuationPersistResult, ContinuationPersistenceError, ContinuationRecord,
 };
+use crate::lifecycle_action::{ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence};
 
 /// Errors raised by PRD17C continuation Postgres persistence.
 #[derive(Debug, Error)]
@@ -30,6 +31,27 @@ pub async fn persist_continuation_record(
     pool: &PgPool,
     record: &ContinuationRecord,
     now_epoch_seconds: u64,
+) -> Result<ContinuationPersistResult> {
+    if record.production_lifecycle_approval == ProductionLifecycleApproval::Approved {
+        return Err(ContinuationPersistenceError::ProductionApprovalMissing {
+            continuation_id: record.continuation_id.clone(),
+        }
+        .into());
+    }
+    persist_continuation_record_internal(
+        pool,
+        record,
+        now_epoch_seconds,
+        "persist_continuation_record",
+    )
+    .await
+}
+
+async fn persist_continuation_record_internal(
+    pool: &PgPool,
+    record: &ContinuationRecord,
+    now_epoch_seconds: u64,
+    operation: &'static str,
 ) -> Result<ContinuationPersistResult> {
     record.validate(now_epoch_seconds)?;
     let idempotency_key = record.idempotency_key()?;
@@ -130,7 +152,7 @@ pub async fn persist_continuation_record(
         Err(error) => {
             if let Err(rollback_error) = tx.rollback().await {
                 tracing::warn!(
-                    operation = "persist_continuation_record",
+                    operation = operation,
                     tenant_id = %record.tenant_id,
                     project_id = %record.project_id,
                     memory_namespace = %record.memory_namespace,
@@ -144,6 +166,23 @@ pub async fn persist_continuation_record(
             Err(error)
         }
     }
+}
+
+/// Approve and persist a continuation record after production approval/finality evidence is bound.
+pub async fn persist_approved_continuation_record(
+    pool: &PgPool,
+    record: &ContinuationRecord,
+    approval: &ProductionLifecycleApprovalEvidence,
+    now_epoch_seconds: u64,
+) -> Result<ContinuationPersistResult> {
+    let approved = record.approved_with_evidence(approval, now_epoch_seconds)?;
+    persist_continuation_record_internal(
+        pool,
+        &approved,
+        now_epoch_seconds,
+        "persist_approved_continuation_record",
+    )
+    .await
 }
 
 fn pg(source: sqlx::Error) -> ContinuationPersistencePostgresError {

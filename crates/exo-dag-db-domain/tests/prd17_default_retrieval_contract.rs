@@ -2,15 +2,17 @@
 
 use exo_dag_db_domain::{
     context_packet_persistence::{
-        ContextPacketRequest, ContextPacketRouteBinding, DefaultContextQuality,
-        PacketFreshnessStatus, PacketPersistenceStatus, PacketValidationStatus,
+        ContextPacketAcceptanceEvidence, ContextPacketRequest, ContextPacketRouteBinding,
+        DefaultContextQuality, PacketFreshnessStatus, PacketPersistenceStatus,
+        PacketValidationStatus, accept_context_packet_record,
         build_context_packet_persistence_report, build_context_packet_record,
         canonical_idempotency_key, validate_context_packet_record,
     },
     default_route::{
-        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRetrievalFailureCode, DefaultRouteError,
-        DefaultRouteMemoryRef, DefaultRouteRecord, DefaultRouteSource, DefaultRouteStatus,
-        DefaultRuntimeReadinessStatus, RouteFreshnessStatus, build_default_context_packet,
+        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRetrievalFailureCode, DefaultRouteAcceptanceEvidence,
+        DefaultRouteError, DefaultRouteMemoryRef, DefaultRouteRecord, DefaultRouteSource,
+        DefaultRouteStatus, DefaultRuntimeReadinessStatus, RouteFreshnessStatus,
+        accept_default_route_record, build_default_context_packet,
         evaluate_default_route_readiness, validate_default_route_record,
     },
 };
@@ -76,6 +78,22 @@ fn route_binding() -> ContextPacketRouteBinding {
         production_default_route_approval_status: "accepted".to_owned(),
         packet_quality_review_status: "accepted".to_owned(),
         route_freshness_status: PacketFreshnessStatus::Current,
+    }
+}
+
+fn route_acceptance_evidence() -> DefaultRouteAcceptanceEvidence {
+    DefaultRouteAcceptanceEvidence {
+        production_default_route_approval_ref: "approval:default-route:prd17b".to_owned(),
+        packet_quality_review_ref: "review:packet-quality:prd17b".to_owned(),
+        finality_ref: "finality:default-route:prd17b".to_owned(),
+    }
+}
+
+fn packet_acceptance_evidence() -> ContextPacketAcceptanceEvidence {
+    ContextPacketAcceptanceEvidence {
+        production_default_route_approval_ref: "approval:default-route:prd17b".to_owned(),
+        packet_quality_review_ref: "review:packet-quality:prd17b".to_owned(),
+        finality_ref: "finality:context-packet:prd17b".to_owned(),
     }
 }
 
@@ -152,6 +170,79 @@ fn missing_operator_approval_is_deferred_not_accepted() {
         decision.readiness_status,
         DefaultRuntimeReadinessStatus::OperatorDeferred
     );
+}
+
+#[test]
+fn acceptance_evidence_graduates_default_route_and_context_packet() {
+    let mut deferred = route();
+    deferred.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred.packet_quality_review_status = "operator_deferred".to_owned();
+
+    let accepted_route = accept_default_route_record(
+        &deferred,
+        &route_acceptance_evidence(),
+        "hlc:accepted-route".to_owned(),
+    )
+    .expect("route approval/finality gates pass");
+    let route_report = evaluate_default_route_readiness(&accepted_route).expect("readiness");
+    assert_eq!(
+        route_report.readiness_status,
+        DefaultRuntimeReadinessStatus::Accepted
+    );
+    assert_eq!(accepted_route.updated_at, "hlc:accepted-route");
+
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let deferred_record =
+        build_context_packet_record(&deferred_binding, packet_request()).expect("record");
+    let deferred_report = build_context_packet_persistence_report(&deferred_record);
+    assert!(!deferred_report.accepted);
+    assert!(deferred_report.operator_deferred);
+
+    let accepted_record =
+        accept_context_packet_record(&deferred_record, &packet_acceptance_evidence())
+            .expect("packet approval/finality gates pass");
+    let accepted_report = build_context_packet_persistence_report(&accepted_record);
+    assert!(accepted_report.accepted);
+    assert!(!accepted_report.operator_deferred);
+    assert!(
+        accepted_record
+            .source_proof_refs
+            .contains(&"finality:finality:context-packet:prd17b".to_owned())
+    );
+}
+
+#[test]
+fn acceptance_evidence_fails_closed_for_missing_finality_and_invalidated_route() {
+    let mut deferred = route();
+    deferred.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred.packet_quality_review_status = "operator_deferred".to_owned();
+
+    let mut missing_finality = route_acceptance_evidence();
+    missing_finality.finality_ref.clear();
+    assert!(accept_default_route_record(&deferred, &missing_finality, "hlc:4".to_owned()).is_err());
+
+    let mut invalidated = deferred;
+    invalidated.invalidated = true;
+    assert!(matches!(
+        accept_default_route_record(
+            &invalidated,
+            &route_acceptance_evidence(),
+            "hlc:5".to_owned()
+        ),
+        Err(DefaultRouteError::AcceptanceGateRejected {
+            failure_code: DefaultRetrievalFailureCode::RouteInvalidated
+        })
+    ));
+
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let record = build_context_packet_record(&deferred_binding, packet_request()).expect("record");
+    let mut missing_packet_finality = packet_acceptance_evidence();
+    missing_packet_finality.finality_ref.clear();
+    assert!(accept_context_packet_record(&record, &missing_packet_finality).is_err());
 }
 
 #[test]
