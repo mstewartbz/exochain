@@ -1,12 +1,11 @@
 //! Additive DAG DB gateway scaffolding and narrow council ingress.
 
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
     collections::BTreeSet,
     sync::{Arc, RwLock},
 };
-
-#[cfg(test)]
-use std::collections::BTreeMap;
 
 #[cfg(test)]
 use axum::extract::{Path, Query};
