@@ -15,6 +15,7 @@ use sqlx::{
 };
 
 const TEST_DATABASE_URL_ENV: &str = "EXO_DAGDB_TEST_DATABASE_URL";
+const CI_DATABASE_URL_ENV: &str = "DATABASE_URL";
 const RLS_TEST_ROLE_PASSWORD: &str = "dagdb_rls_live_path_password";
 
 struct TenantTable {
@@ -556,12 +557,13 @@ struct TestDb {
 
 impl TestDb {
     async fn maybe_new(label: &str) -> Option<Self> {
-        let Ok(database_url) = std::env::var(TEST_DATABASE_URL_ENV) else {
+        let Some((database_url, source_env)) = test_database_url() else {
             eprintln!(
-                "skipping DAG DB tenant RLS live-path postgres test: {TEST_DATABASE_URL_ENV} is not set"
+                "skipping DAG DB tenant RLS live-path postgres test: neither {TEST_DATABASE_URL_ENV} nor {CI_DATABASE_URL_ENV} is set"
             );
             return None;
         };
+        eprintln!("running DAG DB tenant RLS live-path postgres test with {source_env}");
         Some(Self::new_with_database_url(label, &database_url).await)
     }
 
@@ -569,7 +571,7 @@ impl TestDb {
         let schema = format!("dagdb_{label}_{}", process::id());
         let mut admin = PgConnection::connect(database_url)
             .await
-            .expect("connect to EXO_DAGDB_TEST_DATABASE_URL");
+            .expect("connect to configured DAG DB test database URL");
         sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .execute(&mut admin)
             .await
@@ -595,6 +597,16 @@ impl TestDb {
             database_url: database_url.to_owned(),
         }
     }
+}
+
+fn test_database_url() -> Option<(String, &'static str)> {
+    for env_name in [TEST_DATABASE_URL_ENV, CI_DATABASE_URL_ENV] {
+        match std::env::var(env_name) {
+            Ok(value) if !value.trim().is_empty() => return Some((value, env_name)),
+            Ok(_) | Err(_) => {}
+        }
+    }
+    None
 }
 
 impl Drop for TestDb {

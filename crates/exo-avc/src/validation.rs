@@ -32,7 +32,7 @@
 use std::collections::BTreeSet;
 
 use exo_authority::permission::Permission;
-use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -48,6 +48,8 @@ use crate::{
 pub const AVC_HUMAN_APPROVAL_SIGNING_DOMAIN: &str = "exo.avc.human-approval.v1";
 /// Signing domain tag for AVC subject action proofs.
 pub const AVC_ACTION_SIGNING_DOMAIN: &str = "exo.avc.action.v1";
+/// Signing domain tag for AVC receipt action commitments.
+pub const AVC_ACTION_COMMITMENT_DOMAIN: &str = "exo.avc.action.commitment.v1";
 
 // ---------------------------------------------------------------------------
 // Decision / Reason
@@ -160,6 +162,15 @@ struct HumanApprovalSigningPayload<'a> {
 
 #[derive(Serialize)]
 struct AvcActionSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    credential_id: &'a Hash256,
+    action: &'a AvcActionRequest,
+    validation_now: &'a Timestamp,
+}
+
+#[derive(Serialize)]
+struct AvcActionCommitmentPayload<'a> {
     domain: &'static str,
     schema_version: u16,
     credential_id: &'a Hash256,
@@ -388,6 +399,30 @@ pub fn avc_action_signature_payload(
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&payload, &mut buf)?;
     Ok(buf)
+}
+
+/// Compute a deterministic commitment over the subject-signed action content.
+///
+/// The commitment binds the full action request to the content-addressed AVC
+/// credential ID and the validation timestamp used by the subject action
+/// signature. It does not claim external anchoring.
+///
+/// # Errors
+/// Returns [`AvcError::Serialization`] if canonical CBOR encoding fails.
+pub fn avc_action_commitment_hash(
+    credential: &AutonomousVolitionCredential,
+    action: &AvcActionRequest,
+    validation_now: &Timestamp,
+) -> Result<Hash256, AvcError> {
+    let credential_id = credential.id()?;
+    let payload = AvcActionCommitmentPayload {
+        domain: AVC_ACTION_COMMITMENT_DOMAIN,
+        schema_version: AVC_SCHEMA_VERSION,
+        credential_id: &credential_id,
+        action,
+        validation_now,
+    };
+    hash_structured(&payload).map_err(AvcError::from)
 }
 
 fn evaluate_action<R: AvcRegistryRead>(

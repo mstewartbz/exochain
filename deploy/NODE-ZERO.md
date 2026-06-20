@@ -55,7 +55,7 @@ This creates the Railway project and links it to the repo. Pushes to `main` will
 railway add --database postgres
 ```
 
-Railway provisions a Postgres 16 instance and automatically injects `DATABASE_URL` into your service environment over the private network. No manual connection string needed.
+Railway provisions a Postgres 16 instance and automatically injects `DATABASE_URL` into your service environment over the private network. No manual connection string needed. This is required for production AVC registry durability; without it, the node uses the local AVC file fallback and logs a production durability warning.
 
 ---
 
@@ -81,13 +81,17 @@ railway variables --set "JWT_SECRET=$(openssl rand -hex 32)"
 railway variables --set "EXOCHAIN_DATA_DIR=/data"
 railway variables --set "RUST_LOG=info"
 railway variables --set "IS_VALIDATOR=true"   # Genesis validator mode
+railway variables --set "EXO_AVC_REQUIRE_POSTGRES_DURABILITY=true"
 # DATABASE_URL is injected automatically by the Postgres plugin
 # PORT is auto-injected by Railway and consumed by entrypoint.sh
+# EXO_AVC_ROOT_TRUST_BUNDLE is set by the root Dockerfile to the bundled verified root trust bundle
 ```
 
 | Variable | Required | Description |
 |---|---|---|
-| `DATABASE_URL` | Yes (auto) | Set by Railway Postgres plugin — private network URL |
+| `DATABASE_URL` | Yes (auto) | Set by Railway Postgres plugin — private network URL; required for production AVC registry durability |
+| `EXO_AVC_REQUIRE_POSTGRES_DURABILITY` | Yes | `true` — fail startup if `DATABASE_URL` is missing |
+| `EXO_AVC_ROOT_TRUST_BUNDLE` | Yes for production AVC root trust | Verified bundle path; public-key trust anchors are reloaded from this startup config, not from AVC durable state |
 | `JWT_SECRET` | Yes | 32+ byte random hex — JWT signing secret |
 | `EXOCHAIN_DATA_DIR` | Yes | `/data` — persistent volume mount path |
 | `IS_VALIDATOR` | Yes for Node 0 | `true` — entrypoint.sh adds `--validator` flag |
@@ -255,9 +259,10 @@ railway shell                   # open a shell in the running container
 This is the genesis deployment. Once running:
 
 - **DAG is live** — persisting to SQLite at `/data/dag.db`
-- **Postgres connected** — governance artifacts stored via `PostgresStore`
+- **Postgres connected** — governance artifacts and production AVC registry runtime records are stored through Postgres-backed durability
 - **BFT consensus bootstrapped** — standalone validator mode, ready for quorum expansion
 - **Identity key generated** — node DID is committed and stored at `/data/identity.key`
+- **AVC root trust restored** — verified startup bundle registers public-key trust anchors; they are not recovered from AVC durable state
 - **Chain of custody is mathematically provable** — regardless of Railway's availability, the DAG hashes are the truth
 
 When Node 1 joins and quorum reaches 4 validators (3f+1 BFT safety), the network becomes fully fault-tolerant.

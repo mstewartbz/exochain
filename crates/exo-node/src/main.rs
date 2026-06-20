@@ -432,6 +432,38 @@ fn spawn_event_fanout(
     });
 }
 
+fn avc_require_postgres_durability_from_env() -> anyhow::Result<bool> {
+    let value = match std::env::var(avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!(
+                "{} is not valid Unicode",
+                avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV
+            );
+        }
+    };
+    let value = value.trim();
+    if value == "1" || value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        anyhow::bail!(
+            "{} must be true, false, 1, or 0",
+            avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV
+        );
+    }
+}
+
+fn warn_avc_non_postgres_durability(data_dir: &std::path::Path) {
+    tracing::warn!(
+        data_dir = %data_dir.display(),
+        required_env = avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV,
+        "PRODUCTION AVC DURABILITY WARNING: DATABASE_URL not configured; AVC registry runtime credentials, revocations, and trust receipts will use local file fallback in the node data directory, not Postgres"
+    );
+}
+
 /// Start all subsystems for a running node.
 #[allow(clippy::too_many_arguments)]
 // 10 args is the minimum for a node bootstrap entry point:
@@ -985,6 +1017,7 @@ async fn start_node(
         drop(alert_rx);
     }
 
+    let require_avc_postgres_durability = avc_require_postgres_durability_from_env()?;
     let gateway_pool = match std::env::var("DATABASE_URL") {
         Ok(database_url) => {
             tracing::info!("DATABASE_URL configured - initializing gateway readiness pool");
@@ -997,6 +1030,13 @@ async fn start_node(
             )
         }
         Err(std::env::VarError::NotPresent) => {
+            if require_avc_postgres_durability {
+                anyhow::bail!(
+                    "{} is enabled but DATABASE_URL is not configured; AVC registry would use the local file fallback, which does not meet production Postgres durability requirements",
+                    avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV
+                );
+            }
+            warn_avc_non_postgres_durability(data_dir);
             tracing::warn!(
                 "DATABASE_URL not configured - /ready will remain unavailable until a database is configured"
             );
@@ -1017,6 +1057,7 @@ async fn start_node(
         )
         .await?,
     );
+    avc_state.register_validator_public_keys(sync_validator_public_keys.clone())?;
     match avc::load_configured_root_trust_bundle(avc_state.as_ref())? {
         Some(registration) => {
             tracing::info!(
@@ -1710,6 +1751,69 @@ mod tests {
         assert!(
             production[avc_index..].contains("gateway_pool.clone()"),
             "AVC durable registry must reuse the gateway database pool instead of requiring a separate /data-backed store"
+        );
+    }
+
+    #[test]
+    fn avc_registry_startup_registers_all_resolved_validator_public_keys() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let avc_startup = production
+            .split("let avc_state = Arc::new(")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("match avc::load_configured_root_trust_bundle")
+                    .next()
+            })
+            .expect("AVC startup section present");
+
+        assert!(
+            avc_startup.contains(
+                "avc_state.register_validator_public_keys(sync_validator_public_keys.clone())"
+            ),
+            "AVC startup must register the full configured validator key set before durable receipt revalidation"
+        );
+        assert!(
+            !avc_startup.contains("register_validator_public_key(node_identity.public_key)"),
+            "AVC startup must not revalidate durable receipts against only the local node key"
+        );
+    }
+
+    #[test]
+    fn avc_registry_missing_database_url_warns_and_can_fail_closed() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let gateway_section = production
+            .split("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .nth(1)
+            .and_then(|section| section.split("let avc_state = Arc::new").next())
+            .unwrap();
+        let missing_database_url_branch = gateway_section
+            .split("Err(std::env::VarError::NotPresent)")
+            .nth(1)
+            .and_then(|section| section.split("Err(std::env::VarError::NotUnicode").next())
+            .unwrap();
+
+        assert!(
+            production.contains("fn avc_require_postgres_durability_from_env"),
+            "node startup must expose an explicit AVC Postgres durability guard"
+        );
+        assert!(
+            production.contains("avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV"),
+            "AVC Postgres durability guard must use the AVC-owned env constant"
+        );
+        assert!(
+            missing_database_url_branch.contains("if require_avc_postgres_durability"),
+            "missing DATABASE_URL branch must check the fail-closed AVC durability guard"
+        );
+        assert!(
+            missing_database_url_branch.contains("anyhow::bail!"),
+            "enabled AVC Postgres durability guard must fail closed without DATABASE_URL"
+        );
+        assert!(
+            missing_database_url_branch.contains("warn_avc_non_postgres_durability(data_dir)"),
+            "missing DATABASE_URL branch must warn operators before using local AVC file fallback"
         );
     }
 
