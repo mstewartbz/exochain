@@ -188,6 +188,15 @@ impl LifecycleEvidenceRef {
 #[serde(deny_unknown_fields)]
 pub struct ProductionLifecycleApprovalEvidence {
     pub evidence_ref: LifecycleEvidenceRef,
+    pub tenant_id: String,
+    pub memory_namespace: String,
+    pub actor_id: String,
+    pub route_id: String,
+    pub request_id: String,
+    pub payload_hash: String,
+    pub authority_did: String,
+    pub authority_signature: String,
+    pub approved_at: String,
 }
 
 impl ProductionLifecycleApprovalEvidence {
@@ -207,6 +216,75 @@ impl ProductionLifecycleApprovalEvidence {
         if !self.evidence_ref.preserved {
             return Err(LifecycleActionError::EvidenceWouldBeDeleted {
                 action_id: self.evidence_ref.evidence_id.clone(),
+            });
+        }
+        validate_scope_field("production_lifecycle_approval.tenant_id", &self.tenant_id)?;
+        validate_scope_field(
+            "production_lifecycle_approval.memory_namespace",
+            &self.memory_namespace,
+        )?;
+        validate_non_empty("production_lifecycle_approval.actor_id", &self.actor_id)?;
+        validate_non_empty("production_lifecycle_approval.route_id", &self.route_id)?;
+        validate_non_empty("production_lifecycle_approval.request_id", &self.request_id)?;
+        validate_digest(
+            "production_lifecycle_approval.payload_hash",
+            &self.payload_hash,
+        )?;
+        validate_non_empty(
+            "production_lifecycle_approval.authority_did",
+            &self.authority_did,
+        )?;
+        validate_signature(
+            "production_lifecycle_approval.authority_signature",
+            &self.authority_signature,
+        )?;
+        validate_non_empty(
+            "production_lifecycle_approval.approved_at",
+            &self.approved_at,
+        )?;
+        if self.evidence_ref.digest != self.payload_hash {
+            return Err(LifecycleActionError::ProductionApprovalMismatch {
+                field: "payload_hash".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate approval evidence against the proposed lifecycle action it finalizes.
+    pub fn validate_for_lifecycle_action(&self, action: &LifecycleAction) -> Result<()> {
+        self.validate()?;
+        self.require_equal("tenant_id", &self.tenant_id, &action.tenant_id)?;
+        self.require_equal(
+            "memory_namespace",
+            &self.memory_namespace,
+            &action.memory_namespace,
+        )?;
+        self.require_equal("actor_id", &self.actor_id, &action.actor_id)?;
+        self.require_equal("route_id", &self.route_id, &action.policy_ref)?;
+        self.require_equal("request_id", &self.request_id, &action.source_packet_id)?;
+        Ok(())
+    }
+
+    /// Validate approval evidence against the proposed continuation record it finalizes.
+    pub fn validate_for_continuation_record(
+        &self,
+        record: &crate::continuation_persistence::ContinuationRecord,
+    ) -> Result<()> {
+        self.validate()?;
+        self.require_equal("tenant_id", &self.tenant_id, &record.tenant_id)?;
+        self.require_equal(
+            "memory_namespace",
+            &self.memory_namespace,
+            &record.memory_namespace,
+        )?;
+        self.require_equal("request_id", &self.request_id, &record.task_id)?;
+        Ok(())
+    }
+
+    fn require_equal(&self, field: &str, actual: &str, expected: &str) -> Result<()> {
+        if actual != expected {
+            return Err(LifecycleActionError::ProductionApprovalMismatch {
+                field: field.to_owned(),
             });
         }
         Ok(())
@@ -418,7 +496,7 @@ impl LifecycleAction {
                     .to_owned(),
             });
         }
-        approval.validate()?;
+        approval.validate_for_lifecycle_action(self)?;
         let mut accepted = self.clone();
         if accepted
             .evidence_refs
@@ -565,6 +643,8 @@ pub enum LifecycleActionError {
     DuplicateUnsafeReplay { idempotency_key: String },
     #[error("dagdb_prd17_lifecycle_production_approval_missing: {action_id}")]
     ProductionApprovalMissing { action_id: String },
+    #[error("dagdb_prd17_lifecycle_production_approval_mismatch: {field}")]
+    ProductionApprovalMismatch { field: String },
     #[error("dagdb_prd17_lifecycle_count_out_of_range")]
     CountOutOfRange,
 }
@@ -600,6 +680,16 @@ fn validate_digest(field: &str, value: &str) -> Result<()> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(LifecycleActionError::InvalidAction {
             reason: format!("{field} must be a 64-char hex digest"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_signature(field: &str, value: &str) -> Result<()> {
+    validate_non_empty(field, value)?;
+    if value.len() != 128 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(LifecycleActionError::InvalidAction {
+            reason: format!("{field} must be a 128-char hex Ed25519 signature"),
         });
     }
     Ok(())

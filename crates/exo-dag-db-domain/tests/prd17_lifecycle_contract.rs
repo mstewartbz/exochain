@@ -55,6 +55,22 @@ fn approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
             summary_ref: format!("summary-production-approval-{suffix}"),
             preserved: true,
         },
+        tenant_id: TENANT.to_owned(),
+        memory_namespace: NAMESPACE.to_owned(),
+        actor_id: "did:agent:codex-prd17c".to_owned(),
+        route_id: "policy-prd17c-local-mutation".to_owned(),
+        request_id: "packet-prd17c-001".to_owned(),
+        payload_hash: digest("b"),
+        authority_did: "did:exo:governance-authority".to_owned(),
+        authority_signature: "a".repeat(128),
+        approved_at: "2026-06-07T00:00:01Z".to_owned(),
+    }
+}
+
+fn continuation_approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
+    ProductionLifecycleApprovalEvidence {
+        request_id: "task-prd17c-next-agent".to_owned(),
+        ..approval_evidence(suffix)
     }
 }
 
@@ -327,6 +343,34 @@ fn lifecycle_approval_evidence_fails_closed_without_finality_binding() {
 }
 
 #[test]
+fn lifecycle_approval_rejects_mismatched_scope_hash_and_forged_signature() {
+    let action = lifecycle_action("lifecycle-approved-003", LifecycleActionType::Writeback);
+
+    let mut tenant_mismatch = approval_evidence("lifecycle-approved-003");
+    tenant_mismatch.tenant_id = "other-tenant".to_owned();
+    assert_eq!(
+        action.approved_with_evidence(&tenant_mismatch),
+        Err(LifecycleActionError::ProductionApprovalMismatch {
+            field: "tenant_id".to_owned()
+        })
+    );
+
+    let mut hash_mismatch = approval_evidence("lifecycle-approved-003");
+    hash_mismatch.payload_hash = digest("c");
+    assert!(matches!(
+        action.approved_with_evidence(&hash_mismatch),
+        Err(LifecycleActionError::ProductionApprovalMismatch { .. })
+    ));
+
+    let mut forged_signature = approval_evidence("lifecycle-approved-003");
+    forged_signature.authority_signature = "not-a-signature".to_owned();
+    assert!(matches!(
+        action.approved_with_evidence(&forged_signature),
+        Err(LifecycleActionError::InvalidAction { .. })
+    ));
+}
+
+#[test]
 fn lifecycle_rejects_raw_accepted_state_with_caller_controlled_approval_evidence() {
     let mut action = lifecycle_action("lifecycle-raw-accepted-001", LifecycleActionType::Writeback);
     let approval = approval_evidence("lifecycle-raw-accepted-001");
@@ -533,7 +577,7 @@ fn continuation_persists_and_later_retrieval_consumes_current_record() {
 fn approved_continuation_persists_replays_and_retrieves_as_accepted() {
     let mut store = ContinuationStore::default();
     let record = continuation();
-    let approval = approval_evidence("continuation-approved-001");
+    let approval = continuation_approval_evidence("continuation-approved-001");
     let approved = record
         .approved_with_evidence(&approval, 1_000)
         .expect("approve continuation");
@@ -606,7 +650,7 @@ fn approved_continuation_rejects_missing_approval_and_changed_replay_material() 
         Err(ContinuationPersistenceError::ProductionApprovalMissing { .. })
     ));
 
-    let approval = approval_evidence("continuation-approved-002");
+    let approval = continuation_approval_evidence("continuation-approved-002");
     let mut approved_store = ContinuationStore::default();
     approved_store
         .persist_approved_continuation(record.clone(), &approval, 1_000)
@@ -614,7 +658,7 @@ fn approved_continuation_rejects_missing_approval_and_changed_replay_material() 
     assert!(matches!(
         approved_store.persist_approved_continuation(
             record,
-            &approval_evidence("continuation-approved-002-changed"),
+            &continuation_approval_evidence("continuation-approved-002-changed"),
             1_000,
         ),
         Err(ContinuationPersistenceError::DuplicateUnsafeReplay { .. })
@@ -630,7 +674,10 @@ fn approved_continuation_preserves_unrelated_blockers() {
         "production_lifecycle_approval_deferred".to_owned(),
     ];
     let approved = record
-        .approved_with_evidence(&approval_evidence("continuation-blockers-001"), 1_000)
+        .approved_with_evidence(
+            &continuation_approval_evidence("continuation-blockers-001"),
+            1_000,
+        )
         .expect("approved continuation");
 
     assert_eq!(
@@ -645,7 +692,7 @@ fn approved_continuation_preserves_unrelated_blockers() {
 #[test]
 fn continuation_rejects_raw_approved_state_with_caller_controlled_validation_refs() {
     let mut record = continuation();
-    let approval = approval_evidence("continuation-raw-approved-001");
+    let approval = continuation_approval_evidence("continuation-raw-approved-001");
     record
         .validation_refs
         .push(approval.evidence_ref.evidence_id.clone());

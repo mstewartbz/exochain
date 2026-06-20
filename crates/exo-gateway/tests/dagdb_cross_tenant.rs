@@ -25,9 +25,9 @@ use tower::ServiceExt;
 const TEST_DATABASE_URL_ENV: &str = "EXO_DAGDB_TEST_DATABASE_URL";
 
 #[tokio::test]
-async fn dagdb_cross_tenant_denies_every_get_and_post_route() {
+async fn dagdb_cross_tenant_denies_every_live_post_route() {
     let Some(database_url) =
-        configured_database_url("dagdb_cross_tenant_denies_every_get_and_post_route")
+        configured_database_url("dagdb_cross_tenant_denies_every_live_post_route")
     else {
         return;
     };
@@ -40,13 +40,6 @@ async fn dagdb_cross_tenant_denies_every_get_and_post_route() {
 
     assert_cross_tenant_post(
         app.clone(),
-        "/api/v1/dag-db/intake",
-        "dagdb:intake",
-        fixture::<DagDbIntakeRequest>(&fixtures, "requests", "intake"),
-    )
-    .await;
-    assert_cross_tenant_post(
-        app.clone(),
         "/api/v1/dag-db/route",
         "dagdb:route",
         fixture::<DagDbRouteRequest>(&fixtures, "requests", "route"),
@@ -57,13 +50,6 @@ async fn dagdb_cross_tenant_denies_every_get_and_post_route() {
         "/api/v1/dag-db/context-packet",
         "dagdb:context_packet",
         fixture::<DagDbContextPacketRequest>(&fixtures, "requests", "context_packet"),
-    )
-    .await;
-    assert_cross_tenant_post(
-        app.clone(),
-        "/api/v1/dag-db/validate",
-        "dagdb:validate",
-        fixture::<DagDbValidateRequest>(&fixtures, "requests", "validate"),
     )
     .await;
     assert_cross_tenant_post(
@@ -87,57 +73,12 @@ async fn dagdb_cross_tenant_denies_every_get_and_post_route() {
         export_request(),
     )
     .await;
-    assert_cross_tenant_post(
-        app.clone(),
-        "/api/v1/dag-db/trust-check",
-        "dagdb:trust_check",
-        fixture::<DagDbTrustCheckRequest>(&fixtures, "requests", "trust_check"),
-    )
-    .await;
-    assert_cross_tenant_post(
-        app.clone(),
-        "/api/v1/dag-db/council/decision",
-        "dagdb:council_decision",
-        fixture::<DagDbCouncilDecisionRequest>(&fixtures, "requests", "council_decision"),
-    )
-    .await;
-
-    let receipt: DagDbReceiptLookupRequest = fixture(&fixtures, "requests", "receipt_lookup");
-    assert_cross_tenant_get(
-        app.clone(),
-        &format!(
-            "/api/v1/dag-db/receipts/{}?tenant_id={}&namespace={}",
-            receipt.receipt_hash, receipt.tenant_id, receipt.namespace
-        ),
-        "dagdb:receipt_lookup",
-    )
-    .await;
-    let catalog: DagDbCatalogLookupRequest = fixture(&fixtures, "requests", "catalog_lookup");
-    assert_cross_tenant_get(
-        app.clone(),
-        &format!(
-            "/api/v1/dag-db/catalog/{}?tenant_id={}&namespace={}",
-            catalog.catalog_id, catalog.tenant_id, catalog.namespace
-        ),
-        "dagdb:catalog_lookup",
-    )
-    .await;
-    let route: DagDbRouteLookupRequest = fixture(&fixtures, "requests", "route_lookup");
-    assert_cross_tenant_get(
-        app,
-        &format!(
-            "/api/v1/dag-db/routes/{}?tenant_id={}&namespace={}",
-            route.route_id, route.tenant_id, route.namespace
-        ),
-        "dagdb:route_lookup",
-    )
-    .await;
 }
 
 #[tokio::test]
-async fn dagdb_default_router_returns_explicit_runtime_failure_for_every_get_and_post_route() {
+async fn dagdb_default_router_returns_explicit_runtime_failure_for_every_live_route() {
     let Some(database_url) = configured_database_url(
-        "dagdb_default_router_returns_explicit_runtime_failure_for_every_get_and_post_route",
+        "dagdb_default_router_returns_explicit_runtime_failure_for_every_live_route",
     ) else {
         return;
     };
@@ -148,32 +89,22 @@ async fn dagdb_default_router_returns_explicit_runtime_failure_for_every_get_and
     let app = dagdb_router::<()>();
     let fixtures = fixtures();
 
-    assert_scaffold_post_response(
-        app.clone(),
-        "/api/v1/dag-db/intake",
-        "dagdb:intake",
-        fixture::<DagDbIntakeRequest>(&fixtures, "requests", "intake"),
-    )
-    .await;
-    assert_scaffold_post_response(
+    assert_post_error(
         app.clone(),
         "/api/v1/dag-db/route",
         "dagdb:route",
         fixture::<DagDbRouteRequest>(&fixtures, "requests", "route"),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
-    assert_scaffold_post_response(
+    assert_post_error(
         app.clone(),
         "/api/v1/dag-db/context-packet",
         "dagdb:context_packet",
         fixture::<DagDbContextPacketRequest>(&fixtures, "requests", "context_packet"),
-    )
-    .await;
-    assert_scaffold_post_response(
-        app.clone(),
-        "/api/v1/dag-db/validate",
-        "dagdb:validate",
-        fixture::<DagDbValidateRequest>(&fixtures, "requests", "validate"),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
     // Writeback fails closed (503) with no production database pool, identically
@@ -205,63 +136,19 @@ async fn dagdb_default_router_returns_explicit_runtime_failure_for_every_get_and
         "database_unavailable",
     )
     .await;
-    assert_scaffold_post_response(
-        app.clone(),
-        "/api/v1/dag-db/trust-check",
-        "dagdb:trust_check",
-        fixture::<DagDbTrustCheckRequest>(&fixtures, "requests", "trust_check"),
-    )
-    .await;
-    assert_scaffold_post_response(
-        app.clone(),
-        "/api/v1/dag-db/council/decision",
-        "dagdb:council_decision",
-        fixture::<DagDbCouncilDecisionRequest>(&fixtures, "requests", "council_decision"),
-    )
-    .await;
-
-    let receipt: DagDbReceiptLookupRequest = fixture(&fixtures, "requests", "receipt_lookup");
-    assert_scaffold_get_response(
-        app.clone(),
-        &format!(
-            "/api/v1/dag-db/receipts/{}?tenant_id={}&namespace={}&include_body=true",
-            receipt.receipt_hash, receipt.tenant_id, receipt.namespace
-        ),
-        "dagdb:receipt_lookup",
-    )
-    .await;
-    let catalog: DagDbCatalogLookupRequest = fixture(&fixtures, "requests", "catalog_lookup");
-    assert_scaffold_get_response(
-        app.clone(),
-        &format!(
-            "/api/v1/dag-db/catalog/{}?tenant_id={}&namespace={}&include_children=true&include_routes=true",
-            catalog.catalog_id, catalog.tenant_id, catalog.namespace
-        ),
-        "dagdb:catalog_lookup",
-    )
-    .await;
-    let route: DagDbRouteLookupRequest = fixture(&fixtures, "requests", "route_lookup");
-    assert_scaffold_get_response(
-        app,
-        &format!(
-            "/api/v1/dag-db/routes/{}?tenant_id={}&namespace={}&include_memory_refs=true&include_validation=true",
-            route.route_id, route.tenant_id, route.namespace
-        ),
-        "dagdb:route_lookup",
-    )
-    .await;
 }
 
 #[tokio::test]
 async fn dagdb_authorization_failures_are_stable() {
     let app = dagdb_router::<()>();
     let fixtures = fixtures();
-    let request: DagDbIntakeRequest = fixture(&fixtures, "requests", "intake");
+    let request: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
 
     assert_error(
         app.clone()
             .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/intake",
+                "/api/v1/dag-db/route",
+                "dagdb:route",
                 &request,
                 HeaderCase::NoAuth,
             ))
@@ -274,7 +161,8 @@ async fn dagdb_authorization_failures_are_stable() {
     assert_error(
         app.clone()
             .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/intake",
+                "/api/v1/dag-db/route",
+                "dagdb:route",
                 &request,
                 HeaderCase::BasicAuth,
             ))
@@ -287,7 +175,8 @@ async fn dagdb_authorization_failures_are_stable() {
     assert_error(
         app.clone()
             .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/intake",
+                "/api/v1/dag-db/route",
+                "dagdb:route",
                 &request,
                 HeaderCase::NoTenant,
             ))
@@ -300,7 +189,8 @@ async fn dagdb_authorization_failures_are_stable() {
     assert_error(
         app.clone()
             .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/intake",
+                "/api/v1/dag-db/route",
+                "dagdb:route",
                 &request,
                 HeaderCase::NoNamespace,
             ))
@@ -313,7 +203,8 @@ async fn dagdb_authorization_failures_are_stable() {
     assert_error(
         app.clone()
             .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/intake",
+                "/api/v1/dag-db/route",
+                "dagdb:route",
                 &request,
                 HeaderCase::NamespaceMismatch,
             ))
@@ -326,7 +217,8 @@ async fn dagdb_authorization_failures_are_stable() {
     assert_error(
         app.clone()
             .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/intake",
+                "/api/v1/dag-db/route",
+                "dagdb:route",
                 &request,
                 HeaderCase::NoAuthorityScope,
             ))
@@ -340,6 +232,7 @@ async fn dagdb_authorization_failures_are_stable() {
         app.clone()
             .oneshot(json_request_with_headers(
                 "/api/v1/dag-db/import",
+                "dagdb:import",
                 &import_request(),
                 HeaderCase::NoAuthorityScope,
             ))
@@ -353,6 +246,7 @@ async fn dagdb_authorization_failures_are_stable() {
         app.clone()
             .oneshot(json_request_with_headers(
                 "/api/v1/dag-db/export",
+                "dagdb:export",
                 &export_request(),
                 HeaderCase::NamespaceMismatch,
             ))
@@ -363,82 +257,80 @@ async fn dagdb_authorization_failures_are_stable() {
     )
     .await;
 
-    let council: DagDbCouncilDecisionRequest = fixture(&fixtures, "requests", "council_decision");
-    assert_error(
-        app.clone()
-            .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/council/decision",
-                &council,
-                HeaderCase::NoAuth,
-            ))
-            .await
-            .expect("missing council auth response"),
-        StatusCode::UNAUTHORIZED,
-        "unauthenticated",
-    )
-    .await;
-    assert_error(
-        app.clone()
-            .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/council/decision",
-                &council,
-                HeaderCase::BasicAuth,
-            ))
-            .await
-            .expect("basic council auth response"),
-        StatusCode::UNAUTHORIZED,
-        "unauthenticated",
-    )
-    .await;
-    assert_error(
-        app.clone()
-            .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/council/decision",
-                &council,
-                HeaderCase::NoTenant,
-            ))
-            .await
-            .expect("missing council tenant response"),
-        StatusCode::FORBIDDEN,
-        "tenant_scope_mismatch",
-    )
-    .await;
-    assert_error(
-        app.clone()
-            .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/council/decision",
-                &council,
-                HeaderCase::NoNamespace,
-            ))
-            .await
-            .expect("missing council namespace response"),
-        StatusCode::FORBIDDEN,
-        "tenant_scope_mismatch",
-    )
-    .await;
-    assert_error(
-        app.clone()
-            .oneshot(json_request_with_headers(
-                "/api/v1/dag-db/council/decision",
-                &council,
-                HeaderCase::NamespaceMismatch,
-            ))
-            .await
-            .expect("council namespace mismatch response"),
-        StatusCode::FORBIDDEN,
-        "tenant_scope_mismatch",
-    )
-    .await;
-    assert_error(
-        app.oneshot(json_request_with_headers(
+    let unmounted_council = app
+        .oneshot(json_request_with_headers(
             "/api/v1/dag-db/council/decision",
-            &council,
-            HeaderCase::NoAuthorityScope,
+            "dagdb:council_decision",
+            &fixture::<DagDbCouncilDecisionRequest>(&fixtures, "requests", "council_decision"),
+            HeaderCase::NoAuth,
         ))
         .await
-        .expect("missing council authority response"),
-        StatusCode::FORBIDDEN,
-        "council_authority_required",
+        .expect("unmounted council route response");
+    assert_eq!(unmounted_council.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn dagdb_unmounted_scaffold_routes_return_not_found() {
+    let app = dagdb_router::<()>();
+    let fixtures = fixtures();
+
+    assert_post_not_found(
+        app.clone(),
+        "/api/v1/dag-db/intake",
+        "dagdb:intake",
+        fixture::<DagDbIntakeRequest>(&fixtures, "requests", "intake"),
+    )
+    .await;
+    assert_post_not_found(
+        app.clone(),
+        "/api/v1/dag-db/validate",
+        "dagdb:validate",
+        fixture::<DagDbValidateRequest>(&fixtures, "requests", "validate"),
+    )
+    .await;
+    assert_post_not_found(
+        app.clone(),
+        "/api/v1/dag-db/trust-check",
+        "dagdb:trust_check",
+        fixture::<DagDbTrustCheckRequest>(&fixtures, "requests", "trust_check"),
+    )
+    .await;
+    assert_post_not_found(
+        app.clone(),
+        "/api/v1/dag-db/council/decision",
+        "dagdb:council_decision",
+        fixture::<DagDbCouncilDecisionRequest>(&fixtures, "requests", "council_decision"),
+    )
+    .await;
+
+    let receipt: DagDbReceiptLookupRequest = fixture(&fixtures, "requests", "receipt_lookup");
+    assert_get_not_found(
+        app.clone(),
+        &format!(
+            "/api/v1/dag-db/receipts/{}?tenant_id={}&namespace={}",
+            receipt.receipt_hash, receipt.tenant_id, receipt.namespace
+        ),
+        "dagdb:receipt_lookup",
+    )
+    .await;
+    let catalog: DagDbCatalogLookupRequest = fixture(&fixtures, "requests", "catalog_lookup");
+    assert_get_not_found(
+        app.clone(),
+        &format!(
+            "/api/v1/dag-db/catalog/{}?tenant_id={}&namespace={}",
+            catalog.catalog_id, catalog.tenant_id, catalog.namespace
+        ),
+        "dagdb:catalog_lookup",
+    )
+    .await;
+    let route: DagDbRouteLookupRequest = fixture(&fixtures, "requests", "route_lookup");
+    assert_get_not_found(
+        app,
+        &format!(
+            "/api/v1/dag-db/routes/{}?tenant_id={}&namespace={}",
+            route.route_id, route.tenant_id, route.namespace
+        ),
+        "dagdb:route_lookup",
     )
     .await;
 }
@@ -446,24 +338,16 @@ async fn dagdb_authorization_failures_are_stable() {
 #[tokio::test]
 async fn dagdb_routes_are_registered_additively_and_port_collision_has_fallback() {
     let app = dagdb_router::<()>();
+    let fixtures = fixtures();
+    let route: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "{DAGDB_REST_PREFIX}/catalog/{}?tenant_id=tenant-a&namespace=primary",
-                    "00".repeat(32)
-                ))
-                .header(header::AUTHORIZATION, "Bearer token")
-                .header("x-exo-tenant-id", "tenant-a")
-                .header("x-exo-namespace", "primary")
-                .header(
-                    "x-exo-authority-scope",
-                    "dagdb:catalog_lookup:tenant-a:primary",
-                )
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(scoped_json_request(
+            "POST",
+            &format!("{DAGDB_REST_PREFIX}/route"),
+            "dagdb:route",
+            "tenant-a",
+            &route,
+        ))
         .await
         .expect("DAG DB route response");
     assert_ne!(response.status(), StatusCode::NOT_FOUND);
@@ -489,27 +373,15 @@ where
     assert_tenant_scope_mismatch(response).await;
 }
 
-async fn assert_cross_tenant_get(app: axum::Router, uri: &str, action: &str) {
-    let response = app
-        .oneshot(scoped_get_request(uri, action, "tenant-b"))
-        .await
-        .expect("DAG DB cross-tenant GET response");
-    assert_tenant_scope_mismatch(response).await;
-}
-
-async fn assert_scaffold_post_response<T>(app: axum::Router, path: &str, action: &str, body: T)
+async fn assert_post_not_found<T>(app: axum::Router, path: &str, action: &str, body: T)
 where
     T: Serialize,
 {
-    assert_post_error(
-        app,
-        path,
-        action,
-        body,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "database_unavailable",
-    )
-    .await;
+    let response = app
+        .oneshot(scoped_json_request("POST", path, action, "tenant-a", &body))
+        .await
+        .expect("DAG DB unmounted POST response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 async fn assert_post_error<T>(
@@ -529,17 +401,12 @@ async fn assert_post_error<T>(
     assert_error(response, status, error_code).await;
 }
 
-async fn assert_scaffold_get_response(app: axum::Router, uri: &str, action: &str) {
+async fn assert_get_not_found(app: axum::Router, uri: &str, action: &str) {
     let response = app
         .oneshot(scoped_get_request(uri, action, "tenant-a"))
         .await
-        .expect("DAG DB GET route response");
-    assert_error(
-        response,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "database_unavailable",
-    )
-    .await;
+        .expect("DAG DB unmounted GET response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 fn scoped_json_request<T>(
@@ -594,7 +461,12 @@ enum HeaderCase {
     NoAuthorityScope,
 }
 
-fn json_request_with_headers<T>(uri: &str, body: &T, header_case: HeaderCase) -> Request<Body>
+fn json_request_with_headers<T>(
+    uri: &str,
+    action: &str,
+    body: &T,
+    header_case: HeaderCase,
+) -> Request<Body>
 where
     T: Serialize,
 {
@@ -622,7 +494,10 @@ where
         builder = builder.header("x-exo-namespace", namespace);
     }
     if !matches!(header_case, HeaderCase::NoAuthorityScope) {
-        builder = builder.header("x-exo-authority-scope", "dagdb:intake:tenant-a:primary");
+        builder = builder.header(
+            "x-exo-authority-scope",
+            format!("{action}:tenant-a:primary"),
+        );
     }
     builder
         .body(Body::from(

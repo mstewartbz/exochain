@@ -61,11 +61,6 @@ impl DagDbClient {
         }
     }
 
-    /// Build a `POST /api/v1/dag-db/intake` request spec.
-    pub fn intake(&self, request: DagDbIntakeRequest) -> DagDbRequestSpec<DagDbIntakeRequest> {
-        self.post("/intake", request)
-    }
-
     /// Build a `POST /api/v1/dag-db/route` request spec.
     pub fn route(&self, request: DagDbRouteRequest) -> DagDbRequestSpec<DagDbRouteRequest> {
         self.post("/route", request)
@@ -77,14 +72,6 @@ impl DagDbClient {
         request: DagDbContextPacketRequest,
     ) -> DagDbRequestSpec<DagDbContextPacketRequest> {
         self.post("/context-packet", request)
-    }
-
-    /// Build a `POST /api/v1/dag-db/validate` request spec.
-    pub fn validate(
-        &self,
-        request: DagDbValidateRequest,
-    ) -> DagDbRequestSpec<DagDbValidateRequest> {
-        self.post("/validate", request)
     }
 
     /// Build a `POST /api/v1/dag-db/writeback` request spec.
@@ -111,81 +98,6 @@ impl DagDbClient {
         self.post("/export", request)
     }
 
-    /// Build a `POST /api/v1/dag-db/trust-check` request spec.
-    pub fn trust_check(
-        &self,
-        request: DagDbTrustCheckRequest,
-    ) -> DagDbRequestSpec<DagDbTrustCheckRequest> {
-        self.post("/trust-check", request)
-    }
-
-    /// Build a `POST /api/v1/dag-db/council/decision` request spec.
-    pub fn council_decision(
-        &self,
-        request: DagDbCouncilDecisionRequest,
-    ) -> DagDbRequestSpec<DagDbCouncilDecisionRequest> {
-        self.post("/council/decision", request)
-    }
-
-    /// Build a `GET /api/v1/dag-db/receipts/{receipt_hash}` request spec.
-    pub fn receipt_lookup(
-        &self,
-        request: DagDbReceiptLookupRequest,
-    ) -> DagDbRequestSpec<DagDbReceiptLookupRequest> {
-        DagDbRequestSpec {
-            method: DagDbHttpMethod::Get,
-            path: format!(
-                "{}/receipts/{}?tenant_id={}&namespace={}{}",
-                self.prefix,
-                request.receipt_hash,
-                request.tenant_id,
-                request.namespace,
-                optional_bool_query("include_body", request.include_body)
-            ),
-            body: None,
-        }
-    }
-
-    /// Build a `GET /api/v1/dag-db/catalog/{catalog_id}` request spec.
-    pub fn catalog_lookup(
-        &self,
-        request: DagDbCatalogLookupRequest,
-    ) -> DagDbRequestSpec<DagDbCatalogLookupRequest> {
-        DagDbRequestSpec {
-            method: DagDbHttpMethod::Get,
-            path: format!(
-                "{}/catalog/{}?tenant_id={}&namespace={}{}{}",
-                self.prefix,
-                request.catalog_id,
-                request.tenant_id,
-                request.namespace,
-                optional_bool_query("include_children", request.include_children),
-                optional_bool_query("include_routes", request.include_routes)
-            ),
-            body: None,
-        }
-    }
-
-    /// Build a `GET /api/v1/dag-db/routes/{route_id}` request spec.
-    pub fn route_lookup(
-        &self,
-        request: DagDbRouteLookupRequest,
-    ) -> DagDbRequestSpec<DagDbRouteLookupRequest> {
-        DagDbRequestSpec {
-            method: DagDbHttpMethod::Get,
-            path: format!(
-                "{}/routes/{}?tenant_id={}&namespace={}{}{}",
-                self.prefix,
-                request.route_id,
-                request.tenant_id,
-                request.namespace,
-                optional_bool_query("include_memory_refs", request.include_memory_refs),
-                optional_bool_query("include_validation", request.include_validation)
-            ),
-            body: None,
-        }
-    }
-
     fn post<T>(&self, suffix: &str, request: T) -> DagDbRequestSpec<T> {
         DagDbRequestSpec {
             method: DagDbHttpMethod::Post,
@@ -193,10 +105,6 @@ impl DagDbClient {
             body: Some(request),
         }
     }
-}
-
-fn optional_bool_query(name: &str, value: Option<bool>) -> String {
-    value.map_or_else(String::new, |enabled| format!("&{name}={enabled}"))
 }
 
 #[cfg(feature = "http-client")]
@@ -229,14 +137,10 @@ mod transport {
     use zeroize::Zeroize;
 
     use super::{
-        DagDbCatalogLookupRequest, DagDbCatalogLookupResponse, DagDbClient,
-        DagDbContextPacketRequest, DagDbContextPacketResponse, DagDbCouncilDecisionRequest,
-        DagDbCouncilDecisionResponse, DagDbErrorEnvelope, DagDbExportRequest, DagDbExportResponse,
-        DagDbHttpMethod, DagDbImportRequest, DagDbImportResponse, DagDbIntakeRequest,
-        DagDbIntakeResponse, DagDbReceiptLookupRequest, DagDbReceiptLookupResponse,
-        DagDbRequestSpec, DagDbRouteLookupRequest, DagDbRouteLookupResponse, DagDbRouteRequest,
-        DagDbRouteResponse, DagDbTrustCheckRequest, DagDbTrustCheckResponse, DagDbValidateRequest,
-        DagDbValidateResponse, DagDbWritebackRequest, DagDbWritebackResponse,
+        DagDbClient, DagDbContextPacketRequest, DagDbContextPacketResponse, DagDbErrorEnvelope,
+        DagDbExportRequest, DagDbExportResponse, DagDbHttpMethod, DagDbImportRequest,
+        DagDbImportResponse, DagDbRequestSpec, DagDbRouteRequest, DagDbRouteResponse,
+        DagDbWritebackRequest, DagDbWritebackResponse,
     };
 
     /// Gateway header carrying the requesting tenant id.
@@ -247,10 +151,23 @@ mod transport {
     const AUTHORITY_SCOPE_HEADER: &str = "x-exo-authority-scope";
     /// Gateway header carrying the signed write payload.
     const WRITE_SIGNATURE_HEADER: &str = "x-exo-write-signature";
+    /// Gateway header carrying the signed default-route approval payload.
+    const DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-default-route-approval-signature";
+    /// Gateway header naming the external default-route approval authority DID.
+    const DEFAULT_ROUTE_APPROVAL_DID_HEADER: &str = "x-exo-default-route-approval-did";
+    /// Gateway header carrying the signed context-packet approval payload.
+    const CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER: &str =
+        "x-exo-context-packet-approval-signature";
+    /// Gateway header naming the external context-packet approval authority DID.
+    const CONTEXT_PACKET_APPROVAL_DID_HEADER: &str = "x-exo-context-packet-approval-did";
     /// Gateway header carrying the signed lifecycle payload.
     const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
     /// Gateway header carrying the signed continuation payload.
     const CONTINUATION_SIGNATURE_HEADER: &str = "x-exo-continuation-signature";
+    /// Gateway header naming the external lifecycle-finality authority DID.
+    const LIFECYCLE_APPROVAL_DID_HEADER: &str = "x-exo-lifecycle-approval-did";
+    /// Gateway header naming the external continuation-finality authority DID.
+    const CONTINUATION_APPROVAL_DID_HEADER: &str = "x-exo-continuation-approval-did";
 
     /// Bearer token wrapper that never exposes its secret via [`fmt::Debug`].
     ///
@@ -341,8 +258,14 @@ mod transport {
     #[derive(Clone, PartialEq, Eq)]
     pub struct DagDbSignatureHeaders {
         write_signature: String,
+        default_route_approval_signature: Option<String>,
+        default_route_approval_did: Option<String>,
+        context_packet_approval_signature: Option<String>,
+        context_packet_approval_did: Option<String>,
         lifecycle_signature: Option<String>,
         continuation_signature: Option<String>,
+        lifecycle_approval_did: Option<String>,
+        continuation_approval_did: Option<String>,
     }
 
     impl DagDbSignatureHeaders {
@@ -351,22 +274,81 @@ mod transport {
         pub fn write(write_signature: impl Into<String>) -> Self {
             Self {
                 write_signature: write_signature.into(),
+                default_route_approval_signature: None,
+                default_route_approval_did: None,
+                context_packet_approval_signature: None,
+                context_packet_approval_did: None,
                 lifecycle_signature: None,
                 continuation_signature: None,
+                lifecycle_approval_did: None,
+                continuation_approval_did: None,
             }
         }
 
-        /// Header set for writeback, which requires all three signature headers.
+        /// Header set for default-route persistence, which requires an external
+        /// finality authority signature in addition to the requester write
+        /// signature.
+        #[must_use]
+        pub fn default_route(
+            write_signature: impl Into<String>,
+            approval_signature: impl Into<String>,
+            approval_authority_did: impl Into<String>,
+        ) -> Self {
+            Self {
+                write_signature: write_signature.into(),
+                default_route_approval_signature: Some(approval_signature.into()),
+                default_route_approval_did: Some(approval_authority_did.into()),
+                context_packet_approval_signature: None,
+                context_packet_approval_did: None,
+                lifecycle_signature: None,
+                continuation_signature: None,
+                lifecycle_approval_did: None,
+                continuation_approval_did: None,
+            }
+        }
+
+        /// Header set for context-packet persistence, which requires an
+        /// external finality authority signature in addition to the requester
+        /// write signature.
+        #[must_use]
+        pub fn context_packet(
+            write_signature: impl Into<String>,
+            approval_signature: impl Into<String>,
+            approval_authority_did: impl Into<String>,
+        ) -> Self {
+            Self {
+                write_signature: write_signature.into(),
+                default_route_approval_signature: None,
+                default_route_approval_did: None,
+                context_packet_approval_signature: Some(approval_signature.into()),
+                context_packet_approval_did: Some(approval_authority_did.into()),
+                lifecycle_signature: None,
+                continuation_signature: None,
+                lifecycle_approval_did: None,
+                continuation_approval_did: None,
+            }
+        }
+
+        /// Header set for writeback, which requires all three signature headers
+        /// plus distinct finality-authority DID headers.
         #[must_use]
         pub fn writeback(
             write_signature: impl Into<String>,
             lifecycle_signature: impl Into<String>,
             continuation_signature: impl Into<String>,
+            lifecycle_approval_did: impl Into<String>,
+            continuation_approval_did: impl Into<String>,
         ) -> Self {
             Self {
                 write_signature: write_signature.into(),
+                default_route_approval_signature: None,
+                default_route_approval_did: None,
+                context_packet_approval_signature: None,
+                context_packet_approval_did: None,
                 lifecycle_signature: Some(lifecycle_signature.into()),
                 continuation_signature: Some(continuation_signature.into()),
+                lifecycle_approval_did: Some(lifecycle_approval_did.into()),
+                continuation_approval_did: Some(continuation_approval_did.into()),
             }
         }
 
@@ -381,10 +363,46 @@ mod transport {
                     signature_header_value(signature, LIFECYCLE_SIGNATURE_HEADER)?,
                 );
             }
+            if let Some(signature) = self.default_route_approval_signature.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER),
+                    signature_header_value(signature, DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER)?,
+                );
+            }
+            if let Some(did) = self.default_route_approval_did.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(DEFAULT_ROUTE_APPROVAL_DID_HEADER),
+                    signature_header_value(did, DEFAULT_ROUTE_APPROVAL_DID_HEADER)?,
+                );
+            }
+            if let Some(signature) = self.context_packet_approval_signature.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER),
+                    signature_header_value(signature, CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER)?,
+                );
+            }
+            if let Some(did) = self.context_packet_approval_did.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(CONTEXT_PACKET_APPROVAL_DID_HEADER),
+                    signature_header_value(did, CONTEXT_PACKET_APPROVAL_DID_HEADER)?,
+                );
+            }
             if let Some(signature) = self.continuation_signature.as_deref() {
                 headers.insert(
                     HeaderName::from_static(CONTINUATION_SIGNATURE_HEADER),
                     signature_header_value(signature, CONTINUATION_SIGNATURE_HEADER)?,
+                );
+            }
+            if let Some(did) = self.lifecycle_approval_did.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(LIFECYCLE_APPROVAL_DID_HEADER),
+                    signature_header_value(did, LIFECYCLE_APPROVAL_DID_HEADER)?,
+                );
+            }
+            if let Some(did) = self.continuation_approval_did.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(CONTINUATION_APPROVAL_DID_HEADER),
+                    signature_header_value(did, CONTINUATION_APPROVAL_DID_HEADER)?,
                 );
             }
             Ok(())
@@ -540,21 +558,6 @@ mod transport {
             }
         }
 
-        /// `POST /api/v1/dag-db/intake`.
-        pub async fn intake(
-            &self,
-            request: DagDbIntakeRequest,
-        ) -> Result<DagDbIntakeResponse, DagDbClientError> {
-            self.send(
-                self.specs.intake(request),
-                "dagdb:intake",
-                exo_dag_db_api::DAGDB_INTAKE_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbIntakeResponse| r.schema_version.as_str(),
-                None,
-            )
-            .await
-        }
-
         /// `POST /api/v1/dag-db/route`.
         pub async fn route(
             &self,
@@ -566,6 +569,23 @@ mod transport {
                 exo_dag_db_api::DAGDB_ROUTE_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbRouteResponse| r.schema_version.as_str(),
                 None,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/route` with gateway write and external
+        /// default-route approval signatures.
+        pub async fn route_with_signatures(
+            &self,
+            request: DagDbRouteRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbRouteResponse, DagDbClientError> {
+            self.send(
+                self.specs.route(request),
+                "dagdb:route",
+                exo_dag_db_api::DAGDB_ROUTE_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbRouteResponse| r.schema_version.as_str(),
+                Some(signatures),
             )
             .await
         }
@@ -597,21 +617,6 @@ mod transport {
                 exo_dag_db_api::DAGDB_CONTEXT_PACKET_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbContextPacketResponse| r.schema_version.as_str(),
                 Some(signatures),
-            )
-            .await
-        }
-
-        /// `POST /api/v1/dag-db/validate`.
-        pub async fn validate(
-            &self,
-            request: DagDbValidateRequest,
-        ) -> Result<DagDbValidateResponse, DagDbClientError> {
-            self.send(
-                self.specs.validate(request),
-                "dagdb:validate",
-                exo_dag_db_api::DAGDB_VALIDATE_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbValidateResponse| r.schema_version.as_str(),
-                None,
             )
             .await
         }
@@ -709,81 +714,6 @@ mod transport {
             .await
         }
 
-        /// `POST /api/v1/dag-db/trust-check`.
-        pub async fn trust_check(
-            &self,
-            request: DagDbTrustCheckRequest,
-        ) -> Result<DagDbTrustCheckResponse, DagDbClientError> {
-            self.send(
-                self.specs.trust_check(request),
-                "dagdb:trust_check",
-                exo_dag_db_api::DAGDB_TRUST_CHECK_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbTrustCheckResponse| r.schema_version.as_str(),
-                None,
-            )
-            .await
-        }
-
-        /// `POST /api/v1/dag-db/council/decision`.
-        pub async fn council_decision(
-            &self,
-            request: DagDbCouncilDecisionRequest,
-        ) -> Result<DagDbCouncilDecisionResponse, DagDbClientError> {
-            self.send(
-                self.specs.council_decision(request),
-                "dagdb:council_decision",
-                exo_dag_db_api::DAGDB_COUNCIL_DECISION_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbCouncilDecisionResponse| r.schema_version.as_str(),
-                None,
-            )
-            .await
-        }
-
-        /// `GET /api/v1/dag-db/receipts/{receipt_hash}`.
-        pub async fn receipt_lookup(
-            &self,
-            request: DagDbReceiptLookupRequest,
-        ) -> Result<DagDbReceiptLookupResponse, DagDbClientError> {
-            self.send(
-                self.specs.receipt_lookup(request),
-                "dagdb:receipt_lookup",
-                exo_dag_db_api::DAGDB_RECEIPT_LOOKUP_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbReceiptLookupResponse| r.schema_version.as_str(),
-                None,
-            )
-            .await
-        }
-
-        /// `GET /api/v1/dag-db/catalog/{catalog_id}`.
-        pub async fn catalog_lookup(
-            &self,
-            request: DagDbCatalogLookupRequest,
-        ) -> Result<DagDbCatalogLookupResponse, DagDbClientError> {
-            self.send(
-                self.specs.catalog_lookup(request),
-                "dagdb:catalog_lookup",
-                exo_dag_db_api::DAGDB_CATALOG_LOOKUP_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbCatalogLookupResponse| r.schema_version.as_str(),
-                None,
-            )
-            .await
-        }
-
-        /// `GET /api/v1/dag-db/routes/{route_id}`.
-        pub async fn route_lookup(
-            &self,
-            request: DagDbRouteLookupRequest,
-        ) -> Result<DagDbRouteLookupResponse, DagDbClientError> {
-            self.send(
-                self.specs.route_lookup(request),
-                "dagdb:route_lookup",
-                exo_dag_db_api::DAGDB_ROUTE_LOOKUP_RESPONSE_SCHEMA_VERSION,
-                |r: &DagDbRouteLookupResponse| r.schema_version.as_str(),
-                None,
-            )
-            .await
-        }
-
         /// Build, sign, send, and map one request spec.
         ///
         /// `action` is the gateway authority action (e.g. `dagdb:intake`) baked
@@ -871,7 +801,7 @@ mod transport {
             action: &str,
             signatures: Option<&DagDbSignatureHeaders>,
         ) -> Result<HeaderMap, DagDbClientError> {
-            let mut headers = HeaderMap::with_capacity(if signatures.is_some() { 7 } else { 4 });
+            let mut headers = HeaderMap::with_capacity(if signatures.is_some() { 9 } else { 4 });
             headers.insert(
                 AUTHORIZATION,
                 header_value(
@@ -986,10 +916,6 @@ mod tests {
         let client = DagDbClient::new();
 
         assert_post(
-            client.intake(fixture(&fixtures, "requests", "intake")),
-            "/api/v1/dag-db/intake",
-        );
-        assert_post(
             client.route(fixture(&fixtures, "requests", "route")),
             "/api/v1/dag-db/route",
         );
@@ -998,41 +924,11 @@ mod tests {
             "/api/v1/dag-db/context-packet",
         );
         assert_post(
-            client.validate(fixture(&fixtures, "requests", "validate")),
-            "/api/v1/dag-db/validate",
-        );
-        assert_post(
             client.writeback(fixture(&fixtures, "requests", "writeback")),
             "/api/v1/dag-db/writeback",
         );
         assert_post(import_request(&client), "/api/v1/dag-db/import");
         assert_post(export_request(&client), "/api/v1/dag-db/export");
-        assert_post(
-            client.trust_check(fixture(&fixtures, "requests", "trust_check")),
-            "/api/v1/dag-db/trust-check",
-        );
-        assert_post(
-            client.council_decision(fixture(&fixtures, "requests", "council_decision")),
-            "/api/v1/dag-db/council/decision",
-        );
-
-        let receipt = client.receipt_lookup(fixture(&fixtures, "requests", "receipt_lookup"));
-        assert_eq!(receipt.method, DagDbHttpMethod::Get);
-        assert!(receipt.path.starts_with("/api/v1/dag-db/receipts/"));
-        assert!(receipt.path.contains("tenant_id=tenant-a"));
-        assert!(receipt.body.is_none());
-
-        let catalog = client.catalog_lookup(fixture(&fixtures, "requests", "catalog_lookup"));
-        assert_eq!(catalog.method, DagDbHttpMethod::Get);
-        assert!(catalog.path.starts_with("/api/v1/dag-db/catalog/"));
-        assert!(catalog.path.contains("include_children=true"));
-        assert!(catalog.body.is_none());
-
-        let route = client.route_lookup(fixture(&fixtures, "requests", "route_lookup"));
-        assert_eq!(route.method, DagDbHttpMethod::Get);
-        assert!(route.path.starts_with("/api/v1/dag-db/routes/"));
-        assert!(route.path.contains("include_memory_refs=true"));
-        assert!(route.body.is_none());
     }
 
     fn assert_fixture<T>(fixtures: &serde_json::Value, section: &str, name: &str)
@@ -1139,8 +1035,8 @@ mod transport_tests {
     };
 
     use super::{
-        DagDbContextPacketRequest, DagDbExportRequest, DagDbImportRequest, DagDbIntakeRequest,
-        DagDbReceiptLookupRequest, DagDbWritebackRequest,
+        DagDbContextPacketRequest, DagDbExportRequest, DagDbImportRequest, DagDbRouteRequest,
+        DagDbWritebackRequest,
         transport::{
             BearerToken, DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbSignatureHeaders,
         },
@@ -1281,16 +1177,12 @@ mod transport_tests {
         serde_json::from_value(fixtures()["requests"][name].clone()).expect("parse request fixture")
     }
 
-    fn intake_request() -> DagDbIntakeRequest {
-        fixture_request("intake")
+    fn route_request() -> DagDbRouteRequest {
+        fixture_request("route")
     }
 
     fn context_packet_request() -> DagDbContextPacketRequest {
         fixture_request("context_packet")
-    }
-
-    fn receipt_lookup_request() -> DagDbReceiptLookupRequest {
-        fixture_request("receipt_lookup")
     }
 
     fn writeback_request() -> DagDbWritebackRequest {
@@ -1370,18 +1262,18 @@ mod transport_tests {
     // correct `{action}:{tenant}:{namespace}` scope.
     #[tokio::test]
     async fn post_attaches_path_and_four_auth_headers_with_scope() {
-        let body = fixture_response("responses", "intake");
+        let body = fixture_response("responses", "route");
         let server = TestServer::spawn("200 OK", body).await;
         let client =
             DagDbHttpClient::new(format!("{}///", server.base_url), auth()).expect("client");
 
-        let _ = client.intake(intake_request()).await;
+        let _ = client.route(route_request()).await;
         let request = server.captured().await;
 
         assert!(
             request
                 .request_line
-                .starts_with("POST /api/v1/dag-db/intake "),
+                .starts_with("POST /api/v1/dag-db/route "),
             "request line was {:?}",
             request.request_line
         );
@@ -1393,12 +1285,12 @@ mod transport_tests {
         assert_eq!(request.header("x-exo-namespace"), Some("primary"));
         assert_eq!(
             request.header("x-exo-authority-scope"),
-            Some("dagdb:intake:tenant-a:primary")
+            Some("dagdb:route:tenant-a:primary")
         );
         assert!(
             request
                 .body
-                .contains("\"idempotency_key\":\"idem-intake-1\""),
+                .contains("\"idempotency_key\":\"idem-route-1\""),
             "body was {}",
             request.body
         );
@@ -1430,28 +1322,6 @@ mod transport_tests {
             }};
         }
 
-        macro_rules! assert_get_route {
-            ($method:ident, $fixture:literal, $path_prefix:literal, $scope:literal) => {{
-                let body = fixture_response("responses", $fixture);
-                let server = TestServer::spawn("200 OK", body).await;
-                let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
-
-                let _ = client
-                    .$method(fixture_request($fixture))
-                    .await
-                    .expect("route response");
-                let request = server.captured().await;
-
-                assert!(
-                    request.request_line.starts_with($path_prefix),
-                    "request line was {:?}",
-                    request.request_line
-                );
-                assert_eq!(request.header("x-exo-authority-scope"), Some($scope));
-                assert!(request.body.is_empty(), "GET body should be empty");
-            }};
-        }
-
         assert_post_route!(
             route,
             "route",
@@ -1465,40 +1335,10 @@ mod transport_tests {
             "dagdb:context_packet:tenant-a:primary"
         );
         assert_post_route!(
-            validate,
-            "validate",
-            "/api/v1/dag-db/validate",
-            "dagdb:validate:tenant-a:primary"
-        );
-        assert_post_route!(
             writeback,
             "writeback",
             "/api/v1/dag-db/writeback",
             "dagdb:writeback:tenant-a:primary"
-        );
-        assert_post_route!(
-            trust_check,
-            "trust_check",
-            "/api/v1/dag-db/trust-check",
-            "dagdb:trust_check:tenant-a:primary"
-        );
-        assert_post_route!(
-            council_decision,
-            "council_decision",
-            "/api/v1/dag-db/council/decision",
-            "dagdb:council_decision:tenant-a:primary"
-        );
-        assert_get_route!(
-            catalog_lookup,
-            "catalog_lookup",
-            "GET /api/v1/dag-db/catalog/",
-            "dagdb:catalog_lookup:tenant-a:primary"
-        );
-        assert_get_route!(
-            route_lookup,
-            "route_lookup",
-            "GET /api/v1/dag-db/routes/",
-            "dagdb:route_lookup:tenant-a:primary"
         );
     }
 
@@ -1515,6 +1355,8 @@ mod transport_tests {
                     signature_value('a'),
                     signature_value('b'),
                     signature_value('c'),
+                    "did:exo:finality-authority",
+                    "did:exo:finality-authority",
                 ),
             )
             .await;
@@ -1539,10 +1381,62 @@ mod transport_tests {
             request.header("x-exo-continuation-signature"),
             Some(signature_value('c').as_str())
         );
+        assert_eq!(
+            request.header("x-exo-lifecycle-approval-did"),
+            Some("did:exo:finality-authority")
+        );
+        assert_eq!(
+            request.header("x-exo-continuation-approval-did"),
+            Some("did:exo:finality-authority")
+        );
     }
 
     #[tokio::test]
-    async fn signed_context_packet_attaches_only_write_signature_header() {
+    async fn signed_route_attaches_default_route_approval_headers() {
+        let body = fixture_response("responses", "route");
+        let server = TestServer::spawn("200 OK", body).await;
+        let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+        let _ = client
+            .route_with_signatures(
+                route_request(),
+                DagDbSignatureHeaders::default_route(
+                    signature_value('a'),
+                    signature_value('b'),
+                    "did:exo:route-authority",
+                ),
+            )
+            .await;
+        let request = server.captured().await;
+
+        assert!(
+            request
+                .request_line
+                .starts_with("POST /api/v1/dag-db/route "),
+            "request line was {:?}",
+            request.request_line
+        );
+        assert_eq!(
+            request.header("x-exo-write-signature"),
+            Some(signature_value('a').as_str())
+        );
+        assert_eq!(
+            request.header("x-exo-default-route-approval-signature"),
+            Some(signature_value('b').as_str())
+        );
+        assert_eq!(
+            request.header("x-exo-default-route-approval-did"),
+            Some("did:exo:route-authority")
+        );
+        assert_eq!(
+            request.header("x-exo-context-packet-approval-signature"),
+            None
+        );
+        assert_eq!(request.header("x-exo-context-packet-approval-did"), None);
+    }
+
+    #[tokio::test]
+    async fn signed_context_packet_attaches_write_and_approval_headers() {
         let body = fixture_response("responses", "context_packet");
         let server = TestServer::spawn("200 OK", body).await;
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
@@ -1550,7 +1444,11 @@ mod transport_tests {
         let _ = client
             .context_packet_with_signatures(
                 context_packet_request(),
-                DagDbSignatureHeaders::write(signature_value('d')),
+                DagDbSignatureHeaders::context_packet(
+                    signature_value('d'),
+                    signature_value('e'),
+                    "did:exo:context-authority",
+                ),
             )
             .await;
         let request = server.captured().await;
@@ -1566,6 +1464,19 @@ mod transport_tests {
             request.header("x-exo-write-signature"),
             Some(signature_value('d').as_str())
         );
+        assert_eq!(
+            request.header("x-exo-context-packet-approval-signature"),
+            Some(signature_value('e').as_str())
+        );
+        assert_eq!(
+            request.header("x-exo-context-packet-approval-did"),
+            Some("did:exo:context-authority")
+        );
+        assert_eq!(
+            request.header("x-exo-default-route-approval-signature"),
+            None
+        );
+        assert_eq!(request.header("x-exo-default-route-approval-did"), None);
         assert_eq!(request.header("x-exo-lifecycle-signature"), None);
         assert_eq!(request.header("x-exo-continuation-signature"), None);
     }
@@ -1635,46 +1546,20 @@ mod transport_tests {
         }
     }
 
-    // (a) A GET builds the correct path + the four headers with the route's
-    // own action in the scope.
-    #[tokio::test]
-    async fn get_attaches_path_and_scope_for_receipt_lookup() {
-        let body = fixture_response("responses", "receipt_lookup");
-        let server = TestServer::spawn("200 OK", body).await;
-        let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
-
-        let _ = client.receipt_lookup(receipt_lookup_request()).await;
-        let request = server.captured().await;
-
-        assert!(
-            request
-                .request_line
-                .starts_with("GET /api/v1/dag-db/receipts/"),
-            "request line was {:?}",
-            request.request_line
-        );
-        assert!(request.request_line.contains("tenant_id=tenant-a"));
-        assert_eq!(
-            request.header("x-exo-authority-scope"),
-            Some("dagdb:receipt_lookup:tenant-a:primary")
-        );
-        assert!(request.body.is_empty(), "GET body should be empty");
-    }
-
     // (b) A 2xx body deserializes into the right versioned DTO.
     #[tokio::test]
     async fn success_body_deserializes_into_versioned_dto() {
-        let body = fixture_response("responses", "intake");
+        let body = fixture_response("responses", "route");
         let server = TestServer::spawn("200 OK", body).await;
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let response = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect("2xx maps to DTO");
-        assert_eq!(response.schema_version, "dagdb_intake_response_v1");
+        assert_eq!(response.schema_version, "dagdb_route_response_v1");
         assert_eq!(response.tenant_id, "tenant-a");
-        assert_eq!(response.idempotency_key, "idem-intake-1");
+        assert_eq!(response.idempotency_key, "idem-route-1");
     }
 
     #[tokio::test]
@@ -1683,7 +1568,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("malformed 2xx body is an error");
         assert!(
@@ -1700,7 +1585,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("non-2xx is an error");
         match err {
@@ -1727,7 +1612,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("non-2xx is an error");
         match err {
@@ -1750,7 +1635,7 @@ mod transport_tests {
         let client = DagDbHttpClient::with_client(&base_url, auth(), http);
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("timeout is an error");
         assert!(
@@ -1769,7 +1654,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(format!("http://{addr}"), auth()).expect("client");
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("connect failure is an error");
         assert!(
@@ -1784,7 +1669,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new("http://127.0.0.1:1", auth).expect("client");
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("invalid auth header is rejected before send");
         match err {
@@ -1828,21 +1713,20 @@ mod transport_tests {
     // surfaced, not silently accepted.
     #[tokio::test]
     async fn schema_version_mismatch_is_surfaced() {
-        let mut intake = fixtures()["responses"]["intake"].clone();
-        intake["schema_version"] =
-            serde_json::Value::String("dagdb_intake_response_v999".to_owned());
-        let body = intake.to_string();
+        let mut route = fixtures()["responses"]["route"].clone();
+        route["schema_version"] = serde_json::Value::String("dagdb_route_response_v999".to_owned());
+        let body = route.to_string();
         let server = TestServer::spawn("200 OK", body).await;
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .intake(intake_request())
+            .route(route_request())
             .await
             .expect_err("mismatch is an error");
         match err {
             DagDbClientError::SchemaVersionMismatch { expected, actual } => {
-                assert_eq!(expected, "dagdb_intake_response_v1");
-                assert_eq!(actual, "dagdb_intake_response_v999");
+                assert_eq!(expected, "dagdb_route_response_v1");
+                assert_eq!(actual, "dagdb_route_response_v999");
             }
             other => panic!("expected SchemaVersionMismatch, got {other:?}"),
         }
@@ -1883,6 +1767,8 @@ mod transport_tests {
             "write-signature-secret",
             "lifecycle-signature-secret",
             "continuation-signature-secret",
+            "did:exo:lifecycle-finality",
+            "did:exo:continuation-finality",
         );
 
         let rendered = format!("{signatures:?}");

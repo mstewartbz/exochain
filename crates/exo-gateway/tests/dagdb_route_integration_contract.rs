@@ -64,6 +64,7 @@ const TENANT_ID: &str = "tenant-a";
 const NAMESPACE: &str = "primary";
 const AGENT_DID: &str = "did:exo:agent";
 const EXPORTER_DID: &str = "did:exo:exporter";
+const FINALITY_AUTHORITY_DID: &str = "did:exo:finality-authority";
 const BEARER: &str = "test-token";
 const FORGED_BEARER: &str = "forged-test-token";
 
@@ -301,7 +302,7 @@ async fn dagdb_routes_integration_contract() {
 
     ctx.install_gatekeeper_profile(
         ConsentEngine::default(),
-        IdentityRegistry::default().with_public_key(AGENT_DID, *keypair.public_key().as_bytes()),
+        identity_registry_with_finality_authority(&keypair),
     );
     let denied_import_signature = import_signature(&db.pool, &keypair, &import_request).await;
     let denied_import = app
@@ -321,9 +322,7 @@ async fn dagdb_routes_integration_contract() {
 
     ctx.install_gatekeeper_profile(
         active_consent_engine(),
-        IdentityRegistry::default()
-            .with_public_key(AGENT_DID, *keypair.public_key().as_bytes())
-            .with_public_key(EXPORTER_DID, *keypair.public_key().as_bytes()),
+        identity_registry_with_finality_authority(&keypair),
     );
     let receipts_before_import_consent_gap = receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
     let idempotency_before_import_consent_gap =
@@ -356,9 +355,7 @@ async fn dagdb_routes_integration_contract() {
 
     ctx.install_gatekeeper_profile(
         active_import_export_consent_engine(),
-        IdentityRegistry::default()
-            .with_public_key(AGENT_DID, *keypair.public_key().as_bytes())
-            .with_public_key(EXPORTER_DID, *keypair.public_key().as_bytes()),
+        identity_registry_with_finality_authority(&keypair),
     );
     let tenant_mismatch_import = DagDbImportRequest {
         tenant_id: "tenant-b".to_owned(),
@@ -593,7 +590,7 @@ async fn dagdb_routes_integration_contract() {
 
     ctx.install_gatekeeper_profile(
         ConsentEngine::default(),
-        IdentityRegistry::default().with_public_key(AGENT_DID, *keypair.public_key().as_bytes()),
+        identity_registry_with_finality_authority(&keypair),
     );
     let writeback_request_denied = DagDbWritebackRequest {
         tenant_id: TENANT_ID.to_owned(),
@@ -684,9 +681,7 @@ async fn dagdb_routes_integration_contract() {
 
     ctx.install_gatekeeper_profile(
         active_consent_engine(),
-        IdentityRegistry::default()
-            .with_public_key(AGENT_DID, *keypair.public_key().as_bytes())
-            .with_public_key(EXPORTER_DID, *keypair.public_key().as_bytes()),
+        identity_registry_with_finality_authority(&keypair),
     );
 
     let packet_request = DagDbContextPacketRequest {
@@ -1325,9 +1320,7 @@ async fn dagdb_routes_integration_contract() {
 
     ctx.install_gatekeeper_profile(
         active_import_export_consent_engine(),
-        IdentityRegistry::default()
-            .with_public_key(AGENT_DID, *keypair.public_key().as_bytes())
-            .with_public_key(EXPORTER_DID, *keypair.public_key().as_bytes()),
+        identity_registry_with_finality_authority(&keypair),
     );
     let idempotency_before_export_success =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await;
@@ -1797,6 +1790,13 @@ fn export_request() -> DagDbExportRequest {
         source_commit_or_repo_ref: Some("c706242d36f1c275e05d8a132778491da08f61c7".to_owned()),
         include_preview_context: false,
     }
+}
+
+fn identity_registry_with_finality_authority(keypair: &KeyPair) -> IdentityRegistry {
+    IdentityRegistry::default()
+        .with_public_key(AGENT_DID, *keypair.public_key().as_bytes())
+        .with_public_key(EXPORTER_DID, *keypair.public_key().as_bytes())
+        .with_public_key(FINALITY_AUTHORITY_DID, *keypair.public_key().as_bytes())
 }
 
 fn active_consent_engine() -> ConsentEngine {
@@ -2484,6 +2484,18 @@ where
             signature.parse().expect("continuation signature header"),
         );
     }
+    headers.insert(
+        "x-exo-lifecycle-approval-did",
+        FINALITY_AUTHORITY_DID
+            .parse()
+            .expect("lifecycle approval DID header"),
+    );
+    headers.insert(
+        "x-exo-continuation-approval-did",
+        FINALITY_AUTHORITY_DID
+            .parse()
+            .expect("continuation approval DID header"),
+    );
     request
 }
 

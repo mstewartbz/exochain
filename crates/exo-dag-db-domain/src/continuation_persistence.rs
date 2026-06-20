@@ -212,7 +212,7 @@ impl ContinuationRecord {
             });
         }
         approval
-            .validate()
+            .validate_for_continuation_record(self)
             .map_err(|error| ContinuationPersistenceError::InvalidRecord {
                 reason: error.to_string(),
             })?;

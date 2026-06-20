@@ -165,23 +165,16 @@ fn response_contract() -> Vec<(&'static str, &'static str, &'static str)> {
 }
 
 #[test]
-fn openapi_doc_parses_and_declares_every_route() {
+fn openapi_doc_parses_and_declares_every_live_route() {
     let spec = spec();
     assert_eq!(spec.get("openapi").and_then(Value::as_str), Some("3.1.0"));
     let paths = spec.get("paths").expect("spec has paths");
     for route in [
-        "/intake",
         "/route",
         "/context-packet",
-        "/validate",
         "/writeback",
         "/import",
         "/export",
-        "/trust-check",
-        "/council/decision",
-        "/receipts/{receipt_hash}",
-        "/catalog/{catalog_id}",
-        "/routes/{route_id}",
     ] {
         assert!(paths.get(route).is_some(), "spec is missing path {route}");
     }

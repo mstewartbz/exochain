@@ -10,17 +10,6 @@
     { "url": "/api/v1/dag-db", "description": "DAG DB REST prefix for the gateway runtime; functional persistence requires a configured Postgres pool plus tenant/session authority, and missing runtime state fails closed." }
   ],
   "paths": {
-    "/intake": {
-      "post": {
-        "summary": "Submit a memory candidate for governed intake.",
-        "operationId": "dagDbIntake",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbIntakeRequest" } } } },
-        "responses": {
-          "200": { "description": "Intake recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbIntakeResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
     "/route": {
       "post": {
         "summary": "Create a governed retrieval route.",
@@ -39,17 +28,6 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbContextPacketRequest" } } } },
         "responses": {
           "200": { "description": "Context packet built.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbContextPacketResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
-    "/validate": {
-      "post": {
-        "summary": "Record a governed validation decision.",
-        "operationId": "dagDbValidate",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbValidateRequest" } } } },
-        "responses": {
-          "200": { "description": "Validation recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbValidateResponse" } } } },
           "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
         }
       }
@@ -83,78 +61,6 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbExportRequest" } } } },
         "responses": {
           "200": { "description": "Export built.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbExportResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
-    "/trust-check": {
-      "post": {
-        "summary": "Run a governed inbound-agent trust check.",
-        "operationId": "dagDbTrustCheck",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbTrustCheckRequest" } } } },
-        "responses": {
-          "200": { "description": "Trust check recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbTrustCheckResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
-    "/council/decision": {
-      "post": {
-        "summary": "Record a governed council decision.",
-        "operationId": "dagDbCouncilDecision",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbCouncilDecisionRequest" } } } },
-        "responses": {
-          "200": { "description": "Council decision recorded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbCouncilDecisionResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
-    "/receipts/{receipt_hash}": {
-      "get": {
-        "summary": "Look up a receipt by hash.",
-        "operationId": "dagDbReceiptLookup",
-        "parameters": [
-          { "name": "receipt_hash", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "namespace", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "include_body", "in": "query", "required": false, "schema": { "type": "boolean" } }
-        ],
-        "responses": {
-          "200": { "description": "Receipt found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbReceiptLookupResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
-    "/catalog/{catalog_id}": {
-      "get": {
-        "summary": "Look up a catalog entry by id.",
-        "operationId": "dagDbCatalogLookup",
-        "parameters": [
-          { "name": "catalog_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "namespace", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "include_children", "in": "query", "required": false, "schema": { "type": "boolean" } },
-          { "name": "include_routes", "in": "query", "required": false, "schema": { "type": "boolean" } }
-        ],
-        "responses": {
-          "200": { "description": "Catalog entry found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbCatalogLookupResponse" } } } },
-          "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
-        }
-      }
-    },
-    "/routes/{route_id}": {
-      "get": {
-        "summary": "Look up a route by id.",
-        "operationId": "dagDbRouteLookup",
-        "parameters": [
-          { "name": "route_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "tenant_id", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "namespace", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "include_memory_refs", "in": "query", "required": false, "schema": { "type": "boolean" } },
-          { "name": "include_validation", "in": "query", "required": false, "schema": { "type": "boolean" } }
-        ],
-        "responses": {
-          "200": { "description": "Route found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbRouteLookupResponse" } } } },
           "default": { "description": "Error envelope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DagDbErrorEnvelope" } } } }
         }
       }

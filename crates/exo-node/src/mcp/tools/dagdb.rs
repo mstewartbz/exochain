@@ -84,8 +84,12 @@ const MAX_TOKEN_BUDGET: u64 = 1_000_000;
 const SIGNATURE_HEX_CHARS: usize = 128;
 const SIGNATURE_PATTERN: &str = "^[0-9a-f]{128}$";
 const WRITE_SIGNATURE_HEADER: &str = "x-exo-write-signature";
+const CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-context-packet-approval-signature";
+const CONTEXT_PACKET_APPROVAL_DID_HEADER: &str = "x-exo-context-packet-approval-did";
 const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
 const CONTINUATION_SIGNATURE_HEADER: &str = "x-exo-continuation-signature";
+const LIFECYCLE_APPROVAL_DID_HEADER: &str = "x-exo-lifecycle-approval-did";
+const CONTINUATION_APPROVAL_DID_HEADER: &str = "x-exo-continuation-approval-did";
 const KG_IMPORT_REPORT_SCHEMA: &str = "dagdb_kg_dry_run_import_report_v1";
 const KG_IMPORT_CANDIDATES_SCHEMA: &str = "dagdb_markdown_kg_import_candidates_v1";
 const ECHOED_STRING_FIELDS: &[(&str, &str)] = &[
@@ -517,6 +521,17 @@ fn is_signature_value(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+fn is_did_header_value(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.len() >= 5
+        && value.len() <= MAX_SAFE_ID_BYTES
+        && value.starts_with("did:")
+        && bytes[4].is_ascii_alphanumeric()
+        && bytes[5..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
 #[cfg(feature = "dagdb-gateway-proxy")]
 fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
@@ -524,10 +539,15 @@ fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
             WRITE_SIGNATURE_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
             CONTINUATION_SIGNATURE_HEADER,
+            LIFECYCLE_APPROVAL_DID_HEADER,
+            CONTINUATION_APPROVAL_DID_HEADER,
         ],
-        DAGDB_GET_CONTEXT_PACKET_TOOL | DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
-            &[WRITE_SIGNATURE_HEADER]
-        }
+        DAGDB_GET_CONTEXT_PACKET_TOOL => &[
+            WRITE_SIGNATURE_HEADER,
+            CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+            CONTEXT_PACKET_APPROVAL_DID_HEADER,
+        ],
+        DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => &[WRITE_SIGNATURE_HEADER],
         _ => &[],
     }
 }
@@ -578,6 +598,51 @@ fn require_signature_param(
 }
 
 #[cfg(feature = "dagdb-gateway-proxy")]
+fn require_did_header_param(
+    tool_name: &str,
+    params: &Value,
+    header: &'static str,
+) -> Result<String, ToolResult> {
+    let Some(value) = params.get(header).and_then(Value::as_str) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_MISSING,
+            "DAG DB gateway finality authority material is incomplete; no DAG DB operation was performed.",
+            json!({
+                "missing_signature_header": header,
+                "required_signature_headers": required_signature_headers(tool_name),
+            }),
+        ));
+    };
+
+    if value.trim().is_empty() {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_MISSING,
+            "DAG DB gateway finality authority material is incomplete; no DAG DB operation was performed.",
+            json!({
+                "missing_signature_header": header,
+                "required_signature_headers": required_signature_headers(tool_name),
+            }),
+        ));
+    }
+
+    if !is_did_header_value(value) {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_INVALID,
+            "DAG DB gateway finality authority material is invalid; no DAG DB operation was performed.",
+            json!({
+                "invalid_signature_header": header,
+                "expected_signature_format": "DID string matching did:<method-specific-id>",
+            }),
+        ));
+    }
+
+    Ok(value.to_owned())
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
 fn signature_headers_for_tool(
     tool_name: &str,
     params: &Value,
@@ -587,14 +652,17 @@ fn signature_headers_for_tool(
             require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
             require_signature_param(tool_name, params, LIFECYCLE_SIGNATURE_HEADER)?,
             require_signature_param(tool_name, params, CONTINUATION_SIGNATURE_HEADER)?,
+            require_did_header_param(tool_name, params, LIFECYCLE_APPROVAL_DID_HEADER)?,
+            require_did_header_param(tool_name, params, CONTINUATION_APPROVAL_DID_HEADER)?,
         )),
-        DAGDB_GET_CONTEXT_PACKET_TOOL | DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
-            Ok(DagDbSignatureHeaders::write(require_signature_param(
-                tool_name,
-                params,
-                WRITE_SIGNATURE_HEADER,
-            )?))
-        }
+        DAGDB_GET_CONTEXT_PACKET_TOOL => Ok(DagDbSignatureHeaders::context_packet(
+            require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
+            require_signature_param(tool_name, params, CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER)?,
+            require_did_header_param(tool_name, params, CONTEXT_PACKET_APPROVAL_DID_HEADER)?,
+        )),
+        DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => Ok(DagDbSignatureHeaders::write(
+            require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
+        )),
         _ => Err(fail_closed_response(
             tool_name,
             DAGDB_REQUEST_DECODE_FAILED,
@@ -610,8 +678,12 @@ fn proxy_dto_params(params: &Value) -> Value {
     if let Value::Object(map) = &mut dto_params {
         for header in [
             WRITE_SIGNATURE_HEADER,
+            CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+            CONTEXT_PACKET_APPROVAL_DID_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
             CONTINUATION_SIGNATURE_HEADER,
+            LIFECYCLE_APPROVAL_DID_HEADER,
+            CONTINUATION_APPROVAL_DID_HEADER,
         ] {
             map.remove(header);
         }
@@ -962,6 +1034,16 @@ pub fn get_context_packet_definition() -> ToolDefinition {
         WRITE_SIGNATURE_HEADER.to_owned(),
         signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
     );
+    properties.insert(
+        CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER.to_owned(),
+        signature_schema(
+            "External context-packet approval signature forwarded as `x-exo-context-packet-approval-signature`.",
+        ),
+    );
+    properties.insert(
+        CONTEXT_PACKET_APPROVAL_DID_HEADER.to_owned(),
+        did_schema("External DID that signed the context-packet finality approval."),
+    );
 
     ToolDefinition {
         name: DAGDB_GET_CONTEXT_PACKET_TOOL.to_owned(),
@@ -1075,6 +1157,14 @@ pub fn submit_writeback_definition() -> ToolDefinition {
         signature_schema(
             "Gateway continuation signature forwarded as `x-exo-continuation-signature`.",
         ),
+    );
+    properties.insert(
+        LIFECYCLE_APPROVAL_DID_HEADER.to_owned(),
+        did_schema("External DID that signed the lifecycle finality approval."),
+    );
+    properties.insert(
+        CONTINUATION_APPROVAL_DID_HEADER.to_owned(),
+        did_schema("External DID that signed the continuation finality approval."),
     );
 
     ToolDefinition {
@@ -1439,10 +1529,20 @@ mod tests {
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
+    fn add_context_packet_signatures(mut params: Value) -> Value {
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] = json!(signature_value('d'));
+        params[CONTEXT_PACKET_APPROVAL_DID_HEADER] = json!("did:exo:context-authority");
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
     fn add_writeback_signatures(mut params: Value) -> Value {
         params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
         params[LIFECYCLE_SIGNATURE_HEADER] = json!(signature_value('b'));
         params[CONTINUATION_SIGNATURE_HEADER] = json!(signature_value('c'));
+        params[LIFECYCLE_APPROVAL_DID_HEADER] = json!("did:exo:finality-authority");
+        params[CONTINUATION_APPROVAL_DID_HEADER] = json!("did:exo:finality-authority");
         params
     }
 
@@ -1452,11 +1552,34 @@ mod tests {
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
+    fn context_packet_signature_expectations() -> Vec<(&'static str, String)> {
+        vec![
+            (WRITE_SIGNATURE_HEADER, signature_value('a')),
+            (
+                CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+                signature_value('d'),
+            ),
+            (
+                CONTEXT_PACKET_APPROVAL_DID_HEADER,
+                "did:exo:context-authority".to_owned(),
+            ),
+        ]
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
     fn writeback_signature_expectations() -> Vec<(&'static str, String)> {
         vec![
             (WRITE_SIGNATURE_HEADER, signature_value('a')),
             (LIFECYCLE_SIGNATURE_HEADER, signature_value('b')),
             (CONTINUATION_SIGNATURE_HEADER, signature_value('c')),
+            (
+                LIFECYCLE_APPROVAL_DID_HEADER,
+                "did:exo:finality-authority".to_owned(),
+            ),
+            (
+                CONTINUATION_APPROVAL_DID_HEADER,
+                "did:exo:finality-authority".to_owned(),
+            ),
         ]
     }
 
@@ -1535,6 +1658,8 @@ mod tests {
             WRITE_SIGNATURE_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
             CONTINUATION_SIGNATURE_HEADER,
+            LIFECYCLE_APPROVAL_DID_HEADER,
+            CONTINUATION_APPROVAL_DID_HEADER,
         ] {
             assert!(
                 !request.body.contains(signature_header),
@@ -1701,12 +1826,12 @@ mod tests {
     fn configured_gateway_proxies_all_dagdb_mcp_tools_with_auth_and_tenant_scope() {
         assert_live_proxy(
             execute_get_context_packet,
-            add_write_signature(request_fixture("context_packet")),
+            add_context_packet_signatures(request_fixture("context_packet")),
             "context_packet",
             "POST /api/v1/dag-db/context-packet ",
             "dagdb:context_packet:tenant-a:primary",
             "idem-packet-1",
-            write_signature_expectations(),
+            context_packet_signature_expectations(),
         );
         assert_live_proxy(
             execute_submit_writeback,
@@ -1751,7 +1876,7 @@ mod tests {
         };
 
         let result = execute_get_context_packet(
-            &add_write_signature(request_fixture("context_packet")),
+            &add_context_packet_signatures(request_fixture("context_packet")),
             &context,
         );
         assert!(result.is_error);
@@ -1774,7 +1899,7 @@ mod tests {
         };
 
         let result = execute_get_context_packet(
-            &add_write_signature(request_fixture("context_packet")),
+            &add_context_packet_signatures(request_fixture("context_packet")),
             &context,
         );
         assert!(result.is_error);
@@ -1798,7 +1923,7 @@ mod tests {
         };
 
         let result = execute_get_context_packet(
-            &add_write_signature(request_fixture("context_packet")),
+            &add_context_packet_signatures(request_fixture("context_packet")),
             &context,
         );
         assert!(result.is_error);
@@ -1821,7 +1946,7 @@ mod tests {
         };
 
         let result = execute_get_context_packet(
-            &add_write_signature(request_fixture("context_packet")),
+            &add_context_packet_signatures(request_fixture("context_packet")),
             &context,
         );
         assert!(result.is_error);
@@ -1838,7 +1963,7 @@ mod tests {
             ("tenant_id", DAGDB_REQUEST_TENANT_MISSING),
             ("namespace", DAGDB_REQUEST_NAMESPACE_MISSING),
         ] {
-            let mut params = add_write_signature(request_fixture("context_packet"));
+            let mut params = add_context_packet_signatures(request_fixture("context_packet"));
             params
                 .as_object_mut()
                 .expect("context packet params are an object")
@@ -1868,7 +1993,7 @@ mod tests {
         };
 
         let result = execute_get_context_packet(
-            &add_write_signature(request_fixture("context_packet")),
+            &add_context_packet_signatures(request_fixture("context_packet")),
             &context,
         );
         assert!(result.is_error);
@@ -1908,6 +2033,11 @@ mod tests {
             WRITE_SIGNATURE_HEADER,
         );
         assert_missing_signature_fails_before_http(
+            execute_get_context_packet,
+            add_write_signature(request_fixture("context_packet")),
+            CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+        );
+        assert_missing_signature_fails_before_http(
             execute_import,
             scoped_import_params(),
             WRITE_SIGNATURE_HEADER,
@@ -1934,6 +2064,18 @@ mod tests {
             writeback_without_continuation,
             CONTINUATION_SIGNATURE_HEADER,
         );
+
+        let mut writeback_without_lifecycle_authority = request_fixture("writeback");
+        writeback_without_lifecycle_authority[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        writeback_without_lifecycle_authority[LIFECYCLE_SIGNATURE_HEADER] =
+            json!(signature_value('b'));
+        writeback_without_lifecycle_authority[CONTINUATION_SIGNATURE_HEADER] =
+            json!(signature_value('c'));
+        assert_missing_signature_fails_before_http(
+            execute_submit_writeback,
+            writeback_without_lifecycle_authority,
+            LIFECYCLE_APPROVAL_DID_HEADER,
+        );
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
@@ -1954,7 +2096,9 @@ mod tests {
             json!([
                 WRITE_SIGNATURE_HEADER,
                 LIFECYCLE_SIGNATURE_HEADER,
-                CONTINUATION_SIGNATURE_HEADER
+                CONTINUATION_SIGNATURE_HEADER,
+                LIFECYCLE_APPROVAL_DID_HEADER,
+                CONTINUATION_APPROVAL_DID_HEADER
             ])
         );
         assert_eq!(body["success_claimed"], false);
@@ -2004,7 +2148,7 @@ mod tests {
     #[cfg(feature = "dagdb-gateway-proxy")]
     #[test]
     fn configured_gateway_decode_failure_returns_structured_error_before_http() {
-        let mut params = add_write_signature(request_fixture("context_packet"));
+        let mut params = add_context_packet_signatures(request_fixture("context_packet"));
         params["token_budget"] = json!("not-a-token-budget");
 
         let result = execute_get_context_packet(&params, &gateway_context("http://127.0.0.1:9"));
@@ -2029,7 +2173,7 @@ mod tests {
         let context = gateway_context(server.base_url.clone());
 
         let result = execute_get_context_packet(
-            &add_write_signature(request_fixture("context_packet")),
+            &add_context_packet_signatures(request_fixture("context_packet")),
             &context,
         );
         assert!(result.is_error);
