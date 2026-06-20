@@ -206,7 +206,7 @@ async fn insert_default_route_record_accepted_receipt(
     let receipt_body = json!({
         "route_name": DEFAULT_ROUTE_AUDIT_ROUTE_NAME,
         "route_id": route.route_id,
-        "request_id": route.updated_at,
+        "request_id": route.request_id,
         "source": "default_route_persistence_adapter",
     });
     let event_body_hash =

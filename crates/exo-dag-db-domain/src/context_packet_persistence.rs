@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Schema version for persisted/proof-bound PRD17B context packet records.
@@ -42,6 +43,10 @@ const RAW_FORBIDDEN_FRAGMENTS: &[&str] = &[
 const EXTERNAL_PRODUCTION_APPROVAL_REF_PREFIX: &str = "external-production-approval:";
 const EXTERNAL_PACKET_QUALITY_REVIEW_REF_PREFIX: &str = "external-packet-quality-review:";
 const EXTERNAL_FINALITY_REF_PREFIX: &str = "external-finality:";
+/// Bound route purpose for external context-packet finality.
+pub const CONTEXT_PACKET_FINALITY_PURPOSE: &str = "dagdb.context_packet";
+const MIN_APPROVAL_TIMESTAMP: &str = "2026-01-01T00:00:00Z";
+const MAX_APPROVAL_TIMESTAMP: &str = "2038-01-19T03:14:07Z";
 
 /// Context quality emitted by the PRD17B default retrieval runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +158,8 @@ pub struct ContextPacketAcceptanceEvidence {
     pub route_id: String,
     /// Packet verified by the external finality receipt.
     pub packet_id: String,
+    /// Route purpose verified by the external finality receipt.
+    pub route_purpose: String,
     /// Request id verified by the receipt.
     pub request_id: String,
     /// Canonical payload hash approved by the external authority.
@@ -374,6 +381,38 @@ pub enum ContextPacketError {
         /// Mismatched field.
         field: String,
     },
+}
+
+/// Canonical approval hash the external context-packet authority must sign.
+pub fn canonical_context_packet_approval_payload_hash(
+    record: &ContextPacketRecord,
+    actor_id: &str,
+    request_id: &str,
+    authority_did: &str,
+    route_purpose: &str,
+    approved_at: &str,
+) -> Result<String, ContextPacketError> {
+    sha256_hex_cbor(&ContextPacketApprovalMaterial {
+        domain: "exo.dagdb.context_packet.external_finality.v1",
+        schema_version: &record.schema_version,
+        packet_id: &record.packet_id,
+        route_id: &record.route_id,
+        query_hash: &record.query_hash,
+        request_id,
+        idempotency_key: &record.idempotency_key,
+        tenant_id: &record.tenant_id,
+        project_id: &record.project_id,
+        memory_namespace: &record.memory_namespace,
+        selected_memory_ids: &record.selected_memory_ids,
+        selected_edge_ids: &record.selected_edge_ids,
+        token_budget: record.token_budget,
+        token_estimate: record.token_estimate,
+        source_proof_refs: &record.source_proof_refs,
+        actor_id,
+        authority_did,
+        route_purpose,
+        approved_at,
+    })
 }
 
 /// Build a context packet record with canonical idempotency.
@@ -639,6 +678,7 @@ fn validate_acceptance_evidence(
         ("actor_id", evidence.actor_id.as_str()),
         ("route_id", evidence.route_id.as_str()),
         ("packet_id", evidence.packet_id.as_str()),
+        ("route_purpose", evidence.route_purpose.as_str()),
         ("request_id", evidence.request_id.as_str()),
         ("payload_hash", evidence.payload_hash.as_str()),
         (
@@ -657,6 +697,7 @@ fn validate_acceptance_evidence(
     validate_digest("payload_hash", &evidence.payload_hash)?;
     validate_digest("receipt_payload_hash", &evidence.receipt_payload_hash)?;
     validate_signature("authority_signature", &evidence.authority_signature)?;
+    validate_approval_timestamp("approved_at", &evidence.approved_at)?;
     require_external_match("tenant_id", &evidence.tenant_id, &record.tenant_id)?;
     require_external_match(
         "memory_namespace",
@@ -665,10 +706,29 @@ fn validate_acceptance_evidence(
     )?;
     require_external_match("route_id", &evidence.route_id, &record.route_id)?;
     require_external_match("packet_id", &evidence.packet_id, &record.packet_id)?;
+    require_external_match("request_id", &evidence.request_id, &record.idempotency_key)?;
+    require_external_match(
+        "route_purpose",
+        &evidence.route_purpose,
+        CONTEXT_PACKET_FINALITY_PURPOSE,
+    )?;
+    let expected_payload_hash = canonical_context_packet_approval_payload_hash(
+        record,
+        &evidence.actor_id,
+        &evidence.request_id,
+        &evidence.authority_did,
+        &evidence.route_purpose,
+        &evidence.approved_at,
+    )?;
+    require_external_match(
+        "payload_hash",
+        &evidence.payload_hash,
+        &expected_payload_hash,
+    )?;
     require_external_match(
         "receipt_payload_hash",
         &evidence.receipt_payload_hash,
-        &evidence.payload_hash,
+        &expected_payload_hash,
     )?;
     if evidence.authority_did == evidence.actor_id {
         return Err(ContextPacketError::ExternalFinalityMismatch {
@@ -676,6 +736,29 @@ fn validate_acceptance_evidence(
         });
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ContextPacketApprovalMaterial<'a> {
+    domain: &'static str,
+    schema_version: &'a str,
+    packet_id: &'a str,
+    route_id: &'a str,
+    query_hash: &'a str,
+    request_id: &'a str,
+    idempotency_key: &'a str,
+    tenant_id: &'a str,
+    project_id: &'a str,
+    memory_namespace: &'a str,
+    selected_memory_ids: &'a [String],
+    selected_edge_ids: &'a [String],
+    token_budget: u32,
+    token_estimate: u32,
+    source_proof_refs: &'a [String],
+    actor_id: &'a str,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
 }
 
 fn validate_external_ref(
@@ -740,6 +823,40 @@ fn validate_signature(field: &str, value: &str) -> Result<(), ContextPacketError
         });
     }
     Ok(())
+}
+
+fn validate_approval_timestamp(field: &str, value: &str) -> Result<(), ContextPacketError> {
+    if value.len() != 20
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || value.as_bytes().get(10) != Some(&b'T')
+        || value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+        || value.as_bytes().get(19) != Some(&b'Z')
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+        || !(MIN_APPROVAL_TIMESTAMP..=MAX_APPROVAL_TIMESTAMP).contains(&value)
+    {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn sha256_hex_cbor<T: Serialize>(value: &T) -> Result<String, ContextPacketError> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|_| {
+        ContextPacketError::ExternalFinalityMismatch {
+            field: "payload_hash".to_owned(),
+        }
+    })?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn push_unique_proof_ref(

@@ -16,6 +16,12 @@ pub const PRD17_LIFECYCLE_ACTION_SCHEMA: &str = "dagdb_prd17_lifecycle_action_v1
 pub const PRD17_LIFECYCLE_MUTATION_REPORT_SCHEMA: &str = "dagdb_prd17_lifecycle_mutation_report_v1";
 /// Evidence id prefix required before a lifecycle action can claim production approval.
 pub const PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX: &str = "production-lifecycle-approval:";
+/// Bound route purpose for continuation finality evidence.
+pub const CONTINUATION_FINALITY_PURPOSE: &str = "dagdb.continuation";
+const MIN_APPROVAL_EPOCH_SECONDS: u64 = 1_735_689_600;
+const MAX_APPROVAL_EPOCH_SECONDS: u64 = 2_147_483_647;
+const MIN_APPROVAL_TIMESTAMP: &str = "2025-01-01T00:00:00Z";
+const MAX_APPROVAL_TIMESTAMP: &str = "2038-01-19T03:14:07Z";
 
 const RAW_BODY_KEYS: &[&str] = &[
     "body",
@@ -192,6 +198,7 @@ pub struct ProductionLifecycleApprovalEvidence {
     pub memory_namespace: String,
     pub actor_id: String,
     pub route_id: String,
+    pub route_purpose: String,
     pub request_id: String,
     pub payload_hash: String,
     pub authority_did: String,
@@ -225,6 +232,10 @@ impl ProductionLifecycleApprovalEvidence {
         )?;
         validate_non_empty("production_lifecycle_approval.actor_id", &self.actor_id)?;
         validate_non_empty("production_lifecycle_approval.route_id", &self.route_id)?;
+        validate_non_empty(
+            "production_lifecycle_approval.route_purpose",
+            &self.route_purpose,
+        )?;
         validate_non_empty("production_lifecycle_approval.request_id", &self.request_id)?;
         validate_digest(
             "production_lifecycle_approval.payload_hash",
@@ -239,6 +250,10 @@ impl ProductionLifecycleApprovalEvidence {
             &self.authority_signature,
         )?;
         validate_non_empty(
+            "production_lifecycle_approval.approved_at",
+            &self.approved_at,
+        )?;
+        validate_approval_timestamp(
             "production_lifecycle_approval.approved_at",
             &self.approved_at,
         )?;
@@ -266,7 +281,19 @@ impl ProductionLifecycleApprovalEvidence {
         )?;
         self.require_equal("actor_id", &self.actor_id, &action.actor_id)?;
         self.require_equal("route_id", &self.route_id, &action.policy_ref)?;
+        self.require_equal(
+            "route_purpose",
+            &self.route_purpose,
+            action.action_type.as_str(),
+        )?;
         self.require_equal("request_id", &self.request_id, &action.source_packet_id)?;
+        let expected_payload_hash = canonical_lifecycle_approval_payload_hash(
+            action,
+            &self.authority_did,
+            &self.route_purpose,
+            &self.approved_at,
+        )?;
+        self.require_equal("payload_hash", &self.payload_hash, &expected_payload_hash)?;
         Ok(())
     }
 
@@ -282,7 +309,21 @@ impl ProductionLifecycleApprovalEvidence {
             &self.memory_namespace,
             &record.memory_namespace,
         )?;
+        self.require_equal("actor_id", &self.actor_id, &record.actor_id)?;
+        self.require_equal("route_id", &self.route_id, &record.route_id)?;
+        self.require_equal(
+            "route_purpose",
+            &self.route_purpose,
+            CONTINUATION_FINALITY_PURPOSE,
+        )?;
         self.require_equal("request_id", &self.request_id, &record.task_id)?;
+        let expected_payload_hash = canonical_continuation_approval_payload_hash(
+            record,
+            &self.authority_did,
+            &self.route_purpose,
+            &self.approved_at,
+        )?;
+        self.require_equal("payload_hash", &self.payload_hash, &expected_payload_hash)?;
         Ok(())
     }
 
@@ -294,6 +335,56 @@ impl ProductionLifecycleApprovalEvidence {
         }
         Ok(())
     }
+}
+
+/// Canonical approval hash the external lifecycle authority must sign.
+pub fn canonical_lifecycle_approval_payload_hash(
+    action: &LifecycleAction,
+    authority_did: &str,
+    route_purpose: &str,
+    approved_at: &str,
+) -> Result<String> {
+    sha256_hex_cbor(&LifecycleApprovalMaterial {
+        domain: "exo.dagdb.lifecycle.external_finality.v1",
+        action,
+        authority_did,
+        route_purpose,
+        approved_at,
+    })
+}
+
+/// Canonical approval hash the external continuation authority must sign.
+pub fn canonical_continuation_approval_payload_hash(
+    record: &crate::continuation_persistence::ContinuationRecord,
+    authority_did: &str,
+    route_purpose: &str,
+    approved_at: &str,
+) -> Result<String> {
+    sha256_hex_cbor(&ContinuationApprovalMaterial {
+        domain: "exo.dagdb.continuation.external_finality.v1",
+        record,
+        authority_did,
+        route_purpose,
+        approved_at,
+    })
+}
+
+#[derive(Serialize)]
+struct LifecycleApprovalMaterial<'a> {
+    domain: &'static str,
+    action: &'a LifecycleAction,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct ContinuationApprovalMaterial<'a> {
+    domain: &'static str,
+    record: &'a crate::continuation_persistence::ContinuationRecord,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
 }
 
 /// Rollback reference required for every lifecycle mutation.
@@ -707,6 +798,48 @@ fn validate_signature(field: &str, value: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn validate_approval_timestamp(field: &str, value: &str) -> Result<()> {
+    if let Ok(epoch_seconds) = value.parse::<u64>() {
+        if (MIN_APPROVAL_EPOCH_SECONDS..=MAX_APPROVAL_EPOCH_SECONDS).contains(&epoch_seconds) {
+            return Ok(());
+        }
+        return Err(LifecycleActionError::ProductionApprovalMismatch {
+            field: field.to_owned(),
+        });
+    }
+    if value.len() == 20
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+        && value.as_bytes().get(10) == Some(&b'T')
+        && value.as_bytes().get(13) == Some(&b':')
+        && value.as_bytes().get(16) == Some(&b':')
+        && value.as_bytes().get(19) == Some(&b'Z')
+        && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+        && (MIN_APPROVAL_TIMESTAMP..=MAX_APPROVAL_TIMESTAMP).contains(&value)
+    {
+        return Ok(());
+    }
+    Err(LifecycleActionError::ProductionApprovalMismatch {
+        field: field.to_owned(),
+    })
+}
+
+fn sha256_hex_cbor<T: Serialize>(value: &T) -> Result<String> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|error| {
+        LifecycleActionError::InvalidAction {
+            reason: format!("approval payload hash serialization failed: {error}"),
+        }
+    })?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn validate_memory_refs_sorted_unique(

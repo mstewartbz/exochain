@@ -164,6 +164,34 @@ pub async fn persist_context_packet_receipt_to_db(
     }
 }
 
+/// Persist a usage event inside a caller-owned transaction.
+///
+/// The caller owns isolation level, commit, and rollback. This helper still
+/// binds tenant context before touching tenant-scoped tables.
+pub async fn persist_usage_event_to_db_with_metadata_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DagDbGraphContextSelectionResponse,
+    metadata: Option<&UsageEventMemoryMetadata>,
+) -> DomainResult<DbWriteSummary> {
+    validate_selection_response(event)?;
+    let idempotency_key = usage_event_idempotency_key(event)?;
+    let request_hash = usage_event_request_hash(event, metadata)?;
+    let receipt_hash = compute_usage_event_receipt_hash(event)?;
+
+    super::bind_tenant_context(tx, &event.tenant_id)
+        .await
+        .map_err(pg)?;
+    persist_usage_event_in_bound_transaction(
+        tx,
+        event,
+        metadata,
+        &idempotency_key,
+        request_hash,
+        receipt_hash,
+    )
+    .await
+}
+
 async fn persist_usage_event_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     event: &DagDbGraphContextSelectionResponse,
@@ -179,7 +207,25 @@ async fn persist_usage_event_in_transaction(
     super::bind_tenant_context(tx, &event.tenant_id)
         .await
         .map_err(pg)?;
+    persist_usage_event_in_bound_transaction(
+        tx,
+        event,
+        metadata,
+        idempotency_key,
+        request_hash,
+        receipt_hash,
+    )
+    .await
+}
 
+async fn persist_usage_event_in_bound_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DagDbGraphContextSelectionResponse,
+    metadata: Option<&UsageEventMemoryMetadata>,
+    idempotency_key: &str,
+    request_hash: Hash256,
+    receipt_hash: Hash256,
+) -> DomainResult<DbWriteSummary> {
     if let Some(summary) =
         fetch_idempotency_replay(tx, event, idempotency_key, request_hash, USAGE_EVENT_ROUTE)
             .await?

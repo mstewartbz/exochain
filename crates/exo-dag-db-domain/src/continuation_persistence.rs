@@ -82,6 +82,8 @@ pub struct ContinuationRecord {
     pub tenant_id: String,
     pub project_id: String,
     pub memory_namespace: String,
+    pub actor_id: String,
+    pub route_id: String,
     pub summary_ref: String,
     pub memory_refs: Vec<LifecycleMemoryRef>,
     pub blocker_refs: Vec<String>,
@@ -126,6 +128,8 @@ impl ContinuationRecord {
         validate_scope_field("tenant_id", &self.tenant_id)?;
         validate_scope_field("project_id", &self.project_id)?;
         validate_scope_field("memory_namespace", &self.memory_namespace)?;
+        validate_non_empty("actor_id", &self.actor_id)?;
+        validate_non_empty("route_id", &self.route_id)?;
         validate_non_empty("summary_ref", &self.summary_ref)?;
         validate_non_empty("created_at", &self.created_at)?;
         validate_memory_refs_sorted_unique(

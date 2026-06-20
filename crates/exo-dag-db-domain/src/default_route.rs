@@ -5,6 +5,7 @@
 
 use exo_core::Did;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::context_packet_persistence::{
@@ -42,6 +43,10 @@ const RAW_FORBIDDEN_FRAGMENTS: &[&str] = &[
 const EXTERNAL_PRODUCTION_APPROVAL_REF_PREFIX: &str = "external-production-approval:";
 const EXTERNAL_PACKET_QUALITY_REVIEW_REF_PREFIX: &str = "external-packet-quality-review:";
 const EXTERNAL_FINALITY_REF_PREFIX: &str = "external-finality:";
+/// Bound route purpose for external default-route finality.
+pub const DEFAULT_ROUTE_FINALITY_PURPOSE: &str = "dagdb.default_route";
+const MIN_APPROVAL_TIMESTAMP: &str = "2026-01-01T00:00:00Z";
+const MAX_APPROVAL_TIMESTAMP: &str = "2038-01-19T03:14:07Z";
 
 /// Route status for PRD17B default retrieval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +199,8 @@ pub struct DefaultRouteRecord {
     pub schema_version: String,
     /// Route id.
     pub route_id: String,
+    /// Request or idempotency key that created this route.
+    pub request_id: String,
     /// Tenant scope.
     pub tenant_id: String,
     /// Project id.
@@ -244,6 +251,8 @@ pub struct DefaultRouteAcceptanceEvidence {
     pub actor_id: String,
     /// Route verified by the external finality receipt.
     pub route_id: String,
+    /// Route purpose verified by the external finality receipt.
+    pub route_purpose: String,
     /// Request or idempotency key verified by the receipt.
     pub request_id: String,
     /// Canonical payload hash approved by the external authority.
@@ -363,6 +372,33 @@ pub enum DefaultRouteError {
         /// Mismatched field.
         field: String,
     },
+}
+
+/// Canonical approval hash the external default-route authority must sign.
+pub fn canonical_default_route_approval_payload_hash(
+    route: &DefaultRouteRecord,
+    actor_id: &str,
+    request_id: &str,
+    authority_did: &str,
+    route_purpose: &str,
+    approved_at: &str,
+) -> Result<String, DefaultRouteError> {
+    sha256_hex_cbor(&DefaultRouteApprovalMaterial {
+        domain: "exo.dagdb.default_route.external_finality.v1",
+        schema_version: &route.schema_version,
+        route_id: &route.route_id,
+        request_id,
+        tenant_id: &route.tenant_id,
+        project_id: &route.project_id,
+        memory_namespace: &route.memory_namespace,
+        policy_ref: &route.policy_ref,
+        freshness_ref: &route.freshness_ref,
+        selected_memory_refs: &route.selected_memory_refs,
+        actor_id,
+        authority_did,
+        route_purpose,
+        approved_at,
+    })
 }
 
 /// Validate and evaluate a default route for PRD17B readiness.
@@ -632,6 +668,7 @@ pub fn validate_default_route_record(route: &DefaultRouteRecord) -> Result<(), D
     }
     for (field, value) in [
         ("route_id", route.route_id.as_str()),
+        ("request_id", route.request_id.as_str()),
         ("tenant_id", route.tenant_id.as_str()),
         ("project_id", route.project_id.as_str()),
         ("memory_namespace", route.memory_namespace.as_str()),
@@ -693,6 +730,7 @@ fn validate_acceptance_evidence(
         ("memory_namespace", evidence.memory_namespace.as_str()),
         ("actor_id", evidence.actor_id.as_str()),
         ("route_id", evidence.route_id.as_str()),
+        ("route_purpose", evidence.route_purpose.as_str()),
         ("request_id", evidence.request_id.as_str()),
         ("payload_hash", evidence.payload_hash.as_str()),
         (
@@ -711,6 +749,7 @@ fn validate_acceptance_evidence(
     validate_digest("payload_hash", &evidence.payload_hash)?;
     validate_digest("receipt_payload_hash", &evidence.receipt_payload_hash)?;
     validate_signature("authority_signature", &evidence.authority_signature)?;
+    validate_approval_timestamp("approved_at", &evidence.approved_at)?;
     require_external_match("tenant_id", &evidence.tenant_id, &route.tenant_id)?;
     require_external_match(
         "memory_namespace",
@@ -718,10 +757,29 @@ fn validate_acceptance_evidence(
         &route.memory_namespace,
     )?;
     require_external_match("route_id", &evidence.route_id, &route.route_id)?;
+    require_external_match("request_id", &evidence.request_id, &route.request_id)?;
+    require_external_match(
+        "route_purpose",
+        &evidence.route_purpose,
+        DEFAULT_ROUTE_FINALITY_PURPOSE,
+    )?;
+    let expected_payload_hash = canonical_default_route_approval_payload_hash(
+        route,
+        &evidence.actor_id,
+        &evidence.request_id,
+        &evidence.authority_did,
+        &evidence.route_purpose,
+        &evidence.approved_at,
+    )?;
+    require_external_match(
+        "payload_hash",
+        &evidence.payload_hash,
+        &expected_payload_hash,
+    )?;
     require_external_match(
         "receipt_payload_hash",
         &evidence.receipt_payload_hash,
-        &evidence.payload_hash,
+        &expected_payload_hash,
     )?;
     if evidence.authority_did == evidence.actor_id {
         return Err(DefaultRouteError::ExternalFinalityMismatch {
@@ -729,6 +787,24 @@ fn validate_acceptance_evidence(
         });
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct DefaultRouteApprovalMaterial<'a> {
+    domain: &'static str,
+    schema_version: &'a str,
+    route_id: &'a str,
+    request_id: &'a str,
+    tenant_id: &'a str,
+    project_id: &'a str,
+    memory_namespace: &'a str,
+    policy_ref: &'a str,
+    freshness_ref: &'a str,
+    selected_memory_refs: &'a [DefaultRouteMemoryRef],
+    actor_id: &'a str,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
 }
 
 fn validate_external_ref(
@@ -793,6 +869,40 @@ fn validate_signature(field: &str, value: &str) -> Result<(), DefaultRouteError>
         });
     }
     Ok(())
+}
+
+fn validate_approval_timestamp(field: &str, value: &str) -> Result<(), DefaultRouteError> {
+    if value.len() != 20
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || value.as_bytes().get(10) != Some(&b'T')
+        || value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+        || value.as_bytes().get(19) != Some(&b'Z')
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+        || !(MIN_APPROVAL_TIMESTAMP..=MAX_APPROVAL_TIMESTAMP).contains(&value)
+    {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn sha256_hex_cbor<T: Serialize>(value: &T) -> Result<String, DefaultRouteError> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|_| {
+        DefaultRouteError::ExternalFinalityMismatch {
+            field: "payload_hash".to_owned(),
+        }
+    })?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
 }
 
 fn context_quality_for_packet_error(
@@ -864,6 +974,7 @@ mod tests {
         DefaultRouteRecord {
             schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
             route_id: "route-default".to_owned(),
+            request_id: "request-route-default".to_owned(),
             tenant_id: "tenant-alpha".to_owned(),
             project_id: "project-dagdb".to_owned(),
             memory_namespace: "namespace-main".to_owned(),

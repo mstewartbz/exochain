@@ -155,11 +155,16 @@ mod transport {
     const DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-default-route-approval-signature";
     /// Gateway header naming the external default-route approval authority DID.
     const DEFAULT_ROUTE_APPROVAL_DID_HEADER: &str = "x-exo-default-route-approval-did";
+    /// Gateway header carrying the external default-route approval timestamp.
+    const DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-default-route-approval-timestamp";
     /// Gateway header carrying the signed context-packet approval payload.
     const CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER: &str =
         "x-exo-context-packet-approval-signature";
     /// Gateway header naming the external context-packet approval authority DID.
     const CONTEXT_PACKET_APPROVAL_DID_HEADER: &str = "x-exo-context-packet-approval-did";
+    /// Gateway header carrying the external context-packet approval timestamp.
+    const CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER: &str =
+        "x-exo-context-packet-approval-timestamp";
     /// Gateway header carrying the signed lifecycle payload.
     const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
     /// Gateway header carrying the signed continuation payload.
@@ -168,6 +173,10 @@ mod transport {
     const LIFECYCLE_APPROVAL_DID_HEADER: &str = "x-exo-lifecycle-approval-did";
     /// Gateway header naming the external continuation-finality authority DID.
     const CONTINUATION_APPROVAL_DID_HEADER: &str = "x-exo-continuation-approval-did";
+    /// Gateway header carrying the external lifecycle approval timestamp.
+    const LIFECYCLE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-lifecycle-approval-timestamp";
+    /// Gateway header carrying the external continuation approval timestamp.
+    const CONTINUATION_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-continuation-approval-timestamp";
 
     /// Bearer token wrapper that never exposes its secret via [`fmt::Debug`].
     ///
@@ -260,12 +269,16 @@ mod transport {
         write_signature: String,
         default_route_approval_signature: Option<String>,
         default_route_approval_did: Option<String>,
+        default_route_approval_timestamp: Option<String>,
         context_packet_approval_signature: Option<String>,
         context_packet_approval_did: Option<String>,
+        context_packet_approval_timestamp: Option<String>,
         lifecycle_signature: Option<String>,
         continuation_signature: Option<String>,
         lifecycle_approval_did: Option<String>,
         continuation_approval_did: Option<String>,
+        lifecycle_approval_timestamp: Option<String>,
+        continuation_approval_timestamp: Option<String>,
     }
 
     impl DagDbSignatureHeaders {
@@ -276,12 +289,16 @@ mod transport {
                 write_signature: write_signature.into(),
                 default_route_approval_signature: None,
                 default_route_approval_did: None,
+                default_route_approval_timestamp: None,
                 context_packet_approval_signature: None,
                 context_packet_approval_did: None,
+                context_packet_approval_timestamp: None,
                 lifecycle_signature: None,
                 continuation_signature: None,
                 lifecycle_approval_did: None,
                 continuation_approval_did: None,
+                lifecycle_approval_timestamp: None,
+                continuation_approval_timestamp: None,
             }
         }
 
@@ -293,17 +310,22 @@ mod transport {
             write_signature: impl Into<String>,
             approval_signature: impl Into<String>,
             approval_authority_did: impl Into<String>,
+            approval_timestamp: impl Into<String>,
         ) -> Self {
             Self {
                 write_signature: write_signature.into(),
                 default_route_approval_signature: Some(approval_signature.into()),
                 default_route_approval_did: Some(approval_authority_did.into()),
+                default_route_approval_timestamp: Some(approval_timestamp.into()),
                 context_packet_approval_signature: None,
                 context_packet_approval_did: None,
+                context_packet_approval_timestamp: None,
                 lifecycle_signature: None,
                 continuation_signature: None,
                 lifecycle_approval_did: None,
                 continuation_approval_did: None,
+                lifecycle_approval_timestamp: None,
+                continuation_approval_timestamp: None,
             }
         }
 
@@ -315,17 +337,22 @@ mod transport {
             write_signature: impl Into<String>,
             approval_signature: impl Into<String>,
             approval_authority_did: impl Into<String>,
+            approval_timestamp: impl Into<String>,
         ) -> Self {
             Self {
                 write_signature: write_signature.into(),
                 default_route_approval_signature: None,
                 default_route_approval_did: None,
+                default_route_approval_timestamp: None,
                 context_packet_approval_signature: Some(approval_signature.into()),
                 context_packet_approval_did: Some(approval_authority_did.into()),
+                context_packet_approval_timestamp: Some(approval_timestamp.into()),
                 lifecycle_signature: None,
                 continuation_signature: None,
                 lifecycle_approval_did: None,
                 continuation_approval_did: None,
+                lifecycle_approval_timestamp: None,
+                continuation_approval_timestamp: None,
             }
         }
 
@@ -338,17 +365,23 @@ mod transport {
             continuation_signature: impl Into<String>,
             lifecycle_approval_did: impl Into<String>,
             continuation_approval_did: impl Into<String>,
+            lifecycle_approval_timestamp: impl Into<String>,
+            continuation_approval_timestamp: impl Into<String>,
         ) -> Self {
             Self {
                 write_signature: write_signature.into(),
                 default_route_approval_signature: None,
                 default_route_approval_did: None,
+                default_route_approval_timestamp: None,
                 context_packet_approval_signature: None,
                 context_packet_approval_did: None,
+                context_packet_approval_timestamp: None,
                 lifecycle_signature: Some(lifecycle_signature.into()),
                 continuation_signature: Some(continuation_signature.into()),
                 lifecycle_approval_did: Some(lifecycle_approval_did.into()),
                 continuation_approval_did: Some(continuation_approval_did.into()),
+                lifecycle_approval_timestamp: Some(lifecycle_approval_timestamp.into()),
+                continuation_approval_timestamp: Some(continuation_approval_timestamp.into()),
             }
         }
 
@@ -375,6 +408,12 @@ mod transport {
                     signature_header_value(did, DEFAULT_ROUTE_APPROVAL_DID_HEADER)?,
                 );
             }
+            if let Some(timestamp) = self.default_route_approval_timestamp.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER),
+                    signature_header_value(timestamp, DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER)?,
+                );
+            }
             if let Some(signature) = self.context_packet_approval_signature.as_deref() {
                 headers.insert(
                     HeaderName::from_static(CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER),
@@ -385,6 +424,12 @@ mod transport {
                 headers.insert(
                     HeaderName::from_static(CONTEXT_PACKET_APPROVAL_DID_HEADER),
                     signature_header_value(did, CONTEXT_PACKET_APPROVAL_DID_HEADER)?,
+                );
+            }
+            if let Some(timestamp) = self.context_packet_approval_timestamp.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER),
+                    signature_header_value(timestamp, CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER)?,
                 );
             }
             if let Some(signature) = self.continuation_signature.as_deref() {
@@ -403,6 +448,18 @@ mod transport {
                 headers.insert(
                     HeaderName::from_static(CONTINUATION_APPROVAL_DID_HEADER),
                     signature_header_value(did, CONTINUATION_APPROVAL_DID_HEADER)?,
+                );
+            }
+            if let Some(timestamp) = self.lifecycle_approval_timestamp.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(LIFECYCLE_APPROVAL_TIMESTAMP_HEADER),
+                    signature_header_value(timestamp, LIFECYCLE_APPROVAL_TIMESTAMP_HEADER)?,
+                );
+            }
+            if let Some(timestamp) = self.continuation_approval_timestamp.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(CONTINUATION_APPROVAL_TIMESTAMP_HEADER),
+                    signature_header_value(timestamp, CONTINUATION_APPROVAL_TIMESTAMP_HEADER)?,
                 );
             }
             Ok(())
@@ -427,6 +484,10 @@ mod transport {
                     require_signature_material(
                         self.default_route_approval_did.as_deref(),
                         DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.default_route_approval_timestamp.as_deref(),
+                        DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
                     )
                 }
                 DagDbSignatureRequirement::ContextPacket => {
@@ -437,6 +498,10 @@ mod transport {
                     require_signature_material(
                         self.context_packet_approval_did.as_deref(),
                         CONTEXT_PACKET_APPROVAL_DID_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.context_packet_approval_timestamp.as_deref(),
+                        CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
                     )
                 }
                 DagDbSignatureRequirement::Writeback => {
@@ -455,6 +520,14 @@ mod transport {
                     require_signature_material(
                         self.continuation_approval_did.as_deref(),
                         CONTINUATION_APPROVAL_DID_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.lifecycle_approval_timestamp.as_deref(),
+                        LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.continuation_approval_timestamp.as_deref(),
+                        CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
                     )
                 }
             }
@@ -938,7 +1011,7 @@ mod transport {
             action: &str,
             signatures: Option<&DagDbSignatureHeaders>,
         ) -> Result<HeaderMap, DagDbClientError> {
-            let mut headers = HeaderMap::with_capacity(if signatures.is_some() { 9 } else { 4 });
+            let mut headers = HeaderMap::with_capacity(if signatures.is_some() { 11 } else { 4 });
             headers.insert(
                 AUTHORIZATION,
                 header_value(
@@ -1397,11 +1470,16 @@ mod transport_tests {
         byte.to_string().repeat(128)
     }
 
+    fn approval_timestamp() -> &'static str {
+        "2026-06-20T00:00:00Z"
+    }
+
     fn route_signatures() -> DagDbSignatureHeaders {
         DagDbSignatureHeaders::default_route(
             signature_value('a'),
             signature_value('b'),
             "did:exo:route-authority",
+            approval_timestamp(),
         )
     }
 
@@ -1410,6 +1488,7 @@ mod transport_tests {
             signature_value('c'),
             signature_value('d'),
             "did:exo:context-authority",
+            approval_timestamp(),
         )
     }
 
@@ -1420,6 +1499,8 @@ mod transport_tests {
             signature_value('1'),
             "did:exo:lifecycle-authority",
             "did:exo:continuation-authority",
+            approval_timestamp(),
+            "2026-06-20T00:00:01Z",
         )
     }
 
@@ -1529,6 +1610,30 @@ mod transport_tests {
                 .writeback_with_signatures(writeback_request(), write_signature())
                 .await
                 .expect_err("writeback must require lifecycle and continuation material"),
+            "writeback",
+        );
+    }
+
+    #[tokio::test]
+    async fn writeback_missing_approval_timestamps_fails_before_http() {
+        let client = DagDbHttpClient::new("http://127.0.0.1:9", auth()).expect("client");
+
+        assert_local_signature_error(
+            client
+                .writeback_with_signatures(
+                    writeback_request(),
+                    DagDbSignatureHeaders::writeback(
+                        signature_value('a'),
+                        signature_value('b'),
+                        signature_value('c'),
+                        "did:exo:finality-authority",
+                        "did:exo:finality-authority",
+                        "",
+                        "2026-06-20T00:00:01Z",
+                    ),
+                )
+                .await
+                .expect_err("writeback must require lifecycle approval timestamp"),
             "writeback",
         );
     }
@@ -1692,6 +1797,8 @@ mod transport_tests {
                     signature_value('c'),
                     "did:exo:finality-authority",
                     "did:exo:finality-authority",
+                    approval_timestamp(),
+                    "2026-06-20T00:00:01Z",
                 ),
             )
             .await;
@@ -1724,6 +1831,14 @@ mod transport_tests {
             request.header("x-exo-continuation-approval-did"),
             Some("did:exo:finality-authority")
         );
+        assert_eq!(
+            request.header("x-exo-lifecycle-approval-timestamp"),
+            Some(approval_timestamp())
+        );
+        assert_eq!(
+            request.header("x-exo-continuation-approval-timestamp"),
+            Some("2026-06-20T00:00:01Z")
+        );
     }
 
     #[tokio::test]
@@ -1739,6 +1854,7 @@ mod transport_tests {
                     signature_value('a'),
                     signature_value('b'),
                     "did:exo:route-authority",
+                    approval_timestamp(),
                 ),
             )
             .await;
@@ -1764,6 +1880,10 @@ mod transport_tests {
             Some("did:exo:route-authority")
         );
         assert_eq!(
+            request.header("x-exo-default-route-approval-timestamp"),
+            Some(approval_timestamp())
+        );
+        assert_eq!(
             request.header("x-exo-context-packet-approval-signature"),
             None
         );
@@ -1783,6 +1903,7 @@ mod transport_tests {
                     signature_value('d'),
                     signature_value('e'),
                     "did:exo:context-authority",
+                    approval_timestamp(),
                 ),
             )
             .await;
@@ -1806,6 +1927,10 @@ mod transport_tests {
         assert_eq!(
             request.header("x-exo-context-packet-approval-did"),
             Some("did:exo:context-authority")
+        );
+        assert_eq!(
+            request.header("x-exo-context-packet-approval-timestamp"),
+            Some(approval_timestamp())
         );
         assert_eq!(
             request.header("x-exo-default-route-approval-signature"),
@@ -2031,6 +2156,7 @@ mod transport_tests {
                     "signature-secret\nvalue",
                     signature_value('a'),
                     "did:exo:context-authority",
+                    approval_timestamp(),
                 ),
             )
             .await
@@ -2108,6 +2234,8 @@ mod transport_tests {
             "continuation-signature-secret",
             "did:exo:lifecycle-finality",
             "did:exo:continuation-finality",
+            "2026-06-20T00:00:00Z",
+            "2026-06-20T00:00:01Z",
         );
 
         let rendered = format!("{signatures:?}");

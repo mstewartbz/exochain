@@ -35,8 +35,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 454 | `find crates -name '*.rs'` |
-| Rust LOC | 352722 | `wc -l` |
-| Workspace tests | 5,958 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 355187 | `wc -l` |
+| Workspace tests | 5,974 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -44,13 +44,13 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **5,958 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **5,974 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
 - **22 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
 - **Traceability matrix** maps 119 requirements — see `governance/traceability_matrix.md`
-- **Threat model** covers 17 threats tracked: 16 implemented, 1 partial, 0 planned — see `governance/threat_matrix.md`
+- **Threat model** covers 17 threats tracked: 17 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
 - **No floating-point arithmetic** — denied workspace-wide via `#[deny(clippy::float_arithmetic)]`
 - **Post-Quantum signatures** — NIST FIPS 204 ML-DSA-65 (CRYSTALS-Dilithium) via `ml-dsa` 0.1.0-rc.7, fully wired in `Signature::PostQuantum` and `Signature::Hybrid` with deterministic signing, tamper-rejection tests, proptest roundtrip coverage, and RUSTSEC-2025-0144 patch
@@ -113,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 352722 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 355187 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 5,958 listed workspace tests
+         cryptographic proofs, 5,974 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -241,7 +241,7 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 ### Key Governance Artifacts
 
 * [Traceability Matrix](governance/traceability_matrix.md) — 119 requirements tracked
-* [Threat Model](governance/threat_matrix.md) — 17 tracked: 16 implemented, 1 partial, 0 planned
+* [Threat Model](governance/threat_matrix.md) — 17 tracked: 17 implemented, 0 partial, 0 planned
 * [Quality Gates](governance/quality_gates.md) — 22 numbered CI gates plus required aggregator
 * [Sub-Agent Charters](governance/sub_agents.md) — 11 agent charters documented
 * [Council Resolutions](governance/resolutions/INDEX.md) — CR-001 DRAFT

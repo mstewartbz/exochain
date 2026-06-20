@@ -424,6 +424,26 @@ impl DagDbGatekeeperService {
             .map_err(domain_to_gatekeeper)
     }
 
+    /// Validate usage-event write consent, provenance, and optional invariants
+    /// without opening a persistence transaction.
+    pub fn validate_usage_event_write(
+        &self,
+        event: &DagDbGraphContextSelectionResponse,
+        agent_did: &str,
+        signature: &str,
+        invariant_context: Option<&InvariantContext>,
+    ) -> Result<(), GatekeeperError> {
+        let payload_hash = usage_event_payload_hash(event)?;
+        self.validate_write(
+            &event.tenant_id,
+            agent_did,
+            ConsentPurpose::Writeback,
+            &payload_hash,
+            signature,
+            invariant_context,
+        )
+    }
+
     /// Persist a context-packet receipt after consent, signature, and optional invariant checks.
     pub async fn persist_context_packet_receipt(
         &self,
@@ -1677,6 +1697,7 @@ mod tests {
         DefaultRouteRecord {
             schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
             route_id: "route-d5-default".to_owned(),
+            request_id: "request-route-d5-default".to_owned(),
             tenant_id: SURFACE_TENANT.to_owned(),
             project_id: "dag_db".to_owned(),
             memory_namespace: SURFACE_NAMESPACE.to_owned(),
@@ -1708,6 +1729,8 @@ mod tests {
             tenant_id: SURFACE_TENANT.to_owned(),
             project_id: "dag_db".to_owned(),
             memory_namespace: SURFACE_NAMESPACE.to_owned(),
+            actor_id: SURFACE_AGENT.to_owned(),
+            route_id: "route-d5-default".to_owned(),
             summary_ref: "summary-continuation-d5-001".to_owned(),
             memory_refs: vec![surface_memory_ref("memory-target-a")],
             blocker_refs: vec!["blocker-production-lifecycle-approval-deferred".to_owned()],

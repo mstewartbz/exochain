@@ -67,24 +67,27 @@ use exo_dag_db_domain::scoring::DomainError;
 #[cfg(feature = "production-db")]
 use exo_dag_db_domain::{
     context_packet_persistence::{
-        ContextPacketAcceptanceEvidence, ContextPacketRecord, ContextPacketRequest,
-        ContextPacketRouteBinding, DefaultContextQuality, PacketFreshnessStatus,
-        PacketPersistenceStatus, PacketValidationStatus, accept_context_packet_record,
-        build_context_packet_record,
+        CONTEXT_PACKET_FINALITY_PURPOSE, ContextPacketAcceptanceEvidence, ContextPacketRecord,
+        ContextPacketRequest, ContextPacketRouteBinding, DefaultContextQuality,
+        PacketFreshnessStatus, PacketPersistenceStatus, PacketValidationStatus,
+        accept_context_packet_record, build_context_packet_record,
+        canonical_context_packet_approval_payload_hash,
     },
     continuation_persistence::{
         ContinuationRecord, ContinuationRetrievalStatus, PRD17_CONTINUATION_RECORD_SCHEMA,
     },
     default_route::{
-        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRouteAcceptanceEvidence, DefaultRouteMemoryRef,
-        DefaultRouteRecord, DefaultRouteSource, DefaultRouteStatus, RouteFreshnessStatus,
-        accept_default_route_record,
+        DEFAULT_ROUTE_FINALITY_PURPOSE, DEFAULT_ROUTE_SCHEMA_VERSION,
+        DefaultRouteAcceptanceEvidence, DefaultRouteMemoryRef, DefaultRouteRecord,
+        DefaultRouteSource, DefaultRouteStatus, RouteFreshnessStatus, accept_default_route_record,
+        canonical_default_route_approval_payload_hash,
     },
     lifecycle_action::{
-        LifecycleAction, LifecycleActionType, LifecycleEvidenceRef, LifecycleMemoryRef,
-        LifecycleRollbackRef, LifecycleTerminalState, PRD17_LIFECYCLE_ACTION_SCHEMA,
-        PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX, ProductionLifecycleApproval,
-        ProductionLifecycleApprovalEvidence,
+        CONTINUATION_FINALITY_PURPOSE, LifecycleAction, LifecycleActionType, LifecycleEvidenceRef,
+        LifecycleMemoryRef, LifecycleRollbackRef, LifecycleTerminalState,
+        PRD17_LIFECYCLE_ACTION_SCHEMA, PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX,
+        ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence,
+        canonical_continuation_approval_payload_hash, canonical_lifecycle_approval_payload_hash,
     },
 };
 #[cfg(feature = "production-db")]
@@ -97,7 +100,8 @@ use exo_dag_db_postgres::{
         build_persistent_graph_context_selection_with_layered_drilldown,
     },
     postgres::{
-        begin_tenant_transaction, kg_context_selection_write::UsageEventMemoryMetadata,
+        begin_tenant_transaction,
+        kg_context_selection_write::{DbWriteSummary, UsageEventMemoryMetadata},
         kg_import::KgImportPersistenceError,
     },
 };
@@ -138,9 +142,13 @@ const DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-default-route-appro
 #[cfg(feature = "production-db")]
 const DEFAULT_ROUTE_APPROVAL_DID_HEADER: &str = "x-exo-default-route-approval-did";
 #[cfg(feature = "production-db")]
+const DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-default-route-approval-timestamp";
+#[cfg(feature = "production-db")]
 const CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-context-packet-approval-signature";
 #[cfg(feature = "production-db")]
 const CONTEXT_PACKET_APPROVAL_DID_HEADER: &str = "x-exo-context-packet-approval-did";
+#[cfg(feature = "production-db")]
+const CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-context-packet-approval-timestamp";
 #[cfg(feature = "production-db")]
 const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
 #[cfg(feature = "production-db")]
@@ -149,6 +157,10 @@ const CONTINUATION_SIGNATURE_HEADER: &str = "x-exo-continuation-signature";
 const LIFECYCLE_APPROVAL_DID_HEADER: &str = "x-exo-lifecycle-approval-did";
 #[cfg(feature = "production-db")]
 const CONTINUATION_APPROVAL_DID_HEADER: &str = "x-exo-continuation-approval-did";
+#[cfg(feature = "production-db")]
+const LIFECYCLE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-lifecycle-approval-timestamp";
+#[cfg(feature = "production-db")]
+const CONTINUATION_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-continuation-approval-timestamp";
 #[cfg(feature = "production-db")]
 const WRITEBACK_CONTINUATION_EXPIRY_EPOCH_SECONDS: u64 = 4_102_444_800;
 #[cfg(feature = "production-db")]
@@ -1079,6 +1091,28 @@ async fn route_handler(
                 .await;
             }
         };
+        let default_route_approval_timestamp = match header_text(
+            headers,
+            DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
+        ) {
+            Some(timestamp) => timestamp.to_owned(),
+            None => {
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.route",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
+                    StatusCode::BAD_REQUEST,
+                    "default_route_approval_timestamp_required",
+                    "DAG DB default route finality requires x-exo-default-route-approval-timestamp header",
+                    false,
+                )
+                .await;
+            }
+        };
         let service = match ctx
             .gatekeeper_service(
                 pool,
@@ -1108,6 +1142,7 @@ async fn route_handler(
             &signature,
             &default_route_approval_signature,
             &default_route_approval_did,
+            &default_route_approval_timestamp,
         )
         .await
         {
@@ -1223,6 +1258,28 @@ async fn gated_context_packet_handler(
                 .await;
             }
         };
+        let context_packet_approval_timestamp = match header_text(
+            headers,
+            CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
+        ) {
+            Some(timestamp) => timestamp.to_owned(),
+            None => {
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.context_packet",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
+                    StatusCode::BAD_REQUEST,
+                    "context_packet_approval_timestamp_required",
+                    "DAG DB context packet finality requires x-exo-context-packet-approval-timestamp header",
+                    false,
+                )
+                .await;
+            }
+        };
         let service = match ctx
             .gatekeeper_service(
                 pool,
@@ -1253,6 +1310,7 @@ async fn gated_context_packet_handler(
             &signature,
             &context_packet_approval_signature,
             &context_packet_approval_did,
+            &context_packet_approval_timestamp,
         )
         .await
         {
@@ -1460,6 +1518,50 @@ async fn writeback_handler(
                 .await;
             }
         };
+        let lifecycle_approval_timestamp = match header_text(
+            headers,
+            LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+        ) {
+            Some(timestamp) => timestamp.to_owned(),
+            None => {
+                return mounted_dagdb_operational_error_response(
+                        pool,
+                        &request.tenant_id,
+                        &request.namespace,
+                        "dagdb.writeback",
+                        &request.idempotency_key,
+                        &request.requesting_agent_did,
+                        request_hash,
+                        StatusCode::BAD_REQUEST,
+                        "lifecycle_approval_timestamp_required",
+                        "DAG DB writeback lifecycle finality requires x-exo-lifecycle-approval-timestamp header",
+                        false,
+                    )
+                    .await;
+            }
+        };
+        let continuation_approval_timestamp = match header_text(
+            headers,
+            CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
+        ) {
+            Some(timestamp) => timestamp.to_owned(),
+            None => {
+                return mounted_dagdb_operational_error_response(
+                        pool,
+                        &request.tenant_id,
+                        &request.namespace,
+                        "dagdb.writeback",
+                        &request.idempotency_key,
+                        &request.requesting_agent_did,
+                        request_hash,
+                        StatusCode::BAD_REQUEST,
+                        "continuation_approval_timestamp_required",
+                        "DAG DB writeback continuation finality requires x-exo-continuation-approval-timestamp header",
+                        false,
+                    )
+                    .await;
+            }
+        };
         let service = match ctx
             .gatekeeper_service(
                 pool,
@@ -1492,6 +1594,8 @@ async fn writeback_handler(
             &continuation_signature,
             &lifecycle_approval_did,
             &continuation_approval_did,
+            &lifecycle_approval_timestamp,
+            &continuation_approval_timestamp,
         )
         .await
         {
@@ -2049,13 +2153,25 @@ async fn gated_route_response(
     signature: &str,
     approval_signature: &str,
     approval_authority_did: &str,
+    approval_timestamp: &str,
 ) -> Result<DagDbRouteResponse, DagDbHandlerError> {
     let response = route_response_from_request(request.clone(), "dagdb.route")
         .map_err(|response| DagDbHandlerError::from_response(*response))?;
     let proposed = default_route_candidate_from_response(request, &response)
         .map_err(|response| DagDbHandlerError::from_response(*response))?;
-    let approval_payload_hash = exo_gatekeeper::dagdb_gate::default_route_payload_hash(&proposed)
-        .map_err(DagDbHandlerError::from_gatekeeper)?;
+    let approval_payload_hash_hex = canonical_default_route_approval_payload_hash(
+        &proposed,
+        &request.requesting_agent_did,
+        &request.idempotency_key,
+        approval_authority_did,
+        DEFAULT_ROUTE_FINALITY_PURPOSE,
+        approval_timestamp,
+    )
+    .map_err(|response| {
+        DagDbHandlerError::from_response(*d5_record_rejected_response("default route", response))
+    })?;
+    let approval_payload_hash = decode_canonical_approval_hash(&approval_payload_hash_hex)
+        .map_err(|response| DagDbHandlerError::from_response(*response))?;
     validate_gateway_approval_payload(
         service,
         &request.requesting_agent_did,
@@ -2068,7 +2184,8 @@ async fn gated_route_response(
         &response,
         approval_authority_did,
         approval_signature,
-        &approval_payload_hash,
+        approval_timestamp,
+        &approval_payload_hash_hex,
     )
     .map_err(|response| DagDbHandlerError::from_response(*response))?;
     let write_payload_hash = exo_gatekeeper::dagdb_gate::default_route_payload_hash(&record)
@@ -2102,13 +2219,24 @@ async fn gated_context_packet_response(
     signature: &str,
     approval_signature: &str,
     approval_authority_did: &str,
+    approval_timestamp: &str,
 ) -> Result<DagDbContextPacketResponse, DagDbHandlerError> {
     let response = persistent_context_packet_response(pool, request).await?;
     let proposed = context_packet_candidate_from_response(request, &response)
         .map_err(|response| DagDbHandlerError::from_response(*response))?;
-    let approval_payload_hash =
-        exo_gatekeeper::dagdb_gate::context_packet_record_payload_hash(&proposed)
-            .map_err(DagDbHandlerError::from_gatekeeper)?;
+    let approval_payload_hash_hex = canonical_context_packet_approval_payload_hash(
+        &proposed,
+        &request.requesting_agent_did,
+        &proposed.idempotency_key,
+        approval_authority_did,
+        CONTEXT_PACKET_FINALITY_PURPOSE,
+        approval_timestamp,
+    )
+    .map_err(|response| {
+        DagDbHandlerError::from_response(*d5_record_rejected_response("context packet", response))
+    })?;
+    let approval_payload_hash = decode_canonical_approval_hash(&approval_payload_hash_hex)
+        .map_err(|response| DagDbHandlerError::from_response(*response))?;
     validate_gateway_approval_payload(
         service,
         &request.requesting_agent_did,
@@ -2121,7 +2249,8 @@ async fn gated_context_packet_response(
         &response,
         approval_authority_did,
         approval_signature,
-        &approval_payload_hash,
+        approval_timestamp,
+        &approval_payload_hash_hex,
     )
     .map_err(|response| DagDbHandlerError::from_response(*response))?;
     let write_payload_hash =
@@ -2159,6 +2288,8 @@ async fn gated_writeback_response(
     continuation_signature: &str,
     lifecycle_approval_did: &str,
     continuation_approval_did: &str,
+    lifecycle_approval_timestamp: &str,
+    continuation_approval_timestamp: &str,
 ) -> Result<DagDbWritebackResponse, DagDbHandlerError> {
     let selection_request = selection_request_from_writeback(request).map_err(|error| {
         DagDbHandlerError::from_domain(DomainError::HashMaterial {
@@ -2180,7 +2311,6 @@ async fn gated_writeback_response(
     prevalidate_writeback_d5_gates(
         service,
         &selection.selection,
-        lifecycle_base.tenant_id.as_str(),
         &request.requesting_agent_did,
         &lifecycle_base,
         &continuation_base,
@@ -2189,14 +2319,16 @@ async fn gated_writeback_response(
         continuation_signature,
         lifecycle_approval_did,
         continuation_approval_did,
+        lifecycle_approval_timestamp,
+        continuation_approval_timestamp,
+        invariant_context.as_ref(),
     )?;
-    let approval_epoch_seconds = trusted_gateway_epoch_seconds(pool).await?;
     let lifecycle = lifecycle_action_finalization_from_writeback(
         request,
         lifecycle_base,
         lifecycle_signature,
         lifecycle_approval_did,
-        approval_epoch_seconds,
+        lifecycle_approval_timestamp,
     )
     .map_err(|response| DagDbHandlerError::from_response(*response))?;
     let continuation = continuation_record_finalization_from_writeback(
@@ -2204,31 +2336,22 @@ async fn gated_writeback_response(
         continuation_base,
         continuation_signature,
         continuation_approval_did,
-        approval_epoch_seconds,
+        continuation_approval_timestamp,
     )
     .map_err(|response| DagDbHandlerError::from_response(*response))?;
-    let summary = service
-        .persist_usage_event_with_metadata(
-            &selection.selection,
-            &request.requesting_agent_did,
-            signature,
-            invariant_context.as_ref(),
-            Some(&memory_metadata),
-        )
-        .await
-        .map_err(DagDbHandlerError::from_gatekeeper)?;
-    persist_writeback_d5_surfaces(
+    prevalidate_writeback_response_metadata(request)?;
+    let now_epoch_seconds = trusted_gateway_epoch_seconds(pool).await?;
+    let summary = persist_writeback_surfaces_atomically(
         pool,
-        request,
+        &selection.selection,
+        &memory_metadata,
         WritebackD5Surfaces {
             lifecycle_action: &lifecycle.base,
             lifecycle_approval: &lifecycle.approval,
             continuation: &continuation.base,
             continuation_approval: &continuation.approval,
-            lifecycle_signature,
-            continuation_signature,
-            invariant_context: invariant_context.as_ref(),
         },
+        now_epoch_seconds,
     )
     .await?;
     match writeback_response_from_persisted(request, &summary, !summary.replayed) {
@@ -2238,46 +2361,110 @@ async fn gated_writeback_response(
 }
 
 #[cfg(feature = "production-db")]
+fn prevalidate_writeback_response_metadata(
+    request: &DagDbWritebackRequest,
+) -> Result<(), DagDbHandlerError> {
+    if let Some(summary_text) = request.summary_text.as_deref() {
+        sanitize_metadata(MetadataField::Summary, summary_text)
+            .map_err(|response| DagDbHandlerError::from_response(*response))?;
+    }
+    if let Some(keyword_texts) = request.keyword_texts.as_deref() {
+        sanitize_keyword_texts(Some(keyword_texts))
+            .map_err(|response| DagDbHandlerError::from_response(*response))?;
+    }
+    writeback_layered_fields(request)
+        .map(|_| ())
+        .map_err(|response| DagDbHandlerError::from_response(*response))
+}
+
+#[cfg(feature = "production-db")]
 struct WritebackD5Surfaces<'a> {
     lifecycle_action: &'a LifecycleAction,
     lifecycle_approval: &'a ProductionLifecycleApprovalEvidence,
     continuation: &'a ContinuationRecord,
     continuation_approval: &'a ProductionLifecycleApprovalEvidence,
-    lifecycle_signature: &'a str,
-    continuation_signature: &'a str,
-    invariant_context: Option<&'a InvariantContext>,
 }
 
 #[cfg(feature = "production-db")]
-async fn persist_writeback_d5_surfaces(
+async fn persist_writeback_surfaces_atomically(
     pool: &sqlx::PgPool,
-    request: &DagDbWritebackRequest,
+    selection: &DagDbGraphContextSelectionResponse,
+    metadata: &UsageEventMemoryMetadata,
     surfaces: WritebackD5Surfaces<'_>,
-) -> Result<(), DagDbHandlerError> {
-    let _ = (
-        request,
-        surfaces.lifecycle_signature,
-        surfaces.continuation_signature,
-        surfaces.invariant_context,
-    );
-    exo_dag_db_postgres::postgres::lifecycle_action::persist_approved_lifecycle_action(
-        pool,
+    now_epoch_seconds: u64,
+) -> Result<DbWriteSummary, DagDbHandlerError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| DagDbHandlerError::from_d5_postgres("writeback transaction", &error))?;
+    let result = persist_writeback_surfaces_in_transaction(
+        &mut tx,
+        selection,
+        metadata,
+        surfaces,
+        now_epoch_seconds,
+    )
+    .await;
+    match result {
+        Ok(summary) => {
+            tx.commit()
+                .await
+                .map_err(|error| DagDbHandlerError::from_d5_postgres("writeback commit", &error))?;
+            Ok(summary)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = tx.rollback().await {
+                warn!(
+                    operation = "persist_writeback_surfaces_atomically",
+                    tenant_id = %selection.tenant_id,
+                    namespace = %selection.namespace,
+                    request_id = %selection.request_id,
+                    error = %rollback_error,
+                    "failed to rollback transaction after atomic writeback persistence error"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "production-db")]
+async fn persist_writeback_surfaces_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    selection: &DagDbGraphContextSelectionResponse,
+    metadata: &UsageEventMemoryMetadata,
+    surfaces: WritebackD5Surfaces<'_>,
+    now_epoch_seconds: u64,
+) -> Result<DbWriteSummary, DagDbHandlerError> {
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| DagDbHandlerError::from_d5_postgres("writeback transaction", &error))?;
+    let summary = exo_dag_db_postgres::postgres::kg_context_selection_write::persist_usage_event_to_db_with_metadata_in_transaction(
+        tx,
+        selection,
+        Some(metadata),
+    )
+    .await
+    .map_err(DagDbHandlerError::from_domain)?;
+
+    exo_dag_db_postgres::postgres::lifecycle_action::persist_approved_lifecycle_action_in_transaction(
+        tx,
         surfaces.lifecycle_action,
         surfaces.lifecycle_approval,
     )
     .await
     .map_err(|error| DagDbHandlerError::from_d5_postgres("lifecycle action", &error))?;
 
-    let now_epoch_seconds = trusted_gateway_epoch_seconds(pool).await?;
-    exo_dag_db_postgres::postgres::continuation_persistence::persist_approved_continuation_record(
-        pool,
+    exo_dag_db_postgres::postgres::continuation_persistence::persist_approved_continuation_record_in_transaction(
+        tx,
         surfaces.continuation,
         surfaces.continuation_approval,
         now_epoch_seconds,
     )
     .await
     .map_err(|error| DagDbHandlerError::from_d5_postgres("continuation", &error))?;
-    Ok(())
+    Ok(summary)
 }
 
 #[cfg(feature = "production-db")]
@@ -2285,7 +2472,6 @@ async fn persist_writeback_d5_surfaces(
 fn prevalidate_writeback_d5_gates(
     service: &DagDbGatekeeperService,
     selection: &DagDbGraphContextSelectionResponse,
-    _tenant_id: &str,
     agent_did: &str,
     lifecycle_action: &LifecycleAction,
     continuation: &ContinuationRecord,
@@ -2294,23 +2480,28 @@ fn prevalidate_writeback_d5_gates(
     continuation_signature: &str,
     lifecycle_approval_did: &str,
     continuation_approval_did: &str,
+    lifecycle_approval_timestamp: &str,
+    continuation_approval_timestamp: &str,
+    invariant_context: Option<&InvariantContext>,
 ) -> Result<(), DagDbHandlerError> {
     validate_external_finality_authority(agent_did, lifecycle_approval_did)?;
     validate_external_finality_authority(agent_did, continuation_approval_did)?;
 
-    let writeback_payload_hash =
-        usage_event_payload_hash(selection).map_err(DagDbHandlerError::from_gatekeeper)?;
-    validate_gateway_write_payload(
-        service,
-        &selection.tenant_id,
-        agent_did,
-        &writeback_payload_hash,
-        signature,
-    )?;
+    service
+        .validate_usage_event_write(selection, agent_did, signature, invariant_context)
+        .map_err(DagDbHandlerError::from_gatekeeper)?;
 
-    let lifecycle_payload_hash =
-        exo_gatekeeper::dagdb_gate::lifecycle_action_payload_hash(lifecycle_action)
-            .map_err(DagDbHandlerError::from_gatekeeper)?;
+    let lifecycle_payload_hash_hex = canonical_lifecycle_approval_payload_hash(
+        lifecycle_action,
+        lifecycle_approval_did,
+        lifecycle_action.action_type.as_str(),
+        lifecycle_approval_timestamp,
+    )
+    .map_err(|response| {
+        DagDbHandlerError::from_response(*d5_record_rejected_response("lifecycle action", response))
+    })?;
+    let lifecycle_payload_hash = decode_canonical_approval_hash(&lifecycle_payload_hash_hex)
+        .map_err(|response| DagDbHandlerError::from_response(*response))?;
     validate_gateway_signature_for_registered_did(
         service,
         agent_did,
@@ -2319,9 +2510,17 @@ fn prevalidate_writeback_d5_gates(
         lifecycle_signature,
     )?;
 
-    let continuation_payload_hash =
-        exo_gatekeeper::dagdb_gate::continuation_record_payload_hash(continuation)
-            .map_err(DagDbHandlerError::from_gatekeeper)?;
+    let continuation_payload_hash_hex = canonical_continuation_approval_payload_hash(
+        continuation,
+        continuation_approval_did,
+        CONTINUATION_FINALITY_PURPOSE,
+        continuation_approval_timestamp,
+    )
+    .map_err(|response| {
+        DagDbHandlerError::from_response(*d5_record_rejected_response("continuation", response))
+    })?;
+    let continuation_payload_hash = decode_canonical_approval_hash(&continuation_payload_hash_hex)
+        .map_err(|response| DagDbHandlerError::from_response(*response))?;
     validate_gateway_signature_for_registered_did(
         service,
         agent_did,
@@ -2737,6 +2936,54 @@ pub fn writeback_continuation_payload_hash(
 }
 
 #[cfg(feature = "production-db")]
+pub fn writeback_lifecycle_approval_payload_hash(
+    request: &DagDbWritebackRequest,
+    approval_authority_did: &str,
+    approved_at: &str,
+) -> Result<[u8; 32], String> {
+    let action = lifecycle_action_from_writeback(request)
+        .map_err(|_| "lifecycle action request rejected".to_owned())?;
+    let payload_hash = canonical_lifecycle_approval_payload_hash(
+        &action,
+        approval_authority_did,
+        action.action_type.as_str(),
+        approved_at,
+    )
+    .map_err(|error| error.to_string())?;
+    approval_hash_hex_to_bytes(&payload_hash)
+}
+
+#[cfg(feature = "production-db")]
+pub fn writeback_continuation_approval_payload_hash(
+    request: &DagDbWritebackRequest,
+    approval_authority_did: &str,
+    approved_at: &str,
+) -> Result<[u8; 32], String> {
+    let record = continuation_record_from_writeback(request)
+        .map_err(|_| "continuation request rejected".to_owned())?;
+    let payload_hash = canonical_continuation_approval_payload_hash(
+        &record,
+        approval_authority_did,
+        CONTINUATION_FINALITY_PURPOSE,
+        approved_at,
+    )
+    .map_err(|error| error.to_string())?;
+    approval_hash_hex_to_bytes(&payload_hash)
+}
+
+#[cfg(feature = "production-db")]
+fn approval_hash_hex_to_bytes(value: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(value)
+        .map_err(|error| format!("canonical approval hash must be hex: {error}"))?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        format!(
+            "canonical approval hash must be 32 bytes, got {}",
+            bytes.len()
+        )
+    })
+}
+
+#[cfg(feature = "production-db")]
 fn default_route_candidate_from_response(
     request: &DagDbRouteRequest,
     response: &DagDbRouteResponse,
@@ -2770,6 +3017,7 @@ fn default_route_candidate_from_response(
     Ok(DefaultRouteRecord {
         schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
         route_id: response.route_id.clone(),
+        request_id: request.idempotency_key.clone(),
         tenant_id: request.tenant_id.clone(),
         project_id: gateway_project_id(&request.namespace),
         memory_namespace: request.namespace.clone(),
@@ -2794,7 +3042,8 @@ fn default_route_record_from_response(
     response: &DagDbRouteResponse,
     approval_authority_did: &str,
     approval_signature: &str,
-    approval_payload_hash: &[u8; 32],
+    approval_timestamp: &str,
+    approval_payload_hash_hex: &str,
 ) -> Result<DefaultRouteRecord, Box<Response>> {
     let route = default_route_candidate_from_response(request, response)?;
     let updated_at = route.updated_at.clone();
@@ -2805,7 +3054,8 @@ fn default_route_record_from_response(
             response,
             approval_authority_did,
             approval_signature,
-            approval_payload_hash,
+            approval_timestamp,
+            approval_payload_hash_hex,
         )?,
         updated_at,
     )
@@ -2887,7 +3137,8 @@ fn context_packet_record_from_response(
     response: &DagDbContextPacketResponse,
     approval_authority_did: &str,
     approval_signature: &str,
-    approval_payload_hash: &[u8; 32],
+    approval_timestamp: &str,
+    approval_payload_hash_hex: &str,
 ) -> Result<ContextPacketRecord, Box<Response>> {
     let record = context_packet_candidate_from_response(request, response)?;
     accept_context_packet_record(
@@ -2895,9 +3146,11 @@ fn context_packet_record_from_response(
         &context_packet_acceptance_evidence(
             request,
             response,
+            &record,
             approval_authority_did,
             approval_signature,
-            approval_payload_hash,
+            approval_timestamp,
+            approval_payload_hash_hex,
         )?,
     )
     .map_err(|error| d5_record_rejected_response("context packet", error))
@@ -2909,10 +3162,10 @@ fn default_route_acceptance_evidence(
     response: &DagDbRouteResponse,
     approval_authority_did: &str,
     approval_signature: &str,
-    approval_payload_hash: &[u8; 32],
+    approval_timestamp: &str,
+    approval_payload_hash_hex: &str,
 ) -> Result<DefaultRouteAcceptanceEvidence, Box<Response>> {
-    let approval_payload_hash_hex = hex::encode(approval_payload_hash);
-    let approved_at = gateway_record_stamp("dagdb.route.approved_at", &request.idempotency_key)?;
+    let approved_at = approval_timestamp.to_owned();
     Ok(DefaultRouteAcceptanceEvidence {
         production_default_route_approval_ref: format!(
             "external-production-approval:{}",
@@ -2925,7 +3178,7 @@ fn default_route_acceptance_evidence(
                     &response.route_id,
                     &request.idempotency_key,
                     approval_authority_did,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     approval_signature,
                     &approved_at,
                 ),
@@ -2941,7 +3194,7 @@ fn default_route_acceptance_evidence(
                     &response.route_id,
                     &request.task_signature_hash,
                     approval_authority_did,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                 ),
             )?
         ),
@@ -2954,7 +3207,7 @@ fn default_route_acceptance_evidence(
                     &request.idempotency_key,
                     approval_authority_did,
                     approval_signature,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     &approved_at,
                 ),
             )?
@@ -2963,9 +3216,10 @@ fn default_route_acceptance_evidence(
         memory_namespace: request.namespace.clone(),
         actor_id: request.requesting_agent_did.clone(),
         route_id: response.route_id.clone(),
+        route_purpose: DEFAULT_ROUTE_FINALITY_PURPOSE.to_owned(),
         request_id: request.idempotency_key.clone(),
-        payload_hash: approval_payload_hash_hex.clone(),
-        receipt_payload_hash: approval_payload_hash_hex,
+        payload_hash: approval_payload_hash_hex.to_owned(),
+        receipt_payload_hash: approval_payload_hash_hex.to_owned(),
         authority_did: approval_authority_did.to_owned(),
         authority_signature: approval_signature.to_owned(),
         approved_at,
@@ -2976,13 +3230,13 @@ fn default_route_acceptance_evidence(
 fn context_packet_acceptance_evidence(
     request: &DagDbContextPacketRequest,
     response: &DagDbContextPacketResponse,
+    record: &ContextPacketRecord,
     approval_authority_did: &str,
     approval_signature: &str,
-    approval_payload_hash: &[u8; 32],
+    approval_timestamp: &str,
+    approval_payload_hash_hex: &str,
 ) -> Result<ContextPacketAcceptanceEvidence, Box<Response>> {
-    let approval_payload_hash_hex = hex::encode(approval_payload_hash);
-    let approved_at =
-        gateway_record_stamp("dagdb.context_packet.approved_at", &request.idempotency_key)?;
+    let approved_at = approval_timestamp.to_owned();
     Ok(ContextPacketAcceptanceEvidence {
         production_default_route_approval_ref: format!(
             "external-production-approval:{}",
@@ -2996,7 +3250,7 @@ fn context_packet_acceptance_evidence(
                     &response.context_packet_id,
                     &request.request_id,
                     approval_authority_did,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     approval_signature,
                     &approved_at,
                 ),
@@ -3012,7 +3266,7 @@ fn context_packet_acceptance_evidence(
                     &response.context_packet_id,
                     &response.packet_hash,
                     approval_authority_did,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                 ),
             )?
         ),
@@ -3025,7 +3279,7 @@ fn context_packet_acceptance_evidence(
                     &request.idempotency_key,
                     approval_authority_did,
                     approval_signature,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     &approved_at,
                 ),
             )?
@@ -3035,9 +3289,10 @@ fn context_packet_acceptance_evidence(
         actor_id: request.requesting_agent_did.clone(),
         route_id: response.route_id.clone(),
         packet_id: response.context_packet_id.clone(),
-        request_id: request.request_id.clone(),
-        payload_hash: approval_payload_hash_hex.clone(),
-        receipt_payload_hash: approval_payload_hash_hex,
+        route_purpose: CONTEXT_PACKET_FINALITY_PURPOSE.to_owned(),
+        request_id: record.idempotency_key.clone(),
+        payload_hash: approval_payload_hash_hex.to_owned(),
+        receipt_payload_hash: approval_payload_hash_hex.to_owned(),
         authority_did: approval_authority_did.to_owned(),
         authority_signature: approval_signature.to_owned(),
         approved_at,
@@ -3045,16 +3300,17 @@ fn context_packet_acceptance_evidence(
 }
 
 #[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
 fn production_lifecycle_approval_evidence_from_writeback(
     request: &DagDbWritebackRequest,
     subject_id: &str,
     request_id: &str,
-    payload_hash: &[u8; 32],
+    payload_hash: String,
     authority_did: &str,
     authority_signature: &str,
-    approved_at_epoch_seconds: u64,
+    route_purpose: &str,
+    approved_at: &str,
 ) -> Result<ProductionLifecycleApprovalEvidence, Box<Response>> {
-    let payload_hash = Hash256::from_bytes(*payload_hash).to_string();
     let signature_hash = Hash256::digest(authority_signature.as_bytes()).to_string();
     let approval_ref = hash_hex(
         "dagdb.gateway.lifecycle.external_production_approval",
@@ -3064,10 +3320,12 @@ fn production_lifecycle_approval_evidence_from_writeback(
             &request.requesting_agent_did,
             authority_did,
             &request.route_id,
+            route_purpose,
             request_id,
             &payload_hash,
             &signature_hash,
             subject_id,
+            approved_at,
         ),
     )?;
     Ok(ProductionLifecycleApprovalEvidence {
@@ -3078,7 +3336,9 @@ fn production_lifecycle_approval_evidence_from_writeback(
                 &(
                     &request.validation_report_id,
                     &request.route_id,
+                    route_purpose,
                     &signature_hash,
+                    approved_at,
                 ),
             )?,
             digest: payload_hash.clone(),
@@ -3096,11 +3356,12 @@ fn production_lifecycle_approval_evidence_from_writeback(
         memory_namespace: request.namespace.clone(),
         actor_id: request.requesting_agent_did.clone(),
         route_id: request.route_id.clone(),
+        route_purpose: route_purpose.to_owned(),
         request_id: request_id.to_owned(),
         payload_hash,
         authority_did: authority_did.to_owned(),
         authority_signature: authority_signature.to_owned(),
-        approved_at: approved_at_epoch_seconds.to_string(),
+        approved_at: approved_at.to_owned(),
     })
 }
 
@@ -3122,18 +3383,25 @@ fn lifecycle_action_finalization_from_writeback(
     base: LifecycleAction,
     lifecycle_signature: &str,
     lifecycle_approval_did: &str,
-    approved_at_epoch_seconds: u64,
+    approved_at: &str,
 ) -> Result<LifecycleActionFinalization, Box<Response>> {
-    let payload_hash = exo_gatekeeper::dagdb_gate::lifecycle_action_payload_hash(&base)
-        .map_err(|error| d5_record_rejected_response("lifecycle action", error))?;
+    let route_purpose = base.action_type.as_str();
+    let payload_hash = canonical_lifecycle_approval_payload_hash(
+        &base,
+        lifecycle_approval_did,
+        route_purpose,
+        approved_at,
+    )
+    .map_err(|error| d5_record_rejected_response("lifecycle action", error))?;
     let approval = production_lifecycle_approval_evidence_from_writeback(
         request,
         &base.action_id,
         &base.source_packet_id,
-        &payload_hash,
+        payload_hash,
         lifecycle_approval_did,
         lifecycle_signature,
-        approved_at_epoch_seconds,
+        route_purpose,
+        approved_at,
     )?;
     approval
         .validate_for_lifecycle_action(&base)
@@ -3227,18 +3495,24 @@ fn continuation_record_finalization_from_writeback(
     base: ContinuationRecord,
     continuation_signature: &str,
     continuation_approval_did: &str,
-    approved_at_epoch_seconds: u64,
+    approved_at: &str,
 ) -> Result<ContinuationRecordFinalization, Box<Response>> {
-    let payload_hash = exo_gatekeeper::dagdb_gate::continuation_record_payload_hash(&base)
-        .map_err(|error| d5_record_rejected_response("continuation", error))?;
+    let payload_hash = canonical_continuation_approval_payload_hash(
+        &base,
+        continuation_approval_did,
+        CONTINUATION_FINALITY_PURPOSE,
+        approved_at,
+    )
+    .map_err(|error| d5_record_rejected_response("continuation", error))?;
     let approval = production_lifecycle_approval_evidence_from_writeback(
         request,
         &base.continuation_id,
         &base.task_id,
-        &payload_hash,
+        payload_hash,
         continuation_approval_did,
         continuation_signature,
-        approved_at_epoch_seconds,
+        CONTINUATION_FINALITY_PURPOSE,
+        approved_at,
     )?;
     approval
         .validate_for_continuation_record(&base)
@@ -3273,6 +3547,8 @@ fn continuation_record_from_writeback(
         tenant_id: request.tenant_id.clone(),
         project_id: gateway_project_id(&request.namespace),
         memory_namespace: request.namespace.clone(),
+        actor_id: request.requesting_agent_did.clone(),
+        route_id: request.route_id.clone(),
         summary_ref: writeback_target_memory_id(request)?,
         memory_refs,
         blocker_refs: vec!["production_lifecycle_approval_approved".to_owned()],
@@ -3358,6 +3634,25 @@ fn gateway_project_id(namespace: &str) -> String {
 #[cfg(feature = "production-db")]
 fn gateway_record_stamp(domain: &str, idempotency_key: &str) -> Result<String, Box<Response>> {
     hash_hex(domain, &idempotency_key)
+}
+
+#[cfg(feature = "production-db")]
+fn decode_canonical_approval_hash(value: &str) -> Result<[u8; 32], Box<Response>> {
+    let bytes = hex::decode(value).map_err(|error| {
+        d5_record_rejected_response(
+            "external finality approval",
+            format!("canonical approval hash must be hex: {error}"),
+        )
+    })?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        d5_record_rejected_response(
+            "external finality approval",
+            format!(
+                "canonical approval hash must be 32 bytes, got {}",
+                bytes.len()
+            ),
+        )
+    })
 }
 
 #[cfg(feature = "production-db")]
@@ -7009,9 +7304,13 @@ fn operational_event_type_for_error_code(error_code: &str) -> Option<&'static st
     match error_code {
         "write_signature_required"
         | "default_route_approval_signature_required"
+        | "default_route_approval_timestamp_required"
         | "context_packet_approval_signature_required"
+        | "context_packet_approval_timestamp_required"
         | "lifecycle_signature_required"
         | "continuation_signature_required"
+        | "lifecycle_approval_timestamp_required"
+        | "continuation_approval_timestamp_required"
         | "provenance_denied" => Some("dagdb_signature_failure"),
         "tenant_scope_mismatch" => Some("dagdb_rls_tenant_violation"),
         "idempotency_key_conflict" => Some("dagdb_idempotency_conflict"),
@@ -7031,9 +7330,13 @@ fn receipt_event_type_for_error_code(error_code: &str) -> Option<ReceiptEventTyp
     match error_code {
         "write_signature_required"
         | "default_route_approval_signature_required"
+        | "default_route_approval_timestamp_required"
         | "context_packet_approval_signature_required"
+        | "context_packet_approval_timestamp_required"
         | "lifecycle_signature_required"
         | "continuation_signature_required"
+        | "lifecycle_approval_timestamp_required"
+        | "continuation_approval_timestamp_required"
         | "provenance_denied" => Some(ReceiptEventType::DagdbSignatureFailure),
         "tenant_scope_mismatch" => Some(ReceiptEventType::DagdbRlsTenantViolation),
         "idempotency_key_conflict" => Some(ReceiptEventType::DagdbIdempotencyConflict),
@@ -9172,6 +9475,10 @@ mod tests {
         assert_eq!(envelope.error_code, expected_code);
     }
 
+    fn fixed_approval_timestamp() -> &'static str {
+        "2026-06-20T00:00:00Z"
+    }
+
     async fn assert_sanitized_invalid_shape(
         response: axum::response::Response,
         forbidden_fragments: &[&str],
@@ -9581,8 +9888,19 @@ mod tests {
                 route_response_from_request(request.clone(), "dagdb.route").expect("route shape");
             let proposed = default_route_candidate_from_response(&request, &response)
                 .expect("default route proposed record");
-            let approval_payload_hash =
-                default_route_payload_hash(&proposed).expect("default route approval payload hash");
+            let approval_payload_hash_hex = canonical_default_route_approval_payload_hash(
+                &proposed,
+                &request.requesting_agent_did,
+                &request.idempotency_key,
+                authority_did,
+                DEFAULT_ROUTE_FINALITY_PURPOSE,
+                fixed_approval_timestamp(),
+            )
+            .expect("default route approval payload hash");
+            let approval_payload_hash: [u8; 32] = hex::decode(&approval_payload_hash_hex)
+                .expect("approval hash hex")
+                .try_into()
+                .expect("approval hash bytes");
             let approval_signature = sign_write_payload(&authority_keypair, &approval_payload_hash)
                 .expect("default route approval signature");
             let record = default_route_record_from_response(
@@ -9590,7 +9908,8 @@ mod tests {
                 &response,
                 authority_did,
                 &approval_signature,
-                &approval_payload_hash,
+                fixed_approval_timestamp(),
+                &approval_payload_hash_hex,
             )
             .expect("default route record");
             let signature = sign_write_payload(
@@ -9620,6 +9939,10 @@ mod tests {
             headers.insert(
                 DEFAULT_ROUTE_APPROVAL_DID_HEADER,
                 HeaderValue::from_static(authority_did),
+            );
+            headers.insert(
+                DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
+                HeaderValue::from_static(fixed_approval_timestamp()),
             );
             let response = route_handler(&ctx, &headers, request).await;
             assert_error_response(
@@ -9652,6 +9975,109 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn route_handler_requires_default_route_approval_timestamp_header() {
+            let pool = unreachable_lazy_pool();
+            let ctx = DagDbRouteContext::from_pool(Some(pool));
+            let fixtures = fixtures();
+            let request: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
+            let mut headers = authorized_headers("dagdb:route");
+            headers.insert(
+                WRITE_SIGNATURE_HEADER,
+                HeaderValue::from_str(&"a".repeat(128)).expect("signature header"),
+            );
+            headers.insert(
+                DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+                HeaderValue::from_str(&"b".repeat(128)).expect("approval signature header"),
+            );
+            headers.insert(
+                DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+                HeaderValue::from_static("did:exo:route-authority"),
+            );
+
+            let response = route_handler(&ctx, &headers, request).await;
+            assert_error_response(
+                response,
+                StatusCode::BAD_REQUEST,
+                "default_route_approval_timestamp_required",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn default_route_finality_rejects_approval_timestamp_mutation_before_persistence() {
+            let keypair = KeyPair::generate();
+            let authority_keypair = KeyPair::generate();
+            let authority_did = "did:exo:route-authority";
+            let fixtures = fixtures();
+            let request: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
+            let response =
+                route_response_from_request(request.clone(), "dagdb.route").expect("route shape");
+            let proposed = default_route_candidate_from_response(&request, &response)
+                .expect("default route proposed record");
+            let signed_timestamp = fixed_approval_timestamp();
+            let supplied_timestamp = "2026-06-20T00:05:00Z";
+            let approval_payload_hash_hex = canonical_default_route_approval_payload_hash(
+                &proposed,
+                &request.requesting_agent_did,
+                &request.idempotency_key,
+                authority_did,
+                DEFAULT_ROUTE_FINALITY_PURPOSE,
+                signed_timestamp,
+            )
+            .expect("default route approval payload hash");
+            let approval_payload_hash: [u8; 32] = hex::decode(&approval_payload_hash_hex)
+                .expect("approval hash hex")
+                .try_into()
+                .expect("approval hash bytes");
+            let approval_signature = sign_write_payload(&authority_keypair, &approval_payload_hash)
+                .expect("default route approval signature");
+            let record = default_route_record_from_response(
+                &request,
+                &response,
+                authority_did,
+                &approval_signature,
+                signed_timestamp,
+                &approval_payload_hash_hex,
+            )
+            .expect("default route record");
+            let signature = sign_write_payload(
+                &keypair,
+                &default_route_payload_hash(&record).expect("default route payload hash"),
+            )
+            .expect("default route signature");
+            let pool = PgPoolOptions::new()
+                .connect_lazy("postgres://127.0.0.1:1/unreachable")
+                .expect("lazy pool");
+            let ctx = DagDbRouteContext::from_pool(Some(pool));
+            ctx.install_gatekeeper_profile(
+                consent_engine_for_agent(&request.tenant_id, &request.requesting_agent_did),
+                identity_registry_for_agent(&request.requesting_agent_did, &keypair)
+                    .with_public_key(authority_did, *authority_keypair.public_key().as_bytes())
+                    .with_governed_role(authority_did, GovernedRoleName::Operator),
+            );
+            let mut headers = authorized_headers("dagdb:route");
+            headers.insert(
+                WRITE_SIGNATURE_HEADER,
+                HeaderValue::from_str(&signature).expect("signature header"),
+            );
+            headers.insert(
+                DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+                HeaderValue::from_str(&approval_signature).expect("approval signature header"),
+            );
+            headers.insert(
+                DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+                HeaderValue::from_static(authority_did),
+            );
+            headers.insert(
+                DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
+                HeaderValue::from_static(supplied_timestamp),
+            );
+
+            let response = route_handler(&ctx, &headers, request).await;
+            assert_error_response(response, StatusCode::FORBIDDEN, "approval_denied").await;
+        }
+
+        #[tokio::test]
         async fn default_route_finality_rejects_forged_external_approval_before_persistence() {
             let keypair = KeyPair::generate();
             let authority_keypair = KeyPair::generate();
@@ -9661,8 +10087,19 @@ mod tests {
                 route_response_from_request(request.clone(), "dagdb.route").expect("route shape");
             let proposed = default_route_candidate_from_response(&request, &response)
                 .expect("default route proposed record");
-            let approval_payload_hash =
-                default_route_payload_hash(&proposed).expect("default route approval payload hash");
+            let approval_payload_hash_hex = canonical_default_route_approval_payload_hash(
+                &proposed,
+                &request.requesting_agent_did,
+                &request.idempotency_key,
+                "did:exo:route-authority",
+                DEFAULT_ROUTE_FINALITY_PURPOSE,
+                fixed_approval_timestamp(),
+            )
+            .expect("default route approval payload hash");
+            let approval_payload_hash: [u8; 32] = hex::decode(&approval_payload_hash_hex)
+                .expect("approval hash hex")
+                .try_into()
+                .expect("approval hash bytes");
             let approval_signature = sign_write_payload(&authority_keypair, &approval_payload_hash)
                 .expect("default route approval signature");
             let record = default_route_record_from_response(
@@ -9670,7 +10107,8 @@ mod tests {
                 &response,
                 "did:exo:route-authority",
                 &approval_signature,
-                &approval_payload_hash,
+                fixed_approval_timestamp(),
+                &approval_payload_hash_hex,
             )
             .expect("default route record");
             let signature = sign_write_payload(
@@ -9692,6 +10130,7 @@ mod tests {
                 &signature,
                 &"00".repeat(64),
                 "did:exo:route-authority",
+                fixed_approval_timestamp(),
             )
             .await
             .expect_err("forged default-route approval must fail before DB");
@@ -9727,6 +10166,7 @@ mod tests {
                 &signature,
                 &approval_signature,
                 &request.requesting_agent_did,
+                fixed_approval_timestamp(),
             )
             .await
             .expect_err("requester self-approval must fail before DB");
@@ -9746,8 +10186,19 @@ mod tests {
                 route_response_from_request(request.clone(), "dagdb.route").expect("route shape");
             let proposed = default_route_candidate_from_response(&request, &response)
                 .expect("default route proposed record");
-            let approval_payload_hash =
-                default_route_payload_hash(&proposed).expect("default route approval payload hash");
+            let approval_payload_hash_hex = canonical_default_route_approval_payload_hash(
+                &proposed,
+                &request.requesting_agent_did,
+                &request.idempotency_key,
+                registered_non_authority_did,
+                DEFAULT_ROUTE_FINALITY_PURPOSE,
+                fixed_approval_timestamp(),
+            )
+            .expect("default route approval payload hash");
+            let approval_payload_hash: [u8; 32] = hex::decode(&approval_payload_hash_hex)
+                .expect("approval hash hex")
+                .try_into()
+                .expect("approval hash bytes");
             let approval_signature =
                 sign_write_payload(&registered_non_authority_keypair, &approval_payload_hash)
                     .expect("registered non-authority approval signature");
@@ -9756,7 +10207,8 @@ mod tests {
                 &response,
                 registered_non_authority_did,
                 &approval_signature,
-                &approval_payload_hash,
+                fixed_approval_timestamp(),
+                &approval_payload_hash_hex,
             )
             .expect("default route record");
             let signature = sign_write_payload(
@@ -9778,6 +10230,7 @@ mod tests {
                 &signature,
                 &approval_signature,
                 registered_non_authority_did,
+                fixed_approval_timestamp(),
             )
             .await
             .expect_err("registered non-authority approval must fail before DB persistence");
@@ -9828,6 +10281,37 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn context_packet_handler_requires_external_approval_timestamp_when_pool_present() {
+            let pool = unreachable_lazy_pool();
+            let ctx = DagDbRouteContext::from_pool(Some(pool));
+            let mut headers = authorized_headers("dagdb:context_packet");
+            headers.insert(
+                WRITE_SIGNATURE_HEADER,
+                HeaderValue::from_str(&"a".repeat(128)).expect("signature header"),
+            );
+            headers.insert(
+                CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+                HeaderValue::from_str(&"b".repeat(128)).expect("approval signature header"),
+            );
+            headers.insert(
+                CONTEXT_PACKET_APPROVAL_DID_HEADER,
+                HeaderValue::from_static("did:exo:context-authority"),
+            );
+            let response = gated_context_packet_handler(
+                &ctx,
+                &headers,
+                context_packet_request("missing-context-approval-timestamp"),
+            )
+            .await;
+            assert_error_response(
+                response,
+                StatusCode::BAD_REQUEST,
+                "context_packet_approval_timestamp_required",
+            )
+            .await;
+        }
+
+        #[tokio::test]
         async fn gateway_context_packet_record_reaches_durable_persistence_layer() {
             let keypair = KeyPair::generate();
             let authority_keypair = KeyPair::generate();
@@ -9839,8 +10323,19 @@ mod tests {
                 .expect("persistent context response");
             let proposed = context_packet_candidate_from_response(&request, &response)
                 .expect("context packet proposed record");
-            let approval_payload_hash =
-                context_packet_record_payload_hash(&proposed).expect("context approval hash");
+            let approval_payload_hash_hex = canonical_context_packet_approval_payload_hash(
+                &proposed,
+                &request.requesting_agent_did,
+                &proposed.idempotency_key,
+                authority_did,
+                CONTEXT_PACKET_FINALITY_PURPOSE,
+                fixed_approval_timestamp(),
+            )
+            .expect("context approval hash");
+            let approval_payload_hash: [u8; 32] = hex::decode(&approval_payload_hash_hex)
+                .expect("approval hash hex")
+                .try_into()
+                .expect("approval hash bytes");
             let approval_signature = sign_write_payload(&authority_keypair, &approval_payload_hash)
                 .expect("context approval signature");
             let record = context_packet_record_from_response(
@@ -9848,7 +10343,8 @@ mod tests {
                 &response,
                 authority_did,
                 &approval_signature,
-                &approval_payload_hash,
+                fixed_approval_timestamp(),
+                &approval_payload_hash_hex,
             )
             .expect("context packet record");
             let signature = sign_write_payload(
@@ -9960,6 +10456,66 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn writeback_handler_requires_lifecycle_approval_timestamp_when_pool_present() {
+            let pool = unreachable_lazy_pool();
+            let ctx = DagDbRouteContext::from_pool(Some(pool));
+            let mut headers = authorized_headers("dagdb:writeback");
+            headers.insert(WRITE_SIGNATURE_HEADER, HeaderValue::from_static("00"));
+            headers.insert(LIFECYCLE_SIGNATURE_HEADER, HeaderValue::from_static("00"));
+            headers.insert(
+                CONTINUATION_SIGNATURE_HEADER,
+                HeaderValue::from_static("00"),
+            );
+            headers.insert(
+                LIFECYCLE_APPROVAL_DID_HEADER,
+                HeaderValue::from_static("did:exo:finality-authority"),
+            );
+            headers.insert(
+                CONTINUATION_APPROVAL_DID_HEADER,
+                HeaderValue::from_static("did:exo:finality-authority"),
+            );
+            let response = writeback_handler(&ctx, &headers, fixture_writeback_request()).await;
+            assert_error_response(
+                response,
+                StatusCode::BAD_REQUEST,
+                "lifecycle_approval_timestamp_required",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn writeback_handler_requires_continuation_approval_timestamp_when_pool_present() {
+            let pool = unreachable_lazy_pool();
+            let ctx = DagDbRouteContext::from_pool(Some(pool));
+            let mut headers = authorized_headers("dagdb:writeback");
+            headers.insert(WRITE_SIGNATURE_HEADER, HeaderValue::from_static("00"));
+            headers.insert(LIFECYCLE_SIGNATURE_HEADER, HeaderValue::from_static("00"));
+            headers.insert(
+                CONTINUATION_SIGNATURE_HEADER,
+                HeaderValue::from_static("00"),
+            );
+            headers.insert(
+                LIFECYCLE_APPROVAL_DID_HEADER,
+                HeaderValue::from_static("did:exo:finality-authority"),
+            );
+            headers.insert(
+                CONTINUATION_APPROVAL_DID_HEADER,
+                HeaderValue::from_static("did:exo:finality-authority"),
+            );
+            headers.insert(
+                LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+                HeaderValue::from_static("2026-06-20T00:00:00Z"),
+            );
+            let response = writeback_handler(&ctx, &headers, fixture_writeback_request()).await;
+            assert_error_response(
+                response,
+                StatusCode::BAD_REQUEST,
+                "continuation_approval_timestamp_required",
+            )
+            .await;
+        }
+
+        #[tokio::test]
         async fn gateway_writeback_lifecycle_and_continuation_records_reach_db_layer() {
             let keypair = KeyPair::generate();
             let authority_keypair = KeyPair::generate();
@@ -9991,6 +10547,8 @@ mod tests {
                 &selection,
                 &lifecycle_base,
                 &continuation_base,
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
             );
 
             let lifecycle = lifecycle_action_finalization_from_writeback(
@@ -9998,7 +10556,7 @@ mod tests {
                 lifecycle_base,
                 &lifecycle_signature,
                 "did:exo:finality-authority",
-                1,
+                fixed_lifecycle_approval_timestamp(),
             )
             .expect("lifecycle action");
             let accepted_lifecycle = lifecycle
@@ -10034,7 +10592,7 @@ mod tests {
                 continuation_base,
                 &continuation_signature,
                 "did:exo:finality-authority",
-                1,
+                fixed_continuation_approval_timestamp(),
             )
             .expect("continuation record");
             let accepted_continuation = continuation
@@ -10087,12 +10645,13 @@ mod tests {
                 &selection,
                 &lifecycle,
                 &continuation,
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
             );
 
             let error = prevalidate_writeback_d5_gates(
                 &service,
                 &selection,
-                &request.tenant_id,
                 &request.requesting_agent_did,
                 &lifecycle,
                 &continuation,
@@ -10101,8 +10660,107 @@ mod tests {
                 &continuation_signature,
                 "did:exo:finality-authority",
                 "did:exo:finality-authority",
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
+                None,
             )
             .expect_err("forged lifecycle signature must fail in preflight");
+
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), "approval_denied");
+        }
+
+        #[tokio::test]
+        async fn writeback_d5_preflight_rejects_lifecycle_signature_not_bound_to_approval_timestamp()
+         {
+            let keypair = KeyPair::generate();
+            let authority_keypair = KeyPair::generate();
+            let request = fixture_writeback_request();
+            let service = consented_service_for_agent_and_authority(
+                &keypair,
+                &authority_keypair,
+                &request.tenant_id,
+                &request.requesting_agent_did,
+                "did:exo:finality-authority",
+            );
+            let selection = fixture_writeback_selection_response(&request);
+            let lifecycle = lifecycle_action_from_writeback(&request).expect("lifecycle action");
+            let continuation =
+                continuation_record_from_writeback(&request).expect("continuation record");
+            let (writeback_signature, lifecycle_signature, continuation_signature) =
+                writeback_base_record_signatures(
+                    &keypair,
+                    &authority_keypair,
+                    &selection,
+                    &lifecycle,
+                    &continuation,
+                );
+
+            let error = prevalidate_writeback_d5_gates(
+                &service,
+                &selection,
+                &request.requesting_agent_did,
+                &lifecycle,
+                &continuation,
+                &writeback_signature,
+                &lifecycle_signature,
+                &continuation_signature,
+                "did:exo:finality-authority",
+                "did:exo:finality-authority",
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
+                None,
+            )
+            .expect_err("lifecycle finality signature must bind approval timestamp");
+
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), "approval_denied");
+        }
+
+        #[tokio::test]
+        async fn writeback_d5_preflight_rejects_lifecycle_signature_when_approval_timestamp_changes()
+         {
+            let keypair = KeyPair::generate();
+            let authority_keypair = KeyPair::generate();
+            let request = fixture_writeback_request();
+            let service = consented_service_for_agent_and_authority(
+                &keypair,
+                &authority_keypair,
+                &request.tenant_id,
+                &request.requesting_agent_did,
+                "did:exo:finality-authority",
+            );
+            let selection = fixture_writeback_selection_response(&request);
+            let lifecycle = lifecycle_action_from_writeback(&request).expect("lifecycle action");
+            let continuation =
+                continuation_record_from_writeback(&request).expect("continuation record");
+            let (writeback_signature, lifecycle_signature, continuation_signature) =
+                writeback_preflight_signatures(
+                    &keypair,
+                    &authority_keypair,
+                    &selection,
+                    &lifecycle,
+                    &continuation,
+                    fixed_lifecycle_approval_timestamp(),
+                    fixed_continuation_approval_timestamp(),
+                );
+
+            let error = prevalidate_writeback_d5_gates(
+                &service,
+                &selection,
+                &request.requesting_agent_did,
+                &lifecycle,
+                &continuation,
+                &writeback_signature,
+                &lifecycle_signature,
+                &continuation_signature,
+                "did:exo:finality-authority",
+                "did:exo:finality-authority",
+                "2026-06-20T00:05:00Z",
+                fixed_continuation_approval_timestamp(),
+                None,
+            )
+            .expect_err("lifecycle finality signature must bind exact approval timestamp");
 
             assert_eq!(error.status(), StatusCode::FORBIDDEN);
             assert_eq!(error.error_code(), "approval_denied");
@@ -10130,12 +10788,13 @@ mod tests {
                 &selection,
                 &lifecycle,
                 &continuation,
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
             );
 
             let error = prevalidate_writeback_d5_gates(
                 &service,
                 &selection,
-                &request.tenant_id,
                 &request.requesting_agent_did,
                 &lifecycle,
                 &continuation,
@@ -10144,8 +10803,107 @@ mod tests {
                 &"00".repeat(64),
                 "did:exo:finality-authority",
                 "did:exo:finality-authority",
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
+                None,
             )
             .expect_err("forged continuation signature must fail in preflight");
+
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), "approval_denied");
+        }
+
+        #[tokio::test]
+        async fn writeback_d5_preflight_rejects_continuation_signature_not_bound_to_approval_timestamp()
+         {
+            let keypair = KeyPair::generate();
+            let authority_keypair = KeyPair::generate();
+            let request = fixture_writeback_request();
+            let service = consented_service_for_agent_and_authority(
+                &keypair,
+                &authority_keypair,
+                &request.tenant_id,
+                &request.requesting_agent_did,
+                "did:exo:finality-authority",
+            );
+            let selection = fixture_writeback_selection_response(&request);
+            let lifecycle = lifecycle_action_from_writeback(&request).expect("lifecycle action");
+            let continuation =
+                continuation_record_from_writeback(&request).expect("continuation record");
+            let (writeback_signature, lifecycle_signature, continuation_signature) =
+                writeback_base_record_signatures(
+                    &keypair,
+                    &authority_keypair,
+                    &selection,
+                    &lifecycle,
+                    &continuation,
+                );
+
+            let error = prevalidate_writeback_d5_gates(
+                &service,
+                &selection,
+                &request.requesting_agent_did,
+                &lifecycle,
+                &continuation,
+                &writeback_signature,
+                &lifecycle_signature,
+                &continuation_signature,
+                "did:exo:finality-authority",
+                "did:exo:finality-authority",
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
+                None,
+            )
+            .expect_err("continuation finality signature must bind approval timestamp");
+
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), "approval_denied");
+        }
+
+        #[tokio::test]
+        async fn writeback_d5_preflight_rejects_continuation_signature_when_approval_timestamp_changes()
+         {
+            let keypair = KeyPair::generate();
+            let authority_keypair = KeyPair::generate();
+            let request = fixture_writeback_request();
+            let service = consented_service_for_agent_and_authority(
+                &keypair,
+                &authority_keypair,
+                &request.tenant_id,
+                &request.requesting_agent_did,
+                "did:exo:finality-authority",
+            );
+            let selection = fixture_writeback_selection_response(&request);
+            let lifecycle = lifecycle_action_from_writeback(&request).expect("lifecycle action");
+            let continuation =
+                continuation_record_from_writeback(&request).expect("continuation record");
+            let (writeback_signature, lifecycle_signature, continuation_signature) =
+                writeback_preflight_signatures(
+                    &keypair,
+                    &authority_keypair,
+                    &selection,
+                    &lifecycle,
+                    &continuation,
+                    fixed_lifecycle_approval_timestamp(),
+                    fixed_continuation_approval_timestamp(),
+                );
+
+            let error = prevalidate_writeback_d5_gates(
+                &service,
+                &selection,
+                &request.requesting_agent_did,
+                &lifecycle,
+                &continuation,
+                &writeback_signature,
+                &lifecycle_signature,
+                &continuation_signature,
+                "did:exo:finality-authority",
+                "did:exo:finality-authority",
+                fixed_lifecycle_approval_timestamp(),
+                "2026-06-20T00:05:01Z",
+                None,
+            )
+            .expect_err("continuation finality signature must bind exact approval timestamp");
 
             assert_eq!(error.status(), StatusCode::FORBIDDEN);
             assert_eq!(error.error_code(), "approval_denied");
@@ -10171,12 +10929,13 @@ mod tests {
                     &selection,
                     &lifecycle,
                     &continuation,
+                    fixed_lifecycle_approval_timestamp(),
+                    fixed_continuation_approval_timestamp(),
                 );
 
             let error = prevalidate_writeback_d5_gates(
                 &service,
                 &selection,
-                &request.tenant_id,
                 &request.requesting_agent_did,
                 &lifecycle,
                 &continuation,
@@ -10185,6 +10944,9 @@ mod tests {
                 &continuation_signature,
                 &request.requesting_agent_did,
                 &request.requesting_agent_did,
+                fixed_lifecycle_approval_timestamp(),
+                fixed_continuation_approval_timestamp(),
+                None,
             )
             .expect_err("requester self-approval must fail in preflight");
 
@@ -12059,6 +12821,14 @@ mod tests {
             fixture(&fixtures, "requests", "writeback")
         }
 
+        fn fixed_lifecycle_approval_timestamp() -> &'static str {
+            "2026-06-20T00:00:00Z"
+        }
+
+        fn fixed_continuation_approval_timestamp() -> &'static str {
+            "2026-06-20T00:00:01Z"
+        }
+
         fn fixture_writeback_selection_response(
             request: &DagDbWritebackRequest,
         ) -> DagDbGraphContextSelectionResponse {
@@ -12081,6 +12851,54 @@ mod tests {
         }
 
         fn writeback_preflight_signatures(
+            writer_keypair: &KeyPair,
+            approval_keypair: &KeyPair,
+            selection: &DagDbGraphContextSelectionResponse,
+            lifecycle: &LifecycleAction,
+            continuation: &ContinuationRecord,
+            lifecycle_approval_timestamp: &str,
+            continuation_approval_timestamp: &str,
+        ) -> (String, String, String) {
+            let writeback_signature = sign_write_payload(
+                writer_keypair,
+                &usage_event_payload_hash(selection).expect("writeback payload hash"),
+            )
+            .expect("writeback signature");
+            let lifecycle_payload_hash_hex = canonical_lifecycle_approval_payload_hash(
+                lifecycle,
+                "did:exo:finality-authority",
+                lifecycle.action_type.as_str(),
+                lifecycle_approval_timestamp,
+            )
+            .expect("lifecycle approval payload hash");
+            let lifecycle_payload_hash = hex::decode(lifecycle_payload_hash_hex)
+                .expect("lifecycle approval hash hex")
+                .try_into()
+                .expect("lifecycle approval hash bytes");
+            let lifecycle_signature = sign_write_payload(approval_keypair, &lifecycle_payload_hash)
+                .expect("lifecycle signature");
+            let continuation_payload_hash_hex = canonical_continuation_approval_payload_hash(
+                continuation,
+                "did:exo:finality-authority",
+                CONTINUATION_FINALITY_PURPOSE,
+                continuation_approval_timestamp,
+            )
+            .expect("continuation approval payload hash");
+            let continuation_payload_hash = hex::decode(continuation_payload_hash_hex)
+                .expect("continuation approval hash hex")
+                .try_into()
+                .expect("continuation approval hash bytes");
+            let continuation_signature =
+                sign_write_payload(approval_keypair, &continuation_payload_hash)
+                    .expect("continuation signature");
+            (
+                writeback_signature,
+                lifecycle_signature,
+                continuation_signature,
+            )
+        }
+
+        fn writeback_base_record_signatures(
             writer_keypair: &KeyPair,
             approval_keypair: &KeyPair,
             selection: &DagDbGraphContextSelectionResponse,

@@ -10,6 +10,7 @@ use exo_dag_db_domain::{
         LifecycleEvidenceRef, LifecycleMemoryRef, LifecycleRollbackRef, LifecycleTerminalState,
         PRD17_LIFECYCLE_ACTION_SCHEMA, PRODUCTION_LIFECYCLE_APPROVAL_EVIDENCE_PREFIX,
         ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence,
+        canonical_continuation_approval_payload_hash, canonical_lifecycle_approval_payload_hash,
     },
     route_invalidation::{
         PRD17_ROUTE_INVALIDATION_EVENT_SCHEMA, RouteFreshnessState, RouteInvalidationError,
@@ -17,7 +18,9 @@ use exo_dag_db_domain::{
         RouteReadinessRecord,
     },
 };
+use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const TENANT: &str = "dag_db-local";
 const PROJECT: &str = "dag_db";
@@ -29,6 +32,84 @@ fn digest(byte: &str) -> String {
 
 fn authority_signature() -> String {
     "0123456789abcdef".repeat(8)
+}
+
+#[derive(Serialize)]
+struct ExpectedLifecycleApprovalMaterial<'a> {
+    domain: &'static str,
+    action: &'a LifecycleAction,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct ExpectedContinuationApprovalMaterial<'a> {
+    domain: &'static str,
+    record: &'a ContinuationRecord,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
+}
+
+fn sha256_hex_cbor<T: Serialize>(value: &T) -> String {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).expect("canonical CBOR approval material");
+    hex_digest(Sha256::digest(bytes))
+}
+
+fn sha256_hex_json<T: Serialize>(value: &T) -> String {
+    hex_digest(Sha256::digest(
+        serde_json::to_vec(value).expect("JSON approval material"),
+    ))
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[test]
+fn lifecycle_approval_payload_hashes_use_canonical_cbor_not_json_bytes() {
+    let action = lifecycle_action("lifecycle-writeback-cbor", LifecycleActionType::Writeback);
+    let approved_at = "2026-06-07T00:00:01Z";
+    let lifecycle_material = ExpectedLifecycleApprovalMaterial {
+        domain: "exo.dagdb.lifecycle.external_finality.v1",
+        action: &action,
+        authority_did: "did:exo:governance-authority",
+        route_purpose: action.action_type.as_str(),
+        approved_at,
+    };
+    let lifecycle_hash = canonical_lifecycle_approval_payload_hash(
+        &action,
+        lifecycle_material.authority_did,
+        lifecycle_material.route_purpose,
+        lifecycle_material.approved_at,
+    )
+    .expect("canonical lifecycle approval hash");
+    assert_eq!(lifecycle_hash, sha256_hex_cbor(&lifecycle_material));
+    assert_ne!(lifecycle_hash, sha256_hex_json(&lifecycle_material));
+
+    let record = continuation();
+    let continuation_material = ExpectedContinuationApprovalMaterial {
+        domain: "exo.dagdb.continuation.external_finality.v1",
+        record: &record,
+        authority_did: "did:exo:governance-authority",
+        route_purpose: "dagdb.continuation",
+        approved_at,
+    };
+    let continuation_hash = canonical_continuation_approval_payload_hash(
+        &record,
+        continuation_material.authority_did,
+        continuation_material.route_purpose,
+        continuation_material.approved_at,
+    )
+    .expect("canonical continuation approval hash");
+    assert_eq!(continuation_hash, sha256_hex_cbor(&continuation_material));
+    assert_ne!(continuation_hash, sha256_hex_json(&continuation_material));
 }
 
 fn memory_ref(memory_id: &str) -> LifecycleMemoryRef {
@@ -63,6 +144,7 @@ fn approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
         memory_namespace: NAMESPACE.to_owned(),
         actor_id: "did:agent:codex-prd17c".to_owned(),
         route_id: "policy-prd17c-local-mutation".to_owned(),
+        route_purpose: "writeback".to_owned(),
         request_id: "packet-prd17c-001".to_owned(),
         payload_hash: digest("b"),
         authority_did: "did:exo:governance-authority".to_owned(),
@@ -73,9 +155,48 @@ fn approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
 
 fn continuation_approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
     ProductionLifecycleApprovalEvidence {
+        route_purpose: "dagdb.continuation".to_owned(),
         request_id: "task-prd17c-next-agent".to_owned(),
         ..approval_evidence(suffix)
     }
+}
+
+fn approval_evidence_for_action(
+    action: &LifecycleAction,
+    suffix: &str,
+) -> ProductionLifecycleApprovalEvidence {
+    let mut approval = approval_evidence(suffix);
+    approval.route_id = action.policy_ref.clone();
+    approval.route_purpose = action.action_type.as_str().to_owned();
+    approval.request_id = action.source_packet_id.clone();
+    approval.payload_hash = canonical_lifecycle_approval_payload_hash(
+        action,
+        &approval.authority_did,
+        &approval.route_purpose,
+        &approval.approved_at,
+    )
+    .expect("canonical lifecycle approval payload hash");
+    approval.evidence_ref.digest = approval.payload_hash.clone();
+    approval
+}
+
+fn approval_evidence_for_continuation(
+    record: &ContinuationRecord,
+    suffix: &str,
+) -> ProductionLifecycleApprovalEvidence {
+    let mut approval = continuation_approval_evidence(suffix);
+    approval.actor_id = record.actor_id.clone();
+    approval.route_id = record.route_id.clone();
+    approval.request_id = record.task_id.clone();
+    approval.payload_hash = canonical_continuation_approval_payload_hash(
+        record,
+        &approval.authority_did,
+        &approval.route_purpose,
+        &approval.approved_at,
+    )
+    .expect("canonical continuation approval payload hash");
+    approval.evidence_ref.digest = approval.payload_hash.clone();
+    approval
 }
 
 fn rollback_ref(
@@ -160,6 +281,8 @@ fn continuation() -> ContinuationRecord {
         tenant_id: TENANT.to_owned(),
         project_id: PROJECT.to_owned(),
         memory_namespace: NAMESPACE.to_owned(),
+        actor_id: "did:agent:codex-prd17c".to_owned(),
+        route_id: "policy-prd17c-local-mutation".to_owned(),
         summary_ref: "summary-continuation-prd17c-001".to_owned(),
         memory_refs: vec![memory_ref("memory-target-a")],
         blocker_refs: vec!["blocker-production-lifecycle-approval-deferred".to_owned()],
@@ -302,7 +425,7 @@ fn lifecycle_rejects_duplicate_unsafe_replay() {
 #[test]
 fn lifecycle_approval_evidence_graduates_action_and_replays_idempotently() {
     let action = lifecycle_action("lifecycle-approved-001", LifecycleActionType::Writeback);
-    let approval = approval_evidence("lifecycle-approved-001");
+    let approval = approval_evidence_for_action(&action, "lifecycle-approved-001");
 
     let accepted = action
         .approved_with_evidence(&approval)
@@ -327,7 +450,7 @@ fn lifecycle_approval_evidence_graduates_action_and_replays_idempotently() {
     assert!(replay.replayed);
     assert_eq!(ledger.committed_action_count(), 1);
 
-    let changed_approval = approval_evidence("lifecycle-approved-001-changed");
+    let changed_approval = approval_evidence_for_action(&action, "lifecycle-approved-001-changed");
     assert!(matches!(
         ledger.apply_approved_lifecycle_action(action, &changed_approval),
         Err(LifecycleActionError::DuplicateUnsafeReplay { .. })
@@ -337,7 +460,7 @@ fn lifecycle_approval_evidence_graduates_action_and_replays_idempotently() {
 #[test]
 fn lifecycle_approval_evidence_fails_closed_without_finality_binding() {
     let action = lifecycle_action("lifecycle-approved-002", LifecycleActionType::Writeback);
-    let mut approval = approval_evidence("lifecycle-approved-002");
+    let mut approval = approval_evidence_for_action(&action, "lifecycle-approved-002");
     approval.evidence_ref.evidence_id = "self-asserted-production-approval".to_owned();
 
     assert!(matches!(
@@ -353,7 +476,7 @@ fn lifecycle_and_continuation_reject_shaped_placeholder_approval_evidence() {
         LifecycleActionType::Writeback,
     );
     let mut placeholder_lifecycle_approval =
-        approval_evidence("lifecycle-placeholder-approval-001");
+        approval_evidence_for_action(&action, "lifecycle-placeholder-approval-001");
     placeholder_lifecycle_approval.authority_signature = "a".repeat(128);
     assert!(
         action
@@ -364,7 +487,7 @@ fn lifecycle_and_continuation_reject_shaped_placeholder_approval_evidence() {
 
     let record = continuation();
     let mut placeholder_continuation_approval =
-        continuation_approval_evidence("continuation-placeholder-approval-001");
+        approval_evidence_for_continuation(&record, "continuation-placeholder-approval-001");
     placeholder_continuation_approval.authority_signature = "a".repeat(128);
     assert!(
         record
@@ -378,7 +501,7 @@ fn lifecycle_and_continuation_reject_shaped_placeholder_approval_evidence() {
 fn lifecycle_approval_rejects_mismatched_scope_hash_and_forged_signature() {
     let action = lifecycle_action("lifecycle-approved-003", LifecycleActionType::Writeback);
 
-    let mut tenant_mismatch = approval_evidence("lifecycle-approved-003");
+    let mut tenant_mismatch = approval_evidence_for_action(&action, "lifecycle-approved-003");
     tenant_mismatch.tenant_id = "other-tenant".to_owned();
     assert_eq!(
         action.approved_with_evidence(&tenant_mismatch),
@@ -387,14 +510,14 @@ fn lifecycle_approval_rejects_mismatched_scope_hash_and_forged_signature() {
         })
     );
 
-    let mut hash_mismatch = approval_evidence("lifecycle-approved-003");
+    let mut hash_mismatch = approval_evidence_for_action(&action, "lifecycle-approved-003");
     hash_mismatch.payload_hash = digest("c");
     assert!(matches!(
         action.approved_with_evidence(&hash_mismatch),
         Err(LifecycleActionError::ProductionApprovalMismatch { .. })
     ));
 
-    let mut forged_signature = approval_evidence("lifecycle-approved-003");
+    let mut forged_signature = approval_evidence_for_action(&action, "lifecycle-approved-003");
     forged_signature.authority_signature = "not-a-signature".to_owned();
     assert!(matches!(
         action.approved_with_evidence(&forged_signature),
@@ -403,9 +526,47 @@ fn lifecycle_approval_rejects_mismatched_scope_hash_and_forged_signature() {
 }
 
 #[test]
+fn lifecycle_and_continuation_approval_reject_unbound_hash_actor_and_timestamp() {
+    let action = lifecycle_action(
+        "lifecycle-approved-binding-001",
+        LifecycleActionType::Writeback,
+    );
+    let lifecycle_mutations: [fn(&mut ProductionLifecycleApprovalEvidence); 3] = [
+        |approval| {
+            approval.payload_hash = digest("d");
+            approval.evidence_ref.digest = digest("d");
+        },
+        |approval| approval.approved_at = "not-a-timestamp".to_owned(),
+        |approval| approval.approved_at = "2020-01-01T00:00:00Z".to_owned(),
+    ];
+    for mutate in lifecycle_mutations {
+        let mut approval = approval_evidence_for_action(&action, "lifecycle-approved-binding-001");
+        mutate(&mut approval);
+        assert!(action.approved_with_evidence(&approval).is_err());
+    }
+
+    let record = continuation();
+    let continuation_mutations: [fn(&mut ProductionLifecycleApprovalEvidence); 4] = [
+        |approval| approval.actor_id = "did:agent:other".to_owned(),
+        |approval| {
+            approval.payload_hash = digest("e");
+            approval.evidence_ref.digest = digest("e");
+        },
+        |approval| approval.approved_at = "not-a-timestamp".to_owned(),
+        |approval| approval.approved_at = "2020-01-01T00:00:00Z".to_owned(),
+    ];
+    for mutate in continuation_mutations {
+        let mut approval =
+            approval_evidence_for_continuation(&record, "continuation-approved-binding-001");
+        mutate(&mut approval);
+        assert!(record.approved_with_evidence(&approval, 1_000).is_err());
+    }
+}
+
+#[test]
 fn lifecycle_rejects_raw_accepted_state_with_caller_controlled_approval_evidence() {
     let mut action = lifecycle_action("lifecycle-raw-accepted-001", LifecycleActionType::Writeback);
-    let approval = approval_evidence("lifecycle-raw-accepted-001");
+    let approval = approval_evidence_for_action(&action, "lifecycle-raw-accepted-001");
     action.evidence_refs.push(approval.evidence_ref);
     action.terminal_state = LifecycleTerminalState::Accepted;
     action.production_lifecycle_approval = ProductionLifecycleApproval::Approved;
@@ -609,7 +770,7 @@ fn continuation_persists_and_later_retrieval_consumes_current_record() {
 fn approved_continuation_persists_replays_and_retrieves_as_accepted() {
     let mut store = ContinuationStore::default();
     let record = continuation();
-    let approval = continuation_approval_evidence("continuation-approved-001");
+    let approval = approval_evidence_for_continuation(&record, "continuation-approved-001");
     let approved = record
         .approved_with_evidence(&approval, 1_000)
         .expect("approve continuation");
@@ -682,17 +843,15 @@ fn approved_continuation_rejects_missing_approval_and_changed_replay_material() 
         Err(ContinuationPersistenceError::ProductionApprovalMissing { .. })
     ));
 
-    let approval = continuation_approval_evidence("continuation-approved-002");
+    let approval = approval_evidence_for_continuation(&record, "continuation-approved-002");
     let mut approved_store = ContinuationStore::default();
     approved_store
         .persist_approved_continuation(record.clone(), &approval, 1_000)
         .expect("persist approved continuation");
+    let changed_approval =
+        approval_evidence_for_continuation(&record, "continuation-approved-002-changed");
     assert!(matches!(
-        approved_store.persist_approved_continuation(
-            record,
-            &continuation_approval_evidence("continuation-approved-002-changed"),
-            1_000,
-        ),
+        approved_store.persist_approved_continuation(record, &changed_approval, 1_000,),
         Err(ContinuationPersistenceError::DuplicateUnsafeReplay { .. })
     ));
 }
@@ -707,7 +866,7 @@ fn approved_continuation_preserves_unrelated_blockers() {
     ];
     let approved = record
         .approved_with_evidence(
-            &continuation_approval_evidence("continuation-blockers-001"),
+            &approval_evidence_for_continuation(&record, "continuation-blockers-001"),
             1_000,
         )
         .expect("approved continuation");
@@ -724,7 +883,7 @@ fn approved_continuation_preserves_unrelated_blockers() {
 #[test]
 fn continuation_rejects_raw_approved_state_with_caller_controlled_validation_refs() {
     let mut record = continuation();
-    let approval = continuation_approval_evidence("continuation-raw-approved-001");
+    let approval = approval_evidence_for_continuation(&record, "continuation-raw-approved-001");
     record
         .validation_refs
         .push(approval.evidence_ref.evidence_id.clone());

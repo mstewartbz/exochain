@@ -95,6 +95,41 @@ pub async fn persist_approved_lifecycle_action(
     persist_lifecycle_action_checked(pool, &accepted, "persist_approved_lifecycle_action").await
 }
 
+/// Accept and persist a lifecycle action inside a caller-owned transaction.
+///
+/// The caller owns isolation level, commit, and rollback. This helper still
+/// binds tenant context before touching tenant-scoped tables.
+pub async fn persist_approved_lifecycle_action_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    action: &LifecycleAction,
+    approval: &ProductionLifecycleApprovalEvidence,
+) -> Result<LifecycleApplyResult> {
+    let accepted = action.approved_with_evidence(approval)?;
+    persist_lifecycle_action_checked_in_transaction(tx, &accepted).await
+}
+
+async fn persist_lifecycle_action_checked_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    action: &LifecycleAction,
+) -> Result<LifecycleApplyResult> {
+    action.validate()?;
+    let idempotency_key = action.idempotency_key()?;
+    let action_body = serde_json::to_value(action).map_err(json)?;
+    let rollback_body = serde_json::to_value(&action.rollback_ref).map_err(json)?;
+
+    super::bind_tenant_context(tx, &action.tenant_id)
+        .await
+        .map_err(pg)?;
+    persist_lifecycle_action_in_bound_transaction(
+        tx,
+        action,
+        &idempotency_key,
+        action_body,
+        rollback_body,
+    )
+    .await
+}
+
 async fn persist_lifecycle_action_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     action: &LifecycleAction,
@@ -109,7 +144,23 @@ async fn persist_lifecycle_action_in_transaction(
     super::bind_tenant_context(tx, &action.tenant_id)
         .await
         .map_err(pg)?;
+    persist_lifecycle_action_in_bound_transaction(
+        tx,
+        action,
+        idempotency_key,
+        action_body,
+        rollback_body,
+    )
+    .await
+}
 
+async fn persist_lifecycle_action_in_bound_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    action: &LifecycleAction,
+    idempotency_key: &str,
+    action_body: JsonValue,
+    rollback_body: JsonValue,
+) -> Result<LifecycleApplyResult> {
     if let Some(row) = sqlx::query(
         "SELECT action_id, action_body FROM dagdb_lifecycle_actions \
          WHERE idempotency_key = $1 AND tenant_id = $2 AND project_id = $3 \

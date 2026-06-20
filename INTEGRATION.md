@@ -70,10 +70,13 @@ matrix with the implementation.
 
 ## DAG DB Runtime Adapter Contract (split `exo-dag-db-*` crates)
 
-**Status: PR #695 REST runtime activation evidence in progress** — this section
-is the integration contract for the split `exo-dag-db-*` graph-governed
-agent-memory crates; rollout evidence is tracked in
+**Status: PR #695 REST runtime activation evidence is PR-head scoped** — this
+section is the integration contract for the split `exo-dag-db-*`
+graph-governed agent-memory crates. Current PR-head evidence is supplied by the
+PR checks and PR body; rollout evidence is tracked in
 [`docs/dagdb/runtime-activation/rollback-canary-observability.md`](docs/dagdb/runtime-activation/rollback-canary-observability.md).
+Do not treat stale local branch heads, old check runs, or old coverage numbers as
+evidence for later unpushed fixes.
 
 ### Runtime boundary
 
@@ -108,8 +111,9 @@ from served REST paths: default route persistence calls
 `persist_default_route`, context packet build calls
 `persist_context_packet_record`, and writeback persists lifecycle plus
 continuation records. The method-boundary security-regression coverage remains
-the `gatekeeper-lifecycle-surfaces-gated` check; main integration still needs to
-record the route-level proof commands before docs mark that evidence complete.
+the `gatekeeper-lifecycle-surfaces-gated` check; route-level proof for the
+current PR head is supplied by PR checks and the source-of-truth runtime
+activation plan.
 
 ### Fail-closed guarantees
 
@@ -202,16 +206,20 @@ tenant. P1-E hardened three layers:
   canonical `dag_db-local`, so no reconciliation is outstanding there; this
   procedure is the contract for any environment that already wrote the hyphen
   form.
-- **Row-Level Security (implementation present, evidence pending).** RLS is the
+- **Row-Level Security (implementation and PR #695 evidence recorded).** RLS is the
   defense-in-depth layer for tenant isolation. The migration
   `crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`
   enables and forces RLS on the tenant-scoped DAG DB tables with a
   `dagdb_tenant_isolation` policy keyed by `current_setting('exo.tenant_id',
   true)`. Runtime code binds that tenant context inside transactions with
   `bind_tenant_context` / `begin_tenant_transaction`; namespace remains enforced
-  by the existing query predicates and DTO scope. Main integration must still
-  record the migration/test outputs before this document marks RLS evidence
-  complete.
+  by the existing query predicates and DTO scope. Runtime/RLS evidence for the
+  current PR head is supplied by PR checks and the PR body; local verification
+  commands include `RUSTFLAGS='-D warnings' cargo test -p exo-gateway dagdb --features production-db`
+  and `RUSTFLAGS='-D warnings' cargo test -p exo-dag-db-postgres --features postgres --test dagdb_tenant_rls_live_path_contract -- --nocapture`.
+  Coverage evidence remains scoped: coverage claims must cite the exact producing
+  command, package set, exclusions, numerator, and denominator, and must not be
+  described as universal production coverage.
 
 ### Provisioning
 

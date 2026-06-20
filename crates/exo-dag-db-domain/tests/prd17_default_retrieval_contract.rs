@@ -2,20 +2,24 @@
 
 use exo_dag_db_domain::{
     context_packet_persistence::{
-        ContextPacketAcceptanceEvidence, ContextPacketRequest, ContextPacketRouteBinding,
-        DefaultContextQuality, PacketFreshnessStatus, PacketPersistenceStatus,
-        PacketValidationStatus, accept_context_packet_record,
+        CONTEXT_PACKET_FINALITY_PURPOSE, ContextPacketAcceptanceEvidence, ContextPacketRequest,
+        ContextPacketRouteBinding, DefaultContextQuality, PacketFreshnessStatus,
+        PacketPersistenceStatus, PacketValidationStatus, accept_context_packet_record,
         build_context_packet_persistence_report, build_context_packet_record,
-        canonical_idempotency_key, validate_context_packet_record,
+        canonical_context_packet_approval_payload_hash, canonical_idempotency_key,
+        validate_context_packet_record,
     },
     default_route::{
-        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRetrievalFailureCode, DefaultRouteAcceptanceEvidence,
-        DefaultRouteError, DefaultRouteMemoryRef, DefaultRouteRecord, DefaultRouteSource,
-        DefaultRouteStatus, DefaultRuntimeReadinessStatus, RouteFreshnessStatus,
-        accept_default_route_record, build_default_context_packet,
-        evaluate_default_route_readiness, validate_default_route_record,
+        DEFAULT_ROUTE_FINALITY_PURPOSE, DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRetrievalFailureCode,
+        DefaultRouteAcceptanceEvidence, DefaultRouteError, DefaultRouteMemoryRef,
+        DefaultRouteRecord, DefaultRouteSource, DefaultRouteStatus, DefaultRuntimeReadinessStatus,
+        RouteFreshnessStatus, accept_default_route_record, build_default_context_packet,
+        canonical_default_route_approval_payload_hash, evaluate_default_route_readiness,
+        validate_default_route_record,
     },
 };
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 fn memory_ref(id: &str) -> DefaultRouteMemoryRef {
     DefaultRouteMemoryRef {
@@ -30,6 +34,7 @@ fn route() -> DefaultRouteRecord {
     DefaultRouteRecord {
         schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
         route_id: "route-prd17b-default".to_owned(),
+        request_id: "request-prd17b-default-route".to_owned(),
         tenant_id: "dag_db-local".to_owned(),
         project_id: "dag_db".to_owned(),
         memory_namespace: "project_memory_v3".to_owned(),
@@ -89,7 +94,150 @@ fn authority_signature() -> String {
     "0123456789abcdef".repeat(8)
 }
 
+#[derive(Serialize)]
+struct ExpectedDefaultRouteApprovalMaterial<'a> {
+    domain: &'static str,
+    schema_version: &'a str,
+    route_id: &'a str,
+    request_id: &'a str,
+    tenant_id: &'a str,
+    project_id: &'a str,
+    memory_namespace: &'a str,
+    policy_ref: &'a str,
+    freshness_ref: &'a str,
+    selected_memory_refs: &'a [DefaultRouteMemoryRef],
+    actor_id: &'a str,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct ExpectedContextPacketApprovalMaterial<'a> {
+    domain: &'static str,
+    schema_version: &'a str,
+    packet_id: &'a str,
+    route_id: &'a str,
+    query_hash: &'a str,
+    request_id: &'a str,
+    idempotency_key: &'a str,
+    tenant_id: &'a str,
+    project_id: &'a str,
+    memory_namespace: &'a str,
+    selected_memory_ids: &'a [String],
+    selected_edge_ids: &'a [String],
+    token_budget: u32,
+    token_estimate: u32,
+    source_proof_refs: &'a [String],
+    actor_id: &'a str,
+    authority_did: &'a str,
+    route_purpose: &'a str,
+    approved_at: &'a str,
+}
+
+fn sha256_hex_cbor<T: Serialize>(value: &T) -> String {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).expect("canonical CBOR approval material");
+    hex_digest(Sha256::digest(bytes))
+}
+
+fn sha256_hex_json<T: Serialize>(value: &T) -> String {
+    hex_digest(Sha256::digest(
+        serde_json::to_vec(value).expect("JSON approval material"),
+    ))
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[test]
+fn approval_payload_hashes_use_canonical_cbor_not_json_bytes() {
+    let route = route();
+    let route_approved_at = "2026-06-20T00:00:00Z";
+    let route_material = ExpectedDefaultRouteApprovalMaterial {
+        domain: "exo.dagdb.default_route.external_finality.v1",
+        schema_version: &route.schema_version,
+        route_id: &route.route_id,
+        request_id: "request-prd17b-default-route",
+        tenant_id: &route.tenant_id,
+        project_id: &route.project_id,
+        memory_namespace: &route.memory_namespace,
+        policy_ref: &route.policy_ref,
+        freshness_ref: &route.freshness_ref,
+        selected_memory_refs: &route.selected_memory_refs,
+        actor_id: "did:exo:codex-prd17b",
+        authority_did: "did:exo:production-finality-authority",
+        route_purpose: DEFAULT_ROUTE_FINALITY_PURPOSE,
+        approved_at: route_approved_at,
+    };
+    let route_hash = canonical_default_route_approval_payload_hash(
+        &route,
+        route_material.actor_id,
+        route_material.request_id,
+        route_material.authority_did,
+        route_material.route_purpose,
+        route_material.approved_at,
+    )
+    .expect("canonical route approval hash");
+    assert_eq!(route_hash, sha256_hex_cbor(&route_material));
+    assert_ne!(route_hash, sha256_hex_json(&route_material));
+
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let record = build_context_packet_record(&deferred_binding, packet_request())
+        .expect("canonical context packet approval record");
+    let packet_approved_at = "2026-06-20T00:00:01Z";
+    let packet_material = ExpectedContextPacketApprovalMaterial {
+        domain: "exo.dagdb.context_packet.external_finality.v1",
+        schema_version: &record.schema_version,
+        packet_id: &record.packet_id,
+        route_id: &record.route_id,
+        query_hash: &record.query_hash,
+        request_id: &record.idempotency_key,
+        idempotency_key: &record.idempotency_key,
+        tenant_id: &record.tenant_id,
+        project_id: &record.project_id,
+        memory_namespace: &record.memory_namespace,
+        selected_memory_ids: &record.selected_memory_ids,
+        selected_edge_ids: &record.selected_edge_ids,
+        token_budget: record.token_budget,
+        token_estimate: record.token_estimate,
+        source_proof_refs: &record.source_proof_refs,
+        actor_id: "did:exo:codex-prd17b",
+        authority_did: "did:exo:production-finality-authority",
+        route_purpose: CONTEXT_PACKET_FINALITY_PURPOSE,
+        approved_at: packet_approved_at,
+    };
+    let packet_hash = canonical_context_packet_approval_payload_hash(
+        &record,
+        packet_material.actor_id,
+        packet_material.request_id,
+        packet_material.authority_did,
+        packet_material.route_purpose,
+        packet_material.approved_at,
+    )
+    .expect("canonical context packet approval hash");
+    assert_eq!(packet_hash, sha256_hex_cbor(&packet_material));
+    assert_ne!(packet_hash, sha256_hex_json(&packet_material));
+}
+
 fn route_acceptance_evidence() -> DefaultRouteAcceptanceEvidence {
+    let approved_at = "2026-06-20T00:00:00Z".to_owned();
+    let payload_hash = canonical_default_route_approval_payload_hash(
+        &route(),
+        "did:exo:codex-prd17b",
+        "request-prd17b-default-route",
+        "did:exo:production-finality-authority",
+        DEFAULT_ROUTE_FINALITY_PURPOSE,
+        &approved_at,
+    )
+    .expect("canonical route approval payload hash");
     DefaultRouteAcceptanceEvidence {
         production_default_route_approval_ref: "external-production-approval:default-route-prd17b"
             .to_owned(),
@@ -99,16 +247,32 @@ fn route_acceptance_evidence() -> DefaultRouteAcceptanceEvidence {
         memory_namespace: "project_memory_v3".to_owned(),
         actor_id: "did:exo:codex-prd17b".to_owned(),
         route_id: "route-prd17b-default".to_owned(),
+        route_purpose: DEFAULT_ROUTE_FINALITY_PURPOSE.to_owned(),
         request_id: "request-prd17b-default-route".to_owned(),
-        payload_hash: digest("a"),
-        receipt_payload_hash: digest("a"),
+        payload_hash: payload_hash.clone(),
+        receipt_payload_hash: payload_hash,
         authority_did: "did:exo:production-finality-authority".to_owned(),
         authority_signature: authority_signature(),
-        approved_at: "2026-06-20T00:00:00Z".to_owned(),
+        approved_at,
     }
 }
 
 fn packet_acceptance_evidence() -> ContextPacketAcceptanceEvidence {
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let record = build_context_packet_record(&deferred_binding, packet_request())
+        .expect("canonical context packet approval record");
+    let approved_at = "2026-06-20T00:00:01Z".to_owned();
+    let payload_hash = canonical_context_packet_approval_payload_hash(
+        &record,
+        "did:exo:codex-prd17b",
+        &record.idempotency_key,
+        "did:exo:production-finality-authority",
+        CONTEXT_PACKET_FINALITY_PURPOSE,
+        &approved_at,
+    )
+    .expect("canonical context packet approval payload hash");
     ContextPacketAcceptanceEvidence {
         production_default_route_approval_ref: "external-production-approval:context-packet-prd17b"
             .to_owned(),
@@ -119,12 +283,13 @@ fn packet_acceptance_evidence() -> ContextPacketAcceptanceEvidence {
         actor_id: "did:exo:codex-prd17b".to_owned(),
         route_id: "route-prd17b-default".to_owned(),
         packet_id: "packet-prd17b-default".to_owned(),
-        request_id: "request-prd17b-context-packet".to_owned(),
-        payload_hash: digest("b"),
-        receipt_payload_hash: digest("b"),
+        route_purpose: CONTEXT_PACKET_FINALITY_PURPOSE.to_owned(),
+        request_id: record.idempotency_key,
+        payload_hash: payload_hash.clone(),
+        receipt_payload_hash: payload_hash,
         authority_did: "did:exo:production-finality-authority".to_owned(),
         authority_signature: authority_signature(),
-        approved_at: "2026-06-20T00:00:01Z".to_owned(),
+        approved_at,
     }
 }
 
@@ -376,6 +541,49 @@ fn acceptance_evidence_rejects_scope_hash_actor_and_route_mismatches() {
             evidence.packet_id = "packet-other".to_owned();
         },
         |evidence: &mut ContextPacketAcceptanceEvidence| evidence.request_id.clear(),
+    ];
+    for mutate in packet_mutations {
+        let mut evidence = packet_acceptance_evidence();
+        mutate(&mut evidence);
+        assert!(accept_context_packet_record(&record, &evidence).is_err());
+    }
+}
+
+#[test]
+fn acceptance_evidence_rejects_unbound_request_payload_hash_and_timestamp() {
+    let mut deferred = route();
+    deferred.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred.packet_quality_review_status = "operator_deferred".to_owned();
+
+    let route_mutations: [fn(&mut DefaultRouteAcceptanceEvidence); 4] = [
+        |evidence| evidence.request_id = "unbound-idempotency-key".to_owned(),
+        |evidence| {
+            evidence.payload_hash = digest("d");
+            evidence.receipt_payload_hash = digest("d");
+        },
+        |evidence| evidence.approved_at = "not-a-timestamp".to_owned(),
+        |evidence| evidence.approved_at = "2020-01-01T00:00:00Z".to_owned(),
+    ];
+    for mutate in route_mutations {
+        let mut evidence = route_acceptance_evidence();
+        mutate(&mut evidence);
+        assert!(
+            accept_default_route_record(&deferred, &evidence, "hlc:binding".to_owned()).is_err()
+        );
+    }
+
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let record = build_context_packet_record(&deferred_binding, packet_request()).expect("record");
+    let packet_mutations: [fn(&mut ContextPacketAcceptanceEvidence); 4] = [
+        |evidence| evidence.request_id = "unbound-context-request".to_owned(),
+        |evidence| {
+            evidence.payload_hash = digest("e");
+            evidence.receipt_payload_hash = digest("e");
+        },
+        |evidence| evidence.approved_at = "not-a-timestamp".to_owned(),
+        |evidence| evidence.approved_at = "2020-01-01T00:00:00Z".to_owned(),
     ];
     for mutate in packet_mutations {
         let mut evidence = packet_acceptance_evidence();

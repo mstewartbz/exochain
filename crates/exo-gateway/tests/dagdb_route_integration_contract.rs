@@ -18,14 +18,17 @@ use exo_core::{Hash256, crypto::KeyPair};
 use exo_dag_db_core::hash::RequestHashMaterial;
 use exo_dag_db_domain::{
     context_packet_persistence::{
-        ContextPacketAcceptanceEvidence, ContextPacketRequest, ContextPacketRouteBinding,
-        DefaultContextQuality, PacketFreshnessStatus, PacketPersistenceStatus,
-        PacketValidationStatus, accept_context_packet_record, build_context_packet_record,
+        CONTEXT_PACKET_FINALITY_PURPOSE, ContextPacketAcceptanceEvidence, ContextPacketRequest,
+        ContextPacketRouteBinding, DefaultContextQuality, PacketFreshnessStatus,
+        PacketPersistenceStatus, PacketValidationStatus, accept_context_packet_record,
+        build_context_packet_record, canonical_context_packet_approval_payload_hash,
+        canonical_idempotency_key,
     },
     default_route::{
-        DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRouteAcceptanceEvidence, DefaultRouteMemoryRef,
-        DefaultRouteRecord, DefaultRouteSource, DefaultRouteStatus, RouteFreshnessStatus,
-        accept_default_route_record,
+        DEFAULT_ROUTE_FINALITY_PURPOSE, DEFAULT_ROUTE_SCHEMA_VERSION,
+        DefaultRouteAcceptanceEvidence, DefaultRouteMemoryRef, DefaultRouteRecord,
+        DefaultRouteSource, DefaultRouteStatus, RouteFreshnessStatus, accept_default_route_record,
+        canonical_default_route_approval_payload_hash,
     },
 };
 use exo_dag_db_exchange::kg_import::{
@@ -47,19 +50,20 @@ use exo_gatekeeper::{
     dagdb_gate::{context_packet_record_payload_hash, default_route_payload_hash},
     sign_write_payload,
     types::{BailmentState, GovernedRoleName},
-    usage_event_payload_hash,
+    usage_event_payload_hash, verify_write_signature,
 };
 use exo_gateway::{
     dagdb::{
         DagDbRouteContext, dagdb_router, selection_request_from_writeback,
-        set_route_context_for_integration_tests, writeback_continuation_payload_hash,
-        writeback_lifecycle_payload_hash,
+        set_route_context_for_integration_tests, writeback_continuation_approval_payload_hash,
+        writeback_lifecycle_approval_payload_hash,
     },
     server::{AppState, build_router},
 };
 use exo_identity::registry::LocalDidRegistry;
 use serde::de::DeserializeOwned;
 use serde_json::{Value as JsonValue, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tower::ServiceExt;
 
@@ -189,6 +193,8 @@ impl TestDb {
 
 #[tokio::test]
 async fn dagdb_routes_integration_contract() {
+    default_route_approval_signature_binds_request_and_purpose();
+
     let Some(database_url) = configured_database_url("dagdb_routes_integration_contract") else {
         return;
     };
@@ -2523,6 +2529,199 @@ async fn dagdb_routes_integration_contract() {
     db.cleanup().await;
 }
 
+#[tokio::test]
+async fn writeback_rolls_back_usage_event_when_d5_continuation_persistence_fails() {
+    let Some(database_url) = configured_database_url(
+        "writeback_rolls_back_usage_event_when_d5_continuation_persistence_fails",
+    ) else {
+        return;
+    };
+    let db = TestDb::new("writeback_atomicity", &database_url).await;
+
+    let keypair = KeyPair::generate();
+    let ctx = Arc::new(DagDbRouteContext::from_pool(Some(db.pool.clone())));
+    set_route_context_for_integration_tests(ctx.clone());
+    ctx.install_gatekeeper_profile(
+        active_import_export_consent_engine(),
+        identity_registry_with_finality_authority(&keypair),
+    );
+    insert_session_user(&db.pool, BEARER, AGENT_DID, TENANT_ID).await;
+
+    let app = build_router(AppState::new(
+        Some(db.pool.clone()),
+        Arc::new(RwLock::new(LocalDidRegistry::new())),
+    ));
+
+    let import_request = DagDbImportRequest {
+        tenant_id: TENANT_ID.to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        idempotency_key: "idem-import-writeback-atomicity".to_owned(),
+        db_set_version: "dag_db-project_memory_v3".to_owned(),
+        source_hash: h(0x01),
+        requester_did: AGENT_DID.to_owned(),
+        import_report: base_report(),
+    };
+    let import_signature = import_signature(&db.pool, &keypair, &import_request).await;
+    let import_success = app
+        .clone()
+        .oneshot(scoped_post(
+            "/api/v1/dag-db/import",
+            "dagdb:import",
+            &import_request,
+            Some(import_signature),
+        ))
+        .await
+        .expect("seed import response");
+    assert_eq!(import_success.status(), StatusCode::OK);
+
+    let writeback_request = DagDbWritebackRequest {
+        tenant_id: TENANT_ID.to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        idempotency_key: "idem-writeback-d5-continuation-conflict".to_owned(),
+        requesting_agent_did: AGENT_DID.to_owned(),
+        parent_memory_ids: vec![h(0x10)],
+        answer_hash: h(0x88),
+        route_id: h(0x98),
+        context_packet_id: h(0xa8),
+        validation_report_id: h(0xb8),
+        summary_text: Some("Atomic writeback regression summary".to_owned()),
+        citation_hashes: Some(vec![h(0xc8)]),
+        safety_score_id: None,
+        keyword_texts: Some(vec!["atomicity".to_owned()]),
+        knowledge_class: None,
+        layered_mode: None,
+        target_layer_path: None,
+        target_layer_depth: None,
+        target_layer_reason: None,
+    };
+    let selection = build_persistent_graph_context_selection(
+        &db.pool,
+        &selection_request_from_writeback(&writeback_request)
+            .expect("selection request for atomic writeback"),
+    )
+    .await
+    .expect("selection for atomic writeback signature");
+    let signature = sign_write_payload(
+        &keypair,
+        &usage_event_payload_hash(&selection.selection).expect("atomic writeback payload hash"),
+    )
+    .expect("atomic writeback signature");
+    let (lifecycle_signature, continuation_signature) =
+        writeback_d5_signatures(&keypair, &writeback_request);
+
+    insert_conflicting_continuation_record(&db.pool, &writeback_request).await;
+    let memory_objects_before = memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
+
+    let response = app
+        .clone()
+        .oneshot(scoped_post_with_d5_signatures(
+            "/api/v1/dag-db/writeback",
+            "dagdb:writeback",
+            &writeback_request,
+            Some(signature),
+            Some(lifecycle_signature),
+            Some(continuation_signature),
+        ))
+        .await
+        .expect("atomic writeback failure response");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "conflicting D5 continuation row must fail writeback persistence"
+    );
+    let body: DagDbErrorEnvelope = response_json(response).await;
+    assert_eq!(body.error_code, "metadata_rejected");
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before,
+        "D5 continuation failure must roll back the main writeback usage-event memory"
+    );
+
+    db.cleanup().await;
+}
+
+fn default_route_approval_signature_binds_request_and_purpose() {
+    let keypair = KeyPair::generate();
+    let request = DagDbRouteRequest {
+        tenant_id: TENANT_ID.to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        idempotency_key: "idem-route-binding-smoke".to_owned(),
+        requesting_agent_did: AGENT_DID.to_owned(),
+        task_signature_hash: h(0x41),
+        approved_scope_hash: h(0x42),
+        token_budget: 2_048,
+        start_catalog_id: None,
+        requested_memory_ids: Some(vec!["memory-binding-smoke".to_owned()]),
+        credential_id: None,
+    };
+    let route_id = default_route_id(&request);
+    let proposed = default_route_record(&request, &route_id, "operator_deferred");
+    let approval_hash_hex = canonical_default_route_approval_payload_hash(
+        &proposed,
+        &request.requesting_agent_did,
+        &request.idempotency_key,
+        FINALITY_AUTHORITY_DID,
+        DEFAULT_ROUTE_FINALITY_PURPOSE,
+        fixed_approval_timestamp(),
+    )
+    .expect("canonical route approval hash");
+    let approval_hash = decode_hex_hash(&approval_hash_hex);
+    let signature = sign_write_payload(&keypair, &approval_hash).expect("route approval signature");
+    let registry = IdentityRegistry::default()
+        .with_public_key(FINALITY_AUTHORITY_DID, *keypair.public_key().as_bytes());
+    assert!(
+        verify_write_signature(
+            &registry,
+            &approval_hash,
+            &signature,
+            FINALITY_AUTHORITY_DID
+        )
+        .expect("signature verifies")
+    );
+
+    let wrong_request_hash = decode_hex_hash(
+        &canonical_default_route_approval_payload_hash(
+            &proposed,
+            &request.requesting_agent_did,
+            "other-idempotency-key",
+            FINALITY_AUTHORITY_DID,
+            DEFAULT_ROUTE_FINALITY_PURPOSE,
+            fixed_approval_timestamp(),
+        )
+        .expect("wrong request hash"),
+    );
+    assert!(
+        !verify_write_signature(
+            &registry,
+            &wrong_request_hash,
+            &signature,
+            FINALITY_AUTHORITY_DID
+        )
+        .expect("wrong request signature check")
+    );
+
+    let wrong_purpose_hash = decode_hex_hash(
+        &canonical_default_route_approval_payload_hash(
+            &proposed,
+            &request.requesting_agent_did,
+            &request.idempotency_key,
+            FINALITY_AUTHORITY_DID,
+            CONTEXT_PACKET_FINALITY_PURPOSE,
+            fixed_approval_timestamp(),
+        )
+        .expect("wrong purpose hash"),
+    );
+    assert!(
+        !verify_write_signature(
+            &registry,
+            &wrong_purpose_hash,
+            &signature,
+            FINALITY_AUTHORITY_DID
+        )
+        .expect("wrong purpose signature check")
+    );
+}
+
 fn trust_check_request() -> DagDbTrustCheckRequest {
     DagDbTrustCheckRequest {
         tenant_id: TENANT_ID.to_owned(),
@@ -2686,8 +2885,16 @@ fn default_route_signatures(
 ) -> DefaultRouteSignatures {
     let route_id = default_route_id(request);
     let proposed = default_route_record(request, &route_id, "operator_deferred");
-    let approval_payload_hash =
-        default_route_payload_hash(&proposed).expect("default route approval payload hash");
+    let approval_payload_hash_hex = canonical_default_route_approval_payload_hash(
+        &proposed,
+        &request.requesting_agent_did,
+        &request.idempotency_key,
+        FINALITY_AUTHORITY_DID,
+        DEFAULT_ROUTE_FINALITY_PURPOSE,
+        fixed_approval_timestamp(),
+    )
+    .expect("default route approval payload hash");
+    let approval_payload_hash = decode_hex_hash(&approval_payload_hash_hex);
     let approval_signature = sign_write_payload(keypair, &approval_payload_hash)
         .expect("default route approval signature");
     let updated_at = proposed.updated_at.clone();
@@ -2697,7 +2904,7 @@ fn default_route_signatures(
             request,
             &route_id,
             &approval_signature,
-            &approval_payload_hash,
+            &approval_payload_hash_hex,
         ),
         updated_at,
     )
@@ -2747,6 +2954,7 @@ fn default_route_record(
     DefaultRouteRecord {
         schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
         route_id: route_id.to_owned(),
+        request_id: request.idempotency_key.clone(),
         tenant_id: request.tenant_id.clone(),
         project_id: request.namespace.clone(),
         memory_namespace: request.namespace.clone(),
@@ -2769,10 +2977,9 @@ fn default_route_acceptance_evidence(
     request: &DagDbRouteRequest,
     route_id: &str,
     approval_signature: &str,
-    approval_payload_hash: &[u8; 32],
+    approval_payload_hash_hex: &str,
 ) -> DefaultRouteAcceptanceEvidence {
-    let approval_payload_hash_hex = hex::encode(approval_payload_hash);
-    let approved_at = gateway_hash_hex("dagdb.route.approved_at", &request.idempotency_key);
+    let approved_at = fixed_approval_timestamp().to_owned();
     DefaultRouteAcceptanceEvidence {
         production_default_route_approval_ref: format!(
             "external-production-approval:{}",
@@ -2785,7 +2992,7 @@ fn default_route_acceptance_evidence(
                     route_id,
                     &request.idempotency_key,
                     FINALITY_AUTHORITY_DID,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     approval_signature,
                     &approved_at,
                 ),
@@ -2801,7 +3008,7 @@ fn default_route_acceptance_evidence(
                     route_id,
                     &request.task_signature_hash,
                     FINALITY_AUTHORITY_DID,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                 ),
             )
         ),
@@ -2817,7 +3024,7 @@ fn default_route_acceptance_evidence(
                     &request.idempotency_key,
                     FINALITY_AUTHORITY_DID,
                     approval_signature,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     &approved_at,
                 ),
             )
@@ -2826,9 +3033,10 @@ fn default_route_acceptance_evidence(
         memory_namespace: request.namespace.clone(),
         actor_id: request.requesting_agent_did.clone(),
         route_id: route_id.to_owned(),
+        route_purpose: DEFAULT_ROUTE_FINALITY_PURPOSE.to_owned(),
         request_id: request.idempotency_key.clone(),
-        payload_hash: approval_payload_hash_hex.clone(),
-        receipt_payload_hash: approval_payload_hash_hex,
+        payload_hash: approval_payload_hash_hex.to_owned(),
+        receipt_payload_hash: approval_payload_hash_hex.to_owned(),
         authority_did: FINALITY_AUTHORITY_DID.to_owned(),
         authority_signature: approval_signature.to_owned(),
         approved_at,
@@ -2846,8 +3054,16 @@ async fn context_packet_signatures(
     request: &DagDbContextPacketRequest,
 ) -> ContextPacketSignatures {
     let material = context_packet_record_material(pool, request, "operator_deferred").await;
-    let approval_payload_hash = context_packet_record_payload_hash(&material.record)
-        .expect("context packet approval payload hash");
+    let approval_payload_hash_hex = canonical_context_packet_approval_payload_hash(
+        &material.record,
+        &request.requesting_agent_did,
+        &material.record.idempotency_key,
+        FINALITY_AUTHORITY_DID,
+        CONTEXT_PACKET_FINALITY_PURPOSE,
+        fixed_approval_timestamp(),
+    )
+    .expect("context packet approval payload hash");
+    let approval_payload_hash = decode_hex_hash(&approval_payload_hash_hex);
     let approval_signature = sign_write_payload(keypair, &approval_payload_hash)
         .expect("context packet approval signature");
     let accepted = accept_context_packet_record(
@@ -2857,7 +3073,7 @@ async fn context_packet_signatures(
             &material.packet_hash,
             &material.receipt_hash,
             &approval_signature,
-            &approval_payload_hash,
+            &approval_payload_hash_hex,
         ),
     )
     .expect("accepted context packet record");
@@ -2980,11 +3196,9 @@ fn context_packet_acceptance_evidence(
     packet_hash: &str,
     receipt_hash: &str,
     approval_signature: &str,
-    approval_payload_hash: &[u8; 32],
+    approval_payload_hash_hex: &str,
 ) -> ContextPacketAcceptanceEvidence {
-    let approval_payload_hash_hex = hex::encode(approval_payload_hash);
-    let approved_at =
-        gateway_hash_hex("dagdb.context_packet.approved_at", &request.idempotency_key);
+    let approved_at = fixed_approval_timestamp().to_owned();
     ContextPacketAcceptanceEvidence {
         production_default_route_approval_ref: format!(
             "external-production-approval:{}",
@@ -2998,7 +3212,7 @@ fn context_packet_acceptance_evidence(
                     packet_hash,
                     &request.request_id,
                     FINALITY_AUTHORITY_DID,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     approval_signature,
                     &approved_at,
                 ),
@@ -3014,7 +3228,7 @@ fn context_packet_acceptance_evidence(
                     packet_hash,
                     packet_hash,
                     FINALITY_AUTHORITY_DID,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                 ),
             )
         ),
@@ -3027,7 +3241,7 @@ fn context_packet_acceptance_evidence(
                     &request.idempotency_key,
                     FINALITY_AUTHORITY_DID,
                     approval_signature,
-                    &approval_payload_hash_hex,
+                    approval_payload_hash_hex,
                     &approved_at,
                 ),
             )
@@ -3037,9 +3251,14 @@ fn context_packet_acceptance_evidence(
         actor_id: request.requesting_agent_did.clone(),
         route_id: request.route_id.clone(),
         packet_id: packet_hash.to_owned(),
-        request_id: request.request_id.clone(),
-        payload_hash: approval_payload_hash_hex.clone(),
-        receipt_payload_hash: approval_payload_hash_hex,
+        route_purpose: CONTEXT_PACKET_FINALITY_PURPOSE.to_owned(),
+        request_id: canonical_idempotency_key(
+            &request.route_id,
+            &request.task_hash,
+            request.token_budget,
+        ),
+        payload_hash: approval_payload_hash_hex.to_owned(),
+        receipt_payload_hash: approval_payload_hash_hex.to_owned(),
         authority_did: FINALITY_AUTHORITY_DID.to_owned(),
         authority_signature: approval_signature.to_owned(),
         approved_at,
@@ -3049,12 +3268,22 @@ fn context_packet_acceptance_evidence(
 fn writeback_d5_signatures(keypair: &KeyPair, request: &DagDbWritebackRequest) -> (String, String) {
     let lifecycle_signature = sign_write_payload(
         keypair,
-        &writeback_lifecycle_payload_hash(request).expect("writeback lifecycle payload hash"),
+        &writeback_lifecycle_approval_payload_hash(
+            request,
+            FINALITY_AUTHORITY_DID,
+            fixed_lifecycle_approval_timestamp(),
+        )
+        .expect("writeback lifecycle approval payload hash"),
     )
     .expect("writeback lifecycle signature");
     let continuation_signature = sign_write_payload(
         keypair,
-        &writeback_continuation_payload_hash(request).expect("writeback continuation payload hash"),
+        &writeback_continuation_approval_payload_hash(
+            request,
+            FINALITY_AUTHORITY_DID,
+            fixed_continuation_approval_timestamp(),
+        )
+        .expect("writeback continuation approval payload hash"),
     )
     .expect("writeback continuation signature");
     (lifecycle_signature, continuation_signature)
@@ -3192,6 +3421,102 @@ fn gateway_hash_hex<T: serde::Serialize>(domain: &str, value: &T) -> String {
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&(domain, value), &mut bytes).expect("gateway hash material");
     Hash256::digest(&bytes).to_string()
+}
+
+fn fixed_approval_timestamp() -> &'static str {
+    "2026-06-20T00:00:00Z"
+}
+
+fn fixed_lifecycle_approval_timestamp() -> &'static str {
+    fixed_approval_timestamp()
+}
+
+fn fixed_continuation_approval_timestamp() -> &'static str {
+    "2026-06-20T00:00:01Z"
+}
+
+fn decode_hex_hash(value: &str) -> [u8; 32] {
+    hex::decode(value)
+        .expect("hex hash")
+        .try_into()
+        .expect("32-byte hash")
+}
+
+async fn insert_conflicting_continuation_record(pool: &PgPool, request: &DagDbWritebackRequest) {
+    let target_memory_id = writeback_target_memory_id_for_test(request);
+    let idempotency_key = writeback_continuation_idempotency_key(request);
+    let mut memory_ids = request.parent_memory_ids.clone();
+    memory_ids.push(target_memory_id.clone());
+    let memory_refs: Vec<JsonValue> = sorted_strings(memory_ids)
+        .into_iter()
+        .map(|memory_id| {
+            json!({
+                "tenant_id": request.tenant_id,
+                "project_id": request.namespace,
+                "memory_namespace": request.namespace,
+                "memory_id": memory_id
+            })
+        })
+        .collect();
+    sqlx::query(
+        "INSERT INTO dagdb_continuation_records \
+         (continuation_id, task_id, tenant_id, project_id, memory_namespace, summary_ref, \
+          memory_refs, blocker_refs, validation_refs, expiry_epoch_seconds, later_retrieval_status, \
+          production_lifecycle_approval, idempotency_key, record_body, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', 'approved', $11, $12, $13)",
+    )
+    .bind(gateway_hash_hex(
+        "dagdb.test.conflicting_continuation",
+        &request.idempotency_key,
+    ))
+    .bind(&request.idempotency_key)
+    .bind(&request.tenant_id)
+    .bind(&request.namespace)
+    .bind(&request.namespace)
+    .bind(&target_memory_id)
+    .bind(json!(memory_refs))
+    .bind(json!(["production_lifecycle_approval_approved"]))
+    .bind(json!([request.validation_report_id]))
+    .bind(4_102_444_800_i64)
+    .bind(&idempotency_key)
+    .bind(json!({
+        "test_conflict": "different continuation body",
+        "idempotency_key": idempotency_key
+    }))
+    .bind("test-conflicting-continuation")
+    .execute(pool)
+    .await
+    .expect("insert conflicting continuation row");
+}
+
+fn writeback_continuation_idempotency_key(request: &DagDbWritebackRequest) -> String {
+    let target_memory_id = writeback_target_memory_id_for_test(request);
+    let mut memory_ids = request.parent_memory_ids.clone();
+    memory_ids.push(target_memory_id.clone());
+    let memory_hash = sha256_hex(sorted_strings(memory_ids).join(",").as_bytes());
+    format!(
+        "{}:{}:{}:{}:{}:{}",
+        request.tenant_id,
+        request.namespace,
+        request.namespace,
+        request.idempotency_key,
+        target_memory_id,
+        memory_hash
+    )
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn writeback_target_memory_id_for_test(request: &DagDbWritebackRequest) -> String {
+    gateway_hash_hex(
+        "dagdb.gateway.writeback.target_memory",
+        &(&request.idempotency_key, &request.answer_hash),
+    )
 }
 
 fn sorted_strings(mut values: Vec<String>) -> Vec<String> {
@@ -3566,6 +3891,12 @@ where
             .parse()
             .expect("default route approval DID header"),
     );
+    headers.insert(
+        "x-exo-default-route-approval-timestamp",
+        fixed_approval_timestamp()
+            .parse()
+            .expect("default route approval timestamp header"),
+    );
     request
 }
 
@@ -3594,6 +3925,12 @@ where
         FINALITY_AUTHORITY_DID
             .parse()
             .expect("context packet approval DID header"),
+    );
+    headers.insert(
+        "x-exo-context-packet-approval-timestamp",
+        fixed_approval_timestamp()
+            .parse()
+            .expect("context packet approval timestamp header"),
     );
     request
 }
@@ -3634,6 +3971,18 @@ where
         FINALITY_AUTHORITY_DID
             .parse()
             .expect("continuation approval DID header"),
+    );
+    headers.insert(
+        "x-exo-lifecycle-approval-timestamp",
+        fixed_lifecycle_approval_timestamp()
+            .parse()
+            .expect("lifecycle approval timestamp header"),
+    );
+    headers.insert(
+        "x-exo-continuation-approval-timestamp",
+        fixed_continuation_approval_timestamp()
+            .parse()
+            .expect("continuation approval timestamp header"),
     );
     request
 }

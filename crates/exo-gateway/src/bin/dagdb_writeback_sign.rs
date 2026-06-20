@@ -1,8 +1,8 @@
 //! Sign a DAG DB writeback request for local gateway submission.
 //!
 //! Reads a `DagDbWritebackRequest` JSON file path, builds the persistent graph
-//! selection payload hash plus the derived D5 lifecycle/continuation payload
-//! hashes, and prints every required gateway signature header to stdout.
+//! selection payload hash plus the derived lifecycle/continuation finality
+//! approval hashes, and prints every required gateway signature header to stdout.
 
 use std::{env, fs, process};
 
@@ -11,13 +11,17 @@ use exo_core::crypto::KeyPair;
 use exo_dag_db_postgres::persistent_context::build_persistent_graph_context_selection;
 use exo_gatekeeper::{sign_write_payload, usage_event_payload_hash};
 use exo_gateway::dagdb::{
-    selection_request_from_writeback, writeback_continuation_payload_hash,
-    writeback_lifecycle_payload_hash,
+    selection_request_from_writeback, writeback_continuation_approval_payload_hash,
+    writeback_lifecycle_approval_payload_hash,
 };
 use serde_json::{Value, json};
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 
 const LOCAL_DEV_AGENT_DID: &str = "did:exo:cursor-mcp-agent";
+const LIFECYCLE_APPROVAL_DID: &str = "did:exo:finality-authority";
+const CONTINUATION_APPROVAL_DID: &str = "did:exo:finality-authority";
+const LIFECYCLE_APPROVAL_TIMESTAMP: &str = "2026-06-20T00:00:00Z";
+const CONTINUATION_APPROVAL_TIMESTAMP: &str = "2026-06-20T00:00:01Z";
 const DEV_KEY_SEED_REL: &str = "crates/exo-gatekeeper/tests/fixtures/dev_private_key.seed";
 const LOCAL_DEV_GATEKEEPER_ENV: &str = "DAGDB_LOCAL_DEV_GATEKEEPER";
 const KEY_SOURCE_ENV_SEED: &str = "env_seed_file";
@@ -86,7 +90,7 @@ async fn run_writeback_sign(request_path: &str) -> Result<Value, String> {
         Err(error) => return Err(format!("writeback_payload_hash_failed: {error}")),
     };
     let (lifecycle_payload_hash, continuation_payload_hash) =
-        match writeback_d5_payload_hashes(&request) {
+        match writeback_finality_approval_payload_hashes(&request) {
             Ok(payload_hashes) => payload_hashes,
             Err(error) => return Err(error),
         };
@@ -143,13 +147,21 @@ async fn connect_database_pool(database_url: &str) -> Result<Pool<Postgres>, Str
         .map_err(|error| format!("writeback_sign_connect_failed: {error}"))
 }
 
-fn writeback_d5_payload_hashes(
+fn writeback_finality_approval_payload_hashes(
     request: &DagDbWritebackRequest,
 ) -> Result<([u8; 32], [u8; 32]), String> {
-    let lifecycle_payload_hash = writeback_lifecycle_payload_hash(request)
-        .map_err(|error| format!("writeback_lifecycle_payload_hash_failed: {error}"))?;
-    let continuation_payload_hash = writeback_continuation_payload_hash(request)
-        .map_err(|error| format!("writeback_continuation_payload_hash_failed: {error}"))?;
+    let lifecycle_payload_hash = writeback_lifecycle_approval_payload_hash(
+        request,
+        LIFECYCLE_APPROVAL_DID,
+        LIFECYCLE_APPROVAL_TIMESTAMP,
+    )
+    .map_err(|error| format!("writeback_lifecycle_approval_payload_hash_failed: {error}"))?;
+    let continuation_payload_hash = writeback_continuation_approval_payload_hash(
+        request,
+        CONTINUATION_APPROVAL_DID,
+        CONTINUATION_APPROVAL_TIMESTAMP,
+    )
+    .map_err(|error| format!("writeback_continuation_approval_payload_hash_failed: {error}"))?;
     Ok((lifecycle_payload_hash, continuation_payload_hash))
 }
 
@@ -182,7 +194,11 @@ fn signature_output_json(
         "headers": {
             "x-exo-write-signature": signatures.writeback_signature.clone(),
             "x-exo-lifecycle-signature": signatures.lifecycle_signature.clone(),
-            "x-exo-continuation-signature": signatures.continuation_signature.clone()
+            "x-exo-continuation-signature": signatures.continuation_signature.clone(),
+            "x-exo-lifecycle-approval-did": LIFECYCLE_APPROVAL_DID,
+            "x-exo-continuation-approval-did": CONTINUATION_APPROVAL_DID,
+            "x-exo-lifecycle-approval-timestamp": LIFECYCLE_APPROVAL_TIMESTAMP,
+            "x-exo-continuation-approval-timestamp": CONTINUATION_APPROVAL_TIMESTAMP
         },
         "agent_did": agent_did,
         "key_source": key_source
@@ -255,14 +271,21 @@ mod tests {
 
     use exo_api::dagdb::DagDbWritebackRequest;
     use exo_core::crypto::KeyPair;
+    use exo_gatekeeper::sign_write_payload;
+    use exo_gateway::dagdb::{
+        writeback_continuation_approval_payload_hash, writeback_continuation_payload_hash,
+        writeback_lifecycle_approval_payload_hash, writeback_lifecycle_payload_hash,
+    };
 
     use super::{
-        DEV_KEY_SEED_REL, KEY_SOURCE_DEFAULT_SEED, KEY_SOURCE_ENV_SEED, LOCAL_DEV_AGENT_DID,
-        LOCAL_DEV_GATEKEEPER_ENV, connect_database_pool, database_url_from_env,
-        database_url_from_env_result, fallback_enabled, fallback_enabled_from_env,
-        keypair_seed_path_from_env, load_local_dev_keypair, load_local_dev_keypair_from_seed_path,
-        read_writeback_request, request_path_from_args, run_writeback_sign,
-        sign_writeback_payloads, signature_output_json, writeback_d5_payload_hashes,
+        CONTINUATION_APPROVAL_DID, CONTINUATION_APPROVAL_TIMESTAMP, DEV_KEY_SEED_REL,
+        KEY_SOURCE_DEFAULT_SEED, KEY_SOURCE_ENV_SEED, LIFECYCLE_APPROVAL_DID,
+        LIFECYCLE_APPROVAL_TIMESTAMP, LOCAL_DEV_AGENT_DID, LOCAL_DEV_GATEKEEPER_ENV,
+        connect_database_pool, database_url_from_env, database_url_from_env_result,
+        fallback_enabled, fallback_enabled_from_env, keypair_seed_path_from_env,
+        load_local_dev_keypair, load_local_dev_keypair_from_seed_path, read_writeback_request,
+        request_path_from_args, run_writeback_sign, sign_writeback_payloads, signature_output_json,
+        writeback_finality_approval_payload_hashes,
     };
 
     fn temp_seed_path(test_name: &str) -> PathBuf {
@@ -506,8 +529,8 @@ mod tests {
             "writeback_selection_request_failed: ",
             "writeback_selection_failed: ",
             "writeback_payload_hash_failed: ",
-            "writeback_lifecycle_payload_hash_failed: ",
-            "writeback_continuation_payload_hash_failed: ",
+            "writeback_lifecycle_approval_payload_hash_failed: ",
+            "writeback_continuation_approval_payload_hash_failed: ",
             "writeback_sign_key_failed: ",
             "writeback_sign_failed: ",
         ];
@@ -542,16 +565,16 @@ mod tests {
     }
 
     #[test]
-    fn dagdb_writeback_sign_derives_d5_payload_hashes_from_fixture_request() {
+    fn dagdb_writeback_sign_derives_finality_approval_hashes_from_fixture_request() {
         let request = fixture_writeback_request();
         let payload_hashes =
-            writeback_d5_payload_hashes(&request).expect("derive d5 payload hashes");
-        let repeated_hashes =
-            writeback_d5_payload_hashes(&request).expect("derive repeated d5 payload hashes");
+            writeback_finality_approval_payload_hashes(&request).expect("derive finality hashes");
+        let repeated_hashes = writeback_finality_approval_payload_hashes(&request)
+            .expect("derive repeated finality hashes");
 
         assert_eq!(
             payload_hashes, repeated_hashes,
-            "D5 payload hash derivation must be deterministic"
+            "finality approval payload hash derivation must be deterministic"
         );
         assert_ne!(payload_hashes.0, [0_u8; 32]);
         assert_ne!(payload_hashes.1, [0_u8; 32]);
@@ -562,19 +585,19 @@ mod tests {
     }
 
     #[test]
-    fn dagdb_writeback_sign_rejects_d5_hashes_without_parent_memory() {
+    fn dagdb_writeback_sign_rejects_finality_approval_hashes_without_parent_memory() {
         let request = DagDbWritebackRequest {
             parent_memory_ids: Vec::new(),
             ..fixture_writeback_request()
         };
 
-        let error = match writeback_d5_payload_hashes(&request) {
+        let error = match writeback_finality_approval_payload_hashes(&request) {
             Ok(_) => panic!("writeback with no parent memory must fail"),
             Err(error) => error,
         };
 
         assert!(
-            error.contains("writeback_lifecycle_payload_hash_failed"),
+            error.contains("writeback_lifecycle_approval_payload_hash_failed"),
             "expected lifecycle hash prefix, got {error}"
         );
         assert!(
@@ -585,10 +608,28 @@ mod tests {
 
     #[test]
     fn dagdb_writeback_sign_outputs_all_required_gateway_headers() {
-        let keypair = KeyPair::generate();
+        let keypair = KeyPair::from_secret_bytes([17_u8; 32]).expect("keypair from seed");
+        let request = fixture_writeback_request();
         let writeback_payload_hash = [1_u8; 32];
-        let lifecycle_payload_hash = [2_u8; 32];
-        let continuation_payload_hash = [3_u8; 32];
+        let (lifecycle_payload_hash, continuation_payload_hash) =
+            writeback_finality_approval_payload_hashes(&request)
+                .expect("derive signer payload hashes");
+        let expected_lifecycle_payload_hash = writeback_lifecycle_approval_payload_hash(
+            &request,
+            LIFECYCLE_APPROVAL_DID,
+            LIFECYCLE_APPROVAL_TIMESTAMP,
+        )
+        .expect("canonical lifecycle approval hash");
+        let expected_continuation_payload_hash = writeback_continuation_approval_payload_hash(
+            &request,
+            CONTINUATION_APPROVAL_DID,
+            CONTINUATION_APPROVAL_TIMESTAMP,
+        )
+        .expect("canonical continuation approval hash");
+        let old_lifecycle_payload_hash =
+            writeback_lifecycle_payload_hash(&request).expect("old lifecycle D5 hash");
+        let old_continuation_payload_hash =
+            writeback_continuation_payload_hash(&request).expect("old continuation D5 hash");
         let signatures = sign_writeback_payloads(
             &keypair,
             &writeback_payload_hash,
@@ -598,6 +639,32 @@ mod tests {
         .expect("sign all payloads");
         let output = signature_output_json("did:exo:agent", "test_seed", &signatures);
 
+        assert_eq!(
+            lifecycle_payload_hash, expected_lifecycle_payload_hash,
+            "lifecycle signature must bind the canonical finality approval payload"
+        );
+        assert_ne!(
+            lifecycle_payload_hash, old_lifecycle_payload_hash,
+            "lifecycle signature must not use the old D5 record payload"
+        );
+        assert_eq!(
+            continuation_payload_hash, expected_continuation_payload_hash,
+            "continuation signature must bind the canonical finality approval payload"
+        );
+        assert_ne!(
+            continuation_payload_hash, old_continuation_payload_hash,
+            "continuation signature must not use the old D5 record payload"
+        );
+        assert_eq!(
+            signatures.lifecycle_signature,
+            sign_write_payload(&keypair, &expected_lifecycle_payload_hash)
+                .expect("sign expected lifecycle approval payload")
+        );
+        assert_eq!(
+            signatures.continuation_signature,
+            sign_write_payload(&keypair, &expected_continuation_payload_hash)
+                .expect("sign expected continuation approval payload")
+        );
         assert_eq!(
             output.get("signature"),
             output.get("writeback_signature"),
@@ -632,6 +699,30 @@ mod tests {
                 .pointer("/headers/x-exo-continuation-signature")
                 .and_then(|value| value.as_str()),
             Some(signatures.continuation_signature.as_str())
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-lifecycle-approval-did")
+                .and_then(|value| value.as_str()),
+            Some(LIFECYCLE_APPROVAL_DID)
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-continuation-approval-did")
+                .and_then(|value| value.as_str()),
+            Some(CONTINUATION_APPROVAL_DID)
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-lifecycle-approval-timestamp")
+                .and_then(|value| value.as_str()),
+            Some(LIFECYCLE_APPROVAL_TIMESTAMP)
+        );
+        assert_eq!(
+            output
+                .pointer("/headers/x-exo-continuation-approval-timestamp")
+                .and_then(|value| value.as_str()),
+            Some(CONTINUATION_APPROVAL_TIMESTAMP)
         );
         assert_eq!(
             output.get("agent_did").and_then(|value| value.as_str()),

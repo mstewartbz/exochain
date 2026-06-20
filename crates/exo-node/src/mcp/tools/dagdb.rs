@@ -86,10 +86,13 @@ const SIGNATURE_PATTERN: &str = "^[0-9a-f]{128}$";
 const WRITE_SIGNATURE_HEADER: &str = "x-exo-write-signature";
 const CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-context-packet-approval-signature";
 const CONTEXT_PACKET_APPROVAL_DID_HEADER: &str = "x-exo-context-packet-approval-did";
+const CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-context-packet-approval-timestamp";
 const LIFECYCLE_SIGNATURE_HEADER: &str = "x-exo-lifecycle-signature";
 const CONTINUATION_SIGNATURE_HEADER: &str = "x-exo-continuation-signature";
 const LIFECYCLE_APPROVAL_DID_HEADER: &str = "x-exo-lifecycle-approval-did";
 const CONTINUATION_APPROVAL_DID_HEADER: &str = "x-exo-continuation-approval-did";
+const LIFECYCLE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-lifecycle-approval-timestamp";
+const CONTINUATION_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-continuation-approval-timestamp";
 const KG_IMPORT_REPORT_SCHEMA: &str = "dagdb_kg_dry_run_import_report_v1";
 const KG_IMPORT_CANDIDATES_SCHEMA: &str = "dagdb_markdown_kg_import_candidates_v1";
 const ECHOED_STRING_FIELDS: &[(&str, &str)] = &[
@@ -177,6 +180,10 @@ fn signature_schema(description: &str) -> Value {
         "pattern": SIGNATURE_PATTERN,
         "description": description,
     })
+}
+
+fn approval_timestamp_schema(description: &str) -> Value {
+    safe_string_schema(description)
 }
 
 fn token_budget_schema(description: &str) -> Value {
@@ -533,6 +540,16 @@ fn is_did_header_value(value: &str) -> bool {
 }
 
 #[cfg(feature = "dagdb-gateway-proxy")]
+fn is_approval_timestamp_header_value(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !value.is_empty()
+        && value.len() <= MAX_SAFE_ID_BYTES
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
 fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
         DAGDB_SUBMIT_WRITEBACK_TOOL => &[
@@ -541,11 +558,14 @@ fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
             CONTINUATION_SIGNATURE_HEADER,
             LIFECYCLE_APPROVAL_DID_HEADER,
             CONTINUATION_APPROVAL_DID_HEADER,
+            LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+            CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
         ],
         DAGDB_GET_CONTEXT_PACKET_TOOL => &[
             WRITE_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
+            CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
         ],
         DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => &[WRITE_SIGNATURE_HEADER],
         _ => &[],
@@ -643,6 +663,52 @@ fn require_did_header_param(
 }
 
 #[cfg(feature = "dagdb-gateway-proxy")]
+fn require_approval_timestamp_param(
+    tool_name: &str,
+    params: &Value,
+    header: &'static str,
+) -> Result<String, ToolResult> {
+    let Some(value) = params.get(header).and_then(Value::as_str) else {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_MISSING,
+            "DAG DB gateway finality timestamp material is incomplete; no DAG DB operation was performed.",
+            json!({
+                "missing_signature_header": header,
+                "required_signature_headers": required_signature_headers(tool_name),
+            }),
+        ));
+    };
+
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_MISSING,
+            "DAG DB gateway finality timestamp material is incomplete; no DAG DB operation was performed.",
+            json!({
+                "missing_signature_header": header,
+                "required_signature_headers": required_signature_headers(tool_name),
+            }),
+        ));
+    }
+
+    if !is_approval_timestamp_header_value(value) {
+        return Err(fail_closed_response(
+            tool_name,
+            DAGDB_SIGNATURE_MATERIAL_INVALID,
+            "DAG DB gateway finality timestamp material is invalid; no DAG DB operation was performed.",
+            json!({
+                "invalid_signature_header": header,
+                "expected_signature_format": "bounded timestamp string using safe header characters",
+            }),
+        ));
+    }
+
+    Ok(value.to_owned())
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
 fn signature_headers_for_tool(
     tool_name: &str,
     params: &Value,
@@ -654,11 +720,26 @@ fn signature_headers_for_tool(
             require_signature_param(tool_name, params, CONTINUATION_SIGNATURE_HEADER)?,
             require_did_header_param(tool_name, params, LIFECYCLE_APPROVAL_DID_HEADER)?,
             require_did_header_param(tool_name, params, CONTINUATION_APPROVAL_DID_HEADER)?,
+            require_approval_timestamp_param(
+                tool_name,
+                params,
+                LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+            )?,
+            require_approval_timestamp_param(
+                tool_name,
+                params,
+                CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
+            )?,
         )),
         DAGDB_GET_CONTEXT_PACKET_TOOL => Ok(DagDbSignatureHeaders::context_packet(
             require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
             require_signature_param(tool_name, params, CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER)?,
             require_did_header_param(tool_name, params, CONTEXT_PACKET_APPROVAL_DID_HEADER)?,
+            require_approval_timestamp_param(
+                tool_name,
+                params,
+                CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
+            )?,
         )),
         DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => Ok(DagDbSignatureHeaders::write(
             require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
@@ -680,10 +761,13 @@ fn proxy_dto_params(params: &Value) -> Value {
             WRITE_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
+            CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
             CONTINUATION_SIGNATURE_HEADER,
             LIFECYCLE_APPROVAL_DID_HEADER,
             CONTINUATION_APPROVAL_DID_HEADER,
+            LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+            CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
         ] {
             map.remove(header);
         }
@@ -1060,6 +1144,12 @@ pub fn get_context_packet_definition() -> ToolDefinition {
         CONTEXT_PACKET_APPROVAL_DID_HEADER.to_owned(),
         did_schema("External DID that signed the context-packet finality approval."),
     );
+    properties.insert(
+        CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER.to_owned(),
+        approval_timestamp_schema(
+            "External context-packet approval timestamp forwarded as `x-exo-context-packet-approval-timestamp`.",
+        ),
+    );
 
     ToolDefinition {
         name: DAGDB_GET_CONTEXT_PACKET_TOOL.to_owned(),
@@ -1078,7 +1168,8 @@ pub fn get_context_packet_definition() -> ToolDefinition {
                 "token_budget",
                 WRITE_SIGNATURE_HEADER,
                 CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
-                CONTEXT_PACKET_APPROVAL_DID_HEADER
+                CONTEXT_PACKET_APPROVAL_DID_HEADER,
+                CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1185,6 +1276,18 @@ pub fn submit_writeback_definition() -> ToolDefinition {
         CONTINUATION_APPROVAL_DID_HEADER.to_owned(),
         did_schema("External DID that signed the continuation finality approval."),
     );
+    properties.insert(
+        LIFECYCLE_APPROVAL_TIMESTAMP_HEADER.to_owned(),
+        approval_timestamp_schema(
+            "External lifecycle approval timestamp forwarded as `x-exo-lifecycle-approval-timestamp`.",
+        ),
+    );
+    properties.insert(
+        CONTINUATION_APPROVAL_TIMESTAMP_HEADER.to_owned(),
+        approval_timestamp_schema(
+            "External continuation approval timestamp forwarded as `x-exo-continuation-approval-timestamp`.",
+        ),
+    );
 
     ToolDefinition {
         name: DAGDB_SUBMIT_WRITEBACK_TOOL.to_owned(),
@@ -1206,7 +1309,9 @@ pub fn submit_writeback_definition() -> ToolDefinition {
                 LIFECYCLE_SIGNATURE_HEADER,
                 CONTINUATION_SIGNATURE_HEADER,
                 LIFECYCLE_APPROVAL_DID_HEADER,
-                CONTINUATION_APPROVAL_DID_HEADER
+                CONTINUATION_APPROVAL_DID_HEADER,
+                LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+                CONTINUATION_APPROVAL_TIMESTAMP_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1415,6 +1520,7 @@ mod tests {
                 params[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] =
                     json!(schema_signature_value('b'));
                 params[CONTEXT_PACKET_APPROVAL_DID_HEADER] = json!("did:exo:context-authority");
+                params[CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
             }
             DAGDB_SUBMIT_WRITEBACK_TOOL => {
                 params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
@@ -1422,6 +1528,8 @@ mod tests {
                 params[CONTINUATION_SIGNATURE_HEADER] = json!(schema_signature_value('c'));
                 params[LIFECYCLE_APPROVAL_DID_HEADER] = json!("did:exo:lifecycle-authority");
                 params[CONTINUATION_APPROVAL_DID_HEADER] = json!("did:exo:continuation-authority");
+                params[LIFECYCLE_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+                params[CONTINUATION_APPROVAL_TIMESTAMP_HEADER] = json!("2026-06-20T00:00:01Z");
             }
             DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
                 params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
@@ -1575,6 +1683,11 @@ mod tests {
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
+    fn approval_timestamp() -> &'static str {
+        "2026-06-20T00:00:00Z"
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
     fn add_write_signature(mut params: Value) -> Value {
         params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
         params
@@ -1585,6 +1698,7 @@ mod tests {
         params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
         params[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] = json!(signature_value('d'));
         params[CONTEXT_PACKET_APPROVAL_DID_HEADER] = json!("did:exo:context-authority");
+        params[CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
         params
     }
 
@@ -1595,6 +1709,8 @@ mod tests {
         params[CONTINUATION_SIGNATURE_HEADER] = json!(signature_value('c'));
         params[LIFECYCLE_APPROVAL_DID_HEADER] = json!("did:exo:finality-authority");
         params[CONTINUATION_APPROVAL_DID_HEADER] = json!("did:exo:finality-authority");
+        params[LIFECYCLE_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+        params[CONTINUATION_APPROVAL_TIMESTAMP_HEADER] = json!("2026-06-20T00:00:01Z");
         params
     }
 
@@ -1615,6 +1731,10 @@ mod tests {
                 CONTEXT_PACKET_APPROVAL_DID_HEADER,
                 "did:exo:context-authority".to_owned(),
             ),
+            (
+                CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
+                approval_timestamp().to_owned(),
+            ),
         ]
     }
 
@@ -1631,6 +1751,14 @@ mod tests {
             (
                 CONTINUATION_APPROVAL_DID_HEADER,
                 "did:exo:finality-authority".to_owned(),
+            ),
+            (
+                LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+                approval_timestamp().to_owned(),
+            ),
+            (
+                CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
+                "2026-06-20T00:00:01Z".to_owned(),
             ),
         ]
     }
@@ -1710,6 +1838,7 @@ mod tests {
             WRITE_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
+            CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
             CONTINUATION_SIGNATURE_HEADER,
             LIFECYCLE_APPROVAL_DID_HEADER,
@@ -2100,6 +2229,17 @@ mod tests {
             context_without_approval_did,
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
         );
+        let mut context_without_approval_timestamp =
+            add_write_signature(request_fixture("context_packet"));
+        context_without_approval_timestamp[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] =
+            json!(signature_value('d'));
+        context_without_approval_timestamp[CONTEXT_PACKET_APPROVAL_DID_HEADER] =
+            json!("did:exo:context-authority");
+        assert_missing_signature_fails_before_http(
+            execute_get_context_packet,
+            context_without_approval_timestamp,
+            CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
+        );
         assert_missing_signature_fails_before_http(
             execute_import,
             scoped_import_params(),
@@ -2154,6 +2294,41 @@ mod tests {
             writeback_without_continuation_authority,
             CONTINUATION_APPROVAL_DID_HEADER,
         );
+
+        let mut writeback_without_lifecycle_timestamp = request_fixture("writeback");
+        writeback_without_lifecycle_timestamp[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        writeback_without_lifecycle_timestamp[LIFECYCLE_SIGNATURE_HEADER] =
+            json!(signature_value('b'));
+        writeback_without_lifecycle_timestamp[CONTINUATION_SIGNATURE_HEADER] =
+            json!(signature_value('c'));
+        writeback_without_lifecycle_timestamp[LIFECYCLE_APPROVAL_DID_HEADER] =
+            json!("did:exo:finality-authority");
+        writeback_without_lifecycle_timestamp[CONTINUATION_APPROVAL_DID_HEADER] =
+            json!("did:exo:finality-authority");
+        assert_missing_signature_fails_before_http(
+            execute_submit_writeback,
+            writeback_without_lifecycle_timestamp,
+            LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+        );
+
+        let mut writeback_without_continuation_timestamp = request_fixture("writeback");
+        writeback_without_continuation_timestamp[WRITE_SIGNATURE_HEADER] =
+            json!(signature_value('a'));
+        writeback_without_continuation_timestamp[LIFECYCLE_SIGNATURE_HEADER] =
+            json!(signature_value('b'));
+        writeback_without_continuation_timestamp[CONTINUATION_SIGNATURE_HEADER] =
+            json!(signature_value('c'));
+        writeback_without_continuation_timestamp[LIFECYCLE_APPROVAL_DID_HEADER] =
+            json!("did:exo:finality-authority");
+        writeback_without_continuation_timestamp[CONTINUATION_APPROVAL_DID_HEADER] =
+            json!("did:exo:finality-authority");
+        writeback_without_continuation_timestamp[LIFECYCLE_APPROVAL_TIMESTAMP_HEADER] =
+            json!(approval_timestamp());
+        assert_missing_signature_fails_before_http(
+            execute_submit_writeback,
+            writeback_without_continuation_timestamp,
+            CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
+        );
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
@@ -2176,7 +2351,9 @@ mod tests {
                 LIFECYCLE_SIGNATURE_HEADER,
                 CONTINUATION_SIGNATURE_HEADER,
                 LIFECYCLE_APPROVAL_DID_HEADER,
-                CONTINUATION_APPROVAL_DID_HEADER
+                CONTINUATION_APPROVAL_DID_HEADER,
+                LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+                CONTINUATION_APPROVAL_TIMESTAMP_HEADER
             ])
         );
         assert_eq!(body["success_claimed"], false);
@@ -2373,6 +2550,7 @@ mod tests {
                 WRITE_SIGNATURE_HEADER,
                 CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
                 CONTEXT_PACKET_APPROVAL_DID_HEADER,
+                CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
             ],
         );
         assert_required_fields(
@@ -2383,6 +2561,8 @@ mod tests {
                 CONTINUATION_SIGNATURE_HEADER,
                 LIFECYCLE_APPROVAL_DID_HEADER,
                 CONTINUATION_APPROVAL_DID_HEADER,
+                LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+                CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
             ],
         );
         assert_required_fields(import_definition(), &[WRITE_SIGNATURE_HEADER]);
