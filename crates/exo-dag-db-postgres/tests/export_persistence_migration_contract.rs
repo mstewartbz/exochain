@@ -147,7 +147,7 @@ async fn assert_export_constraints(pool: &PgPool) {
         "proof_algorithm = 'hash_commitment_v1'::text",
     );
     assert_constraint(&constraints, "dagdb_receipts", "export");
-    assert_constraint(&constraints, "dagdb_receipts", "export_created");
+    assert_constraint(&constraints, "dagdb_receipts", "dagdb_export_completed");
     assert_constraint(&constraints, "dagdb_receipts", "export_challenge_verified");
     assert_constraint(&constraints, "dagdb_subject_receipt_heads", "export");
 }

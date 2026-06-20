@@ -1,12 +1,25 @@
 //! PRD17B Postgres adapter for context packet persistence.
 
-use serde_json::to_value;
+use exo_core::Timestamp;
+use exo_dag_db_api::{ReceiptEventType, SubjectKind};
+use serde_json::{json, to_value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
-use crate::context_packet_persistence::{
-    ContextPacketAcceptanceEvidence, ContextPacketError, ContextPacketRecord,
-    accept_context_packet_record, validate_context_packet_record,
+use crate::{
+    context_packet_persistence::{
+        ContextPacketAcceptanceEvidence, ContextPacketError, ContextPacketRecord,
+        accept_context_packet_record, validate_context_packet_record,
+    },
+    receipt::{
+        OperationalReceiptInsert, ReceiptStoreError, insert_operational_receipt_in_transaction,
+        operational_receipt_subject_id,
+    },
+    scoring::hash_event_body,
 };
+
+const CONTEXT_PACKET_AUDIT_ACTOR_DID: &str = "did:exo:dagdb-context-packet-writer";
+const CONTEXT_PACKET_ROUTE_NAME: &str = "dagdb.context_packet";
+const CREATED_AT: Timestamp = Timestamp::new(1, 0);
 
 /// Persist a PRD17B context packet record in a serializable transaction.
 pub async fn persist_context_packet_record(
@@ -221,7 +234,92 @@ pub async fn persist_context_packet_record_in_transaction(
             packet_id: record.packet_id.clone(),
         });
     }
+    insert_context_packet_approval_receipts(tx, record).await?;
+    insert_context_packet_record_accepted_receipt(tx, record).await?;
     Ok(result.rows_affected())
+}
+
+async fn insert_context_packet_approval_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &ContextPacketRecord,
+) -> Result<u64, ContextPacketPostgresError> {
+    let mut inserted = 0_u64;
+    for event_type in [
+        ReceiptEventType::DagdbApprovalRequestSubmitted,
+        ReceiptEventType::DagdbApprovalGranted,
+    ] {
+        let receipt_body = json!({
+            "route_name": CONTEXT_PACKET_ROUTE_NAME,
+            "packet_id": record.packet_id,
+            "route_id": record.route_id,
+            "idempotency_key": record.idempotency_key,
+            "source": "context_packet_persistence_adapter",
+        });
+        let event_body_hash =
+            hash_event_body(&receipt_body).map_err(ContextPacketPostgresError::ReceiptHash)?;
+        inserted = inserted.saturating_add(
+            insert_operational_receipt_in_transaction(
+                tx,
+                OperationalReceiptInsert {
+                    tenant_id: &record.tenant_id,
+                    namespace: &record.memory_namespace,
+                    subject_kind: SubjectKind::ContextPacket,
+                    subject_id: operational_receipt_subject_id(
+                        CONTEXT_PACKET_ROUTE_NAME,
+                        &record.packet_id,
+                        event_type,
+                    ),
+                    event_type,
+                    actor_did: CONTEXT_PACKET_AUDIT_ACTOR_DID,
+                    event_hlc: CREATED_AT,
+                    event_body_hash,
+                    receipt_body,
+                },
+            )
+            .await?,
+        );
+    }
+    Ok(inserted)
+}
+
+async fn insert_context_packet_record_accepted_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &ContextPacketRecord,
+) -> Result<u64, ContextPacketPostgresError> {
+    if record.production_default_route_approval_status != "accepted"
+        || record.packet_quality_review_status != "accepted"
+    {
+        return Ok(0);
+    }
+    let event_type = ReceiptEventType::DagdbRecordAccepted;
+    let receipt_body = json!({
+        "route_name": CONTEXT_PACKET_ROUTE_NAME,
+        "packet_id": record.packet_id,
+        "idempotency_key": record.idempotency_key,
+        "source": "context_packet_persistence_adapter",
+    });
+    let event_body_hash =
+        hash_event_body(&receipt_body).map_err(ContextPacketPostgresError::ReceiptHash)?;
+    insert_operational_receipt_in_transaction(
+        tx,
+        OperationalReceiptInsert {
+            tenant_id: &record.tenant_id,
+            namespace: &record.memory_namespace,
+            subject_kind: SubjectKind::ContextPacket,
+            subject_id: operational_receipt_subject_id(
+                CONTEXT_PACKET_ROUTE_NAME,
+                &record.packet_id,
+                event_type,
+            ),
+            event_type,
+            actor_did: CONTEXT_PACKET_AUDIT_ACTOR_DID,
+            event_hlc: CREATED_AT,
+            event_body_hash,
+            receipt_body,
+        },
+    )
+    .await
+    .map_err(ContextPacketPostgresError::Receipt)
 }
 
 /// Errors raised by the PRD17B context-packet Postgres adapter.
@@ -233,6 +331,12 @@ pub enum ContextPacketPostgresError {
     /// JSON serialization failed.
     #[error("context_packet_json_failed")]
     Json(#[source] serde_json::Error),
+    /// Receipt hash material failed.
+    #[error("context_packet_receipt_hash_failed")]
+    ReceiptHash(#[source] crate::scoring::DomainError),
+    /// Receipt audit write failed.
+    #[error("context_packet_receipt_failed")]
+    Receipt(#[from] ReceiptStoreError),
     /// Replay of an existing packet_id with a different scope or body.
     #[error("context_packet_unsafe_replay: {packet_id}")]
     UnsafeReplay {

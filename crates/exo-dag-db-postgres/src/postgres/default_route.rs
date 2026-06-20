@@ -3,13 +3,26 @@
 //! This adapter is intentionally scoped to route readiness persistence. Route
 //! invalidation mutation remains PRD17C-owned.
 
-use serde_json::to_value;
+use exo_core::Timestamp;
+use exo_dag_db_api::{ReceiptEventType, SubjectKind};
+use serde_json::{json, to_value};
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::default_route::{
-    DefaultRouteAcceptanceEvidence, DefaultRouteError, DefaultRouteRecord,
-    accept_default_route_record, validate_default_route_record,
+use crate::{
+    default_route::{
+        DefaultRouteAcceptanceEvidence, DefaultRouteError, DefaultRouteRecord,
+        accept_default_route_record, validate_default_route_record,
+    },
+    receipt::{
+        OperationalReceiptInsert, ReceiptStoreError, insert_operational_receipt_in_transaction,
+        operational_receipt_subject_id,
+    },
+    scoring::hash_event_body,
 };
+
+const DEFAULT_ROUTE_AUDIT_ACTOR_DID: &str = "did:exo:dagdb-default-route-writer";
+const DEFAULT_ROUTE_AUDIT_ROUTE_NAME: &str = "dagdb.route";
+const CREATED_AT: Timestamp = Timestamp::new(1, 0);
 
 /// Persist a PRD17B default route in a serializable transaction.
 pub async fn persist_default_route(
@@ -133,7 +146,91 @@ pub async fn persist_default_route_in_transaction(
     .execute(&mut **tx)
     .await
     .map_err(DefaultRoutePostgresError::Sqlx)?;
+    insert_default_route_approval_receipts(tx, route).await?;
+    insert_default_route_record_accepted_receipt(tx, route).await?;
     Ok(result.rows_affected())
+}
+
+async fn insert_default_route_approval_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    route: &DefaultRouteRecord,
+) -> Result<u64, DefaultRoutePostgresError> {
+    let mut inserted = 0_u64;
+    for event_type in [
+        ReceiptEventType::DagdbApprovalRequestSubmitted,
+        ReceiptEventType::DagdbApprovalGranted,
+    ] {
+        let receipt_body = json!({
+            "route_name": DEFAULT_ROUTE_AUDIT_ROUTE_NAME,
+            "route_id": route.route_id,
+            "project_id": route.project_id,
+            "source": "default_route_persistence_adapter",
+        });
+        let event_body_hash =
+            hash_event_body(&receipt_body).map_err(DefaultRoutePostgresError::ReceiptHash)?;
+        inserted = inserted.saturating_add(
+            insert_operational_receipt_in_transaction(
+                tx,
+                OperationalReceiptInsert {
+                    tenant_id: &route.tenant_id,
+                    namespace: &route.memory_namespace,
+                    subject_kind: SubjectKind::Route,
+                    subject_id: operational_receipt_subject_id(
+                        DEFAULT_ROUTE_AUDIT_ROUTE_NAME,
+                        &route.route_id,
+                        event_type,
+                    ),
+                    event_type,
+                    actor_did: DEFAULT_ROUTE_AUDIT_ACTOR_DID,
+                    event_hlc: CREATED_AT,
+                    event_body_hash,
+                    receipt_body,
+                },
+            )
+            .await?,
+        );
+    }
+    Ok(inserted)
+}
+
+async fn insert_default_route_record_accepted_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    route: &DefaultRouteRecord,
+) -> Result<u64, DefaultRoutePostgresError> {
+    if route.production_default_route_approval_status != "accepted"
+        || route.packet_quality_review_status != "accepted"
+    {
+        return Ok(0);
+    }
+    let event_type = ReceiptEventType::DagdbRecordAccepted;
+    let receipt_body = json!({
+        "route_name": DEFAULT_ROUTE_AUDIT_ROUTE_NAME,
+        "route_id": route.route_id,
+        "request_id": route.updated_at,
+        "source": "default_route_persistence_adapter",
+    });
+    let event_body_hash =
+        hash_event_body(&receipt_body).map_err(DefaultRoutePostgresError::ReceiptHash)?;
+    insert_operational_receipt_in_transaction(
+        tx,
+        OperationalReceiptInsert {
+            tenant_id: &route.tenant_id,
+            namespace: &route.memory_namespace,
+            subject_kind: SubjectKind::Route,
+            subject_id: operational_receipt_subject_id(
+                DEFAULT_ROUTE_AUDIT_ROUTE_NAME,
+                &route.route_id,
+                event_type,
+            ),
+            event_type,
+            actor_did: DEFAULT_ROUTE_AUDIT_ACTOR_DID,
+            event_hlc: CREATED_AT,
+            event_body_hash,
+            receipt_body,
+        },
+    )
+    .await
+    .map_err(DefaultRoutePostgresError::Receipt)
 }
 
 /// Errors raised by the PRD17B default-route Postgres adapter.
@@ -145,6 +242,12 @@ pub enum DefaultRoutePostgresError {
     /// JSON serialization failed.
     #[error("default_route_json_failed")]
     Json(#[source] serde_json::Error),
+    /// Receipt hash material failed.
+    #[error("default_route_receipt_hash_failed")]
+    ReceiptHash(#[source] crate::scoring::DomainError),
+    /// Receipt audit write failed.
+    #[error("default_route_receipt_failed")]
+    Receipt(#[from] ReceiptStoreError),
     /// SQL execution failed.
     #[error("default_route_sql_failed")]
     Sqlx(#[source] sqlx::Error),

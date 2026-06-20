@@ -127,10 +127,12 @@ across `crates/exo-dag-db-api`, `crates/exo-dag-db-core`,
 `docs/dagdb/`. Bridge code that exposes DAG DB through the substrate lives in
 `exo-api`, `exo-gateway`, `exo-node`, and `exochain-sdk`.
 
-The governed REST runtime is served by `exo-gateway` under `/api/v1/dag-db/*`
-when the gateway has a configured Postgres pool and tenant/session authority.
-Missing database state, authority, or write signatures fail closed. Rollback,
-canary, and observability evidence for this runtime lives in
+The governed REST runtime is served by `exo-gateway` at exactly
+`POST /api/v1/dag-db/route`, `POST /api/v1/dag-db/context-packet`,
+`POST /api/v1/dag-db/writeback`, `POST /api/v1/dag-db/import`, and
+`POST /api/v1/dag-db/export` when the gateway has a configured Postgres pool and
+tenant/session authority. Missing database state, authority, or write signatures
+fail closed. Rollback, canary, and observability evidence for this runtime lives in
 `docs/dagdb/runtime-activation/rollback-canary-observability.md`.
 
 ### DAG DB Planning And Anti-Duplication
@@ -157,8 +159,8 @@ result; with the feature and configuration, they proxy through the SDK
 `DagDbHttpClient`.
 
 This package claims production-runtime activation only for the gateway REST
-paths described in `INTEGRATION.md`; MCP proxy, RLS, canary, and rollback
-evidence remain pending until main integration records the commands in
+paths described in `INTEGRATION.md`; MCP/SDK configured-proxy evidence, RLS,
+canary, and rollback evidence remain pending until main integration records the commands in
 `docs/dagdb/runtime-activation/rollback-canary-observability.md`. This package
 claims no billing savings and no thesis acceptance for DAG DB.
 
@@ -536,7 +538,8 @@ Section 8.8 quality gates. All must pass:
 
 1. **Build** — `cargo build --workspace --release`
 2. **Test** — `cargo test --workspace` (debug and release)
-3. **Coverage** — cargo-tarpaulin, minimum 90% line coverage
+3. **Coverage** — cargo-tarpaulin, scoped minimum 90% line coverage under the
+   exclusions configured in `tarpaulin.toml`
 4. **Lint** — `cargo clippy --workspace -- -D warnings`
 5. **Format** — `cargo +nightly fmt --all -- --check`
 6. **Audit** — `cargo audit` (no known vulnerabilities)

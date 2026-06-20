@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use exo_core::Did;
+
 use crate::context_packet_persistence::{
     ContextPacketRecord, ContextPacketRequest, ContextPacketRouteBinding, DefaultContextQuality,
     PacketFreshnessStatus, build_context_packet_record,
@@ -38,6 +40,9 @@ const RAW_FORBIDDEN_FRAGMENTS: &[&str] = &[
     "raw_prompt_body",
     "source_excerpt",
 ];
+const EXTERNAL_PRODUCTION_APPROVAL_REF_PREFIX: &str = "external-production-approval:";
+const EXTERNAL_PACKET_QUALITY_REVIEW_REF_PREFIX: &str = "external-packet-quality-review:";
+const EXTERNAL_FINALITY_REF_PREFIX: &str = "external-finality:";
 
 /// Route status for PRD17B default retrieval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +237,26 @@ pub struct DefaultRouteAcceptanceEvidence {
     pub packet_quality_review_ref: String,
     /// Finality receipt or outbox ref.
     pub finality_ref: String,
+    /// Tenant verified by the external finality receipt.
+    pub tenant_id: String,
+    /// Namespace verified by the external finality receipt.
+    pub memory_namespace: String,
+    /// Actor whose request was finalized.
+    pub actor_id: String,
+    /// Route verified by the external finality receipt.
+    pub route_id: String,
+    /// Request or idempotency key verified by the receipt.
+    pub request_id: String,
+    /// Canonical payload hash approved by the external authority.
+    pub payload_hash: String,
+    /// Payload hash carried by the external finality receipt.
+    pub receipt_payload_hash: String,
+    /// External production authority DID.
+    pub authority_did: String,
+    /// External production authority signature.
+    pub authority_signature: String,
+    /// External approval timestamp.
+    pub approved_at: String,
 }
 
 /// Readiness report consumed by PRD17A scoring later.
@@ -332,6 +357,12 @@ pub enum DefaultRouteError {
     AcceptanceGateRejected {
         /// Existing readiness failure.
         failure_code: DefaultRetrievalFailureCode,
+    },
+    /// External finality evidence did not bind to the route.
+    #[error("external_finality_mismatch: {field}")]
+    ExternalFinalityMismatch {
+        /// Mismatched field.
+        field: String,
     },
 }
 
@@ -575,7 +606,7 @@ pub fn accept_default_route_record(
     updated_at: String,
 ) -> Result<DefaultRouteRecord, DefaultRouteError> {
     validate_default_route_record(route)?;
-    validate_acceptance_evidence(evidence)?;
+    validate_acceptance_evidence(route, evidence)?;
     validate_required("updated_at", &updated_at)?;
     reject_forbidden("updated_at", &updated_at)?;
 
@@ -640,21 +671,127 @@ pub fn validate_default_route_record(route: &DefaultRouteRecord) -> Result<(), D
 }
 
 fn validate_acceptance_evidence(
+    route: &DefaultRouteRecord,
     evidence: &DefaultRouteAcceptanceEvidence,
 ) -> Result<(), DefaultRouteError> {
+    validate_external_ref(
+        "production_default_route_approval_ref",
+        &evidence.production_default_route_approval_ref,
+        EXTERNAL_PRODUCTION_APPROVAL_REF_PREFIX,
+    )?;
+    validate_external_ref(
+        "packet_quality_review_ref",
+        &evidence.packet_quality_review_ref,
+        EXTERNAL_PACKET_QUALITY_REVIEW_REF_PREFIX,
+    )?;
+    validate_external_ref(
+        "finality_ref",
+        &evidence.finality_ref,
+        EXTERNAL_FINALITY_REF_PREFIX,
+    )?;
     for (field, value) in [
+        ("tenant_id", evidence.tenant_id.as_str()),
+        ("memory_namespace", evidence.memory_namespace.as_str()),
+        ("actor_id", evidence.actor_id.as_str()),
+        ("route_id", evidence.route_id.as_str()),
+        ("request_id", evidence.request_id.as_str()),
+        ("payload_hash", evidence.payload_hash.as_str()),
         (
-            "production_default_route_approval_ref",
-            evidence.production_default_route_approval_ref.as_str(),
+            "receipt_payload_hash",
+            evidence.receipt_payload_hash.as_str(),
         ),
-        (
-            "packet_quality_review_ref",
-            evidence.packet_quality_review_ref.as_str(),
-        ),
-        ("finality_ref", evidence.finality_ref.as_str()),
+        ("authority_did", evidence.authority_did.as_str()),
+        ("authority_signature", evidence.authority_signature.as_str()),
+        ("approved_at", evidence.approved_at.as_str()),
     ] {
         validate_required(field, value)?;
         reject_forbidden(field, value)?;
+    }
+    validate_did("actor_id", &evidence.actor_id)?;
+    validate_did("authority_did", &evidence.authority_did)?;
+    validate_digest("payload_hash", &evidence.payload_hash)?;
+    validate_digest("receipt_payload_hash", &evidence.receipt_payload_hash)?;
+    validate_signature("authority_signature", &evidence.authority_signature)?;
+    require_external_match("tenant_id", &evidence.tenant_id, &route.tenant_id)?;
+    require_external_match(
+        "memory_namespace",
+        &evidence.memory_namespace,
+        &route.memory_namespace,
+    )?;
+    require_external_match("route_id", &evidence.route_id, &route.route_id)?;
+    require_external_match(
+        "receipt_payload_hash",
+        &evidence.receipt_payload_hash,
+        &evidence.payload_hash,
+    )?;
+    if evidence.authority_did == evidence.actor_id {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: "authority_did".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_external_ref(
+    field: &'static str,
+    value: &str,
+    prefix: &str,
+) -> Result<(), DefaultRouteError> {
+    validate_required(field, value)?;
+    reject_forbidden(field, value)?;
+    if !value.starts_with(prefix) {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn require_external_match(
+    field: &str,
+    actual: &str,
+    expected: &str,
+) -> Result<(), DefaultRouteError> {
+    if actual != expected {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_did(field: &str, value: &str) -> Result<(), DefaultRouteError> {
+    if Did::new(value).is_err() {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_digest(field: &str, value: &str) -> Result<(), DefaultRouteError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_signature(field: &str, value: &str) -> Result<(), DefaultRouteError> {
+    if value.len() != 128 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    if value
+        .as_bytes()
+        .first()
+        .is_some_and(|first| value.as_bytes().iter().all(|byte| byte == first))
+    {
+        return Err(DefaultRouteError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
     }
     Ok(())
 }

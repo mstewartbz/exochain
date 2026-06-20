@@ -36,7 +36,7 @@ use crate::{
     invariants::{
         ConstitutionalInvariant, InvariantContext, InvariantEngine, InvariantSet, enforce_all,
     },
-    types::{BailmentState, ConsentRecord},
+    types::{BailmentState, ConsentRecord, GovernedRoleName, Role},
 };
 
 const USAGE_EVENT_MEMORY_ID_DOMAIN: &str =
@@ -157,6 +157,7 @@ impl ConsentEngine {
 #[derive(Debug, Clone, Default)]
 pub struct IdentityRegistry {
     keys: BTreeMap<String, [u8; 32]>,
+    roles: BTreeMap<String, Vec<Role>>,
 }
 
 impl IdentityRegistry {
@@ -167,9 +168,46 @@ impl IdentityRegistry {
         self
     }
 
+    /// Register an existing governed role for a DID.
+    #[must_use]
+    pub fn with_role(mut self, agent_did: impl Into<String>, role: Role) -> Self {
+        self.roles.entry(agent_did.into()).or_default().push(role);
+        self
+    }
+
+    /// Register a governed role by enum name for a DID.
+    #[must_use]
+    pub fn with_governed_role(
+        self,
+        agent_did: impl Into<String>,
+        role_name: GovernedRoleName,
+    ) -> Self {
+        self.with_role(agent_did, Role::governed(role_name))
+    }
+
     fn public_key_for(&self, agent_did: &str) -> Option<&[u8; 32]> {
         self.keys.get(agent_did)
     }
+
+    /// Return true when the DID holds an existing governed role allowed to issue
+    /// production DAG DB finality receipts.
+    #[must_use]
+    pub fn has_production_finality_authority(&self, authority_did: &str) -> bool {
+        self.roles
+            .get(authority_did)
+            .is_some_and(|roles| roles.iter().any(role_can_issue_production_finality))
+    }
+}
+
+fn role_can_issue_production_finality(role: &Role) -> bool {
+    matches!(
+        role.validate_governed(),
+        Ok(GovernedRoleName::Operator
+            | GovernedRoleName::Executive
+            | GovernedRoleName::ExecutiveAdmin
+            | GovernedRoleName::Judge
+            | GovernedRoleName::TransitionJudge)
+    )
 }
 
 /// Returns `true` when active bailment (BCTS) and consent exist for writeback.
@@ -231,6 +269,24 @@ pub fn verify_write_signature(
     let public_key = PublicKey::from_bytes(*public_key_bytes);
     let sig = Signature::from_bytes(signature_bytes);
     Ok(crypto::verify(message.as_bytes(), &sig, &public_key))
+}
+
+/// Verify that an external production finality authority, not merely any
+/// registered DID, signed the canonical finality payload.
+pub fn verify_production_finality_authority(
+    registry: &IdentityRegistry,
+    requesting_agent_did: &str,
+    authority_did: &str,
+    payload_hash: &[u8; 32],
+    signature: &str,
+) -> Result<bool, IdentityError> {
+    if authority_did.trim().is_empty() || authority_did == requesting_agent_did {
+        return Ok(false);
+    }
+    if !registry.has_production_finality_authority(authority_did) {
+        return Ok(false);
+    }
+    verify_write_signature(registry, payload_hash, signature, authority_did)
 }
 
 /// Gatekeeper service that enforces consent and provenance before `M12` writes.

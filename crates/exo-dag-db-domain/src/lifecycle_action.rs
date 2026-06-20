@@ -242,6 +242,11 @@ impl ProductionLifecycleApprovalEvidence {
             "production_lifecycle_approval.approved_at",
             &self.approved_at,
         )?;
+        if self.authority_did == self.actor_id {
+            return Err(LifecycleActionError::ProductionApprovalMismatch {
+                field: "authority_did".to_owned(),
+            });
+        }
         if self.evidence_ref.digest != self.payload_hash {
             return Err(LifecycleActionError::ProductionApprovalMismatch {
                 field: "payload_hash".to_owned(),
@@ -690,6 +695,15 @@ fn validate_signature(field: &str, value: &str) -> Result<()> {
     if value.len() != 128 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(LifecycleActionError::InvalidAction {
             reason: format!("{field} must be a 128-char hex Ed25519 signature"),
+        });
+    }
+    if value
+        .as_bytes()
+        .first()
+        .is_some_and(|first| value.as_bytes().iter().all(|byte| byte == first))
+    {
+        return Err(LifecycleActionError::InvalidAction {
+            reason: format!("{field} must not be placeholder material"),
         });
     }
     Ok(())

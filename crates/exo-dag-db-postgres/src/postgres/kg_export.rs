@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use exo_core::{Hash256, Timestamp};
-use exo_dag_db_api::SafeMetadata;
+use exo_dag_db_api::{ReceiptEventType, SafeMetadata, SubjectKind};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value as JsonValue, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -36,12 +36,17 @@ use crate::{
     kg_import::{hash_from_hex, stable_hash},
     kg_retrieval::{KgCitationHandle, KgContextPacketPreview, KgGraphEdgeRef, KgMemoryRef},
     kg_writeback::KG_WRITEBACK_PERSISTED_ROUTE_NAME,
+    receipt::{
+        OperationalReceiptInsert, insert_operational_receipt_in_transaction,
+        operational_receipt_subject_id,
+    },
     scoring::hash_event_body,
 };
 
 const CREATED_AT: Timestamp = Timestamp::new(1, 0);
 const UPDATED_AT: Timestamp = Timestamp::new(1, 1);
 const EXPIRES_AT: Timestamp = Timestamp::new(86_400_001, 0);
+const DAGDB_EXPORT_COMPLETED_EVENT_TYPE: &str = "dagdb_export_completed";
 
 /// Build a portable KG export report using `EXO_DAGDB_TEST_DATABASE_URL`.
 pub async fn build_kg_portable_export_from_env(
@@ -685,7 +690,10 @@ async fn verify_export_finality_receipt_rows(
         reason: "export finality receipt evidence not found".to_owned(),
     })?;
     let event_type: String = row.try_get("event_type").map_err(pg)?;
-    if event_type != "export_created" && event_type != "export_verified" {
+    if event_type != DAGDB_EXPORT_COMPLETED_EVENT_TYPE
+        && event_type != "export_created"
+        && event_type != "export_verified"
+    {
         return Err(KgExportError::Conflict {
             reason: "unsupported export finality receipt event type".to_owned(),
         });
@@ -1441,7 +1449,7 @@ async fn verify_export_receipt_row(
     require_row_string(&row, "subject_kind", "export")?;
     require_row_string(&row, "subject_id", &export.export_id)?;
     require_row_i64(&row, "seq", 1)?;
-    require_row_string(&row, "event_type", "export_created")?;
+    require_row_string(&row, "event_type", DAGDB_EXPORT_COMPLETED_EVENT_TYPE)?;
     require_row_string(&row, "actor_did", requester_did)?;
     require_row_string(
         &row,
@@ -1776,8 +1784,11 @@ async fn persist_kg_portable_export_in_transaction(
 
     let mut counts = ExportPersistedCounts::default();
     let receipt_hash = export_receipt_hash(export, requester_did)?;
-    counts.inserted_receipt_count =
-        rows_to_u32(insert_export_receipt(tx, export, requester_did, receipt_hash).await?)?;
+    insert_export_approval_receipts(tx, export, requester_did, idempotency_key, request_hash)
+        .await?;
+    counts.inserted_receipt_count = counts.inserted_receipt_count.saturating_add(rows_to_u32(
+        insert_export_receipt(tx, export, requester_did, receipt_hash).await?,
+    )?);
     counts.inserted_subject_receipt_head_count =
         rows_to_u32(insert_export_subject_head(tx, export, receipt_hash).await?)?;
     counts.inserted_export_count =
@@ -1892,7 +1903,7 @@ fn export_persisted_summary(
             },
             receipt: KgExportPersistedReceiptDiagnostics {
                 receipt_subject_kind: "export".to_owned(),
-                receipt_event_type: "export_created".to_owned(),
+                receipt_event_type: DAGDB_EXPORT_COMPLETED_EVENT_TYPE.to_owned(),
                 latest_receipt_hash: Some(receipt_hash.to_string()),
                 subject_head_written: counts.inserted_subject_receipt_head_count > 0 || replayed,
                 dag_finality_status: "pending_no_dag_outbox".to_owned(),
@@ -2209,7 +2220,7 @@ async fn insert_export_receipt(
          (receipt_hash, tenant_id, namespace, subject_kind, subject_id, prev_receipt_hash, seq, \
           event_type, actor_did, event_hlc_physical_ms, event_hlc_logical, event_hash, receipt_body, \
           created_at_physical_ms, created_at_logical) \
-         VALUES ($1, $2, $3, 'export', $4, $5, 1, 'export_created', $6, $7, $8, $9, $10, $7, $8) \
+         VALUES ($1, $2, $3, 'export', $4, $5, 1, $6, $7, $8, $9, $10, $11, $8, $9) \
          ON CONFLICT (receipt_hash) DO NOTHING",
     )
     .bind(hash_bytes(receipt_hash))
@@ -2217,6 +2228,7 @@ async fn insert_export_receipt(
     .bind(&export.namespace)
     .bind(hash_bytes(export_id))
     .bind(hash_bytes(Hash256::ZERO))
+    .bind(DAGDB_EXPORT_COMPLETED_EVENT_TYPE)
     .bind(requester_did)
     .bind(event_hlc.physical_ms)
     .bind(event_hlc.logical)
@@ -2226,6 +2238,56 @@ async fn insert_export_receipt(
     .await
     .map_err(pg)?;
     Ok(result.rows_affected())
+}
+
+async fn insert_export_approval_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    export: &KgPortableExport,
+    requester_did: &str,
+    idempotency_key: &str,
+    request_hash: Hash256,
+) -> Result<u32> {
+    let mut inserted = 0_u32;
+    for event_type in [
+        ReceiptEventType::DagdbApprovalRequestSubmitted,
+        ReceiptEventType::DagdbApprovalGranted,
+    ] {
+        let receipt_body = json!({
+            "route_name": KG_EXPORT_PERSISTED_ROUTE_NAME,
+            "export_id": export.export_id,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash.to_string(),
+            "source": "kg_export_persisted_adapter",
+        });
+        let event_body_hash =
+            hash_event_body(&receipt_body).map_err(|error| KgExportError::Hash {
+                reason: error.to_string(),
+            })?;
+        let rows = insert_operational_receipt_in_transaction(
+            tx,
+            OperationalReceiptInsert {
+                tenant_id: &export.tenant_id,
+                namespace: &export.namespace,
+                subject_kind: SubjectKind::ValidationReport,
+                subject_id: operational_receipt_subject_id(
+                    KG_EXPORT_PERSISTED_ROUTE_NAME,
+                    &export.export_id,
+                    event_type,
+                ),
+                event_type,
+                actor_did: requester_did,
+                event_hlc: CREATED_AT,
+                event_body_hash,
+                receipt_body,
+            },
+        )
+        .await
+        .map_err(|error| KgExportError::Postgres {
+            source: Box::new(error),
+        })?;
+        inserted = inserted.saturating_add(rows_to_u32(rows)?);
+    }
+    Ok(inserted)
 }
 
 async fn insert_export_subject_head(
@@ -2454,7 +2516,7 @@ fn export_receipt_body_hash(export: &KgPortableExport, requester_did: &str) -> R
             &export.export_id,
             &export.hashes.whole_export_hash,
             requester_did,
-            "export_created",
+            DAGDB_EXPORT_COMPLETED_EVENT_TYPE,
         ],
     )
     .map_err(Into::into)

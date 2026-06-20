@@ -27,6 +27,10 @@ fn digest(byte: &str) -> String {
     byte.repeat(64)
 }
 
+fn authority_signature() -> String {
+    "0123456789abcdef".repeat(8)
+}
+
 fn memory_ref(memory_id: &str) -> LifecycleMemoryRef {
     LifecycleMemoryRef {
         tenant_id: TENANT.to_owned(),
@@ -62,7 +66,7 @@ fn approval_evidence(suffix: &str) -> ProductionLifecycleApprovalEvidence {
         request_id: "packet-prd17c-001".to_owned(),
         payload_hash: digest("b"),
         authority_did: "did:exo:governance-authority".to_owned(),
-        authority_signature: "a".repeat(128),
+        authority_signature: authority_signature(),
         approved_at: "2026-06-07T00:00:01Z".to_owned(),
     }
 }
@@ -340,6 +344,34 @@ fn lifecycle_approval_evidence_fails_closed_without_finality_binding() {
         action.approved_with_evidence(&approval),
         Err(LifecycleActionError::ProductionApprovalMissing { .. })
     ));
+}
+
+#[test]
+fn lifecycle_and_continuation_reject_shaped_placeholder_approval_evidence() {
+    let action = lifecycle_action(
+        "lifecycle-placeholder-approval-001",
+        LifecycleActionType::Writeback,
+    );
+    let mut placeholder_lifecycle_approval =
+        approval_evidence("lifecycle-placeholder-approval-001");
+    placeholder_lifecycle_approval.authority_signature = "a".repeat(128);
+    assert!(
+        action
+            .approved_with_evidence(&placeholder_lifecycle_approval)
+            .is_err(),
+        "lifecycle approval must reject shaped placeholder authority evidence"
+    );
+
+    let record = continuation();
+    let mut placeholder_continuation_approval =
+        continuation_approval_evidence("continuation-placeholder-approval-001");
+    placeholder_continuation_approval.authority_signature = "a".repeat(128);
+    assert!(
+        record
+            .approved_with_evidence(&placeholder_continuation_approval, 1_000)
+            .is_err(),
+        "continuation approval must reject shaped placeholder authority evidence"
+    );
 }
 
 #[test]

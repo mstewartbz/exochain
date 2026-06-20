@@ -35,8 +35,7 @@ use exo_api::dagdb::{
     DagDbCouncilDecisionRequest, DagDbIntakeRequest, DagDbIntakeResponse,
     DagDbReceiptLookupRequest, DagDbReceiptLookupResponse, DagDbRouteLookupRequest,
     DagDbRouteLookupResponse, DagDbTrustCheckRequest, DagDbTrustCheckResponse,
-    DagDbValidateRequest, DagDbValidateResponse, MemoryStatus, ReceiptEventType, SubjectKind,
-    ValidationDecision,
+    DagDbValidateRequest, DagDbValidateResponse, MemoryStatus, ValidationDecision,
 };
 use exo_api::dagdb::{
     ContextPacketLayerBudgetReport, ContextPacketLayerEdgeRef, ContextPacketLayerRef,
@@ -52,7 +51,11 @@ use exo_api::dagdb::{
     DagDbGraphContextPacketBuildRequest, DagDbGraphContextSelectionRequest,
     DagDbGraphContextSelectionResponse,
 };
+#[cfg(any(test, feature = "production-db"))]
+use exo_api::dagdb::{ReceiptEventType, SubjectKind};
 use exo_core::Hash256;
+#[cfg(feature = "production-db")]
+use exo_core::Timestamp;
 use exo_dag_db_core::{
     hash::RequestHashMaterial,
     metadata::{MetadataField, sanitize_keywords, sanitize_runtime_metadata},
@@ -108,7 +111,10 @@ use exo_gatekeeper::{ConsentEngine, IdentityRegistry};
 #[cfg(any(feature = "production-db", debug_assertions))]
 use exo_gatekeeper::{DagDbConsentRecord, types::BailmentState};
 #[cfg(feature = "production-db")]
-use exo_gatekeeper::{DagDbGatekeeperService, GatekeeperError, types::DAGDB_WRITEBACK_SCOPE};
+use exo_gatekeeper::{
+    DagDbGatekeeperService, GatekeeperError,
+    types::{DAGDB_WRITEBACK_SCOPE, GovernmentBranch, Role},
+};
 #[cfg(feature = "production-db")]
 use exo_gatekeeper::{usage_event_payload_hash, verify_write_consent, verify_write_signature};
 use serde::Serialize;
@@ -152,9 +158,16 @@ const EXPORT_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.export";
 #[cfg(feature = "production-db")]
 const RESERVED_IDEMPOTENCY_BODY_STATUS: &str = "reserved";
 #[cfg(feature = "production-db")]
+const STORED_IDEMPOTENCY_BODY_STATUS: &str = "stored";
+#[cfg(feature = "production-db")]
+const REPLAYED_IDEMPOTENCY_BODY_STATUS: &str = "replayed";
+#[cfg(feature = "production-db")]
 const GATEWAY_IDEMPOTENCY_RESERVATION_TTL_MS: i64 = 86_400_000;
 #[cfg(feature = "production-db")]
 const GATEWAY_AUTHORIZATION_PAYLOAD_HASH_FIELD: &str = "_gateway_authorization_payload_hash";
+const GATEWAY_OPERATIONAL_AUDIT_ACTOR: &str = "did:exo:dagdb-gateway";
+#[cfg(feature = "production-db")]
+const GATEWAY_OPERATIONAL_AUDIT_SOURCE: &str = "dagdb_gateway_mounted_route";
 /// Environment variable that enables the repository local-dev gatekeeper profile.
 ///
 /// Only consulted by the `#[cfg(debug_assertions)]` dev-profile mount; the
@@ -473,6 +486,8 @@ async fn resolve_gatekeeper_service_from_db(
                 identity_registry = identity_registry.with_public_key(&identity_did, key_bytes);
             }
         }
+        identity_registry =
+            register_governed_roles_from_db(identity_registry, pool, &identity_did, now_ms).await?;
     }
 
     Ok(DagDbGatekeeperService::new(
@@ -480,6 +495,44 @@ async fn resolve_gatekeeper_service_from_db(
         Arc::new(consent_engine),
         Arc::new(identity_registry),
     ))
+}
+
+#[cfg(feature = "production-db")]
+async fn register_governed_roles_from_db(
+    mut identity_registry: IdentityRegistry,
+    pool: &sqlx::PgPool,
+    identity_did: &str,
+    now_ms: i64,
+) -> Result<IdentityRegistry, GatekeeperError> {
+    let role_rows = crate::db::load_agent_roles(pool, identity_did, now_ms)
+        .await
+        .map_err(|error| {
+            GatekeeperError::AuthorityResolverUnavailable(format!(
+                "agent role lookup failed: {error}"
+            ))
+        })?;
+    for row in role_rows {
+        let branch = gateway_government_branch(&row.branch)?;
+        let role = Role::try_new(row.role, branch).map_err(|error| {
+            GatekeeperError::AuthorityResolverUnavailable(format!(
+                "agent role validation failed: {error}"
+            ))
+        })?;
+        identity_registry = identity_registry.with_role(identity_did, role);
+    }
+    Ok(identity_registry)
+}
+
+#[cfg(feature = "production-db")]
+fn gateway_government_branch(branch: &str) -> Result<GovernmentBranch, GatekeeperError> {
+    match branch {
+        "executive" => Ok(GovernmentBranch::Executive),
+        "legislative" => Ok(GovernmentBranch::Legislative),
+        "judicial" => Ok(GovernmentBranch::Judicial),
+        _ => Err(GatekeeperError::AuthorityResolverUnavailable(
+            "agent role branch is not governed".to_owned(),
+        )),
+    }
 }
 
 /// Canonical tenant-qualified DAG DB writeback scope string used as the
@@ -674,7 +727,8 @@ async fn handle_dagdb_import(
             return dagdb_invalid_json_request_response("dagdb.import", &rejection);
         }
     };
-    if let Some(denied) = verify_dagdb_authority(
+    let ctx = resolve_route_context(extension);
+    if let Some(denial) = dagdb_authority_denial(
         &headers,
         &request.tenant_id,
         &request.namespace,
@@ -687,9 +741,31 @@ async fn handle_dagdb_import(
             &request.namespace,
             "dagdb:import",
         );
+        #[cfg(feature = "production-db")]
+        if let Some(pool) = &ctx.pool {
+            let receipt_tenant = mounted_audit_tenant_id(&headers, &request.tenant_id);
+            let receipt_namespace = mounted_audit_namespace(&headers, &request.namespace);
+            let request_hash = import_route_request_hash(&request).ok();
+            if let Err(error) = insert_gateway_operational_receipt_for_error(
+                pool,
+                &receipt_tenant,
+                &receipt_namespace,
+                IMPORT_ROUTE_IDEMPOTENCY_NAME,
+                "import",
+                gateway_operational_actor(&request.requester_did),
+                &request.idempotency_key,
+                request_hash,
+                denial.status,
+                denial.error_code,
+            )
+            .await
+            {
+                return *error;
+            }
+        }
+        let denied = dagdb_authority_denial_response(denial, false);
         return denied;
     }
-    let ctx = resolve_route_context(extension);
     #[cfg(feature = "production-db")]
     {
         let session_actor = match verify_dagdb_session_authority(
@@ -726,7 +802,8 @@ async fn handle_dagdb_export(
             return dagdb_invalid_json_request_response("dagdb.export", &rejection);
         }
     };
-    if let Some(denied) = verify_dagdb_authority(
+    let ctx = resolve_route_context(extension);
+    if let Some(denial) = dagdb_authority_denial(
         &headers,
         &request.tenant_id,
         &request.namespace,
@@ -739,9 +816,31 @@ async fn handle_dagdb_export(
             &request.namespace,
             "dagdb:export",
         );
+        #[cfg(feature = "production-db")]
+        if let Some(pool) = &ctx.pool {
+            let receipt_tenant = mounted_audit_tenant_id(&headers, &request.tenant_id);
+            let receipt_namespace = mounted_audit_namespace(&headers, &request.namespace);
+            let request_hash = export_route_request_hash(&request).ok();
+            if let Err(error) = insert_gateway_operational_receipt_for_error(
+                pool,
+                &receipt_tenant,
+                &receipt_namespace,
+                EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                "export",
+                gateway_operational_actor(&request.requester_did),
+                &request.idempotency_key,
+                request_hash,
+                denial.status,
+                denial.error_code,
+            )
+            .await
+            {
+                return *error;
+            }
+        }
+        let denied = dagdb_authority_denial_response(denial, false);
         return denied;
     }
-    let ctx = resolve_route_context(extension);
     #[cfg(feature = "production-db")]
     {
         let session_actor = match verify_dagdb_session_authority(
@@ -910,15 +1009,30 @@ async fn route_handler(
     let _ = headers;
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
+        let request_hash = request_hash(
+            "dagdb.route",
+            &request.tenant_id,
+            &request.namespace,
+            &request,
+        )
+        .ok();
         let signature = match header_text(headers, WRITE_SIGNATURE_HEADER) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.route",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "write_signature_required",
                     "DAG DB route persistence requires x-exo-write-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let default_route_approval_signature = match header_text(
@@ -927,12 +1041,20 @@ async fn route_handler(
         ) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.route",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "default_route_approval_signature_required",
                     "DAG DB default route finality requires x-exo-default-route-approval-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let default_route_approval_did = match header_text(
@@ -941,12 +1063,20 @@ async fn route_handler(
         ) {
             Some(did) => did.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.route",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "default_route_approval_authority_required",
                     "DAG DB default route finality requires x-exo-default-route-approval-did header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let service = match ctx
@@ -1023,15 +1153,30 @@ async fn gated_context_packet_handler(
     let _ = headers;
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
+        let request_hash = request_hash(
+            "dagdb.context_packet",
+            &request.tenant_id,
+            &request.namespace,
+            &request,
+        )
+        .ok();
         let signature = match header_text(headers, WRITE_SIGNATURE_HEADER) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.context_packet",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "write_signature_required",
                     "DAG DB context packet persistence requires x-exo-write-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let context_packet_approval_signature = match header_text(
@@ -1040,12 +1185,20 @@ async fn gated_context_packet_handler(
         ) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.context_packet",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "context_packet_approval_signature_required",
                     "DAG DB context packet finality requires x-exo-context-packet-approval-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let context_packet_approval_did = match header_text(
@@ -1054,12 +1207,20 @@ async fn gated_context_packet_handler(
         ) {
             Some(did) => did.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.context_packet",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "context_packet_approval_authority_required",
                     "DAG DB context packet finality requires x-exo-context-packet-approval-did header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let service = match ctx
@@ -1196,60 +1357,107 @@ async fn writeback_handler(
     let _ = (ctx, headers);
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
+        let request_hash = request_hash(
+            "dagdb.writeback",
+            &request.tenant_id,
+            &request.namespace,
+            &request,
+        )
+        .ok();
         let signature = match header_text(headers, WRITE_SIGNATURE_HEADER) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.writeback",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "write_signature_required",
                     "DAG DB writeback requires x-exo-write-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let lifecycle_signature = match header_text(headers, LIFECYCLE_SIGNATURE_HEADER) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.writeback",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "lifecycle_signature_required",
                     "DAG DB writeback lifecycle persistence requires x-exo-lifecycle-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let continuation_signature = match header_text(headers, CONTINUATION_SIGNATURE_HEADER) {
             Some(signature) => signature.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.writeback",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "continuation_signature_required",
                     "DAG DB writeback continuation persistence requires x-exo-continuation-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let lifecycle_approval_did = match header_text(headers, LIFECYCLE_APPROVAL_DID_HEADER) {
             Some(did) => did.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.writeback",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "lifecycle_approval_authority_required",
                     "DAG DB writeback lifecycle finality requires x-exo-lifecycle-approval-did header",
                     true,
-                );
+                )
+                .await;
             }
         };
         let continuation_approval_did = match header_text(headers, CONTINUATION_APPROVAL_DID_HEADER)
         {
             Some(did) => did.to_owned(),
             None => {
-                return dagdb_error_response(
+                return mounted_dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    "dagdb.writeback",
+                    &request.idempotency_key,
+                    &request.requesting_agent_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "continuation_approval_authority_required",
                     "DAG DB writeback continuation finality requires x-exo-continuation-approval-did header",
                     true,
-                );
+                )
+                .await;
             }
         };
         let service = match ctx
@@ -1356,12 +1564,20 @@ async fn import_handler(
                     namespace = %request.namespace,
                     "DAG DB import rejected because write signature is missing"
                 );
-                return dagdb_error_response(
+                return dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    IMPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "write_signature_required",
                     "DAG DB import requires x-exo-write-signature header",
                     false,
-                );
+                )
+                .await;
             }
         };
         let replayed_response = match reserve_gateway_idempotency_key(
@@ -1371,12 +1587,14 @@ async fn import_handler(
             IMPORT_ROUTE_IDEMPOTENCY_NAME,
             &request.idempotency_key,
             request_hash,
+            &request.requester_did,
             "import",
         )
         .await
         {
             Ok(GatewayIdempotencyDecision::Reserved) => None,
             Ok(GatewayIdempotencyDecision::Replayed(response)) => Some(response),
+            Ok(GatewayIdempotencyDecision::Failed(response)) => return *response,
             Err(response) => return *response,
         };
         let service = match ctx
@@ -1408,7 +1626,17 @@ async fn import_handler(
                     namespace = %request.namespace,
                     "DAG DB import authority resolver failed closed"
                 );
-                return handler_error.into_response();
+                return handler_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    IMPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
+                    handler_error,
+                )
+                .await;
             }
         };
         let authorization_payload_hash = match gated_import_authorization(
@@ -1441,7 +1669,17 @@ async fn import_handler(
                     namespace = %request.namespace,
                     "DAG DB import gate failed closed"
                 );
-                return error.into_response();
+                return handler_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    IMPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
+                    error,
+                )
+                .await;
             }
         };
         if let Some(response) = replayed_response {
@@ -1529,6 +1767,10 @@ async fn export_handler(
     let _ = &scope;
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
+        let request_hash = match export_route_request_hash(&request) {
+            Ok(request_hash) => request_hash,
+            Err(response) => return *response,
+        };
         let signature = match header_text(headers, WRITE_SIGNATURE_HEADER) {
             Some(signature) => signature.to_owned(),
             None => {
@@ -1540,17 +1782,21 @@ async fn export_handler(
                     namespace = %request.namespace,
                     "DAG DB export rejected because write signature is missing"
                 );
-                return dagdb_error_response(
+                return dagdb_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
                     StatusCode::BAD_REQUEST,
                     "write_signature_required",
                     "DAG DB export requires x-exo-write-signature header",
                     false,
-                );
+                )
+                .await;
             }
-        };
-        let request_hash = match export_route_request_hash(&request) {
-            Ok(request_hash) => request_hash,
-            Err(response) => return *response,
         };
         let replayed_response = match reserve_gateway_idempotency_key(
             pool,
@@ -1559,12 +1805,14 @@ async fn export_handler(
             EXPORT_ROUTE_IDEMPOTENCY_NAME,
             &request.idempotency_key,
             request_hash,
+            &request.requester_did,
             "export",
         )
         .await
         {
             Ok(GatewayIdempotencyDecision::Reserved) => None,
             Ok(GatewayIdempotencyDecision::Replayed(response)) => Some(response),
+            Ok(GatewayIdempotencyDecision::Failed(response)) => return *response,
             Err(response) => return *response,
         };
         let service = match ctx
@@ -1596,7 +1844,17 @@ async fn export_handler(
                     namespace = %request.namespace,
                     "DAG DB export authority resolver failed closed"
                 );
-                return handler_error.into_response();
+                return handler_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
+                    handler_error,
+                )
+                .await;
             }
         };
         let authorization_payload_hash = match gated_export_authorization(
@@ -1630,7 +1888,17 @@ async fn export_handler(
                     namespace = %request.namespace,
                     "DAG DB export gate failed closed"
                 );
-                return error.into_response();
+                return handler_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
+                    error,
+                )
+                .await;
             }
         };
         if let Some(response) = replayed_response {
@@ -1639,44 +1907,63 @@ async fn export_handler(
         match exo_dag_db_postgres::postgres::kg_export::build_kg_portable_export(pool, &scope, &[])
             .await
         {
-            Ok(export) => match export_response_from_portable(request.clone(), export) {
-                Ok(response) => {
-                    if let Err(error) = store_gateway_idempotency_response(
+            Ok(export) => {
+                if let Err(error) =
+                    exo_dag_db_postgres::postgres::kg_export::persist_kg_portable_export_with_idempotency_key(
                         pool,
-                        &response.tenant_id,
-                        &response.namespace,
-                        EXPORT_ROUTE_IDEMPOTENCY_NAME,
-                        &response.idempotency_key,
-                        request_hash,
-                        StatusCode::OK,
-                        serde_json::to_value(&response)
-                            .map_err(|_| export_idempotency_unavailable_response()),
-                        Some(authorization_payload_hash),
-                        "export",
+                        &export,
+                        &request.requester_did,
+                        &request.idempotency_key,
                     )
                     .await
-                    {
-                        return *error;
-                    }
-                    info!(
-                        route = "dagdb.export",
-                        status = 200,
-                        tenant_id = %response.tenant_id,
-                        namespace = %response.namespace,
-                        export_status = %response.export_status,
-                        "DAG DB export built from database"
-                    );
-                    return (StatusCode::OK, Json(response)).into_response();
-                }
-                Err(response) => {
+                {
                     if let Err(cleanup_error) =
                         cleanup_export_idempotency_reservation(pool, &request, request_hash).await
                     {
                         return *cleanup_error;
                     }
-                    return *response;
+                    return dagdb_export_adapter_error_response(&request, &error);
                 }
-            },
+                match export_response_from_portable(request.clone(), export) {
+                    Ok(response) => {
+                        if let Err(error) = store_gateway_idempotency_response(
+                            pool,
+                            &response.tenant_id,
+                            &response.namespace,
+                            EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                            &response.idempotency_key,
+                            request_hash,
+                            StatusCode::OK,
+                            serde_json::to_value(&response)
+                                .map_err(|_| export_idempotency_unavailable_response()),
+                            Some(authorization_payload_hash),
+                            "export",
+                        )
+                        .await
+                        {
+                            return *error;
+                        }
+                        info!(
+                            route = "dagdb.export",
+                            status = 200,
+                            tenant_id = %response.tenant_id,
+                            namespace = %response.namespace,
+                            export_status = %response.export_status,
+                            "DAG DB export built from database"
+                        );
+                        return (StatusCode::OK, Json(response)).into_response();
+                    }
+                    Err(response) => {
+                        if let Err(cleanup_error) =
+                            cleanup_export_idempotency_reservation(pool, &request, request_hash)
+                                .await
+                        {
+                            return *cleanup_error;
+                        }
+                        return *response;
+                    }
+                }
+            }
             Err(error) => {
                 if let Err(cleanup_error) =
                     cleanup_export_idempotency_reservation(pool, &request, request_hash).await
@@ -2026,6 +2313,7 @@ fn prevalidate_writeback_d5_gates(
             .map_err(DagDbHandlerError::from_gatekeeper)?;
     validate_gateway_signature_for_registered_did(
         service,
+        agent_did,
         lifecycle_approval_did,
         &lifecycle_payload_hash,
         lifecycle_signature,
@@ -2036,6 +2324,7 @@ fn prevalidate_writeback_d5_gates(
             .map_err(DagDbHandlerError::from_gatekeeper)?;
     validate_gateway_signature_for_registered_did(
         service,
+        agent_did,
         continuation_approval_did,
         &continuation_payload_hash,
         continuation_signature,
@@ -2071,6 +2360,7 @@ fn validate_gateway_approval_payload(
     validate_external_finality_authority(requesting_agent_did, approval_authority_did)?;
     validate_gateway_signature_for_registered_did(
         service,
+        requesting_agent_did,
         approval_authority_did,
         payload_hash,
         signature,
@@ -2094,15 +2384,17 @@ fn validate_external_finality_authority(
 #[cfg(feature = "production-db")]
 fn validate_gateway_signature_for_registered_did(
     service: &DagDbGatekeeperService,
+    requesting_agent_did: &str,
     authority_did: &str,
     payload_hash: &[u8; 32],
     signature: &str,
 ) -> Result<(), DagDbHandlerError> {
-    match verify_write_signature(
+    match exo_gatekeeper::dagdb_gate::verify_production_finality_authority(
         service.identity_registry.as_ref(),
+        requesting_agent_did,
+        authority_did,
         payload_hash,
         signature,
-        authority_did,
     ) {
         Ok(true) => Ok(()),
         Ok(false) | Err(_) => Err(DagDbHandlerError::external_finality_denied()),
@@ -2622,42 +2914,61 @@ fn default_route_acceptance_evidence(
     let approval_payload_hash_hex = hex::encode(approval_payload_hash);
     let approved_at = gateway_record_stamp("dagdb.route.approved_at", &request.idempotency_key)?;
     Ok(DefaultRouteAcceptanceEvidence {
-        production_default_route_approval_ref: hash_hex(
-            "dagdb.gateway.default_route.external_production_approval",
-            &(
-                &request.tenant_id,
-                &request.namespace,
-                &request.requesting_agent_did,
-                &response.route_id,
-                &request.idempotency_key,
-                approval_authority_did,
-                &approval_payload_hash_hex,
-                approval_signature,
-                &approved_at,
-            ),
-        )?,
-        packet_quality_review_ref: hash_hex(
-            "dagdb.gateway.default_route.packet_quality",
-            &(
-                &request.tenant_id,
-                &request.namespace,
-                &response.route_id,
-                &request.task_signature_hash,
-                approval_authority_did,
-                &approval_payload_hash_hex,
-            ),
-        )?,
-        finality_ref: hash_hex(
-            "dagdb.gateway.default_route.external_finality",
-            &(
-                &response.receipt_hash,
-                &request.idempotency_key,
-                approval_authority_did,
-                approval_signature,
-                &approval_payload_hash_hex,
-                &approved_at,
-            ),
-        )?,
+        production_default_route_approval_ref: format!(
+            "external-production-approval:{}",
+            hash_hex(
+                "dagdb.gateway.default_route.external_production_approval",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    &request.requesting_agent_did,
+                    &response.route_id,
+                    &request.idempotency_key,
+                    approval_authority_did,
+                    &approval_payload_hash_hex,
+                    approval_signature,
+                    &approved_at,
+                ),
+            )?
+        ),
+        packet_quality_review_ref: format!(
+            "external-packet-quality-review:{}",
+            hash_hex(
+                "dagdb.gateway.default_route.packet_quality",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    &response.route_id,
+                    &request.task_signature_hash,
+                    approval_authority_did,
+                    &approval_payload_hash_hex,
+                ),
+            )?
+        ),
+        finality_ref: format!(
+            "external-finality:{}",
+            hash_hex(
+                "dagdb.gateway.default_route.external_finality",
+                &(
+                    &response.receipt_hash,
+                    &request.idempotency_key,
+                    approval_authority_did,
+                    approval_signature,
+                    &approval_payload_hash_hex,
+                    &approved_at,
+                ),
+            )?
+        ),
+        tenant_id: request.tenant_id.clone(),
+        memory_namespace: request.namespace.clone(),
+        actor_id: request.requesting_agent_did.clone(),
+        route_id: response.route_id.clone(),
+        request_id: request.idempotency_key.clone(),
+        payload_hash: approval_payload_hash_hex.clone(),
+        receipt_payload_hash: approval_payload_hash_hex,
+        authority_did: approval_authority_did.to_owned(),
+        authority_signature: approval_signature.to_owned(),
+        approved_at,
     })
 }
 
@@ -2673,43 +2984,63 @@ fn context_packet_acceptance_evidence(
     let approved_at =
         gateway_record_stamp("dagdb.context_packet.approved_at", &request.idempotency_key)?;
     Ok(ContextPacketAcceptanceEvidence {
-        production_default_route_approval_ref: hash_hex(
-            "dagdb.gateway.context_packet.external_production_approval",
-            &(
-                &request.tenant_id,
-                &request.namespace,
-                &request.requesting_agent_did,
-                &response.route_id,
-                &response.context_packet_id,
-                &request.request_id,
-                approval_authority_did,
-                &approval_payload_hash_hex,
-                approval_signature,
-                &approved_at,
-            ),
-        )?,
-        packet_quality_review_ref: hash_hex(
-            "dagdb.gateway.context_packet.quality_review",
-            &(
-                &request.tenant_id,
-                &request.namespace,
-                &response.context_packet_id,
-                &response.packet_hash,
-                approval_authority_did,
-                &approval_payload_hash_hex,
-            ),
-        )?,
-        finality_ref: hash_hex(
-            "dagdb.gateway.context_packet.external_finality",
-            &(
-                &response.receipt_hash,
-                &request.idempotency_key,
-                approval_authority_did,
-                approval_signature,
-                &approval_payload_hash_hex,
-                &approved_at,
-            ),
-        )?,
+        production_default_route_approval_ref: format!(
+            "external-production-approval:{}",
+            hash_hex(
+                "dagdb.gateway.context_packet.external_production_approval",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    &request.requesting_agent_did,
+                    &response.route_id,
+                    &response.context_packet_id,
+                    &request.request_id,
+                    approval_authority_did,
+                    &approval_payload_hash_hex,
+                    approval_signature,
+                    &approved_at,
+                ),
+            )?
+        ),
+        packet_quality_review_ref: format!(
+            "external-packet-quality-review:{}",
+            hash_hex(
+                "dagdb.gateway.context_packet.quality_review",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    &response.context_packet_id,
+                    &response.packet_hash,
+                    approval_authority_did,
+                    &approval_payload_hash_hex,
+                ),
+            )?
+        ),
+        finality_ref: format!(
+            "external-finality:{}",
+            hash_hex(
+                "dagdb.gateway.context_packet.external_finality",
+                &(
+                    &response.receipt_hash,
+                    &request.idempotency_key,
+                    approval_authority_did,
+                    approval_signature,
+                    &approval_payload_hash_hex,
+                    &approved_at,
+                ),
+            )?
+        ),
+        tenant_id: request.tenant_id.clone(),
+        memory_namespace: request.namespace.clone(),
+        actor_id: request.requesting_agent_did.clone(),
+        route_id: response.route_id.clone(),
+        packet_id: response.context_packet_id.clone(),
+        request_id: request.request_id.clone(),
+        payload_hash: approval_payload_hash_hex.clone(),
+        receipt_payload_hash: approval_payload_hash_hex,
+        authority_did: approval_authority_did.to_owned(),
+        authority_signature: approval_signature.to_owned(),
+        approved_at,
     })
 }
 
@@ -3500,12 +3831,19 @@ fn verify_dagdb_authority(
     action: &str,
 ) -> Option<Response> {
     let denial = dagdb_authority_denial(headers, tenant_id, namespace, action)?;
-    Some(match denial.error_code {
+    Some(dagdb_authority_denial_response(denial, false))
+}
+
+fn dagdb_authority_denial_response(
+    denial: DagDbAuthorityDenial,
+    requires_council_review: bool,
+) -> Response {
+    match denial.error_code {
         "unauthenticated" => dagdb_unauthenticated_response(false),
-        "tenant_scope_mismatch" => dagdb_tenant_scope_mismatch_response(false),
-        "authority_denied" => dagdb_authority_required_response(false),
-        _ => dagdb_authority_required_response(false),
-    })
+        "tenant_scope_mismatch" => dagdb_tenant_scope_mismatch_response(requires_council_review),
+        "authority_denied" => dagdb_authority_required_response(requires_council_review),
+        _ => dagdb_authority_required_response(requires_council_review),
+    }
 }
 
 /// Identity established by binding a bearer token to a live DB-backed session.
@@ -4609,6 +4947,7 @@ fn export_route_request_hash(request: &DagDbExportRequest) -> Result<Hash256, Bo
 enum GatewayIdempotencyDecision {
     Reserved,
     Replayed(CachedGatewayIdempotencyResponse),
+    Failed(Box<Response>),
 }
 
 #[cfg(feature = "production-db")]
@@ -4618,13 +4957,15 @@ struct CachedGatewayIdempotencyResponse {
 }
 
 #[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
 async fn reserve_gateway_idempotency_key(
     pool: &sqlx::PgPool,
     tenant_id: &str,
     namespace: &str,
-    route_name: &str,
+    route_name: &'static str,
     idempotency_key: &str,
     request_hash: Hash256,
+    actor_did: &str,
     operation: &'static str,
 ) -> Result<GatewayIdempotencyDecision, Box<Response>> {
     let response_body = json!({
@@ -4694,6 +5035,7 @@ async fn reserve_gateway_idempotency_key(
             route_name,
             idempotency_key,
             request_hash,
+            actor_did,
             operation,
         )
         .await?
@@ -4708,7 +5050,10 @@ async fn reserve_gateway_idempotency_key(
         operation,
     )
     .await?;
-    Ok(decision)
+    match decision {
+        GatewayIdempotencyDecision::Failed(response) => Err(response),
+        decision => Ok(decision),
+    }
 }
 
 #[cfg(feature = "production-db")]
@@ -4757,6 +5102,350 @@ async fn commit_gateway_idempotency_transaction(
     })
 }
 
+#[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
+async fn dagdb_operational_error_response(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    namespace: &str,
+    route_name: &'static str,
+    idempotency_key: &str,
+    actor_did: &str,
+    request_hash: Hash256,
+    status: StatusCode,
+    error_code: &str,
+    message: impl Into<String>,
+    requires_council_review: bool,
+) -> Response {
+    let message = message.into();
+    let _ = insert_gateway_operational_receipt_for_error(
+        pool,
+        tenant_id,
+        namespace,
+        route_name,
+        gateway_operation_from_route_name(route_name),
+        gateway_operational_actor(actor_did),
+        idempotency_key,
+        Some(request_hash),
+        status,
+        error_code,
+    )
+    .await;
+    dagdb_error_response(status, error_code, message, requires_council_review)
+}
+
+#[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
+async fn handler_operational_error_response(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    namespace: &str,
+    route_name: &'static str,
+    idempotency_key: &str,
+    actor_did: &str,
+    request_hash: Hash256,
+    error: DagDbHandlerError,
+) -> Response {
+    if let Err(audit_error) = insert_gateway_operational_receipt_for_error(
+        pool,
+        tenant_id,
+        namespace,
+        route_name,
+        gateway_operation_from_route_name(route_name),
+        gateway_operational_actor(actor_did),
+        idempotency_key,
+        Some(request_hash),
+        error.status(),
+        error.error_code(),
+    )
+    .await
+    {
+        return *audit_error;
+    }
+    error.into_response()
+}
+
+#[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
+async fn mounted_dagdb_operational_error_response(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    namespace: &str,
+    route_name: &'static str,
+    idempotency_key: &str,
+    actor_did: &str,
+    request_hash: Option<Hash256>,
+    status: StatusCode,
+    error_code: &str,
+    message: impl Into<String>,
+    requires_council_review: bool,
+) -> Response {
+    let message = message.into();
+    let _ = insert_gateway_operational_receipt_for_error(
+        pool,
+        tenant_id,
+        namespace,
+        route_name,
+        gateway_operation_from_route_name(route_name),
+        gateway_operational_actor(actor_did),
+        idempotency_key,
+        request_hash,
+        status,
+        error_code,
+    )
+    .await;
+    dagdb_error_response(status, error_code, message, requires_council_review)
+}
+
+#[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
+async fn insert_gateway_operational_receipt_for_error(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    namespace: &str,
+    route_name: &'static str,
+    operation: &'static str,
+    actor_did: &str,
+    idempotency_key: &str,
+    request_hash: Option<Hash256>,
+    status: StatusCode,
+    error_code: &str,
+) -> Result<(), Box<Response>> {
+    let Some(event_type) = receipt_event_type_for_error_code(error_code) else {
+        return Ok(());
+    };
+    insert_gateway_operational_receipt(
+        pool,
+        GatewayOperationalReceipt {
+            tenant_id,
+            namespace,
+            route_name,
+            operation,
+            actor_did,
+            idempotency_key,
+            request_hash,
+            event_type,
+            status,
+            error_code: Some(error_code),
+        },
+    )
+    .await
+}
+
+#[cfg(feature = "production-db")]
+#[derive(Clone, Copy)]
+struct GatewayOperationalReceipt<'a> {
+    tenant_id: &'a str,
+    namespace: &'a str,
+    route_name: &'static str,
+    operation: &'static str,
+    actor_did: &'a str,
+    idempotency_key: &'a str,
+    request_hash: Option<Hash256>,
+    event_type: ReceiptEventType,
+    status: StatusCode,
+    error_code: Option<&'a str>,
+}
+
+#[cfg(feature = "production-db")]
+async fn insert_gateway_operational_receipt(
+    pool: &sqlx::PgPool,
+    receipt: GatewayOperationalReceipt<'_>,
+) -> Result<(), Box<Response>> {
+    let mut tx = match begin_tenant_transaction(pool, receipt.tenant_id).await {
+        Ok(tx) => tx,
+        Err(_) => return Err(operational_audit_unavailable_response(receipt)),
+    };
+    if let Err(error) = insert_gateway_operational_receipt_in_transaction(&mut tx, receipt).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    tx.commit()
+        .await
+        .map_err(|_| operational_audit_unavailable_response(receipt))?;
+    Ok(())
+}
+
+#[cfg(feature = "production-db")]
+async fn insert_gateway_operational_receipt_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    receipt: GatewayOperationalReceipt<'_>,
+) -> Result<u64, Box<Response>> {
+    let idempotency_ref = idempotency_ref(receipt.idempotency_key);
+    let request_hash = receipt.request_hash.map(|hash| hash.to_string());
+    let event_type = receipt_event_type_name(receipt.event_type);
+    let attempt_ordinal = next_gateway_operational_attempt_ordinal(
+        tx,
+        receipt,
+        &idempotency_ref,
+        request_hash.as_deref(),
+    )
+    .await?;
+    let receipt_body = json!({
+        "route": receipt.route_name,
+        "operation": receipt.operation,
+        "tenant_id": receipt.tenant_id,
+        "namespace": receipt.namespace,
+        "idempotency_ref": idempotency_ref,
+        "request_hash": request_hash,
+        "status": receipt.status.as_u16(),
+        "error_code": receipt.error_code,
+        "event_type": event_type,
+        "actor_did": receipt.actor_did,
+        "attempt_ordinal": attempt_ordinal,
+        "source": GATEWAY_OPERATIONAL_AUDIT_SOURCE,
+    });
+    let event_body_hash = gateway_operational_event_body_hash(&receipt_body)
+        .map_err(|_| operational_audit_unavailable_response(receipt))?;
+    let subject_ref = format!(
+        "{}:{}:{}:{}:{}:{}",
+        receipt.route_name,
+        event_type,
+        idempotency_ref,
+        request_hash.as_deref().unwrap_or(""),
+        receipt.error_code.unwrap_or(""),
+        attempt_ordinal
+    );
+    let event_hlc = gateway_operational_event_hlc(receipt, attempt_ordinal)?;
+    exo_dag_db_postgres::receipt::insert_operational_receipt_in_transaction(
+        tx,
+        exo_dag_db_postgres::receipt::OperationalReceiptInsert {
+            tenant_id: receipt.tenant_id,
+            namespace: receipt.namespace,
+            subject_kind: SubjectKind::Route,
+            subject_id: exo_dag_db_postgres::receipt::operational_receipt_subject_id(
+                receipt.route_name,
+                &subject_ref,
+                receipt.event_type,
+            ),
+            event_type: receipt.event_type,
+            actor_did: receipt.actor_did,
+            event_hlc,
+            event_body_hash,
+            receipt_body,
+        },
+    )
+    .await
+    .map_err(|_| operational_audit_unavailable_response(receipt))
+}
+
+#[cfg(feature = "production-db")]
+fn gateway_operational_event_body_hash<T: Serialize>(
+    body: &T,
+) -> Result<Hash256, ciborium::ser::Error<std::io::Error>> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&("dagdb.gateway.operational_receipt", body), &mut bytes)?;
+    Ok(Hash256::digest(&bytes))
+}
+
+#[cfg(feature = "production-db")]
+async fn next_gateway_operational_attempt_ordinal(
+    tx: &mut Transaction<'_, Postgres>,
+    receipt: GatewayOperationalReceipt<'_>,
+    idempotency_ref: &str,
+    request_hash: Option<&str>,
+) -> Result<i64, Box<Response>> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dagdb_receipts \
+         WHERE tenant_id = $1 AND namespace = $2 AND event_type = $3 \
+           AND receipt_body->>'route' = $4 \
+           AND COALESCE(receipt_body->>'idempotency_ref', '') = $5 \
+           AND COALESCE(receipt_body->>'request_hash', '') = $6 \
+           AND COALESCE(receipt_body->>'error_code', '') = $7",
+    )
+    .bind(receipt.tenant_id)
+    .bind(receipt.namespace)
+    .bind(receipt_event_type_name(receipt.event_type))
+    .bind(receipt.route_name)
+    .bind(idempotency_ref)
+    .bind(request_hash.unwrap_or(""))
+    .bind(receipt.error_code.unwrap_or(""))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|_| operational_audit_unavailable_response(receipt))?;
+    Ok(count + 1)
+}
+
+#[cfg(feature = "production-db")]
+fn gateway_operational_event_hlc(
+    receipt: GatewayOperationalReceipt<'_>,
+    attempt_ordinal: i64,
+) -> Result<Timestamp, Box<Response>> {
+    let logical = u32::try_from(attempt_ordinal)
+        .map_err(|_| operational_audit_unavailable_response(receipt))?;
+    Ok(Timestamp::new(1, logical))
+}
+
+#[cfg(feature = "production-db")]
+fn operational_audit_unavailable_response(receipt: GatewayOperationalReceipt<'_>) -> Box<Response> {
+    warn!(
+        route = receipt.route_name,
+        status = StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        tenant_id = %receipt.tenant_id,
+        namespace = %receipt.namespace,
+        idempotency_ref = %idempotency_ref(receipt.idempotency_key),
+        "DAG DB operational receipt persistence failed closed"
+    );
+    Box::new(dagdb_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
+        format!(
+            "DAG DB {} operational audit could not be persisted",
+            receipt.operation
+        ),
+        false,
+    ))
+}
+
+#[cfg(feature = "production-db")]
+fn gateway_operational_actor(actor_did: &str) -> &str {
+    if actor_did.trim().is_empty() {
+        GATEWAY_OPERATIONAL_AUDIT_ACTOR
+    } else {
+        actor_did
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn gateway_operation_from_route_name(route_name: &str) -> &'static str {
+    match route_name {
+        IMPORT_ROUTE_IDEMPOTENCY_NAME => "import",
+        EXPORT_ROUTE_IDEMPOTENCY_NAME => "export",
+        "dagdb.route" => "route",
+        "dagdb.context_packet" => "context_packet",
+        "dagdb.writeback" => "writeback",
+        _ => "dagdb",
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn receipt_event_type_name(event_type: ReceiptEventType) -> &'static str {
+    match event_type {
+        ReceiptEventType::DagdbApprovalDenied => "dagdb_approval_denied",
+        ReceiptEventType::DagdbReplayDetected => "dagdb_replay_detected",
+        ReceiptEventType::DagdbIdempotencyConflict => "dagdb_idempotency_conflict",
+        ReceiptEventType::DagdbRlsTenantViolation => "dagdb_rls_tenant_violation",
+        ReceiptEventType::DagdbSignatureFailure => "dagdb_signature_failure",
+        _ => "dagdb_operational_event",
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn mounted_audit_tenant_id(headers: &HeaderMap, request_tenant_id: &str) -> String {
+    header_text(headers, TENANT_HEADER)
+        .filter(|tenant_id| !tenant_id.trim().is_empty())
+        .unwrap_or(request_tenant_id)
+        .to_owned()
+}
+
+#[cfg(feature = "production-db")]
+fn mounted_audit_namespace(headers: &HeaderMap, request_namespace: &str) -> String {
+    header_text(headers, NAMESPACE_HEADER)
+        .filter(|namespace| !namespace.trim().is_empty())
+        .unwrap_or(request_namespace)
+        .to_owned()
+}
+
 /// Insert a gateway idempotency reservation stamped by the trusted database
 /// clock (the gateway's approved DB-backed time source; AGENTS.md forbids
 /// `SystemTime` in production code).
@@ -4766,7 +5455,7 @@ async fn insert_gateway_idempotency_reservation(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     namespace: &str,
-    route_name: &str,
+    route_name: &'static str,
     idempotency_key: &str,
     request_hash: Hash256,
     response_hash: Hash256,
@@ -4815,7 +5504,7 @@ async fn reclaim_expired_gateway_idempotency_reservation(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     namespace: &str,
-    route_name: &str,
+    route_name: &'static str,
     idempotency_key: &str,
     request_hash: Hash256,
     operation: &'static str,
@@ -4850,13 +5539,15 @@ async fn reclaim_expired_gateway_idempotency_reservation(
 
 #[cfg(feature = "production-db")]
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 async fn replay_gateway_idempotency_response(
     pool: &sqlx::PgPool,
     tenant_id: &str,
     namespace: &str,
-    route_name: &str,
+    route_name: &'static str,
     idempotency_key: &str,
     request_hash: Hash256,
+    actor_did: &str,
     operation: &'static str,
 ) -> Result<GatewayIdempotencyDecision, Box<Response>> {
     let mut tx = begin_gateway_idempotency_transaction(
@@ -4876,6 +5567,7 @@ async fn replay_gateway_idempotency_response(
         route_name,
         idempotency_key,
         request_hash,
+        actor_did,
         operation,
     )
     .await?;
@@ -4889,17 +5581,22 @@ async fn replay_gateway_idempotency_response(
         operation,
     )
     .await?;
-    Ok(decision)
+    match decision {
+        GatewayIdempotencyDecision::Failed(response) => Err(response),
+        decision => Ok(decision),
+    }
 }
 
 #[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
 async fn replay_gateway_idempotency_response_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     namespace: &str,
-    route_name: &str,
+    route_name: &'static str,
     idempotency_key: &str,
     request_hash: Hash256,
+    actor_did: &str,
     operation: &'static str,
 ) -> Result<GatewayIdempotencyDecision, Box<Response>> {
     let unavailable = || {
@@ -4940,14 +5637,35 @@ async fn replay_gateway_idempotency_response_in_transaction(
         );
     })?;
     if existing_hash != request_hash {
-        return Err(idempotency_conflict_response(operation));
+        insert_gateway_operational_receipt_in_transaction(
+            tx,
+            GatewayOperationalReceipt {
+                tenant_id,
+                namespace,
+                route_name,
+                operation,
+                actor_did: gateway_operational_actor(actor_did),
+                idempotency_key,
+                request_hash: Some(request_hash),
+                event_type: ReceiptEventType::DagdbIdempotencyConflict,
+                status: StatusCode::CONFLICT,
+                error_code: Some("idempotency_key_conflict"),
+            },
+        )
+        .await
+        .map_err(|_| unavailable())?;
+        return Ok(GatewayIdempotencyDecision::Failed(
+            idempotency_conflict_response(operation),
+        ));
     }
 
     let mut body: Value = row.try_get("response_body").map_err(|_| unavailable())?;
     if body.get("idempotency_status").and_then(Value::as_str)
         == Some(RESERVED_IDEMPOTENCY_BODY_STATUS)
     {
-        return Err(idempotency_in_progress_response(operation));
+        return Ok(GatewayIdempotencyDecision::Failed(
+            idempotency_in_progress_response(operation),
+        ));
     }
     let authorization_payload_hash = gateway_authorization_payload_hash_from_cached_body(
         route_name,
@@ -4956,6 +5674,14 @@ async fn replay_gateway_idempotency_response_in_transaction(
         namespace,
         idempotency_key,
         &mut body,
+    )?;
+    mark_gateway_idempotency_replay_status(
+        &mut body,
+        route_name,
+        operation,
+        tenant_id,
+        namespace,
+        idempotency_key,
     )?;
 
     let status = status_from_idempotency_row(
@@ -4973,6 +5699,23 @@ async fn replay_gateway_idempotency_response_in_transaction(
             StatusCode::SERVICE_UNAVAILABLE,
         );
     })?;
+    insert_gateway_operational_receipt_in_transaction(
+        tx,
+        GatewayOperationalReceipt {
+            tenant_id,
+            namespace,
+            route_name,
+            operation,
+            actor_did: gateway_operational_actor(actor_did),
+            idempotency_key,
+            request_hash: Some(request_hash),
+            event_type: ReceiptEventType::DagdbReplayDetected,
+            status,
+            error_code: None,
+        },
+    )
+    .await
+    .map_err(|_| unavailable())?;
     Ok(GatewayIdempotencyDecision::Replayed(
         CachedGatewayIdempotencyResponse {
             response: (status, Json(body)).into_response(),
@@ -5025,6 +5768,34 @@ fn gateway_authorization_payload_hash_from_cached_body(
         fields.remove(GATEWAY_AUTHORIZATION_PAYLOAD_HASH_FIELD);
     }
     Ok(Some(authorization_payload_hash))
+}
+
+#[cfg(feature = "production-db")]
+fn mark_gateway_idempotency_replay_status(
+    body: &mut Value,
+    route_name: &str,
+    operation: &'static str,
+    tenant_id: &str,
+    namespace: &str,
+    idempotency_key: &str,
+) -> Result<(), Box<Response>> {
+    let Value::Object(fields) = body else {
+        log_idempotency_failure(
+            route_name,
+            "replay",
+            operation,
+            tenant_id,
+            namespace,
+            idempotency_key,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+        return Err(idempotency_unavailable_response(operation));
+    };
+    fields.insert(
+        "idempotency_status".to_owned(),
+        json!(REPLAYED_IDEMPOTENCY_BODY_STATUS),
+    );
+    Ok(())
 }
 
 #[cfg(feature = "production-db")]
@@ -5660,6 +6431,14 @@ fn import_response_from_summary(
         imported_record_count,
         receipt_path: None,
         non_claims: runtime_non_claims(),
+        idempotency_status: Some(
+            if summary.replayed {
+                REPLAYED_IDEMPOTENCY_BODY_STATUS
+            } else {
+                STORED_IDEMPOTENCY_BODY_STATUS
+            }
+            .to_owned(),
+        ),
     })
 }
 
@@ -5728,6 +6507,7 @@ fn export_response_from_portable(
         exported_record_count,
         report_path: None,
         non_claims: runtime_non_claims(),
+        idempotency_status: Some(STORED_IDEMPOTENCY_BODY_STATUS.to_owned()),
     })
 }
 
@@ -6218,9 +6998,54 @@ fn dagdb_error_response(
             receipt_hash: None,
             validation_report_id: None,
             requires_council_review,
+            operational_event_type: operational_event_type_for_error_code(error_code)
+                .map(ToOwned::to_owned),
         }),
     )
         .into_response()
+}
+
+fn operational_event_type_for_error_code(error_code: &str) -> Option<&'static str> {
+    match error_code {
+        "write_signature_required"
+        | "default_route_approval_signature_required"
+        | "context_packet_approval_signature_required"
+        | "lifecycle_signature_required"
+        | "continuation_signature_required"
+        | "provenance_denied" => Some("dagdb_signature_failure"),
+        "tenant_scope_mismatch" => Some("dagdb_rls_tenant_violation"),
+        "idempotency_key_conflict" => Some("dagdb_idempotency_conflict"),
+        "approval_denied"
+        | "authority_denied"
+        | "consent_denied"
+        | "default_route_approval_authority_required"
+        | "context_packet_approval_authority_required"
+        | "lifecycle_approval_authority_required"
+        | "continuation_approval_authority_required" => Some("dagdb_approval_denied"),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn receipt_event_type_for_error_code(error_code: &str) -> Option<ReceiptEventType> {
+    match error_code {
+        "write_signature_required"
+        | "default_route_approval_signature_required"
+        | "context_packet_approval_signature_required"
+        | "lifecycle_signature_required"
+        | "continuation_signature_required"
+        | "provenance_denied" => Some(ReceiptEventType::DagdbSignatureFailure),
+        "tenant_scope_mismatch" => Some(ReceiptEventType::DagdbRlsTenantViolation),
+        "idempotency_key_conflict" => Some(ReceiptEventType::DagdbIdempotencyConflict),
+        "approval_denied"
+        | "authority_denied"
+        | "consent_denied"
+        | "default_route_approval_authority_required"
+        | "context_packet_approval_authority_required"
+        | "lifecycle_approval_authority_required"
+        | "continuation_approval_authority_required" => Some(ReceiptEventType::DagdbApprovalDenied),
+        _ => None,
+    }
 }
 
 // T1: the local-dev keypair loader (including the deterministic [0..31] seed
@@ -8414,6 +9239,7 @@ mod tests {
                 default_route_payload_hash, lifecycle_action_payload_hash,
             },
             sign_write_payload,
+            types::GovernedRoleName,
         };
         use sqlx::postgres::PgPoolOptions;
 
@@ -8538,6 +9364,13 @@ mod tests {
                 ),
                 "release build must fail closed with a typed error, never a deterministic-key signer"
             );
+        }
+
+        fn unreachable_lazy_pool() -> sqlx::PgPool {
+            PgPoolOptions::new()
+                .acquire_timeout(Duration::from_millis(50))
+                .connect_lazy("postgres://127.0.0.1:1/unreachable")
+                .expect("lazy pool")
         }
 
         #[test]
@@ -8710,9 +9543,7 @@ mod tests {
 
         #[tokio::test]
         async fn writeback_handler_requires_write_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -8726,9 +9557,7 @@ mod tests {
 
         #[tokio::test]
         async fn route_handler_requires_default_route_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let fixtures = fixtures();
             let request: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
@@ -8776,7 +9605,8 @@ mod tests {
             ctx.install_gatekeeper_profile(
                 consent_engine_for_agent(&request.tenant_id, &request.requesting_agent_did),
                 identity_registry_for_agent(&request.requesting_agent_did, &keypair)
-                    .with_public_key(authority_did, *authority_keypair.public_key().as_bytes()),
+                    .with_public_key(authority_did, *authority_keypair.public_key().as_bytes())
+                    .with_governed_role(authority_did, GovernedRoleName::Operator),
             );
             let mut headers = authorized_headers("dagdb:route");
             headers.insert(
@@ -8802,9 +9632,7 @@ mod tests {
 
         #[tokio::test]
         async fn route_handler_requires_external_default_route_approval_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let fixtures = fixtures();
             let request: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
@@ -8885,19 +9713,8 @@ mod tests {
                 default_route_payload_hash(&proposed).expect("default route approval payload hash");
             let approval_signature = sign_write_payload(&keypair, &approval_payload_hash)
                 .expect("default route self-approval signature");
-            let record = default_route_record_from_response(
-                &request,
-                &response,
-                &request.requesting_agent_did,
-                &approval_signature,
-                &approval_payload_hash,
-            )
-            .expect("default route record");
-            let signature = sign_write_payload(
-                &keypair,
-                &default_route_payload_hash(&record).expect("default route payload hash"),
-            )
-            .expect("default route signature");
+            let signature = sign_write_payload(&keypair, &approval_payload_hash)
+                .expect("default route signature");
             let service = consented_service_for_agent(
                 &keypair,
                 &request.tenant_id,
@@ -8919,10 +9736,59 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn default_route_finality_rejects_registered_non_authority_before_persistence() {
+            let keypair = KeyPair::generate();
+            let registered_non_authority_keypair = KeyPair::generate();
+            let registered_non_authority_did = "did:exo:registered-non-authority";
+            let fixtures = fixtures();
+            let request: DagDbRouteRequest = fixture(&fixtures, "requests", "route");
+            let response =
+                route_response_from_request(request.clone(), "dagdb.route").expect("route shape");
+            let proposed = default_route_candidate_from_response(&request, &response)
+                .expect("default route proposed record");
+            let approval_payload_hash =
+                default_route_payload_hash(&proposed).expect("default route approval payload hash");
+            let approval_signature =
+                sign_write_payload(&registered_non_authority_keypair, &approval_payload_hash)
+                    .expect("registered non-authority approval signature");
+            let record = default_route_record_from_response(
+                &request,
+                &response,
+                registered_non_authority_did,
+                &approval_signature,
+                &approval_payload_hash,
+            )
+            .expect("default route record");
+            let signature = sign_write_payload(
+                &keypair,
+                &default_route_payload_hash(&record).expect("default route payload hash"),
+            )
+            .expect("default route signature");
+            let service = consented_service_for_agent_and_registered_did(
+                &keypair,
+                &registered_non_authority_keypair,
+                &request.tenant_id,
+                &request.requesting_agent_did,
+                registered_non_authority_did,
+            );
+
+            let error = gated_route_response(
+                &service,
+                &request,
+                &signature,
+                &approval_signature,
+                registered_non_authority_did,
+            )
+            .await
+            .expect_err("registered non-authority approval must fail before DB persistence");
+
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), "approval_denied");
+        }
+
+        #[tokio::test]
         async fn context_packet_handler_requires_record_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let response = gated_context_packet_handler(
                 &ctx,
@@ -8940,9 +9806,7 @@ mod tests {
 
         #[tokio::test]
         async fn context_packet_handler_requires_external_approval_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let mut headers = authorized_headers("dagdb:context_packet");
             headers.insert(
@@ -9027,10 +9891,46 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn context_packet_finality_rejects_registered_non_authority_before_persistence() {
+            let keypair = KeyPair::generate();
+            let registered_non_authority_keypair = KeyPair::generate();
+            let registered_non_authority_did = "did:exo:registered-context-non-authority";
+            let request = context_packet_request("context-non-authority-finality");
+            let selected_ref = selected_context_ref();
+            let persistent = persistent_context_packet(vec![selected_ref]);
+            let response = context_packet_response_from_persistent(&request, &persistent)
+                .expect("persistent context response");
+            let proposed = context_packet_candidate_from_response(&request, &response)
+                .expect("context packet proposed record");
+            let approval_payload_hash =
+                context_packet_record_payload_hash(&proposed).expect("context approval hash");
+            let approval_signature =
+                sign_write_payload(&registered_non_authority_keypair, &approval_payload_hash)
+                    .expect("registered non-authority context approval signature");
+            let service = consented_service_for_agent_and_registered_did(
+                &keypair,
+                &registered_non_authority_keypair,
+                &request.tenant_id,
+                &request.requesting_agent_did,
+                registered_non_authority_did,
+            );
+
+            let error = validate_gateway_approval_payload(
+                &service,
+                &request.requesting_agent_did,
+                registered_non_authority_did,
+                &approval_payload_hash,
+                &approval_signature,
+            )
+            .expect_err("registered non-authority context approval must fail before persistence");
+
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), "approval_denied");
+        }
+
+        #[tokio::test]
         async fn writeback_handler_requires_d5_lifecycle_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let mut headers = authorized_headers("dagdb:writeback");
             headers.insert(WRITE_SIGNATURE_HEADER, HeaderValue::from_static("00"));
@@ -9045,9 +9945,7 @@ mod tests {
 
         #[tokio::test]
         async fn writeback_handler_requires_d5_continuation_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let mut headers = authorized_headers("dagdb:writeback");
             headers.insert(WRITE_SIGNATURE_HEADER, HeaderValue::from_static("00"));
@@ -9296,9 +10194,7 @@ mod tests {
 
         #[tokio::test]
         async fn import_handler_requires_write_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let response =
                 import_handler(&ctx, &authorized_headers("dagdb:import"), import_request()).await;
@@ -9312,9 +10208,7 @@ mod tests {
 
         #[tokio::test]
         async fn export_handler_requires_write_signature_when_pool_present() {
-            let pool = PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("lazy pool");
+            let pool = unreachable_lazy_pool();
             let ctx = DagDbRouteContext::from_pool(Some(pool));
             let response =
                 export_handler(&ctx, &authorized_headers("dagdb:export"), export_request()).await;
@@ -10083,6 +10977,85 @@ mod tests {
             assert_eq!(export_authorized, payload_hash);
         }
 
+        #[tokio::test]
+        async fn import_export_authorization_deny_cross_purpose_consent_and_signature() {
+            let keypair = KeyPair::generate();
+            let payload_hash = Hash256::digest(b"cross-purpose import/export payload");
+            let signature =
+                sign_write_payload(&keypair, payload_hash.as_bytes()).expect("write signature");
+            let pool = PgPoolOptions::new()
+                .connect_lazy("postgres://127.0.0.1:1/unreachable")
+                .expect("lazy pool");
+            let service = DagDbGatekeeperService::new(
+                pool.clone(),
+                Arc::new(
+                    ConsentEngine::default()
+                        .with_bailment(
+                            "tenant-a",
+                            BailmentState::Active {
+                                bailor: exo_core::Did::new("did:exo:bailor")
+                                    .expect("valid bailor did"),
+                                bailee: exo_core::Did::new("did:exo:importer")
+                                    .expect("valid importer did"),
+                                scope: "dag-db:writeback".to_owned(),
+                            },
+                        )
+                        .with_consent_record(DagDbConsentRecord {
+                            tenant_id: "tenant-a".to_owned(),
+                            agent_did: "did:exo:importer".to_owned(),
+                            purpose: ConsentPurpose::Import,
+                            active: true,
+                        })
+                        .with_consent_record(DagDbConsentRecord {
+                            tenant_id: "tenant-a".to_owned(),
+                            agent_did: "did:exo:exporter".to_owned(),
+                            purpose: ConsentPurpose::Export,
+                            active: true,
+                        }),
+                ),
+                Arc::new(
+                    IdentityRegistry::default()
+                        .with_public_key("did:exo:importer", *keypair.public_key().as_bytes())
+                        .with_public_key("did:exo:exporter", *keypair.public_key().as_bytes()),
+                ),
+            );
+
+            let export_with_import_consent = DagDbExportRequest {
+                requester_did: "did:exo:importer".to_owned(),
+                ..export_request()
+            };
+            let export_denied = gated_export_authorization(
+                &service,
+                &pool,
+                &export_with_import_consent,
+                Hash256::digest(b"unread export hash"),
+                &signature,
+                false,
+                Some(payload_hash),
+            )
+            .await
+            .expect_err("import consent must not authorize export");
+            assert_eq!(export_denied.status(), StatusCode::FORBIDDEN);
+            assert_eq!(export_denied.error_code(), "consent_denied");
+
+            let import_with_export_consent = DagDbImportRequest {
+                requester_did: "did:exo:exporter".to_owned(),
+                ..import_request()
+            };
+            let import_denied = gated_import_authorization(
+                &service,
+                &pool,
+                &import_with_export_consent,
+                &signature,
+                false,
+                Some(payload_hash),
+            )
+            .await
+            .expect_err("export consent must not authorize import");
+            assert_eq!(import_denied.status(), StatusCode::FORBIDDEN);
+            assert_eq!(import_denied.error_code(), "consent_denied");
+        }
+
         #[test]
         fn runtime_import_response_counts_inserted_sections_and_non_claims() {
             let request = import_request();
@@ -10189,6 +11162,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 "idem-import-1",
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10212,6 +11186,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 "idem-import-1",
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10341,6 +11316,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 idempotency_key,
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10354,6 +11330,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 idempotency_key,
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10377,6 +11354,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 idempotency_key,
                 Hash256::digest(b"different live idempotency request"),
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10414,6 +11392,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 idempotency_key,
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10462,6 +11441,7 @@ mod tests {
                     EXPORT_ROUTE_IDEMPOTENCY_NAME,
                     &export_denied_request.idempotency_key,
                     export_denied_hash,
+                    "did:exo:test-actor",
                     "export",
                 )
                 .await
@@ -10504,6 +11484,7 @@ mod tests {
                     IMPORT_ROUTE_IDEMPOTENCY_NAME,
                     cleanup_import_key,
                     cleanup_import_hash,
+                    "did:exo:test-actor",
                     "import",
                 )
                 .await
@@ -10530,6 +11511,7 @@ mod tests {
                     IMPORT_ROUTE_IDEMPOTENCY_NAME,
                     cleanup_import_key,
                     cleanup_import_hash,
+                    "did:exo:test-actor",
                     "import",
                 )
                 .await
@@ -10547,6 +11529,7 @@ mod tests {
                     EXPORT_ROUTE_IDEMPOTENCY_NAME,
                     cleanup_export_key,
                     cleanup_export_hash,
+                    "did:exo:test-actor",
                     "export",
                 )
                 .await
@@ -10573,6 +11556,7 @@ mod tests {
                     EXPORT_ROUTE_IDEMPOTENCY_NAME,
                     cleanup_export_key,
                     cleanup_export_hash,
+                    "did:exo:test-actor",
                     "export",
                 )
                 .await
@@ -10589,6 +11573,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 stale_key,
                 stale_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10698,6 +11683,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 idempotency_key,
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10747,6 +11733,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 idempotency_key,
                 request_hash,
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -10781,6 +11768,7 @@ mod tests {
                 IMPORT_ROUTE_IDEMPOTENCY_NAME,
                 conflict_key,
                 Hash256::digest(b"different expired request"),
+                "did:exo:test-actor",
                 "import",
             )
             .await
@@ -11128,6 +12116,31 @@ mod tests {
             agent_did: &str,
             authority_did: &str,
         ) -> DagDbGatekeeperService {
+            let service = consented_service_for_agent_and_registered_did(
+                agent_keypair,
+                authority_keypair,
+                tenant_id,
+                agent_did,
+                authority_did,
+            );
+            DagDbGatekeeperService::new(
+                service.pool,
+                service.consent_engine,
+                Arc::new(
+                    (*service.identity_registry)
+                        .clone()
+                        .with_governed_role(authority_did, GovernedRoleName::Operator),
+                ),
+            )
+        }
+
+        fn consented_service_for_agent_and_registered_did(
+            agent_keypair: &KeyPair,
+            registered_keypair: &KeyPair,
+            tenant_id: &str,
+            agent_did: &str,
+            registered_did: &str,
+        ) -> DagDbGatekeeperService {
             let pool = PgPoolOptions::new()
                 .acquire_timeout(Duration::from_millis(50))
                 .connect_lazy("postgres://127.0.0.1:1/unreachable")
@@ -11136,8 +12149,10 @@ mod tests {
                 pool,
                 Arc::new(consent_engine_for_agent(tenant_id, agent_did)),
                 Arc::new(
-                    identity_registry_for_agent(agent_did, agent_keypair)
-                        .with_public_key(authority_did, *authority_keypair.public_key().as_bytes()),
+                    identity_registry_for_agent(agent_did, agent_keypair).with_public_key(
+                        registered_did,
+                        *registered_keypair.public_key().as_bytes(),
+                    ),
                 ),
             )
         }

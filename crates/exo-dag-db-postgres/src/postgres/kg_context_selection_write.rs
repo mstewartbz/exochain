@@ -18,6 +18,10 @@ use crate::{
     hash::{ReceiptHashMaterial, RequestHashMaterial},
     kg_import::{hash_from_hex, stable_hash},
     metadata::{MetadataField, sanitize_runtime_metadata},
+    receipt::{
+        OperationalReceiptInsert, insert_operational_receipt_in_transaction,
+        operational_receipt_subject_id,
+    },
     scoring::{DomainError, DomainResult, hash_event_body},
 };
 
@@ -530,6 +534,9 @@ async fn write_usage_event_rows(
     receipt_hash: Hash256,
 ) -> DomainResult<u32> {
     let event_body_hash = hash_event_body(event)?;
+    insert_usage_event_approval_receipts(tx, event, memory_id).await?;
+    let record_accepted_rows =
+        insert_usage_event_record_accepted_receipt(tx, event, memory_id).await?;
     let receipt_body = json!({
         "request_id": event.request_id,
         "task_hash": event.task_hash,
@@ -552,7 +559,93 @@ async fn write_usage_event_rows(
     )
     .await?;
     let memory_rows = insert_usage_memory(tx, event, metadata, memory_id, receipt_hash).await?;
-    Ok(receipt_rows.saturating_add(memory_rows))
+    Ok(record_accepted_rows
+        .saturating_add(receipt_rows)
+        .saturating_add(memory_rows))
+}
+
+async fn insert_usage_event_approval_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DagDbGraphContextSelectionResponse,
+    memory_id: Hash256,
+) -> DomainResult<u32> {
+    let mut inserted = 0_u32;
+    for event_type in [
+        ReceiptEventType::DagdbApprovalRequestSubmitted,
+        ReceiptEventType::DagdbApprovalGranted,
+    ] {
+        let receipt_body = json!({
+            "route_name": USAGE_EVENT_ROUTE,
+            "request_id": event.request_id,
+            "task_hash": event.task_hash,
+            "source": "graph_context_selection_usage_event",
+        });
+        let event_body_hash = hash_event_body(&receipt_body)?;
+        let rows = insert_operational_receipt_in_transaction(
+            tx,
+            OperationalReceiptInsert {
+                tenant_id: &event.tenant_id,
+                namespace: &event.namespace,
+                subject_kind: SubjectKind::Memory,
+                subject_id: operational_receipt_subject_id(
+                    USAGE_EVENT_ROUTE,
+                    &memory_id.to_string(),
+                    event_type,
+                ),
+                event_type,
+                actor_did: WRITER_DID,
+                event_hlc: CREATED_AT,
+                event_body_hash,
+                receipt_body,
+            },
+        )
+        .await
+        .map_err(|error| DomainError::HashMaterial {
+            reason: error.to_string(),
+        })?;
+        inserted = inserted.saturating_add(rows_to_u32(rows)?);
+    }
+    Ok(inserted)
+}
+
+async fn insert_usage_event_record_accepted_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DagDbGraphContextSelectionResponse,
+    memory_id: Hash256,
+) -> DomainResult<u32> {
+    let event_type = ReceiptEventType::DagdbRecordAccepted;
+    let receipt_body = json!({
+        "route_name": USAGE_EVENT_ROUTE,
+        "request_id": event.request_id,
+        "task_hash": event.task_hash,
+        "selection_status": event.selection_status,
+        "selected_memory_ref_count": event.selected_memory_refs.len(),
+        "source": "graph_context_selection_usage_event",
+    });
+    let event_body_hash = hash_event_body(&receipt_body)?;
+    let rows = insert_operational_receipt_in_transaction(
+        tx,
+        OperationalReceiptInsert {
+            tenant_id: &event.tenant_id,
+            namespace: &event.namespace,
+            subject_kind: SubjectKind::Memory,
+            subject_id: operational_receipt_subject_id(
+                USAGE_EVENT_ROUTE,
+                &memory_id.to_string(),
+                event_type,
+            ),
+            event_type,
+            actor_did: WRITER_DID,
+            event_hlc: CREATED_AT,
+            event_body_hash,
+            receipt_body,
+        },
+    )
+    .await
+    .map_err(|error| DomainError::HashMaterial {
+        reason: error.to_string(),
+    })?;
+    rows_to_u32(rows)
 }
 
 async fn write_context_packet_rows(
@@ -576,7 +669,7 @@ async fn write_context_packet_rows(
             namespace: &packet.namespace,
             subject_kind: SubjectKind::ContextPacket,
             subject_id,
-            event_type: ReceiptEventType::ContextPacketCreated,
+            event_type: ReceiptEventType::DagdbRecordAccepted,
             event_body_hash,
             receipt_hash,
             receipt_body,
@@ -780,7 +873,7 @@ fn compute_context_packet_receipt_hash(packet: &DagDbGraphContextPacket) -> Doma
         subject_id,
         prev_receipt_hash: Hash256::ZERO,
         seq: 1,
-        event_type: ReceiptEventType::ContextPacketCreated,
+        event_type: ReceiptEventType::DagdbRecordAccepted,
         actor_did: WRITER_DID.to_owned(),
         event_hlc: CREATED_AT,
         event_body_hash,
@@ -1043,6 +1136,17 @@ fn event_type_sql(event_type: ReceiptEventType) -> &'static str {
         ReceiptEventType::DagFinalityCommitted => "dag_finality_committed",
         ReceiptEventType::DagFinalityFailed => "dag_finality_failed",
         ReceiptEventType::DagFinalityCompensated => "dag_finality_compensated",
+        ReceiptEventType::DagdbApprovalRequestSubmitted => "dagdb_approval_request_submitted",
+        ReceiptEventType::DagdbApprovalGranted => "dagdb_approval_granted",
+        ReceiptEventType::DagdbApprovalDenied => "dagdb_approval_denied",
+        ReceiptEventType::DagdbRecordAccepted => "dagdb_record_accepted",
+        ReceiptEventType::DagdbImportCompleted => "dagdb_import_completed",
+        ReceiptEventType::DagdbExportCompleted => "dagdb_export_completed",
+        ReceiptEventType::DagdbReplayDetected => "dagdb_replay_detected",
+        ReceiptEventType::DagdbIdempotencyConflict => "dagdb_idempotency_conflict",
+        ReceiptEventType::DagdbRlsTenantViolation => "dagdb_rls_tenant_violation",
+        ReceiptEventType::DagdbSignatureFailure => "dagdb_signature_failure",
+        ReceiptEventType::DagdbCouncilOperatorDecision => "dagdb_council_operator_decision",
     }
 }
 
@@ -1299,6 +1403,50 @@ mod tests {
         assert_eq!(
             event_type_sql(ReceiptEventType::DagFinalityCompensated),
             "dag_finality_compensated"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbApprovalRequestSubmitted),
+            "dagdb_approval_request_submitted"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbApprovalGranted),
+            "dagdb_approval_granted"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbApprovalDenied),
+            "dagdb_approval_denied"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbRecordAccepted),
+            "dagdb_record_accepted"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbImportCompleted),
+            "dagdb_import_completed"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbExportCompleted),
+            "dagdb_export_completed"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbReplayDetected),
+            "dagdb_replay_detected"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbIdempotencyConflict),
+            "dagdb_idempotency_conflict"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbRlsTenantViolation),
+            "dagdb_rls_tenant_violation"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbSignatureFailure),
+            "dagdb_signature_failure"
+        );
+        assert_eq!(
+            event_type_sql(ReceiptEventType::DagdbCouncilOperatorDecision),
+            "dagdb_council_operator_decision"
         );
     }
 

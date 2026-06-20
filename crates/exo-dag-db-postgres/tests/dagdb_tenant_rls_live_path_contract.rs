@@ -1,7 +1,7 @@
 #![cfg(feature = "postgres")]
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::{process, str::FromStr};
+use std::{collections::BTreeSet, process, str::FromStr};
 
 use exo_dag_db_postgres::postgres::{
     DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL, DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL,
@@ -20,83 +20,274 @@ const RLS_TEST_ROLE_PASSWORD: &str = "dagdb_rls_live_path_password";
 
 struct TenantTable {
     name: &'static str,
+    families: &'static [&'static str],
     expected_tenant_a_rows: i64,
 }
+
+const FAMILY_EXPORT: &str = "export";
+const FAMILY_IDEMPOTENCY: &str = "idempotency";
+const FAMILY_IMPORT: &str = "import";
+const FAMILY_LOOKUP: &str = "lookup";
+
+const EXPORT_TABLES: &[&str] = &[
+    "dagdb_exports",
+    "dagdb_export_challenges",
+    "dagdb_graph_similarity_results",
+    "dagdb_graph_canonicalization_decisions",
+    "dagdb_graph_placement_traces",
+    "dagdb_graph_route_invalidations",
+];
+const IDEMPOTENCY_TABLES: &[&str] = &[
+    "dagdb_idempotency_keys",
+    "dagdb_context_packet_records",
+    "dagdb_lifecycle_actions",
+    "dagdb_route_invalidation_events",
+    "dagdb_continuation_records",
+    "dagdb_graph_edge_tombstones",
+];
+const IMPORT_TABLES: &[&str] = &[
+    "dagdb_memory_objects",
+    "dagdb_memory_edges",
+    "dagdb_graph_nodes",
+    "dagdb_graph_edges",
+    "dagdb_graph_similarity_results",
+    "dagdb_graph_canonicalization_decisions",
+    "dagdb_graph_placement_traces",
+    "dagdb_graph_layers",
+    "dagdb_graph_layer_memberships",
+    "dagdb_graph_layer_edges",
+];
+const LOOKUP_TABLES: &[&str] = &[
+    "dagdb_receipts",
+    "dagdb_subject_receipt_heads",
+    "dagdb_memory_objects",
+    "dagdb_memory_edges",
+    "dagdb_catalog_entries",
+    "dagdb_route_receipts",
+    "dagdb_context_packets",
+    "dagdb_validation_reports",
+    "dagdb_agent_safety_scores",
+    "dagdb_inbound_agent_credentials",
+    "dagdb_council_decisions",
+    "dagdb_graph_nodes",
+    "dagdb_graph_edges",
+    "dagdb_graph_views",
+    "dagdb_graph_route_invalidations",
+    "dagdb_graph_edge_tombstones",
+    "dagdb_graph_layers",
+    "dagdb_graph_layer_memberships",
+    "dagdb_graph_layer_edges",
+    "dagdb_default_routes",
+    "dagdb_context_packet_records",
+    "dagdb_lifecycle_actions",
+    "dagdb_route_invalidation_events",
+    "dagdb_continuation_records",
+];
+const REQUIRED_TABLE_FAMILIES: &[(&str, &[&str])] = &[
+    (FAMILY_EXPORT, EXPORT_TABLES),
+    (FAMILY_IDEMPOTENCY, IDEMPOTENCY_TABLES),
+    (FAMILY_IMPORT, IMPORT_TABLES),
+    (FAMILY_LOOKUP, LOOKUP_TABLES),
+];
 
 const TENANT_TABLES: &[TenantTable] = &[
     TenantTable {
         name: "dagdb_receipts",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_subject_receipt_heads",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_memory_objects",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
         expected_tenant_a_rows: 2,
     },
     TenantTable {
+        name: "dagdb_memory_edges",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
         name: "dagdb_catalog_entries",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_route_receipts",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_context_packets",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_validation_reports",
+        families: &[FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_agent_safety_scores",
+        families: &[FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_inbound_agent_credentials",
+        families: &[FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_council_decisions",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_idempotency_keys",
+        families: &[FAMILY_IDEMPOTENCY],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_dag_outbox",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_graph_nodes",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_graph_edges",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_similarity_results",
+        families: &[FAMILY_EXPORT, FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_canonicalization_decisions",
+        families: &[FAMILY_EXPORT, FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_views",
+        families: &[FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_placement_traces",
+        families: &[FAMILY_EXPORT, FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_route_invalidations",
+        families: &[FAMILY_EXPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_edge_tombstones",
+        families: &[FAMILY_IDEMPOTENCY, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_graph_layers",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 2,
+    },
+    TenantTable {
+        name: "dagdb_graph_layer_memberships",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_graph_layer_edges",
+        families: &[FAMILY_IMPORT, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_exports",
+        families: &[FAMILY_EXPORT],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_export_challenges",
+        families: &[FAMILY_EXPORT],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_default_routes",
+        families: &[FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_context_packet_records",
+        families: &[FAMILY_IDEMPOTENCY, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_lifecycle_actions",
+        families: &[FAMILY_IDEMPOTENCY, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_route_invalidation_events",
+        families: &[FAMILY_IDEMPOTENCY, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
     TenantTable {
         name: "dagdb_continuation_records",
+        families: &[FAMILY_IDEMPOTENCY, FAMILY_LOOKUP],
         expected_tenant_a_rows: 1,
     },
 ];
+
+#[test]
+fn rls_migration_tenant_table_list_matches_test_metadata() {
+    let migration_tables = rls_migration_tenant_tables();
+    let tested_tables = tested_tenant_tables();
+    let missing: Vec<_> = migration_tables
+        .difference(&tested_tables)
+        .copied()
+        .collect();
+    let extra: Vec<_> = tested_tables
+        .difference(&migration_tables)
+        .copied()
+        .collect();
+
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "RLS contract metadata must match migration tenant tables; missing from tests: \
+         {missing:?}; extra in tests: {extra:?}"
+    );
+}
+
+#[test]
+fn rls_contract_covers_import_export_lookup_and_idempotency_table_families() {
+    for (family, required_tables) in REQUIRED_TABLE_FAMILIES {
+        let covered_tables: BTreeSet<_> = TENANT_TABLES
+            .iter()
+            .filter(|table| table.families.contains(family))
+            .map(|table| table.name)
+            .collect();
+        let missing: Vec<_> = required_tables
+            .iter()
+            .copied()
+            .filter(|table| !covered_tables.contains(table))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "RLS contract family {family} is missing tenant tables: {missing:?}"
+        );
+    }
+}
 
 #[tokio::test]
 async fn rls_requires_bound_tenant_context_for_live_path_tables() {
@@ -116,8 +307,9 @@ async fn rls_requires_bound_tenant_context_for_live_path_tables() {
             .await;
         assert!(
             result.is_err(),
-            "unbound tenant context must fail closed for {}",
-            table.name
+            "unbound tenant context must fail closed for {} ({:?})",
+            table.name,
+            table.families
         );
     }
 
@@ -168,6 +360,12 @@ async fn rls_blocks_cross_tenant_reads_and_writes_for_live_path_tables() {
             .await
             .expect("cross-tenant update is filtered by RLS")
             .rows_affected();
+        let delete_query = format!("DELETE FROM {} WHERE tenant_id = 'tenant-a'", table.name);
+        let deleted = sqlx::query(&delete_query)
+            .execute(&mut *tenant_b_tx)
+            .await
+            .expect("cross-tenant delete is filtered by RLS")
+            .rows_affected();
         tenant_b_tx
             .commit()
             .await
@@ -177,10 +375,32 @@ async fn rls_blocks_cross_tenant_reads_and_writes_for_live_path_tables() {
             "tenant-b must not update tenant-a rows for {}",
             table.name
         );
+        assert_eq!(
+            deleted, 0,
+            "tenant-b must not delete tenant-a rows for {}",
+            table.name
+        );
     }
 
     assert_tenant_mismatch_insert_is_rejected(&rls_pool.pool).await;
     rls_pool.cleanup(&db.pool).await;
+}
+
+fn rls_migration_tenant_tables() -> BTreeSet<&'static str> {
+    DAGDB_TENANT_RLS_SCHEMA_SQL
+        .lines()
+        .filter_map(|line| {
+            let table = line.trim().trim_end_matches(',');
+            table
+                .strip_prefix('\'')
+                .and_then(|table| table.strip_suffix('\''))
+                .filter(|table| table.starts_with("dagdb_"))
+        })
+        .collect()
+}
+
+fn tested_tenant_tables() -> BTreeSet<&'static str> {
+    TENANT_TABLES.iter().map(|table| table.name).collect()
 }
 
 async fn count_tenant_rows(
@@ -281,6 +501,17 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
         .await?;
     }
     sqlx::query(
+        "INSERT INTO dagdb_memory_edges \
+         (tenant_id, namespace, from_memory_id, to_memory_id, edge_type, \
+          created_at_physical_ms, created_at_logical) \
+         VALUES ($1, 'default', $2, $3, 'cites', 1, 0)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(hb(0x43))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
         "INSERT INTO dagdb_catalog_entries \
          (catalog_id, tenant_id, namespace, memory_id, catalog_level, title, summary, keywords, \
           payload_hash, source_hash, status, validation_status, council_status, latest_receipt_hash, \
@@ -353,6 +584,62 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .execute(&mut *tx)
     .await?;
     sqlx::query(
+        "INSERT INTO dagdb_agent_safety_scores \
+         (safety_score_id, tenant_id, namespace, agent_did, operator_did, \
+          window_start_physical_ms, window_start_logical, window_end_physical_ms, \
+          window_end_logical, evidence_hash, identity_bp, authority_bp, consent_bp, \
+          provenance_bp, validation_bp, recency_bp, revocation_bp, route_quality_bp, \
+          incident_penalty_bp, total_score_bp, validation_status, council_status, \
+          latest_receipt_hash, created_at_physical_ms, created_at_logical) \
+         VALUES ($1, $2, 'default', 'did:example:agent', 'did:example:operator', \
+                 1, 0, 2, 0, $3, 10000, 10000, 10000, 10000, 10000, 10000, 10000, \
+                 10000, 0, 10000, 'passed', 'not_required', $4, 1, 0)",
+    )
+    .bind(hb(0x83))
+    .bind(tenant_id)
+    .bind(hb(0x84))
+    .bind(hb(0x01))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_inbound_agent_credentials \
+         (credential_id, tenant_id, namespace, agent_did, operator_did, model_name, \
+          model_version, provider_or_builder, requested_action, requested_scope_hash, \
+          purpose, autonomy_level, nonce, expires_at_physical_ms, expires_at_logical, \
+          signature_hash, credential_status, created_at_physical_ms, created_at_logical) \
+         VALUES ($1, $2, 'default', 'did:example:agent', 'did:example:operator', \
+                 'model-rls', '1', 'provider-rls', 'route', $3, 'retrieval', \
+                 'operator_approved', 'nonce-rls', 2, 0, $4, 'active', 1, 0)",
+    )
+    .bind(hb(0x85))
+    .bind(tenant_id)
+    .bind(hb(0x86))
+    .bind(hb(0x87))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_council_decisions \
+         (decision_id, tenant_id, namespace, subject_kind, subject_id, requested_action, \
+          approved_scope_hash, risk_class, approver_did, decision_source, decision_status, \
+          reason_code, validation_report_id, route_id, context_packet_id, notes, \
+          created_at_physical_ms, created_at_logical, expires_at_physical_ms, \
+          expires_at_logical, receipt_hash) \
+         VALUES ($1, $2, 'default', 'memory', $3, 'route', $4, 'R0', \
+                 'did:example:approver', 'policy', 'approved', 'seeded_rls_contract', \
+                 $5, $6, $7, $8, 1, 0, 2, 0, $9)",
+    )
+    .bind(hb(0x88))
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(hb(0x89))
+    .bind(hb(0x80))
+    .bind(hb(0x60))
+    .bind(hb(0x70))
+    .bind(json!({"decision": "approved"}))
+    .bind(hb(0x01))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
         "INSERT INTO dagdb_idempotency_keys \
          (tenant_id, namespace, route_name, idempotency_key, request_hash, response_hash, \
           response_body, status_code, cached_failure, created_at_physical_ms, created_at_logical, \
@@ -403,6 +690,101 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .execute(&mut *tx)
     .await?;
     sqlx::query(
+        "INSERT INTO dagdb_graph_similarity_results \
+         (similarity_result_id, tenant_id, namespace, candidate_memory_id, matched_memory_id, \
+          similarity_type, similarity_bp, matched_fields, reason, created_at_physical_ms, \
+          created_at_logical) \
+         VALUES ($1, $2, 'default', $3, $4, 'near_duplicate', 8500, $5, \
+                 'seeded similarity', 1, 0)",
+    )
+    .bind(hb(0xa4))
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(hb(0x43))
+    .bind(&empty_refs)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_canonicalization_decisions \
+         (decision_id, tenant_id, namespace, input_memory_id, canonical_memory_id, \
+          matched_memory_ids, decision_kind, decision_reason, confidence_bp, risk_class, \
+          validator_status, required_edges_to_create, receipt_hash, receipt_intent, \
+          created_at_physical_ms, created_at_logical) \
+         VALUES ($1, $2, 'default', $3, $4, $5, 'near_duplicate', \
+                 'seeded canonicalization', 9000, 'R0', 'passed', $5, $6, \
+                 'canonicalized', 1, 0)",
+    )
+    .bind(hb(0xa5))
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(hb(0x43))
+    .bind(&empty_refs)
+    .bind(hb(0x01))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_views \
+         (view_id, tenant_id, namespace, graph_style, source_root_id, included_node_ids, \
+          included_edge_ids, view_type, topological_order, transitive_reduction_edges, \
+          omitted_edges, reason_edges_omitted, source_records_hash, stale, \
+          created_at_physical_ms, created_at_logical, refreshed_at_physical_ms, \
+          refreshed_at_logical) \
+         VALUES ($1, $2, 'default', 'canonical_memory_graph', $3, $4, $4, \
+                 'canonical_view', $4, $4, $4, $4, $5, false, 1, 0, 1, 0)",
+    )
+    .bind(hb(0xa6))
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(&empty_refs)
+    .bind(hb(0xa7))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_placement_traces \
+         (placement_trace_id, tenant_id, namespace, input_memory_id, trace_steps, \
+          completed, created_at_physical_ms, created_at_logical) \
+         VALUES ($1, $2, 'default', $3, $4, true, 1, 0)",
+    )
+    .bind(hb(0xa8))
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(&empty_refs)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_route_invalidations \
+         (invalidation_id, tenant_id, namespace, route_id, affected_memory_ids, trigger_type, \
+          triggering_receipt_id, prior_route_status, new_route_status, invalidation_reason, \
+          created_at_physical_ms, created_at_logical, validator_id, validation_report_id, \
+          receipt_hash, receipt_intent) \
+         VALUES ($1, $2, 'default', $3, $4, 'risk_changed', $5, 'active', 'stale', \
+                 'seeded route invalidation', 1, 0, 'did:example:validator', $6, $5, \
+                 'route_invalidated')",
+    )
+    .bind(hb(0xa9))
+    .bind(tenant_id)
+    .bind(hb(0x60))
+    .bind(&empty_refs)
+    .bind(hb(0x01))
+    .bind(hb(0x80))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_edge_tombstones \
+         (tombstone_id, tenant_id, namespace, prior_edge_id, tombstone_reason, \
+          recommended_action, receipt_hash, idempotency_key, created_at_physical_ms, \
+          created_at_logical, tombstone_body) \
+         VALUES ($1, $2, 'default', $3, 'seeded tombstone', 'review', $4, \
+                 'graph-edge-tombstone-rls', 1, 0, $5)",
+    )
+    .bind(hb(0xaa))
+    .bind(tenant_id)
+    .bind(hb(0xa1))
+    .bind(hb(0x01))
+    .bind(&empty_object)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
         "INSERT INTO dagdb_graph_layers \
          (layer_id, tenant_id, namespace, root_memory_id, layer_depth, layer_kind, graph_style, \
           layer_path, metadata, created_at_physical_ms, created_at_logical, \
@@ -412,6 +794,53 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .bind(hb(0xa2))
     .bind(tenant_id)
     .bind(hb(0x40))
+    .bind(&empty_object)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_layers \
+         (layer_id, tenant_id, namespace, root_memory_id, parent_layer_id, parent_graph_node_id, \
+          layer_depth, layer_kind, graph_style, layer_path, metadata, created_at_physical_ms, \
+          created_at_logical, updated_at_physical_ms, updated_at_logical) \
+         VALUES ($1, $2, 'default', $3, $4, $5, 1, 'task_subgraph', \
+                 'canonical_memory_graph', 'root/task', $6, 1, 0, 1, 0)",
+    )
+    .bind(hb(0xa3))
+    .bind(tenant_id)
+    .bind(hb(0x40))
+    .bind(hb(0xa2))
+    .bind(hb(0xa0))
+    .bind(&empty_object)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_layer_memberships \
+         (layer_membership_id, tenant_id, namespace, layer_id, graph_node_id, graph_style, \
+          membership_role, local_node_rank, metadata, created_at_physical_ms, \
+          created_at_logical, updated_at_physical_ms, updated_at_logical) \
+         VALUES ($1, $2, 'default', $3, $4, 'canonical_memory_graph', 'root', 0, \
+                 $5, 1, 0, 1, 0)",
+    )
+    .bind(hb(0xab))
+    .bind(tenant_id)
+    .bind(hb(0xa2))
+    .bind(hb(0xa0))
+    .bind(&empty_object)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_graph_layer_edges \
+         (layer_edge_id, tenant_id, namespace, graph_style, from_layer_id, to_layer_id, \
+          edge_kind, receipt_hash, metadata, created_at_physical_ms, created_at_logical, \
+          updated_at_physical_ms, updated_at_logical) \
+         VALUES ($1, $2, 'default', 'canonical_memory_graph', $3, $4, 'drills_down_to', \
+                 $5, $6, 1, 0, 1, 0)",
+    )
+    .bind(hb(0xac))
+    .bind(tenant_id)
+    .bind(hb(0xa2))
+    .bind(hb(0xa3))
+    .bind(hb(0x01))
     .bind(&empty_object)
     .execute(&mut *tx)
     .await?;
@@ -437,6 +866,22 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .bind(hb(0xb7))
     .bind(hb(0xb8))
     .bind(hb(0xb9))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_export_challenges \
+         (challenge_id, tenant_id, namespace, export_id, challenge_kind, challenge_hash, \
+          proof_hash, proof_algorithm, verifier_did, verification_status, \
+          verification_notes_hash, created_at_physical_ms, created_at_logical) \
+         VALUES ($1, $2, 'default', $3, 'whole_export_hash', $4, $5, \
+                 'hash_commitment_v1', 'did:example:verifier', 'verified', $6, 1, 0)",
+    )
+    .bind(hb(0xba))
+    .bind(tenant_id)
+    .bind(hb(0xb0))
+    .bind(hb(0xbb))
+    .bind(hb(0xbc))
+    .bind(hb(0xbd))
     .execute(&mut *tx)
     .await?;
     sqlx::query(

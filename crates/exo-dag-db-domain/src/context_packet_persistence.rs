@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use exo_core::Did;
+
 /// Schema version for persisted/proof-bound PRD17B context packet records.
 pub const CONTEXT_PACKET_RECORD_SCHEMA_VERSION: &str = "dagdb_prd17_context_packet_record_v1";
 /// Schema version for PRD17B context packet persistence reports.
@@ -38,6 +40,9 @@ const RAW_FORBIDDEN_FRAGMENTS: &[&str] = &[
     "raw_prompt_body",
     "source_excerpt",
 ];
+const EXTERNAL_PRODUCTION_APPROVAL_REF_PREFIX: &str = "external-production-approval:";
+const EXTERNAL_PACKET_QUALITY_REVIEW_REF_PREFIX: &str = "external-packet-quality-review:";
+const EXTERNAL_FINALITY_REF_PREFIX: &str = "external-finality:";
 
 /// Context quality emitted by the PRD17B default retrieval runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +144,28 @@ pub struct ContextPacketAcceptanceEvidence {
     pub packet_quality_review_ref: String,
     /// Finality receipt or outbox ref.
     pub finality_ref: String,
+    /// Tenant verified by the external finality receipt.
+    pub tenant_id: String,
+    /// Namespace verified by the external finality receipt.
+    pub memory_namespace: String,
+    /// Actor whose request was finalized.
+    pub actor_id: String,
+    /// Route verified by the external finality receipt.
+    pub route_id: String,
+    /// Packet verified by the external finality receipt.
+    pub packet_id: String,
+    /// Request id verified by the receipt.
+    pub request_id: String,
+    /// Canonical payload hash approved by the external authority.
+    pub payload_hash: String,
+    /// Payload hash carried by the external finality receipt.
+    pub receipt_payload_hash: String,
+    /// External production authority DID.
+    pub authority_did: String,
+    /// External production authority signature.
+    pub authority_signature: String,
+    /// External approval timestamp.
+    pub approved_at: String,
 }
 
 /// Caller input for building a PRD17B packet record.
@@ -342,6 +369,12 @@ pub enum ContextPacketError {
         /// Field name.
         field: &'static str,
     },
+    /// External finality evidence did not bind to the context packet.
+    #[error("external_finality_mismatch: {field}")]
+    ExternalFinalityMismatch {
+        /// Mismatched field.
+        field: String,
+    },
 }
 
 /// Build a context packet record with canonical idempotency.
@@ -404,7 +437,7 @@ pub fn accept_context_packet_record(
     evidence: &ContextPacketAcceptanceEvidence,
 ) -> Result<ContextPacketRecord, ContextPacketError> {
     validate_context_packet_record(record)?;
-    validate_acceptance_evidence(evidence)?;
+    validate_acceptance_evidence(record, evidence)?;
     let mut accepted = record.clone();
     push_unique_proof_ref(
         &mut accepted.source_proof_refs,
@@ -583,26 +616,130 @@ fn validate_binding(route: &ContextPacketRouteBinding) -> Result<(), ContextPack
 }
 
 fn validate_acceptance_evidence(
+    record: &ContextPacketRecord,
     evidence: &ContextPacketAcceptanceEvidence,
 ) -> Result<(), ContextPacketError> {
-    validate_required(
+    validate_external_ref(
         "production_default_route_approval_ref",
         &evidence.production_default_route_approval_ref,
+        EXTERNAL_PRODUCTION_APPROVAL_REF_PREFIX,
     )?;
-    validate_required(
+    validate_external_ref(
         "packet_quality_review_ref",
         &evidence.packet_quality_review_ref,
+        EXTERNAL_PACKET_QUALITY_REVIEW_REF_PREFIX,
     )?;
-    validate_required("finality_ref", &evidence.finality_ref)?;
-    reject_forbidden(
-        "production_default_route_approval_ref",
-        &evidence.production_default_route_approval_ref,
+    validate_external_ref(
+        "finality_ref",
+        &evidence.finality_ref,
+        EXTERNAL_FINALITY_REF_PREFIX,
     )?;
-    reject_forbidden(
-        "packet_quality_review_ref",
-        &evidence.packet_quality_review_ref,
+    for (field, value) in [
+        ("tenant_id", evidence.tenant_id.as_str()),
+        ("memory_namespace", evidence.memory_namespace.as_str()),
+        ("actor_id", evidence.actor_id.as_str()),
+        ("route_id", evidence.route_id.as_str()),
+        ("packet_id", evidence.packet_id.as_str()),
+        ("request_id", evidence.request_id.as_str()),
+        ("payload_hash", evidence.payload_hash.as_str()),
+        (
+            "receipt_payload_hash",
+            evidence.receipt_payload_hash.as_str(),
+        ),
+        ("authority_did", evidence.authority_did.as_str()),
+        ("authority_signature", evidence.authority_signature.as_str()),
+        ("approved_at", evidence.approved_at.as_str()),
+    ] {
+        validate_required(field, value)?;
+        reject_forbidden(field, value)?;
+    }
+    validate_did("actor_id", &evidence.actor_id)?;
+    validate_did("authority_did", &evidence.authority_did)?;
+    validate_digest("payload_hash", &evidence.payload_hash)?;
+    validate_digest("receipt_payload_hash", &evidence.receipt_payload_hash)?;
+    validate_signature("authority_signature", &evidence.authority_signature)?;
+    require_external_match("tenant_id", &evidence.tenant_id, &record.tenant_id)?;
+    require_external_match(
+        "memory_namespace",
+        &evidence.memory_namespace,
+        &record.memory_namespace,
     )?;
-    reject_forbidden("finality_ref", &evidence.finality_ref)?;
+    require_external_match("route_id", &evidence.route_id, &record.route_id)?;
+    require_external_match("packet_id", &evidence.packet_id, &record.packet_id)?;
+    require_external_match(
+        "receipt_payload_hash",
+        &evidence.receipt_payload_hash,
+        &evidence.payload_hash,
+    )?;
+    if evidence.authority_did == evidence.actor_id {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: "authority_did".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_external_ref(
+    field: &'static str,
+    value: &str,
+    prefix: &str,
+) -> Result<(), ContextPacketError> {
+    validate_required(field, value)?;
+    reject_forbidden(field, value)?;
+    if !value.starts_with(prefix) {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn require_external_match(
+    field: &str,
+    actual: &str,
+    expected: &str,
+) -> Result<(), ContextPacketError> {
+    if actual != expected {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_did(field: &str, value: &str) -> Result<(), ContextPacketError> {
+    if Did::new(value).is_err() {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_digest(field: &str, value: &str) -> Result<(), ContextPacketError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_signature(field: &str, value: &str) -> Result<(), ContextPacketError> {
+    if value.len() != 128 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
+    if value
+        .as_bytes()
+        .first()
+        .is_some_and(|first| value.as_bytes().iter().all(|byte| byte == first))
+    {
+        return Err(ContextPacketError::ExternalFinalityMismatch {
+            field: field.to_owned(),
+        });
+    }
     Ok(())
 }
 

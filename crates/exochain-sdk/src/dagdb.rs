@@ -407,12 +407,72 @@ mod transport {
             }
             Ok(())
         }
+
+        fn validate_for(
+            &self,
+            requirement: DagDbSignatureRequirement,
+        ) -> Result<(), DagDbClientError> {
+            require_signature_material(
+                Some(self.write_signature.as_str()),
+                WRITE_SIGNATURE_HEADER,
+            )?;
+
+            match requirement {
+                DagDbSignatureRequirement::WriteOnly => Ok(()),
+                DagDbSignatureRequirement::DefaultRoute => {
+                    require_signature_material(
+                        self.default_route_approval_signature.as_deref(),
+                        DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.default_route_approval_did.as_deref(),
+                        DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+                    )
+                }
+                DagDbSignatureRequirement::ContextPacket => {
+                    require_signature_material(
+                        self.context_packet_approval_signature.as_deref(),
+                        CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.context_packet_approval_did.as_deref(),
+                        CONTEXT_PACKET_APPROVAL_DID_HEADER,
+                    )
+                }
+                DagDbSignatureRequirement::Writeback => {
+                    require_signature_material(
+                        self.lifecycle_signature.as_deref(),
+                        LIFECYCLE_SIGNATURE_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.continuation_signature.as_deref(),
+                        CONTINUATION_SIGNATURE_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.lifecycle_approval_did.as_deref(),
+                        LIFECYCLE_APPROVAL_DID_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.continuation_approval_did.as_deref(),
+                        CONTINUATION_APPROVAL_DID_HEADER,
+                    )
+                }
+            }
+        }
     }
 
     impl fmt::Debug for DagDbSignatureHeaders {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str("DagDbSignatureHeaders(<redacted>)")
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum DagDbSignatureRequirement {
+        WriteOnly,
+        DefaultRoute,
+        ContextPacket,
+        Writeback,
     }
 
     /// Governed error returned by the gateway for a non-2xx DAG DB response.
@@ -490,6 +550,14 @@ mod transport {
             header: &'static str,
         },
 
+        /// Required per-request signature or finality-authority material is
+        /// absent or blank, so the request was never sent.
+        #[error("DAG DB signature material `{header}` is missing; request was not sent")]
+        MissingSignatureMaterial {
+            /// Name of the missing header.
+            header: &'static str,
+        },
+
         /// Per-request signature material contained bytes that are not a legal
         /// HTTP header value, so the request was never sent. The signature value
         /// itself is never included in this error.
@@ -497,6 +565,22 @@ mod transport {
         InvalidSignatureHeader {
             /// Name of the header that could not be constructed.
             header: &'static str,
+        },
+
+        /// The request DTO's tenant or namespace does not match the configured
+        /// auth scope, so the request was never sent.
+        #[error(
+            "DAG DB request tenant/namespace mismatch: request `{request_tenant_id}`/`{request_namespace}` does not match auth `{auth_tenant_id}`/`{auth_namespace}`"
+        )]
+        TenantNamespaceMismatch {
+            /// Tenant id carried by the request DTO.
+            request_tenant_id: String,
+            /// Namespace carried by the request DTO.
+            request_namespace: String,
+            /// Tenant id configured in the auth headers.
+            auth_tenant_id: String,
+            /// Namespace configured in the auth headers.
+            auth_namespace: String,
         },
     }
 
@@ -558,17 +642,20 @@ mod transport {
             }
         }
 
-        /// `POST /api/v1/dag-db/route`.
+        /// Fail closed for `POST /api/v1/dag-db/route` without the required
+        /// write and default-route approval signatures.
         pub async fn route(
             &self,
             request: DagDbRouteRequest,
         ) -> Result<DagDbRouteResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.route(request),
                 "dagdb:route",
                 exo_dag_db_api::DAGDB_ROUTE_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbRouteResponse| r.schema_version.as_str(),
                 None,
+                DagDbSignatureRequirement::DefaultRoute,
             )
             .await
         }
@@ -580,58 +667,69 @@ mod transport {
             request: DagDbRouteRequest,
             signatures: DagDbSignatureHeaders,
         ) -> Result<DagDbRouteResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.route(request),
                 "dagdb:route",
                 exo_dag_db_api::DAGDB_ROUTE_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbRouteResponse| r.schema_version.as_str(),
                 Some(signatures),
+                DagDbSignatureRequirement::DefaultRoute,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/context-packet`.
+        /// Fail closed for `POST /api/v1/dag-db/context-packet` without the
+        /// required write and context-packet approval signatures.
         pub async fn context_packet(
             &self,
             request: DagDbContextPacketRequest,
         ) -> Result<DagDbContextPacketResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.context_packet(request),
                 "dagdb:context_packet",
                 exo_dag_db_api::DAGDB_CONTEXT_PACKET_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbContextPacketResponse| r.schema_version.as_str(),
                 None,
+                DagDbSignatureRequirement::ContextPacket,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/context-packet` with gateway write signature.
+        /// `POST /api/v1/dag-db/context-packet` with gateway write and
+        /// external context-packet approval signatures.
         pub async fn context_packet_with_signatures(
             &self,
             request: DagDbContextPacketRequest,
             signatures: DagDbSignatureHeaders,
         ) -> Result<DagDbContextPacketResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.context_packet(request),
                 "dagdb:context_packet",
                 exo_dag_db_api::DAGDB_CONTEXT_PACKET_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbContextPacketResponse| r.schema_version.as_str(),
                 Some(signatures),
+                DagDbSignatureRequirement::ContextPacket,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/writeback`.
+        /// Fail closed for `POST /api/v1/dag-db/writeback` without the
+        /// required writeback signature set.
         pub async fn writeback(
             &self,
             request: DagDbWritebackRequest,
         ) -> Result<DagDbWritebackResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.writeback(request),
                 "dagdb:writeback",
                 exo_dag_db_api::DAGDB_WRITEBACK_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbWritebackResponse| r.schema_version.as_str(),
                 None,
+                DagDbSignatureRequirement::Writeback,
             )
             .await
         }
@@ -642,27 +740,32 @@ mod transport {
             request: DagDbWritebackRequest,
             signatures: DagDbSignatureHeaders,
         ) -> Result<DagDbWritebackResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.writeback(request),
                 "dagdb:writeback",
                 exo_dag_db_api::DAGDB_WRITEBACK_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbWritebackResponse| r.schema_version.as_str(),
                 Some(signatures),
+                DagDbSignatureRequirement::Writeback,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/import`.
+        /// Fail closed for `POST /api/v1/dag-db/import` without the required
+        /// write signature.
         pub async fn dagdb_import(
             &self,
             request: DagDbImportRequest,
         ) -> Result<DagDbImportResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.dagdb_import(request),
                 "dagdb:import",
                 exo_dag_db_api::DAGDB_IMPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbImportResponse| r.schema_version.as_str(),
                 None,
+                DagDbSignatureRequirement::WriteOnly,
             )
             .await
         }
@@ -673,27 +776,32 @@ mod transport {
             request: DagDbImportRequest,
             signatures: DagDbSignatureHeaders,
         ) -> Result<DagDbImportResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.dagdb_import(request),
                 "dagdb:import",
                 exo_dag_db_api::DAGDB_IMPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbImportResponse| r.schema_version.as_str(),
                 Some(signatures),
+                DagDbSignatureRequirement::WriteOnly,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/export`.
+        /// Fail closed for `POST /api/v1/dag-db/export` without the required
+        /// write signature.
         pub async fn dagdb_export(
             &self,
             request: DagDbExportRequest,
         ) -> Result<DagDbExportResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.dagdb_export(request),
                 "dagdb:export",
                 exo_dag_db_api::DAGDB_EXPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbExportResponse| r.schema_version.as_str(),
                 None,
+                DagDbSignatureRequirement::WriteOnly,
             )
             .await
         }
@@ -704,14 +812,34 @@ mod transport {
             request: DagDbExportRequest,
             signatures: DagDbSignatureHeaders,
         ) -> Result<DagDbExportResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
             self.send(
                 self.specs.dagdb_export(request),
                 "dagdb:export",
                 exo_dag_db_api::DAGDB_EXPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbExportResponse| r.schema_version.as_str(),
                 Some(signatures),
+                DagDbSignatureRequirement::WriteOnly,
             )
             .await
+        }
+
+        fn ensure_request_scope(
+            &self,
+            request_tenant_id: &str,
+            request_namespace: &str,
+        ) -> Result<(), DagDbClientError> {
+            if request_tenant_id == self.auth.tenant_id && request_namespace == self.auth.namespace
+            {
+                return Ok(());
+            }
+
+            Err(DagDbClientError::TenantNamespaceMismatch {
+                request_tenant_id: request_tenant_id.to_owned(),
+                request_namespace: request_namespace.to_owned(),
+                auth_tenant_id: self.auth.tenant_id.clone(),
+                auth_namespace: self.auth.namespace.clone(),
+            })
         }
 
         /// Build, sign, send, and map one request spec.
@@ -728,17 +856,26 @@ mod transport {
             expected: &'static str,
             schema_of: impl Fn(&Resp) -> &str,
             signatures: Option<DagDbSignatureHeaders>,
+            signature_requirement: DagDbSignatureRequirement,
         ) -> Result<Resp, DagDbClientError>
         where
             Body: Serialize,
             Resp: DeserializeOwned,
         {
+            let signatures =
+                signatures
+                    .as_ref()
+                    .ok_or(DagDbClientError::MissingSignatureMaterial {
+                        header: WRITE_SIGNATURE_HEADER,
+                    })?;
+            signatures.validate_for(signature_requirement)?;
+
             let url = format!("{}{}", self.base_url, spec.path);
             let mut builder = match spec.method {
                 DagDbHttpMethod::Get => self.http.get(url),
                 DagDbHttpMethod::Post => self.http.post(url),
             };
-            builder = builder.headers(self.auth_headers(action, signatures.as_ref())?);
+            builder = builder.headers(self.auth_headers(action, Some(signatures))?);
             if let Some(body) = spec.body.as_ref() {
                 builder = builder.json(body);
             }
@@ -845,6 +982,16 @@ mod transport {
     ) -> Result<HeaderValue, DagDbClientError> {
         HeaderValue::from_str(value)
             .map_err(|_| DagDbClientError::InvalidSignatureHeader { header })
+    }
+
+    fn require_signature_material(
+        value: Option<&str>,
+        header: &'static str,
+    ) -> Result<(), DagDbClientError> {
+        match value {
+            Some(value) if !value.trim().is_empty() => Ok(()),
+            _ => Err(DagDbClientError::MissingSignatureMaterial { header }),
+        }
     }
 }
 
@@ -1250,12 +1397,195 @@ mod transport_tests {
         byte.to_string().repeat(128)
     }
 
+    fn route_signatures() -> DagDbSignatureHeaders {
+        DagDbSignatureHeaders::default_route(
+            signature_value('a'),
+            signature_value('b'),
+            "did:exo:route-authority",
+        )
+    }
+
+    fn context_packet_signatures() -> DagDbSignatureHeaders {
+        DagDbSignatureHeaders::context_packet(
+            signature_value('c'),
+            signature_value('d'),
+            "did:exo:context-authority",
+        )
+    }
+
+    fn writeback_signatures() -> DagDbSignatureHeaders {
+        DagDbSignatureHeaders::writeback(
+            signature_value('e'),
+            signature_value('f'),
+            signature_value('1'),
+            "did:exo:lifecycle-authority",
+            "did:exo:continuation-authority",
+        )
+    }
+
+    fn write_signature() -> DagDbSignatureHeaders {
+        DagDbSignatureHeaders::write(signature_value('2'))
+    }
+
     fn fixture_response(section: &str, name: &str) -> String {
         fixtures()
             .get(section)
             .and_then(|s| s.get(name))
             .expect("fixture exists")
             .to_string()
+    }
+
+    fn assert_local_signature_error(err: DagDbClientError, method: &str) {
+        assert!(
+            !matches!(
+                err,
+                DagDbClientError::Transport(_) | DagDbClientError::Timeout(_)
+            ),
+            "{method} should reject missing signatures before HTTP, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("signature"),
+            "{method} should report missing signature material, got {rendered}"
+        );
+    }
+
+    fn assert_scope_mismatch_error(err: DagDbClientError, method: &str) {
+        assert!(
+            !matches!(
+                err,
+                DagDbClientError::Transport(_) | DagDbClientError::Timeout(_)
+            ),
+            "{method} should reject tenant/namespace mismatch before HTTP, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("tenant") && rendered.contains("namespace"),
+            "{method} should report tenant/namespace mismatch, got {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsigned_live_persistence_methods_fail_before_http_when_signatures_missing() {
+        let client = DagDbHttpClient::new("http://127.0.0.1:9", auth()).expect("client");
+
+        assert_local_signature_error(
+            client
+                .route(route_request())
+                .await
+                .expect_err("unsigned route must fail before HTTP"),
+            "route",
+        );
+        assert_local_signature_error(
+            client
+                .context_packet(context_packet_request())
+                .await
+                .expect_err("unsigned context-packet must fail before HTTP"),
+            "context_packet",
+        );
+        assert_local_signature_error(
+            client
+                .writeback(writeback_request())
+                .await
+                .expect_err("unsigned writeback must fail before HTTP"),
+            "writeback",
+        );
+        assert_local_signature_error(
+            client
+                .dagdb_import(import_request())
+                .await
+                .expect_err("unsigned import must fail before HTTP"),
+            "import",
+        );
+        assert_local_signature_error(
+            client
+                .dagdb_export(export_request())
+                .await
+                .expect_err("unsigned export must fail before HTTP"),
+            "export",
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_route_specific_signature_sets_fail_before_http() {
+        let client = DagDbHttpClient::new("http://127.0.0.1:9", auth()).expect("client");
+
+        assert_local_signature_error(
+            client
+                .route_with_signatures(route_request(), write_signature())
+                .await
+                .expect_err("route must require external approval signature material"),
+            "route",
+        );
+        assert_local_signature_error(
+            client
+                .context_packet_with_signatures(context_packet_request(), write_signature())
+                .await
+                .expect_err("context-packet must require approval signature material"),
+            "context_packet",
+        );
+        assert_local_signature_error(
+            client
+                .writeback_with_signatures(writeback_request(), write_signature())
+                .await
+                .expect_err("writeback must require lifecycle and continuation material"),
+            "writeback",
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_request_tenant_namespace_mismatch_fails_before_http() {
+        let client = DagDbHttpClient::new("http://127.0.0.1:9", auth()).expect("client");
+
+        let mut route = route_request();
+        route.tenant_id = "tenant-b".to_owned();
+        assert_scope_mismatch_error(
+            client
+                .route_with_signatures(route, route_signatures())
+                .await
+                .expect_err("route tenant mismatch must fail before HTTP"),
+            "route",
+        );
+
+        let mut context_packet = context_packet_request();
+        context_packet.namespace = "secondary".to_owned();
+        assert_scope_mismatch_error(
+            client
+                .context_packet_with_signatures(context_packet, context_packet_signatures())
+                .await
+                .expect_err("context-packet namespace mismatch must fail before HTTP"),
+            "context_packet",
+        );
+
+        let mut writeback = writeback_request();
+        writeback.tenant_id = "tenant-b".to_owned();
+        assert_scope_mismatch_error(
+            client
+                .writeback_with_signatures(writeback, writeback_signatures())
+                .await
+                .expect_err("writeback tenant mismatch must fail before HTTP"),
+            "writeback",
+        );
+
+        let mut import = import_request();
+        import.namespace = "secondary".to_owned();
+        assert_scope_mismatch_error(
+            client
+                .dagdb_import_with_signatures(import, write_signature())
+                .await
+                .expect_err("import namespace mismatch must fail before HTTP"),
+            "import",
+        );
+
+        let mut export = export_request();
+        export.tenant_id = "tenant-b".to_owned();
+        assert_scope_mismatch_error(
+            client
+                .dagdb_export_with_signatures(export, write_signature())
+                .await
+                .expect_err("export tenant mismatch must fail before HTTP"),
+            "export",
+        );
     }
 
     // (a) A POST builds the correct path + all four auth headers with the
@@ -1267,7 +1597,9 @@ mod transport_tests {
         let client =
             DagDbHttpClient::new(format!("{}///", server.base_url), auth()).expect("client");
 
-        let _ = client.route(route_request()).await;
+        let _ = client
+            .route_with_signatures(route_request(), route_signatures())
+            .await;
         let request = server.captured().await;
 
         assert!(
@@ -1299,13 +1631,13 @@ mod transport_tests {
     #[tokio::test]
     async fn typed_methods_use_route_specific_paths_and_scopes() {
         macro_rules! assert_post_route {
-            ($method:ident, $fixture:literal, $path:literal, $scope:literal) => {{
+            ($method:ident, $fixture:literal, $path:literal, $scope:literal, $signatures:expr) => {{
                 let body = fixture_response("responses", $fixture);
                 let server = TestServer::spawn("200 OK", body).await;
                 let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
                 let _ = client
-                    .$method(fixture_request($fixture))
+                    .$method(fixture_request($fixture), $signatures)
                     .await
                     .expect("route response");
                 let request = server.captured().await;
@@ -1323,22 +1655,25 @@ mod transport_tests {
         }
 
         assert_post_route!(
-            route,
+            route_with_signatures,
             "route",
             "/api/v1/dag-db/route",
-            "dagdb:route:tenant-a:primary"
+            "dagdb:route:tenant-a:primary",
+            route_signatures()
         );
         assert_post_route!(
-            context_packet,
+            context_packet_with_signatures,
             "context_packet",
             "/api/v1/dag-db/context-packet",
-            "dagdb:context_packet:tenant-a:primary"
+            "dagdb:context_packet:tenant-a:primary",
+            context_packet_signatures()
         );
         assert_post_route!(
-            writeback,
+            writeback_with_signatures,
             "writeback",
             "/api/v1/dag-db/writeback",
-            "dagdb:writeback:tenant-a:primary"
+            "dagdb:writeback:tenant-a:primary",
+            writeback_signatures()
         );
     }
 
@@ -1554,7 +1889,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let response = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect("2xx maps to DTO");
         assert_eq!(response.schema_version, "dagdb_route_response_v1");
@@ -1568,7 +1903,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("malformed 2xx body is an error");
         assert!(
@@ -1585,7 +1920,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("non-2xx is an error");
         match err {
@@ -1612,7 +1947,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("non-2xx is an error");
         match err {
@@ -1635,7 +1970,7 @@ mod transport_tests {
         let client = DagDbHttpClient::with_client(&base_url, auth(), http);
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("timeout is an error");
         assert!(
@@ -1654,7 +1989,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(format!("http://{addr}"), auth()).expect("client");
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("connect failure is an error");
         assert!(
@@ -1669,7 +2004,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new("http://127.0.0.1:1", auth).expect("client");
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("invalid auth header is rejected before send");
         match err {
@@ -1692,7 +2027,11 @@ mod transport_tests {
         let err = client
             .context_packet_with_signatures(
                 context_packet_request(),
-                DagDbSignatureHeaders::write("signature-secret\nvalue"),
+                DagDbSignatureHeaders::context_packet(
+                    "signature-secret\nvalue",
+                    signature_value('a'),
+                    "did:exo:context-authority",
+                ),
             )
             .await
             .expect_err("invalid signature header is rejected before send");
@@ -1720,7 +2059,7 @@ mod transport_tests {
         let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
 
         let err = client
-            .route(route_request())
+            .route_with_signatures(route_request(), route_signatures())
             .await
             .expect_err("mismatch is an error");
         match err {

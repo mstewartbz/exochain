@@ -35,8 +35,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 453 | `find crates -name '*.rs'` |
-| Rust LOC | 347886 | `wc -l` |
-| Workspace tests | 5,939 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 352620 | `wc -l` |
+| Workspace tests | 5,958 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -44,7 +44,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **5,898 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **5,958 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
@@ -113,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 344909 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 352637 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 5,898 listed workspace tests
+         cryptographic proofs, 5,958 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -161,12 +161,15 @@ DB as a graph-governed memory runtime adapter. Runtime ownership is split across
 with `exochain/exochain`; DAG DB bridge points live in `exo-api`, `exo-gateway`,
 `exo-node`, and `exochain-sdk`.
 
-The REST runtime surface is `/api/v1/dag-db/*`: `exo-gateway` defaults compile
-the `production-db` path, and `exo-node` defaults inherit that gateway feature
-set. Runtime database configuration remains explicit; missing Postgres state,
-tenant authority, or write signatures fail closed instead of fabricating
-persistence. The node MCP gateway proxy is a separate feature-gated surface that
-requires operator-supplied gateway configuration and separate evidence.
+The production REST runtime mounts exactly `POST /api/v1/dag-db/route`,
+`POST /api/v1/dag-db/context-packet`, `POST /api/v1/dag-db/writeback`,
+`POST /api/v1/dag-db/import`, and `POST /api/v1/dag-db/export`:
+`exo-gateway` defaults compile the `production-db` path, and `exo-node` defaults
+inherit that gateway feature set. Runtime database configuration remains
+explicit; missing Postgres state, tenant authority, or write signatures fail
+closed instead of fabricating persistence. The node MCP/SDK gateway proxy is a
+separate feature-gated configured-proxy evidence path, not an additional mounted
+REST surface.
 
 #### Current `exo-dag-db` status
 
@@ -190,7 +193,8 @@ savings are **not_calculable** (no provider billing receipts), and answer qualit
 is **at best a tie**. The thesis proof gate returns **not_accepted**.
 
 The runtime activation claim is bounded to the governed gateway REST paths,
-tenant-bound Postgres persistence, and live node MCP gateway proxy described in
+tenant-bound Postgres persistence, and configured node MCP/SDK gateway proxy
+evidence described in
 [`INTEGRATION.md`](INTEGRATION.md). Operator rollout sequencing, canary rollback,
 and production observability are tracked in the DAG DB runtime activation runbook:
 [`docs/dagdb/runtime-activation/rollback-canary-observability.md`](docs/dagdb/runtime-activation/rollback-canary-observability.md).

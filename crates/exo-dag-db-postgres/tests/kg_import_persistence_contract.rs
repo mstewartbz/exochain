@@ -133,7 +133,7 @@ async fn kg_import_persists_supported_sections_and_replays_idempotently() {
     assert_eq!(first.inserted_validation_report_count, 2);
     assert_eq!(first.inserted_placement_decision_count, 2);
     assert_eq!(first.inserted_placement_trace_count, 2);
-    assert_eq!(first.inserted_receipt_count, 6);
+    assert_eq!(first.inserted_receipt_count, 7);
 
     assert_eq!(row_count(&db.pool, "dagdb_memory_objects").await, 2);
     assert_eq!(row_count(&db.pool, "dagdb_catalog_entries").await, 2);
@@ -145,8 +145,20 @@ async fn kg_import_persists_supported_sections_and_replays_idempotently() {
         2
     );
     assert_eq!(row_count(&db.pool, "dagdb_graph_placement_traces").await, 2);
-    assert_eq!(row_count(&db.pool, "dagdb_receipts").await, 6);
-    assert_eq!(row_count(&db.pool, "dagdb_subject_receipt_heads").await, 6);
+    assert_eq!(row_count(&db.pool, "dagdb_receipts").await, 9);
+    assert_eq!(row_count(&db.pool, "dagdb_subject_receipt_heads").await, 7);
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_approval_request_submitted").await,
+        1
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_approval_granted").await,
+        1
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_import_completed").await,
+        1
+    );
     assert_eq!(exo_dag_table_count(&db.pool).await, 0);
 
     let second = persist_kg_import_report(&db.pool, &report_json)
@@ -154,8 +166,20 @@ async fn kg_import_persists_supported_sections_and_replays_idempotently() {
         .expect("idempotent KG import replay");
     assert!(second.replayed);
     assert_eq!(row_count(&db.pool, "dagdb_memory_objects").await, 2);
-    assert_eq!(row_count(&db.pool, "dagdb_receipts").await, 6);
-    assert_eq!(row_count(&db.pool, "dagdb_subject_receipt_heads").await, 6);
+    assert_eq!(row_count(&db.pool, "dagdb_receipts").await, 9);
+    assert_eq!(row_count(&db.pool, "dagdb_subject_receipt_heads").await, 7);
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_approval_request_submitted").await,
+        1
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_approval_granted").await,
+        1
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_import_completed").await,
+        1
+    );
 
     db.cleanup().await;
 }
@@ -399,7 +423,7 @@ async fn kg_import_existing_supported_rows_with_new_batch_are_not_duplicated() {
     assert!(!second.replayed);
     assert_eq!(second.inserted_memory_count, 0);
     assert_eq!(second.inserted_catalog_count, 0);
-    assert_eq!(second.inserted_receipt_count, 0);
+    assert_eq!(second.inserted_receipt_count, 1);
     assert_eq!(second.inserted_graph_node_count, 0);
     assert_eq!(second.inserted_graph_edge_count, 0);
     assert_eq!(second.inserted_validation_report_count, 0);
@@ -410,7 +434,19 @@ async fn kg_import_existing_supported_rows_with_new_batch_are_not_duplicated() {
     assert_eq!(row_count(&db.pool, "dagdb_graph_nodes").await, 2);
     assert_eq!(row_count(&db.pool, "dagdb_graph_edges").await, 1);
     assert_eq!(row_count(&db.pool, "dagdb_validation_reports").await, 2);
-    assert_eq!(row_count(&db.pool, "dagdb_receipts").await, 6);
+    assert_eq!(row_count(&db.pool, "dagdb_receipts").await, 12);
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_approval_request_submitted").await,
+        2
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_approval_granted").await,
+        2
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, "dagdb_import_completed").await,
+        2
+    );
     assert_eq!(
         row_count(&db.pool, "dagdb_graph_canonicalization_decisions").await,
         2
@@ -755,6 +791,14 @@ async fn row_count(pool: &PgPool, table: &str) -> i64 {
         .fetch_one(pool)
         .await
         .expect("count table rows")
+}
+
+async fn receipt_event_count(pool: &PgPool, event_type: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM dagdb_receipts WHERE event_type = $1")
+        .bind(event_type)
+        .fetch_one(pool)
+        .await
+        .expect("count receipt event rows")
 }
 
 async fn scalar_count_where(pool: &PgPool, table: &str, clause: &str) -> i64 {

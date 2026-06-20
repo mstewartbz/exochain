@@ -245,6 +245,17 @@ pub enum ReceiptEventType {
     DagFinalityCommitted,
     DagFinalityFailed,
     DagFinalityCompensated,
+    DagdbApprovalRequestSubmitted,
+    DagdbApprovalGranted,
+    DagdbApprovalDenied,
+    DagdbRecordAccepted,
+    DagdbImportCompleted,
+    DagdbExportCompleted,
+    DagdbReplayDetected,
+    DagdbIdempotencyConflict,
+    DagdbRlsTenantViolation,
+    DagdbSignatureFailure,
+    DagdbCouncilOperatorDecision,
 }
 
 /// Decision source for a durable council decision.
@@ -547,6 +558,8 @@ pub struct DagDbErrorEnvelope {
     pub receipt_hash: Option<String>,
     pub validation_report_id: Option<String>,
     pub requires_council_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operational_event_type: Option<String>,
 }
 
 /// Intake request.
@@ -1005,6 +1018,8 @@ pub struct DagDbImportResponse {
     pub imported_record_count: u32,
     pub receipt_path: Option<String>,
     pub non_claims: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_status: Option<String>,
 }
 
 /// Runtime export response.
@@ -1024,6 +1039,8 @@ pub struct DagDbExportResponse {
     pub exported_record_count: u32,
     pub report_path: Option<String>,
     pub non_claims: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_status: Option<String>,
 }
 
 /// Trust-check response.
@@ -1357,6 +1374,61 @@ mod tests {
         assert_fixture::<DagDbRouteLookupResponse>(&fixtures, "responses", "route_lookup");
 
         assert_fixture::<DagDbErrorEnvelope>(&fixtures, "errors", "tenant_scope_mismatch");
+    }
+
+    #[test]
+    fn receipt_event_type_serializes_operational_audit_categories() {
+        for (event_type, expected) in [
+            (
+                ReceiptEventType::DagdbApprovalRequestSubmitted,
+                "dagdb_approval_request_submitted",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalGranted,
+                "dagdb_approval_granted",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalDenied,
+                "dagdb_approval_denied",
+            ),
+            (
+                ReceiptEventType::DagdbRecordAccepted,
+                "dagdb_record_accepted",
+            ),
+            (
+                ReceiptEventType::DagdbImportCompleted,
+                "dagdb_import_completed",
+            ),
+            (
+                ReceiptEventType::DagdbExportCompleted,
+                "dagdb_export_completed",
+            ),
+            (
+                ReceiptEventType::DagdbReplayDetected,
+                "dagdb_replay_detected",
+            ),
+            (
+                ReceiptEventType::DagdbIdempotencyConflict,
+                "dagdb_idempotency_conflict",
+            ),
+            (
+                ReceiptEventType::DagdbRlsTenantViolation,
+                "dagdb_rls_tenant_violation",
+            ),
+            (
+                ReceiptEventType::DagdbSignatureFailure,
+                "dagdb_signature_failure",
+            ),
+            (
+                ReceiptEventType::DagdbCouncilOperatorDecision,
+                "dagdb_council_operator_decision",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(event_type).expect("serialize event"),
+                serde_json::json!(expected)
+            );
+        }
     }
 
     #[test]

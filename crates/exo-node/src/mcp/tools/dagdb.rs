@@ -840,9 +840,25 @@ fn client_error_response(tool_name: &str, error: DagDbClientError) -> ToolResult
             "error_kind": "invalid_auth_header",
             "header": header,
         }),
+        DagDbClientError::MissingSignatureMaterial { header } => json!({
+            "error_kind": "missing_signature_material",
+            "header": header,
+        }),
         DagDbClientError::InvalidSignatureHeader { header } => json!({
             "error_kind": "invalid_signature_header",
             "header": header,
+        }),
+        DagDbClientError::TenantNamespaceMismatch {
+            request_tenant_id,
+            request_namespace,
+            auth_tenant_id,
+            auth_namespace,
+        } => json!({
+            "error_kind": "tenant_namespace_mismatch",
+            "request_tenant_id": request_tenant_id,
+            "request_namespace": request_namespace,
+            "auth_tenant_id": auth_tenant_id,
+            "auth_namespace": auth_namespace,
         }),
     };
 
@@ -1059,7 +1075,10 @@ pub fn get_context_packet_definition() -> ToolDefinition {
                 "route_id",
                 "task_hash",
                 "requesting_agent_did",
-                "token_budget"
+                "token_budget",
+                WRITE_SIGNATURE_HEADER,
+                CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+                CONTEXT_PACKET_APPROVAL_DID_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1182,7 +1201,12 @@ pub fn submit_writeback_definition() -> ToolDefinition {
                 "answer_hash",
                 "route_id",
                 "context_packet_id",
-                "validation_report_id"
+                "validation_report_id",
+                WRITE_SIGNATURE_HEADER,
+                LIFECYCLE_SIGNATURE_HEADER,
+                CONTINUATION_SIGNATURE_HEADER,
+                LIFECYCLE_APPROVAL_DID_HEADER,
+                CONTINUATION_APPROVAL_DID_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1222,7 +1246,8 @@ pub fn import_definition() -> ToolDefinition {
                 "db_set_version",
                 "source_hash",
                 "requester_did",
-                "import_report"
+                "import_report",
+                WRITE_SIGNATURE_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1282,7 +1307,8 @@ pub fn export_definition() -> ToolDefinition {
                 "included_memory_ids",
                 "included_graph_styles",
                 "included_writeback_idempotency_keys",
-                "include_preview_context"
+                "include_preview_context",
+                WRITE_SIGNATURE_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1376,6 +1402,32 @@ mod tests {
             .and_then(|requests| requests.get(name))
             .unwrap_or_else(|| panic!("missing request fixture {name}"))
             .clone()
+    }
+
+    fn schema_signature_value(byte: char) -> String {
+        byte.to_string().repeat(SIGNATURE_HEX_CHARS)
+    }
+
+    fn add_required_signature_material(tool_name: &str, params: &mut Value) {
+        match tool_name {
+            DAGDB_GET_CONTEXT_PACKET_TOOL => {
+                params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+                params[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] =
+                    json!(schema_signature_value('b'));
+                params[CONTEXT_PACKET_APPROVAL_DID_HEADER] = json!("did:exo:context-authority");
+            }
+            DAGDB_SUBMIT_WRITEBACK_TOOL => {
+                params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+                params[LIFECYCLE_SIGNATURE_HEADER] = json!(schema_signature_value('b'));
+                params[CONTINUATION_SIGNATURE_HEADER] = json!(schema_signature_value('c'));
+                params[LIFECYCLE_APPROVAL_DID_HEADER] = json!("did:exo:lifecycle-authority");
+                params[CONTINUATION_APPROVAL_DID_HEADER] = json!("did:exo:continuation-authority");
+            }
+            DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
+                params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+            }
+            _ => {}
+        }
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
@@ -1656,6 +1708,8 @@ mod tests {
         assert_eq!(request_body["namespace"], "primary");
         for signature_header in [
             WRITE_SIGNATURE_HEADER,
+            CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+            CONTEXT_PACKET_APPROVAL_DID_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
             CONTINUATION_SIGNATURE_HEADER,
             LIFECYCLE_APPROVAL_DID_HEADER,
@@ -2037,6 +2091,15 @@ mod tests {
             add_write_signature(request_fixture("context_packet")),
             CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
         );
+        let mut context_without_approval_did =
+            add_write_signature(request_fixture("context_packet"));
+        context_without_approval_did[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] =
+            json!(signature_value('d'));
+        assert_missing_signature_fails_before_http(
+            execute_get_context_packet,
+            context_without_approval_did,
+            CONTEXT_PACKET_APPROVAL_DID_HEADER,
+        );
         assert_missing_signature_fails_before_http(
             execute_import,
             scoped_import_params(),
@@ -2075,6 +2138,21 @@ mod tests {
             execute_submit_writeback,
             writeback_without_lifecycle_authority,
             LIFECYCLE_APPROVAL_DID_HEADER,
+        );
+
+        let mut writeback_without_continuation_authority = request_fixture("writeback");
+        writeback_without_continuation_authority[WRITE_SIGNATURE_HEADER] =
+            json!(signature_value('a'));
+        writeback_without_continuation_authority[LIFECYCLE_SIGNATURE_HEADER] =
+            json!(signature_value('b'));
+        writeback_without_continuation_authority[CONTINUATION_SIGNATURE_HEADER] =
+            json!(signature_value('c'));
+        writeback_without_continuation_authority[LIFECYCLE_APPROVAL_DID_HEADER] =
+            json!("did:exo:finality-authority");
+        assert_missing_signature_fails_before_http(
+            execute_submit_writeback,
+            writeback_without_continuation_authority,
+            CONTINUATION_APPROVAL_DID_HEADER,
         );
     }
 
@@ -2213,6 +2291,7 @@ mod tests {
         let validator =
             JSONSchema::compile(&definition.input_schema).expect("export schema compiles");
         let mut params = valid_export_params();
+        add_required_signature_material(DAGDB_EXPORT_TOOL, &mut params);
         params["source_commit_or_repo_ref"] = Value::Null;
 
         let errors = validator
@@ -2254,6 +2333,7 @@ mod tests {
             }),
         ] {
             let mut params = valid_import_params();
+            add_required_signature_material(DAGDB_IMPORT_TOOL, &mut params);
             params["import_report"] = import_report;
             assert!(
                 validator.validate(&params).is_err(),
@@ -2286,11 +2366,49 @@ mod tests {
     }
 
     #[test]
+    fn proxy_tool_schemas_require_gateway_signature_material() {
+        assert_required_fields(
+            get_context_packet_definition(),
+            &[
+                WRITE_SIGNATURE_HEADER,
+                CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
+                CONTEXT_PACKET_APPROVAL_DID_HEADER,
+            ],
+        );
+        assert_required_fields(
+            submit_writeback_definition(),
+            &[
+                WRITE_SIGNATURE_HEADER,
+                LIFECYCLE_SIGNATURE_HEADER,
+                CONTINUATION_SIGNATURE_HEADER,
+                LIFECYCLE_APPROVAL_DID_HEADER,
+                CONTINUATION_APPROVAL_DID_HEADER,
+            ],
+        );
+        assert_required_fields(import_definition(), &[WRITE_SIGNATURE_HEADER]);
+        assert_required_fields(export_definition(), &[WRITE_SIGNATURE_HEADER]);
+    }
+
+    fn assert_required_fields(definition: ToolDefinition, expected_fields: &[&str]) {
+        let required = definition.input_schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{} schema must define required fields", definition.name));
+        for field in expected_fields {
+            assert!(
+                required.contains(&json!(field)),
+                "{} schema must require {field}",
+                definition.name
+            );
+        }
+    }
+
+    #[test]
     fn import_report_schema_rejects_digest_only_summary() {
         let definition = import_definition();
         let validator =
             JSONSchema::compile(&definition.input_schema).expect("import schema compiles");
         let mut params = valid_import_params();
+        add_required_signature_material(DAGDB_IMPORT_TOOL, &mut params);
         params["import_report"] = json!({
             "schema_version": KG_IMPORT_REPORT_SCHEMA,
             "source_candidates_schema_version": KG_IMPORT_CANDIDATES_SCHEMA,
@@ -2309,6 +2427,7 @@ mod tests {
         let validator =
             JSONSchema::compile(&definition.input_schema).expect("export schema compiles");
         let mut params = valid_export_params();
+        add_required_signature_material(DAGDB_EXPORT_TOOL, &mut params);
         params["included_memory_ids"] = json!(["memory-001"]);
 
         assert!(
@@ -2342,10 +2461,13 @@ mod tests {
                 panic!("fixture {fixture_name} must deserialize into its exo-api DTO: {err}")
             });
 
-            // (b) The compiled tool schema accepts the same fixture.
+            // (b) The compiled tool schema accepts the same DTO shape plus
+            // transport-only signature carrier fields required by the MCP proxy.
+            let mut schema_fixture = fixture;
+            add_required_signature_material(&definition.name, &mut schema_fixture);
             let validator = JSONSchema::compile(&definition.input_schema)
                 .unwrap_or_else(|err| panic!("{} schema compiles: {err}", definition.name));
-            if let Err(errors) = validator.validate(&fixture) {
+            if let Err(errors) = validator.validate(&schema_fixture) {
                 let msgs: Vec<String> = errors.map(|err| err.to_string()).collect();
                 panic!(
                     "{} input schema must accept the exo-api {fixture_name} request fixture: {}",
@@ -2369,9 +2491,10 @@ mod tests {
     fn assert_import_export_bound() {
         use exo_api::dagdb::{DagDbExportRequest, DagDbImportRequest};
 
-        let import_params = valid_import_params();
+        let mut import_params = valid_import_params();
         let _import: DagDbImportRequest = serde_json::from_value(import_params.clone())
             .expect("import params deserialize into DagDbImportRequest");
+        add_required_signature_material(DAGDB_IMPORT_TOOL, &mut import_params);
         let import_validator =
             JSONSchema::compile(&import_definition().input_schema).expect("import schema compiles");
         assert!(
@@ -2379,9 +2502,10 @@ mod tests {
             "import schema must accept a valid DagDbImportRequest payload"
         );
 
-        let export_params = valid_export_params();
+        let mut export_params = valid_export_params();
         let _export: DagDbExportRequest = serde_json::from_value(export_params.clone())
             .expect("export params deserialize into DagDbExportRequest");
+        add_required_signature_material(DAGDB_EXPORT_TOOL, &mut export_params);
         let export_validator =
             JSONSchema::compile(&export_definition().input_schema).expect("export schema compiles");
         assert!(

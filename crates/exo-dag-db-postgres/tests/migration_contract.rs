@@ -733,7 +733,7 @@ fn expected_constraint_snippets() -> &'static [(&'static str, &'static str)] {
     &[
         ("dagdb_receipts", "octet_length(receipt_hash) = 32"),
         ("dagdb_receipts", "subject_kind = ANY"),
-        ("dagdb_receipts", "export_created"),
+        ("dagdb_receipts", "dagdb_export_completed"),
         ("dagdb_memory_objects", "node_type = ANY"),
         ("dagdb_memory_objects", "source_type = ANY"),
         ("dagdb_memory_objects", "consent_purpose = ANY"),

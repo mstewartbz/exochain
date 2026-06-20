@@ -36,14 +36,17 @@ use exo_dag_db_postgres::{
     build_graph_context_packet,
     persistent_context::build_persistent_graph_context_selection,
     postgres::{
-        DAGDB_GRAPH_SCHEMA_SQL, DAGDB_SCHEMA_SQL, DAGDB_TELEMETRY_FACET_NODE_TYPE_SCHEMA_SQL,
+        DAGDB_EXPORT_FINALITY_OUTBOX_SCHEMA_SQL, DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL,
+        DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL, DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL,
+        DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL,
+        DAGDB_TELEMETRY_FACET_NODE_TYPE_SCHEMA_SQL,
     },
 };
 use exo_gatekeeper::{
     ConsentEngine, DagDbConsentRecord, IdentityRegistry,
     dagdb_gate::{context_packet_record_payload_hash, default_route_payload_hash},
     sign_write_payload,
-    types::BailmentState,
+    types::{BailmentState, GovernedRoleName},
     usage_event_payload_hash,
 };
 use exo_gateway::{
@@ -67,6 +70,9 @@ const EXPORTER_DID: &str = "did:exo:exporter";
 const FINALITY_AUTHORITY_DID: &str = "did:exo:finality-authority";
 const BEARER: &str = "test-token";
 const FORGED_BEARER: &str = "forged-test-token";
+const DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL: &str = include_str!(
+    "../../exo-dag-db-postgres/migrations/20260620000001_add_dagdb_operational_receipt_event_types.sql"
+);
 
 struct TestDb {
     admin_pool: PgPool,
@@ -105,10 +111,35 @@ impl TestDb {
             .execute(&pool)
             .await
             .expect("apply DAG DB graph schema");
+        sqlx::raw_sql(DAGDB_EXPORT_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB export schema");
+        sqlx::raw_sql(DAGDB_EXPORT_FINALITY_OUTBOX_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB export finality/outbox schema");
+        sqlx::raw_sql(DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB operational receipt event-type schema");
         sqlx::raw_sql(DAGDB_TELEMETRY_FACET_NODE_TYPE_SCHEMA_SQL)
             .execute(&pool)
             .await
             .expect("apply DAG DB telemetry-facet node_type schema");
+        sqlx::raw_sql(DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB PRD17 default-route schema");
+        sqlx::raw_sql(DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB PRD17 context-packet schema");
+        sqlx::raw_sql(DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB PRD17 lifecycle schema");
+        assert_export_schema_tables_present(&pool).await;
         sqlx::raw_sql(
             r#"
             CREATE TABLE IF NOT EXISTS users (
@@ -196,6 +227,12 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(forged_bearer_response.status(), StatusCode::UNAUTHORIZED);
     let receipts_before_missing_import_signature =
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let signature_failures_before_missing_import_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let idempotency_before_missing_import_signature =
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
+    let memory_objects_before_missing_import_signature =
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
     let missing_import_signature = app
         .clone()
         .oneshot(scoped_post(
@@ -214,9 +251,30 @@ async fn dagdb_routes_integration_contract() {
         "write_signature_required"
     );
     assert_eq!(
+        missing_import_signature_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
-        receipts_before_missing_import_signature,
-        "missing import signature must fail before DAG DB persistence"
+        receipts_before_missing_import_signature + 1,
+        "missing import signature must append one durable operational receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_import_signature + 1,
+        "missing import signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await,
+        idempotency_before_missing_import_signature,
+        "missing import signature must fail before idempotency reservation"
+    );
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before_missing_import_signature,
+        "missing import signature must not mutate import data"
     );
 
     let mut scope_mismatch_import = import_request.clone();
@@ -304,13 +362,22 @@ async fn dagdb_routes_integration_contract() {
         ConsentEngine::default(),
         identity_registry_with_finality_authority(&keypair),
     );
-    let denied_import_signature = import_signature(&db.pool, &keypair, &import_request).await;
+    let approval_denied_before_denied_import =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
+    let idempotency_before_denied_import =
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
+    let denied_import_request = DagDbImportRequest {
+        idempotency_key: "idem-import-denied-no-consent".to_owned(),
+        ..import_request.clone()
+    };
+    let denied_import_signature =
+        import_signature(&db.pool, &keypair, &denied_import_request).await;
     let denied_import = app
         .clone()
         .oneshot(scoped_post(
             "/api/v1/dag-db/import",
             "dagdb:import",
-            &import_request,
+            &denied_import_request,
             Some(denied_import_signature),
         ))
         .await
@@ -318,13 +385,29 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(denied_import.status(), StatusCode::FORBIDDEN);
     let denied_import_body: DagDbErrorEnvelope = response_json(denied_import).await;
     assert_eq!(denied_import_body.error_code, "consent_denied");
+    assert_eq!(
+        denied_import_body.operational_event_type.as_deref(),
+        Some("dagdb_approval_denied")
+    );
     assert_no_forbidden_material(&denied_import_body.message);
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denied_before_denied_import + 1,
+        "import consent denial must persist dagdb_approval_denied"
+    );
+    assert_eq!(
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await,
+        idempotency_before_denied_import,
+        "import consent denial must clean its idempotency reservation"
+    );
 
     ctx.install_gatekeeper_profile(
         active_consent_engine(),
         identity_registry_with_finality_authority(&keypair),
     );
     let receipts_before_import_consent_gap = receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let approval_denied_before_import_consent_gap =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
     let idempotency_before_import_consent_gap =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
     let initial_import_signature = import_signature(&db.pool, &keypair, &import_request).await;
@@ -341,11 +424,20 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(import_response.status(), StatusCode::FORBIDDEN);
     let import_body: DagDbErrorEnvelope = response_json(import_response).await;
     assert_eq!(import_body.error_code, "consent_denied");
+    assert_eq!(
+        import_body.operational_event_type.as_deref(),
+        Some("dagdb_approval_denied")
+    );
     assert_no_forbidden_material(&import_body.message);
     assert_eq!(
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
-        receipts_before_import_consent_gap,
-        "writeback consent must not let import append DAG DB rows"
+        receipts_before_import_consent_gap + 1,
+        "writeback consent must only append an operational denial receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denied_before_import_consent_gap + 1,
+        "writeback consent gap must persist dagdb_approval_denied for import"
     );
     assert_eq!(
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await,
@@ -357,6 +449,10 @@ async fn dagdb_routes_integration_contract() {
         active_import_export_consent_engine(),
         identity_registry_with_finality_authority(&keypair),
     );
+    let rls_violations_before_tenant_mismatch_import =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_rls_tenant_violation").await;
+    let idempotency_before_tenant_mismatch_import =
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
     let tenant_mismatch_import = DagDbImportRequest {
         tenant_id: "tenant-b".to_owned(),
         idempotency_key: "idem-import-tenant-mismatch".to_owned(),
@@ -382,6 +478,26 @@ async fn dagdb_routes_integration_contract() {
         tenant_mismatch_import_body.error_code,
         "tenant_scope_mismatch"
     );
+    assert_eq!(
+        tenant_mismatch_import_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_rls_tenant_violation")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_rls_tenant_violation").await,
+        rls_violations_before_tenant_mismatch_import + 1,
+        "import tenant mismatch must persist dagdb_rls_tenant_violation under the mounted scope"
+    );
+    assert_eq!(
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await,
+        idempotency_before_tenant_mismatch_import,
+        "import tenant mismatch must not leave an idempotency reservation"
+    );
+    let signature_failures_before_forged_import =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let idempotency_before_forged_import =
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
     let forged_import_material = DagDbImportRequest {
         idempotency_key: "idem-import-forged-signature".to_owned(),
         source_hash: h(0x03),
@@ -400,7 +516,25 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(forged_import_response.status(), StatusCode::FORBIDDEN);
     let forged_import_body: DagDbErrorEnvelope = response_json(forged_import_response).await;
     assert_eq!(forged_import_body.error_code, "provenance_denied");
+    assert_eq!(
+        forged_import_body.operational_event_type.as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_forged_import + 1,
+        "forged import signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await,
+        idempotency_before_forged_import,
+        "forged import signature must clean its idempotency reservation"
+    );
     let receipts_before_import_success = receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let import_completed_before_success =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_import_completed").await;
+    let approval_counts_before_import_success =
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let idempotency_before_import_success =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
     let import_success_signature = import_signature(&db.pool, &keypair, &import_request).await;
@@ -417,6 +551,7 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(import_success.status(), StatusCode::OK);
     let import_success_body: JsonValue = response_json(import_success).await;
     assert_eq!(import_success_body["import_status"], "persisted");
+    assert_eq!(import_success_body["idempotency_status"], "stored");
     assert!(
         import_success_body["imported_record_count"]
             .as_u64()
@@ -428,12 +563,28 @@ async fn dagdb_routes_integration_contract() {
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await > receipts_before_import_success,
         "import must append persisted DAG DB receipts"
     );
+    assert!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_import_completed").await
+            > import_completed_before_success,
+        "import success must append a durable dagdb_import_completed receipt"
+    );
+    assert_approval_counts_increased(
+        approval_counts_before_import_success,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "import success",
+    );
     assert_eq!(
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await,
         idempotency_before_import_success + 1,
         "import success must store one idempotency response"
     );
     let receipts_before_import_replay = receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let replay_detected_before_import_replay =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_replay_detected").await;
+    let import_completed_before_import_replay =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_import_completed").await;
+    let approval_counts_before_import_replay =
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let import_replay = app
         .clone()
         .oneshot(scoped_post(
@@ -446,16 +597,35 @@ async fn dagdb_routes_integration_contract() {
         .expect("import replay response");
     assert_eq!(import_replay.status(), StatusCode::OK);
     let import_replay_body: JsonValue = response_json(import_replay).await;
-    assert_eq!(import_replay_body, import_success_body);
+    let mut expected_import_replay_body = import_success_body.clone();
+    expected_import_replay_body["idempotency_status"] = JsonValue::String("replayed".to_owned());
+    assert_eq!(import_replay_body, expected_import_replay_body);
     assert_eq!(
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
-        receipts_before_import_replay,
-        "idempotent import replay must not append duplicate DAG DB receipts"
+        receipts_before_import_replay + 1,
+        "idempotent import replay must append exactly one operational receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_replay_detected").await,
+        replay_detected_before_import_replay + 1,
+        "idempotent import replay must persist dagdb_replay_detected"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_import_completed").await,
+        import_completed_before_import_replay,
+        "idempotent import replay must not append duplicate dagdb_import_completed receipts"
+    );
+    assert_approval_counts_unchanged(
+        approval_counts_before_import_replay,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "idempotent import replay",
     );
     let changed_import_material = DagDbImportRequest {
         source_hash: h(0x02),
         ..import_request.clone()
     };
+    let idempotency_conflicts_before_changed_import =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_idempotency_conflict").await;
     let changed_import_signature =
         import_signature(&db.pool, &keypair, &changed_import_material).await;
     let changed_import_response = app
@@ -471,6 +641,15 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(changed_import_response.status(), StatusCode::CONFLICT);
     let changed_import_body: DagDbErrorEnvelope = response_json(changed_import_response).await;
     assert_eq!(changed_import_body.error_code, "idempotency_key_conflict");
+    assert_eq!(
+        changed_import_body.operational_event_type.as_deref(),
+        Some("dagdb_idempotency_conflict")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_idempotency_conflict").await,
+        idempotency_conflicts_before_changed_import + 1,
+        "changed import material must persist dagdb_idempotency_conflict"
+    );
 
     let default_route_request = DagDbRouteRequest {
         tenant_id: TENANT_ID.to_owned(),
@@ -484,19 +663,166 @@ async fn dagdb_routes_integration_contract() {
         requested_memory_ids: Some(vec![h(0x10)]),
         credential_id: None,
     };
-    let default_route_signature = default_route_signature(&keypair, &default_route_request);
+    let default_route_sigs = default_route_signatures(&keypair, &default_route_request);
+    let route_rows_before_missing_signature = default_route_count(&db.pool).await;
+    let receipts_before_missing_route_signature =
+        receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let signature_failures_before_missing_route_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let missing_route_signature_request = DagDbRouteRequest {
+        idempotency_key: "idem-route-missing-write-signature".to_owned(),
+        ..default_route_request.clone()
+    };
+    let missing_route_signature = app
+        .clone()
+        .oneshot(scoped_post_with_default_route_signature(
+            "/api/v1/dag-db/route",
+            "dagdb:route",
+            &missing_route_signature_request,
+            None,
+            Some(default_route_sigs.approval_signature.clone()),
+        ))
+        .await
+        .expect("missing route write signature response");
+    assert_eq!(missing_route_signature.status(), StatusCode::BAD_REQUEST);
+    let missing_route_signature_body: DagDbErrorEnvelope =
+        response_json(missing_route_signature).await;
+    assert_eq!(
+        missing_route_signature_body.error_code,
+        "write_signature_required"
+    );
+    assert_eq!(
+        missing_route_signature_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        receipts_before_missing_route_signature + 1,
+        "missing route write signature must append one durable operational receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_route_signature + 1,
+        "missing route write signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        default_route_count(&db.pool).await,
+        route_rows_before_missing_signature,
+        "missing route write signature must not persist a default route"
+    );
+
+    let route_rows_before_missing_approval = default_route_count(&db.pool).await;
+    let signature_failures_before_missing_route_approval =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let missing_route_approval_request = DagDbRouteRequest {
+        idempotency_key: "idem-route-missing-approval-signature".to_owned(),
+        ..default_route_request.clone()
+    };
+    let missing_route_approval = app
+        .clone()
+        .oneshot(scoped_post_with_default_route_signature(
+            "/api/v1/dag-db/route",
+            "dagdb:route",
+            &missing_route_approval_request,
+            Some(default_route_sigs.write_signature.clone()),
+            None,
+        ))
+        .await
+        .expect("missing route approval signature response");
+    assert_eq!(missing_route_approval.status(), StatusCode::BAD_REQUEST);
+    let missing_route_approval_body: DagDbErrorEnvelope =
+        response_json(missing_route_approval).await;
+    assert_eq!(
+        missing_route_approval_body.error_code,
+        "default_route_approval_signature_required"
+    );
+    assert_eq!(
+        missing_route_approval_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_route_approval + 1,
+        "missing route approval signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        default_route_count(&db.pool).await,
+        route_rows_before_missing_approval,
+        "missing route approval signature must not persist a default route"
+    );
+
+    let route_rows_before_missing_approval_did = default_route_count(&db.pool).await;
+    let approval_denials_before_missing_route_did =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
+    let missing_route_approval_did_request = DagDbRouteRequest {
+        idempotency_key: "idem-route-missing-approval-did".to_owned(),
+        ..default_route_request.clone()
+    };
+    let mut missing_route_approval_did_request_http = scoped_post_with_default_route_signature(
+        "/api/v1/dag-db/route",
+        "dagdb:route",
+        &missing_route_approval_did_request,
+        Some(default_route_sigs.write_signature.clone()),
+        Some(default_route_sigs.approval_signature.clone()),
+    );
+    missing_route_approval_did_request_http
+        .headers_mut()
+        .remove("x-exo-default-route-approval-did");
+    let missing_route_approval_did = app
+        .clone()
+        .oneshot(missing_route_approval_did_request_http)
+        .await
+        .expect("missing route approval DID response");
+    assert_eq!(missing_route_approval_did.status(), StatusCode::BAD_REQUEST);
+    let missing_route_approval_did_body: DagDbErrorEnvelope =
+        response_json(missing_route_approval_did).await;
+    assert_eq!(
+        missing_route_approval_did_body.error_code,
+        "default_route_approval_authority_required"
+    );
+    assert_eq!(
+        missing_route_approval_did_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_approval_denied")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denials_before_missing_route_did + 1,
+        "missing route approval DID must persist dagdb_approval_denied"
+    );
+    assert_eq!(
+        default_route_count(&db.pool).await,
+        route_rows_before_missing_approval_did,
+        "missing route approval DID must not persist a default route"
+    );
+
+    let record_accepted_before_default_route =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_record_accepted").await;
+    let approval_counts_before_default_route =
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let default_route_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_default_route_signature(
             "/api/v1/dag-db/route",
             "dagdb:route",
             &default_route_request,
-            Some(default_route_signature),
+            Some(default_route_sigs.write_signature),
+            Some(default_route_sigs.approval_signature),
         ))
         .await
         .expect("default route response");
-    assert_eq!(default_route_response.status(), StatusCode::CREATED);
+    let default_route_status = default_route_response.status();
     let default_route_body: JsonValue = response_json(default_route_response).await;
+    assert_eq!(
+        default_route_status,
+        StatusCode::CREATED,
+        "default route response body: {default_route_body}"
+    );
     let default_route_id = default_route_body["route_id"]
         .as_str()
         .expect("route_id")
@@ -511,6 +837,16 @@ async fn dagdb_routes_integration_contract() {
         default_route_state.selected_memory_ref_count > 0,
         "default route must persist selected memory evidence"
     );
+    assert!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_record_accepted").await
+            > record_accepted_before_default_route,
+        "default route success must append a durable dagdb_record_accepted receipt"
+    );
+    assert_approval_counts_increased(
+        approval_counts_before_default_route,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "default route success",
+    );
 
     let default_route_rows_before_missing = default_route_count(&db.pool).await;
     let missing_memory_route = DagDbRouteRequest {
@@ -520,10 +856,11 @@ async fn dagdb_routes_integration_contract() {
     };
     let missing_memory_route_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_default_route_signature(
             "/api/v1/dag-db/route",
             "dagdb:route",
             &missing_memory_route,
+            Some("00".repeat(64)),
             Some("00".repeat(64)),
         ))
         .await
@@ -662,6 +999,12 @@ async fn dagdb_routes_integration_contract() {
         target_layer_depth: None,
         target_layer_reason: None,
     };
+    let receipts_before_missing_writeback_signature =
+        receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let signature_failures_before_missing_writeback_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let memory_objects_before_missing_writeback_signature =
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
     let missing_signature = app
         .clone()
         .oneshot(scoped_post(
@@ -677,6 +1020,25 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(
         missing_signature_body.error_code,
         "write_signature_required"
+    );
+    assert_eq!(
+        missing_signature_body.operational_event_type.as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        receipts_before_missing_writeback_signature + 1,
+        "missing writeback write signature must append one durable operational receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_writeback_signature + 1,
+        "missing writeback write signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before_missing_writeback_signature,
+        "missing writeback write signature must not persist user data"
     );
 
     ctx.install_gatekeeper_profile(
@@ -701,14 +1063,154 @@ async fn dagdb_routes_integration_contract() {
         require_layer_evidence: None,
         drilldown_reserve_bp: None,
     };
-    let packet_signature = context_packet_signature(&db.pool, &keypair, &packet_request).await;
+    let packet_signatures = context_packet_signatures(&db.pool, &keypair, &packet_request).await;
+    let packet_rows_before_missing_signature = context_packet_count(&db.pool).await;
+    let signature_failures_before_missing_packet_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let missing_packet_signature_request = DagDbContextPacketRequest {
+        idempotency_key: "idem-packet-missing-write-signature".to_owned(),
+        request_id: "request-missing-write-signature".to_owned(),
+        ..packet_request.clone()
+    };
+    let missing_packet_signature = app
+        .clone()
+        .oneshot(scoped_post_with_context_packet_signature(
+            "/api/v1/dag-db/context-packet",
+            "dagdb:context_packet",
+            &missing_packet_signature_request,
+            None,
+            Some(packet_signatures.approval_signature.clone()),
+        ))
+        .await
+        .expect("missing context packet write signature response");
+    assert_eq!(missing_packet_signature.status(), StatusCode::BAD_REQUEST);
+    let missing_packet_signature_body: DagDbErrorEnvelope =
+        response_json(missing_packet_signature).await;
+    assert_eq!(
+        missing_packet_signature_body.error_code,
+        "write_signature_required"
+    );
+    assert_eq!(
+        missing_packet_signature_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_packet_signature + 1,
+        "missing context packet write signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        context_packet_count(&db.pool).await,
+        packet_rows_before_missing_signature,
+        "missing context packet write signature must not persist packet state"
+    );
+
+    let packet_rows_before_missing_approval = context_packet_count(&db.pool).await;
+    let signature_failures_before_missing_packet_approval =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let missing_packet_approval_request = DagDbContextPacketRequest {
+        idempotency_key: "idem-packet-missing-approval-signature".to_owned(),
+        request_id: "request-missing-approval-signature".to_owned(),
+        ..packet_request.clone()
+    };
+    let missing_packet_approval = app
+        .clone()
+        .oneshot(scoped_post_with_context_packet_signature(
+            "/api/v1/dag-db/context-packet",
+            "dagdb:context_packet",
+            &missing_packet_approval_request,
+            Some(packet_signatures.write_signature.clone()),
+            None,
+        ))
+        .await
+        .expect("missing context packet approval signature response");
+    assert_eq!(missing_packet_approval.status(), StatusCode::BAD_REQUEST);
+    let missing_packet_approval_body: DagDbErrorEnvelope =
+        response_json(missing_packet_approval).await;
+    assert_eq!(
+        missing_packet_approval_body.error_code,
+        "context_packet_approval_signature_required"
+    );
+    assert_eq!(
+        missing_packet_approval_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_packet_approval + 1,
+        "missing context packet approval signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        context_packet_count(&db.pool).await,
+        packet_rows_before_missing_approval,
+        "missing context packet approval signature must not persist packet state"
+    );
+
+    let packet_rows_before_missing_approval_did = context_packet_count(&db.pool).await;
+    let approval_denials_before_missing_packet_did =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
+    let missing_packet_approval_did_request = DagDbContextPacketRequest {
+        idempotency_key: "idem-packet-missing-approval-did".to_owned(),
+        request_id: "request-missing-approval-did".to_owned(),
+        ..packet_request.clone()
+    };
+    let mut missing_packet_approval_did_request_http = scoped_post_with_context_packet_signature(
+        "/api/v1/dag-db/context-packet",
+        "dagdb:context_packet",
+        &missing_packet_approval_did_request,
+        Some(packet_signatures.write_signature.clone()),
+        Some(packet_signatures.approval_signature.clone()),
+    );
+    missing_packet_approval_did_request_http
+        .headers_mut()
+        .remove("x-exo-context-packet-approval-did");
+    let missing_packet_approval_did = app
+        .clone()
+        .oneshot(missing_packet_approval_did_request_http)
+        .await
+        .expect("missing context packet approval DID response");
+    assert_eq!(
+        missing_packet_approval_did.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let missing_packet_approval_did_body: DagDbErrorEnvelope =
+        response_json(missing_packet_approval_did).await;
+    assert_eq!(
+        missing_packet_approval_did_body.error_code,
+        "context_packet_approval_authority_required"
+    );
+    assert_eq!(
+        missing_packet_approval_did_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_approval_denied")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denials_before_missing_packet_did + 1,
+        "missing context packet approval DID must persist dagdb_approval_denied"
+    );
+    assert_eq!(
+        context_packet_count(&db.pool).await,
+        packet_rows_before_missing_approval_did,
+        "missing context packet approval DID must not persist packet state"
+    );
+
+    let record_accepted_before_packet =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_record_accepted").await;
+    let approval_counts_before_packet = approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let packet_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_context_packet_signature(
             "/api/v1/dag-db/context-packet",
             "dagdb:context_packet",
             &packet_request,
-            Some(packet_signature),
+            Some(packet_signatures.write_signature),
+            Some(packet_signatures.approval_signature),
         ))
         .await
         .expect("context packet response");
@@ -750,6 +1252,16 @@ async fn dagdb_routes_integration_contract() {
         packet_state.selected_memory_count > 0,
         "context packet must persist selected memory evidence"
     );
+    assert!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_record_accepted").await
+            > record_accepted_before_packet,
+        "context packet success must append a durable dagdb_record_accepted receipt"
+    );
+    assert_approval_counts_increased(
+        approval_counts_before_packet,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "context packet success",
+    );
 
     let empty_selection_packet = DagDbContextPacketRequest {
         idempotency_key: "idem-packet-empty-selection".to_owned(),
@@ -761,10 +1273,11 @@ async fn dagdb_routes_integration_contract() {
     let packet_rows_before_empty = context_packet_count(&db.pool).await;
     let empty_selection_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_context_packet_signature(
             "/api/v1/dag-db/context-packet",
             "dagdb:context_packet",
             &empty_selection_packet,
+            Some("00".repeat(64)),
             Some("00".repeat(64)),
         ))
         .await
@@ -817,6 +1330,193 @@ async fn dagdb_routes_integration_contract() {
     let signature = sign_write_payload(&keypair, &payload_hash).expect("signature");
     let (lifecycle_signature, continuation_signature) =
         writeback_d5_signatures(&keypair, &writeback_request);
+
+    let memory_objects_before_missing_lifecycle_signature =
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let signature_failures_before_missing_lifecycle_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let missing_lifecycle_signature_request = DagDbWritebackRequest {
+        idempotency_key: "idem-writeback-missing-lifecycle-signature".to_owned(),
+        ..writeback_request.clone()
+    };
+    let missing_lifecycle_signature = app
+        .clone()
+        .oneshot(scoped_post_with_d5_signatures(
+            "/api/v1/dag-db/writeback",
+            "dagdb:writeback",
+            &missing_lifecycle_signature_request,
+            Some(signature.clone()),
+            None,
+            Some(continuation_signature.clone()),
+        ))
+        .await
+        .expect("missing lifecycle signature response");
+    assert_eq!(
+        missing_lifecycle_signature.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let missing_lifecycle_signature_body: DagDbErrorEnvelope =
+        response_json(missing_lifecycle_signature).await;
+    assert_eq!(
+        missing_lifecycle_signature_body.error_code,
+        "lifecycle_signature_required"
+    );
+    assert_eq!(
+        missing_lifecycle_signature_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_lifecycle_signature + 1,
+        "missing lifecycle signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before_missing_lifecycle_signature,
+        "missing lifecycle signature must not persist user data"
+    );
+
+    let memory_objects_before_missing_continuation_signature =
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let signature_failures_before_missing_continuation_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let missing_continuation_signature_request = DagDbWritebackRequest {
+        idempotency_key: "idem-writeback-missing-continuation-signature".to_owned(),
+        ..writeback_request.clone()
+    };
+    let missing_continuation_signature = app
+        .clone()
+        .oneshot(scoped_post_with_d5_signatures(
+            "/api/v1/dag-db/writeback",
+            "dagdb:writeback",
+            &missing_continuation_signature_request,
+            Some(signature.clone()),
+            Some(lifecycle_signature.clone()),
+            None,
+        ))
+        .await
+        .expect("missing continuation signature response");
+    assert_eq!(
+        missing_continuation_signature.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let missing_continuation_signature_body: DagDbErrorEnvelope =
+        response_json(missing_continuation_signature).await;
+    assert_eq!(
+        missing_continuation_signature_body.error_code,
+        "continuation_signature_required"
+    );
+    assert_eq!(
+        missing_continuation_signature_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_continuation_signature + 1,
+        "missing continuation signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before_missing_continuation_signature,
+        "missing continuation signature must not persist user data"
+    );
+
+    let memory_objects_before_missing_lifecycle_did =
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let approval_denials_before_missing_lifecycle_did =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
+    let missing_lifecycle_did_request = DagDbWritebackRequest {
+        idempotency_key: "idem-writeback-missing-lifecycle-did".to_owned(),
+        ..writeback_request.clone()
+    };
+    let mut missing_lifecycle_did_request_http = scoped_post_with_d5_signatures(
+        "/api/v1/dag-db/writeback",
+        "dagdb:writeback",
+        &missing_lifecycle_did_request,
+        Some(signature.clone()),
+        Some(lifecycle_signature.clone()),
+        Some(continuation_signature.clone()),
+    );
+    missing_lifecycle_did_request_http
+        .headers_mut()
+        .remove("x-exo-lifecycle-approval-did");
+    let missing_lifecycle_did = app
+        .clone()
+        .oneshot(missing_lifecycle_did_request_http)
+        .await
+        .expect("missing lifecycle approval DID response");
+    assert_eq!(missing_lifecycle_did.status(), StatusCode::BAD_REQUEST);
+    let missing_lifecycle_did_body: DagDbErrorEnvelope = response_json(missing_lifecycle_did).await;
+    assert_eq!(
+        missing_lifecycle_did_body.error_code,
+        "lifecycle_approval_authority_required"
+    );
+    assert_eq!(
+        missing_lifecycle_did_body.operational_event_type.as_deref(),
+        Some("dagdb_approval_denied")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denials_before_missing_lifecycle_did + 1,
+        "missing lifecycle approval DID must persist dagdb_approval_denied"
+    );
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before_missing_lifecycle_did,
+        "missing lifecycle approval DID must not persist user data"
+    );
+
+    let memory_objects_before_missing_continuation_did =
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let approval_denials_before_missing_continuation_did =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
+    let missing_continuation_did_request = DagDbWritebackRequest {
+        idempotency_key: "idem-writeback-missing-continuation-did".to_owned(),
+        ..writeback_request.clone()
+    };
+    let mut missing_continuation_did_request_http = scoped_post_with_d5_signatures(
+        "/api/v1/dag-db/writeback",
+        "dagdb:writeback",
+        &missing_continuation_did_request,
+        Some(signature.clone()),
+        Some(lifecycle_signature.clone()),
+        Some(continuation_signature.clone()),
+    );
+    missing_continuation_did_request_http
+        .headers_mut()
+        .remove("x-exo-continuation-approval-did");
+    let missing_continuation_did = app
+        .clone()
+        .oneshot(missing_continuation_did_request_http)
+        .await
+        .expect("missing continuation approval DID response");
+    assert_eq!(missing_continuation_did.status(), StatusCode::BAD_REQUEST);
+    let missing_continuation_did_body: DagDbErrorEnvelope =
+        response_json(missing_continuation_did).await;
+    assert_eq!(
+        missing_continuation_did_body.error_code,
+        "continuation_approval_authority_required"
+    );
+    assert_eq!(
+        missing_continuation_did_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_approval_denied")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denials_before_missing_continuation_did + 1,
+        "missing continuation approval DID must persist dagdb_approval_denied"
+    );
+    assert_eq!(
+        memory_object_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        memory_objects_before_missing_continuation_did,
+        "missing continuation approval DID must not persist user data"
+    );
 
     let receipts_before_metadata_relay = receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
     let memory_objects_before_metadata_relay =
@@ -893,6 +1593,10 @@ async fn dagdb_routes_integration_contract() {
         "mutated knowledge_class relay must not persist DAG DB memory rows"
     );
 
+    let record_accepted_before_writeback =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_record_accepted").await;
+    let approval_counts_before_writeback =
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let writeback_response = app
         .clone()
         .oneshot(scoped_post_with_d5_signatures(
@@ -913,6 +1617,16 @@ async fn dagdb_routes_integration_contract() {
     assert!(
         receipts_after > receipts_before,
         "writeback must append at least one dagdb_receipts row"
+    );
+    assert!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_record_accepted").await
+            > record_accepted_before_writeback,
+        "writeback success must append a durable dagdb_record_accepted receipt"
+    );
+    assert_approval_counts_increased(
+        approval_counts_before_writeback,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "writeback success",
     );
     let lifecycle_state = lifecycle_d5_state(
         &db.pool,
@@ -1252,11 +1966,20 @@ async fn dagdb_routes_integration_contract() {
         "signed layered writeback must append DAG DB rows"
     );
 
+    insert_session_user(&db.pool, BEARER, EXPORTER_DID, TENANT_ID).await;
     let export = export_request();
+    assert_eq!(
+        export.requester_did, EXPORTER_DID,
+        "export success/replay/conflict must use the requester with active Export consent"
+    );
     let receipts_before_missing_export_signature =
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let signature_failures_before_missing_export_signature =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
     let idempotency_before_missing_export_signature =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await;
+    let export_rows_before_missing_export_signature =
+        export_row_count(&db.pool, TENANT_ID, NAMESPACE).await;
     let missing_export_signature = app
         .clone()
         .oneshot(scoped_post(
@@ -1275,19 +1998,39 @@ async fn dagdb_routes_integration_contract() {
         "write_signature_required"
     );
     assert_eq!(
+        missing_export_signature_body
+            .operational_event_type
+            .as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
-        receipts_before_missing_export_signature,
-        "missing export signature must fail before DAG DB persistence"
+        receipts_before_missing_export_signature + 1,
+        "missing export signature must append one durable operational receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_missing_export_signature + 1,
+        "missing export signature must persist dagdb_signature_failure"
     );
     assert_eq!(
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await,
         idempotency_before_missing_export_signature,
         "missing export signature must fail before idempotency reservation"
     );
+    assert_eq!(
+        export_row_count(&db.pool, TENANT_ID, NAMESPACE).await,
+        export_rows_before_missing_export_signature,
+        "missing export signature must not mutate export data"
+    );
 
     let receipts_before_export_consent_gap = receipt_count(&db.pool, TENANT_ID, NAMESPACE).await;
+    let approval_denied_before_export_consent_gap =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
     let idempotency_before_export_consent_gap =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await;
+    let export_completed_before_export_consent_gap =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await;
     let export_write_signature = export_signature(&db.pool, &keypair, &export).await;
     let export_response = app
         .clone()
@@ -1306,11 +2049,25 @@ async fn dagdb_routes_integration_contract() {
     );
     let export_body: DagDbErrorEnvelope = response_json(export_response).await;
     assert_eq!(export_body.error_code, "consent_denied");
+    assert_eq!(
+        export_body.operational_event_type.as_deref(),
+        Some("dagdb_approval_denied")
+    );
     assert_no_forbidden_material(&export_body.message);
     assert_eq!(
         receipt_count(&db.pool, TENANT_ID, NAMESPACE).await,
-        receipts_before_export_consent_gap,
-        "writeback consent must not let export append DAG DB rows"
+        receipts_before_export_consent_gap + 1,
+        "writeback consent must only append an operational denial receipt"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await,
+        approval_denied_before_export_consent_gap + 1,
+        "writeback consent gap must persist dagdb_approval_denied for export"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await,
+        export_completed_before_export_consent_gap,
+        "writeback consent must not append dagdb_export_completed receipts"
     );
     assert_eq!(
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await,
@@ -1322,8 +2079,49 @@ async fn dagdb_routes_integration_contract() {
         active_import_export_consent_engine(),
         identity_registry_with_finality_authority(&keypair),
     );
+    let forged_export_signature = export_signature(&db.pool, &keypair, &export).await;
+    let signature_failures_before_forged_export =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
+    let idempotency_before_forged_export =
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await;
+    let forged_export_material = DagDbExportRequest {
+        idempotency_key: "idem-export-forged-signature".to_owned(),
+        include_preview_context: true,
+        ..export.clone()
+    };
+    let forged_export_response = app
+        .clone()
+        .oneshot(scoped_post(
+            "/api/v1/dag-db/export",
+            "dagdb:export",
+            &forged_export_material,
+            Some(forged_export_signature),
+        ))
+        .await
+        .expect("forged export signature response");
+    assert_eq!(forged_export_response.status(), StatusCode::FORBIDDEN);
+    let forged_export_body: DagDbErrorEnvelope = response_json(forged_export_response).await;
+    assert_eq!(forged_export_body.error_code, "provenance_denied");
+    assert_eq!(
+        forged_export_body.operational_event_type.as_deref(),
+        Some("dagdb_signature_failure")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await,
+        signature_failures_before_forged_export + 1,
+        "forged export signature must persist dagdb_signature_failure"
+    );
+    assert_eq!(
+        idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await,
+        idempotency_before_forged_export,
+        "forged export signature must clean its idempotency reservation"
+    );
     let idempotency_before_export_success =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await;
+    let export_completed_before_success =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await;
+    let approval_counts_before_export_success =
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let export_success_signature = export_signature(&db.pool, &keypair, &export).await;
     let export_success = app
         .clone()
@@ -1338,6 +2136,7 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(export_success.status(), StatusCode::OK);
     let export_success_body: JsonValue = response_json(export_success).await;
     assert_eq!(export_success_body["export_status"], "built");
+    assert_eq!(export_success_body["idempotency_status"], "stored");
     assert!(
         export_success_body["exported_record_count"]
             .as_u64()
@@ -1350,6 +2149,22 @@ async fn dagdb_routes_integration_contract() {
         idempotency_before_export_success + 1,
         "export success must store one idempotency response"
     );
+    assert!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await
+            > export_completed_before_success,
+        "export success must append a durable dagdb_export_completed receipt"
+    );
+    assert_approval_counts_increased(
+        approval_counts_before_export_success,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "export success",
+    );
+    let replay_detected_before_export_replay =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_replay_detected").await;
+    let export_completed_before_export_replay =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await;
+    let approval_counts_before_export_replay =
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let export_replay = app
         .clone()
         .oneshot(scoped_post(
@@ -1362,11 +2177,30 @@ async fn dagdb_routes_integration_contract() {
         .expect("export replay response");
     assert_eq!(export_replay.status(), StatusCode::OK);
     let export_replay_body: JsonValue = response_json(export_replay).await;
-    assert_eq!(export_replay_body, export_success_body);
+    let mut expected_export_replay_body = export_success_body.clone();
+    expected_export_replay_body["idempotency_status"] = JsonValue::String("replayed".to_owned());
+    assert_eq!(export_replay_body, expected_export_replay_body);
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_replay_detected").await,
+        replay_detected_before_export_replay + 1,
+        "idempotent export replay must persist dagdb_replay_detected"
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await,
+        export_completed_before_export_replay,
+        "idempotent export replay must not append duplicate dagdb_export_completed receipts"
+    );
+    assert_approval_counts_unchanged(
+        approval_counts_before_export_replay,
+        approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await,
+        "idempotent export replay",
+    );
     let changed_export_material = DagDbExportRequest {
         include_preview_context: true,
         ..export.clone()
     };
+    let idempotency_conflicts_before_changed_export =
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_idempotency_conflict").await;
     let changed_export_signature =
         export_signature(&db.pool, &keypair, &changed_export_material).await;
     let changed_export_response = app
@@ -1382,6 +2216,16 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(changed_export_response.status(), StatusCode::CONFLICT);
     let changed_export_body: DagDbErrorEnvelope = response_json(changed_export_response).await;
     assert_eq!(changed_export_body.error_code, "idempotency_key_conflict");
+    assert_eq!(
+        changed_export_body.operational_event_type.as_deref(),
+        Some("dagdb_idempotency_conflict")
+    );
+    assert_eq!(
+        receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_idempotency_conflict").await,
+        idempotency_conflicts_before_changed_export + 1,
+        "changed export material must persist dagdb_idempotency_conflict"
+    );
+    insert_session_user(&db.pool, BEARER, AGENT_DID, TENANT_ID).await;
 
     let writeback_request_tenant_mismatch = DagDbWritebackRequest {
         tenant_id: "tenant-b".to_owned(),
@@ -1418,6 +2262,10 @@ async fn dagdb_routes_integration_contract() {
     assert_eq!(tenant_mismatch.status(), StatusCode::FORBIDDEN);
     let tenant_mismatch_body: DagDbErrorEnvelope = response_json(tenant_mismatch).await;
     assert_eq!(tenant_mismatch_body.error_code, "tenant_scope_mismatch");
+    assert_eq!(
+        tenant_mismatch_body.operational_event_type.as_deref(),
+        Some("dagdb_rls_tenant_violation")
+    );
 
     let bad_council = DagDbCouncilDecisionRequest {
         expires_at: "not-an-hlc".to_owned(),
@@ -1433,9 +2281,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("council error response");
-    assert_eq!(council_error.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let council_error_body: DagDbErrorEnvelope = response_json(council_error).await;
-    assert_eq!(council_error_body.error_code, "database_unavailable");
+    assert_eq!(council_error.status(), StatusCode::NOT_FOUND);
 
     let writeback_request_metadata = DagDbWritebackRequest {
         tenant_id: TENANT_ID.to_owned(),
@@ -1532,12 +2378,9 @@ async fn dagdb_routes_integration_contract() {
     let provenance_body: DagDbErrorEnvelope = response_json(provenance_denied).await;
     assert_eq!(provenance_body.error_code, "provenance_denied");
 
-    // Regression (header-trust gap + synthetic scaffold success): the DAG DB
-    // router itself must bind bearer tokens to live sessions when a pool is
-    // configured, even when mounted WITHOUT the gateway-wide session middleware.
-    // A forged bearer with self-asserted tenant/namespace/scope headers must
-    // fail at auth, and a valid live session must still fail closed for routes
-    // that have no governed DB-backed implementation.
+    // Regression (header-trust gap + synthetic scaffold success): reserved
+    // DTO-only surfaces must remain unmounted, while live mounted routes still
+    // fail closed when the standalone router has no DB-backed configuration.
     let standalone = dagdb_router::<()>();
     let fixtures = dagdb_fixtures();
     let trust_check = trust_check_request();
@@ -1552,9 +2395,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("forged bearer trust-check response");
-    assert_eq!(forged_trust.status(), StatusCode::UNAUTHORIZED);
-    let forged_trust_body: DagDbErrorEnvelope = response_json(forged_trust).await;
-    assert_eq!(forged_trust_body.error_code, "unauthenticated");
+    assert_eq!(forged_trust.status(), StatusCode::NOT_FOUND);
 
     let live_trust = standalone
         .clone()
@@ -1567,7 +2408,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer trust-check response");
-    assert_live_scaffold_fail_closed(live_trust, "dagdb.trust_check").await;
+    assert_eq!(live_trust.status(), StatusCode::NOT_FOUND);
 
     let intake: DagDbIntakeRequest = dagdb_fixture(&fixtures, "intake");
     let live_intake = standalone
@@ -1581,7 +2422,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer intake response");
-    assert_live_scaffold_fail_closed(live_intake, "dagdb.intake").await;
+    assert_eq!(live_intake.status(), StatusCode::NOT_FOUND);
 
     let route: DagDbRouteRequest = dagdb_fixture(&fixtures, "route");
     let live_route = standalone
@@ -1595,7 +2436,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer route response");
-    assert_live_scaffold_fail_closed(live_route, "dagdb.route").await;
+    assert_standalone_route_requires_write_signature(live_route).await;
 
     let validation: DagDbValidateRequest = dagdb_fixture(&fixtures, "validate");
     let live_validation = standalone
@@ -1609,7 +2450,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer validate response");
-    assert_live_scaffold_fail_closed(live_validation, "dagdb.validate").await;
+    assert_eq!(live_validation.status(), StatusCode::NOT_FOUND);
 
     let receipt: DagDbReceiptLookupRequest = dagdb_fixture(&fixtures, "receipt_lookup");
     let live_receipt = standalone
@@ -1623,7 +2464,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer receipt lookup response");
-    assert_live_scaffold_fail_closed(live_receipt, "dagdb.receipt_lookup").await;
+    assert_eq!(live_receipt.status(), StatusCode::NOT_FOUND);
 
     let catalog: DagDbCatalogLookupRequest = dagdb_fixture(&fixtures, "catalog_lookup");
     let live_catalog = standalone
@@ -1637,7 +2478,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer catalog lookup response");
-    assert_live_scaffold_fail_closed(live_catalog, "dagdb.catalog_lookup").await;
+    assert_eq!(live_catalog.status(), StatusCode::NOT_FOUND);
 
     let route_lookup: DagDbRouteLookupRequest = dagdb_fixture(&fixtures, "route_lookup");
     let live_route_lookup = standalone
@@ -1651,7 +2492,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer route lookup response");
-    assert_live_scaffold_fail_closed(live_route_lookup, "dagdb.route_lookup").await;
+    assert_eq!(live_route_lookup.status(), StatusCode::NOT_FOUND);
 
     let forged_council = standalone
         .clone()
@@ -1664,9 +2505,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("forged bearer council response");
-    assert_eq!(forged_council.status(), StatusCode::UNAUTHORIZED);
-    let forged_council_body: DagDbErrorEnvelope = response_json(forged_council).await;
-    assert_eq!(forged_council_body.error_code, "unauthenticated");
+    assert_eq!(forged_council.status(), StatusCode::NOT_FOUND);
 
     let live_council = standalone
         .clone()
@@ -1679,7 +2518,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer council response");
-    assert_live_scaffold_fail_closed(live_council, "dagdb.council_decision").await;
+    assert_eq!(live_council.status(), StatusCode::NOT_FOUND);
 
     db.cleanup().await;
 }
@@ -1779,11 +2618,7 @@ fn export_request() -> DagDbExportRequest {
         namespace: NAMESPACE.to_owned(),
         idempotency_key: "idem-export-integration".to_owned(),
         db_set_version: "dag_db-project_memory_v3".to_owned(),
-        // The export requester must be the authenticated session actor: a
-        // writeback-authorized agent cannot self-assert a different
-        // requester_did to reach the export adapter (the cross-actor case is
-        // covered by the bind_requester_to_session_actor unit tests).
-        requester_did: AGENT_DID.to_owned(),
+        requester_did: EXPORTER_DID.to_owned(),
         included_memory_ids: Vec::new(),
         included_graph_styles: Vec::new(),
         included_writeback_idempotency_keys: Vec::new(),
@@ -1797,6 +2632,7 @@ fn identity_registry_with_finality_authority(keypair: &KeyPair) -> IdentityRegis
         .with_public_key(AGENT_DID, *keypair.public_key().as_bytes())
         .with_public_key(EXPORTER_DID, *keypair.public_key().as_bytes())
         .with_public_key(FINALITY_AUTHORITY_DID, *keypair.public_key().as_bytes())
+        .with_governed_role(FINALITY_AUTHORITY_DID, GovernedRoleName::Operator)
 }
 
 fn active_consent_engine() -> ConsentEngine {
@@ -1839,23 +2675,59 @@ fn active_import_export_consent_engine() -> ConsentEngine {
         })
 }
 
-fn default_route_signature(keypair: &KeyPair, request: &DagDbRouteRequest) -> String {
-    let record = accepted_default_route_record(request);
-    sign_write_payload(
-        keypair,
-        &default_route_payload_hash(&record).expect("default route payload hash"),
-    )
-    .expect("default route signature")
+struct DefaultRouteSignatures {
+    write_signature: String,
+    approval_signature: String,
 }
 
-fn accepted_default_route_record(request: &DagDbRouteRequest) -> DefaultRouteRecord {
-    let route_id = gateway_hash_hex(
+fn default_route_signatures(
+    keypair: &KeyPair,
+    request: &DagDbRouteRequest,
+) -> DefaultRouteSignatures {
+    let route_id = default_route_id(request);
+    let proposed = default_route_record(request, &route_id, "operator_deferred");
+    let approval_payload_hash =
+        default_route_payload_hash(&proposed).expect("default route approval payload hash");
+    let approval_signature = sign_write_payload(keypair, &approval_payload_hash)
+        .expect("default route approval signature");
+    let updated_at = proposed.updated_at.clone();
+    let accepted = accept_default_route_record(
+        &proposed,
+        &default_route_acceptance_evidence(
+            request,
+            &route_id,
+            &approval_signature,
+            &approval_payload_hash,
+        ),
+        updated_at,
+    )
+    .expect("accepted default route record");
+    let write_signature = sign_write_payload(
+        keypair,
+        &default_route_payload_hash(&accepted).expect("default route payload hash"),
+    )
+    .expect("default route signature");
+    DefaultRouteSignatures {
+        write_signature,
+        approval_signature,
+    }
+}
+
+fn default_route_id(request: &DagDbRouteRequest) -> String {
+    gateway_hash_hex(
         "dagdb.gateway.route",
         &(
             &gateway_route_request_hash(request),
             &request.task_signature_hash,
         ),
-    );
+    )
+}
+
+fn default_route_record(
+    request: &DagDbRouteRequest,
+    route_id: &str,
+    approval_status: &str,
+) -> DefaultRouteRecord {
     let selected_memory_refs =
         sorted_strings(request.requested_memory_ids.clone().unwrap_or_default())
             .into_iter()
@@ -1872,10 +2744,9 @@ fn accepted_default_route_record(request: &DagDbRouteRequest) -> DefaultRouteRec
                 memory_id,
             })
             .collect();
-    let updated_at = gateway_hash_hex("dagdb.route.updated_at", &request.idempotency_key);
-    let route = DefaultRouteRecord {
+    DefaultRouteRecord {
         schema_version: DEFAULT_ROUTE_SCHEMA_VERSION.to_owned(),
-        route_id: route_id.clone(),
+        route_id: route_id.to_owned(),
         tenant_id: request.tenant_id.clone(),
         project_id: request.namespace.clone(),
         memory_namespace: request.namespace.clone(),
@@ -1886,63 +2757,132 @@ fn accepted_default_route_record(request: &DagDbRouteRequest) -> DefaultRouteRec
         policy_allowed: true,
         freshness_status: RouteFreshnessStatus::Current,
         invalidated: false,
-        production_default_route_approval_status: "accepted".to_owned(),
-        packet_quality_review_status: "accepted".to_owned(),
+        production_default_route_approval_status: approval_status.to_owned(),
+        packet_quality_review_status: approval_status.to_owned(),
         selected_memory_refs,
         created_at: gateway_hash_hex("dagdb.route.created_at", &request.idempotency_key),
-        updated_at: updated_at.clone(),
-    };
-    accept_default_route_record(
-        &route,
-        &default_route_acceptance_evidence(request, &route_id),
-        updated_at,
-    )
-    .expect("accepted default route record")
+        updated_at: gateway_hash_hex("dagdb.route.updated_at", &request.idempotency_key),
+    }
 }
 
 fn default_route_acceptance_evidence(
     request: &DagDbRouteRequest,
     route_id: &str,
+    approval_signature: &str,
+    approval_payload_hash: &[u8; 32],
 ) -> DefaultRouteAcceptanceEvidence {
+    let approval_payload_hash_hex = hex::encode(approval_payload_hash);
+    let approved_at = gateway_hash_hex("dagdb.route.approved_at", &request.idempotency_key);
     DefaultRouteAcceptanceEvidence {
-        production_default_route_approval_ref: gateway_hash_hex(
-            "dagdb.gateway.default_route.production_approval",
-            &(&request.approved_scope_hash, route_id),
-        ),
-        packet_quality_review_ref: gateway_hash_hex(
-            "dagdb.gateway.default_route.packet_quality",
-            &(route_id, &request.task_signature_hash),
-        ),
-        finality_ref: gateway_hash_hex(
-            "dagdb.gateway.default_route.finality",
-            &(
-                &gateway_hash_hex(
-                    "dagdb.gateway.receipt",
-                    &("dagdb.route", gateway_route_request_hash(request)),
+        production_default_route_approval_ref: format!(
+            "external-production-approval:{}",
+            gateway_hash_hex(
+                "dagdb.gateway.default_route.external_production_approval",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    &request.requesting_agent_did,
+                    route_id,
+                    &request.idempotency_key,
+                    FINALITY_AUTHORITY_DID,
+                    &approval_payload_hash_hex,
+                    approval_signature,
+                    &approved_at,
                 ),
-                &request.idempotency_key,
-            ),
+            )
         ),
+        packet_quality_review_ref: format!(
+            "external-packet-quality-review:{}",
+            gateway_hash_hex(
+                "dagdb.gateway.default_route.packet_quality",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    route_id,
+                    &request.task_signature_hash,
+                    FINALITY_AUTHORITY_DID,
+                    &approval_payload_hash_hex,
+                ),
+            )
+        ),
+        finality_ref: format!(
+            "external-finality:{}",
+            gateway_hash_hex(
+                "dagdb.gateway.default_route.external_finality",
+                &(
+                    &gateway_hash_hex(
+                        "dagdb.gateway.receipt",
+                        &("dagdb.route", gateway_route_request_hash(request)),
+                    ),
+                    &request.idempotency_key,
+                    FINALITY_AUTHORITY_DID,
+                    approval_signature,
+                    &approval_payload_hash_hex,
+                    &approved_at,
+                ),
+            )
+        ),
+        tenant_id: request.tenant_id.clone(),
+        memory_namespace: request.namespace.clone(),
+        actor_id: request.requesting_agent_did.clone(),
+        route_id: route_id.to_owned(),
+        request_id: request.idempotency_key.clone(),
+        payload_hash: approval_payload_hash_hex.clone(),
+        receipt_payload_hash: approval_payload_hash_hex,
+        authority_did: FINALITY_AUTHORITY_DID.to_owned(),
+        authority_signature: approval_signature.to_owned(),
+        approved_at,
     }
 }
 
-async fn context_packet_signature(
+struct ContextPacketSignatures {
+    write_signature: String,
+    approval_signature: String,
+}
+
+async fn context_packet_signatures(
     pool: &PgPool,
     keypair: &KeyPair,
     request: &DagDbContextPacketRequest,
-) -> String {
-    let record = accepted_context_packet_record(pool, request).await;
-    sign_write_payload(
-        keypair,
-        &context_packet_record_payload_hash(&record).expect("context packet payload hash"),
+) -> ContextPacketSignatures {
+    let material = context_packet_record_material(pool, request, "operator_deferred").await;
+    let approval_payload_hash = context_packet_record_payload_hash(&material.record)
+        .expect("context packet approval payload hash");
+    let approval_signature = sign_write_payload(keypair, &approval_payload_hash)
+        .expect("context packet approval signature");
+    let accepted = accept_context_packet_record(
+        &material.record,
+        &context_packet_acceptance_evidence(
+            request,
+            &material.packet_hash,
+            &material.receipt_hash,
+            &approval_signature,
+            &approval_payload_hash,
+        ),
     )
-    .expect("context packet signature")
+    .expect("accepted context packet record");
+    let write_signature = sign_write_payload(
+        keypair,
+        &context_packet_record_payload_hash(&accepted).expect("context packet payload hash"),
+    )
+    .expect("context packet signature");
+    ContextPacketSignatures {
+        write_signature,
+        approval_signature,
+    }
 }
 
-async fn accepted_context_packet_record(
+struct ContextPacketRecordMaterial {
+    record: exo_dag_db_domain::context_packet_persistence::ContextPacketRecord,
+    packet_hash: String,
+    receipt_hash: String,
+}
+
+async fn context_packet_record_material(
     pool: &PgPool,
     request: &DagDbContextPacketRequest,
-) -> exo_dag_db_domain::context_packet_persistence::ContextPacketRecord {
+    approval_status: &str,
+) -> ContextPacketRecordMaterial {
     let selection_request = selection_request_for_context_packet(request);
     let selection = build_persistent_graph_context_selection(pool, &selection_request)
         .await
@@ -1995,8 +2935,8 @@ async fn accepted_context_packet_record(
         tenant_id: request.tenant_id.clone(),
         project_id: request.namespace.clone(),
         memory_namespace: request.namespace.clone(),
-        production_default_route_approval_status: "accepted".to_owned(),
-        packet_quality_review_status: "accepted".to_owned(),
+        production_default_route_approval_status: approval_status.to_owned(),
+        packet_quality_review_status: approval_status.to_owned(),
         route_freshness_status: PacketFreshnessStatus::Current,
     };
     let record = build_context_packet_record(
@@ -2024,38 +2964,85 @@ async fn accepted_context_packet_record(
         },
     )
     .expect("context packet record");
-    accept_context_packet_record(
-        &record,
-        &context_packet_acceptance_evidence(
-            request,
-            &packet.packet_hash,
-            &gateway_hash_hex(
-                "dagdb.gateway.receipt",
-                &("dagdb.context_packet", packet.packet_hash.as_str()),
-            ),
-        ),
-    )
-    .expect("accepted context packet record")
+    let receipt_hash = gateway_hash_hex(
+        "dagdb.gateway.receipt",
+        &("dagdb.context_packet", packet.packet_hash.as_str()),
+    );
+    ContextPacketRecordMaterial {
+        record,
+        packet_hash: packet.packet_hash,
+        receipt_hash,
+    }
 }
 
 fn context_packet_acceptance_evidence(
     request: &DagDbContextPacketRequest,
     packet_hash: &str,
     receipt_hash: &str,
+    approval_signature: &str,
+    approval_payload_hash: &[u8; 32],
 ) -> ContextPacketAcceptanceEvidence {
+    let approval_payload_hash_hex = hex::encode(approval_payload_hash);
+    let approved_at =
+        gateway_hash_hex("dagdb.context_packet.approved_at", &request.idempotency_key);
     ContextPacketAcceptanceEvidence {
-        production_default_route_approval_ref: gateway_hash_hex(
-            "dagdb.gateway.context_packet.production_approval",
-            &(&request.route_id, packet_hash),
+        production_default_route_approval_ref: format!(
+            "external-production-approval:{}",
+            gateway_hash_hex(
+                "dagdb.gateway.context_packet.external_production_approval",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    &request.requesting_agent_did,
+                    &request.route_id,
+                    packet_hash,
+                    &request.request_id,
+                    FINALITY_AUTHORITY_DID,
+                    &approval_payload_hash_hex,
+                    approval_signature,
+                    &approved_at,
+                ),
+            )
         ),
-        packet_quality_review_ref: gateway_hash_hex(
-            "dagdb.gateway.context_packet.quality_review",
-            &(packet_hash, packet_hash),
+        packet_quality_review_ref: format!(
+            "external-packet-quality-review:{}",
+            gateway_hash_hex(
+                "dagdb.gateway.context_packet.quality_review",
+                &(
+                    &request.tenant_id,
+                    &request.namespace,
+                    packet_hash,
+                    packet_hash,
+                    FINALITY_AUTHORITY_DID,
+                    &approval_payload_hash_hex,
+                ),
+            )
         ),
-        finality_ref: gateway_hash_hex(
-            "dagdb.gateway.context_packet.finality",
-            &(receipt_hash, &request.idempotency_key),
+        finality_ref: format!(
+            "external-finality:{}",
+            gateway_hash_hex(
+                "dagdb.gateway.context_packet.external_finality",
+                &(
+                    receipt_hash,
+                    &request.idempotency_key,
+                    FINALITY_AUTHORITY_DID,
+                    approval_signature,
+                    &approval_payload_hash_hex,
+                    &approved_at,
+                ),
+            )
         ),
+        tenant_id: request.tenant_id.clone(),
+        memory_namespace: request.namespace.clone(),
+        actor_id: request.requesting_agent_did.clone(),
+        route_id: request.route_id.clone(),
+        packet_id: packet_hash.to_owned(),
+        request_id: request.request_id.clone(),
+        payload_hash: approval_payload_hash_hex.clone(),
+        receipt_payload_hash: approval_payload_hash_hex,
+        authority_did: FINALITY_AUTHORITY_DID.to_owned(),
+        authority_signature: approval_signature.to_owned(),
+        approved_at,
     }
 }
 
@@ -2398,6 +3385,91 @@ async fn receipt_count(pool: &PgPool, tenant_id: &str, namespace: &str) -> i64 {
     .expect("count receipts")
 }
 
+async fn assert_export_schema_tables_present(pool: &PgPool) {
+    let missing_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM (VALUES ('dagdb_exports'), ('dagdb_export_challenges')) AS required(name) \
+         WHERE to_regclass(format('%I.%I', current_schema(), name)) IS NULL ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("check export schema tables");
+    assert!(
+        missing_tables.is_empty(),
+        "fresh integration schema is missing export tables: {missing_tables:?}"
+    );
+}
+
+async fn receipt_event_count(
+    pool: &PgPool,
+    tenant_id: &str,
+    namespace: &str,
+    event_type: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM dagdb_receipts \
+         WHERE tenant_id = $1 AND namespace = $2 AND event_type = $3",
+    )
+    .bind(tenant_id)
+    .bind(namespace)
+    .bind(event_type)
+    .fetch_one(pool)
+    .await
+    .expect("count receipt event type")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApprovalEventCounts {
+    request_submitted: i64,
+    granted: i64,
+}
+
+async fn approval_event_counts(
+    pool: &PgPool,
+    tenant_id: &str,
+    namespace: &str,
+) -> ApprovalEventCounts {
+    ApprovalEventCounts {
+        request_submitted: receipt_event_count(
+            pool,
+            tenant_id,
+            namespace,
+            "dagdb_approval_request_submitted",
+        )
+        .await,
+        granted: receipt_event_count(pool, tenant_id, namespace, "dagdb_approval_granted").await,
+    }
+}
+
+fn assert_approval_counts_increased(
+    before: ApprovalEventCounts,
+    after: ApprovalEventCounts,
+    operation: &str,
+) {
+    assert!(
+        after.request_submitted > before.request_submitted,
+        "{operation} must append a durable dagdb_approval_request_submitted receipt"
+    );
+    assert!(
+        after.granted > before.granted,
+        "{operation} must append a durable dagdb_approval_granted receipt"
+    );
+}
+
+fn assert_approval_counts_unchanged(
+    before: ApprovalEventCounts,
+    after: ApprovalEventCounts,
+    operation: &str,
+) {
+    assert_eq!(
+        after.request_submitted, before.request_submitted,
+        "{operation} must not append duplicate dagdb_approval_request_submitted receipts"
+    );
+    assert_eq!(
+        after.granted, before.granted,
+        "{operation} must not append duplicate dagdb_approval_granted receipts"
+    );
+}
+
 async fn memory_object_count(pool: &PgPool, tenant_id: &str, namespace: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM dagdb_memory_objects WHERE tenant_id = $1 AND namespace = $2",
@@ -2407,6 +3479,15 @@ async fn memory_object_count(pool: &PgPool, tenant_id: &str, namespace: &str) ->
     .fetch_one(pool)
     .await
     .expect("count memory objects")
+}
+
+async fn export_row_count(pool: &PgPool, tenant_id: &str, namespace: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM dagdb_exports WHERE tenant_id = $1 AND namespace = $2")
+        .bind(tenant_id)
+        .bind(namespace)
+        .fetch_one(pool)
+        .await
+        .expect("count export rows")
 }
 
 async fn idempotency_count(
@@ -2457,6 +3538,64 @@ where
     T: serde::Serialize,
 {
     scoped_post_with_bearer(BEARER, path, action, body, write_signature)
+}
+
+fn scoped_post_with_default_route_signature<T>(
+    path: &str,
+    action: &str,
+    body: &T,
+    write_signature: Option<String>,
+    default_route_approval_signature: Option<String>,
+) -> Request<Body>
+where
+    T: serde::Serialize,
+{
+    let mut request = scoped_post_with_bearer(BEARER, path, action, body, write_signature);
+    let headers = request.headers_mut();
+    if let Some(signature) = default_route_approval_signature {
+        headers.insert(
+            "x-exo-default-route-approval-signature",
+            signature
+                .parse()
+                .expect("default route approval signature header"),
+        );
+    }
+    headers.insert(
+        "x-exo-default-route-approval-did",
+        FINALITY_AUTHORITY_DID
+            .parse()
+            .expect("default route approval DID header"),
+    );
+    request
+}
+
+fn scoped_post_with_context_packet_signature<T>(
+    path: &str,
+    action: &str,
+    body: &T,
+    write_signature: Option<String>,
+    context_packet_approval_signature: Option<String>,
+) -> Request<Body>
+where
+    T: serde::Serialize,
+{
+    let mut request = scoped_post_with_bearer(BEARER, path, action, body, write_signature);
+    let headers = request.headers_mut();
+    if let Some(signature) = context_packet_approval_signature {
+        headers.insert(
+            "x-exo-context-packet-approval-signature",
+            signature
+                .parse()
+                .expect("context packet approval signature header"),
+        );
+    }
+    headers.insert(
+        "x-exo-context-packet-approval-did",
+        FINALITY_AUTHORITY_DID
+            .parse()
+            .expect("context packet approval DID header"),
+    );
+    request
 }
 
 fn scoped_post_with_d5_signatures<T>(
@@ -2604,22 +3743,24 @@ async fn response_json<T: DeserializeOwned>(response: axum::response::Response) 
     serde_json::from_slice(&bytes).expect("json body")
 }
 
-async fn assert_live_scaffold_fail_closed(response: axum::response::Response, route_name: &str) {
+async fn assert_standalone_route_requires_write_signature(response: axum::response::Response) {
     let status = response.status();
     let body: DagDbErrorEnvelope = response_json(response).await;
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "{route_name} must fail closed instead of returning scaffold success: {body:?}"
+        StatusCode::BAD_REQUEST,
+        "dagdb.route must require write signature instead of returning scaffold success: {body:?}"
     );
-    assert_eq!(body.error_code, "database_unavailable");
-    assert!(
-        body.message
-            .contains("requires a configured production database"),
-        "{route_name} error message must identify missing governed persistence: {}",
-        body.message
+    assert_eq!(body.error_code, "write_signature_required");
+    assert_eq!(
+        body.message,
+        "DAG DB route persistence requires x-exo-write-signature header"
     );
     assert!(!body.requires_council_review);
+    assert_eq!(
+        body.operational_event_type.as_deref(),
+        Some("dagdb_signature_failure")
+    );
     assert_no_forbidden_material(&body.message);
 }
 

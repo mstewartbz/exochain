@@ -163,16 +163,16 @@ Updated 2026-06-18 after DAG DB REST runtime activation evidence review. Maps ev
 | **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
 | **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
 
-## DAG DB Runtime Adapter (GAP-012 PR-body candidate)
+## DAG DB Runtime Adapter (PR #695 active plan)
 
-GAP-012 is referenced by `README.md` and `INTEGRATION.md`; this repository copy
-does not contain a `GAP-012` section in `GAP-REGISTRY.md`. The spec section below
-is therefore a PR-body candidate from current repo docs and requires maintainer
-confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
+PR #695 runtime activation evidence is tracked in
+`docs/dagdb/runtime-activation/rollback-canary-observability.md`. The spec
+section below summarizes the mounted runtime contract from current repo docs and
+requires maintainer confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
 
 | Req | Spec Candidate | Requirement | Module / Evidence | Status |
 |---|---|---|---|---|
-| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | DAG DB REST route, context-packet, writeback, import, and export paths must be served by the gateway runtime when Postgres and tenant/session authority are configured; each write must pass tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export fail closed pending distinct import/export consent; RLS tenant policy and MCP gateway proxy proof are tracked as activation evidence. | `exochain/exochain#694`; `INTEGRATION.md` DAG DB Runtime Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `crates/exo-node/src/mcp/tools/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/runtime-activation/rollback-canary-observability.md` | 🟡 Evidence pending |
+| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | Exactly `POST /api/v1/dag-db/route`, `POST /api/v1/dag-db/context-packet`, `POST /api/v1/dag-db/writeback`, `POST /api/v1/dag-db/import`, and `POST /api/v1/dag-db/export` must be served by the gateway runtime when Postgres and tenant/session authority are configured; reserved intake, validate, trust-check, council decision, receipt lookup, catalog lookup, and route lookup DTO surfaces remain unmounted; writes must pass tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export are live only with distinct import/export consent plus route-bound signatures, and missing or mismatched consent/signatures fail closed. | `exochain/exochain#695`; `INTEGRATION.md` DAG DB Runtime Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `crates/exo-node/src/mcp/tools/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/runtime-activation/rollback-canary-observability.md` | 🟡 Evidence in progress |
 
 ## Autonomous Volition Credential (AVC) Layer
 
@@ -231,9 +231,10 @@ confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
 | P2P/API/Gateway/Tenant (§16–17) | 4 | 4 | 0 | 0 |
 | Decision Forum (GOV/TNC/M) | 15 | 15 | 0 | 0 |
 | Governance Monitoring (MON) | 12 | 10 | 0 | 2 |
+| DAG DB Runtime Adapter (DAGDB) | 1 | 0 | 1 | 0 |
 | AVC (Autonomous Volition Credential) | 10 | 10 | 0 | 0 |
 | Custody-Native Economy (zero-launch) | 22 | 22 | 0 | 0 |
-| **TOTAL** | **118** | **116** | **0** | **2** |
+| **TOTAL** | **119** | **116** | **1** | **2** |
 
-**Coverage: 116/118 requirements traced to code (98%). 2 planned (ExoForge scheduling + React dashboard). 0 partial.**
+**Coverage: 116/119 requirements implemented (97%). 2 planned (ExoForge scheduling + React dashboard). 1 partial/evidence pending (DAGDB-001).**
 **Workspace inventory: 3,638+ listed tests across 22 packages and 266+ Rust files (AVC and economy crates added).**

@@ -70,29 +70,34 @@ matrix with the implementation.
 
 ## DAG DB Runtime Adapter Contract (split `exo-dag-db-*` crates)
 
-**Status: REST runtime activation evidence in progress** — tracked as GAP-012 in
-`GAP-REGISTRY.md`. This section is the integration contract for the split
-`exo-dag-db-*` graph-governed agent-memory crates; rollout evidence is tracked in
+**Status: PR #695 REST runtime activation evidence in progress** — this section
+is the integration contract for the split `exo-dag-db-*` graph-governed
+agent-memory crates; rollout evidence is tracked in
 [`docs/dagdb/runtime-activation/rollback-canary-observability.md`](docs/dagdb/runtime-activation/rollback-canary-observability.md).
 
 ### Runtime boundary
 
-`exo-dag-db-*` is the governed DAG DB runtime adapter surface. The
-`/api/v1/dag-db/*` routes are merged into the `exo-gateway` router; the
+`exo-dag-db-*` is the governed DAG DB runtime adapter surface. The production
+router mounts exactly `POST /api/v1/dag-db/route`,
+`POST /api/v1/dag-db/context-packet`, `POST /api/v1/dag-db/writeback`,
+`POST /api/v1/dag-db/import`, and `POST /api/v1/dag-db/export`; the
 `exo-gateway` default feature set includes `production-db`, and the `exo-node`
-default feature set inherits `exo-gateway/default`. A functional governed
-runtime still requires a configured Postgres pool and tenant/session authority.
-Without that runtime state the routes fail closed, normally with
-`503 database_unavailable`, rather than fabricating persistence.
+default feature set inherits `exo-gateway/default`. A functional governed runtime
+still requires a configured Postgres pool and tenant/session authority. Without
+that runtime state the routes fail closed, normally with `503
+database_unavailable`, rather than fabricating persistence.
 
 The served persistent REST paths are default route, context packet build,
-writeback, import, and export. The writeback persistence path is routed through the
-`DagDbGatekeeperService` (`crates/exo-gatekeeper/src/dagdb_gate.rs`) consent,
-Ed25519, and invariant chain. Import/export routes fail closed (`403`,
-`consent_denied`) until distinct import/export consent is configured, so
-writeback-only consent cannot authorize them. Other route/lookup/scaffold
-endpoints expose the v1 DTO contract and return explicit runtime errors until
-their governed persistence path lands.
+writeback, import, and export. The writeback persistence path is routed through
+the `DagDbGatekeeperService` (`crates/exo-gatekeeper/src/dagdb_gate.rs`) consent,
+Ed25519, and invariant chain. Import/export are live routes only with distinct
+import/export consent plus route-bound signature material; missing or mismatched
+consent/signatures fail closed (for example `403 consent_denied` on authorization
+denial), so writeback-only consent cannot authorize them. Intake, validate,
+trust-check, council decision, receipt lookup, catalog lookup, and route lookup
+DTO surfaces are not mounted in the production router until live governed
+persistence exists for them; those requests therefore do not have runtime error
+contracts on the served router.
 Consumers must not write the `dagdb_*` tables directly; the raw
 `exo_dag_db_postgres::postgres::*` functions are not a public,
 governance-bearing surface.
@@ -137,7 +142,7 @@ record the route-level proof commands before docs mark that evidence complete.
   constitutional `InvariantEngine`" — that claim is corrected here to the honest
   enforced subset.
 
-### Tenant isolation (GAP-012 P1-E)
+### Tenant isolation (PR #695 activation evidence)
 
 Tenant isolation is enforced at the storage layer by a `tenant_id` + `namespace`
 pair carried on every row. Content-addressed rows (`dagdb_receipts.receipt_hash`,
@@ -216,8 +221,8 @@ The dag-db schema is applied by a single ledgered migrator on gateway startup
 into a dedicated `dagdb` Postgres schema. The migration SQL is **embedded in the
 binary** at compile time by `sqlx::migrate!`, so the deploy image needs **no
 Dockerfile change** to copy `crates/exo-dag-db-postgres/migrations/` — provisioning is
-purely from the compiled binary. A fresh container must answer one
-`/api/v1/dag-db/*` call after startup; if the dag-db migration fails, startup
+purely from the compiled binary. A fresh container must answer at least one of
+the five mounted DAG DB REST calls after startup; if the dag-db migration fails, startup
 aborts (fail closed) so the gateway never serves dag-db routes against an
 unprovisioned schema.
 
@@ -245,26 +250,34 @@ divergence on fresh deploys is tracked as a follow-up, out of scope here.
 
 ### Versioned v1 REST wire contract
 
-Every consumer-facing `/api/v1/dag-db/*` **response** body now carries a stable
-`schema_version` string so a non-Rust integrator can detect the wire-contract
-version directly from the response. The constants are owned by `exo-api`
-(`crates/exo-api/src/dagdb.rs`, `DAGDB_*_RESPONSE_SCHEMA_VERSION`) and are the
-single source of truth:
+Every response body for the five active production-mounted DAG DB REST endpoints
+carries a stable `schema_version` string so a non-Rust integrator can detect the
+wire-contract version directly from the response. The constants are owned by
+`exo-api` (`crates/exo-api/src/dagdb.rs`,
+`DAGDB_*_RESPONSE_SCHEMA_VERSION`) and are the single source of truth.
 
-| Endpoint | Response DTO | `schema_version` |
+Active runtime contracts mounted by the production router:
+
+| Mounted endpoint | Response DTO | `schema_version` |
 | --- | --- | --- |
-| `POST /intake` | `DagDbIntakeResponse` | `dagdb_intake_response_v1` |
-| `POST /route` | `DagDbRouteResponse` | `dagdb_route_response_v1` |
-| `POST /context-packet` | `DagDbContextPacketResponse` | `dagdb_context_packet_response_v1` |
-| `POST /validate` | `DagDbValidateResponse` | `dagdb_validate_response_v1` |
-| `POST /writeback` | `DagDbWritebackResponse` | `dagdb_writeback_response_v1` |
-| `POST /import` | `DagDbImportResponse` | `dagdb_import_response_v1` |
-| `POST /export` | `DagDbExportResponse` | `dagdb_export_response_v1` |
-| `POST /trust-check` | `DagDbTrustCheckResponse` | `dagdb_trust_check_response_v1` |
-| `POST /council/decision` | `DagDbCouncilDecisionResponse` | `dagdb_council_decision_response_v1` |
-| `GET /receipts/{hash}` | `DagDbReceiptLookupResponse` | `dagdb_receipt_lookup_response_v1` |
-| `GET /catalog/{id}` | `DagDbCatalogLookupResponse` | `dagdb_catalog_lookup_response_v1` |
-| `GET /routes/{id}` | `DagDbRouteLookupResponse` | `dagdb_route_lookup_response_v1` |
+| `POST /api/v1/dag-db/route` | `DagDbRouteResponse` | `dagdb_route_response_v1` |
+| `POST /api/v1/dag-db/context-packet` | `DagDbContextPacketResponse` | `dagdb_context_packet_response_v1` |
+| `POST /api/v1/dag-db/writeback` | `DagDbWritebackResponse` | `dagdb_writeback_response_v1` |
+| `POST /api/v1/dag-db/import` | `DagDbImportResponse` | `dagdb_import_response_v1` |
+| `POST /api/v1/dag-db/export` | `DagDbExportResponse` | `dagdb_export_response_v1` |
+
+Reserved DTO-only contracts are defined for future governed persistence paths,
+but are not mounted production routes:
+
+| Reserved DTO surface | Response DTO | `schema_version` |
+| --- | --- | --- |
+| `POST /api/v1/dag-db/intake` | `DagDbIntakeResponse` | `dagdb_intake_response_v1` |
+| `POST /api/v1/dag-db/validate` | `DagDbValidateResponse` | `dagdb_validate_response_v1` |
+| `POST /api/v1/dag-db/trust-check` | `DagDbTrustCheckResponse` | `dagdb_trust_check_response_v1` |
+| `POST /api/v1/dag-db/council/decision` | `DagDbCouncilDecisionResponse` | `dagdb_council_decision_response_v1` |
+| `GET /api/v1/dag-db/receipts/{hash}` | `DagDbReceiptLookupResponse` | `dagdb_receipt_lookup_response_v1` |
+| `GET /api/v1/dag-db/catalog/{id}` | `DagDbCatalogLookupResponse` | `dagdb_catalog_lookup_response_v1` |
+| `GET /api/v1/dag-db/routes/{id}` | `DagDbRouteLookupResponse` | `dagdb_route_lookup_response_v1` |
 
 Request bodies and the shared `DagDbErrorEnvelope` are **not** versioned in v1.
 

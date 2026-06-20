@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use exo_dag_db_postgres::{
     KG_EXPORT_DATABASE_URL_ENV, KG_EXPORT_PERSISTENCE_VERIFICATION_SCHEMA, KgExportBuildInput,
     KgExportError, KgExportRecord, KgExportScope, build_portable_export,
-    postgres::{DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL, DAGDB_SCHEMA_SQL, kg_export},
+    postgres::{
+        DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL,
+        DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL, DAGDB_SCHEMA_SQL, kg_export,
+    },
 };
 use serde_json::{Value as JsonValue, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -58,6 +61,10 @@ impl TestDb {
             .execute(&pool)
             .await
             .expect("apply DAG DB export schema");
+        sqlx::raw_sql(DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("apply DAG DB operational receipt event-type schema");
         Some(Self {
             admin_pool,
             pool,
@@ -201,7 +208,7 @@ async fn export_persistence_persists_hashes_challenges_receipts_and_replays() {
     assert_eq!(first.diagnostics.receipt.receipt_subject_kind, "export");
     assert_eq!(
         first.diagnostics.receipt.receipt_event_type,
-        "export_created"
+        "dagdb_export_completed"
     );
     assert!(first.diagnostics.receipt.latest_receipt_hash.is_some());
     assert!(first.diagnostics.receipt.subject_head_written);

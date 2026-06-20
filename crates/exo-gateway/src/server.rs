@@ -127,6 +127,46 @@ const MAX_EDISCOVERY_CORPUS_DOCUMENTS: usize = 1_000;
 const DAGDB_TENANT_HEADER: &str = "x-exo-tenant-id";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DagDbRuntimeStatus {
+    status: &'static str,
+    reason: &'static str,
+}
+
+fn dagdb_runtime_status_from_probe(
+    pool_configured: bool,
+    db_probe_succeeded: Option<bool>,
+) -> DagDbRuntimeStatus {
+    if !pool_configured {
+        return DagDbRuntimeStatus {
+            status: "dagdb_unavailable",
+            reason: "missing_db_config",
+        };
+    }
+
+    match db_probe_succeeded {
+        Some(true) => DagDbRuntimeStatus {
+            status: "dagdb_active",
+            reason: "db_probe_ok",
+        },
+        Some(false) | None => DagDbRuntimeStatus {
+            status: "dagdb_degraded",
+            reason: "db_probe_failed",
+        },
+    }
+}
+
+impl DagDbRuntimeStatus {
+    fn ready_status(self) -> (&'static str, StatusCode) {
+        match self.status {
+            "dagdb_active" => ("ok", StatusCode::OK),
+            "dagdb_degraded" => ("db_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+            "dagdb_unavailable" => ("no_db_configured", StatusCode::SERVICE_UNAVAILABLE),
+            _ => ("db_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayRateLimitOutcome {
     Allowed,
     Limited { retry_after_ms: u64 },
@@ -2309,29 +2349,45 @@ async fn handle_health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         uptime_seconds: state.uptime_seconds(),
+        dagdb_runtime_status: None,
+        dagdb_runtime_reason: None,
     })
 }
 
 /// GET /ready — returns 200 when the DB pool is reachable, 503 otherwise.
 async fn handle_ready(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
-    let (status_str, http_status) = match &state.pool {
-        Some(pool) => match sqlx::query("SELECT 1").fetch_one(pool).await {
-            Ok(_) => ("ok", StatusCode::OK),
-            Err(_) => ("db_unavailable", StatusCode::SERVICE_UNAVAILABLE),
-        },
-        None => ("no_db_configured", StatusCode::SERVICE_UNAVAILABLE),
-    };
+    let dagdb_runtime_status = probe_dagdb_runtime_status(&state).await;
+    let (status_str, http_status) = dagdb_runtime_status.ready_status();
     let body = HealthResponse {
         status: status_str.into(),
         version: env!("CARGO_PKG_VERSION").into(),
         uptime_seconds: state.uptime_seconds(),
+        dagdb_runtime_status: Some(dagdb_runtime_status.status.to_owned()),
+        dagdb_runtime_reason: Some(dagdb_runtime_status.reason.to_owned()),
     };
     (http_status, Json(body))
 }
 
-fn render_gateway_metrics(state: &AppState) -> std::result::Result<String, &'static str> {
+async fn probe_dagdb_runtime_status(state: &AppState) -> DagDbRuntimeStatus {
+    let Some(pool) = &state.pool else {
+        return dagdb_runtime_status_from_probe(false, None);
+    };
+
+    dagdb_runtime_status_from_probe(
+        true,
+        Some(sqlx::query("SELECT 1").fetch_one(pool).await.is_ok()),
+    )
+}
+
+fn render_gateway_metrics(
+    state: &AppState,
+    dagdb_runtime_status: DagDbRuntimeStatus,
+) -> std::result::Result<String, &'static str> {
     let db_configured = usize::from(state.pool.is_some());
     let uptime_seconds = state.uptime_seconds();
+    let dagdb_active = usize::from(dagdb_runtime_status.status == "dagdb_active");
+    let dagdb_degraded = usize::from(dagdb_runtime_status.status == "dagdb_degraded");
+    let dagdb_unavailable = usize::from(dagdb_runtime_status.status == "dagdb_unavailable");
 
     Ok(format!(
         concat!(
@@ -2344,14 +2400,23 @@ fn render_gateway_metrics(state: &AppState) -> std::result::Result<String, &'sta
             "# HELP exo_gateway_db_configured Whether durable storage is configured.\n",
             "# TYPE exo_gateway_db_configured gauge\n",
             "exo_gateway_db_configured {db_configured}\n",
+            "# HELP exo_gateway_dagdb_runtime_status DAG DB production runtime status; current state is 1.\n",
+            "# TYPE exo_gateway_dagdb_runtime_status gauge\n",
+            "exo_gateway_dagdb_runtime_status{{status=\"dagdb_active\",reason=\"db_probe_ok\"}} {dagdb_active}\n",
+            "exo_gateway_dagdb_runtime_status{{status=\"dagdb_degraded\",reason=\"db_probe_failed\"}} {dagdb_degraded}\n",
+            "exo_gateway_dagdb_runtime_status{{status=\"dagdb_unavailable\",reason=\"missing_db_config\"}} {dagdb_unavailable}\n",
         ),
         uptime_seconds = uptime_seconds,
         db_configured = db_configured,
+        dagdb_active = dagdb_active,
+        dagdb_degraded = dagdb_degraded,
+        dagdb_unavailable = dagdb_unavailable,
     ))
 }
 
 async fn handle_metrics(State(state): State<AppState>) -> Response {
-    match render_gateway_metrics(&state) {
+    let dagdb_runtime_status = probe_dagdb_runtime_status(&state).await;
+    match render_gateway_metrics(&state, dagdb_runtime_status) {
         Ok(body) => ([(header::CONTENT_TYPE, PROMETHEUS_TEXT_CONTENT_TYPE)], body).into_response(),
         Err(message) => {
             tracing::error!(message, "Gateway metrics unavailable");
@@ -6655,6 +6720,10 @@ mod tests {
         assert!(body.contains("# HELP exo_gateway_up"));
         assert!(body.contains("exo_gateway_up 1"));
         assert!(body.contains("exo_gateway_db_configured 0"));
+        assert!(body.contains("# HELP exo_gateway_dagdb_runtime_status"));
+        assert!(body.contains(
+            "exo_gateway_dagdb_runtime_status{status=\"dagdb_unavailable\",reason=\"missing_db_config\"} 1"
+        ));
         assert!(body.contains("exo_gateway_uptime_seconds"));
         for forbidden_metric in [
             "exo_gateway_did_registry_documents",
@@ -6675,6 +6744,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gateway_metrics_rendering_includes_dagdb_runtime_status_without_secrets() {
+        let body = render_gateway_metrics(&state(), dagdb_runtime_status_from_probe(false, None))
+            .expect("metrics render");
+
+        assert!(body.contains("# HELP exo_gateway_dagdb_runtime_status"));
+        assert!(body.contains(
+            "exo_gateway_dagdb_runtime_status{status=\"dagdb_unavailable\",reason=\"missing_db_config\"} 1"
+        ));
+        for forbidden in ["DATABASE_URL", "POSTGRES", "password", "secret", "token"] {
+            assert!(
+                !body
+                    .to_ascii_lowercase()
+                    .contains(&forbidden.to_ascii_lowercase()),
+                "gateway metrics must not expose secret-bearing labels or values: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn dagdb_runtime_status_derivation_covers_active_degraded_and_unavailable() {
+        let unavailable = dagdb_runtime_status_from_probe(false, None);
+        assert_eq!(unavailable.status, "dagdb_unavailable");
+        assert_eq!(unavailable.reason, "missing_db_config");
+
+        let active = dagdb_runtime_status_from_probe(true, Some(true));
+        assert_eq!(active.status, "dagdb_active");
+        assert_eq!(active.reason, "db_probe_ok");
+
+        let degraded = dagdb_runtime_status_from_probe(true, Some(false));
+        assert_eq!(degraded.status, "dagdb_degraded");
+        assert_eq!(degraded.reason, "db_probe_failed");
+    }
+
     #[tokio::test]
     async fn ready_without_db_returns_503() {
         let app = build_router(state());
@@ -6688,6 +6791,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            val["dagdb_runtime_status"],
+            serde_json::Value::String("dagdb_unavailable".to_owned())
+        );
+        assert_eq!(
+            val["dagdb_runtime_reason"],
+            serde_json::Value::String("missing_db_config".to_owned())
+        );
     }
 
     #[tokio::test]

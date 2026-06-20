@@ -30,6 +30,10 @@ use crate::{
         KgWritebackPersistedRowCounts, KgWritebackPersistedSummary,
         KgWritebackPersistedValidationDiagnostics, KgWritebackSkippedSection,
     },
+    receipt::{
+        OperationalReceiptInsert, insert_operational_receipt_in_transaction,
+        operational_receipt_subject_id,
+    },
     scoring::hash_event_body,
 };
 
@@ -200,13 +204,16 @@ async fn persist_kg_writeback_report_in_transaction(
     verify_evidence_memories(tx, report).await?;
 
     let mut counts = PersistedCounts::default();
+    counts.inserted_receipt_count = counts.inserted_receipt_count.saturating_add(
+        insert_writeback_approval_receipts(tx, report, idempotency_key, request_hash).await?,
+    );
     let memory_receipt = insert_receipt(
         tx,
         report,
         SubjectKind::Memory,
         &report.candidate_id,
-        ReceiptEventType::WritebackCreated,
-        "writeback_created",
+        ReceiptEventType::DagdbRecordAccepted,
+        "dagdb_record_accepted",
     )
     .await?;
     counts.inserted_receipt_count = counts
@@ -738,6 +745,56 @@ async fn ensure_existing_memory(
             reason: format!("placement references cross-scope memory {memory_id}"),
         })
     }
+}
+
+async fn insert_writeback_approval_receipts(
+    tx: &mut Transaction<'_, Postgres>,
+    report: &KgWritebackDryRunReport,
+    idempotency_key: &str,
+    request_hash: Hash256,
+) -> Result<u32> {
+    let mut inserted = 0_u32;
+    let request_hash_ref = request_hash.to_string();
+    for event_type in [
+        ReceiptEventType::DagdbApprovalRequestSubmitted,
+        ReceiptEventType::DagdbApprovalGranted,
+    ] {
+        let receipt_body = json!({
+            "route_name": KG_WRITEBACK_PERSISTED_ROUTE_NAME,
+            "candidate_id": report.candidate_id,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash_ref,
+            "source": "kg_writeback_persisted_adapter",
+        });
+        let event_body_hash =
+            hash_event_body(&receipt_body).map_err(|error| KgWritebackPersistenceError::Hash {
+                reason: error.to_string(),
+            })?;
+        let rows = insert_operational_receipt_in_transaction(
+            tx,
+            OperationalReceiptInsert {
+                tenant_id: &report.tenant_id,
+                namespace: &report.namespace,
+                subject_kind: SubjectKind::Memory,
+                subject_id: operational_receipt_subject_id(
+                    KG_WRITEBACK_PERSISTED_ROUTE_NAME,
+                    &request_hash_ref,
+                    event_type,
+                ),
+                event_type,
+                actor_did: &report.requesting_agent_did,
+                event_hlc: CREATED_AT,
+                event_body_hash,
+                receipt_body,
+            },
+        )
+        .await
+        .map_err(|error| KgWritebackPersistenceError::Postgres {
+            source: sqlx::Error::Protocol(error.to_string()),
+        })?;
+        inserted = inserted.saturating_add(rows_to_u32(rows)?);
+    }
+    Ok(inserted)
 }
 
 async fn insert_receipt(
@@ -2388,6 +2445,17 @@ fn event_type_sql(event_type: ReceiptEventType) -> &'static str {
         ReceiptEventType::DagFinalityCommitted => "dag_finality_committed",
         ReceiptEventType::DagFinalityFailed => "dag_finality_failed",
         ReceiptEventType::DagFinalityCompensated => "dag_finality_compensated",
+        ReceiptEventType::DagdbApprovalRequestSubmitted => "dagdb_approval_request_submitted",
+        ReceiptEventType::DagdbApprovalGranted => "dagdb_approval_granted",
+        ReceiptEventType::DagdbApprovalDenied => "dagdb_approval_denied",
+        ReceiptEventType::DagdbRecordAccepted => "dagdb_record_accepted",
+        ReceiptEventType::DagdbImportCompleted => "dagdb_import_completed",
+        ReceiptEventType::DagdbExportCompleted => "dagdb_export_completed",
+        ReceiptEventType::DagdbReplayDetected => "dagdb_replay_detected",
+        ReceiptEventType::DagdbIdempotencyConflict => "dagdb_idempotency_conflict",
+        ReceiptEventType::DagdbRlsTenantViolation => "dagdb_rls_tenant_violation",
+        ReceiptEventType::DagdbSignatureFailure => "dagdb_signature_failure",
+        ReceiptEventType::DagdbCouncilOperatorDecision => "dagdb_council_operator_decision",
     }
 }
 
@@ -2646,6 +2714,50 @@ mod tests {
             (
                 ReceiptEventType::DagFinalityCompensated,
                 "dag_finality_compensated",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalRequestSubmitted,
+                "dagdb_approval_request_submitted",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalGranted,
+                "dagdb_approval_granted",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalDenied,
+                "dagdb_approval_denied",
+            ),
+            (
+                ReceiptEventType::DagdbRecordAccepted,
+                "dagdb_record_accepted",
+            ),
+            (
+                ReceiptEventType::DagdbImportCompleted,
+                "dagdb_import_completed",
+            ),
+            (
+                ReceiptEventType::DagdbExportCompleted,
+                "dagdb_export_completed",
+            ),
+            (
+                ReceiptEventType::DagdbReplayDetected,
+                "dagdb_replay_detected",
+            ),
+            (
+                ReceiptEventType::DagdbIdempotencyConflict,
+                "dagdb_idempotency_conflict",
+            ),
+            (
+                ReceiptEventType::DagdbRlsTenantViolation,
+                "dagdb_rls_tenant_violation",
+            ),
+            (
+                ReceiptEventType::DagdbSignatureFailure,
+                "dagdb_signature_failure",
+            ),
+            (
+                ReceiptEventType::DagdbCouncilOperatorDecision,
+                "dagdb_council_operator_decision",
             ),
         ] {
             assert_eq!(event_type_sql(event_type), expected);

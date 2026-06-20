@@ -31,6 +31,20 @@ pub struct ReceiptAppendResult {
     pub created_new: bool,
 }
 
+/// Deterministic single-row operational audit receipt material.
+#[derive(Debug, Clone)]
+pub struct OperationalReceiptInsert<'a> {
+    pub tenant_id: &'a str,
+    pub namespace: &'a str,
+    pub subject_kind: SubjectKind,
+    pub subject_id: Hash256,
+    pub event_type: ReceiptEventType,
+    pub actor_did: &'a str,
+    pub event_hlc: Timestamp,
+    pub event_body_hash: Hash256,
+    pub receipt_body: JsonValue,
+}
+
 /// Receipt row reconstructed from the latest subject head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiptRecord {
@@ -82,6 +96,74 @@ pub async fn append_receipt(
         return append_receipt_once(pool, request).await;
     }
     first
+}
+
+/// Insert an operational audit receipt in the caller's transaction.
+///
+/// Callers must use a deterministic, event-specific `subject_id` when writing
+/// multiple audit events for the same runtime operation.
+pub async fn insert_operational_receipt_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    request: OperationalReceiptInsert<'_>,
+) -> Result<u64> {
+    let event_hlc = timestamp_parts(request.event_hlc)?;
+    let receipt_hash = ReceiptHashMaterial {
+        tenant_id: request.tenant_id.to_owned(),
+        namespace: request.namespace.to_owned(),
+        subject_kind: request.subject_kind,
+        subject_id: request.subject_id,
+        prev_receipt_hash: Hash256::ZERO,
+        seq: 1,
+        event_type: request.event_type,
+        actor_did: request.actor_did.to_owned(),
+        event_hlc: request.event_hlc,
+        event_body_hash: request.event_body_hash,
+    }
+    .hash()
+    .map_err(|err| ReceiptStoreError::Hash(err.to_string()))?;
+
+    let result = sqlx::query(
+        "INSERT INTO dagdb_receipts \
+         (receipt_hash, tenant_id, namespace, subject_kind, subject_id, prev_receipt_hash, seq, \
+          event_type, actor_did, event_hlc_physical_ms, event_hlc_logical, event_hash, receipt_body, \
+          created_at_physical_ms, created_at_logical) \
+         VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9, $10, $11, $12, $9, $10) \
+         ON CONFLICT (receipt_hash) DO NOTHING",
+    )
+    .bind(hash_bytes(receipt_hash))
+    .bind(request.tenant_id)
+    .bind(request.namespace)
+    .bind(subject_kind_sql(request.subject_kind))
+    .bind(hash_bytes(request.subject_id))
+    .bind(hash_bytes(Hash256::ZERO))
+    .bind(event_type_sql(request.event_type))
+    .bind(request.actor_did)
+    .bind(event_hlc.physical_ms)
+    .bind(event_hlc.logical)
+    .bind(hash_bytes(request.event_body_hash))
+    .bind(request.receipt_body)
+    .execute(&mut **tx)
+    .await
+    .map_err(pg)?;
+
+    Ok(result.rows_affected())
+}
+
+#[must_use]
+pub fn operational_receipt_subject_id(
+    route_name: &str,
+    subject_ref: &str,
+    event_type: ReceiptEventType,
+) -> Hash256 {
+    let mut material = Vec::new();
+    material.extend_from_slice(b"exo.dagdb.operational_receipt.subject_id.v1");
+    material.push(0);
+    material.extend_from_slice(route_name.as_bytes());
+    material.push(0);
+    material.extend_from_slice(subject_ref.as_bytes());
+    material.push(0);
+    material.extend_from_slice(event_type_sql(event_type).as_bytes());
+    Hash256::digest(&material)
 }
 
 async fn append_receipt_once(
@@ -525,5 +607,73 @@ fn event_type_sql(event_type: ReceiptEventType) -> &'static str {
         ReceiptEventType::DagFinalityCommitted => "dag_finality_committed",
         ReceiptEventType::DagFinalityFailed => "dag_finality_failed",
         ReceiptEventType::DagFinalityCompensated => "dag_finality_compensated",
+        ReceiptEventType::DagdbApprovalRequestSubmitted => "dagdb_approval_request_submitted",
+        ReceiptEventType::DagdbApprovalGranted => "dagdb_approval_granted",
+        ReceiptEventType::DagdbApprovalDenied => "dagdb_approval_denied",
+        ReceiptEventType::DagdbRecordAccepted => "dagdb_record_accepted",
+        ReceiptEventType::DagdbImportCompleted => "dagdb_import_completed",
+        ReceiptEventType::DagdbExportCompleted => "dagdb_export_completed",
+        ReceiptEventType::DagdbReplayDetected => "dagdb_replay_detected",
+        ReceiptEventType::DagdbIdempotencyConflict => "dagdb_idempotency_conflict",
+        ReceiptEventType::DagdbRlsTenantViolation => "dagdb_rls_tenant_violation",
+        ReceiptEventType::DagdbSignatureFailure => "dagdb_signature_failure",
+        ReceiptEventType::DagdbCouncilOperatorDecision => "dagdb_council_operator_decision",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_type_sql_maps_operational_audit_categories() {
+        for (event_type, expected) in [
+            (
+                ReceiptEventType::DagdbApprovalRequestSubmitted,
+                "dagdb_approval_request_submitted",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalGranted,
+                "dagdb_approval_granted",
+            ),
+            (
+                ReceiptEventType::DagdbApprovalDenied,
+                "dagdb_approval_denied",
+            ),
+            (
+                ReceiptEventType::DagdbRecordAccepted,
+                "dagdb_record_accepted",
+            ),
+            (
+                ReceiptEventType::DagdbImportCompleted,
+                "dagdb_import_completed",
+            ),
+            (
+                ReceiptEventType::DagdbExportCompleted,
+                "dagdb_export_completed",
+            ),
+            (
+                ReceiptEventType::DagdbReplayDetected,
+                "dagdb_replay_detected",
+            ),
+            (
+                ReceiptEventType::DagdbIdempotencyConflict,
+                "dagdb_idempotency_conflict",
+            ),
+            (
+                ReceiptEventType::DagdbRlsTenantViolation,
+                "dagdb_rls_tenant_violation",
+            ),
+            (
+                ReceiptEventType::DagdbSignatureFailure,
+                "dagdb_signature_failure",
+            ),
+            (
+                ReceiptEventType::DagdbCouncilOperatorDecision,
+                "dagdb_council_operator_decision",
+            ),
+        ] {
+            assert_eq!(event_type_sql(event_type), expected);
+        }
     }
 }

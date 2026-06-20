@@ -60,6 +60,10 @@ pub const DAGDB_GRAPH_SCHEMA_SQL: &str = concat!(
 pub const DAGDB_EXPORT_SCHEMA_SQL: &str =
     include_str!("../../migrations/20260511000001_create_dagdb_export_persistence_schema.sql");
 
+/// SQL migration source for operational receipt event types added after export persistence.
+pub const DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL: &str =
+    include_str!("../../migrations/20260620000001_add_dagdb_operational_receipt_event_types.sql");
+
 /// SQL migration source for additive KG export finality/outbox subject support.
 pub const DAGDB_EXPORT_FINALITY_OUTBOX_SCHEMA_SQL: &str =
     include_str!("../../migrations/20260511000002_create_dagdb_export_finality_outbox_schema.sql");

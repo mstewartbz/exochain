@@ -81,19 +81,70 @@ fn route_binding() -> ContextPacketRouteBinding {
     }
 }
 
+fn digest(byte: &str) -> String {
+    byte.repeat(64)
+}
+
+fn authority_signature() -> String {
+    "0123456789abcdef".repeat(8)
+}
+
 fn route_acceptance_evidence() -> DefaultRouteAcceptanceEvidence {
     DefaultRouteAcceptanceEvidence {
-        production_default_route_approval_ref: "approval:default-route:prd17b".to_owned(),
-        packet_quality_review_ref: "review:packet-quality:prd17b".to_owned(),
-        finality_ref: "finality:default-route:prd17b".to_owned(),
+        production_default_route_approval_ref: "external-production-approval:default-route-prd17b"
+            .to_owned(),
+        packet_quality_review_ref: "external-packet-quality-review:prd17b".to_owned(),
+        finality_ref: "external-finality:default-route-prd17b".to_owned(),
+        tenant_id: "dag_db-local".to_owned(),
+        memory_namespace: "project_memory_v3".to_owned(),
+        actor_id: "did:exo:codex-prd17b".to_owned(),
+        route_id: "route-prd17b-default".to_owned(),
+        request_id: "request-prd17b-default-route".to_owned(),
+        payload_hash: digest("a"),
+        receipt_payload_hash: digest("a"),
+        authority_did: "did:exo:production-finality-authority".to_owned(),
+        authority_signature: authority_signature(),
+        approved_at: "2026-06-20T00:00:00Z".to_owned(),
     }
 }
 
 fn packet_acceptance_evidence() -> ContextPacketAcceptanceEvidence {
     ContextPacketAcceptanceEvidence {
+        production_default_route_approval_ref: "external-production-approval:context-packet-prd17b"
+            .to_owned(),
+        packet_quality_review_ref: "external-packet-quality-review:prd17b".to_owned(),
+        finality_ref: "external-finality:context-packet-prd17b".to_owned(),
+        tenant_id: "dag_db-local".to_owned(),
+        memory_namespace: "project_memory_v3".to_owned(),
+        actor_id: "did:exo:codex-prd17b".to_owned(),
+        route_id: "route-prd17b-default".to_owned(),
+        packet_id: "packet-prd17b-default".to_owned(),
+        request_id: "request-prd17b-context-packet".to_owned(),
+        payload_hash: digest("b"),
+        receipt_payload_hash: digest("b"),
+        authority_did: "did:exo:production-finality-authority".to_owned(),
+        authority_signature: authority_signature(),
+        approved_at: "2026-06-20T00:00:01Z".to_owned(),
+    }
+}
+
+fn placeholder_route_acceptance_evidence() -> DefaultRouteAcceptanceEvidence {
+    DefaultRouteAcceptanceEvidence {
+        production_default_route_approval_ref: "approval:default-route:prd17b".to_owned(),
+        packet_quality_review_ref: "review:packet-quality:prd17b".to_owned(),
+        finality_ref: "finality:default-route:prd17b".to_owned(),
+        authority_signature: "a".repeat(128),
+        ..route_acceptance_evidence()
+    }
+}
+
+fn placeholder_packet_acceptance_evidence() -> ContextPacketAcceptanceEvidence {
+    ContextPacketAcceptanceEvidence {
         production_default_route_approval_ref: "approval:default-route:prd17b".to_owned(),
         packet_quality_review_ref: "review:packet-quality:prd17b".to_owned(),
         finality_ref: "finality:context-packet:prd17b".to_owned(),
+        authority_signature: "a".repeat(128),
+        ..packet_acceptance_evidence()
     }
 }
 
@@ -209,7 +260,7 @@ fn acceptance_evidence_graduates_default_route_and_context_packet() {
     assert!(
         accepted_record
             .source_proof_refs
-            .contains(&"finality:finality:context-packet:prd17b".to_owned())
+            .contains(&"finality:external-finality:context-packet-prd17b".to_owned())
     );
 }
 
@@ -243,6 +294,94 @@ fn acceptance_evidence_fails_closed_for_missing_finality_and_invalidated_route()
     let mut missing_packet_finality = packet_acceptance_evidence();
     missing_packet_finality.finality_ref.clear();
     assert!(accept_context_packet_record(&record, &missing_packet_finality).is_err());
+}
+
+#[test]
+fn acceptance_evidence_rejects_shaped_placeholder_receipts() {
+    let mut deferred = route();
+    deferred.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred.packet_quality_review_status = "operator_deferred".to_owned();
+
+    let placeholder_route_evidence = placeholder_route_acceptance_evidence();
+    assert!(
+        accept_default_route_record(
+            &deferred,
+            &placeholder_route_evidence,
+            "hlc:placeholder".to_owned()
+        )
+        .is_err(),
+        "default-route acceptance must reject caller-shaped placeholder refs"
+    );
+
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let record = build_context_packet_record(&deferred_binding, packet_request()).expect("record");
+    let placeholder_packet_evidence = placeholder_packet_acceptance_evidence();
+    assert!(
+        accept_context_packet_record(&record, &placeholder_packet_evidence).is_err(),
+        "context-packet acceptance must reject caller-shaped placeholder refs"
+    );
+}
+
+#[test]
+fn acceptance_evidence_rejects_scope_hash_actor_and_route_mismatches() {
+    let mut deferred = route();
+    deferred.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred.packet_quality_review_status = "operator_deferred".to_owned();
+
+    let route_mutations: [fn(&mut DefaultRouteAcceptanceEvidence); 6] = [
+        |evidence: &mut DefaultRouteAcceptanceEvidence| evidence.tenant_id = "tenant-b".to_owned(),
+        |evidence: &mut DefaultRouteAcceptanceEvidence| {
+            evidence.memory_namespace = "namespace-b".to_owned();
+        },
+        |evidence: &mut DefaultRouteAcceptanceEvidence| {
+            evidence.receipt_payload_hash = digest("c");
+        },
+        |evidence: &mut DefaultRouteAcceptanceEvidence| {
+            evidence.actor_id = evidence.authority_did.clone();
+        },
+        |evidence: &mut DefaultRouteAcceptanceEvidence| {
+            evidence.route_id = "route-other".to_owned();
+        },
+        |evidence: &mut DefaultRouteAcceptanceEvidence| evidence.request_id.clear(),
+    ];
+    for mutate in route_mutations {
+        let mut evidence = route_acceptance_evidence();
+        mutate(&mut evidence);
+        assert!(
+            accept_default_route_record(&deferred, &evidence, "hlc:mismatch".to_owned()).is_err()
+        );
+    }
+
+    let mut deferred_binding = route_binding();
+    deferred_binding.production_default_route_approval_status = "operator_deferred".to_owned();
+    deferred_binding.packet_quality_review_status = "operator_deferred".to_owned();
+    let record = build_context_packet_record(&deferred_binding, packet_request()).expect("record");
+    let packet_mutations: [fn(&mut ContextPacketAcceptanceEvidence); 7] = [
+        |evidence: &mut ContextPacketAcceptanceEvidence| evidence.tenant_id = "tenant-b".to_owned(),
+        |evidence: &mut ContextPacketAcceptanceEvidence| {
+            evidence.memory_namespace = "namespace-b".to_owned();
+        },
+        |evidence: &mut ContextPacketAcceptanceEvidence| {
+            evidence.receipt_payload_hash = digest("d");
+        },
+        |evidence: &mut ContextPacketAcceptanceEvidence| {
+            evidence.actor_id = evidence.authority_did.clone();
+        },
+        |evidence: &mut ContextPacketAcceptanceEvidence| {
+            evidence.route_id = "route-other".to_owned();
+        },
+        |evidence: &mut ContextPacketAcceptanceEvidence| {
+            evidence.packet_id = "packet-other".to_owned();
+        },
+        |evidence: &mut ContextPacketAcceptanceEvidence| evidence.request_id.clear(),
+    ];
+    for mutate in packet_mutations {
+        let mut evidence = packet_acceptance_evidence();
+        mutate(&mut evidence);
+        assert!(accept_context_packet_record(&record, &evidence).is_err());
+    }
 }
 
 #[test]
