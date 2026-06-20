@@ -3,10 +3,9 @@
 //! This module defines the default-route readiness gate and default packet
 //! decision wrapper without mutating PRD17C route-invalidation ownership.
 
+use exo_core::Did;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use exo_core::Did;
 
 use crate::context_packet_persistence::{
     ContextPacketRecord, ContextPacketRequest, ContextPacketRouteBinding, DefaultContextQuality,

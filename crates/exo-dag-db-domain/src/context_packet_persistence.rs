@@ -6,10 +6,9 @@
 
 use std::collections::BTreeSet;
 
+use exo_core::Did;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use exo_core::Did;
 
 /// Schema version for persisted/proof-bound PRD17B context packet records.
 pub const CONTEXT_PACKET_RECORD_SCHEMA_VERSION: &str = "dagdb_prd17_context_packet_record_v1";
