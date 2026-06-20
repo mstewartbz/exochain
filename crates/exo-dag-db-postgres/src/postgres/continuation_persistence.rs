@@ -4,10 +4,12 @@ use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 
-use crate::continuation_persistence::{
-    ContinuationPersistResult, ContinuationPersistenceError, ContinuationRecord,
+use crate::{
+    continuation_persistence::{
+        ContinuationPersistResult, ContinuationPersistenceError, ContinuationRecord,
+    },
+    lifecycle_action::{ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence},
 };
-use crate::lifecycle_action::{ProductionLifecycleApproval, ProductionLifecycleApprovalEvidence};
 
 /// Errors raised by PRD17C continuation Postgres persistence.
 #[derive(Debug, Error)]
