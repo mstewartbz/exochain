@@ -62,9 +62,10 @@ use exo_authority::permission::Permission;
 use exo_avc::{
     AVC_MAX_SUPPORTED_PROTOCOL_VERSION, AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
     AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION, AVC_SCHEMA_VERSION,
-    AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcRegistryDurableState,
-    AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt, AvcValidationRequest,
-    AvcValidationResult, InMemoryAvcRegistry, avc_action_signature_payload, create_trust_receipt,
+    AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcReceiptTimestampProvenance,
+    AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt,
+    AvcTrustReceiptEvidence, AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry,
+    avc_action_commitment_hash, avc_action_signature_payload, create_trust_receipt_with_evidence,
     require_supported_avc_protocol_version, validate_avc,
 };
 use exo_core::{
@@ -78,6 +79,7 @@ use tower::limit::ConcurrencyLimitLayer;
 const MAX_AVC_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_AVC_API_CONCURRENT_REQUESTS: usize = 64;
 pub const AVC_ROOT_TRUST_BUNDLE_ENV: &str = "EXO_AVC_ROOT_TRUST_BUNDLE";
+pub const AVC_REQUIRE_POSTGRES_DURABILITY_ENV: &str = "EXO_AVC_REQUIRE_POSTGRES_DURABILITY";
 pub const AVC_ROOT_TRUST_CEREMONY_ID: &str = "avc-exo-ceremony-2026";
 pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
     "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58";
@@ -104,19 +106,33 @@ enum AvcReceiptTimestampSource {
 }
 
 impl AvcReceiptTimestampSource {
-    async fn now(&self) -> anyhow::Result<Timestamp> {
+    async fn now(&self) -> anyhow::Result<(Timestamp, AvcReceiptTimestampProvenance)> {
         match self {
             Self::HybridLogicalClock(clock) => {
                 let mut clock = clock
                     .lock()
                     .map_err(|_| anyhow::anyhow!("AVC receipt HLC mutex poisoned"))?;
-                clock
+                let timestamp = clock
                     .now()
-                    .map_err(|error| anyhow::anyhow!("AVC receipt HLC unavailable: {error}"))
+                    .map_err(|error| anyhow::anyhow!("AVC receipt HLC unavailable: {error}"))?;
+                Ok((
+                    timestamp,
+                    AvcReceiptTimestampProvenance::LocalHybridLogicalClock,
+                ))
             }
-            Self::Postgres(pool) => trusted_postgres_receipt_timestamp(pool).await,
+            Self::Postgres(pool) => {
+                trusted_postgres_receipt_timestamp(pool)
+                    .await
+                    .map(|timestamp| {
+                        (
+                            timestamp,
+                            AvcReceiptTimestampProvenance::PostgresClockTimestamp,
+                        )
+                    })
+            }
             #[cfg(test)]
-            Self::Fixed(source) => source(),
+            Self::Fixed(source) => source()
+                .map(|timestamp| (timestamp, AvcReceiptTimestampProvenance::FixedTestTimestamp)),
         }
     }
 }
@@ -190,11 +206,17 @@ impl AvcApiState {
                     AvcReceiptTimestampSource::Postgres(pool),
                 )
             }
-            None => (
-                load_file_durable_registry(&durable_state_path)?,
-                AvcRegistryDurability::File(Arc::new(durable_state_path)),
-                receipt_timestamp_source_from_clock(HybridClock::new()),
-            ),
+            None => {
+                tracing::warn!(
+                    path = %durable_state_path.display(),
+                    "AVC registry using local file fallback without Postgres-backed durability; set DATABASE_URL for production AVC registry durability"
+                );
+                (
+                    load_file_durable_registry(&durable_state_path)?,
+                    AvcRegistryDurability::File(Arc::new(durable_state_path)),
+                    receipt_timestamp_source_from_clock(HybridClock::new()),
+                )
+            }
         };
         Ok(Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -203,6 +225,26 @@ impl AvcApiState {
             receipt_timestamp_source,
             durability,
         })
+    }
+
+    pub fn register_validator_public_keys<I>(&self, public_keys: I) -> anyhow::Result<()>
+    where
+        I: IntoIterator<Item = (Did, PublicKey)>,
+    {
+        let mut registry = self.registry.lock().map_err(|_| {
+            anyhow::anyhow!("AVC registry unavailable while registering validator public key")
+        })?;
+        let mut candidate = registry.clone();
+        for (did, public_key) in public_keys {
+            candidate.put_receipt_validator_public_key(did, public_key);
+        }
+        candidate.validate_loaded_receipts().map_err(|error| {
+            anyhow::anyhow!(
+                "AVC durable receipt validation failed after validator public key registration: {error}"
+            )
+        })?;
+        *registry = candidate;
+        Ok(())
     }
 }
 
@@ -848,7 +890,9 @@ fn receipt_timestamp_error(err: anyhow::Error) -> ApiError {
     )
 }
 
-async fn trusted_receipt_timestamp(state: &AvcApiState) -> ApiResult<Timestamp> {
+async fn trusted_receipt_timestamp(
+    state: &AvcApiState,
+) -> ApiResult<(Timestamp, AvcReceiptTimestampProvenance)> {
     state
         .receipt_timestamp_source
         .now()
@@ -1107,6 +1151,41 @@ fn store_receipt_idempotent(
     }
 }
 
+fn validate_idempotent_receipt_hit(
+    receipt: &AvcTrustReceipt,
+    credential_id: Hash256,
+    action_id: Hash256,
+    action_commitment_hash: Hash256,
+    validation: &AvcValidationResult,
+) -> ApiResult<()> {
+    let validation_hash = hash_structured(validation)
+        .map_err(exo_avc::AvcError::from)
+        .map_err(map_avc_error)?;
+    if receipt.credential_id == credential_id
+        && receipt.action_id == Some(action_id)
+        && receipt.action_commitment_hash == Some(action_commitment_hash)
+        && receipt.validation_hash == validation_hash
+        && receipt.decision == validation.decision
+        && receipt.reason_codes == validation.reason_codes
+    {
+        return Ok(());
+    }
+
+    tracing::error!(
+        receipt_id = %receipt.receipt_id,
+        stored_credential_id = %receipt.credential_id,
+        expected_credential_id = %credential_id,
+        stored_action_id = ?receipt.action_id,
+        expected_action_id = %action_id,
+        action_commitment_hash = %action_commitment_hash,
+        "AVC receipt action commitment conflict"
+    );
+    Err((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AVC receipt action commitment conflict".into(),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -1143,11 +1222,18 @@ async fn handle_emit_receipt(
 ) -> ApiResult<Json<EmitReceiptResponse>> {
     let validator_did = state.validator_did.clone();
     let receipt_signer = Arc::clone(&state.receipt_signer);
-    let trusted_now = trusted_receipt_timestamp(&state).await?;
+    let (trusted_now, timestamp_provenance) = trusted_receipt_timestamp(&state).await?;
     let response = with_registry_blocking(state, true, move |registry| {
         let submitted_request = payload.validation;
-        let action_id = require_action(&submitted_request)?.action_id;
-        require_registered_credential(registry, &submitted_request)?;
+        let action = require_action(&submitted_request)?;
+        let action_id = action.action_id;
+        let action_commitment_hash = avc_action_commitment_hash(
+            &submitted_request.credential,
+            action,
+            &submitted_request.now,
+        )
+        .map_err(map_avc_error)?;
+        let credential_id = require_registered_credential(registry, &submitted_request)?;
         verify_subject_action_signature(
             registry,
             &submitted_request,
@@ -1163,9 +1249,29 @@ async fn handle_emit_receipt(
                 format!("AVC validation denied: {:?}", validation.reason_codes),
             ));
         }
-        let receipt = create_trust_receipt(
+        if let Some(receipt) = registry.get_receipt_by_action_commitment(&action_commitment_hash) {
+            validate_idempotent_receipt_hit(
+                &receipt,
+                credential_id,
+                action_id,
+                action_commitment_hash,
+                &validation,
+            )?;
+            return Ok(EmitReceiptResponse {
+                receipt_hash: format!("{}", receipt.receipt_id),
+                receipt,
+                validation,
+            });
+        }
+        let previous_receipt_hash = registry.receipt_chain_head();
+        let receipt = create_trust_receipt_with_evidence(
             &validation,
             Some(action_id),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(action_commitment_hash),
+                previous_receipt_hash,
+                timestamp_provenance: Some(timestamp_provenance),
+            },
             validator_did,
             trusted_now,
             |bytes| (receipt_signer)(bytes),
@@ -1341,7 +1447,7 @@ mod tests {
     use exo_avc::{
         AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcActionRequest, AvcConstraints,
         AvcDecision, AvcDraft, AvcReasonCode, AvcRevocationReason, AvcSubjectKind, DelegatedIntent,
-        issue_avc, revoke_avc,
+        create_trust_receipt, issue_avc, revoke_avc,
     };
     use exo_core::{Hash256, Signature, Timestamp, crypto, crypto::KeyPair};
     use tower::ServiceExt;
@@ -1374,6 +1480,7 @@ mod tests {
         let mut registry = state.registry.lock().unwrap();
         registry.put_public_key(did, kp.public);
         registry.put_public_key(Did::new("did:exo:agent").unwrap(), subject_keypair().public);
+        registry.put_receipt_validator_public_key(validator_did(), validator_keypair().public);
     }
 
     fn fixed_receipt_timestamp_source(timestamp: Timestamp) -> AvcReceiptTimestampSource {
@@ -1859,9 +1966,13 @@ mod tests {
         let state = Arc::new(state);
         let app = avc_router(Arc::clone(&state));
 
-        let trusted_now = trusted_receipt_timestamp(&state)
+        let (trusted_now, provenance) = trusted_receipt_timestamp(&state)
             .await
             .expect("trusted Postgres receipt timestamp");
+        assert_eq!(
+            provenance,
+            AvcReceiptTimestampProvenance::PostgresClockTimestamp
+        );
         let mut first_draft = baseline_draft();
         first_draft.delegated_intent.purpose = "postgres anchor persistence one".into();
         first_draft.expires_at = Some(Timestamp::new(trusted_now.physical_ms + 1_000_000, 0));
@@ -2274,6 +2385,12 @@ mod tests {
             now: Timestamp::new(1_500_000, 0),
         };
         let action_id = request.action.as_ref().unwrap().action_id;
+        let action_commitment_hash = avc_action_commitment_hash(
+            &request.credential,
+            request.action.as_ref().unwrap(),
+            &request.now,
+        )
+        .unwrap();
         let subject_signature = sign_action(&request, &subject_keypair());
         let body = serde_json::to_vec(&EmitReceiptRequest {
             validation: request,
@@ -2304,6 +2421,15 @@ mod tests {
         );
         assert_eq!(parsed.receipt.credential_id, credential_id);
         assert_eq!(parsed.receipt.action_id, Some(action_id));
+        assert_eq!(
+            parsed.receipt.action_commitment_hash,
+            Some(action_commitment_hash)
+        );
+        assert_eq!(parsed.receipt.previous_receipt_hash, None);
+        assert_eq!(
+            parsed.receipt.timestamp_provenance,
+            Some(AvcReceiptTimestampProvenance::FixedTestTimestamp)
+        );
         assert_eq!(parsed.receipt.validator_did, validator_did());
         assert_eq!(parsed.validation.decision, AvcDecision::Allow);
         assert!(parsed.receipt.verify_id().unwrap());
@@ -2314,6 +2440,89 @@ mod tests {
             validator_keypair().public_key()
         ));
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_links_sequential_receipts_to_previous_avc_receipt_hash() {
+        let state = fresh_state();
+        let first_credential = credential_with_purpose("first linked receipt");
+        let second_credential = credential_with_purpose("second linked receipt");
+        {
+            let mut registry = state.registry.lock().unwrap();
+            registry.put_credential(first_credential.clone()).unwrap();
+            registry.put_credential(second_credential.clone()).unwrap();
+        }
+
+        let first_request = AvcValidationRequest {
+            credential: first_credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let mut second_action = baseline_action(Did::new("did:exo:agent").unwrap());
+        second_action.action_id = Hash256::from_bytes([0x56; 32]);
+        let second_request = AvcValidationRequest {
+            credential: second_credential,
+            action: Some(second_action),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let first_body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: first_request.clone(),
+            subject_signature: sign_action(&first_request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+        let second_body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: second_request.clone(),
+            subject_signature: sign_action(&second_request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(first_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(second_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first_response.status(), StatusCode::OK);
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let first: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(first_response).await).unwrap();
+        let second: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(second_response).await).unwrap();
+
+        assert_eq!(first.receipt.previous_receipt_hash, None);
+        assert_eq!(
+            second.receipt.previous_receipt_hash,
+            Some(first.receipt.receipt_id)
+        );
+        assert_ne!(
+            first.receipt.action_commitment_hash,
+            second.receipt.action_commitment_hash
+        );
+        assert_eq!(
+            state.registry.lock().unwrap().receipt_chain_head(),
+            Some(second.receipt.receipt_id)
+        );
     }
 
     #[tokio::test]
@@ -2705,6 +2914,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_emit_rejects_conflicting_stored_action_commitment() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        let request = AvcValidationRequest {
+            credential: credential.clone(),
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let action_commitment_hash = avc_action_commitment_hash(
+            &request.credential,
+            request.action.as_ref().unwrap(),
+            &request.now,
+        )
+        .unwrap();
+        {
+            let mut registry = state.registry.lock().unwrap();
+            registry.put_credential(credential).unwrap();
+            let mut trusted_request = request.clone();
+            trusted_request.now = Timestamp::new(1_600_000, 0);
+            let validation = validate_avc(&trusted_request, &*registry).unwrap();
+            let conflicting_receipt = create_trust_receipt_with_evidence(
+                &validation,
+                Some(Hash256::from_bytes([0x99; 32])),
+                AvcTrustReceiptEvidence {
+                    action_commitment_hash: Some(action_commitment_hash),
+                    previous_receipt_hash: None,
+                    timestamp_provenance: Some(AvcReceiptTimestampProvenance::FixedTestTimestamp),
+                },
+                validator_did(),
+                Timestamp::new(1_600_000, 0),
+                |bytes| validator_keypair().sign(bytes),
+            )
+            .unwrap();
+            registry.put_receipt(conflicting_receipt).unwrap();
+        }
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
     async fn receipt_emit_accepts_derived_subject_public_key_when_registry_key_absent() {
         let state = fresh_state();
         let subject = crate::identity::did_from_public_key(subject_keypair().public_key()).unwrap();
@@ -2749,6 +3018,7 @@ mod tests {
     fn duplicate_same_receipt_is_idempotent() {
         let mut registry = InMemoryAvcRegistry::new();
         registry.put_public_key(Did::new("did:exo:issuer").unwrap(), issuer_keypair().public);
+        registry.put_receipt_validator_public_key(validator_did(), validator_keypair().public);
         let credential = baseline_credential();
         let credential_id = registry.put_credential(credential).unwrap();
         let validation = AvcValidationResult {
@@ -2771,6 +3041,125 @@ mod tests {
         store_receipt_idempotent(&mut registry, receipt.clone()).unwrap();
         store_receipt_idempotent(&mut registry, receipt).unwrap();
         assert_eq!(registry.receipt_count(), 1);
+    }
+
+    #[test]
+    fn avc_registry_validator_key_registration_does_not_create_issuer_trust() {
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::new_with_receipt_timestamp_source(
+            validator_did(),
+            signer,
+            fixed_receipt_timestamp_source(Timestamp::new(1_600_000, 0)),
+        );
+
+        state
+            .register_validator_public_keys([(validator_did(), validator_keypair().public)])
+            .unwrap();
+
+        assert_eq!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .resolve_public_key(&validator_did()),
+            None
+        );
+    }
+
+    #[test]
+    fn avc_registry_validator_key_registration_errors_when_mutex_is_poisoned() {
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::new(validator_did(), signer);
+        let registry = Arc::clone(&state.registry);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = registry.lock().unwrap();
+            panic!("poison AVC registry mutex for validator key registration test");
+        });
+
+        let error = state
+            .register_validator_public_keys([(validator_did(), validator_keypair().public)])
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "AVC registry unavailable while registering validator public key"
+        );
+    }
+
+    #[test]
+    fn avc_registry_validator_key_registration_rejects_loaded_receipt_without_swapping_state() {
+        let other_validator_keypair = KeyPair::from_secret_bytes([0x44; 32]).unwrap();
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        let validation = AvcValidationResult {
+            credential_id,
+            decision: AvcDecision::Allow,
+            reason_codes: Vec::new(),
+            normalized_holder_did: Did::new("did:exo:agent").unwrap(),
+            valid_until: Some(Timestamp::new(2_000_000, 0)),
+            receipt: None,
+        };
+        let receipt = create_trust_receipt(
+            &validation,
+            None,
+            validator_did(),
+            Timestamp::new(1_500_000, 0),
+            |bytes| other_validator_keypair.sign(bytes),
+        )
+        .unwrap();
+        let mut durable_state = AvcRegistryDurableState::default();
+        durable_state.credentials.insert(credential_id, credential);
+        durable_state.receipts.insert(receipt.receipt_id, receipt);
+        let loaded_registry = InMemoryAvcRegistry::from_durable_state(durable_state).unwrap();
+
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::new(validator_did(), signer);
+        *state.registry.lock().unwrap() = loaded_registry;
+
+        let error = state
+            .register_validator_public_keys([(validator_did(), validator_keypair().public)])
+            .unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("AVC durable receipt validation failed"));
+        assert!(error.contains("signature"));
+
+        let post_failure_error = {
+            let registry = state.registry.lock().unwrap();
+            registry.validate_loaded_receipts().unwrap_err()
+        };
+        assert_eq!(
+            post_failure_error.to_string(),
+            "AVC invalid input: receipt validator public key for did:exo:validator is unresolved",
+            "failed validator key registration must not replace the live registry with the candidate"
+        );
+    }
+
+    #[test]
+    fn avc_registry_registered_credential_mismatch_is_rejected() {
+        let credential = baseline_credential();
+        let credential_id = credential.id().unwrap();
+        let mut submitted_credential = credential.clone();
+        submitted_credential.signature = Signature::from_bytes([0x44; 64]);
+        assert_eq!(submitted_credential.id().unwrap(), credential_id);
+
+        let mut registry = InMemoryAvcRegistry::new();
+        registry.put_public_key(Did::new("did:exo:issuer").unwrap(), issuer_keypair().public);
+        registry.put_credential(credential).unwrap();
+        let request = AvcValidationRequest {
+            credential: submitted_credential,
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+
+        let error = require_registered_credential(&registry, &request).unwrap_err();
+
+        assert_eq!(
+            error,
+            (
+                StatusCode::BAD_REQUEST,
+                "credential does not match registered AVC".into()
+            )
+        );
     }
 
     #[test]
@@ -3692,6 +4081,15 @@ mod tests {
         assert!(
             production.contains("load_postgres_durable_registry_or_import_file"),
             "AVC startup must import any existing file-backed state into Postgres"
+        );
+        let file_fallback = production
+            .split("None => {")
+            .nth(1)
+            .and_then(|section| section.split("Ok(Self").next())
+            .expect("AVC file fallback branch present");
+        assert!(
+            file_fallback.contains("tracing::warn!"),
+            "AVC file fallback startup must warn operators that Postgres durability is unavailable"
         );
         assert!(
             production.contains("AvcRegistryDurability::File"),
