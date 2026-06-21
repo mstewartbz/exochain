@@ -1,0 +1,69 @@
+[package]
+name = "exo-dag-db-lab"
+description = "EXOCHAIN DAG DB diagnostics, graph explorer, benchmarks, and lab tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+postgres = ["exo-dag-db-postgres/postgres", "dep:sqlx", "dep:tokio"]
+
+[[bin]]
+name = "dagdb_kg_import_persist"
+path = "src/bin/dagdb_kg_import_persist.rs"
+required-features = ["postgres"]
+
+[[bin]]
+name = "dagdb_agent_brain_writeback_growth_smoke"
+path = "src/bin/dagdb_agent_brain_writeback_growth_smoke.rs"
+required-features = ["postgres"]
+
+[[bin]]
+name = "dagdb_kg_export_manifest"
+path = "src/bin/dagdb_kg_export_manifest.rs"
+
+[[bin]]
+name = "dagdb_kg_import_candidates"
+path = "src/bin/dagdb_kg_import_candidates.rs"
+
+[[bench]]
+name = "packet_pipeline"
+harness = false
+required-features = ["postgres"]
+
+[[bench]]
+name = "scale_curve"
+harness = false
+required-features = ["postgres"]
+
+[[bench]]
+name = "concurrency"
+harness = false
+required-features = ["postgres"]
+
+[dependencies]
+exo-dag-db-api = { path = "../exo-dag-db-api" }
+exo-core = { path = "../exo-core" }
+exo-dag-db-core = { path = "../exo-dag-db-core" }
+exo-dag-db-domain = { path = "../exo-dag-db-domain" }
+exo-dag-db-exchange = { path = "../exo-dag-db-exchange" }
+exo-dag-db-graph = { path = "../exo-dag-db-graph" }
+exo-dag-db-postgres = { path = "../exo-dag-db-postgres" }
+exo-dag-db-retrieval = { path = "../exo-dag-db-retrieval" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["rt", "macros"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -1,0 +1,105 @@
+{
+  "schema_version": "dagdb_crate_boundary_map_v1",
+  "facade_crate": null,
+  "wire_dto_crate": "exo-dag-db-api",
+  "target_crates": [
+    {
+      "name": "exo-dag-db-api",
+      "path": "crates/exo-dag-db-api",
+      "owns": [
+        "dagdb DTO wire contracts",
+        "DAG DB response schema version constants",
+        "DTO JSON fixtures"
+      ]
+    },
+    {
+      "name": "exo-dag-db-core",
+      "path": "crates/exo-dag-db-core",
+      "owns": ["error", "hash", "metadata", "safe metadata fixtures", "similarity", "tenant"]
+    },
+    {
+      "name": "exo-dag-db-graph",
+      "path": "crates/exo-dag-db-graph",
+      "owns": ["layer_creation_policy", "layered_graph", "layered_hygiene", "layered_placement"]
+    },
+    {
+      "name": "exo-dag-db-domain",
+      "path": "crates/exo-dag-db-domain",
+      "owns": [
+        "canonicalization",
+        "context",
+        "context_packet_persistence",
+        "continuation_packet",
+        "continuation_persistence",
+        "council",
+        "default_route",
+        "export_finality",
+        "graph",
+        "intake",
+        "lifecycle_action",
+        "model",
+        "placement",
+        "route",
+        "route_invalidation",
+        "scoring",
+        "state",
+        "trust",
+        "validation",
+        "writeback"
+      ]
+    },
+    {
+      "name": "exo-dag-db-retrieval",
+      "path": "crates/exo-dag-db-retrieval",
+      "owns": [
+        "citation_locator",
+        "context_packet_output",
+        "graph_context_selection",
+        "hybrid_retrieval",
+        "kg_catalog_router",
+        "kg_retrieval",
+        "layered_drilldown",
+        "query",
+        "source_adapter",
+        "views"
+      ]
+    },
+    {
+      "name": "exo-dag-db-exchange",
+      "path": "crates/exo-dag-db-exchange",
+      "owns": ["kg_import", "kg_export", "kg_writeback", "writeback_hygiene", "drift_repair"]
+    },
+    {
+      "name": "exo-dag-db-postgres",
+      "path": "crates/exo-dag-db-postgres",
+      "owns": ["postgres", "SQLx migrations", "idempotency", "outbox", "persistent_context", "receipt"]
+    },
+    {
+      "name": "exo-dag-db-lab",
+      "path": "crates/exo-dag-db-lab",
+      "owns": [
+        "benchmark",
+        "benchmark_isolation",
+        "browser",
+        "command binaries",
+        "diagnostics",
+        "graph_explorer",
+        "graph_explorer_postgres",
+        "graph_refinement",
+        "KG manifest export executable",
+        "KG import candidates executable",
+        "benchmark fixtures",
+        "criterion benches",
+        "layered_backfill",
+        "optimization"
+      ]
+    }
+  ],
+  "compatibility": {
+    "wire_dto_owner": "exo-dag-db-api",
+    "wire_dto_compatibility_reexport": "exo-api::dagdb",
+    "facade_imports_preserved": false,
+    "postgres_facade_preserved": false,
+    "generated_artifact_root": "target/dagdb"
+  }
+}

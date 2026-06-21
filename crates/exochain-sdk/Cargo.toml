@@ -33,6 +33,7 @@ workspace = true
 # note in commit message when adding back — avoid drift between
 # `pub use` surface and dependency graph)
 exo-core = { path = "../exo-core" }
+exo-dag-db-api = { path = "../exo-dag-db-api" }
 exo-identity = { path = "../exo-identity" }
 exo-gatekeeper = { path = "../exo-gatekeeper" }
 exo-avc = { path = "../exo-avc" }
@@ -47,3 +48,23 @@ thiserror = { workspace = true }
 
 # Crypto
 blake3 = { workspace = true }
+
+# HTTP transport (optional — only compiled with the `http-client` feature so
+# the spec-only SDK stays free of the async HTTP stack). reqwest is pinned to
+# the same version + feature set already used by exo-node (rustls, no default
+# OpenSSL); zeroize redacts the bearer token from Debug output.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+zeroize = { workspace = true, optional = true }
+
+[features]
+default = []
+# Real async HTTP client (`DagDbHttpClient`) for calling a live DAG DB gateway.
+# Off by default: consumers who only need the request-spec builder pay no HTTP
+# dependency cost.
+http-client = ["dep:reqwest", "dep:zeroize"]
+
+[dev-dependencies]
+# Async test runtime + a minimal in-process TCP server stand in for a live
+# gateway when exercising the HTTP client; no external mock-server crate is a
+# workspace dependency.
+tokio = { workspace = true }

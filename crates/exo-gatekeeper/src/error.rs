@@ -45,6 +45,9 @@ pub enum GatekeeperError {
     #[error("capability denied: {0}")]
     CapabilityDenied(String),
 
+    #[error("authority resolver unavailable: {0}")]
+    AuthorityResolverUnavailable(String),
+
     #[error("timeout after {0} ms")]
     Timeout(u64),
 
@@ -96,6 +99,10 @@ mod tests {
             ),
             (GatekeeperError::TeeError("tee".into()), "tee"),
             (GatekeeperError::CapabilityDenied("cap".into()), "cap"),
+            (
+                GatekeeperError::AuthorityResolverUnavailable("pool absent".into()),
+                "authority resolver unavailable",
+            ),
             (GatekeeperError::Timeout(500), "500"),
             (GatekeeperError::CheckpointError("ckpt".into()), "ckpt"),
             (GatekeeperError::Core("core".into()), "core"),

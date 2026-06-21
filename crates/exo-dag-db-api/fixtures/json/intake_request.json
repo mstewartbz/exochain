@@ -1,0 +1,23 @@
+{
+  "tenant_id": "tenant-a",
+  "namespace": "primary",
+  "idempotency_key": "idem-intake-001",
+  "source_type": "public_web",
+  "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "payload_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "owner_did": "did:exo:owner",
+  "controller_did": "did:exo:controller",
+  "submitted_by_did": "did:exo:submitter",
+  "consent_purpose": "retrieval",
+  "requested_action": "memory:intake",
+  "title_text": "Safe public title",
+  "summary_text": "Safe public summary",
+  "payload_uri_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "parent_memory_ids": [
+    "4444444444444444444444444444444444444444444444444444444444444444"
+  ],
+  "edge_types": ["parent"],
+  "access_policy_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+  "declared_rights_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+  "keyword_texts": ["public", "safe"]
+}

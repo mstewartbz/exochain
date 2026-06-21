@@ -82,6 +82,22 @@ use sync::{SyncConfig, SyncEngine, SyncEvent};
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "dagdb-gateway-proxy")]
+const EXO_DAGDB_GATEWAY_URL_ENV: &str = "EXO_DAGDB_GATEWAY_URL";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV: &str = "EXO_DAGDB_GATEWAY_BEARER_TOKEN";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const EXO_DAGDB_TENANT_ID_ENV: &str = "EXO_DAGDB_TENANT_ID";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const EXO_DAGDB_NAMESPACE_ENV: &str = "EXO_DAGDB_NAMESPACE";
+#[cfg(feature = "dagdb-gateway-proxy")]
+const EXO_DAGDB_MCP_ENV_VARS: &[&str] = &[
+    EXO_DAGDB_GATEWAY_URL_ENV,
+    EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV,
+    EXO_DAGDB_TENANT_ID_ENV,
+    EXO_DAGDB_NAMESPACE_ENV,
+];
+
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -130,6 +146,82 @@ fn parse_validator_set(
         set.insert(node_did.clone());
         Ok(set)
     }
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn mcp_node_context_from_env() -> anyhow::Result<mcp::NodeContext> {
+    mcp_node_context_from_env_reader(|name| match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} is not valid Unicode")
+        }
+    })
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+fn mcp_node_context_from_env_reader<F>(read: F) -> anyhow::Result<mcp::NodeContext>
+where
+    F: Fn(&'static str) -> anyhow::Result<Option<String>>,
+{
+    let gateway_url = read(EXO_DAGDB_GATEWAY_URL_ENV)?;
+    let bearer_token = read(EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV)?;
+    let tenant_id = read(EXO_DAGDB_TENANT_ID_ENV)?;
+    let namespace = read(EXO_DAGDB_NAMESPACE_ENV)?;
+
+    let configured = [
+        (EXO_DAGDB_GATEWAY_URL_ENV, gateway_url.as_ref()),
+        (EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV, bearer_token.as_ref()),
+        (EXO_DAGDB_TENANT_ID_ENV, tenant_id.as_ref()),
+        (EXO_DAGDB_NAMESPACE_ENV, namespace.as_ref()),
+    ];
+
+    if configured.iter().all(|(_, value)| value.is_none()) {
+        return Ok(mcp::NodeContext::empty());
+    }
+
+    let missing: Vec<&str> = configured
+        .iter()
+        .filter_map(|(name, value)| value.is_none().then_some(*name))
+        .collect();
+    let empty: Vec<&str> = configured
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty())
+                .then_some(*name)
+        })
+        .collect();
+
+    if !missing.is_empty() || !empty.is_empty() {
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("missing {}", missing.join(", ")));
+        }
+        if !empty.is_empty() {
+            details.push(format!("empty {}", empty.join(", ")));
+        }
+        anyhow::bail!(
+            "DAG DB MCP gateway proxy config is incomplete: {}; set all of {} or unset all four to disable the proxy",
+            details.join("; "),
+            EXO_DAGDB_MCP_ENV_VARS.join(", ")
+        );
+    }
+
+    tracing::info!(
+        "DAG DB MCP gateway proxy configured from environment; gateway URL and bearer token omitted from logs"
+    );
+
+    Ok(mcp::NodeContext {
+        dagdb_gateway: Some(mcp::context::DagDbGatewayConfig::new(
+            gateway_url.unwrap_or_default(),
+            bearer_token.unwrap_or_default(),
+            tenant_id.unwrap_or_default(),
+            namespace.unwrap_or_default(),
+        )),
+        ..mcp::NodeContext::empty()
+    })
 }
 
 fn parse_seed_addrs(seed: &[String]) -> anyhow::Result<Vec<Multiaddr>> {
@@ -1210,15 +1302,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mcp_authority_signer = Arc::new(move |message: &[u8]| node_identity.sign(message));
 
             // The standalone `exochain mcp` command does NOT connect to a
-            // running node, so we spin up the MCP server with an empty
-            // runtime context. Tools that query live node state fall back
-            // to standalone / template responses.
-            //
-            // When an MCP server is embedded in a running node (future
-            // enhancement), it would use `McpServer::with_context(did,
-            // context)` where `context` carries the `SharedReactorState`
-            // and the `Arc<Mutex<SqliteDagStore>>` so tools return real
-            // runtime data.
+            // running node. In `dagdb-gateway-proxy` builds it may still carry
+            // an operator-configured DAG DB gateway proxy context from env;
+            // with no DAG DB env configured, tools continue to fail closed as
+            // unconfigured.
+            #[cfg(feature = "dagdb-gateway-proxy")]
+            let server = mcp::McpServer::with_context_and_authority(
+                did,
+                mcp_node_context_from_env()?,
+                mcp_authority_did,
+                mcp_authority_public_key,
+                mcp_authority_signer,
+            );
+
+            #[cfg(not(feature = "dagdb-gateway-proxy"))]
             let server = mcp::McpServer::with_authority(
                 did,
                 mcp_authority_did,
@@ -1286,6 +1383,98 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("duplicate validator DID"));
         assert!(text.contains("did:exo:alice"));
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn mcp_context_from_env_pairs(
+        pairs: &[(&'static str, &str)],
+    ) -> anyhow::Result<mcp::NodeContext> {
+        let values: BTreeMap<&'static str, String> = pairs
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_owned()))
+            .collect();
+        mcp_node_context_from_env_reader(|name| Ok(values.get(name).cloned()))
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn mcp_dagdb_env_config_builds_gateway_context_when_complete() {
+        let context = mcp_context_from_env_pairs(&[
+            (EXO_DAGDB_GATEWAY_URL_ENV, "http://127.0.0.1:3000"),
+            (
+                EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV,
+                "super-secret-token-value",
+            ),
+            (EXO_DAGDB_TENANT_ID_ENV, "tenant-a"),
+            (EXO_DAGDB_NAMESPACE_ENV, "primary"),
+        ])
+        .unwrap();
+
+        let config = context
+            .dagdb_gateway
+            .as_ref()
+            .expect("complete env builds gateway config");
+        assert_eq!(config.base_url.as_deref(), Some("http://127.0.0.1:3000"));
+        assert_eq!(
+            config.bearer_token.as_ref().map(|token| token.as_str()),
+            Some("super-secret-token-value")
+        );
+        assert_eq!(config.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(config.namespace.as_deref(), Some("primary"));
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn mcp_dagdb_env_config_absent_preserves_unconfigured_context() {
+        let context = mcp_context_from_env_pairs(&[]).unwrap();
+
+        assert!(context.dagdb_gateway.is_none());
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn mcp_dagdb_env_config_partial_or_empty_fails_without_leaking_token() {
+        let err = match mcp_context_from_env_pairs(&[
+            (EXO_DAGDB_GATEWAY_URL_ENV, "http://127.0.0.1:3000"),
+            (
+                EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV,
+                "super-secret-token-value",
+            ),
+            (EXO_DAGDB_TENANT_ID_ENV, "tenant-a"),
+        ]) {
+            Ok(_) => panic!("partial DAG DB env config must fail"),
+            Err(err) => err,
+        };
+        let text = err.to_string();
+        assert!(text.contains("DAG DB MCP gateway proxy config is incomplete"));
+        assert!(text.contains(EXO_DAGDB_NAMESPACE_ENV));
+        assert!(!text.contains("super-secret-token-value"));
+
+        let err = match mcp_context_from_env_pairs(&[
+            (EXO_DAGDB_GATEWAY_URL_ENV, "http://127.0.0.1:3000"),
+            (EXO_DAGDB_GATEWAY_BEARER_TOKEN_ENV, " "),
+            (EXO_DAGDB_TENANT_ID_ENV, "tenant-a"),
+            (EXO_DAGDB_NAMESPACE_ENV, "primary"),
+        ]) {
+            Ok(_) => panic!("empty DAG DB env config value must fail"),
+            Err(err) => err,
+        };
+        let text = err.to_string();
+        assert!(text.contains("empty EXO_DAGDB_GATEWAY_BEARER_TOKEN"));
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    #[test]
+    fn mcp_command_uses_context_bound_server_when_dagdb_proxy_feature_is_enabled() {
+        let source = include_str!("main.rs");
+        let command_mcp_section = source
+            .split("Command::Mcp")
+            .nth(1)
+            .and_then(|section| section.split("Command::Genesis").next())
+            .expect("MCP command section present");
+
+        assert!(command_mcp_section.contains("mcp_node_context_from_env()?"));
+        assert!(command_mcp_section.contains("McpServer::with_context_and_authority"));
     }
 
     #[test]

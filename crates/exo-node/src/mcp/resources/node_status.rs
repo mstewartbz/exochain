@@ -172,6 +172,7 @@ mod tests {
             reactor_state: Some(reactor_state),
             store: None,
             node_did: Some(node_did.to_string()),
+            ..NodeContext::empty()
         };
 
         let content = read(&context);

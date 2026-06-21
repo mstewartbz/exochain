@@ -1,0 +1,3093 @@
+{
+  "fixture_id": "redacted_project_session_v1",
+  "deterministic_seed": 525252,
+  "corpus": [
+    {
+      "corpus_item_id": "c001",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d41",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e1",
+      "title_text": "Redacted project-session title 001",
+      "summary_text": "Redacted project-session summary 001 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a1",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c002",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d42",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e2",
+      "title_text": "Redacted project-session title 002",
+      "summary_text": "Redacted project-session summary 002 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a2",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c003",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d43",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e3",
+      "title_text": "Redacted project-session title 003",
+      "summary_text": "Redacted project-session summary 003 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a3",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c004",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d44",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e4",
+      "title_text": "Redacted project-session title 004",
+      "summary_text": "Redacted project-session summary 004 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a4",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c005",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d45",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e5",
+      "title_text": "Redacted project-session title 005",
+      "summary_text": "Redacted project-session summary 005 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a5",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c006",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d46",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e6",
+      "title_text": "Redacted project-session title 006",
+      "summary_text": "Redacted project-session summary 006 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a6",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c007",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d47",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e7",
+      "title_text": "Redacted project-session title 007",
+      "summary_text": "Redacted project-session summary 007 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a7",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c008",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d48",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e8",
+      "title_text": "Redacted project-session title 008",
+      "summary_text": "Redacted project-session summary 008 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a8",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c009",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d49",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493e9",
+      "title_text": "Redacted project-session title 009",
+      "summary_text": "Redacted project-session summary 009 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186a9",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c010",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d4a",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493ea",
+      "title_text": "Redacted project-session title 010",
+      "summary_text": "Redacted project-session summary 010 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186aa",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c011",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d4b",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493eb",
+      "title_text": "Redacted project-session title 011",
+      "summary_text": "Redacted project-session summary 011 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ab",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c012",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d4c",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493ec",
+      "title_text": "Redacted project-session title 012",
+      "summary_text": "Redacted project-session summary 012 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ac",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c013",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d4d",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493ed",
+      "title_text": "Redacted project-session title 013",
+      "summary_text": "Redacted project-session summary 013 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ad",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c014",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d4e",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493ee",
+      "title_text": "Redacted project-session title 014",
+      "summary_text": "Redacted project-session summary 014 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ae",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c015",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d4f",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493ef",
+      "title_text": "Redacted project-session title 015",
+      "summary_text": "Redacted project-session summary 015 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186af",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c016",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d50",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f0",
+      "title_text": "Redacted project-session title 016",
+      "summary_text": "Redacted project-session summary 016 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b0",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c017",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d51",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f1",
+      "title_text": "Redacted project-session title 017",
+      "summary_text": "Redacted project-session summary 017 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b1",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c018",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d52",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f2",
+      "title_text": "Redacted project-session title 018",
+      "summary_text": "Redacted project-session summary 018 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b2",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c019",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d53",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f3",
+      "title_text": "Redacted project-session title 019",
+      "summary_text": "Redacted project-session summary 019 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b3",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c020",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d54",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f4",
+      "title_text": "Redacted project-session title 020",
+      "summary_text": "Redacted project-session summary 020 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b4",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c021",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d55",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f5",
+      "title_text": "Redacted project-session title 021",
+      "summary_text": "Redacted project-session summary 021 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b5",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c022",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d56",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f6",
+      "title_text": "Redacted project-session title 022",
+      "summary_text": "Redacted project-session summary 022 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b6",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c023",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d57",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f7",
+      "title_text": "Redacted project-session title 023",
+      "summary_text": "Redacted project-session summary 023 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b7",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c024",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d58",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f8",
+      "title_text": "Redacted project-session title 024",
+      "summary_text": "Redacted project-session summary 024 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b8",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c025",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d59",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493f9",
+      "title_text": "Redacted project-session title 025",
+      "summary_text": "Redacted project-session summary 025 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186b9",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c026",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d5a",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493fa",
+      "title_text": "Redacted project-session title 026",
+      "summary_text": "Redacted project-session summary 026 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ba",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c027",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d5b",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493fb",
+      "title_text": "Redacted project-session title 027",
+      "summary_text": "Redacted project-session summary 027 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186bb",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c028",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d5c",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493fc",
+      "title_text": "Redacted project-session title 028",
+      "summary_text": "Redacted project-session summary 028 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186bc",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c029",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d5d",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493fd",
+      "title_text": "Redacted project-session title 029",
+      "summary_text": "Redacted project-session summary 029 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186bd",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c030",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d5e",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493fe",
+      "title_text": "Redacted project-session title 030",
+      "summary_text": "Redacted project-session summary 030 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186be",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c031",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d5f",
+      "source_hash": "00000000000000000000000000000000000000000000000000000000000493ff",
+      "title_text": "Redacted project-session title 031",
+      "summary_text": "Redacted project-session summary 031 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186bf",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c032",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d60",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049400",
+      "title_text": "Redacted project-session title 032",
+      "summary_text": "Redacted project-session summary 032 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c0",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c033",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d61",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049401",
+      "title_text": "Redacted project-session title 033",
+      "summary_text": "Redacted project-session summary 033 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c1",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c034",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d62",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049402",
+      "title_text": "Redacted project-session title 034",
+      "summary_text": "Redacted project-session summary 034 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c2",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c035",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d63",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049403",
+      "title_text": "Redacted project-session title 035",
+      "summary_text": "Redacted project-session summary 035 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c3",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c036",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d64",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049404",
+      "title_text": "Redacted project-session title 036",
+      "summary_text": "Redacted project-session summary 036 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c4",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c037",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d65",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049405",
+      "title_text": "Redacted project-session title 037",
+      "summary_text": "Redacted project-session summary 037 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c5",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c038",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d66",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049406",
+      "title_text": "Redacted project-session title 038",
+      "summary_text": "Redacted project-session summary 038 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c6",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c039",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d67",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049407",
+      "title_text": "Redacted project-session title 039",
+      "summary_text": "Redacted project-session summary 039 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c7",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c040",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d68",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049408",
+      "title_text": "Redacted project-session title 040",
+      "summary_text": "Redacted project-session summary 040 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c8",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c041",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d69",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049409",
+      "title_text": "Redacted project-session title 041",
+      "summary_text": "Redacted project-session summary 041 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186c9",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c042",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d6a",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004940a",
+      "title_text": "Redacted project-session title 042",
+      "summary_text": "Redacted project-session summary 042 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ca",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c043",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d6b",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004940b",
+      "title_text": "Redacted project-session title 043",
+      "summary_text": "Redacted project-session summary 043 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186cb",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c044",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d6c",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004940c",
+      "title_text": "Redacted project-session title 044",
+      "summary_text": "Redacted project-session summary 044 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186cc",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c045",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d6d",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004940d",
+      "title_text": "Redacted project-session title 045",
+      "summary_text": "Redacted project-session summary 045 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186cd",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c046",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d6e",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004940e",
+      "title_text": "Redacted project-session title 046",
+      "summary_text": "Redacted project-session summary 046 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ce",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c047",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d6f",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004940f",
+      "title_text": "Redacted project-session title 047",
+      "summary_text": "Redacted project-session summary 047 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186cf",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c048",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d70",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049410",
+      "title_text": "Redacted project-session title 048",
+      "summary_text": "Redacted project-session summary 048 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d0",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c049",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d71",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049411",
+      "title_text": "Redacted project-session title 049",
+      "summary_text": "Redacted project-session summary 049 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d1",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c050",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d72",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049412",
+      "title_text": "Redacted project-session title 050",
+      "summary_text": "Redacted project-session summary 050 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d2",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c051",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d73",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049413",
+      "title_text": "Redacted project-session title 051",
+      "summary_text": "Redacted project-session summary 051 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d3",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c052",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d74",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049414",
+      "title_text": "Redacted project-session title 052",
+      "summary_text": "Redacted project-session summary 052 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d4",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c053",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d75",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049415",
+      "title_text": "Redacted project-session title 053",
+      "summary_text": "Redacted project-session summary 053 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d5",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c054",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d76",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049416",
+      "title_text": "Redacted project-session title 054",
+      "summary_text": "Redacted project-session summary 054 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d6",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c055",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d77",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049417",
+      "title_text": "Redacted project-session title 055",
+      "summary_text": "Redacted project-session summary 055 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d7",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c056",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d78",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049418",
+      "title_text": "Redacted project-session title 056",
+      "summary_text": "Redacted project-session summary 056 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d8",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c057",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d79",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049419",
+      "title_text": "Redacted project-session title 057",
+      "summary_text": "Redacted project-session summary 057 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186d9",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c058",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d7a",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004941a",
+      "title_text": "Redacted project-session title 058",
+      "summary_text": "Redacted project-session summary 058 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186da",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c059",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d7b",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004941b",
+      "title_text": "Redacted project-session title 059",
+      "summary_text": "Redacted project-session summary 059 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186db",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c060",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d7c",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004941c",
+      "title_text": "Redacted project-session title 060",
+      "summary_text": "Redacted project-session summary 060 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186dc",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c061",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d7d",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004941d",
+      "title_text": "Redacted project-session title 061",
+      "summary_text": "Redacted project-session summary 061 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186dd",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c062",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d7e",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004941e",
+      "title_text": "Redacted project-session title 062",
+      "summary_text": "Redacted project-session summary 062 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186de",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c063",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d7f",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004941f",
+      "title_text": "Redacted project-session title 063",
+      "summary_text": "Redacted project-session summary 063 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186df",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c064",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d80",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049420",
+      "title_text": "Redacted project-session title 064",
+      "summary_text": "Redacted project-session summary 064 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e0",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c065",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d81",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049421",
+      "title_text": "Redacted project-session title 065",
+      "summary_text": "Redacted project-session summary 065 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e1",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c066",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d82",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049422",
+      "title_text": "Redacted project-session title 066",
+      "summary_text": "Redacted project-session summary 066 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e2",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c067",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d83",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049423",
+      "title_text": "Redacted project-session title 067",
+      "summary_text": "Redacted project-session summary 067 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e3",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c068",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d84",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049424",
+      "title_text": "Redacted project-session title 068",
+      "summary_text": "Redacted project-session summary 068 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e4",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c069",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d85",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049425",
+      "title_text": "Redacted project-session title 069",
+      "summary_text": "Redacted project-session summary 069 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e5",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c070",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "unknown_provenance",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d86",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049426",
+      "title_text": "Redacted project-session title 070",
+      "summary_text": "Redacted project-session summary 070 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "unknown_provenance",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e6",
+      "revoked": false,
+      "stale": true,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c071",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d87",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049427",
+      "title_text": "Redacted project-session title 071",
+      "summary_text": "Redacted project-session summary 071 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e7",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c072",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d88",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049428",
+      "title_text": "Redacted project-session title 072",
+      "summary_text": "Redacted project-session summary 072 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e8",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c073",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d89",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049429",
+      "title_text": "Redacted project-session title 073",
+      "summary_text": "Redacted project-session summary 073 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186e9",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c074",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d8a",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004942a",
+      "title_text": "Redacted project-session title 074",
+      "summary_text": "Redacted project-session summary 074 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ea",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c075",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d8b",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004942b",
+      "title_text": "Redacted project-session title 075",
+      "summary_text": "Redacted project-session summary 075 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186eb",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c076",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d8c",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004942c",
+      "title_text": "Redacted project-session title 076",
+      "summary_text": "Redacted project-session summary 076 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ec",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c077",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d8d",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004942d",
+      "title_text": "Redacted project-session title 077",
+      "summary_text": "Redacted project-session summary 077 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ed",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c078",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d8e",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004942e",
+      "title_text": "Redacted project-session title 078",
+      "summary_text": "Redacted project-session summary 078 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ee",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c079",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d8f",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004942f",
+      "title_text": "Redacted project-session title 079",
+      "summary_text": "Redacted project-session summary 079 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ef",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c080",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "public_web",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d90",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049430",
+      "title_text": "Redacted project-session title 080",
+      "summary_text": "Redacted project-session summary 080 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "public_web",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f0",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c081",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d91",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049431",
+      "title_text": "Redacted project-session title 081",
+      "summary_text": "Redacted project-session summary 081 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f1",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c082",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d92",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049432",
+      "title_text": "Redacted project-session title 082",
+      "summary_text": "Redacted project-session summary 082 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f2",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c083",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d93",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049433",
+      "title_text": "Redacted project-session title 083",
+      "summary_text": "Redacted project-session summary 083 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f3",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c084",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d94",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049434",
+      "title_text": "Redacted project-session title 084",
+      "summary_text": "Redacted project-session summary 084 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f4",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c085",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d95",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049435",
+      "title_text": "Redacted project-session title 085",
+      "summary_text": "Redacted project-session summary 085 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f5",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c086",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d96",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049436",
+      "title_text": "Redacted project-session title 086",
+      "summary_text": "Redacted project-session summary 086 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f6",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c087",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d97",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049437",
+      "title_text": "Redacted project-session title 087",
+      "summary_text": "Redacted project-session summary 087 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f7",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c088",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d98",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049438",
+      "title_text": "Redacted project-session title 088",
+      "summary_text": "Redacted project-session summary 088 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f8",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c089",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d99",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049439",
+      "title_text": "Redacted project-session title 089",
+      "summary_text": "Redacted project-session summary 089 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186f9",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c090",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "private_customer",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d9a",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004943a",
+      "title_text": "Redacted project-session title 090",
+      "summary_text": "Redacted project-session summary 090 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "private_customer",
+        "r0"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186fa",
+      "revoked": true,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c091",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d9b",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004943b",
+      "title_text": "Redacted project-session title 091",
+      "summary_text": "Redacted project-session summary 091 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r1"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186fb",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c081"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c092",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d9c",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004943c",
+      "title_text": "Redacted project-session title 092",
+      "summary_text": "Redacted project-session summary 092 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r2"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186fc",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c082"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c093",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d9d",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004943d",
+      "title_text": "Redacted project-session title 093",
+      "summary_text": "Redacted project-session summary 093 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r3"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186fd",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c083"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c094",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d9e",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004943e",
+      "title_text": "Redacted project-session title 094",
+      "summary_text": "Redacted project-session summary 094 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r4"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186fe",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c084"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c095",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030d9f",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004943f",
+      "title_text": "Redacted project-session title 095",
+      "summary_text": "Redacted project-session summary 095 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r5"
+      ],
+      "memory_id": "00000000000000000000000000000000000000000000000000000000000186ff",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c085"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c096",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da0",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049440",
+      "title_text": "Redacted project-session title 096",
+      "summary_text": "Redacted project-session summary 096 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r0"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018700",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c086"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c097",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da1",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049441",
+      "title_text": "Redacted project-session title 097",
+      "summary_text": "Redacted project-session summary 097 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r1"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018701",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c087"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c098",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da2",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049442",
+      "title_text": "Redacted project-session title 098",
+      "summary_text": "Redacted project-session summary 098 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r2"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018702",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c088"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c099",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da3",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049443",
+      "title_text": "Redacted project-session title 099",
+      "summary_text": "Redacted project-session summary 099 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r3"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018703",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c089"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c100",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "ip_sensitive",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da4",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049444",
+      "title_text": "Redacted project-session title 100",
+      "summary_text": "Redacted project-session summary 100 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "ip_sensitive",
+        "r4"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018704",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [
+        "c090"
+      ],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c101",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da5",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049445",
+      "title_text": "Redacted project-session title 101",
+      "summary_text": "Redacted project-session summary 101 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r5"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018705",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c001"
+      ]
+    },
+    {
+      "corpus_item_id": "c102",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da6",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049446",
+      "title_text": "Redacted project-session title 102",
+      "summary_text": "Redacted project-session summary 102 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r0"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018706",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c002"
+      ]
+    },
+    {
+      "corpus_item_id": "c103",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da7",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049447",
+      "title_text": "Redacted project-session title 103",
+      "summary_text": "Redacted project-session summary 103 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r1"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018707",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c003"
+      ]
+    },
+    {
+      "corpus_item_id": "c104",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da8",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049448",
+      "title_text": "Redacted project-session title 104",
+      "summary_text": "Redacted project-session summary 104 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r2"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018708",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c004"
+      ]
+    },
+    {
+      "corpus_item_id": "c105",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030da9",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049449",
+      "title_text": "Redacted project-session title 105",
+      "summary_text": "Redacted project-session summary 105 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r3"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018709",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c005"
+      ]
+    },
+    {
+      "corpus_item_id": "c106",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030daa",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004944a",
+      "title_text": "Redacted project-session title 106",
+      "summary_text": "Redacted project-session summary 106 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r4"
+      ],
+      "memory_id": "000000000000000000000000000000000000000000000000000000000001870a",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c006"
+      ]
+    },
+    {
+      "corpus_item_id": "c107",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030dab",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004944b",
+      "title_text": "Redacted project-session title 107",
+      "summary_text": "Redacted project-session summary 107 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r5"
+      ],
+      "memory_id": "000000000000000000000000000000000000000000000000000000000001870b",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c007"
+      ]
+    },
+    {
+      "corpus_item_id": "c108",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030dac",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004944c",
+      "title_text": "Redacted project-session title 108",
+      "summary_text": "Redacted project-session summary 108 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r0"
+      ],
+      "memory_id": "000000000000000000000000000000000000000000000000000000000001870c",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c008"
+      ]
+    },
+    {
+      "corpus_item_id": "c109",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030dad",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004944d",
+      "title_text": "Redacted project-session title 109",
+      "summary_text": "Redacted project-session summary 109 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r1"
+      ],
+      "memory_id": "000000000000000000000000000000000000000000000000000000000001870d",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c009"
+      ]
+    },
+    {
+      "corpus_item_id": "c110",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "generated",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030dae",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004944e",
+      "title_text": "Redacted project-session title 110",
+      "summary_text": "Redacted project-session summary 110 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "generated",
+        "r2"
+      ],
+      "memory_id": "000000000000000000000000000000000000000000000000000000000001870e",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": [
+        "c010"
+      ]
+    },
+    {
+      "corpus_item_id": "c111",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030daf",
+      "source_hash": "000000000000000000000000000000000000000000000000000000000004944f",
+      "title_text": "Redacted project-session title 111",
+      "summary_text": "Redacted project-session summary 111 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r3"
+      ],
+      "memory_id": "000000000000000000000000000000000000000000000000000000000001870f",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c112",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db0",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049450",
+      "title_text": "Redacted project-session title 112",
+      "summary_text": "Redacted project-session summary 112 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r4"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018710",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c113",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db1",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049451",
+      "title_text": "Redacted project-session title 113",
+      "summary_text": "Redacted project-session summary 113 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r5"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018711",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c114",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db2",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049452",
+      "title_text": "Redacted project-session title 114",
+      "summary_text": "Redacted project-session summary 114 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r0"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018712",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c115",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db3",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049453",
+      "title_text": "Redacted project-session title 115",
+      "summary_text": "Redacted project-session summary 115 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R1",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r1"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018713",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c116",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db4",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049454",
+      "title_text": "Redacted project-session title 116",
+      "summary_text": "Redacted project-session summary 116 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R2",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r2"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018714",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c117",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db5",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049455",
+      "title_text": "Redacted project-session title 117",
+      "summary_text": "Redacted project-session summary 117 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R3",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r3"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018715",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c118",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db6",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049456",
+      "title_text": "Redacted project-session title 118",
+      "summary_text": "Redacted project-session summary 118 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R4",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r4"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018716",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c119",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db7",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049457",
+      "title_text": "Redacted project-session title 119",
+      "summary_text": "Redacted project-session summary 119 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R5",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r5"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018717",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    },
+    {
+      "corpus_item_id": "c120",
+      "tenant_id": "tenant_benchmark",
+      "namespace": "redacted_project_session",
+      "source_type": "open_source",
+      "payload_hash": "0000000000000000000000000000000000000000000000000000000000030db8",
+      "source_hash": "0000000000000000000000000000000000000000000000000000000000049458",
+      "title_text": "Redacted project-session title 120",
+      "summary_text": "Redacted project-session summary 120 for redacted deterministic DAG DB replay evaluation only.",
+      "risk_class": "R0",
+      "expected_validation_status": "passed",
+      "labels": [
+        "open_source",
+        "r0"
+      ],
+      "memory_id": "0000000000000000000000000000000000000000000000000000000000018718",
+      "revoked": false,
+      "stale": false,
+      "contradicts": [],
+      "duplicates": []
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "t001",
+      "question_text": "Redacted project-session question 001",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a81",
+      "expected_citations": [
+        "c001"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a1",
+        "00000000000000000000000000000000000000000000000000000000000186a2",
+        "00000000000000000000000000000000000000000000000000000000000186a3",
+        "00000000000000000000000000000000000000000000000000000000000186a4",
+        "00000000000000000000000000000000000000000000000000000000000186a5",
+        "00000000000000000000000000000000000000000000000000000000000186dd",
+        "00000000000000000000000000000000000000000000000000000000000186f1",
+        "00000000000000000000000000000000000000000000000000000000000186fb"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c001"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a1",
+        "00000000000000000000000000000000000000000000000000000000000186a2"
+      ],
+      "risk_labels": [
+        "R3"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t002",
+      "question_text": "Redacted project-session question 002",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a82",
+      "expected_citations": [
+        "c002"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a2",
+        "00000000000000000000000000000000000000000000000000000000000186a3",
+        "00000000000000000000000000000000000000000000000000000000000186a4",
+        "00000000000000000000000000000000000000000000000000000000000186a5",
+        "00000000000000000000000000000000000000000000000000000000000186a6",
+        "00000000000000000000000000000000000000000000000000000000000186de",
+        "00000000000000000000000000000000000000000000000000000000000186f2",
+        "00000000000000000000000000000000000000000000000000000000000186fc"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c002"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a2",
+        "00000000000000000000000000000000000000000000000000000000000186a3"
+      ],
+      "risk_labels": [
+        "R4"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t003",
+      "question_text": "Redacted project-session question 003",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a83",
+      "expected_citations": [
+        "c003"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a3",
+        "00000000000000000000000000000000000000000000000000000000000186a4",
+        "00000000000000000000000000000000000000000000000000000000000186a5",
+        "00000000000000000000000000000000000000000000000000000000000186a6",
+        "00000000000000000000000000000000000000000000000000000000000186a7",
+        "00000000000000000000000000000000000000000000000000000000000186df",
+        "00000000000000000000000000000000000000000000000000000000000186f3",
+        "00000000000000000000000000000000000000000000000000000000000186fd"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c003"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a3",
+        "00000000000000000000000000000000000000000000000000000000000186a4"
+      ],
+      "risk_labels": [
+        "R5"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t004",
+      "question_text": "Redacted project-session question 004",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a84",
+      "expected_citations": [
+        "c004"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a4",
+        "00000000000000000000000000000000000000000000000000000000000186a5",
+        "00000000000000000000000000000000000000000000000000000000000186a6",
+        "00000000000000000000000000000000000000000000000000000000000186a7",
+        "00000000000000000000000000000000000000000000000000000000000186a8",
+        "00000000000000000000000000000000000000000000000000000000000186e0",
+        "00000000000000000000000000000000000000000000000000000000000186f4",
+        "00000000000000000000000000000000000000000000000000000000000186fe"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c004"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a4",
+        "00000000000000000000000000000000000000000000000000000000000186a5"
+      ],
+      "risk_labels": [
+        "R3"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t005",
+      "question_text": "Redacted project-session question 005",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a85",
+      "expected_citations": [
+        "c005"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a5",
+        "00000000000000000000000000000000000000000000000000000000000186a6",
+        "00000000000000000000000000000000000000000000000000000000000186a7",
+        "00000000000000000000000000000000000000000000000000000000000186a8",
+        "00000000000000000000000000000000000000000000000000000000000186a9",
+        "00000000000000000000000000000000000000000000000000000000000186e1",
+        "00000000000000000000000000000000000000000000000000000000000186f5",
+        "00000000000000000000000000000000000000000000000000000000000186ff"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c005"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a5",
+        "00000000000000000000000000000000000000000000000000000000000186a6"
+      ],
+      "risk_labels": [
+        "R4"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t006",
+      "question_text": "Redacted project-session question 006",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a86",
+      "expected_citations": [
+        "c006"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a6",
+        "00000000000000000000000000000000000000000000000000000000000186a7",
+        "00000000000000000000000000000000000000000000000000000000000186a8",
+        "00000000000000000000000000000000000000000000000000000000000186a9",
+        "00000000000000000000000000000000000000000000000000000000000186aa",
+        "00000000000000000000000000000000000000000000000000000000000186e2",
+        "00000000000000000000000000000000000000000000000000000000000186f6",
+        "0000000000000000000000000000000000000000000000000000000000018700"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c006"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a6",
+        "00000000000000000000000000000000000000000000000000000000000186a7"
+      ],
+      "risk_labels": [
+        "R5"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t007",
+      "question_text": "Redacted project-session question 007",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a87",
+      "expected_citations": [
+        "c007"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a7",
+        "00000000000000000000000000000000000000000000000000000000000186a8",
+        "00000000000000000000000000000000000000000000000000000000000186a9",
+        "00000000000000000000000000000000000000000000000000000000000186aa",
+        "00000000000000000000000000000000000000000000000000000000000186ab",
+        "00000000000000000000000000000000000000000000000000000000000186e3",
+        "00000000000000000000000000000000000000000000000000000000000186f7",
+        "0000000000000000000000000000000000000000000000000000000000018701"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c007"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a7",
+        "00000000000000000000000000000000000000000000000000000000000186a8"
+      ],
+      "risk_labels": [
+        "R3"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t008",
+      "question_text": "Redacted project-session question 008",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a88",
+      "expected_citations": [
+        "c008"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a8",
+        "00000000000000000000000000000000000000000000000000000000000186a9",
+        "00000000000000000000000000000000000000000000000000000000000186aa",
+        "00000000000000000000000000000000000000000000000000000000000186ab",
+        "00000000000000000000000000000000000000000000000000000000000186ac",
+        "00000000000000000000000000000000000000000000000000000000000186e4",
+        "00000000000000000000000000000000000000000000000000000000000186f8",
+        "0000000000000000000000000000000000000000000000000000000000018702"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c008"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a8",
+        "00000000000000000000000000000000000000000000000000000000000186a9"
+      ],
+      "risk_labels": [
+        "R4"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t009",
+      "question_text": "Redacted project-session question 009",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a89",
+      "expected_citations": [
+        "c009"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a9",
+        "00000000000000000000000000000000000000000000000000000000000186aa",
+        "00000000000000000000000000000000000000000000000000000000000186ab",
+        "00000000000000000000000000000000000000000000000000000000000186ac",
+        "00000000000000000000000000000000000000000000000000000000000186ad",
+        "00000000000000000000000000000000000000000000000000000000000186e5",
+        "00000000000000000000000000000000000000000000000000000000000186f9",
+        "0000000000000000000000000000000000000000000000000000000000018703"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c009"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186a9",
+        "00000000000000000000000000000000000000000000000000000000000186aa"
+      ],
+      "risk_labels": [
+        "R5"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t010",
+      "question_text": "Redacted project-session question 010",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a8a",
+      "expected_citations": [
+        "c010"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186aa",
+        "00000000000000000000000000000000000000000000000000000000000186ab",
+        "00000000000000000000000000000000000000000000000000000000000186ac",
+        "00000000000000000000000000000000000000000000000000000000000186ad",
+        "00000000000000000000000000000000000000000000000000000000000186ae",
+        "00000000000000000000000000000000000000000000000000000000000186e6",
+        "00000000000000000000000000000000000000000000000000000000000186fa",
+        "0000000000000000000000000000000000000000000000000000000000018704"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c010"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186aa",
+        "00000000000000000000000000000000000000000000000000000000000186ab"
+      ],
+      "risk_labels": [
+        "R3"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t011",
+      "question_text": "Redacted project-session question 011",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a8b",
+      "expected_citations": [
+        "c011"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ab",
+        "00000000000000000000000000000000000000000000000000000000000186ac",
+        "00000000000000000000000000000000000000000000000000000000000186ad",
+        "00000000000000000000000000000000000000000000000000000000000186ae",
+        "00000000000000000000000000000000000000000000000000000000000186af",
+        "00000000000000000000000000000000000000000000000000000000000186e7",
+        "00000000000000000000000000000000000000000000000000000000000186fb",
+        "0000000000000000000000000000000000000000000000000000000000018705"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c011"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ab",
+        "00000000000000000000000000000000000000000000000000000000000186ac"
+      ],
+      "risk_labels": [
+        "R4"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t012",
+      "question_text": "Redacted project-session question 012",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a8c",
+      "expected_citations": [
+        "c012"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ac",
+        "00000000000000000000000000000000000000000000000000000000000186ad",
+        "00000000000000000000000000000000000000000000000000000000000186ae",
+        "00000000000000000000000000000000000000000000000000000000000186af",
+        "00000000000000000000000000000000000000000000000000000000000186b0",
+        "00000000000000000000000000000000000000000000000000000000000186e8",
+        "00000000000000000000000000000000000000000000000000000000000186fc",
+        "0000000000000000000000000000000000000000000000000000000000018706"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c012"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ac",
+        "00000000000000000000000000000000000000000000000000000000000186ad"
+      ],
+      "risk_labels": [
+        "R5"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t013",
+      "question_text": "Redacted project-session question 013",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a8d",
+      "expected_citations": [
+        "c013"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ad",
+        "00000000000000000000000000000000000000000000000000000000000186ae",
+        "00000000000000000000000000000000000000000000000000000000000186af",
+        "00000000000000000000000000000000000000000000000000000000000186b0",
+        "00000000000000000000000000000000000000000000000000000000000186b1",
+        "00000000000000000000000000000000000000000000000000000000000186e9",
+        "00000000000000000000000000000000000000000000000000000000000186fd",
+        "0000000000000000000000000000000000000000000000000000000000018707"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c013"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ad",
+        "00000000000000000000000000000000000000000000000000000000000186ae"
+      ],
+      "risk_labels": [
+        "R3"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t014",
+      "question_text": "Redacted project-session question 014",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a8e",
+      "expected_citations": [
+        "c014"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ae",
+        "00000000000000000000000000000000000000000000000000000000000186af",
+        "00000000000000000000000000000000000000000000000000000000000186b0",
+        "00000000000000000000000000000000000000000000000000000000000186b1",
+        "00000000000000000000000000000000000000000000000000000000000186b2",
+        "00000000000000000000000000000000000000000000000000000000000186ea",
+        "00000000000000000000000000000000000000000000000000000000000186fe",
+        "0000000000000000000000000000000000000000000000000000000000018708"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c014"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186ae",
+        "00000000000000000000000000000000000000000000000000000000000186af"
+      ],
+      "risk_labels": [
+        "R4"
+      ],
+      "expected_validation_outcome": "passed"
+    },
+    {
+      "task_id": "t015",
+      "question_text": "Redacted project-session question 015",
+      "task_signature_hash": "0000000000000000000000000000000000000000000000000000000000061a8f",
+      "expected_citations": [
+        "c015"
+      ],
+      "allowed_memory_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186af",
+        "00000000000000000000000000000000000000000000000000000000000186b0",
+        "00000000000000000000000000000000000000000000000000000000000186b1",
+        "00000000000000000000000000000000000000000000000000000000000186b2",
+        "00000000000000000000000000000000000000000000000000000000000186b3",
+        "00000000000000000000000000000000000000000000000000000000000186eb",
+        "00000000000000000000000000000000000000000000000000000000000186ff",
+        "0000000000000000000000000000000000000000000000000000000000018709"
+      ],
+      "prohibited_memory_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "expected_citation_ids": [
+        "c015"
+      ],
+      "prohibited_ref_ids": [
+        "0000000000000000000000000000000000000000000000000000000000018717"
+      ],
+      "contradiction_ref_ids": [
+        "00000000000000000000000000000000000000000000000000000000000186af",
+        "00000000000000000000000000000000000000000000000000000000000186b0"
+      ],
+      "risk_labels": [
+        "R5"
+      ],
+      "expected_validation_outcome": "passed"
+    }
+  ]
+}

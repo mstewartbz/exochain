@@ -18,9 +18,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Traceability Matrix
 
-Updated 2026-05-09 after EXOCHAIN-REM-009 attestation true-up. Maps every spec requirement to code, tests, and status.
+Updated 2026-06-18 after DAG DB REST runtime activation evidence review. Maps every spec requirement to code, tests, and status.
 
-**Status key:** 🟢 Implemented (tests passing) | 🟡 Partial | 🔴 Planned
+**Status key:** 🟢 Implemented (tests passing) | 🟡 Partial or evidence pending | 🔴 Planned
 
 ## Core Infrastructure (Spec §9)
 
@@ -163,6 +163,17 @@ Updated 2026-05-09 after EXOCHAIN-REM-009 attestation true-up. Maps every spec r
 | **MON-011** | ExoForge scheduled trigger activation | ExoForge platform configuration — daily + on-merge schedule | 🔴 Planned (requires ExoForge platform access) |
 | **MON-012** | Governance health dashboard (React UI widget) | `demo/web/src/` — new GovernanceHealthWidget | 🔴 Planned |
 
+## DAG DB Runtime Adapter (PR #695 active plan)
+
+PR #695 runtime activation evidence is tracked in
+`docs/dagdb/runtime-activation/rollback-canary-observability.md`. The spec
+section below summarizes the mounted runtime contract from current repo docs and
+requires maintainer confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
+
+| Req | Spec Candidate | Requirement | Module / Evidence | Status |
+|---|---|---|---|---|
+| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | Exactly `POST /api/v1/dag-db/route`, `POST /api/v1/dag-db/context-packet`, `POST /api/v1/dag-db/writeback`, `POST /api/v1/dag-db/import`, and `POST /api/v1/dag-db/export` must be served by the gateway runtime when Postgres and tenant/session authority are configured; reserved intake, validate, trust-check, council decision, receipt lookup, catalog lookup, and route lookup DTO surfaces remain unmounted; writes must pass tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export are live only with distinct import/export consent plus route-bound signatures, and missing or mismatched consent/signatures fail closed. | Current PR-head evidence is supplied by PR checks and the PR body; `INTEGRATION.md` DAG DB Runtime Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `crates/exo-node/src/mcp/tools/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/runtime-activation/rollback-canary-observability.md`; local verification commands include `RUSTFLAGS='-D warnings' cargo test -p exo-gateway dagdb --features production-db` and `RUSTFLAGS='-D warnings' cargo test -p exo-dag-db-postgres --features postgres --test dagdb_tenant_rls_live_path_contract -- --nocapture` | 🟢 Implemented |
+
 ## Autonomous Volition Credential (AVC) Layer
 
 | Req | Requirement | Crate / Module | Test Location | Status |
@@ -220,9 +231,10 @@ Updated 2026-05-09 after EXOCHAIN-REM-009 attestation true-up. Maps every spec r
 | P2P/API/Gateway/Tenant (§16–17) | 4 | 4 | 0 | 0 |
 | Decision Forum (GOV/TNC/M) | 15 | 15 | 0 | 0 |
 | Governance Monitoring (MON) | 12 | 10 | 0 | 2 |
+| DAG DB Runtime Adapter (DAGDB) | 1 | 1 | 0 | 0 |
 | AVC (Autonomous Volition Credential) | 10 | 10 | 0 | 0 |
 | Custody-Native Economy (zero-launch) | 22 | 22 | 0 | 0 |
-| **TOTAL** | **118** | **116** | **0** | **2** |
+| **TOTAL** | **119** | **117** | **0** | **2** |
 
-**Coverage: 116/118 requirements traced to code (98%). 2 planned (ExoForge scheduling + React dashboard). 0 partial.**
-**Workspace inventory: 3,638+ listed tests across 22 packages and 266+ Rust files (AVC and economy crates added).**
+**Coverage: 117/119 requirements implemented (98%). 2 planned (ExoForge scheduling + React dashboard). DAGDB-001 current PR-head evidence is supplied by PR checks and the PR body; scoped coverage claims must cite the exact producing command, package set, exclusions, numerator, and denominator. No coverage statement here is a universal production coverage claim.**
+**Workspace inventory: 5,974 listed workspace tests and 454 Rust source files.**

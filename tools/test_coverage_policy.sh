@@ -32,11 +32,40 @@ import sys
 import tomllib
 from pathlib import Path
 
-runtime_adapter_paths = {
-    "crates/exo-gateway/src/db.rs": "gateway database persistence is a core runtime adapter",
-    "crates/exo-gateway/src/server.rs": "gateway HTTP authentication and routing is a core runtime adapter",
-    "crates/exo-gateway/src/handlers.rs": "gateway API handlers expose core runtime decisions",
-    "crates/exo-gateway/src/graphql.rs": "gateway GraphQL exposes core runtime decisions",
+coverage_exclusion_categories = {
+    "Integration test harnesses": {
+        "crates/*/tests/*.rs": "integration tests are test-only harness code, not production/library code",
+    },
+    "Gateway runtime adapters": {
+        "crates/exo-gateway/src/dagdb.rs": "DAG DB gateway Axum routes reach SQLx/live Postgres production-db paths",
+        "crates/exo-gateway/src/db.rs": "gateway database persistence is a core runtime adapter",
+        "crates/exo-gateway/src/server.rs": "gateway HTTP authentication and routing is a core runtime adapter",
+        "crates/exo-gateway/src/handlers.rs": "gateway API handlers expose core runtime decisions",
+        "crates/exo-gateway/src/graphql.rs": "gateway GraphQL exposes core runtime decisions",
+    },
+    "DAG DB Postgres adapters": {
+        "crates/exo-dag-db-postgres/src/idempotency.rs": "SQLx idempotency store requires a live Postgres schema",
+        "crates/exo-dag-db-postgres/src/outbox.rs": "SQLx outbox processing requires a live Postgres schema",
+        "crates/exo-dag-db-postgres/src/persistent_context.rs": "persistent context selection reads live Postgres rows",
+        "crates/exo-dag-db-postgres/src/postgres/context_packet_persistence.rs": "context packet persistence requires Postgres migrations",
+        "crates/exo-dag-db-postgres/src/postgres/continuation_persistence.rs": "continuation persistence requires Postgres migrations",
+        "crates/exo-dag-db-postgres/src/postgres/default_route.rs": "default route persistence requires Postgres migrations",
+        "crates/exo-dag-db-postgres/src/postgres/kg_catalog_router.rs": "catalog routing adapter reads live Postgres graph rows",
+        "crates/exo-dag-db-postgres/src/postgres/kg_context_selection.rs": "context selection adapter reads live Postgres graph rows",
+        "crates/exo-dag-db-postgres/src/postgres/kg_context_selection_write.rs": "context selection write adapter persists Postgres rows",
+        "crates/exo-dag-db-postgres/src/postgres/kg_export.rs": "KG export adapter requires a live Postgres database",
+        "crates/exo-dag-db-postgres/src/postgres/kg_import.rs": "KG import adapter requires a live Postgres database",
+        "crates/exo-dag-db-postgres/src/postgres/kg_retrieval.rs": "KG retrieval adapter requires a live Postgres database",
+        "crates/exo-dag-db-postgres/src/postgres/kg_writeback.rs": "KG writeback adapter requires a live Postgres database",
+        "crates/exo-dag-db-postgres/src/postgres/lifecycle_action.rs": "lifecycle action adapter requires Postgres migrations",
+        "crates/exo-dag-db-postgres/src/postgres/mod.rs": "Postgres module wiring is adapter-only",
+        "crates/exo-dag-db-postgres/src/postgres/route_invalidation.rs": "route invalidation adapter requires Postgres migrations",
+        "crates/exo-dag-db-postgres/src/receipt.rs": "SQLx receipt store requires a live Postgres schema",
+    },
+    "DAG DB lab operator CLIs": {
+        "crates/exo-dag-db-lab/src/bin/dagdb_kg_export_manifest.rs": "lab export CLI parses process args and writes filesystem/stdout fixtures",
+        "crates/exo-dag-db-lab/src/bin/dagdb_kg_import_candidates.rs": "lab import CLI parses process args and reads filesystem fixtures",
+    },
 }
 
 tarpaulin_text = Path("tarpaulin.toml").read_text()
@@ -44,28 +73,62 @@ config = tomllib.loads(tarpaulin_text)
 exclude_files = config.get("default", {}).get("exclude-files", [])
 excluded = set(exclude_files)
 
-runtime_adapter_exclusions = [
-    f"{path} ({reason})"
-    for path, reason in runtime_adapter_paths.items()
-    if path in excluded
-]
+categorized_exclusions = {}
+for category, paths in coverage_exclusion_categories.items():
+    hits = [
+        f"{path} ({reason})"
+        for path, reason in paths.items()
+        if path in excluded
+    ]
+    if hits:
+        categorized_exclusions[category] = hits
 
-if runtime_adapter_exclusions and "not a whole-workspace coverage claim" not in tarpaulin_text:
+if categorized_exclusions and "not a whole-workspace coverage claim" not in tarpaulin_text:
     print(
-        "coverage policy test failed: runtime adapter exclusions require an "
+        "coverage policy test failed: structural exclusions require an "
         "explicit scoped-coverage disclosure:",
         file=sys.stderr,
     )
-    for exclusion in runtime_adapter_exclusions:
-        print(f"  - {exclusion}", file=sys.stderr)
+    for exclusions in categorized_exclusions.values():
+        for exclusion in exclusions:
+            print(f"  - {exclusion}", file=sys.stderr)
     sys.exit(1)
 
-if runtime_adapter_exclusions and "Gateway runtime adapters" not in tarpaulin_text:
+for category, exclusions in categorized_exclusions.items():
+    if category not in tarpaulin_text:
+        print(
+            "coverage policy test failed: structural exclusions must be "
+            "classified in tarpaulin.toml comments:",
+            file=sys.stderr,
+        )
+        print(f"  - missing category: {category}", file=sys.stderr)
+        for exclusion in exclusions:
+            print(f"  - {exclusion}", file=sys.stderr)
+        sys.exit(1)
+
+allowed_dagdb_exclusions = set()
+for category, paths in coverage_exclusion_categories.items():
+    if category.startswith("DAG DB"):
+        allowed_dagdb_exclusions.update(paths)
+
+unclassified_dagdb_exclusions = [
+    path
+    for path in sorted(excluded)
+    if (
+        path.startswith("crates/exo-dag-db-")
+        or path.startswith("crates/exo-gateway/src/bin/dagdb_")
+    )
+    and path not in allowed_dagdb_exclusions
+]
+
+if unclassified_dagdb_exclusions:
     print(
-        "coverage policy test failed: runtime adapter exclusions must be "
-        "classified in tarpaulin.toml comments",
+        "coverage policy test failed: DAG DB exclusions must be explicit "
+        "and classified by structural untestability:",
         file=sys.stderr,
     )
+    for path in unclassified_dagdb_exclusions:
+        print(f"  - {path}", file=sys.stderr)
     sys.exit(1)
 PY
 

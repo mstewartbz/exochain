@@ -24,6 +24,10 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub uptime_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dagdb_runtime_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dagdb_runtime_reason: Option<String>,
 }
 
 /// REST API route definitions.
@@ -297,10 +301,14 @@ mod tests {
             status: "ok".into(),
             version: "0.1.0".into(),
             uptime_seconds: 42,
+            dagdb_runtime_status: None,
+            dagdb_runtime_reason: None,
         };
         assert_eq!(r.status, "ok");
         assert_eq!(r.version, "0.1.0");
         assert_eq!(r.uptime_seconds, 42);
+        assert_eq!(r.dagdb_runtime_status, None);
+        assert_eq!(r.dagdb_runtime_reason, None);
     }
 
     #[test]

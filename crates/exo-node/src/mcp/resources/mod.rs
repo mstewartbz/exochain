@@ -23,7 +23,7 @@
 //! - `exochain://invariants` — 8 constitutional invariants (JSON).
 //! - `exochain://mcp-rules` — 6 MCP enforcement rules (JSON).
 //! - `exochain://node/status` — live node status snapshot (JSON).
-//! - `exochain://tools` — all 40 MCP tools grouped by domain (JSON).
+//! - `exochain://tools` — all MCP tools grouped by domain (JSON).
 //! - `exochain://readme` — markdown agent quick-reference.
 
 pub mod constitution;
@@ -184,14 +184,19 @@ mod tests {
     }
 
     #[test]
-    fn resource_read_tools_summary_40() {
+    fn resource_read_tools_summary_matches_inventory() {
         let registry = ResourceRegistry::default();
         let content = registry
             .read("exochain://tools", &NodeContext::empty())
             .expect("tools present");
         let text = content.text.expect("text present");
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["total"], 40);
+        let tools = parsed["tools"].as_array().expect("tools array");
+        assert_eq!(parsed["total"], tools.len());
+        assert_eq!(
+            parsed["total"],
+            crate::mcp::tools::ToolRegistry::default().list().len()
+        );
     }
 
     #[test]

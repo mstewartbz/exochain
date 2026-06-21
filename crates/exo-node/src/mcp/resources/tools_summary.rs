@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! `exochain://tools` — summary list of all 40 MCP tools grouped by domain.
+//! `exochain://tools` — summary list of all 42 MCP tools grouped by domain.
 //!
 //! Walks the live [`ToolRegistry`] to compute the param count per tool so
 //! the summary stays in sync with the actual definitions.
@@ -34,9 +34,9 @@ pub fn definition() -> ResourceDefinition {
         uri: "exochain://tools".into(),
         name: "MCP Tools Summary".into(),
         description: Some(
-            "Summary of all 40 MCP tools grouped by domain (node, identity, \
+            "Summary of all 42 MCP tools grouped by domain (node, identity, \
              consent, governance, authority, ledger, proofs, legal, escalation, \
-             messaging). Each entry includes the tool name, human-readable \
+             messaging, dagdb). Each entry includes the tool name, human-readable \
              description, domain, and parameter count computed from the \
              registered input schema."
                 .into(),
@@ -86,6 +86,9 @@ fn domain_for(name: &str) -> &'static str {
         "exochain_send_encrypted"
         | "exochain_receive_encrypted"
         | "exochain_configure_death_trigger" => "messaging",
+        "dagdb_get_context_packet" | "dagdb_submit_writeback" | "dagdb_import" | "dagdb_export" => {
+            "dagdb"
+        }
         _ => "unknown",
     }
 }
@@ -148,6 +151,7 @@ pub(crate) fn build_payload() -> Value {
             "legal" => "legal",
             "escalation" => "escalation",
             "messaging" => "messaging",
+            "dagdb" => "dagdb",
             _ => "unknown",
         };
         *domains.entry(static_d).or_insert(0) += 1;
@@ -182,13 +186,13 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_40_tools() {
+    fn read_returns_44_tools() {
         let content = read(&NodeContext::empty());
         let text = content.text.expect("text present");
         let parsed: Value = serde_json::from_str(&text).expect("valid JSON");
-        assert_eq!(parsed["total"], 40);
+        assert_eq!(parsed["total"], 44);
         let tools = parsed["tools"].as_array().expect("array");
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 44);
     }
 
     #[test]
@@ -207,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_counts_sum_to_40() {
+    fn domain_counts_sum_to_44() {
         let content = read(&NodeContext::empty());
         let text = content.text.unwrap();
         let parsed: Value = serde_json::from_str(&text).unwrap();
@@ -217,6 +221,6 @@ mod tests {
             .iter()
             .map(|d| d["count"].as_u64().unwrap())
             .sum();
-        assert_eq!(total, 40);
+        assert_eq!(total, 44);
     }
 }

@@ -1009,6 +1009,72 @@ mod tests {
         .expect("signed round1 envelope")
     }
 
+    async fn spawn_test_portal(config: GenesisCeremonyConfig) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind portal listener");
+        let address = listener.local_addr().expect("portal address");
+        let router = root_genesis_router(RootGenesisApiState::new(config));
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve portal");
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn dispatcher_setup_commands_write_expected_files() {
+        let directory = tempdir().expect("temporary directory");
+        let certifier_path = directory.path().join("certifier-01.json");
+        let private_path = directory.path().join("certifier-01.private.json");
+
+        run_genesis_command(GenesisCommand::Certifier {
+            command: GenesisCertifierCommand::Init(GenesisCertifierInitArgs {
+                did: "did:exo:root-cli-new-certifier".to_owned(),
+                frost_identifier: 1,
+                certifier_out: certifier_path.clone(),
+                private_out: private_path.clone(),
+            }),
+        })
+        .await
+        .expect("certifier init dispatch");
+
+        let contact: CertifierContact = read_json(&certifier_path).expect("read contact");
+        let private: PrivateCertifierMaterial =
+            read_json(&private_path).expect("read private material");
+        assert_eq!(contact.did, private.did);
+        assert_eq!(contact.frost_identifier, private.frost_identifier);
+        let signing_secret = decode_fixed_32(&private.signing_secret_hex).expect("signing secret");
+        let signing_keypair = KeyPair::from_secret_bytes(signing_secret).expect("keypair");
+        assert_eq!(contact.signing_public_key, *signing_keypair.public_key());
+        let transport_secret =
+            decode_fixed_32(&private.transport_secret_hex).expect("transport secret");
+        let transport_public = X25519PublicKey::from(&StaticSecret::from(transport_secret));
+        assert_eq!(contact.transport_public_key, *transport_public.as_bytes());
+
+        let roster_path = directory.path().join("roster.json");
+        let config_path = directory.path().join("ceremony.json");
+        let roster: Vec<_> = (1..=13).map(certifier).collect();
+        write_json(&roster_path, &roster).expect("write roster");
+        run_genesis_command(GenesisCommand::Ceremony {
+            command: GenesisCeremonyCommand::Init(GenesisCeremonyInitArgs {
+                ceremony_id: "root-cli-dispatch-ceremony".to_owned(),
+                network_id: "exo-mainnet".to_owned(),
+                repo_commit: "d8927686a34bdc28ba36d53938f665685d2c4c04".to_owned(),
+                constitution_hash: hex::encode([9u8; 32]),
+                created_physical_ms: 101,
+                roster: roster_path,
+                signing_set: (1..=7).collect(),
+                out: config_path.clone(),
+            }),
+        })
+        .await
+        .expect("ceremony init dispatch");
+        let config: GenesisCeremonyConfig = read_json(&config_path).expect("read config");
+        assert_eq!(config.ceremony_id, "root-cli-dispatch-ceremony");
+        assert_eq!(config.created_at, Timestamp::new(101, 0));
+        config.validate().expect("dispatcher wrote valid config");
+    }
+
     #[test]
     fn init_ceremony_writes_valid_institutional_config() {
         let directory = tempdir().expect("temporary directory");
@@ -1038,6 +1104,313 @@ mod tests {
         );
         assert_eq!(config.created_at, Timestamp::new(42, 0));
         config.validate().expect("valid root genesis config");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_reaches_file_backed_missing_input_errors() {
+        let directory = tempdir().expect("temporary directory");
+        let missing_io = || GenesisIoArgs {
+            input: None,
+            output: Some(directory.path().join("unused-output.json")),
+        };
+        let commands = vec![
+            ("round1", GenesisCommand::Round1(missing_io())),
+            ("round2", GenesisCommand::Round2(missing_io())),
+            ("finalize-dkg", GenesisCommand::FinalizeDkg(missing_io())),
+            (
+                "build-final-key-confirmation",
+                GenesisCommand::BuildFinalKeyConfirmation(missing_io()),
+            ),
+            (
+                "sign-root-artifact",
+                GenesisCommand::SignRootArtifact(missing_io()),
+            ),
+            (
+                "assemble-bundle",
+                GenesisCommand::AssembleBundle(missing_io()),
+            ),
+            ("verify-bundle", GenesisCommand::VerifyBundle(missing_io())),
+            ("seal-share", GenesisCommand::SealShare(missing_io())),
+            ("unseal-share", GenesisCommand::UnsealShare(missing_io())),
+            (
+                "sign-envelope",
+                GenesisCommand::SignEnvelope(GenesisSignEnvelopeArgs {
+                    input: None,
+                    output: None,
+                    private_input: directory.path().join("missing-private.json"),
+                }),
+            ),
+            (
+                "encrypt-pairwise",
+                GenesisCommand::EncryptPairwise(missing_io()),
+            ),
+            (
+                "decrypt-pairwise",
+                GenesisCommand::DecryptPairwise(missing_io()),
+            ),
+            (
+                "emit-artifact-bytes",
+                GenesisCommand::EmitArtifactBytes(missing_io()),
+            ),
+            (
+                "submit-envelope",
+                GenesisCommand::SubmitEnvelope(GenesisSubmitEnvelopeArgs {
+                    portal_url: "http://127.0.0.1:1".to_owned(),
+                    input: None,
+                }),
+            ),
+            (
+                "compute-dkg-transcript-hash",
+                GenesisCommand::ComputeDkgTranscriptHash(missing_io()),
+            ),
+            (
+                "compute-final-transcript-hash",
+                GenesisCommand::ComputeFinalTranscriptHash(missing_io()),
+            ),
+            (
+                "encode-encrypted-payload",
+                GenesisCommand::EncodeEncryptedPayload(missing_io()),
+            ),
+            (
+                "decode-encrypted-payload",
+                GenesisCommand::DecodeEncryptedPayload(missing_io()),
+            ),
+            (
+                "sign-commit",
+                GenesisCommand::SignCommit(GenesisSignCommitArgs {
+                    input: None,
+                    commitment_out: directory.path().join("commitment.json"),
+                    nonces_out: directory.path().join("nonces.json"),
+                }),
+            ),
+            (
+                "build-signing-package",
+                GenesisCommand::BuildSigningPackage(missing_io()),
+            ),
+            (
+                "sign-share",
+                GenesisCommand::SignShare(GenesisSignShareArgs {
+                    input: None,
+                    nonces: directory.path().join("nonces.json"),
+                    output: Some(directory.path().join("share.json")),
+                }),
+            ),
+            (
+                "aggregate-signature",
+                GenesisCommand::AggregateSignature(missing_io()),
+            ),
+        ];
+
+        for (name, command) in commands {
+            let error = match run_genesis_command(command).await {
+                Ok(()) => panic!("{name} must require --input"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("--input is required"),
+                "{name} returned unexpected error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn portal_dispatch_validates_config_before_binding() {
+        let directory = tempdir().expect("temporary directory");
+        let config_path = directory.path().join("ceremony.json");
+        write_json(&config_path, &rostered_config()).expect("write config");
+
+        let error = run_genesis_command(GenesisCommand::Portal(GenesisPortalArgs {
+            config: config_path,
+            bind: "not-a-socket".to_owned(),
+        }))
+        .await
+        .expect_err("portal dispatch must reject invalid bind address");
+        assert!(error.to_string().contains("socket"));
+    }
+
+    #[tokio::test]
+    async fn portal_dispatch_binds_and_serves_until_cancelled() {
+        let directory = tempdir().expect("temporary directory");
+        let config_path = directory.path().join("ceremony.json");
+        write_json(&config_path, &rostered_config()).expect("write config");
+
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve local port");
+        let address = reservation.local_addr().expect("reserved address");
+        drop(reservation);
+
+        let handle = tokio::spawn(run_genesis_command(GenesisCommand::Portal(
+            GenesisPortalArgs {
+                config: config_path,
+                bind: address.to_string(),
+            },
+        )));
+        let client = reqwest::Client::new();
+        let status_url = format!("http://{address}/api/v1/root-genesis/portal");
+        let mut served_status = false;
+        for _ in 0..50 {
+            if handle.is_finished() {
+                let result = handle.await;
+                panic!("portal exited before serving status: {result:?}");
+            }
+            match client.get(&status_url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    served_status = true;
+                    break;
+                }
+                Ok(_) | Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+        handle.abort();
+        let _ = handle.await;
+        assert!(
+            served_status,
+            "portal should bind and serve the status endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn round1_dispatch_writes_secret_output_and_refuses_stdout() {
+        let config = rostered_config();
+        let directory = tempdir().expect("temporary directory");
+        let input_path = directory.path().join("round1-in.json");
+        let output_path = directory.path().join("round1-out.json");
+        write_json(
+            &input_path,
+            &Round1CommandInput {
+                config: config.clone(),
+                frost_identifier: 1,
+            },
+        )
+        .expect("write round1 input");
+        run_genesis_command(GenesisCommand::Round1(io_args(
+            input_path,
+            output_path.clone(),
+        )))
+        .await
+        .expect("round1 dispatch writes output");
+        let output: exo_root::RootDkgRound1Output =
+            read_json(&output_path).expect("read round1 output");
+        assert_eq!(output.frost_identifier, 1);
+        assert!(!output.round1_secret_package.is_empty());
+        assert!(!output.round1_package.is_empty());
+
+        let stdout_input_path = directory.path().join("round1-stdout-in.json");
+        write_json(
+            &stdout_input_path,
+            &Round1CommandInput {
+                config,
+                frost_identifier: 1,
+            },
+        )
+        .expect("write stdout round1 input");
+        let error = run_genesis_command(GenesisCommand::Round1(GenesisIoArgs {
+            input: Some(stdout_input_path),
+            output: None,
+        }))
+        .await
+        .expect_err("secret round1 material must not render to stdout");
+        assert!(error.to_string().contains("--output is required"));
+    }
+
+    #[tokio::test]
+    async fn round2_and_finalize_dispatch_decode_hex_maps_and_write_secret_files() {
+        let config = rostered_config();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(6_951);
+        let mut round1_outputs = BTreeMap::new();
+        for identifier in 1..=config.max_signers {
+            let output = dkg_round1(&config, identifier, &mut rng).expect("round one");
+            round1_outputs.insert(identifier, output);
+        }
+
+        let peer_round1_hex = |participant: u16| -> BTreeMap<u16, String> {
+            round1_outputs
+                .iter()
+                .filter(|(identifier, _)| **identifier != participant)
+                .map(|(identifier, output)| (*identifier, hex::encode(&output.round1_package)))
+                .collect()
+        };
+        let peer_round1_bytes = |participant: u16| -> BTreeMap<u16, Vec<u8>> {
+            round1_outputs
+                .iter()
+                .filter(|(identifier, _)| **identifier != participant)
+                .map(|(identifier, output)| (*identifier, output.round1_package.clone()))
+                .collect()
+        };
+
+        let directory = tempdir().expect("temporary directory");
+        let round2_input = directory.path().join("round2-in.json");
+        let round2_output = directory.path().join("round2-out.json");
+        write_json(
+            &round2_input,
+            &Round2CommandInput {
+                config: config.clone(),
+                frost_identifier: 1,
+                round1_secret_package_hex: hex::encode(&round1_outputs[&1].round1_secret_package),
+                round1_packages_hex: peer_round1_hex(1),
+            },
+        )
+        .expect("write round2 input");
+        run_genesis_command(GenesisCommand::Round2(io_args(
+            round2_input,
+            round2_output.clone(),
+        )))
+        .await
+        .expect("round2 dispatch");
+        let first_round2: exo_root::RootDkgRound2Output =
+            read_json(&round2_output).expect("read round2 output");
+        assert_eq!(first_round2.frost_identifier, 1);
+        assert_eq!(first_round2.round2_packages.len(), 12);
+
+        let mut round2_outputs = BTreeMap::new();
+        round2_outputs.insert(1, first_round2.clone());
+        for identifier in 2..=config.max_signers {
+            let output = dkg_round2(
+                &config,
+                identifier,
+                round1_outputs[&identifier].round1_secret_package.as_slice(),
+                peer_round1_bytes(identifier),
+            )
+            .expect("round two");
+            round2_outputs.insert(identifier, output);
+        }
+        let round2_packages_hex: BTreeMap<u16, String> = round2_outputs
+            .iter()
+            .filter(|(identifier, _)| **identifier != 1)
+            .map(|(identifier, output)| {
+                (
+                    *identifier,
+                    hex::encode(output.round2_packages[&1].as_slice()),
+                )
+            })
+            .collect();
+
+        let finalize_input = directory.path().join("finalize-in.json");
+        let finalize_output = directory.path().join("finalize-out.json");
+        write_json(
+            &finalize_input,
+            &FinalizeDkgCommandInput {
+                config,
+                frost_identifier: 1,
+                round2_secret_package_hex: hex::encode(&first_round2.round2_secret_package),
+                round1_packages_hex: peer_round1_hex(1),
+                round2_packages_hex,
+            },
+        )
+        .expect("write finalize input");
+        run_genesis_command(GenesisCommand::FinalizeDkg(io_args(
+            finalize_input,
+            finalize_output.clone(),
+        )))
+        .await
+        .expect("finalize dispatch");
+        let participant: RootParticipantDkgOutput =
+            read_json(&finalize_output).expect("read participant output");
+        assert_eq!(participant.key_package.frost_identifier, 1);
+        assert!(!participant.public_key_package.root_public_key.is_empty());
     }
 
     #[test]
@@ -1136,9 +1509,29 @@ mod tests {
                 .to_string()
                 .contains("expected 24 bytes")
         );
+        assert!(
+            decode_fixed_32("abcd")
+                .expect_err("short 32-byte value must fail")
+                .to_string()
+                .contains("expected 32 bytes")
+        );
         let mut packages = BTreeMap::new();
         packages.insert(7, "not-hex".to_owned());
         assert!(decode_package_map(packages).is_err());
+    }
+
+    #[test]
+    fn public_output_can_render_to_stdout_when_output_is_omitted() {
+        write_output(
+            &GenesisIoArgs {
+                input: None,
+                output: None,
+            },
+            &HashHexOutput {
+                hash_hex: hex::encode([4u8; 32]),
+            },
+        )
+        .expect("public output renders to stdout");
     }
 
     #[test]
@@ -1396,6 +1789,52 @@ mod tests {
         assert!(error.to_string().contains("disabled"));
     }
 
+    #[tokio::test]
+    async fn sign_envelope_refuses_private_material_for_another_did() {
+        let config = rostered_config();
+        let signer = config.certifiers[0].clone();
+        let other = config.certifiers[1].clone();
+        let directory = tempdir().expect("temporary directory");
+        let input_path = directory.path().join("draft.json");
+        let private_path = directory.path().join("other.private.json");
+        write_json(
+            &input_path,
+            &SignEnvelopeCommandInput {
+                ceremony_id: config.ceremony_id.clone(),
+                phase: CeremonyPhase::RootSigning,
+                payload_kind: CeremonyPayloadKind::RootSigningCommitment,
+                sender_did: signer.did.clone(),
+                recipient_did: None,
+                sequence: 7,
+                payload_bytes: b"public commitment bytes".to_vec(),
+            },
+        )
+        .expect("write draft");
+        write_json(
+            &private_path,
+            &PrivateCertifierMaterial {
+                did: other.did,
+                frost_identifier: other.frost_identifier,
+                signing_secret_hex: hex::encode([2u8; 32]),
+                transport_secret_hex: hex::encode([66u8; 32]),
+            },
+        )
+        .expect("write mismatched private material");
+
+        let error = run_genesis_command(GenesisCommand::SignEnvelope(GenesisSignEnvelopeArgs {
+            input: Some(input_path),
+            output: Some(directory.path().join("envelope.json")),
+            private_input: private_path,
+        }))
+        .await
+        .expect_err("sign-envelope must reject private material for another DID");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match envelope sender_did")
+        );
+    }
+
     #[test]
     fn encrypt_then_decrypt_pairwise_round_trips() {
         let directory = tempdir().expect("temporary directory");
@@ -1557,6 +1996,79 @@ mod tests {
         assert_eq!(output.artifact_hex, hex::encode(expected.as_slice()));
     }
 
+    #[tokio::test]
+    async fn sign_root_artifact_and_assemble_bundle_dispatch_write_public_outputs() {
+        let config = rostered_config();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(6_952);
+        let dkg = exo_root::run_complete_dkg(&config, &mut rng).expect("dkg");
+        let delegation = RootIssuerDelegation {
+            issuer_did: Did::new("did:exo:root-cli-sign-artifact-issuer").expect("issuer DID"),
+            issuer_public_key: PublicKey::from_bytes([0x44; 32]),
+            granted_permissions: vec![Permission::Read, Permission::Write, Permission::Delegate],
+            effective_at: Timestamp::new(1_785_000_010_000, 0),
+            expires_at: None,
+            purpose: "Delegate operational AVC issuing authority".to_owned(),
+        };
+        let transcript_hash = Hash256::digest(b"root-cli-sign-artifact-transcript");
+        let artifact = delegation
+            .root_artifact_payload(&config, &dkg.public_key_package, transcript_hash)
+            .expect("root artifact payload");
+        let directory = tempdir().expect("temporary directory");
+        let sign_input = directory.path().join("sign-root-in.json");
+        let sign_output = directory.path().join("sign-root-out.json");
+        write_json(
+            &sign_input,
+            &SignRootArtifactCommandInput {
+                config: config.clone(),
+                public_key_package: dkg.public_key_package.clone(),
+                key_packages: dkg
+                    .key_packages
+                    .iter()
+                    .take(7)
+                    .map(|(identifier, key_package)| (*identifier, key_package.clone()))
+                    .collect(),
+                artifact_hex: hex::encode(&artifact),
+            },
+        )
+        .expect("write sign root input");
+        run_genesis_command(GenesisCommand::SignRootArtifact(io_args(
+            sign_input,
+            sign_output.clone(),
+        )))
+        .await
+        .expect("sign root artifact dispatch");
+        let signature: RootSignature = read_json(&sign_output).expect("read root signature");
+        assert_eq!(signature.signer_ids.len(), 7);
+        exo_root::verify_root_signature(
+            &dkg.public_key_package.root_public_key,
+            artifact.as_slice(),
+            &signature.signature,
+        )
+        .expect("root artifact signature verifies");
+
+        let assemble_input = directory.path().join("assemble-in.json");
+        let assemble_output = directory.path().join("assemble-out.json");
+        write_json(
+            &assemble_input,
+            &AssembleBundleCommandInput {
+                config,
+                public_key_package: dkg.public_key_package,
+                issuer_delegation: delegation,
+                transcript_hash,
+                root_signature: signature,
+            },
+        )
+        .expect("write assemble input");
+        run_genesis_command(GenesisCommand::AssembleBundle(io_args(
+            assemble_input,
+            assemble_output.clone(),
+        )))
+        .await
+        .expect("assemble bundle dispatch");
+        let bundle: RootTrustBundle = read_json(&assemble_output).expect("read bundle");
+        verify_root_bundle(&bundle).expect("assembled bundle verifies");
+    }
+
     #[test]
     fn distributed_signing_handlers_produce_a_verifiable_signature() {
         let config = rostered_config();
@@ -1695,6 +2207,100 @@ mod tests {
         .expect("distributed signature verifies against the root key");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sign_share_reports_nonce_consumption_failure_after_writing_share() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = rostered_config();
+        let dkg = exo_root::run_complete_dkg(&config, &mut rand::rngs::OsRng).expect("dkg");
+        let artifact_hex = hex::encode(b"distributed root artifact cleanup failure");
+        let directory = tempdir().expect("temporary directory");
+        let nonces_directory = directory.path().join("nonces-dir");
+        fs::create_dir(&nonces_directory).expect("create nonces directory");
+        let mut commitments_hex = BTreeMap::new();
+        let mut first_nonces = None;
+
+        for id in 1..=7u16 {
+            let in_path = directory.path().join(format!("commit-in-{id}.json"));
+            let commitment_out = directory.path().join(format!("commitment-{id}.json"));
+            let nonces_out = if id == 1 {
+                nonces_directory.join("nonces-1.json")
+            } else {
+                directory.path().join(format!("nonces-{id}.json"))
+            };
+            write_json(
+                &in_path,
+                &SignCommitCommandInput {
+                    config: config.clone(),
+                    key_package: dkg.key_packages[&id].clone(),
+                    artifact_hex: artifact_hex.clone(),
+                },
+            )
+            .expect("write commit input");
+            run_sign_commit(GenesisSignCommitArgs {
+                input: Some(in_path),
+                commitment_out: commitment_out.clone(),
+                nonces_out: nonces_out.clone(),
+            })
+            .expect("sign commitment");
+            let commitment: exo_root::RootSigningCommitment =
+                read_json(&commitment_out).expect("read commitment");
+            commitments_hex.insert(id, hex::encode(commitment.commitments.as_slice()));
+            if id == 1 {
+                first_nonces = Some(nonces_out);
+            }
+        }
+
+        let package_in = directory.path().join("package-in.json");
+        let package_out = directory.path().join("package-out.json");
+        write_json(
+            &package_in,
+            &BuildSigningPackageCommandInput {
+                config: config.clone(),
+                commitments_hex,
+                artifact_hex: artifact_hex.clone(),
+            },
+        )
+        .expect("write signing package input");
+        run_build_signing_package(io_args(package_in, package_out.clone()))
+            .expect("build signing package");
+        let package: RootSigningPackage = read_json(&package_out).expect("read signing package");
+
+        fs::set_permissions(&nonces_directory, fs::Permissions::from_mode(0o500))
+            .expect("lock nonces directory");
+        let share_in = directory.path().join("share-in.json");
+        let share_out = directory.path().join("share-out.json");
+        write_json(
+            &share_in,
+            &SignShareCommandInput {
+                config,
+                key_package: dkg.key_packages[&1].clone(),
+                signing_package: package,
+                artifact_hex,
+            },
+        )
+        .expect("write share input");
+        let result = run_sign_share(GenesisSignShareArgs {
+            input: Some(share_in),
+            nonces: first_nonces.expect("first nonces path"),
+            output: Some(share_out.clone()),
+        });
+        fs::set_permissions(&nonces_directory, fs::Permissions::from_mode(0o700))
+            .expect("restore nonces directory permissions");
+
+        let error = result.expect_err("nonce deletion failure must be reported");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to consume the single-use nonces file")
+        );
+        assert!(
+            share_out.exists(),
+            "share is written before cleanup failure"
+        );
+    }
+
     #[test]
     fn root_signing_commitment_json_has_no_secret_named_field() {
         // The relay-safe RootSigningCommitment, round-tripped through JSON, must
@@ -1777,6 +2383,64 @@ mod tests {
         })
         .await
         .expect("portal accepts submitted envelope");
+    }
+
+    #[tokio::test]
+    async fn submit_envelope_reports_portal_rejection() {
+        let config = rostered_config();
+        let envelope = round1_broadcast(&config, 0, 1, b"not a frost round-one package".to_vec());
+        let portal_url = spawn_test_portal(config).await;
+
+        let directory = tempdir().expect("temporary directory");
+        let input_path = directory.path().join("bad-envelope.json");
+        write_json(&input_path, &envelope).expect("write bad envelope");
+
+        let error =
+            run_genesis_command(GenesisCommand::SubmitEnvelope(GenesisSubmitEnvelopeArgs {
+                portal_url,
+                input: Some(input_path),
+            }))
+            .await
+            .expect_err("portal rejection must be surfaced");
+        assert!(error.to_string().contains("portal rejected envelope"));
+    }
+
+    #[tokio::test]
+    async fn pull_envelopes_dispatch_writes_filtered_response() {
+        let config = rostered_config();
+        let recipient = config.certifiers[0].did.to_string();
+        let portal_url = spawn_test_portal(config).await;
+        let directory = tempdir().expect("temporary directory");
+        let output_path = directory.path().join("pulled.json");
+
+        run_genesis_command(GenesisCommand::PullEnvelopes(GenesisPullEnvelopesArgs {
+            portal_url,
+            phase: Some("Round1".to_owned()),
+            payload_kind: Some("Round1Package".to_owned()),
+            recipient_did: Some(recipient),
+            output: Some(output_path.clone()),
+        }))
+        .await
+        .expect("pull envelopes dispatch");
+
+        let envelopes: Vec<CeremonyEnvelope> = read_json(&output_path).expect("read envelopes");
+        assert!(envelopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pull_envelopes_dispatch_reports_portal_query_errors() {
+        let portal_url = spawn_test_portal(rostered_config()).await;
+        let error = run_genesis_command(GenesisCommand::PullEnvelopes(GenesisPullEnvelopesArgs {
+            portal_url,
+            phase: Some("Bogus".to_owned()),
+            payload_kind: None,
+            recipient_did: None,
+            output: None,
+        }))
+        .await
+        .expect_err("invalid portal query must be surfaced");
+        assert!(error.to_string().contains("portal pull failed: HTTP 400"));
+        assert!(error.to_string().contains("invalid phase"));
     }
 
     #[test]

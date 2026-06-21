@@ -52,20 +52,6 @@ ignore = [
     # paste is a proc-macro utility; the unmaintained status poses no runtime risk.
     # Upgrade tracked in APE-12 hygiene sprint.
     { id = "RUSTSEC-2024-0436", reason = "pre-existing transitive via async-graphql; proc-macro only; no runtime security impact" },
-
-    # rustls-webpki 0.103.10 — name constraint URI names incorrectly accepted.
-    # Present through the Rustls stack used by axum-server, reqwest, SQLx, and
-    # libp2p. EXOCHAIN does not accept URI name constraints as an authority
-    # source for constitutional identity or delegation.
-    { id = "RUSTSEC-2026-0098", reason = "EXOCHAIN does not use URI name constraints as constitutional authority" },
-
-    # rustls-webpki 0.103.10 — name constraints accepted for wildcard-name certs.
-    # Same transitive path, same reachability analysis as RUSTSEC-2026-0098.
-    { id = "RUSTSEC-2026-0099", reason = "EXOCHAIN does not use wildcard name constraints as constitutional authority" },
-
-    # rustls-webpki 0.103.10 — reachable panic in CRL parsing.
-    # EXOCHAIN does not configure CRL parsing on owned TLS paths.
-    { id = "RUSTSEC-2026-0104", reason = "workspace does not configure CRL parsing on owned TLS paths" },
 ]
 
 # ---------------------------------------------------------------------------

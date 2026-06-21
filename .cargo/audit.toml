@@ -38,18 +38,4 @@ ignore = [
     # EXOCHAIN runtime DB access is PostgreSQL-only; MySQL connection support is
     # not exposed by any owned runtime configuration.
     "RUSTSEC-2023-0071",
-
-    # rustls-webpki URI name-constraint bug.
-    # Present through the Rustls stack used by axum-server, reqwest, SQLx, and
-    # libp2p. EXOCHAIN does not accept URI name constraints as an authority
-    # source for constitutional identity or delegation.
-    "RUSTSEC-2026-0098",
-
-    # rustls-webpki wildcard name-constraint bug; same reachability analysis as
-    # RUSTSEC-2026-0098.
-    "RUSTSEC-2026-0099",
-
-    # rustls-webpki CRL parsing panic.
-    # EXOCHAIN does not configure CRL parsing on owned TLS paths.
-    "RUSTSEC-2026-0104",
 ]

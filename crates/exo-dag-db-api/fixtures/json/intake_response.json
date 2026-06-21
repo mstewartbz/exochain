@@ -1,0 +1,42 @@
+{
+  "tenant_id": "tenant-a",
+  "namespace": "primary",
+  "idempotency_key": "idem-intake-001",
+  "memory_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "receipt_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "validation_status": "pending",
+  "council_status": "not_required",
+  "dag_finality_status": "pending",
+  "risk_class": "R1",
+  "risk_bp": 1200,
+  "created_new": false,
+  "title": {
+    "decision": "allow",
+    "text": "Safe public title",
+    "redaction_codes": [],
+    "original_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+    "truncated": false,
+    "byte_len": 17
+  },
+  "summary": {
+    "decision": "allow",
+    "text": "Safe public summary",
+    "redaction_codes": [],
+    "original_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+    "truncated": false,
+    "byte_len": 19
+  },
+  "keywords": [
+    {
+      "decision": "allow",
+      "text": "public",
+      "redaction_codes": [],
+      "original_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+      "truncated": false,
+      "byte_len": 6
+    }
+  ],
+  "validation_report_id": null,
+  "council_decision_id": null,
+  "duplicate_of_memory_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

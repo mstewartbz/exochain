@@ -28,6 +28,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod combinator;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dagdb_gate;
 pub mod error;
 pub mod governance_monitor;
 pub mod holon;
@@ -40,6 +42,11 @@ pub mod types;
 
 // Re-export primary types.
 pub use combinator::{Combinator, CombinatorInput, CombinatorOutput};
+#[cfg(not(target_arch = "wasm32"))]
+pub use dagdb_gate::{
+    ConsentEngine, DagDbConsentRecord, DagDbGatekeeperService, IdentityRegistry,
+    sign_write_payload, usage_event_payload_hash, verify_write_consent, verify_write_signature,
+};
 pub use error::GatekeeperError;
 pub use governance_monitor::{
     ApprovalGate, ApprovalStatus, GovernanceAttestation, GovernanceCircuitBreaker,

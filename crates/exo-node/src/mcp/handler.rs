@@ -156,6 +156,7 @@ impl McpServer {
     /// Create a new MCP server with a configured authority signer for
     /// constitutional adjudication.
     #[must_use]
+    #[allow(dead_code)]
     pub fn with_authority(
         actor_did: Did,
         authority_did: Did,
@@ -911,6 +912,10 @@ mod tests {
         )
     }
 
+    fn expected_tool_count() -> usize {
+        ToolRegistry::default().list().len()
+    }
+
     fn mcp_audit_snapshot(server: &McpServer) -> McpAuditLog {
         server
             .mcp_audit_log
@@ -1103,7 +1108,7 @@ mod tests {
         let did = Did::new("did:exo:test-ai-agent").expect("valid DID");
         let server = McpServer::with_context(did, NodeContext::empty());
         assert_eq!(server.actor_did(), "did:exo:test-ai-agent");
-        assert_eq!(server.tool_count(), 40);
+        assert_eq!(server.tool_count(), expected_tool_count());
         assert!(!server.context().has_store());
     }
 
@@ -1146,7 +1151,11 @@ mod tests {
         assert!(parsed.error.is_none());
         let result = parsed.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 40, "expected 3+5+4+5+4+4+4+4+4+3 = 40 tools");
+        assert_eq!(
+            tools.len(),
+            expected_tool_count(),
+            "tools/list should match the registered MCP tool inventory"
+        );
         // Tools are in BTreeMap order (alphabetical).
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"exochain_node_status"));

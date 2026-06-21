@@ -30,8 +30,10 @@ workspace = true
 
 [dependencies]
 exo-core = { path = "../exo-core" }
+exo-dag-db-api = { path = "../exo-dag-db-api" }
 exo-identity = { path = "../exo-identity" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
@@ -39,6 +41,7 @@ ciborium = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+jsonschema = { version = "0.19", default-features = false }
 
 [package.metadata.cargo-machete]
 ignored = ["exo-identity"]

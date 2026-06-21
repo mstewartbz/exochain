@@ -116,6 +116,54 @@ exo-core
           -> decision-forum
 ```
 
+## DAG DB Runtime Adapter
+
+This PR package keeps upstream `exochain/exochain` as the substrate and adds DAG
+DB as a graph-governed memory runtime adapter. DAG DB runtime work is split
+across `crates/exo-dag-db-api`, `crates/exo-dag-db-core`,
+`crates/exo-dag-db-graph`, `crates/exo-dag-db-domain`,
+`crates/exo-dag-db-retrieval`, `crates/exo-dag-db-exchange`,
+`crates/exo-dag-db-postgres`, and `crates/exo-dag-db-lab`; shipped docs live in
+`docs/dagdb/`. Bridge code that exposes DAG DB through the substrate lives in
+`exo-api`, `exo-gateway`, `exo-node`, and `exochain-sdk`.
+
+The governed REST runtime is served by `exo-gateway` at exactly
+`POST /api/v1/dag-db/route`, `POST /api/v1/dag-db/context-packet`,
+`POST /api/v1/dag-db/writeback`, `POST /api/v1/dag-db/import`, and
+`POST /api/v1/dag-db/export` when the gateway has a configured Postgres pool and
+tenant/session authority. Missing database state, authority, or write signatures
+fail closed. Rollback, canary, and observability evidence for this runtime lives in
+`docs/dagdb/runtime-activation/rollback-canary-observability.md`.
+
+### DAG DB Planning And Anti-Duplication
+
+Use the DAG DB files present in this checkout as the source of truth for this PR
+package. Do not require local-only memory tooling, out-of-package planning
+catalogs, or generated status ledgers unless they are added to the checkout.
+
+Before creating any new function, component, route, service, store, schema,
+prompt, or architecture layer, search the repository for an existing
+implementation. Reuse or extend the canonical implementation unless there is a
+documented reason not to. Do not create parallel implementations of the same
+capability.
+
+### DAG DB MCP Surface
+
+The canonical, versioned home of the DAG DB MCP tools in this PR package is the
+Rust node MCP surface (`crates/exo-node/src/mcp/tools/dagdb.rs`), with JSON
+Schemas bound to the `exo-api` DAG DB DTOs and structured output. The MCP
+gateway proxy is separate from the REST runtime: without the
+`dagdb-gateway-proxy` feature or complete `NodeContext` gateway configuration,
+the Rust tools fail closed with a structured `dagdb_adapter_unconfigured`
+result; with the feature and configuration, they proxy through the SDK
+`DagDbHttpClient`.
+
+This package claims production-runtime activation only for the gateway REST
+paths described in `INTEGRATION.md`; MCP/SDK configured-proxy evidence, RLS,
+canary, and rollback evidence remain pending until main integration records the commands in
+`docs/dagdb/runtime-activation/rollback-canary-observability.md`. This package
+claims no billing savings and no thesis acceptance for DAG DB.
+
 ## Core vs Adjacent Surface Rules
 
 Core is core. Adjacent products, demos, customer-zero apps, portfolio sites, and
@@ -412,7 +460,7 @@ requirements. Assessments are stored in `governance/`.
    cargo build --workspace --release
    cargo test --workspace
    cargo clippy --workspace --all-targets -- -D warnings
-   cargo fmt --all -- --check
+   cargo +nightly fmt --all -- --check
    cargo doc --workspace --no-deps
    ```
 
@@ -490,9 +538,10 @@ Section 8.8 quality gates. All must pass:
 
 1. **Build** — `cargo build --workspace --release`
 2. **Test** — `cargo test --workspace` (debug and release)
-3. **Coverage** — cargo-tarpaulin, minimum 90% line coverage
+3. **Coverage** — cargo-tarpaulin, scoped minimum 90% line coverage under the
+   exclusions configured in `tarpaulin.toml`
 4. **Lint** — `cargo clippy --workspace -- -D warnings`
-5. **Format** — `cargo fmt --all -- --check`
+5. **Format** — `cargo +nightly fmt --all -- --check`
 6. **Audit** — `cargo audit` (no known vulnerabilities)
 7. **Deny** — `cargo deny check` (license and advisory compliance)
 8. **Doc** — `cargo doc --workspace --no-deps` (no warnings)
@@ -503,7 +552,7 @@ Run all gates locally before pushing:
 cargo build --workspace --release && \
 cargo test --workspace && \
 cargo clippy --workspace --all-targets -- -D warnings && \
-cargo fmt --all -- --check && \
+cargo +nightly fmt --all -- --check && \
 cargo doc --workspace --no-deps
 ```
 

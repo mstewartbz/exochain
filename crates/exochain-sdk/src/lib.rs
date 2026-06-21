@@ -33,6 +33,7 @@
 //! - [`authority`] — validated delegation chains.
 //! - [`kernel`] — the Constitutional Governance Runtime (CGR) kernel.
 //! - [`crypto`] — hash / sign / verify primitives (BLAKE3 + Ed25519).
+//! - [`dagdb`] — DAG DB DTO re-exports and REST request helpers.
 //! - [`error`] — the single [`error::ExoError`] type returned by fallible ops.
 //!
 //! ## Why use this SDK
@@ -173,6 +174,7 @@ pub mod authority;
 pub mod avc;
 pub mod consent;
 pub mod crypto;
+pub mod dagdb;
 pub mod economy;
 pub mod error;
 pub mod governance;

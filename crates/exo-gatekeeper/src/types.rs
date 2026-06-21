@@ -223,6 +223,9 @@ impl Role {
 // Bailment state (gatekeeper view — simpler than BCTS lifecycle)
 // ---------------------------------------------------------------------------
 
+/// Canonical DAG DB writeback bailment scope.
+pub const DAGDB_WRITEBACK_SCOPE: &str = "dag-db:writeback";
+
 /// Whether an active bailment + consent exists for a data scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BailmentState {
@@ -243,6 +246,14 @@ pub enum BailmentState {
 impl BailmentState {
     pub fn is_active(&self) -> bool {
         matches!(self, BailmentState::Active { .. })
+    }
+
+    pub fn authorizes_writeback(&self, agent_did: &str) -> bool {
+        matches!(
+            self,
+            BailmentState::Active { bailee, scope, .. }
+                if bailee.as_str() == agent_did && scope == DAGDB_WRITEBACK_SCOPE
+        )
     }
 }
 
@@ -557,6 +568,51 @@ mod tests {
             reason: "audit".into(),
         };
         assert!(!suspended.is_active());
+    }
+
+    #[test]
+    fn bailment_state_authorizes_writeback_for_active_bailee_and_scope() {
+        let active = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: did("did:exo:bailee"),
+            scope: DAGDB_WRITEBACK_SCOPE.into(),
+        };
+
+        assert!(active.authorizes_writeback("did:exo:bailee"));
+    }
+
+    #[test]
+    fn bailment_state_authorizes_writeback_rejects_wrong_bailee() {
+        let active = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: did("did:exo:bailee"),
+            scope: DAGDB_WRITEBACK_SCOPE.into(),
+        };
+
+        assert!(!active.authorizes_writeback("did:exo:other"));
+    }
+
+    #[test]
+    fn bailment_state_authorizes_writeback_rejects_wrong_scope() {
+        let active = BailmentState::Active {
+            bailor: did("did:exo:bailor"),
+            bailee: did("did:exo:bailee"),
+            scope: "dag-db:read".into(),
+        };
+
+        assert!(!active.authorizes_writeback("did:exo:bailee"));
+    }
+
+    #[test]
+    fn bailment_state_authorizes_writeback_rejects_inactive_states() {
+        assert!(!BailmentState::None.authorizes_writeback("did:exo:bailee"));
+        assert!(!BailmentState::Terminated.authorizes_writeback("did:exo:bailee"));
+        assert!(
+            !BailmentState::Suspended {
+                reason: "audit".into(),
+            }
+            .authorizes_writeback("did:exo:bailee")
+        );
     }
 
     #[test]

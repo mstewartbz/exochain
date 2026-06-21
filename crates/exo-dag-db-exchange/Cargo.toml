@@ -1,0 +1,27 @@
+[package]
+name = "exo-dag-db-exchange"
+description = "EXOCHAIN DAG DB import, export, and writeback contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+exo-dag-db-api = { path = "../exo-dag-db-api" }
+exo-authority = { path = "../exo-authority" }
+exo-avc = { path = "../exo-avc" }
+exo-consent = { path = "../exo-consent" }
+exo-core = { path = "../exo-core" }
+exo-dag-db-core = { path = "../exo-dag-db-core" }
+exo-dag-db-domain = { path = "../exo-dag-db-domain" }
+exo-dag-db-graph = { path = "../exo-dag-db-graph" }
+exo-dag-db-retrieval = { path = "../exo-dag-db-retrieval" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

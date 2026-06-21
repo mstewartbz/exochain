@@ -19,6 +19,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod auth;
+pub mod dagdb;
 pub mod db;
 pub mod error;
 pub mod graphql;

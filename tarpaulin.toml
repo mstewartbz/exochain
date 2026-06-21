@@ -18,14 +18,21 @@
 #
 # This is a scoped coverage gate, not a whole-workspace coverage claim.
 #
-# Excludes files that are structurally untestable by the default cargo-tarpaulin
-# unit-test gate without credentials, filesystem fixtures, a live database,
-# a live P2P network, or feature-gated bridge/runtime coverage:
+# Excludes files that are outside the production/library scoped denominator or
+# structurally untestable by the default cargo-tarpaulin unit-test gate without
+# credentials, filesystem fixtures, a live database, a live P2P network, or
+# feature-gated bridge/runtime coverage:
+#   - Integration test harnesses under crates/*/tests/*.rs — test-only harness
+#     code executed by cargo test, not production/library code
 #   - Binary entry points (main.rs) — bootstrapping code with no logic to unit-test
+#   - DAG DB lab operator CLIs that parse process args and read/write
+#     filesystem/stdout fixtures outside production DAG DB runtime coverage
 #   - External-service integrations requiring credentials at runtime (Telegram)
 #   - Gateway runtime adapters whose DB-backed branches require DATABASE_URL
-#     and production runtime fixtures (exo-gateway db.rs, server.rs, handlers.rs,
-#     graphql.rs)
+#     and production runtime fixtures (exo-gateway dagdb.rs, db.rs, server.rs,
+#     handlers.rs, graphql.rs)
+#   - DAG DB Postgres adapters requiring DATABASE_URL, SQLx migrations, and
+#     live database state
 #   - Configuration loading from disk/env (structurally requires the filesystem)
 #   - Node identity key loading from disk (requires filesystem)
 #   - Consensus reactor and event-loop orchestration surfaces (requires live P2P
@@ -43,6 +50,24 @@
 
 [default]
 exclude-files = [
+    "crates/*/tests/*.rs",
+    "crates/exo-dag-db-postgres/src/idempotency.rs",
+    "crates/exo-dag-db-postgres/src/outbox.rs",
+    "crates/exo-dag-db-postgres/src/persistent_context.rs",
+    "crates/exo-dag-db-postgres/src/postgres/context_packet_persistence.rs",
+    "crates/exo-dag-db-postgres/src/postgres/continuation_persistence.rs",
+    "crates/exo-dag-db-postgres/src/postgres/default_route.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_catalog_router.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_context_selection.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_context_selection_write.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_export.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_import.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_retrieval.rs",
+    "crates/exo-dag-db-postgres/src/postgres/kg_writeback.rs",
+    "crates/exo-dag-db-postgres/src/postgres/lifecycle_action.rs",
+    "crates/exo-dag-db-postgres/src/postgres/mod.rs",
+    "crates/exo-dag-db-postgres/src/postgres/route_invalidation.rs",
+    "crates/exo-dag-db-postgres/src/receipt.rs",
     "crates/exo-node/src/main.rs",
     "crates/exo-node/src/telegram.rs",
     "crates/exo-node/src/config.rs",
@@ -52,7 +77,10 @@ exclude-files = [
     "crates/exo-node/src/sync.rs",
     "crates/exo-node/src/sentinels.rs",
     "crates/exo-node/src/holons.rs",
+    "crates/exo-dag-db-lab/src/bin/dagdb_kg_export_manifest.rs",
+    "crates/exo-dag-db-lab/src/bin/dagdb_kg_import_candidates.rs",
     "crates/exo-gateway/src/main.rs",
+    "crates/exo-gateway/src/dagdb.rs",
     "crates/exo-gateway/src/db.rs",
     "crates/exo-gateway/src/server.rs",
     "crates/exo-gateway/src/handlers.rs",

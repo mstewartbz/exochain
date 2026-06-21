@@ -432,17 +432,24 @@ pub fn resolve_credential(
             authenticate(&request, did_registry, metadata)
         }
 
-        Credential::ApiKey(key) => resolve_token(key, api_key_registry, "API key", metadata),
-
-        Credential::BearerToken(token) => {
-            resolve_token(token, api_key_registry, "bearer token", metadata)
+        Credential::ApiKey(key) => {
+            resolve_token(key, did_registry, api_key_registry, "API key", metadata)
         }
+
+        Credential::BearerToken(token) => resolve_token(
+            token,
+            did_registry,
+            api_key_registry,
+            "bearer token",
+            metadata,
+        ),
     }
 }
 
 /// Shared resolution logic for API key and bearer token credentials.
 fn resolve_token(
     token: &str,
+    did_registry: &dyn DidRegistry,
     registry: &ApiKeyRegistry,
     kind: &str,
     metadata: AuthenticationMetadata,
@@ -465,6 +472,16 @@ fn resolve_token(
                 reason: format!("{kind} has expired"),
             });
         }
+    }
+
+    // The credential token may still be live while its bound DID has been
+    // revoked. `DidRegistry::resolve` filters out revoked DID documents, so a
+    // `None` here means the DID is unknown or revoked — fail closed before
+    // constructing an authenticated actor for a defunct identity.
+    if did_registry.resolve(&record.did).is_none() {
+        return Err(GatewayError::AuthenticationFailed {
+            reason: format!("{kind} bound to unregistered or revoked DID"),
+        });
     }
 
     Ok(AuthenticatedActor {
@@ -561,6 +578,35 @@ mod tests {
         let mut reg = LocalDidRegistry::new();
         reg.register(doc).unwrap();
         (reg, sk)
+    }
+
+    /// Register a minimal active DID document for `did_str` into `reg` so a
+    /// bound API/bearer credential resolves to a live DID.
+    fn register_did(reg: &mut LocalDidRegistry, did_str: &str) {
+        let did = Did::new(did_str).unwrap();
+        let (pk, _sk) = generate_keypair();
+        let multibase = format!("z{}", bs58::encode(pk.as_bytes()).into_string());
+        let doc = DidDocument {
+            id: did.clone(),
+            public_keys: vec![pk],
+            authentication: vec![],
+            verification_methods: vec![VerificationMethod {
+                id: format!("{did_str}#key-1"),
+                key_type: "Ed25519VerificationKey2020".into(),
+                controller: did,
+                public_key_multibase: multibase,
+                version: 1,
+                active: true,
+                valid_from: 0,
+                revoked_at: None,
+            }],
+            hybrid_verification_methods: vec![],
+            service_endpoints: vec![],
+            created: Timestamp::ZERO,
+            updated: Timestamp::ZERO,
+            revoked: false,
+        };
+        reg.register(doc).unwrap();
     }
 
     struct StaticDidRegistry {
@@ -1127,7 +1173,8 @@ mod tests {
 
     #[test]
     fn credential_api_key_valid() {
-        let did_reg = LocalDidRegistry::new();
+        let mut did_reg = LocalDidRegistry::new();
+        register_did(&mut did_reg, "did:exo:alice");
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
         let (plaintext, _record) = api_reg
@@ -1137,6 +1184,30 @@ mod tests {
         let cred = Credential::ApiKey(plaintext);
         let actor = resolve_credential(&cred, &did_reg, &api_reg, auth_metadata()).unwrap();
         assert_eq!(actor.did.as_str(), "did:exo:alice");
+    }
+
+    #[test]
+    fn credential_api_key_with_revoked_did_fails() {
+        // `DidRegistry::resolve` returns `None` both for unknown DIDs and for
+        // revoked ones (`LocalDidRegistry::resolve` filters revoked documents),
+        // so a registry that does not resolve the key's bound DID models the
+        // revoked-DID case. Here the registry only knows a different DID.
+        let (reg, _sk) = registry_with_alice();
+        let mut api_reg = ApiKeyRegistry::new();
+        let revoked_did = Did::new("did:exo:revoked-subject").unwrap();
+        let (plaintext, _record) = api_reg
+            .register(revoked_did, "test key".into(), api_key_metadata())
+            .expect("api key registration");
+
+        // The API key itself is live (not revoked, not expired), but its bound
+        // DID does not resolve — authentication must fail closed.
+        let cred = Credential::ApiKey(plaintext);
+        let err = resolve_credential(&cred, &reg, &api_reg, auth_metadata()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unregistered or revoked DID"),
+            "expected revoked-DID rejection in: {msg}"
+        );
     }
 
     #[test]
@@ -1207,7 +1278,8 @@ mod tests {
 
     #[test]
     fn credential_bearer_valid() {
-        let did_reg = LocalDidRegistry::new();
+        let mut did_reg = LocalDidRegistry::new();
+        register_did(&mut did_reg, "did:exo:bob");
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:bob").unwrap();
         let (plaintext, _record) = api_reg
@@ -1324,7 +1396,8 @@ mod tests {
 
     #[test]
     fn resolve_credential_uses_trusted_authentication_metadata() {
-        let did_reg = LocalDidRegistry::new();
+        let mut did_reg = LocalDidRegistry::new();
+        register_did(&mut did_reg, "did:exo:alice");
         let mut api_reg = ApiKeyRegistry::new();
         let did = Did::new("did:exo:alice").unwrap();
         let key_metadata = ApiKeyMetadata::new(Timestamp::new(1_000, 0)).unwrap();

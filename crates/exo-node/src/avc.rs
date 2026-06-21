@@ -1724,6 +1724,11 @@ mod tests {
             .to_string();
         assert!(empty_error.contains("is empty"));
 
+        let directory_error = load_file_durable_registry(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(directory_error.contains("failed to read AVC durable registry"));
+
         let corrupt_path = dir.path().join("corrupt.cbor");
         std::fs::write(&corrupt_path, b"not cbor").unwrap();
         let corrupt_error = load_file_durable_registry(&corrupt_path)
@@ -2858,6 +2863,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_emit_fails_closed_when_trusted_timestamp_source_is_unavailable() {
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState {
+            registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
+            validator_did: validator_did(),
+            receipt_signer: signer,
+            receipt_timestamp_source: AvcReceiptTimestampSource::Postgres(
+                unreachable_postgres_pool(),
+            ),
+            durability: AvcRegistryDurability::None,
+        };
+        seed_avc_trust_keys(&state);
+        let state = Arc::new(state);
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
     async fn receipt_emit_is_idempotent_for_identical_request() {
         let state = fresh_state();
         let credential = baseline_credential();
@@ -3501,6 +3556,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_rejects_registered_credential_mismatch_without_receipt() {
+        let state = fresh_state();
+        let registered = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(registered.clone())
+            .unwrap();
+        let mut submitted = registered;
+        submitted.signature = Signature::empty();
+        let request = AvcValidationRequest {
+            credential: submitted,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            subject_signature: sign_action(&request, &subject_keypair()),
+            validation: request,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 

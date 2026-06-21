@@ -20,6 +20,42 @@ use std::sync::{Arc, Mutex};
 
 use crate::{reactor::SharedReactorState, store::SqliteDagStore};
 
+/// Operator-supplied DAG DB gateway proxy configuration for MCP tools.
+///
+/// Present only when the `dagdb-gateway-proxy` feature is compiled. Empty
+/// fields are rejected by the DAG DB tool dispatch before any HTTP request is
+/// attempted.
+#[cfg(feature = "dagdb-gateway-proxy")]
+#[derive(Clone, Default)]
+pub struct DagDbGatewayConfig {
+    /// Gateway origin, for example `https://gateway.example.com`.
+    pub base_url: Option<String>,
+    /// Bearer token used by the SDK transport.
+    pub bearer_token: Option<zeroize::Zeroizing<String>>,
+    /// Tenant id authorized for this MCP proxy context.
+    pub tenant_id: Option<String>,
+    /// Namespace authorized for this MCP proxy context.
+    pub namespace: Option<String>,
+}
+
+#[cfg(feature = "dagdb-gateway-proxy")]
+impl DagDbGatewayConfig {
+    #[must_use]
+    pub fn new(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+        tenant_id: impl Into<String>,
+        namespace: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: Some(base_url.into()),
+            bearer_token: Some(zeroize::Zeroizing::new(bearer_token.into())),
+            tenant_id: Some(tenant_id.into()),
+            namespace: Some(namespace.into()),
+        }
+    }
+}
+
 /// Shared runtime context available to MCP tools.
 ///
 /// Wraps the node's live state in a thread-safe, clonable handle that
@@ -33,6 +69,9 @@ pub struct NodeContext {
     pub store: Option<Arc<Mutex<SqliteDagStore>>>,
     /// The node's own DID string.
     pub node_did: Option<String>,
+    /// Opt-in DAG DB gateway proxy configuration.
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    pub dagdb_gateway: Option<DagDbGatewayConfig>,
 }
 
 impl NodeContext {
