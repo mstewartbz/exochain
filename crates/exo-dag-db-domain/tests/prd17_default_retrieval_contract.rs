@@ -2,12 +2,12 @@
 
 use exo_dag_db_domain::{
     context_packet_persistence::{
-        CONTEXT_PACKET_FINALITY_PURPOSE, ContextPacketAcceptanceEvidence, ContextPacketRequest,
-        ContextPacketRouteBinding, DefaultContextQuality, PacketFreshnessStatus,
-        PacketPersistenceStatus, PacketValidationStatus, accept_context_packet_record,
-        build_context_packet_persistence_report, build_context_packet_record,
-        canonical_context_packet_approval_payload_hash, canonical_idempotency_key,
-        validate_context_packet_record,
+        CONTEXT_PACKET_FINALITY_PURPOSE, ContextPacketAcceptanceEvidence, ContextPacketRecord,
+        ContextPacketRequest, ContextPacketRouteBinding, DefaultContextQuality,
+        PacketFreshnessStatus, PacketPersistenceStatus, PacketValidationStatus,
+        accept_context_packet_record, build_context_packet_persistence_report,
+        build_context_packet_record, canonical_context_packet_approval_payload_hash,
+        canonical_idempotency_key, validate_context_packet_record,
     },
     default_route::{
         DEFAULT_ROUTE_FINALITY_PURPOSE, DEFAULT_ROUTE_SCHEMA_VERSION, DefaultRetrievalFailureCode,
@@ -20,6 +20,9 @@ use exo_dag_db_domain::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+type RouteMutation = (&'static str, fn(&mut DefaultRouteRecord));
+type PacketMutation = (&'static str, fn(&mut ContextPacketRecord));
 
 fn memory_ref(id: &str) -> DefaultRouteMemoryRef {
     DefaultRouteMemoryRef {
@@ -267,82 +270,128 @@ fn approval_payload_hashes_use_canonical_cbor_not_json_bytes() {
 
 #[test]
 fn default_route_approval_hash_binds_acceptance_critical_state() {
-    let approved = route();
-    let approved_hash = canonical_default_route_approval_payload_hash(
-        &approved,
+    let base = route();
+    let base_hash = canonical_default_route_approval_payload_hash(
+        &base,
         "did:exo:codex-prd17b",
-        &approved.request_id,
+        &base.request_id,
         "did:exo:production-finality-authority",
         DEFAULT_ROUTE_FINALITY_PURPOSE,
         "2026-06-20T00:00:00Z",
     )
-    .expect("approved route hash");
+    .expect("base route hash");
 
-    let mut denied = approved.clone();
-    denied.status = DefaultRouteStatus::Forbidden;
-    denied.route_source = DefaultRouteSource::Preview;
-    denied.policy_allowed = false;
-    denied.freshness_status = RouteFreshnessStatus::StaleMemory;
-    denied.invalidated = true;
-    denied.production_default_route_approval_status = "operator_deferred".to_owned();
-    denied.packet_quality_review_status = "operator_deferred".to_owned();
-    denied.created_at = "hlc:denied-created".to_owned();
-    denied.updated_at = "hlc:denied-updated".to_owned();
-    let denied_hash = canonical_default_route_approval_payload_hash(
-        &denied,
-        "did:exo:codex-prd17b",
-        &denied.request_id,
-        "did:exo:production-finality-authority",
-        DEFAULT_ROUTE_FINALITY_PURPOSE,
-        "2026-06-20T00:00:00Z",
-    )
-    .expect("denied route hash");
+    let mutations: [RouteMutation; 9] = [
+        ("status", |route| {
+            route.status = DefaultRouteStatus::Forbidden
+        }),
+        ("route_source", |route| {
+            route.route_source = DefaultRouteSource::Preview;
+        }),
+        ("policy_allowed", |route| route.policy_allowed = false),
+        ("freshness_status", |route| {
+            route.freshness_status = RouteFreshnessStatus::StaleMemory;
+        }),
+        ("invalidated", |route| route.invalidated = true),
+        ("production_default_route_approval_status", |route| {
+            route.production_default_route_approval_status = "operator_deferred".to_owned();
+        }),
+        ("packet_quality_review_status", |route| {
+            route.packet_quality_review_status = "operator_deferred".to_owned();
+        }),
+        ("created_at", |route| {
+            route.created_at = "hlc:denied-created".to_owned();
+        }),
+        ("updated_at", |route| {
+            route.updated_at = "hlc:denied-updated".to_owned();
+        }),
+    ];
 
-    assert_ne!(
-        approved_hash, denied_hash,
-        "external default-route finality must bind every readiness-critical route field"
-    );
+    for (field, mutate) in mutations {
+        let mut candidate = base.clone();
+        mutate(&mut candidate);
+        let candidate_hash = canonical_default_route_approval_payload_hash(
+            &candidate,
+            "did:exo:codex-prd17b",
+            &candidate.request_id,
+            "did:exo:production-finality-authority",
+            DEFAULT_ROUTE_FINALITY_PURPOSE,
+            "2026-06-20T00:00:00Z",
+        )
+        .expect("mutated route hash");
+
+        assert_ne!(
+            base_hash, candidate_hash,
+            "external default-route finality must bind {field}"
+        );
+    }
 }
 
 #[test]
 fn context_packet_approval_hash_binds_acceptance_critical_state() {
-    let approved = build_context_packet_record(&route_binding(), packet_request())
-        .expect("approved packet record");
-    let approved_hash = canonical_context_packet_approval_payload_hash(
-        &approved,
+    let base = build_context_packet_record(&route_binding(), packet_request())
+        .expect("base packet record");
+    let base_hash = canonical_context_packet_approval_payload_hash(
+        &base,
         "did:exo:codex-prd17b",
-        &approved.idempotency_key,
+        &base.idempotency_key,
         "did:exo:production-finality-authority",
         CONTEXT_PACKET_FINALITY_PURPOSE,
         "2026-06-20T00:00:01Z",
     )
-    .expect("approved packet hash");
+    .expect("base packet hash");
 
-    let mut rejected = approved.clone();
-    rejected.context_quality = DefaultContextQuality::RawFallback;
-    rejected.citation_coverage_bp = 0;
-    rejected.validation_coverage_bp = 0;
-    rejected.freshness_status = PacketFreshnessStatus::StaleMemory;
-    rejected.validation_status = PacketValidationStatus::Failed;
-    rejected.persistence_status = PacketPersistenceStatus::PreviewOnly;
-    rejected.fallback_reason = Some("external authority rejected packet quality".to_owned());
-    rejected.production_default_route_approval_status = "operator_deferred".to_owned();
-    rejected.packet_quality_review_status = "operator_deferred".to_owned();
-    rejected.created_at = "hlc:rejected-created".to_owned();
-    let rejected_hash = canonical_context_packet_approval_payload_hash(
-        &rejected,
-        "did:exo:codex-prd17b",
-        &rejected.idempotency_key,
-        "did:exo:production-finality-authority",
-        CONTEXT_PACKET_FINALITY_PURPOSE,
-        "2026-06-20T00:00:01Z",
-    )
-    .expect("rejected packet hash");
+    let mutations: [PacketMutation; 10] = [
+        ("context_quality", |record| {
+            record.context_quality = DefaultContextQuality::RawFallback;
+        }),
+        ("citation_coverage_bp", |record| {
+            record.citation_coverage_bp = 0;
+        }),
+        ("validation_coverage_bp", |record| {
+            record.validation_coverage_bp = 0;
+        }),
+        ("freshness_status", |record| {
+            record.freshness_status = PacketFreshnessStatus::StaleMemory;
+        }),
+        ("validation_status", |record| {
+            record.validation_status = PacketValidationStatus::Failed;
+        }),
+        ("fallback_reason", |record| {
+            record.fallback_reason = Some("external authority rejected packet quality".to_owned());
+        }),
+        ("persistence_status", |record| {
+            record.persistence_status = PacketPersistenceStatus::PreviewOnly;
+        }),
+        ("production_default_route_approval_status", |record| {
+            record.production_default_route_approval_status = "operator_deferred".to_owned();
+        }),
+        ("packet_quality_review_status", |record| {
+            record.packet_quality_review_status = "operator_deferred".to_owned();
+        }),
+        ("created_at", |record| {
+            record.created_at = "hlc:rejected-created".to_owned();
+        }),
+    ];
 
-    assert_ne!(
-        approved_hash, rejected_hash,
-        "external context-packet finality must bind every validation-critical packet field"
-    );
+    for (field, mutate) in mutations {
+        let mut candidate = base.clone();
+        mutate(&mut candidate);
+        let candidate_hash = canonical_context_packet_approval_payload_hash(
+            &candidate,
+            "did:exo:codex-prd17b",
+            &candidate.idempotency_key,
+            "did:exo:production-finality-authority",
+            CONTEXT_PACKET_FINALITY_PURPOSE,
+            "2026-06-20T00:00:01Z",
+        )
+        .expect("mutated packet hash");
+
+        assert_ne!(
+            base_hash, candidate_hash,
+            "external context-packet finality must bind {field}"
+        );
+    }
 }
 
 fn route_acceptance_evidence() -> DefaultRouteAcceptanceEvidence {
