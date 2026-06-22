@@ -62,15 +62,14 @@ use exo_authority::permission::Permission;
 use exo_avc::{
     AVC_MAX_SUPPORTED_PROTOCOL_VERSION, AVC_MIN_SUPPORTED_PROTOCOL_VERSION,
     AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION, AVC_SCHEMA_VERSION,
-    AutonomousVolitionCredential, AvcActionRequest, AvcDecision, AvcReceiptTimestampProvenance,
+    AutonomousVolitionCredential, AvcActionDescriptor, AvcActionRequest, AvcDecision,
+    AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProof, AvcReceiptTimestampProvenance,
     AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt,
     AvcTrustReceiptEvidence, AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry,
-    avc_action_commitment_hash, avc_action_signature_payload, create_trust_receipt_with_evidence,
-    require_supported_avc_protocol_version, validate_avc,
+    avc_action_commitment_hash, avc_action_descriptor_hash, avc_action_signature_payload,
+    create_trust_receipt_with_evidence, require_supported_avc_protocol_version, validate_avc,
 };
-use exo_core::{
-    Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured, hlc::HybridClock,
-};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured};
 use exo_root::{RootSignature, RootTrustBundle, verify_root_bundle, verify_root_signature};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -86,6 +85,12 @@ pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
 pub const AVC_ROOT_TRUST_ISSUER_DID: &str = "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX";
 pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
     "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32";
+pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV: &str =
+    "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL";
+pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV: &str =
+    "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID";
+pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV: &str =
+    "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX";
 const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
 const AVC_REGISTRY_POSTGRES_TABLE: &str = "avc_registry_state";
 const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
@@ -98,43 +103,183 @@ const WASM_PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub type AvcReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
 
 #[derive(Clone)]
-enum AvcReceiptTimestampSource {
-    HybridLogicalClock(Arc<Mutex<HybridClock>>),
-    Postgres(PgPool),
+enum AvcReceiptExternalTimestampSource {
+    Unconfigured,
+    Http {
+        endpoint: Arc<String>,
+        authority_did: Did,
+        authority_public_key: PublicKey,
+        client: reqwest::Client,
+    },
     #[cfg(test)]
-    Fixed(Arc<dyn Fn() -> anyhow::Result<Timestamp> + Send + Sync>),
+    Fixed {
+        authority_did: Did,
+        authority_public_key: PublicKey,
+        issued_at: Timestamp,
+        signer: AvcReceiptSigner,
+    },
 }
 
-impl AvcReceiptTimestampSource {
-    async fn now(&self) -> anyhow::Result<(Timestamp, AvcReceiptTimestampProvenance)> {
+#[derive(Serialize)]
+struct AvcExternalTimestampRequest {
+    schema_version: u16,
+    domain: &'static str,
+    subject_hash: String,
+}
+
+#[derive(Deserialize)]
+struct AvcExternalTimestampResponse {
+    authority_did: String,
+    subject_hash: String,
+    issued_at_physical_ms: u64,
+    issued_at_logical: u32,
+    signature_hex: String,
+}
+
+impl AvcReceiptExternalTimestampSource {
+    async fn issue_proof(
+        &self,
+        subject_hash: Hash256,
+    ) -> anyhow::Result<AvcReceiptExternalTimestampProof> {
         match self {
-            Self::HybridLogicalClock(clock) => {
-                let mut clock = clock
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("AVC receipt HLC mutex poisoned"))?;
-                let timestamp = clock
-                    .now()
-                    .map_err(|error| anyhow::anyhow!("AVC receipt HLC unavailable: {error}"))?;
-                Ok((
-                    timestamp,
-                    AvcReceiptTimestampProvenance::LocalHybridLogicalClock,
-                ))
+            Self::Unconfigured => {
+                anyhow::bail!(
+                    "AVC external timestamp authority is not configured; set {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV}, {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV}, and {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV}"
+                );
             }
-            Self::Postgres(pool) => {
-                trusted_postgres_receipt_timestamp(pool)
+            Self::Http {
+                endpoint,
+                authority_did,
+                authority_public_key,
+                client,
+            } => {
+                let request = AvcExternalTimestampRequest {
+                    schema_version: AVC_SCHEMA_VERSION,
+                    domain: exo_avc::AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN,
+                    subject_hash: subject_hash.to_string(),
+                };
+                let response = client
+                    .post(endpoint.as_str())
+                    .json(&request)
+                    .send()
                     .await
-                    .map(|timestamp| {
-                        (
-                            timestamp,
-                            AvcReceiptTimestampProvenance::PostgresClockTimestamp,
+                    .map_err(|error| {
+                        anyhow::anyhow!("AVC external timestamp authority request failed: {error}")
+                    })?;
+                let status = response.status();
+                if !status.is_success() {
+                    anyhow::bail!(
+                        "AVC external timestamp authority returned non-success status {status}"
+                    );
+                }
+                let wire: AvcExternalTimestampResponse =
+                    response.json().await.map_err(|error| {
+                        anyhow::anyhow!(
+                            "AVC external timestamp authority response was not valid JSON: {error}"
                         )
-                    })
+                    })?;
+                let proof = external_timestamp_proof_from_wire(wire)?;
+                validate_external_timestamp_proof(
+                    &proof,
+                    subject_hash,
+                    authority_did,
+                    authority_public_key,
+                )?;
+                Ok(proof)
             }
             #[cfg(test)]
-            Self::Fixed(source) => source()
-                .map(|timestamp| (timestamp, AvcReceiptTimestampProvenance::FixedTestTimestamp)),
+            Self::Fixed {
+                authority_did,
+                authority_public_key,
+                issued_at,
+                signer,
+            } => {
+                let proof = AvcReceiptExternalTimestampProof::signed(
+                    authority_did.clone(),
+                    subject_hash,
+                    *issued_at,
+                    |bytes| signer(bytes),
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("fixed AVC external timestamp proof failed: {error}")
+                })?;
+                validate_external_timestamp_proof(
+                    &proof,
+                    subject_hash,
+                    authority_did,
+                    authority_public_key,
+                )?;
+                Ok(proof)
+            }
         }
     }
+}
+
+fn external_timestamp_proof_from_wire(
+    wire: AvcExternalTimestampResponse,
+) -> anyhow::Result<AvcReceiptExternalTimestampProof> {
+    let authority_did = Did::new(&wire.authority_did).map_err(|error| {
+        anyhow::anyhow!("invalid AVC external timestamp authority DID: {error}")
+    })?;
+    let subject_hash = parse_hash_anyhow(&wire.subject_hash, "AVC timestamp subject hash")?;
+    let signature = parse_signature_hex(&wire.signature_hex, "AVC timestamp signature")?;
+    Ok(AvcReceiptExternalTimestampProof {
+        authority_did,
+        subject_hash,
+        issued_at: Timestamp::new(wire.issued_at_physical_ms, wire.issued_at_logical),
+        signature,
+    })
+}
+
+fn validate_external_timestamp_proof(
+    proof: &AvcReceiptExternalTimestampProof,
+    expected_subject_hash: Hash256,
+    expected_authority_did: &Did,
+    authority_public_key: &PublicKey,
+) -> anyhow::Result<()> {
+    if proof.subject_hash != expected_subject_hash {
+        anyhow::bail!(
+            "AVC external timestamp proof subject {} did not match expected {}",
+            proof.subject_hash,
+            expected_subject_hash
+        );
+    }
+    if proof.authority_did != *expected_authority_did {
+        anyhow::bail!(
+            "AVC external timestamp proof authority {} did not match expected {}",
+            proof.authority_did,
+            expected_authority_did
+        );
+    }
+    let verified = proof
+        .verify_signature(authority_public_key)
+        .map_err(|error| {
+            anyhow::anyhow!("AVC external timestamp signature payload failed: {error}")
+        })?;
+    if !verified {
+        anyhow::bail!("AVC external timestamp proof signature is invalid");
+    }
+    Ok(())
+}
+
+fn parse_hash_anyhow(raw: &str, label: &str) -> anyhow::Result<Hash256> {
+    let bytes = hex::decode(raw).map_err(|error| anyhow::anyhow!("{label} is not hex: {error}"))?;
+    if bytes.len() != 32 {
+        anyhow::bail!("{label} must be 32 bytes, got {}", bytes.len());
+    }
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&bytes);
+    Ok(Hash256::from_bytes(buf))
+}
+
+fn parse_signature_hex(raw: &str, label: &str) -> anyhow::Result<Signature> {
+    let bytes = hex::decode(raw).map_err(|error| anyhow::anyhow!("{label} is not hex: {error}"))?;
+    if bytes.len() != 64 {
+        anyhow::bail!("{label} must be 64 bytes, got {}", bytes.len());
+    }
+    let mut buf = [0u8; 64];
+    buf.copy_from_slice(&bytes);
+    Ok(Signature::from_bytes(buf))
 }
 
 #[derive(Clone)]
@@ -151,7 +296,7 @@ pub struct AvcApiState {
     pub registry: Arc<Mutex<InMemoryAvcRegistry>>,
     validator_did: Did,
     receipt_signer: AvcReceiptSigner,
-    receipt_timestamp_source: AvcReceiptTimestampSource,
+    external_timestamp_source: AvcReceiptExternalTimestampSource,
     durability: AvcRegistryDurability,
 }
 
@@ -160,24 +305,24 @@ impl AvcApiState {
     #[cfg(test)]
     #[must_use]
     pub fn new(validator_did: Did, receipt_signer: AvcReceiptSigner) -> Self {
-        Self::new_with_receipt_timestamp_source(
+        Self::new_with_external_timestamp_source(
             validator_did,
             receipt_signer,
-            receipt_timestamp_source_from_clock(HybridClock::new()),
+            AvcReceiptExternalTimestampSource::Unconfigured,
         )
     }
 
     #[cfg(test)]
-    fn new_with_receipt_timestamp_source(
+    fn new_with_external_timestamp_source(
         validator_did: Did,
         receipt_signer: AvcReceiptSigner,
-        receipt_timestamp_source: AvcReceiptTimestampSource,
+        external_timestamp_source: AvcReceiptExternalTimestampSource,
     ) -> Self {
         Self {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did,
             receipt_signer,
-            receipt_timestamp_source,
+            external_timestamp_source,
             durability: AvcRegistryDurability::None,
         }
     }
@@ -195,16 +340,12 @@ impl AvcApiState {
         database_pool: Option<PgPool>,
     ) -> anyhow::Result<Self> {
         let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
-        let (registry, durability, receipt_timestamp_source) = match database_pool {
+        let (registry, durability) = match database_pool {
             Some(pool) => {
                 let registry =
                     load_postgres_durable_registry_or_import_file(&pool, &durable_state_path)
                         .await?;
-                (
-                    registry,
-                    AvcRegistryDurability::Postgres(pool.clone()),
-                    AvcReceiptTimestampSource::Postgres(pool),
-                )
+                (registry, AvcRegistryDurability::Postgres(pool.clone()))
             }
             None => {
                 tracing::warn!(
@@ -214,7 +355,6 @@ impl AvcApiState {
                 (
                     load_file_durable_registry(&durable_state_path)?,
                     AvcRegistryDurability::File(Arc::new(durable_state_path)),
-                    receipt_timestamp_source_from_clock(HybridClock::new()),
                 )
             }
         };
@@ -222,7 +362,7 @@ impl AvcApiState {
             registry: Arc::new(Mutex::new(registry)),
             validator_did,
             receipt_signer,
-            receipt_timestamp_source,
+            external_timestamp_source: configured_external_timestamp_source_from_env()?,
             durability,
         })
     }
@@ -248,24 +388,47 @@ impl AvcApiState {
     }
 }
 
-fn receipt_timestamp_source_from_clock(clock: HybridClock) -> AvcReceiptTimestampSource {
-    AvcReceiptTimestampSource::HybridLogicalClock(Arc::new(Mutex::new(clock)))
-}
+fn configured_external_timestamp_source_from_env()
+-> anyhow::Result<AvcReceiptExternalTimestampSource> {
+    let endpoint = std::env::var(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV).ok();
+    let authority_did = std::env::var(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV).ok();
+    let authority_public_key =
+        std::env::var(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV).ok();
 
-async fn trusted_postgres_receipt_timestamp(pool: &PgPool) -> anyhow::Result<Timestamp> {
-    let physical_ms: i64 =
-        sqlx::query_scalar("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT")
-            .fetch_one(pool)
-            .await
-            .map_err(|error| {
+    match (endpoint, authority_did, authority_public_key) {
+        (Some(endpoint), Some(authority_did), Some(authority_public_key)) => {
+            if endpoint.trim().is_empty() {
+                anyhow::bail!("{AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV} must not be empty");
+            }
+            let authority_did = Did::new(&authority_did).map_err(|error| {
                 anyhow::anyhow!(
-                    "failed to read trusted AVC receipt timestamp from Postgres: {error}"
+                    "{AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV} is not a valid DID: {error}"
                 )
             })?;
-    let physical_ms = u64::try_from(physical_ms).map_err(|_| {
-        anyhow::anyhow!("Postgres returned a negative AVC receipt timestamp: {physical_ms}")
-    })?;
-    Ok(Timestamp::new(physical_ms, 0))
+            let authority_public_key = parse_expected_public_key(
+                &authority_public_key,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+            )?;
+            Ok(AvcReceiptExternalTimestampSource::Http {
+                endpoint: Arc::new(endpoint),
+                authority_did,
+                authority_public_key,
+                client: reqwest::Client::new(),
+            })
+        }
+        (None, None, None) => {
+            tracing::warn!(
+                url_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                did_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                key_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+                "AVC external timestamp authority is not configured; receipt emission will fail closed"
+            );
+            Ok(AvcReceiptExternalTimestampSource::Unconfigured)
+        }
+        _ => anyhow::bail!(
+            "AVC external timestamp authority configuration is incomplete; set {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV}, {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV}, and {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV} together"
+        ),
+    }
 }
 
 fn load_file_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
@@ -882,22 +1045,23 @@ fn persistence_error(err: anyhow::Error) -> ApiError {
     )
 }
 
-fn receipt_timestamp_error(err: anyhow::Error) -> ApiError {
-    tracing::error!(err = %err, "AVC receipt timestamp unavailable");
+fn external_timestamp_error(err: anyhow::Error) -> ApiError {
+    tracing::error!(err = %err, "AVC external timestamp authority unavailable");
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "AVC receipt timestamp unavailable".into(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "AVC external timestamp authority unavailable".into(),
     )
 }
 
-async fn trusted_receipt_timestamp(
+async fn trusted_external_timestamp_proof(
     state: &AvcApiState,
-) -> ApiResult<(Timestamp, AvcReceiptTimestampProvenance)> {
+    subject_hash: Hash256,
+) -> ApiResult<AvcReceiptExternalTimestampProof> {
     state
-        .receipt_timestamp_source
-        .now()
+        .external_timestamp_source
+        .issue_proof(subject_hash)
         .await
-        .map_err(receipt_timestamp_error)
+        .map_err(external_timestamp_error)
 }
 
 fn avc_receipt_list_limit(limit: Option<u32>) -> usize {
@@ -1222,23 +1386,52 @@ async fn handle_emit_receipt(
 ) -> ApiResult<Json<EmitReceiptResponse>> {
     let validator_did = state.validator_did.clone();
     let receipt_signer = Arc::clone(&state.receipt_signer);
-    let (trusted_now, timestamp_provenance) = trusted_receipt_timestamp(&state).await?;
+    let submitted_request = payload.validation.clone();
+    let action = require_action(&submitted_request)?;
+    let action_id = action.action_id;
+    let action_commitment_hash = avc_action_commitment_hash(
+        &submitted_request.credential,
+        action,
+        &submitted_request.now,
+    )
+    .map_err(map_avc_error)?;
+    let action_descriptor = AvcActionDescriptor::from_action(action);
+    let action_descriptor_hash =
+        avc_action_descriptor_hash(&action_descriptor).map_err(map_avc_error)?;
+    let subject_signature = payload.subject_signature.clone();
+    let subject_public_key = payload.subject_public_key;
+    let preflight_request = submitted_request.clone();
+    let preflight_signature = subject_signature.clone();
+    let preflight = with_registry_blocking(Arc::clone(&state), false, move |registry| {
+        let credential_id = require_registered_credential(registry, &preflight_request)?;
+        verify_subject_action_signature(
+            registry,
+            &preflight_request,
+            &preflight_signature,
+            subject_public_key,
+        )?;
+        Ok((credential_id, registry.receipt_chain_head()))
+    })
+    .await?;
+    let (credential_id, previous_receipt_hash) = preflight;
+    let evidence_subject = AvcReceiptEvidenceSubject {
+        credential_id,
+        action_id,
+        action_commitment_hash,
+        action_descriptor_hash,
+        previous_receipt_hash,
+    };
+    let external_timestamp_proof =
+        trusted_external_timestamp_proof(&state, evidence_subject.hash().map_err(map_avc_error)?)
+            .await?;
+    let trusted_now = external_timestamp_proof.issued_at;
     let response = with_registry_blocking(state, true, move |registry| {
-        let submitted_request = payload.validation;
-        let action = require_action(&submitted_request)?;
-        let action_id = action.action_id;
-        let action_commitment_hash = avc_action_commitment_hash(
-            &submitted_request.credential,
-            action,
-            &submitted_request.now,
-        )
-        .map_err(map_avc_error)?;
         let credential_id = require_registered_credential(registry, &submitted_request)?;
         verify_subject_action_signature(
             registry,
             &submitted_request,
-            &payload.subject_signature,
-            payload.subject_public_key,
+            &subject_signature,
+            subject_public_key,
         )?;
         let mut validation_request = submitted_request;
         validation_request.now = trusted_now;
@@ -1263,14 +1456,23 @@ async fn handle_emit_receipt(
                 validation,
             });
         }
-        let previous_receipt_hash = registry.receipt_chain_head();
+        if registry.receipt_chain_head() != previous_receipt_hash {
+            return Err((
+                StatusCode::CONFLICT,
+                "AVC receipt chain advanced during external timestamp attestation".into(),
+            ));
+        }
         let receipt = create_trust_receipt_with_evidence(
             &validation,
             Some(action_id),
             AvcTrustReceiptEvidence {
                 action_commitment_hash: Some(action_commitment_hash),
+                action_descriptor: Some(action_descriptor),
                 previous_receipt_hash,
-                timestamp_provenance: Some(timestamp_provenance),
+                timestamp_provenance: Some(
+                    AvcReceiptTimestampProvenance::ExternalTimestampAuthority,
+                ),
+                external_timestamp_proof: Some(external_timestamp_proof),
             },
             validator_did,
             trusted_now,
@@ -1445,8 +1647,9 @@ mod tests {
     };
     use exo_authority::permission::Permission;
     use exo_avc::{
-        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcActionRequest, AvcConstraints,
-        AvcDecision, AvcDraft, AvcReasonCode, AvcRevocationReason, AvcSubjectKind, DelegatedIntent,
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcActionDescriptor, AvcActionRequest,
+        AvcConstraints, AvcDecision, AvcDraft, AvcReasonCode, AvcReceiptEvidenceSubject,
+        AvcRevocationReason, AvcSubjectKind, DelegatedIntent, avc_action_descriptor_hash,
         create_trust_receipt, issue_avc, revoke_avc,
     };
     use exo_core::{Hash256, Signature, Timestamp, crypto, crypto::KeyPair};
@@ -1457,6 +1660,7 @@ mod tests {
     const ISSUER_SEED: [u8; 32] = [0x11; 32];
     const SUBJECT_SEED: [u8; 32] = [0x22; 32];
     const VALIDATOR_SEED: [u8; 32] = [0x33; 32];
+    const TIMESTAMP_AUTHORITY_SEED: [u8; 32] = [0x44; 32];
 
     fn issuer_keypair() -> KeyPair {
         KeyPair::from_secret_bytes(ISSUER_SEED).expect("valid seed")
@@ -1470,8 +1674,16 @@ mod tests {
         KeyPair::from_secret_bytes(VALIDATOR_SEED).expect("valid seed")
     }
 
+    fn timestamp_authority_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(TIMESTAMP_AUTHORITY_SEED).expect("valid seed")
+    }
+
     fn validator_did() -> Did {
         Did::new("did:exo:validator").unwrap()
+    }
+
+    fn timestamp_authority_did() -> Did {
+        Did::new("did:exo:timestamp-authority").unwrap()
     }
 
     fn seed_avc_trust_keys(state: &AvcApiState) {
@@ -1483,16 +1695,23 @@ mod tests {
         registry.put_receipt_validator_public_key(validator_did(), validator_keypair().public);
     }
 
-    fn fixed_receipt_timestamp_source(timestamp: Timestamp) -> AvcReceiptTimestampSource {
-        AvcReceiptTimestampSource::Fixed(Arc::new(move || Ok(timestamp)))
+    fn fixed_external_timestamp_source(timestamp: Timestamp) -> AvcReceiptExternalTimestampSource {
+        let signer: AvcReceiptSigner =
+            Arc::new(|payload: &[u8]| timestamp_authority_keypair().sign(payload));
+        AvcReceiptExternalTimestampSource::Fixed {
+            authority_did: timestamp_authority_did(),
+            authority_public_key: timestamp_authority_keypair().public,
+            issued_at: timestamp,
+            signer,
+        }
     }
 
     fn fresh_state() -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let state = AvcApiState::new_with_receipt_timestamp_source(
+        let state = AvcApiState::new_with_external_timestamp_source(
             validator_did(),
             signer,
-            fixed_receipt_timestamp_source(Timestamp::new(1_600_000, 0)),
+            fixed_external_timestamp_source(Timestamp::new(1_600_000, 0)),
         );
         // Seed the issuer key so validate paths succeed.
         seed_avc_trust_keys(&state);
@@ -1501,9 +1720,11 @@ mod tests {
 
     async fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let state = AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None)
+        let mut state = AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None)
             .await
             .expect("durable AVC state");
+        state.external_timestamp_source =
+            fixed_external_timestamp_source(Timestamp::new(1_600_000, 0));
         seed_avc_trust_keys(&state);
         Arc::new(state)
     }
@@ -1926,7 +2147,7 @@ mod tests {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did: validator_did(),
             receipt_signer: signer,
-            receipt_timestamp_source: fixed_receipt_timestamp_source(Timestamp::new(1_600_000, 0)),
+            external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
             durability: AvcRegistryDurability::Postgres(pool.clone()),
         };
         seed_avc_trust_keys(&state);
@@ -1959,7 +2180,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let state = AvcApiState::with_durable_registry(
+        let mut state = AvcApiState::with_durable_registry(
             dir.path(),
             validator_did(),
             Arc::clone(&signer),
@@ -1967,17 +2188,12 @@ mod tests {
         )
         .await
         .expect("Postgres AVC state");
+        let trusted_now = Timestamp::new(1_600_000, 0);
+        state.external_timestamp_source = fixed_external_timestamp_source(trusted_now);
         seed_avc_trust_keys(&state);
         let state = Arc::new(state);
         let app = avc_router(Arc::clone(&state));
 
-        let (trusted_now, provenance) = trusted_receipt_timestamp(&state)
-            .await
-            .expect("trusted Postgres receipt timestamp");
-        assert_eq!(
-            provenance,
-            AvcReceiptTimestampProvenance::PostgresClockTimestamp
-        );
         let mut first_draft = baseline_draft();
         first_draft.delegated_intent.purpose = "postgres anchor persistence one".into();
         first_draft.expires_at = Some(Timestamp::new(trusted_now.physical_ms + 1_000_000, 0));
@@ -2398,7 +2614,7 @@ mod tests {
         .unwrap();
         let subject_signature = sign_action(&request, &subject_keypair());
         let body = serde_json::to_vec(&EmitReceiptRequest {
-            validation: request,
+            validation: request.clone(),
             subject_signature,
             subject_public_key: None,
         })
@@ -2433,7 +2649,42 @@ mod tests {
         assert_eq!(parsed.receipt.previous_receipt_hash, None);
         assert_eq!(
             parsed.receipt.timestamp_provenance,
-            Some(AvcReceiptTimestampProvenance::FixedTestTimestamp)
+            Some(AvcReceiptTimestampProvenance::ExternalTimestampAuthority)
+        );
+        let action_descriptor =
+            AvcActionDescriptor::from_action(request.action.as_ref().expect("receipt action"));
+        let action_descriptor_hash = avc_action_descriptor_hash(&action_descriptor).unwrap();
+        assert_eq!(parsed.receipt.action_descriptor, Some(action_descriptor));
+        assert_eq!(
+            parsed.receipt.action_descriptor_hash,
+            Some(action_descriptor_hash)
+        );
+        let evidence_subject = AvcReceiptEvidenceSubject {
+            credential_id,
+            action_id,
+            action_commitment_hash,
+            action_descriptor_hash,
+            previous_receipt_hash: None,
+        };
+        let evidence_subject_hash = evidence_subject.hash().unwrap();
+        let external_timestamp_proof = parsed
+            .receipt
+            .external_timestamp_proof
+            .as_ref()
+            .expect("receipt must carry external timestamp proof");
+        assert_eq!(
+            external_timestamp_proof.authority_did,
+            timestamp_authority_did()
+        );
+        assert_eq!(external_timestamp_proof.subject_hash, evidence_subject_hash);
+        assert!(
+            external_timestamp_proof
+                .verify_signature(timestamp_authority_keypair().public_key())
+                .unwrap()
+        );
+        assert_eq!(
+            parsed.receipt.created_at,
+            external_timestamp_proof.issued_at
         );
         assert_eq!(parsed.receipt.validator_did, validator_did());
         assert_eq!(parsed.validation.decision, AvcDecision::Allow);
@@ -2863,15 +3114,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receipt_emit_fails_closed_when_trusted_timestamp_source_is_unavailable() {
+    async fn receipt_emit_fails_closed_when_external_timestamp_authority_is_unavailable() {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
         let state = AvcApiState {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did: validator_did(),
             receipt_signer: signer,
-            receipt_timestamp_source: AvcReceiptTimestampSource::Postgres(
-                unreachable_postgres_pool(),
-            ),
+            external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
             durability: AvcRegistryDurability::None,
         };
         seed_avc_trust_keys(&state);
@@ -2908,7 +3157,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
@@ -2994,8 +3243,10 @@ mod tests {
                 Some(Hash256::from_bytes([0x99; 32])),
                 AvcTrustReceiptEvidence {
                     action_commitment_hash: Some(action_commitment_hash),
+                    action_descriptor: None,
                     previous_receipt_hash: None,
                     timestamp_provenance: Some(AvcReceiptTimestampProvenance::FixedTestTimestamp),
+                    external_timestamp_proof: None,
                 },
                 validator_did(),
                 Timestamp::new(1_600_000, 0),
@@ -3101,11 +3352,7 @@ mod tests {
     #[test]
     fn avc_registry_validator_key_registration_does_not_create_issuer_trust() {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let state = AvcApiState::new_with_receipt_timestamp_source(
-            validator_did(),
-            signer,
-            fixed_receipt_timestamp_source(Timestamp::new(1_600_000, 0)),
-        );
+        let state = AvcApiState::new(validator_did(), signer);
 
         state
             .register_validator_public_keys([(validator_did(), validator_keypair().public)])
@@ -4146,13 +4393,13 @@ mod tests {
             "AVC durable registry must persist to Postgres when DATABASE_URL is configured"
         );
         assert!(
-            production.contains("AvcReceiptTimestampSource::Postgres(pool)"),
-            "Postgres-backed AVC runtime receipts must use the trusted database timestamp source"
+            production.contains("configured_external_timestamp_source_from_env()?"),
+            "AVC runtime receipt emission must load the external timestamp authority from explicit environment configuration"
         );
         assert!(
-            production
-                .contains("SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
-            "AVC production receipt timestamps must come from trusted Postgres clock_timestamp()"
+            production.contains("validate_external_timestamp_proof(")
+                && production.contains("AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN"),
+            "AVC production receipt timestamps must verify a signed external evidence-subject proof"
         );
         assert!(
             !production.contains("SystemTime::now") && !production.contains("Instant::now"),
@@ -4219,9 +4466,7 @@ mod avc_root_trust_tests {
             registry: Arc::new(Mutex::new(registry)),
             validator_did: Did::new("did:exo:test-validator").expect("test DID"),
             receipt_signer: signer,
-            receipt_timestamp_source: AvcReceiptTimestampSource::Fixed(Arc::new(|| {
-                Ok(Timestamp::new(1_700_000, 0))
-            })),
+            external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
             durability: AvcRegistryDurability::None,
         }
     }

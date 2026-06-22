@@ -50,6 +50,8 @@ pub const AVC_HUMAN_APPROVAL_SIGNING_DOMAIN: &str = "exo.avc.human-approval.v1";
 pub const AVC_ACTION_SIGNING_DOMAIN: &str = "exo.avc.action.v1";
 /// Signing domain tag for AVC receipt action commitments.
 pub const AVC_ACTION_COMMITMENT_DOMAIN: &str = "exo.avc.action.commitment.v1";
+/// Signing domain tag for canonical receipt action descriptors.
+pub const AVC_ACTION_DESCRIPTOR_DOMAIN: &str = "exo.avc.action.descriptor.v1";
 
 // ---------------------------------------------------------------------------
 // Decision / Reason
@@ -117,6 +119,42 @@ pub struct AvcActionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvcActionDescriptor {
+    pub schema_version: u16,
+    pub action_id: Hash256,
+    pub actor_did: Did,
+    pub requested_permission: Permission,
+    pub tool: Option<String>,
+    pub target_did: Option<Did>,
+    pub data_class: Option<DataClass>,
+    pub estimated_budget_minor_units: Option<u64>,
+    pub estimated_risk_bp: Option<u32>,
+    pub requires_human_approval: bool,
+    pub human_approval_present: bool,
+    pub action_name: Option<String>,
+}
+
+impl AvcActionDescriptor {
+    #[must_use]
+    pub fn from_action(action: &AvcActionRequest) -> Self {
+        Self {
+            schema_version: AVC_SCHEMA_VERSION,
+            action_id: action.action_id,
+            actor_did: action.actor_did.clone(),
+            requested_permission: action.requested_permission,
+            tool: action.tool.clone(),
+            target_did: action.target_did.clone(),
+            data_class: action.data_class.clone(),
+            estimated_budget_minor_units: action.estimated_budget_minor_units,
+            estimated_risk_bp: action.estimated_risk_bp,
+            requires_human_approval: action.requires_human_approval,
+            human_approval_present: action.human_approval.is_some(),
+            action_name: action.action_name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvcHumanApproval {
     pub approver_did: Did,
     pub approved_at: Timestamp,
@@ -176,6 +214,12 @@ struct AvcActionCommitmentPayload<'a> {
     credential_id: &'a Hash256,
     action: &'a AvcActionRequest,
     validation_now: &'a Timestamp,
+}
+
+#[derive(Serialize)]
+struct AvcActionDescriptorPayload<'a> {
+    domain: &'static str,
+    descriptor: &'a AvcActionDescriptor,
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +467,22 @@ pub fn avc_action_commitment_hash(
         validation_now,
     };
     hash_structured(&payload).map_err(AvcError::from)
+}
+
+/// Compute a deterministic hash for the minimal action descriptor embedded in
+/// trust receipts. The descriptor is intentionally narrower than the signed
+/// action request: high-value proof material remains committed by
+/// [`avc_action_commitment_hash`], while the receipt carries enough canonical
+/// action meaning for court/audit reconstruction.
+///
+/// # Errors
+/// Returns [`AvcError::Serialization`] if canonical CBOR encoding fails.
+pub fn avc_action_descriptor_hash(descriptor: &AvcActionDescriptor) -> Result<Hash256, AvcError> {
+    hash_structured(&AvcActionDescriptorPayload {
+        domain: AVC_ACTION_DESCRIPTOR_DOMAIN,
+        descriptor,
+    })
+    .map_err(AvcError::from)
 }
 
 fn evaluate_action<R: AvcRegistryRead>(
