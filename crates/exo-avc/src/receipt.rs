@@ -21,17 +21,25 @@
 //! domain-tagged so they cannot be confused with credentials or
 //! revocations on the wire.
 
-use exo_core::{Did, Hash256, Signature, Timestamp, hash::hash_structured};
+use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     credential::AVC_SCHEMA_VERSION,
     error::AvcError,
-    validation::{AvcDecision, AvcReasonCode, AvcValidationResult},
+    validation::{
+        AvcActionDescriptor, AvcDecision, AvcReasonCode, AvcValidationResult,
+        avc_action_descriptor_hash,
+    },
 };
 
 /// Domain tag for AVC trust receipts.
 pub const AVC_RECEIPT_SIGNING_DOMAIN: &str = "exo.avc.receipt.v1";
+/// Domain tag for externally signed AVC receipt timestamp proofs.
+pub const AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN: &str = "exo.avc.receipt.external_timestamp.v1";
+/// Domain tag for the receipt evidence subject sent to external timestamp
+/// authorities.
+pub const AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN: &str = "exo.avc.receipt.evidence_subject.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvcTrustReceipt {
@@ -42,9 +50,15 @@ pub struct AvcTrustReceipt {
     #[serde(default)]
     pub action_commitment_hash: Option<Hash256>,
     #[serde(default)]
+    pub action_descriptor: Option<AvcActionDescriptor>,
+    #[serde(default)]
+    pub action_descriptor_hash: Option<Hash256>,
+    #[serde(default)]
     pub previous_receipt_hash: Option<Hash256>,
     #[serde(default)]
     pub timestamp_provenance: Option<AvcReceiptTimestampProvenance>,
+    #[serde(default)]
+    pub external_timestamp_proof: Option<AvcReceiptExternalTimestampProof>,
     pub validator_did: Did,
     pub decision: AvcDecision,
     pub reason_codes: Vec<AvcReasonCode>,
@@ -58,17 +72,144 @@ pub enum AvcReceiptTimestampProvenance {
     PostgresClockTimestamp,
     LocalHybridLogicalClock,
     FixedTestTimestamp,
+    ExternalTimestampAuthority,
 }
 
 /// Optional local evidence included in extended trust receipt payloads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AvcTrustReceiptEvidence {
     /// Hash committing to the credential action being receipted.
     pub action_commitment_hash: Option<Hash256>,
+    /// Minimal canonical action meaning embedded for audit reconstruction.
+    pub action_descriptor: Option<AvcActionDescriptor>,
     /// Previous receipt hash used to link extended receipts in order.
     pub previous_receipt_hash: Option<Hash256>,
     /// Source of the trusted timestamp used for this receipt.
     pub timestamp_provenance: Option<AvcReceiptTimestampProvenance>,
+    /// Externally signed timestamp proof over the receipt evidence subject.
+    pub external_timestamp_proof: Option<AvcReceiptExternalTimestampProof>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvcReceiptEvidenceSubject {
+    pub credential_id: Hash256,
+    pub action_id: Hash256,
+    pub action_commitment_hash: Hash256,
+    pub action_descriptor_hash: Hash256,
+    pub previous_receipt_hash: Option<Hash256>,
+}
+
+#[derive(Serialize)]
+struct AvcReceiptEvidenceSubjectPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    credential_id: &'a Hash256,
+    action_id: &'a Hash256,
+    action_commitment_hash: &'a Hash256,
+    action_descriptor_hash: &'a Hash256,
+    previous_receipt_hash: Option<&'a Hash256>,
+}
+
+impl AvcReceiptEvidenceSubject {
+    /// Hash the exact receipt evidence subject that an external timestamp
+    /// authority signs. This subject intentionally excludes the node signature
+    /// and final receipt hash to avoid circular evidence.
+    ///
+    /// # Errors
+    /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
+    pub fn hash(&self) -> Result<Hash256, AvcError> {
+        hash_structured(&AvcReceiptEvidenceSubjectPayload {
+            domain: AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN,
+            schema_version: AVC_SCHEMA_VERSION,
+            credential_id: &self.credential_id,
+            action_id: &self.action_id,
+            action_commitment_hash: &self.action_commitment_hash,
+            action_descriptor_hash: &self.action_descriptor_hash,
+            previous_receipt_hash: self.previous_receipt_hash.as_ref(),
+        })
+        .map_err(AvcError::from)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvcReceiptExternalTimestampProof {
+    pub authority_did: Did,
+    pub subject_hash: Hash256,
+    pub issued_at: Timestamp,
+    pub signature: Signature,
+}
+
+#[derive(Serialize)]
+struct AvcReceiptExternalTimestampSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    authority_did: &'a Did,
+    subject_hash: &'a Hash256,
+    issued_at: &'a Timestamp,
+}
+
+impl AvcReceiptExternalTimestampProof {
+    #[must_use]
+    pub fn unsigned(authority_did: Did, subject_hash: Hash256, issued_at: Timestamp) -> Self {
+        Self {
+            authority_did,
+            subject_hash,
+            issued_at,
+            signature: Signature::empty(),
+        }
+    }
+
+    /// Build and sign an external timestamp proof.
+    ///
+    /// # Errors
+    /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
+    pub fn signed<F>(
+        authority_did: Did,
+        subject_hash: Hash256,
+        issued_at: Timestamp,
+        sign: F,
+    ) -> Result<Self, AvcError>
+    where
+        F: FnOnce(&[u8]) -> Signature,
+    {
+        let mut proof = Self::unsigned(authority_did, subject_hash, issued_at);
+        let payload = proof.signing_payload()?;
+        proof.signature = sign(&payload);
+        Ok(proof)
+    }
+
+    /// Return the canonical payload signed by the external timestamp
+    /// authority.
+    ///
+    /// # Errors
+    /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
+    pub fn signing_payload(&self) -> Result<Vec<u8>, AvcError> {
+        let payload = AvcReceiptExternalTimestampSigningPayload {
+            domain: AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
+            schema_version: AVC_SCHEMA_VERSION,
+            authority_did: &self.authority_did,
+            subject_hash: &self.subject_hash,
+            issued_at: &self.issued_at,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&payload, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Verify the external timestamp authority signature.
+    ///
+    /// # Errors
+    /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
+    pub fn verify_signature(&self, public_key: &PublicKey) -> Result<bool, AvcError> {
+        if self.signature.is_empty() {
+            return Ok(false);
+        }
+        Ok(crypto::verify(
+            &self.signing_payload()?,
+            &self.signature,
+            public_key,
+        ))
+    }
 }
 
 #[derive(Serialize)]
@@ -91,8 +232,11 @@ struct ExtendedReceiptSigningPayload<'a> {
     credential_id: &'a Hash256,
     action_id: Option<&'a Hash256>,
     action_commitment_hash: Option<&'a Hash256>,
+    action_descriptor: Option<&'a AvcActionDescriptor>,
+    action_descriptor_hash: Option<&'a Hash256>,
     previous_receipt_hash: Option<&'a Hash256>,
     timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+    external_timestamp_proof: Option<&'a AvcReceiptExternalTimestampProof>,
     validator_did: &'a Did,
     decision: &'a AvcDecision,
     reason_codes: &'a [AvcReasonCode],
@@ -104,8 +248,11 @@ impl AvcTrustReceipt {
     #[must_use]
     pub fn has_extended_evidence(&self) -> bool {
         self.action_commitment_hash.is_some()
+            || self.action_descriptor.is_some()
+            || self.action_descriptor_hash.is_some()
             || self.previous_receipt_hash.is_some()
             || self.timestamp_provenance.is_some()
+            || self.external_timestamp_proof.is_some()
     }
 
     /// Compute the canonical signing payload bytes for this receipt.
@@ -121,8 +268,11 @@ impl AvcTrustReceipt {
                 credential_id: &self.credential_id,
                 action_id: self.action_id.as_ref(),
                 action_commitment_hash: self.action_commitment_hash.as_ref(),
+                action_descriptor: self.action_descriptor.as_ref(),
+                action_descriptor_hash: self.action_descriptor_hash.as_ref(),
                 previous_receipt_hash: self.previous_receipt_hash.as_ref(),
                 timestamp_provenance: self.timestamp_provenance.as_ref(),
+                external_timestamp_proof: self.external_timestamp_proof.as_ref(),
                 validator_did: &self.validator_did,
                 decision: &self.decision,
                 reason_codes: &self.reason_codes,
@@ -214,6 +364,11 @@ where
     F: FnOnce(&[u8]) -> Signature,
 {
     let validation_hash = hash_structured(validation).map_err(AvcError::from)?;
+    let action_descriptor_hash = evidence
+        .action_descriptor
+        .as_ref()
+        .map(avc_action_descriptor_hash)
+        .transpose()?;
 
     // Build the receipt with an empty signature first so we can compute
     // its content-addressed ID over the canonical signing payload.
@@ -223,8 +378,11 @@ where
         credential_id: validation.credential_id,
         action_id,
         action_commitment_hash: evidence.action_commitment_hash,
+        action_descriptor: evidence.action_descriptor,
+        action_descriptor_hash,
         previous_receipt_hash: evidence.previous_receipt_hash,
         timestamp_provenance: evidence.timestamp_provenance,
+        external_timestamp_proof: evidence.external_timestamp_proof,
         validator_did,
         decision: validation.decision,
         reason_codes: validation.reason_codes.clone(),
@@ -250,7 +408,10 @@ mod tests {
             test_support::{baseline_draft, did, ts},
         },
         registry::AvcRegistryWrite,
-        validation::{AvcDecision, AvcReasonCode, AvcValidationRequest, validate_avc},
+        validation::{
+            AvcActionDescriptor, AvcActionRequest, AvcDecision, AvcReasonCode,
+            AvcValidationRequest, avc_action_descriptor_hash, validate_avc,
+        },
     };
 
     fn fixed_signature() -> Signature {
@@ -276,6 +437,34 @@ mod tests {
         };
         let result = validate_avc(&request, &registry).unwrap();
         (result, id)
+    }
+
+    fn sample_action_descriptor() -> AvcActionDescriptor {
+        let action = AvcActionRequest {
+            action_id: Hash256::from_bytes([0x42; 32]),
+            actor_did: did("agent"),
+            requested_permission: exo_authority::permission::Permission::Read,
+            tool: Some("records.search".into()),
+            target_did: Some(did("target")),
+            data_class: None,
+            estimated_budget_minor_units: Some(125),
+            estimated_risk_bp: Some(25),
+            human_approval: None,
+            requires_human_approval: false,
+            action_name: Some("records.search.case".into()),
+        };
+        AvcActionDescriptor::from_action(&action)
+    }
+
+    fn external_timestamp_proof(subject_hash: Hash256) -> AvcReceiptExternalTimestampProof {
+        let authority = fresh_issuer();
+        AvcReceiptExternalTimestampProof::signed(
+            did("timestamp-authority"),
+            subject_hash,
+            ts(2_500),
+            |bytes| authority.sign(bytes),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -461,8 +650,10 @@ mod tests {
             Some(action_id),
             AvcTrustReceiptEvidence {
                 action_commitment_hash: Some(Hash256::from_bytes([0xA1; 32])),
+                action_descriptor: None,
                 previous_receipt_hash: None,
                 timestamp_provenance: Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
+                external_timestamp_proof: None,
             },
             did("validator"),
             ts(2_000),
@@ -477,5 +668,101 @@ mod tests {
         );
         assert_ne!(legacy.receipt_id, extended.receipt_id);
         assert!(extended.verify_id().unwrap());
+    }
+
+    #[test]
+    fn extended_receipt_embeds_signed_action_descriptor_and_external_timestamp_proof() {
+        let (validation, _id) = sample_validation();
+        let action_descriptor = sample_action_descriptor();
+        let action_descriptor_hash = avc_action_descriptor_hash(&action_descriptor).unwrap();
+        let evidence_subject = AvcReceiptEvidenceSubject {
+            credential_id: validation.credential_id,
+            action_id: action_descriptor.action_id,
+            action_commitment_hash: Hash256::from_bytes([0xA1; 32]),
+            action_descriptor_hash,
+            previous_receipt_hash: None,
+        };
+        let subject_hash = evidence_subject.hash().unwrap();
+        let external_timestamp_proof = external_timestamp_proof(subject_hash);
+        assert!(
+            external_timestamp_proof
+                .verify_signature(&fresh_issuer().public)
+                .unwrap()
+        );
+
+        let receipt = create_trust_receipt_with_evidence(
+            &validation,
+            Some(action_descriptor.action_id),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(evidence_subject.action_commitment_hash),
+                action_descriptor: Some(action_descriptor.clone()),
+                previous_receipt_hash: None,
+                timestamp_provenance: Some(
+                    AvcReceiptTimestampProvenance::ExternalTimestampAuthority,
+                ),
+                external_timestamp_proof: Some(external_timestamp_proof.clone()),
+            },
+            did("validator"),
+            external_timestamp_proof.issued_at,
+            |_| fixed_signature(),
+        )
+        .unwrap();
+
+        assert_eq!(receipt.action_descriptor, Some(action_descriptor));
+        assert_eq!(receipt.action_descriptor_hash, Some(action_descriptor_hash));
+        assert_eq!(
+            receipt.timestamp_provenance,
+            Some(AvcReceiptTimestampProvenance::ExternalTimestampAuthority)
+        );
+        assert_eq!(
+            receipt.external_timestamp_proof,
+            Some(external_timestamp_proof)
+        );
+        assert!(receipt.has_extended_evidence());
+        assert!(receipt.verify_id().unwrap());
+    }
+
+    #[test]
+    fn changing_embedded_action_descriptor_changes_receipt_identity() {
+        let (validation, _id) = sample_validation();
+        let mut action_descriptor = sample_action_descriptor();
+        let baseline = create_trust_receipt_with_evidence(
+            &validation,
+            Some(action_descriptor.action_id),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(Hash256::from_bytes([0xA1; 32])),
+                action_descriptor: Some(action_descriptor.clone()),
+                previous_receipt_hash: None,
+                timestamp_provenance: Some(
+                    AvcReceiptTimestampProvenance::ExternalTimestampAuthority,
+                ),
+                external_timestamp_proof: None,
+            },
+            did("validator"),
+            ts(2_500),
+            |_| fixed_signature(),
+        )
+        .unwrap();
+
+        action_descriptor.action_name = Some("records.search.changed".into());
+        let changed = create_trust_receipt_with_evidence(
+            &validation,
+            Some(action_descriptor.action_id),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(Hash256::from_bytes([0xA1; 32])),
+                action_descriptor: Some(action_descriptor),
+                previous_receipt_hash: None,
+                timestamp_provenance: Some(
+                    AvcReceiptTimestampProvenance::ExternalTimestampAuthority,
+                ),
+                external_timestamp_proof: None,
+            },
+            did("validator"),
+            ts(2_500),
+            |_| fixed_signature(),
+        )
+        .unwrap();
+
+        assert_ne!(baseline.receipt_id, changed.receipt_id);
     }
 }

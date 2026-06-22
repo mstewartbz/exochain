@@ -122,8 +122,10 @@ pub use credential::{
 pub use delegation::{delegate_avc, parent_id_of};
 pub use error::AvcError;
 pub use receipt::{
-    AVC_RECEIPT_SIGNING_DOMAIN, AvcReceiptTimestampProvenance, AvcTrustReceipt,
-    AvcTrustReceiptEvidence, create_trust_receipt, create_trust_receipt_with_evidence,
+    AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN, AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
+    AVC_RECEIPT_SIGNING_DOMAIN, AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProof,
+    AvcReceiptTimestampProvenance, AvcTrustReceipt, AvcTrustReceiptEvidence, create_trust_receipt,
+    create_trust_receipt_with_evidence,
 };
 pub use registry::{
     AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, InMemoryAvcRegistry,
@@ -132,9 +134,10 @@ pub use revocation::{
     AVC_REVOCATION_SIGNING_DOMAIN, AvcRevocation, AvcRevocationReason, revoke_avc,
 };
 pub use validation::{
-    AVC_ACTION_COMMITMENT_DOMAIN, AVC_ACTION_SIGNING_DOMAIN, AVC_HUMAN_APPROVAL_SIGNING_DOMAIN,
-    AvcActionRequest, AvcDecision, AvcHumanApproval, AvcReasonCode, AvcValidationRequest,
-    AvcValidationResult, avc_action_commitment_hash, avc_action_signature_payload,
+    AVC_ACTION_COMMITMENT_DOMAIN, AVC_ACTION_DESCRIPTOR_DOMAIN, AVC_ACTION_SIGNING_DOMAIN,
+    AVC_HUMAN_APPROVAL_SIGNING_DOMAIN, AvcActionDescriptor, AvcActionRequest, AvcDecision,
+    AvcHumanApproval, AvcReasonCode, AvcValidationRequest, AvcValidationResult,
+    avc_action_commitment_hash, avc_action_descriptor_hash, avc_action_signature_payload,
     human_approval_signature_payload, validate_avc,
 };
 
@@ -142,9 +145,12 @@ pub use validation::{
 /// and external auditors who need to ensure no domain collisions.
 pub const AVC_SIGNING_DOMAINS: &[&str] = &[
     AVC_ACTION_COMMITMENT_DOMAIN,
+    AVC_ACTION_DESCRIPTOR_DOMAIN,
     AVC_ACTION_SIGNING_DOMAIN,
     AVC_CREDENTIAL_SIGNING_DOMAIN,
     AVC_HUMAN_APPROVAL_SIGNING_DOMAIN,
+    AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN,
+    AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
     AVC_RECEIPT_SIGNING_DOMAIN,
     AVC_REVOCATION_SIGNING_DOMAIN,
 ];
