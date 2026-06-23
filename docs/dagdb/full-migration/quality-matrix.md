@@ -82,11 +82,11 @@ commit: `6b33a1b7`
 
 surface: Node DAG store
 classification: EXOCHAIN core
-red_command: `cargo test -p exo-node dagdb_node_store_source_guard`
-red_failure: not-claimed
-green_command: `cargo test -p exo-node --features dagdb-gateway-proxy dagdb`
-artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs`
-commit: not-claimed
+red_command: `cargo test -p exo-dag-db-postgres --features postgres node_store_tables_are_dagdb_schema_contract` and `cargo test -p exo-node node_production_startup_uses_dagdb_store_not_sqlite_dag_db`
+red_failure: `DAG DB schema must include node-store table dagdb_node_dag_nodes`; `start_node must not open the legacy SQLite dag.db store in production`
+green_command: `cargo test -p exo-dag-db-postgres --features postgres --test migration_contract`; `cargo test -p exo-node node_production_startup_uses_dagdb_store_not_sqlite_dag_db`; `cargo test -p exo-node store::tests`; `cargo clippy -p exo-node --all-targets -- -D warnings`; `cargo clippy -p exo-dag-db-postgres --features postgres --all-targets -- -D warnings`
+artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000002_create_dagdb_node_store_schema.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`
+commit: qm04-node-dag-store-commit
 
 ### QM-05
 

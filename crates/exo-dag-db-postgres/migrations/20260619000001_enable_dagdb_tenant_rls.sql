@@ -49,7 +49,18 @@ BEGIN
         'dagdb_context_packet_records',
         'dagdb_lifecycle_actions',
         'dagdb_route_invalidation_events',
-        'dagdb_continuation_records'
+        'dagdb_continuation_records',
+        'dagdb_node_dag_nodes',
+        'dagdb_node_dag_parents',
+        'dagdb_node_committed',
+        'dagdb_node_consensus_meta',
+        'dagdb_node_consensus_votes',
+        'dagdb_node_commit_certificates',
+        'dagdb_node_validators',
+        'dagdb_node_trust_receipts',
+        'dagdb_node_economy_objects',
+        'dagdb_node_economy_anchors',
+        'dagdb_node_economy_meta'
     ] LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tenant_table);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tenant_table);

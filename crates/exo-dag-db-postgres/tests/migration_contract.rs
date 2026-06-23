@@ -40,6 +40,17 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_lifecycle_rollbacks",
     "dagdb_memory_edges",
     "dagdb_memory_objects",
+    "dagdb_node_commit_certificates",
+    "dagdb_node_committed",
+    "dagdb_node_consensus_meta",
+    "dagdb_node_consensus_votes",
+    "dagdb_node_dag_nodes",
+    "dagdb_node_dag_parents",
+    "dagdb_node_economy_anchors",
+    "dagdb_node_economy_meta",
+    "dagdb_node_economy_objects",
+    "dagdb_node_trust_receipts",
+    "dagdb_node_validators",
     "dagdb_receipts",
     "dagdb_root_bundle_receipts",
     "dagdb_route_invalidation_events",
@@ -75,6 +86,17 @@ const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
     "dagdb_lifecycle_actions",
     "dagdb_memory_edges",
     "dagdb_memory_objects",
+    "dagdb_node_commit_certificates",
+    "dagdb_node_committed",
+    "dagdb_node_consensus_meta",
+    "dagdb_node_consensus_votes",
+    "dagdb_node_dag_nodes",
+    "dagdb_node_dag_parents",
+    "dagdb_node_economy_anchors",
+    "dagdb_node_economy_meta",
+    "dagdb_node_economy_objects",
+    "dagdb_node_trust_receipts",
+    "dagdb_node_validators",
     "dagdb_receipts",
     "dagdb_route_invalidation_events",
     "dagdb_route_receipts",
@@ -331,6 +353,58 @@ fn root_bundle_receipts_are_global_immutable_schema_contract() {
     assert!(lower.contains("prevent_dagdb_root_bundle_receipt_mutation"));
     assert!(lower.contains("root_bundle_receipts_are_immutable"));
     assert!(!lower.contains("dagdb_root_bundle_receipts (\n    tenant_id"));
+}
+
+#[test]
+fn node_store_tables_are_dagdb_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    for table in [
+        "dagdb_node_dag_nodes",
+        "dagdb_node_dag_parents",
+        "dagdb_node_committed",
+        "dagdb_node_consensus_meta",
+        "dagdb_node_consensus_votes",
+        "dagdb_node_commit_certificates",
+        "dagdb_node_validators",
+        "dagdb_node_trust_receipts",
+        "dagdb_node_economy_objects",
+        "dagdb_node_economy_anchors",
+        "dagdb_node_economy_meta",
+    ] {
+        assert!(
+            lower.contains(&format!("create table if not exists {table}")),
+            "DAG DB schema must include node-store table {table}"
+        );
+    }
+    assert!(lower.contains("tenant_id text not null"));
+    assert!(lower.contains("namespace text not null"));
+    assert!(lower.contains("cbor_payload bytea not null"));
+    assert!(lower.contains("receipt_hash bytea not null"));
+    assert!(lower.contains("primary key (tenant_id, namespace, receipt_hash)"));
+    assert!(lower.contains("anchor_hash bytea not null"));
+    assert!(lower.contains("primary key (tenant_id, namespace, anchor_hash)"));
+    assert!(lower.contains("idx_dagdb_node_committed_height"));
+    assert!(lower.contains("idx_dagdb_node_trust_receipts_actor"));
+
+    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    for table in [
+        "dagdb_node_dag_nodes",
+        "dagdb_node_dag_parents",
+        "dagdb_node_committed",
+        "dagdb_node_consensus_meta",
+        "dagdb_node_consensus_votes",
+        "dagdb_node_commit_certificates",
+        "dagdb_node_validators",
+        "dagdb_node_trust_receipts",
+        "dagdb_node_economy_objects",
+        "dagdb_node_economy_anchors",
+        "dagdb_node_economy_meta",
+    ] {
+        assert!(
+            rls_lower.contains(&format!("'{table}'")),
+            "DAG DB tenant RLS migration must enumerate node-store table {table}"
+        );
+    }
 }
 
 #[tokio::test]

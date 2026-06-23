@@ -34,12 +34,12 @@ git rev-parse origin/main
 
 | Path | Classification | Current durable-state finding |
 |---|---|---|
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs` | EXOCHAIN core | Production start and status commands still open `SqliteDagStore` against `dag.db`. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs` | EXOCHAIN core | Owns the current SQLite node DAG schema. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs` | EXOCHAIN core | QM-04 moved production start and status commands to `DagDbNodeStore::open` with required `DATABASE_URL`, `EXO_DAGDB_TENANT_ID`, and `EXO_DAGDB_NAMESPACE`. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs` | EXOCHAIN core | QM-04 introduced a DAG DB-backed node store while retaining legacy SQLite construction only for direct test/dev compatibility. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs` | EXOCHAIN core | 0dentity remains process-memory only. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs` | Core runtime adapter | Gateway still owns public-schema production tables for DID documents, users, agents, decisions, audit, LiveSafe, layout, and feedback state. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs` | Core runtime adapter | DAG DB REST router currently mounts five live routes. The remaining documented routes are present as test-only handlers or DTO fixtures, not live production routes. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 33 traced table contracts exist. Missing production state families must be added here first. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 45 traced table contracts exist after QM-04 node-store schema migration. Missing production state families continue to be added here first. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs` | Core runtime adapter | SDK exposes the same five-route subset. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | MCP exposes four agent-facing DAG DB tools, not the full REST surface. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | Production CommandBase uses `better-sqlite3`, `the_team.db`, `task_forces.db`, many SQLite DDL blocks, and browser durable state. |
@@ -48,7 +48,48 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/web` | Adjacent surface | Council, feedback, layout templates, onboarding, and auth compatibility paths use `localStorage`. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica` | Adjacent surface | Trust adapter/runtime configuration code records evidence boundaries but is not a live DB owner on `origin/main`. |
 
-## Core Node SQLite
+## Core Node Store
+
+QM-04 implementation replaced the production node DAG store startup path:
+
+```text
+crates/exo-node/src/main.rs:513
+let gateway_pool = gateway_pool_from_env().await?;
+let (dagdb_tenant_id, dagdb_namespace) = dagdb_node_scope_from_env()?;
+let dag_store =
+    store::DagDbNodeStore::open(gateway_pool.clone(), dagdb_tenant_id, dagdb_namespace).await?;
+```
+
+`exochain status` now reads the same DAG DB-backed height:
+
+```text
+crates/exo-node/src/main.rs:1260
+let gateway_pool = gateway_pool_from_env().await?;
+let (dagdb_tenant_id, dagdb_namespace) = dagdb_node_scope_from_env()?;
+let dag_store =
+    store::DagDbNodeStore::open(gateway_pool, dagdb_tenant_id, dagdb_namespace).await?;
+```
+
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs:132`
+through `:175` is now a compatibility handle with two backends:
+
+```text
+SqliteDagStore { backend: NodeStoreBackend }
+NodeStoreBackend::DagDb(PostgresDagNodeStore)
+DagDbNodeStore::open(pool, tenant_id, namespace)
+```
+
+The DAG DB backend persists DAG nodes, parents, committed heights, consensus
+round/votes, commit certificates, validators, trust receipts, economy objects,
+economy anchors, and economy metadata in tenant-scoped Postgres tables. Each
+operation binds `exo.tenant_id` in a transaction before reading or writing.
+
+Legacy SQLite remains directly constructible through
+`SqliteDagStore::open(data_dir)` at
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs:1087`
+through `:1098`, but production `start_node` and `status` no longer call it.
+
+### Baseline Finding Before QM-04
 
 `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs:495`
 through `:501` opens the local DAG store and then opens the 0dentity store:
@@ -122,11 +163,11 @@ pool initialization. `:205` through `:226` binds `exo.tenant_id` for RLS-protect
 tenant transactions. `:249` through `:290` provisions the schema through the
 canonical ledgered migration runner.
 
-Fresh-base inventory:
+Current inventory:
 
-- 15 SQL migration files exist under
+- 16 SQL migration files exist under
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations`.
-- Those migrations contain 34 `CREATE TABLE IF NOT EXISTS` table contracts.
+- Those migrations contain 45 `CREATE TABLE IF NOT EXISTS` table contracts.
 - Tenant RLS is centralized in
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`.
 
@@ -138,6 +179,17 @@ dagdb_root_bundle_receipts
 dagdb_subject_receipt_heads
 dagdb_memory_objects
 dagdb_memory_edges
+dagdb_node_commit_certificates
+dagdb_node_committed
+dagdb_node_consensus_meta
+dagdb_node_consensus_votes
+dagdb_node_dag_nodes
+dagdb_node_dag_parents
+dagdb_node_economy_anchors
+dagdb_node_economy_meta
+dagdb_node_economy_objects
+dagdb_node_trust_receipts
+dagdb_node_validators
 dagdb_catalog_entries
 dagdb_route_receipts
 dagdb_context_packets
