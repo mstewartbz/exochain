@@ -371,6 +371,32 @@ responses. They call route-specific persistence and lookup paths:
 Live Postgres write/read proof is still gated by QM-19 and requires
 `EXO_DAGDB_TEST_DATABASE_URL`.
 
+## DAG DB Finality Boundary
+
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
+now keeps write authorization separate from independent finality approval for
+production DAG DB import and export routes:
+
+- import requests must carry `x-exo-import-approval-signature`,
+  `x-exo-import-approval-did`, and `x-exo-import-approval-timestamp`;
+- export requests must carry `x-exo-export-approval-signature`,
+  `x-exo-export-approval-did`, and `x-exo-export-approval-timestamp`;
+- the approval DID is loaded into the gatekeeper service and must be different
+  from the requesting DID;
+- finality signatures bind a deterministic operation-finality payload derived
+  from tenant, namespace, requester, idempotency key, DB set version, request
+  hash/source hash, authorization payload hash, finality authority DID, and
+  approval timestamp;
+- missing finality headers or self-approval fail closed before import/export
+  persistence;
+- approved council decision persistence rejects direct self-approval when
+  `subject_id` is the same DID as `approver_did`.
+
+Route, context-packet, and writeback finality already used independent
+approval-authority checks. QM-08 extends that same boundary to import/export
+and council-decision persistence. Live signed Postgres proof remains covered by
+QM-19.
+
 `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs:64`
 through `:99` exposes SDK helpers for the same five routes.
 

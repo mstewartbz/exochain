@@ -165,6 +165,18 @@ const IMPORT_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.import";
 #[cfg(feature = "production-db")]
 const EXPORT_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.export";
 #[cfg(feature = "production-db")]
+const IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-import-approval-signature";
+#[cfg(feature = "production-db")]
+const IMPORT_FINALITY_APPROVAL_DID_HEADER: &str = "x-exo-import-approval-did";
+#[cfg(feature = "production-db")]
+const IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-import-approval-timestamp";
+#[cfg(feature = "production-db")]
+const EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-export-approval-signature";
+#[cfg(feature = "production-db")]
+const EXPORT_FINALITY_APPROVAL_DID_HEADER: &str = "x-exo-export-approval-did";
+#[cfg(feature = "production-db")]
+const EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-export-approval-timestamp";
+#[cfg(feature = "production-db")]
 const RESERVED_IDEMPOTENCY_BODY_STATUS: &str = "reserved";
 #[cfg(feature = "production-db")]
 const STORED_IDEMPOTENCY_BODY_STATUS: &str = "stored";
@@ -1885,13 +1897,42 @@ async fn import_handler(
             Ok(GatewayIdempotencyDecision::Failed(response)) => return *response,
             Err(response) => return *response,
         };
+        let finality_approval = match require_operation_finality_approval(
+            headers,
+            "import",
+            IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            IMPORT_FINALITY_APPROVAL_DID_HEADER,
+            IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+        ) {
+            Ok(approval) => approval,
+            Err(error) => {
+                if replayed_response.is_none() {
+                    if let Err(cleanup_error) =
+                        cleanup_gateway_idempotency_reservation(pool, &request, request_hash).await
+                    {
+                        return *cleanup_error;
+                    }
+                }
+                return handler_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    IMPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
+                    error,
+                )
+                .await;
+            }
+        };
         let service = match ctx
             .gatekeeper_service(
                 pool,
                 &request.requester_did,
                 &request.tenant_id,
                 &request.namespace,
-                &[],
+                &[&finality_approval.authority_did],
             )
             .await
         {
@@ -1970,6 +2011,40 @@ async fn import_handler(
                 .await;
             }
         };
+        if let Err(error) = validate_import_finality_approval(
+            &service,
+            &request,
+            authorization_payload_hash,
+            &finality_approval,
+        ) {
+            if replayed_response.is_none() {
+                if let Err(cleanup_error) =
+                    cleanup_gateway_idempotency_reservation(pool, &request, request_hash).await
+                {
+                    return *cleanup_error;
+                }
+            }
+            warn!(
+                route = "dagdb.import",
+                status = error.status().as_u16(),
+                error_code = %error.error_code(),
+                gatekeeper_error_class = %error.class(),
+                tenant_id = %request.tenant_id,
+                namespace = %request.namespace,
+                "DAG DB import finality gate failed closed"
+            );
+            return handler_operational_error_response(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                IMPORT_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                &request.requester_did,
+                request_hash,
+                error,
+            )
+            .await;
+        }
         if let Some(response) = replayed_response {
             return response.response;
         }
@@ -2103,13 +2178,42 @@ async fn export_handler(
             Ok(GatewayIdempotencyDecision::Failed(response)) => return *response,
             Err(response) => return *response,
         };
+        let finality_approval = match require_operation_finality_approval(
+            headers,
+            "export",
+            EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            EXPORT_FINALITY_APPROVAL_DID_HEADER,
+            EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+        ) {
+            Ok(approval) => approval,
+            Err(error) => {
+                if replayed_response.is_none() {
+                    if let Err(cleanup_error) =
+                        cleanup_export_idempotency_reservation(pool, &request, request_hash).await
+                    {
+                        return *cleanup_error;
+                    }
+                }
+                return handler_operational_error_response(
+                    pool,
+                    &request.tenant_id,
+                    &request.namespace,
+                    EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                    &request.idempotency_key,
+                    &request.requester_did,
+                    request_hash,
+                    error,
+                )
+                .await;
+            }
+        };
         let service = match ctx
             .gatekeeper_service(
                 pool,
                 &request.requester_did,
                 &request.tenant_id,
                 &request.namespace,
-                &[],
+                &[&finality_approval.authority_did],
             )
             .await
         {
@@ -2189,6 +2293,40 @@ async fn export_handler(
                 .await;
             }
         };
+        if let Err(error) = validate_export_finality_approval(
+            &service,
+            &request,
+            authorization_payload_hash,
+            &finality_approval,
+        ) {
+            if replayed_response.is_none() {
+                if let Err(cleanup_error) =
+                    cleanup_export_idempotency_reservation(pool, &request, request_hash).await
+                {
+                    return *cleanup_error;
+                }
+            }
+            warn!(
+                route = "dagdb.export",
+                status = error.status().as_u16(),
+                error_code = %error.error_code(),
+                gatekeeper_error_class = %error.class(),
+                tenant_id = %request.tenant_id,
+                namespace = %request.namespace,
+                "DAG DB export finality gate failed closed"
+            );
+            return handler_operational_error_response(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                EXPORT_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                &request.requester_did,
+                request_hash,
+                error,
+            )
+            .await;
+        }
         if let Some(response) = replayed_response {
             return response.response;
         }
@@ -2874,6 +3012,188 @@ async fn gated_export_authorization(
         signature,
     )?;
     Ok(authorization_payload_hash)
+}
+
+#[cfg(feature = "production-db")]
+struct OperationFinalityApproval {
+    signature: String,
+    authority_did: String,
+    timestamp: String,
+}
+
+#[cfg(feature = "production-db")]
+fn require_operation_finality_approval(
+    headers: &HeaderMap,
+    operation: &'static str,
+    signature_header: &'static str,
+    authority_header: &'static str,
+    timestamp_header: &'static str,
+) -> Result<OperationFinalityApproval, DagDbHandlerError> {
+    let signature = required_nonempty_header(headers, signature_header, operation)?;
+    let authority_did = required_nonempty_header(headers, authority_header, operation)?;
+    let timestamp = required_nonempty_header(headers, timestamp_header, operation)?;
+    Ok(OperationFinalityApproval {
+        signature,
+        authority_did,
+        timestamp,
+    })
+}
+
+#[cfg(feature = "production-db")]
+fn required_nonempty_header(
+    headers: &HeaderMap,
+    header_name: &'static str,
+    operation: &'static str,
+) -> Result<String, DagDbHandlerError> {
+    match header_text(headers, header_name) {
+        Some(value) if !value.trim().is_empty() => Ok(value.to_owned()),
+        _ => Err(DagDbHandlerError::finality_approval_required(format!(
+            "DAG DB {operation} finality requires {header_name} header"
+        ))),
+    }
+}
+
+#[cfg(feature = "production-db")]
+fn validate_import_finality_approval(
+    service: &DagDbGatekeeperService,
+    request: &DagDbImportRequest,
+    authorization_payload_hash: Hash256,
+    approval: &OperationFinalityApproval,
+) -> Result<(), DagDbHandlerError> {
+    let finality_payload_hash = import_finality_payload_hash(
+        request,
+        authorization_payload_hash,
+        &approval.authority_did,
+        &approval.timestamp,
+    )?;
+    validate_gateway_approval_payload(
+        service,
+        &request.requester_did,
+        &approval.authority_did,
+        finality_payload_hash.as_bytes(),
+        &approval.signature,
+    )
+}
+
+#[cfg(feature = "production-db")]
+fn validate_export_finality_approval(
+    service: &DagDbGatekeeperService,
+    request: &DagDbExportRequest,
+    authorization_payload_hash: Hash256,
+    approval: &OperationFinalityApproval,
+) -> Result<(), DagDbHandlerError> {
+    let finality_payload_hash = export_finality_payload_hash(
+        request,
+        authorization_payload_hash,
+        &approval.authority_did,
+        &approval.timestamp,
+    )?;
+    validate_gateway_approval_payload(
+        service,
+        &request.requester_did,
+        &approval.authority_did,
+        finality_payload_hash.as_bytes(),
+        &approval.signature,
+    )
+}
+
+#[cfg(feature = "production-db")]
+fn import_finality_payload_hash(
+    request: &DagDbImportRequest,
+    authorization_payload_hash: Hash256,
+    approval_authority_did: &str,
+    approval_timestamp: &str,
+) -> Result<Hash256, DagDbHandlerError> {
+    validate_external_finality_authority(&request.requester_did, approval_authority_did)?;
+    operation_finality_payload_hash(
+        "dagdb.gateway.import.external_finality",
+        &(
+            &request.tenant_id,
+            &request.namespace,
+            &request.requester_did,
+            &request.idempotency_key,
+            &request.db_set_version,
+            &request.source_hash,
+            authorization_payload_hash.to_string(),
+            approval_authority_did,
+            approval_timestamp,
+        ),
+    )
+}
+
+#[cfg(feature = "production-db")]
+fn export_finality_payload_hash(
+    request: &DagDbExportRequest,
+    authorization_payload_hash: Hash256,
+    approval_authority_did: &str,
+    approval_timestamp: &str,
+) -> Result<Hash256, DagDbHandlerError> {
+    validate_external_finality_authority(&request.requester_did, approval_authority_did)?;
+    let request_body = request_json(request).map_err(|response| {
+        DagDbHandlerError::from_response(*d5_record_rejected_response(
+            "export finality approval",
+            format!(
+                "export request could not be canonicalized: {:?}",
+                response.status()
+            ),
+        ))
+    })?;
+    let request_hash = request_hash(
+        EXPORT_ROUTE_IDEMPOTENCY_NAME,
+        &request.tenant_id,
+        &request.namespace,
+        &request_body,
+    )
+    .map_err(|response| {
+        DagDbHandlerError::from_response(*d5_record_rejected_response(
+            "export finality approval",
+            format!(
+                "export request hash could not be computed: {:?}",
+                response.status()
+            ),
+        ))
+    })?;
+    operation_finality_payload_hash(
+        "dagdb.gateway.export.external_finality",
+        &(
+            &request.tenant_id,
+            &request.namespace,
+            &request.requester_did,
+            &request.idempotency_key,
+            &request.db_set_version,
+            request_hash.to_string(),
+            authorization_payload_hash.to_string(),
+            approval_authority_did,
+            approval_timestamp,
+        ),
+    )
+}
+
+#[cfg(feature = "production-db")]
+fn operation_finality_payload_hash<T>(
+    domain: &str,
+    material: &T,
+) -> Result<Hash256, DagDbHandlerError>
+where
+    T: Serialize,
+{
+    let hash_hex = hash_hex(domain, material)
+        .map_err(|response| DagDbHandlerError::from_response(*response))?;
+    let hash_bytes = decode_canonical_approval_hash(&hash_hex)
+        .map_err(|response| DagDbHandlerError::from_response(*response))?;
+    Ok(Hash256::from_bytes(hash_bytes))
+}
+
+#[cfg(feature = "production-db")]
+fn validate_council_decision_finality(
+    request: &DagDbCouncilDecisionRequest,
+) -> Result<(), DagDbHandlerError> {
+    if request.decision_status == CouncilDecisionStatus::Approved
+        && request.subject_id == request.approver_did
+    {
+        return Err(DagDbHandlerError::external_finality_denied());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "production-db")]
@@ -4102,6 +4422,16 @@ impl DagDbHandlerError {
             error_code: "approval_denied",
             class: "approval",
             message: "DAG DB writeback finality approval was denied".to_owned(),
+            requires_council_review: true,
+        }
+    }
+
+    fn finality_approval_required(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error_code: "finality_approval_required",
+            class: "approval",
+            message,
             requires_council_review: true,
         }
     }
@@ -5557,6 +5887,8 @@ async fn persist_council_decision_response(
     pool: &sqlx::PgPool,
     request: DagDbCouncilDecisionRequest,
 ) -> Result<DagDbCouncilDecisionResponse, Box<Response>> {
+    validate_council_decision_finality(&request)
+        .map_err(|error| Box::new(error.into_response()))?;
     let notes = sanitize_optional_metadata(
         MetadataField::ValidationNotes,
         request.notes_text.as_deref(),
@@ -13138,6 +13470,43 @@ mod tests {
             .expect_err("export consent must not authorize import");
             assert_eq!(import_denied.status(), StatusCode::FORBIDDEN);
             assert_eq!(import_denied.error_code(), "consent_denied");
+        }
+
+        #[test]
+        fn dagdb_finality_requires_independent_authority() {
+            let request = import_request();
+            let payload_hash = Hash256::digest(b"import finality payload");
+            let self_approval = import_finality_payload_hash(
+                &request,
+                payload_hash,
+                &request.requester_did,
+                "2026-06-23T00:00:00Z",
+            )
+            .expect_err("import self-finality must be denied");
+            assert_eq!(self_approval.error_code(), "approval_denied");
+
+            let export = export_request();
+            let export_payload_hash = Hash256::digest(b"export finality payload");
+            let export_self_approval = export_finality_payload_hash(
+                &export,
+                export_payload_hash,
+                &export.requester_did,
+                "2026-06-23T00:00:00Z",
+            )
+            .expect_err("export self-finality must be denied");
+            assert_eq!(export_self_approval.error_code(), "approval_denied");
+
+            let council = DagDbCouncilDecisionRequest {
+                subject_id: "did:exo:council-self".to_owned(),
+                approver_did: "did:exo:council-self".to_owned(),
+                decision_status: CouncilDecisionStatus::Approved,
+                ..council_decision_request()
+            };
+            let council_self_approval = validate_council_decision_finality(&council).expect_err(
+                "approved council decision must require independent finality authority",
+            );
+            assert_eq!(council_self_approval.status(), StatusCode::FORBIDDEN);
+            assert_eq!(council_self_approval.error_code(), "approval_denied");
         }
 
         #[test]
