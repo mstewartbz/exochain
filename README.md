@@ -35,8 +35,8 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 455 | `find crates -name '*.rs'` |
-| Rust LOC | 355336 | `wc -l` |
-| Workspace tests | 5,974 listed | `cargo test --workspace -- --list` |
+| Rust LOC | 355557 | `wc -l` |
+| Workspace tests | 5,979 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
@@ -44,7 +44,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **5,974 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **5,979 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
@@ -113,9 +113,9 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 355187 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 355557 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 5,974 listed workspace tests
+         cryptographic proofs, 5,979 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
