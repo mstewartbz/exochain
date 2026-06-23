@@ -86,9 +86,18 @@ fn domain_for(name: &str) -> &'static str {
         "exochain_send_encrypted"
         | "exochain_receive_encrypted"
         | "exochain_configure_death_trigger" => "messaging",
-        "dagdb_get_context_packet" | "dagdb_submit_writeback" | "dagdb_import" | "dagdb_export" => {
-            "dagdb"
-        }
+        "dagdb_intake"
+        | "dagdb_route"
+        | "dagdb_get_context_packet"
+        | "dagdb_validate"
+        | "dagdb_submit_writeback"
+        | "dagdb_import"
+        | "dagdb_export"
+        | "dagdb_trust_check"
+        | "dagdb_council_decision"
+        | "dagdb_receipt_lookup"
+        | "dagdb_catalog_lookup"
+        | "dagdb_route_lookup" => "dagdb",
         _ => "unknown",
     }
 }

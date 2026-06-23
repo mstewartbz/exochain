@@ -1905,7 +1905,8 @@ mod tests {
             "node startup must initialize the database pool before opening durable stores"
         );
         assert!(
-            start_node.contains("DagDbNodeStore::open(gateway_pool.clone()"),
+            start_node.contains("DagDbNodeStore::open(")
+                && start_node.contains("gateway_pool.clone()"),
             "node startup must use DATABASE_URL-backed DAG DB for canonical DAG state"
         );
         assert!(

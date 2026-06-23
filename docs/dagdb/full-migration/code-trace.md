@@ -40,8 +40,10 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs` | Core runtime adapter | QM-06 splits gateway migrations from runtime serving: public migrations still run as rollback/history, but the returned production pool uses DAGDB-first `search_path` so gateway table contracts resolve in the `dagdb` schema. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs` | Core runtime adapter | QM-07 mounts all twelve documented REST routes; QM-10 wraps promoted write routes in DAG DB idempotency replay/conflict guards. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 69 traced table contracts exist after the QM-06 gateway-state migrations. Missing production state families continue to be added here first. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs` | Core runtime adapter | SDK exposes the same five-route subset. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | MCP exposes four agent-facing DAG DB tools, not the full REST surface. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs` | Core runtime adapter | QM-11 exposes typed spec helpers and HTTP client methods for all twelve DAG DB REST routes, including import/export finality headers and auth-only lookup methods. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | QM-11 exposes twelve MCP tools bound to canonical DAG DB DTO fixtures, with route-specific signature/finality carrier fields and fail-closed gateway proxy dispatch. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/mod.rs` | Core runtime adapter | QM-11 registers and dispatches all twelve DAG DB MCP tools through the production `ToolRegistry`. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/resources/tools_summary.rs` | Core runtime adapter | QM-11 categorizes all twelve DAG DB MCP tools as `dagdb` in the tool-summary resource. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | Production CommandBase uses `better-sqlite3`, `the_team.db`, `task_forces.db`, many SQLite DDL blocks, and browser durable state. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo` | Adjacent surface | Demo services create direct `pg.Pool` instances against `DATABASE_URL` and initialize demo-owned Postgres schemas. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/site` | Adjacent surface | Contact intake owns direct `CONTACT_DATABASE_URL` tables and rate-limit state. |
@@ -448,13 +450,46 @@ has an explicit route constant, calls `reserve_gateway_idempotency_key`, stores
 with `store_gateway_idempotency_response`, and routes cleanup through the shared
 reservation delete helper.
 
-`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs:64`
-through `:99` exposes SDK helpers for the same five routes.
+## DAG DB SDK and MCP Parity
 
-`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs:1`
-through `:39` documents four MCP tools:
-`dagdb_get_context_packet`, `dagdb_submit_writeback`, `dagdb_import`, and
-`dagdb_export`.
+QM-11 expands the typed SDK and MCP surfaces to match the twelve REST routes.
+`crates/exochain-sdk/src/dagdb.rs:65` through `:163` now exposes typed
+`DagDbClient` request specs for:
+
+```text
+intake
+route
+context_packet
+validate
+writeback
+dagdb_import
+dagdb_export
+trust_check
+council_decision
+receipt_lookup
+catalog_lookup
+route_lookup
+```
+
+`crates/exochain-sdk/src/dagdb.rs:989` through `:1351` exposes matching
+`DagDbHttpClient` methods. Mutating routes fail closed before HTTP when required
+gateway signatures are missing. Import and export additionally require
+independent finality approval signatures, DIDs, and timestamps before HTTP
+dispatch. Receipt, catalog, and route lookups are auth/tenant/namespace scoped
+GET requests and do not accept mutation signature carriers.
+
+`crates/exo-node/src/mcp/tools/dagdb.rs:84` through `:95` defines the twelve MCP
+tool names, `:1417` through `:1881` defines strict object schemas, and `:1924`
+through `:1988` executes each tool through the shared fail-closed gateway proxy.
+The schema helpers bind new write-route tools to canonical
+`exo-dag-db-api/fixtures/json/all_dto_fixtures.json` request fixtures. MCP strips
+signature carrier fields before DTO deserialization and forwards them only as
+gateway headers.
+
+`crates/exo-node/src/mcp/tools/mod.rs:97` through `:164` registers all twelve
+DAG DB tools in the production `ToolRegistry`, and `:260` through `:276`
+dispatches them. `crates/exo-node/src/mcp/resources/tools_summary.rs:89` through
+`:100` categorizes all twelve tools under `dagdb`.
 
 ## Root Bundle Preservation Boundary
 

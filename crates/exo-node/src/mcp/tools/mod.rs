@@ -145,11 +145,19 @@ impl ToolRegistry {
         self.register(messaging::send_encrypted_definition());
         self.register(messaging::receive_encrypted_definition());
         self.register(messaging::configure_death_trigger_definition());
-        // DAG DB tools (4)
+        // DAG DB tools (12)
+        self.register(dagdb::intake_definition());
+        self.register(dagdb::route_definition());
         self.register(dagdb::get_context_packet_definition());
+        self.register(dagdb::validate_definition());
         self.register(dagdb::submit_writeback_definition());
         self.register(dagdb::import_definition());
         self.register(dagdb::export_definition());
+        self.register(dagdb::trust_check_definition());
+        self.register(dagdb::council_decision_definition());
+        self.register(dagdb::receipt_lookup_definition());
+        self.register(dagdb::catalog_lookup_definition());
+        self.register(dagdb::route_lookup_definition());
     }
 
     /// Execute a tool by name with the given params and runtime context.
@@ -253,10 +261,18 @@ impl ToolRegistry {
                 Ok(messaging::execute_configure_death_trigger(params, context))
             }
             // DAG DB
+            "dagdb_intake" => Ok(dagdb::execute_intake(params, context)),
+            "dagdb_route" => Ok(dagdb::execute_route(params, context)),
             "dagdb_get_context_packet" => Ok(dagdb::execute_get_context_packet(params, context)),
+            "dagdb_validate" => Ok(dagdb::execute_validate(params, context)),
             "dagdb_submit_writeback" => Ok(dagdb::execute_submit_writeback(params, context)),
             "dagdb_import" => Ok(dagdb::execute_import(params, context)),
             "dagdb_export" => Ok(dagdb::execute_export(params, context)),
+            "dagdb_trust_check" => Ok(dagdb::execute_trust_check(params, context)),
+            "dagdb_council_decision" => Ok(dagdb::execute_council_decision(params, context)),
+            "dagdb_receipt_lookup" => Ok(dagdb::execute_receipt_lookup(params, context)),
+            "dagdb_catalog_lookup" => Ok(dagdb::execute_catalog_lookup(params, context)),
+            "dagdb_route_lookup" => Ok(dagdb::execute_route_lookup(params, context)),
             _ => Err(McpError::ToolNotFound(name.to_string())),
         }
     }
@@ -282,7 +298,11 @@ mod tests {
     fn registry_registers_and_lists() {
         let registry = ToolRegistry::default();
         let tools = registry.list();
-        assert_eq!(tools.len(), 44, "expected 3+5+4+5+4+4+4+4+4+3+4 = 44 tools");
+        assert_eq!(
+            tools.len(),
+            52,
+            "expected 3+5+4+5+4+4+4+4+4+3+12 = 52 tools"
+        );
     }
 
     #[test]
@@ -304,10 +324,18 @@ mod tests {
         assert!(registry.get("exochain_propose_bailment").is_some());
         assert!(registry.get("exochain_create_decision").is_some());
         assert!(registry.get("exochain_adjudicate_action").is_some());
+        assert!(registry.get("dagdb_intake").is_some());
+        assert!(registry.get("dagdb_route").is_some());
         assert!(registry.get("dagdb_get_context_packet").is_some());
+        assert!(registry.get("dagdb_validate").is_some());
         assert!(registry.get("dagdb_submit_writeback").is_some());
         assert!(registry.get("dagdb_import").is_some());
         assert!(registry.get("dagdb_export").is_some());
+        assert!(registry.get("dagdb_trust_check").is_some());
+        assert!(registry.get("dagdb_council_decision").is_some());
+        assert!(registry.get("dagdb_receipt_lookup").is_some());
+        assert!(registry.get("dagdb_catalog_lookup").is_some());
+        assert!(registry.get("dagdb_route_lookup").is_some());
     }
 
     #[test]

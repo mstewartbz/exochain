@@ -152,10 +152,10 @@ commit: `5d691fec`
 
 surface: SDK/MCP parity
 classification: Core runtime adapter
-red_command: `cargo test -p exochain-sdk --features http-client dagdb && cargo test -p exo-node --features dagdb-gateway-proxy dagdb`
-red_failure: not-claimed
-green_command: `cargo test -p exochain-sdk --features http-client dagdb && cargo test -p exo-node --features dagdb-gateway-proxy dagdb`
-artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs`
+red_command: `cargo test -p exochain-sdk dagdb_sdk_helpers_cover_every_route_without_shape_drift`; `cargo test -p exochain-sdk --features http-client import_export_require_independent_finality_signature_sets_before_http`; `cargo test -p exo-node mcp_dagdb_tool_surface_covers_full_rest_parity`
+red_failure: SDK helper parity RED failed for missing `DagDbClient` methods `intake`, `validate`, `trust_check`, `council_decision`, `receipt_lookup`, `catalog_lookup`, and `route_lookup`; HTTP RED failed for missing import/export finality header constructors and route-specific HTTP methods; MCP RED failed for missing constants, definitions, and executors for the full REST parity tool set.
+green_command: `cargo test -p exochain-sdk --features http-client dagdb && cargo test -p exo-node --features dagdb-gateway-proxy dagdb && cargo test -p exo-node --features dagdb-gateway-proxy registry_registers_and_lists && cargo test -p exo-node --features dagdb-gateway-proxy registry_get_existing && cargo clippy -p exochain-sdk --features http-client --all-targets -- -D warnings && cargo clippy -p exo-node --features dagdb-gateway-proxy --all-targets -- -D warnings && cargo fmt --all -- --check && cargo test -p exo-gateway quality_matrix_is_complete`
+artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/mod.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/resources/tools_summary.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/code-trace.md`
 commit: not-claimed
 
 ### QM-12

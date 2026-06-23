@@ -61,6 +61,11 @@ impl DagDbClient {
         }
     }
 
+    /// Build a `POST /api/v1/dag-db/intake` request spec.
+    pub fn intake(&self, request: DagDbIntakeRequest) -> DagDbRequestSpec<DagDbIntakeRequest> {
+        self.post("/intake", request)
+    }
+
     /// Build a `POST /api/v1/dag-db/route` request spec.
     pub fn route(&self, request: DagDbRouteRequest) -> DagDbRequestSpec<DagDbRouteRequest> {
         self.post("/route", request)
@@ -72,6 +77,14 @@ impl DagDbClient {
         request: DagDbContextPacketRequest,
     ) -> DagDbRequestSpec<DagDbContextPacketRequest> {
         self.post("/context-packet", request)
+    }
+
+    /// Build a `POST /api/v1/dag-db/validate` request spec.
+    pub fn validate(
+        &self,
+        request: DagDbValidateRequest,
+    ) -> DagDbRequestSpec<DagDbValidateRequest> {
+        self.post("/validate", request)
     }
 
     /// Build a `POST /api/v1/dag-db/writeback` request spec.
@@ -98,12 +111,90 @@ impl DagDbClient {
         self.post("/export", request)
     }
 
+    /// Build a `POST /api/v1/dag-db/trust-check` request spec.
+    pub fn trust_check(
+        &self,
+        request: DagDbTrustCheckRequest,
+    ) -> DagDbRequestSpec<DagDbTrustCheckRequest> {
+        self.post("/trust-check", request)
+    }
+
+    /// Build a `POST /api/v1/dag-db/council/decision` request spec.
+    pub fn council_decision(
+        &self,
+        request: DagDbCouncilDecisionRequest,
+    ) -> DagDbRequestSpec<DagDbCouncilDecisionRequest> {
+        self.post("/council/decision", request)
+    }
+
+    /// Build a `GET /api/v1/dag-db/receipts/:receipt_hash` request spec.
+    pub fn receipt_lookup(
+        &self,
+        request: DagDbReceiptLookupRequest,
+    ) -> DagDbRequestSpec<DagDbReceiptLookupRequest> {
+        let mut path = format!(
+            "{}/receipts/{}?tenant_id={}&namespace={}",
+            self.prefix, request.receipt_hash, request.tenant_id, request.namespace
+        );
+        append_bool_query(&mut path, "include_body", request.include_body);
+        self.get(path)
+    }
+
+    /// Build a `GET /api/v1/dag-db/catalog/:catalog_id` request spec.
+    pub fn catalog_lookup(
+        &self,
+        request: DagDbCatalogLookupRequest,
+    ) -> DagDbRequestSpec<DagDbCatalogLookupRequest> {
+        let mut path = format!(
+            "{}/catalog/{}?tenant_id={}&namespace={}",
+            self.prefix, request.catalog_id, request.tenant_id, request.namespace
+        );
+        append_bool_query(&mut path, "include_children", request.include_children);
+        append_bool_query(&mut path, "include_routes", request.include_routes);
+        self.get(path)
+    }
+
+    /// Build a `GET /api/v1/dag-db/routes/:route_id` request spec.
+    pub fn route_lookup(
+        &self,
+        request: DagDbRouteLookupRequest,
+    ) -> DagDbRequestSpec<DagDbRouteLookupRequest> {
+        let mut path = format!(
+            "{}/routes/{}?tenant_id={}&namespace={}",
+            self.prefix, request.route_id, request.tenant_id, request.namespace
+        );
+        append_bool_query(
+            &mut path,
+            "include_memory_refs",
+            request.include_memory_refs,
+        );
+        append_bool_query(&mut path, "include_validation", request.include_validation);
+        self.get(path)
+    }
+
     fn post<T>(&self, suffix: &str, request: T) -> DagDbRequestSpec<T> {
         DagDbRequestSpec {
             method: DagDbHttpMethod::Post,
             path: format!("{}{}", self.prefix, suffix),
             body: Some(request),
         }
+    }
+
+    fn get<T>(&self, path: String) -> DagDbRequestSpec<T> {
+        DagDbRequestSpec {
+            method: DagDbHttpMethod::Get,
+            path,
+            body: None,
+        }
+    }
+}
+
+fn append_bool_query(path: &mut String, name: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        path.push('&');
+        path.push_str(name);
+        path.push('=');
+        path.push_str(if value { "true" } else { "false" });
     }
 }
 
@@ -137,10 +228,14 @@ mod transport {
     use zeroize::Zeroize;
 
     use super::{
-        DagDbClient, DagDbContextPacketRequest, DagDbContextPacketResponse, DagDbErrorEnvelope,
-        DagDbExportRequest, DagDbExportResponse, DagDbHttpMethod, DagDbImportRequest,
-        DagDbImportResponse, DagDbRequestSpec, DagDbRouteRequest, DagDbRouteResponse,
-        DagDbWritebackRequest, DagDbWritebackResponse,
+        DagDbCatalogLookupRequest, DagDbCatalogLookupResponse, DagDbClient,
+        DagDbContextPacketRequest, DagDbContextPacketResponse, DagDbCouncilDecisionRequest,
+        DagDbCouncilDecisionResponse, DagDbErrorEnvelope, DagDbExportRequest, DagDbExportResponse,
+        DagDbHttpMethod, DagDbImportRequest, DagDbImportResponse, DagDbIntakeRequest,
+        DagDbIntakeResponse, DagDbReceiptLookupRequest, DagDbReceiptLookupResponse,
+        DagDbRequestSpec, DagDbRouteLookupRequest, DagDbRouteLookupResponse, DagDbRouteRequest,
+        DagDbRouteResponse, DagDbTrustCheckRequest, DagDbTrustCheckResponse, DagDbValidateRequest,
+        DagDbValidateResponse, DagDbWritebackRequest, DagDbWritebackResponse,
     };
 
     /// Gateway header carrying the requesting tenant id.
@@ -177,6 +272,18 @@ mod transport {
     const LIFECYCLE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-lifecycle-approval-timestamp";
     /// Gateway header carrying the external continuation approval timestamp.
     const CONTINUATION_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-continuation-approval-timestamp";
+    /// Gateway header carrying the signed import finality approval payload.
+    const IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-import-approval-signature";
+    /// Gateway header naming the external import finality authority DID.
+    const IMPORT_FINALITY_APPROVAL_DID_HEADER: &str = "x-exo-import-approval-did";
+    /// Gateway header carrying the external import finality approval timestamp.
+    const IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-import-approval-timestamp";
+    /// Gateway header carrying the signed export finality approval payload.
+    const EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-export-approval-signature";
+    /// Gateway header naming the external export finality authority DID.
+    const EXPORT_FINALITY_APPROVAL_DID_HEADER: &str = "x-exo-export-approval-did";
+    /// Gateway header carrying the external export finality approval timestamp.
+    const EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-export-approval-timestamp";
 
     /// Bearer token wrapper that never exposes its secret via [`fmt::Debug`].
     ///
@@ -279,6 +386,12 @@ mod transport {
         continuation_approval_did: Option<String>,
         lifecycle_approval_timestamp: Option<String>,
         continuation_approval_timestamp: Option<String>,
+        import_approval_signature: Option<String>,
+        import_approval_did: Option<String>,
+        import_approval_timestamp: Option<String>,
+        export_approval_signature: Option<String>,
+        export_approval_did: Option<String>,
+        export_approval_timestamp: Option<String>,
     }
 
     impl DagDbSignatureHeaders {
@@ -299,6 +412,12 @@ mod transport {
                 continuation_approval_did: None,
                 lifecycle_approval_timestamp: None,
                 continuation_approval_timestamp: None,
+                import_approval_signature: None,
+                import_approval_did: None,
+                import_approval_timestamp: None,
+                export_approval_signature: None,
+                export_approval_did: None,
+                export_approval_timestamp: None,
             }
         }
 
@@ -326,6 +445,12 @@ mod transport {
                 continuation_approval_did: None,
                 lifecycle_approval_timestamp: None,
                 continuation_approval_timestamp: None,
+                import_approval_signature: None,
+                import_approval_did: None,
+                import_approval_timestamp: None,
+                export_approval_signature: None,
+                export_approval_did: None,
+                export_approval_timestamp: None,
             }
         }
 
@@ -353,6 +478,12 @@ mod transport {
                 continuation_approval_did: None,
                 lifecycle_approval_timestamp: None,
                 continuation_approval_timestamp: None,
+                import_approval_signature: None,
+                import_approval_did: None,
+                import_approval_timestamp: None,
+                export_approval_signature: None,
+                export_approval_did: None,
+                export_approval_timestamp: None,
             }
         }
 
@@ -382,6 +513,76 @@ mod transport {
                 continuation_approval_did: Some(continuation_approval_did.into()),
                 lifecycle_approval_timestamp: Some(lifecycle_approval_timestamp.into()),
                 continuation_approval_timestamp: Some(continuation_approval_timestamp.into()),
+                import_approval_signature: None,
+                import_approval_did: None,
+                import_approval_timestamp: None,
+                export_approval_signature: None,
+                export_approval_did: None,
+                export_approval_timestamp: None,
+            }
+        }
+
+        /// Header set for import, which requires requester write signature and
+        /// independent import-finality authority material.
+        #[must_use]
+        pub fn dagdb_import(
+            write_signature: impl Into<String>,
+            approval_signature: impl Into<String>,
+            approval_authority_did: impl Into<String>,
+            approval_timestamp: impl Into<String>,
+        ) -> Self {
+            Self {
+                write_signature: write_signature.into(),
+                default_route_approval_signature: None,
+                default_route_approval_did: None,
+                default_route_approval_timestamp: None,
+                context_packet_approval_signature: None,
+                context_packet_approval_did: None,
+                context_packet_approval_timestamp: None,
+                lifecycle_signature: None,
+                continuation_signature: None,
+                lifecycle_approval_did: None,
+                continuation_approval_did: None,
+                lifecycle_approval_timestamp: None,
+                continuation_approval_timestamp: None,
+                import_approval_signature: Some(approval_signature.into()),
+                import_approval_did: Some(approval_authority_did.into()),
+                import_approval_timestamp: Some(approval_timestamp.into()),
+                export_approval_signature: None,
+                export_approval_did: None,
+                export_approval_timestamp: None,
+            }
+        }
+
+        /// Header set for export, which requires requester write signature and
+        /// independent export-finality authority material.
+        #[must_use]
+        pub fn dagdb_export(
+            write_signature: impl Into<String>,
+            approval_signature: impl Into<String>,
+            approval_authority_did: impl Into<String>,
+            approval_timestamp: impl Into<String>,
+        ) -> Self {
+            Self {
+                write_signature: write_signature.into(),
+                default_route_approval_signature: None,
+                default_route_approval_did: None,
+                default_route_approval_timestamp: None,
+                context_packet_approval_signature: None,
+                context_packet_approval_did: None,
+                context_packet_approval_timestamp: None,
+                lifecycle_signature: None,
+                continuation_signature: None,
+                lifecycle_approval_did: None,
+                continuation_approval_did: None,
+                lifecycle_approval_timestamp: None,
+                continuation_approval_timestamp: None,
+                import_approval_signature: None,
+                import_approval_did: None,
+                import_approval_timestamp: None,
+                export_approval_signature: Some(approval_signature.into()),
+                export_approval_did: Some(approval_authority_did.into()),
+                export_approval_timestamp: Some(approval_timestamp.into()),
             }
         }
 
@@ -462,6 +663,42 @@ mod transport {
                     signature_header_value(timestamp, CONTINUATION_APPROVAL_TIMESTAMP_HEADER)?,
                 );
             }
+            if let Some(signature) = self.import_approval_signature.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER),
+                    signature_header_value(signature, IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER)?,
+                );
+            }
+            if let Some(did) = self.import_approval_did.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(IMPORT_FINALITY_APPROVAL_DID_HEADER),
+                    signature_header_value(did, IMPORT_FINALITY_APPROVAL_DID_HEADER)?,
+                );
+            }
+            if let Some(timestamp) = self.import_approval_timestamp.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER),
+                    signature_header_value(timestamp, IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER)?,
+                );
+            }
+            if let Some(signature) = self.export_approval_signature.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER),
+                    signature_header_value(signature, EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER)?,
+                );
+            }
+            if let Some(did) = self.export_approval_did.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(EXPORT_FINALITY_APPROVAL_DID_HEADER),
+                    signature_header_value(did, EXPORT_FINALITY_APPROVAL_DID_HEADER)?,
+                );
+            }
+            if let Some(timestamp) = self.export_approval_timestamp.as_deref() {
+                headers.insert(
+                    HeaderName::from_static(EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER),
+                    signature_header_value(timestamp, EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER)?,
+                );
+            }
             Ok(())
         }
 
@@ -475,6 +712,7 @@ mod transport {
             )?;
 
             match requirement {
+                DagDbSignatureRequirement::None => Ok(()),
                 DagDbSignatureRequirement::WriteOnly => Ok(()),
                 DagDbSignatureRequirement::DefaultRoute => {
                     require_signature_material(
@@ -530,6 +768,34 @@ mod transport {
                         CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
                     )
                 }
+                DagDbSignatureRequirement::Import => {
+                    require_signature_material(
+                        self.import_approval_signature.as_deref(),
+                        IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.import_approval_did.as_deref(),
+                        IMPORT_FINALITY_APPROVAL_DID_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.import_approval_timestamp.as_deref(),
+                        IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+                    )
+                }
+                DagDbSignatureRequirement::Export => {
+                    require_signature_material(
+                        self.export_approval_signature.as_deref(),
+                        EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.export_approval_did.as_deref(),
+                        EXPORT_FINALITY_APPROVAL_DID_HEADER,
+                    )?;
+                    require_signature_material(
+                        self.export_approval_timestamp.as_deref(),
+                        EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+                    )
+                }
             }
         }
     }
@@ -540,12 +806,15 @@ mod transport {
         }
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum DagDbSignatureRequirement {
+        None,
         WriteOnly,
         DefaultRoute,
         ContextPacket,
         Writeback,
+        Import,
+        Export,
     }
 
     /// Governed error returned by the gateway for a non-2xx DAG DB response.
@@ -715,6 +984,42 @@ mod transport {
             }
         }
 
+        /// Fail closed for `POST /api/v1/dag-db/intake` without requester
+        /// write signature material.
+        pub async fn intake(
+            &self,
+            request: DagDbIntakeRequest,
+        ) -> Result<DagDbIntakeResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.intake(request),
+                "dagdb:intake",
+                exo_dag_db_api::DAGDB_INTAKE_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbIntakeResponse| r.schema_version.as_str(),
+                None,
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/intake` with requester write signature.
+        pub async fn intake_with_signatures(
+            &self,
+            request: DagDbIntakeRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbIntakeResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.intake(request),
+                "dagdb:intake",
+                exo_dag_db_api::DAGDB_INTAKE_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbIntakeResponse| r.schema_version.as_str(),
+                Some(signatures),
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
         /// Fail closed for `POST /api/v1/dag-db/route` without the required
         /// write and default-route approval signatures.
         pub async fn route(
@@ -789,6 +1094,42 @@ mod transport {
             .await
         }
 
+        /// Fail closed for `POST /api/v1/dag-db/validate` without requester
+        /// write signature material.
+        pub async fn validate(
+            &self,
+            request: DagDbValidateRequest,
+        ) -> Result<DagDbValidateResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.validate(request),
+                "dagdb:validate",
+                exo_dag_db_api::DAGDB_VALIDATE_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbValidateResponse| r.schema_version.as_str(),
+                None,
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/validate` with requester write signature.
+        pub async fn validate_with_signatures(
+            &self,
+            request: DagDbValidateRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbValidateResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.validate(request),
+                "dagdb:validate",
+                exo_dag_db_api::DAGDB_VALIDATE_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbValidateResponse| r.schema_version.as_str(),
+                Some(signatures),
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
         /// Fail closed for `POST /api/v1/dag-db/writeback` without the
         /// required writeback signature set.
         pub async fn writeback(
@@ -838,12 +1179,13 @@ mod transport {
                 exo_dag_db_api::DAGDB_IMPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbImportResponse| r.schema_version.as_str(),
                 None,
-                DagDbSignatureRequirement::WriteOnly,
+                DagDbSignatureRequirement::Import,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/import` with gateway write signature.
+        /// `POST /api/v1/dag-db/import` with gateway write signature and
+        /// independent import-finality approval headers.
         pub async fn dagdb_import_with_signatures(
             &self,
             request: DagDbImportRequest,
@@ -856,7 +1198,7 @@ mod transport {
                 exo_dag_db_api::DAGDB_IMPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbImportResponse| r.schema_version.as_str(),
                 Some(signatures),
-                DagDbSignatureRequirement::WriteOnly,
+                DagDbSignatureRequirement::Import,
             )
             .await
         }
@@ -874,12 +1216,13 @@ mod transport {
                 exo_dag_db_api::DAGDB_EXPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbExportResponse| r.schema_version.as_str(),
                 None,
-                DagDbSignatureRequirement::WriteOnly,
+                DagDbSignatureRequirement::Export,
             )
             .await
         }
 
-        /// `POST /api/v1/dag-db/export` with gateway write signature.
+        /// `POST /api/v1/dag-db/export` with gateway write signature and
+        /// independent export-finality approval headers.
         pub async fn dagdb_export_with_signatures(
             &self,
             request: DagDbExportRequest,
@@ -892,7 +1235,131 @@ mod transport {
                 exo_dag_db_api::DAGDB_EXPORT_RESPONSE_SCHEMA_VERSION,
                 |r: &DagDbExportResponse| r.schema_version.as_str(),
                 Some(signatures),
+                DagDbSignatureRequirement::Export,
+            )
+            .await
+        }
+
+        /// Fail closed for `POST /api/v1/dag-db/trust-check` without
+        /// requester write signature material.
+        pub async fn trust_check(
+            &self,
+            request: DagDbTrustCheckRequest,
+        ) -> Result<DagDbTrustCheckResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.trust_check(request),
+                "dagdb:trust_check",
+                exo_dag_db_api::DAGDB_TRUST_CHECK_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbTrustCheckResponse| r.schema_version.as_str(),
+                None,
                 DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/trust-check` with requester write signature.
+        pub async fn trust_check_with_signatures(
+            &self,
+            request: DagDbTrustCheckRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbTrustCheckResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.trust_check(request),
+                "dagdb:trust_check",
+                exo_dag_db_api::DAGDB_TRUST_CHECK_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbTrustCheckResponse| r.schema_version.as_str(),
+                Some(signatures),
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
+        /// Fail closed for `POST /api/v1/dag-db/council/decision` without
+        /// requester write signature material.
+        pub async fn council_decision(
+            &self,
+            request: DagDbCouncilDecisionRequest,
+        ) -> Result<DagDbCouncilDecisionResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.council_decision(request),
+                "dagdb:council_decision",
+                exo_dag_db_api::DAGDB_COUNCIL_DECISION_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbCouncilDecisionResponse| r.schema_version.as_str(),
+                None,
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
+        /// `POST /api/v1/dag-db/council/decision` with requester write
+        /// signature.
+        pub async fn council_decision_with_signatures(
+            &self,
+            request: DagDbCouncilDecisionRequest,
+            signatures: DagDbSignatureHeaders,
+        ) -> Result<DagDbCouncilDecisionResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.council_decision(request),
+                "dagdb:council_decision",
+                exo_dag_db_api::DAGDB_COUNCIL_DECISION_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbCouncilDecisionResponse| r.schema_version.as_str(),
+                Some(signatures),
+                DagDbSignatureRequirement::WriteOnly,
+            )
+            .await
+        }
+
+        /// `GET /api/v1/dag-db/receipts/:receipt_hash` with auth scope.
+        pub async fn receipt_lookup(
+            &self,
+            request: DagDbReceiptLookupRequest,
+        ) -> Result<DagDbReceiptLookupResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.receipt_lookup(request),
+                "dagdb:receipt_lookup",
+                exo_dag_db_api::DAGDB_RECEIPT_LOOKUP_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbReceiptLookupResponse| r.schema_version.as_str(),
+                None,
+                DagDbSignatureRequirement::None,
+            )
+            .await
+        }
+
+        /// `GET /api/v1/dag-db/catalog/:catalog_id` with auth scope.
+        pub async fn catalog_lookup(
+            &self,
+            request: DagDbCatalogLookupRequest,
+        ) -> Result<DagDbCatalogLookupResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.catalog_lookup(request),
+                "dagdb:catalog_lookup",
+                exo_dag_db_api::DAGDB_CATALOG_LOOKUP_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbCatalogLookupResponse| r.schema_version.as_str(),
+                None,
+                DagDbSignatureRequirement::None,
+            )
+            .await
+        }
+
+        /// `GET /api/v1/dag-db/routes/:route_id` with auth scope.
+        pub async fn route_lookup(
+            &self,
+            request: DagDbRouteLookupRequest,
+        ) -> Result<DagDbRouteLookupResponse, DagDbClientError> {
+            self.ensure_request_scope(&request.tenant_id, &request.namespace)?;
+            self.send(
+                self.specs.route_lookup(request),
+                "dagdb:route_lookup",
+                exo_dag_db_api::DAGDB_ROUTE_LOOKUP_RESPONSE_SCHEMA_VERSION,
+                |r: &DagDbRouteLookupResponse| r.schema_version.as_str(),
+                None,
+                DagDbSignatureRequirement::None,
             )
             .await
         }
@@ -935,20 +1402,25 @@ mod transport {
             Body: Serialize,
             Resp: DeserializeOwned,
         {
-            let signatures =
-                signatures
-                    .as_ref()
-                    .ok_or(DagDbClientError::MissingSignatureMaterial {
-                        header: WRITE_SIGNATURE_HEADER,
-                    })?;
-            signatures.validate_for(signature_requirement)?;
+            let signatures = if signature_requirement == DagDbSignatureRequirement::None {
+                None
+            } else {
+                let signatures =
+                    signatures
+                        .as_ref()
+                        .ok_or(DagDbClientError::MissingSignatureMaterial {
+                            header: WRITE_SIGNATURE_HEADER,
+                        })?;
+                signatures.validate_for(signature_requirement)?;
+                Some(signatures)
+            };
 
             let url = format!("{}{}", self.base_url, spec.path);
             let mut builder = match spec.method {
                 DagDbHttpMethod::Get => self.http.get(url),
                 DagDbHttpMethod::Post => self.http.post(url),
             };
-            builder = builder.headers(self.auth_headers(action, Some(signatures))?);
+            builder = builder.headers(self.auth_headers(action, signatures)?);
             if let Some(body) = spec.body.as_ref() {
                 builder = builder.json(body);
             }
@@ -1136,6 +1608,10 @@ mod tests {
         let client = DagDbClient::new();
 
         assert_post(
+            client.intake(fixture(&fixtures, "requests", "intake")),
+            "/api/v1/dag-db/intake",
+        );
+        assert_post(
             client.route(fixture(&fixtures, "requests", "route")),
             "/api/v1/dag-db/route",
         );
@@ -1144,11 +1620,35 @@ mod tests {
             "/api/v1/dag-db/context-packet",
         );
         assert_post(
+            client.validate(fixture(&fixtures, "requests", "validate")),
+            "/api/v1/dag-db/validate",
+        );
+        assert_post(
             client.writeback(fixture(&fixtures, "requests", "writeback")),
             "/api/v1/dag-db/writeback",
         );
         assert_post(import_request(&client), "/api/v1/dag-db/import");
         assert_post(export_request(&client), "/api/v1/dag-db/export");
+        assert_post(
+            client.trust_check(fixture(&fixtures, "requests", "trust_check")),
+            "/api/v1/dag-db/trust-check",
+        );
+        assert_post(
+            client.council_decision(fixture(&fixtures, "requests", "council_decision")),
+            "/api/v1/dag-db/council/decision",
+        );
+        assert_get(
+            client.receipt_lookup(fixture(&fixtures, "requests", "receipt_lookup")),
+            "/api/v1/dag-db/receipts/",
+        );
+        assert_get(
+            client.catalog_lookup(fixture(&fixtures, "requests", "catalog_lookup")),
+            "/api/v1/dag-db/catalog/",
+        );
+        assert_get(
+            client.route_lookup(fixture(&fixtures, "requests", "route_lookup")),
+            "/api/v1/dag-db/routes/",
+        );
     }
 
     fn assert_fixture<T>(fixtures: &serde_json::Value, section: &str, name: &str)
@@ -1184,6 +1684,18 @@ mod tests {
         assert_eq!(spec.method, DagDbHttpMethod::Post);
         assert_eq!(spec.path, path);
         assert!(spec.body.is_some());
+    }
+
+    fn assert_get<T>(spec: DagDbRequestSpec<T>, path_prefix: &str) {
+        assert_eq!(spec.method, DagDbHttpMethod::Get);
+        assert!(
+            spec.path.starts_with(path_prefix),
+            "GET path `{}` must start with `{path_prefix}`",
+            spec.path
+        );
+        assert!(spec.path.contains("tenant_id="));
+        assert!(spec.path.contains("namespace="));
+        assert!(spec.body.is_none());
     }
 
     fn import_request(client: &DagDbClient) -> DagDbRequestSpec<DagDbImportRequest> {
@@ -1255,7 +1767,8 @@ mod transport_tests {
     };
 
     use super::{
-        DagDbContextPacketRequest, DagDbExportRequest, DagDbImportRequest, DagDbRouteRequest,
+        DagDbCatalogLookupRequest, DagDbContextPacketRequest, DagDbExportRequest,
+        DagDbImportRequest, DagDbReceiptLookupRequest, DagDbRouteLookupRequest, DagDbRouteRequest,
         DagDbWritebackRequest,
         transport::{
             BearerToken, DagDbAuthConfig, DagDbClientError, DagDbHttpClient, DagDbSignatureHeaders,
@@ -1409,6 +1922,18 @@ mod transport_tests {
         fixture_request("writeback")
     }
 
+    fn receipt_lookup_request() -> DagDbReceiptLookupRequest {
+        fixture_request("receipt_lookup")
+    }
+
+    fn catalog_lookup_request() -> DagDbCatalogLookupRequest {
+        fixture_request("catalog_lookup")
+    }
+
+    fn route_lookup_request() -> DagDbRouteLookupRequest {
+        fixture_request("route_lookup")
+    }
+
     fn import_request() -> DagDbImportRequest {
         DagDbImportRequest {
             tenant_id: "tenant-a".to_owned(),
@@ -1506,6 +2031,24 @@ mod transport_tests {
 
     fn write_signature() -> DagDbSignatureHeaders {
         DagDbSignatureHeaders::write(signature_value('2'))
+    }
+
+    fn import_signatures() -> DagDbSignatureHeaders {
+        DagDbSignatureHeaders::dagdb_import(
+            signature_value('3'),
+            signature_value('4'),
+            "did:exo:import-authority",
+            approval_timestamp(),
+        )
+    }
+
+    fn export_signatures() -> DagDbSignatureHeaders {
+        DagDbSignatureHeaders::dagdb_export(
+            signature_value('5'),
+            signature_value('6'),
+            "did:exo:export-authority",
+            approval_timestamp(),
+        )
     }
 
     fn fixture_response(section: &str, name: &str) -> String {
@@ -1611,6 +2154,26 @@ mod transport_tests {
                 .await
                 .expect_err("writeback must require lifecycle and continuation material"),
             "writeback",
+        );
+    }
+
+    #[tokio::test]
+    async fn import_export_require_independent_finality_signature_sets_before_http() {
+        let client = DagDbHttpClient::new("http://127.0.0.1:9", auth()).expect("client");
+
+        assert_local_signature_error(
+            client
+                .dagdb_import_with_signatures(import_request(), write_signature())
+                .await
+                .expect_err("import must require independent finality headers before HTTP"),
+            "import",
+        );
+        assert_local_signature_error(
+            client
+                .dagdb_export_with_signatures(export_request(), write_signature())
+                .await
+                .expect_err("export must require independent finality headers before HTTP"),
+            "export",
         );
     }
 
@@ -1760,6 +2323,13 @@ mod transport_tests {
         }
 
         assert_post_route!(
+            intake_with_signatures,
+            "intake",
+            "/api/v1/dag-db/intake",
+            "dagdb:intake:tenant-a:primary",
+            write_signature()
+        );
+        assert_post_route!(
             route_with_signatures,
             "route",
             "/api/v1/dag-db/route",
@@ -1774,11 +2344,75 @@ mod transport_tests {
             context_packet_signatures()
         );
         assert_post_route!(
+            validate_with_signatures,
+            "validate",
+            "/api/v1/dag-db/validate",
+            "dagdb:validate:tenant-a:primary",
+            write_signature()
+        );
+        assert_post_route!(
             writeback_with_signatures,
             "writeback",
             "/api/v1/dag-db/writeback",
             "dagdb:writeback:tenant-a:primary",
             writeback_signatures()
+        );
+        assert_post_route!(
+            trust_check_with_signatures,
+            "trust_check",
+            "/api/v1/dag-db/trust-check",
+            "dagdb:trust_check:tenant-a:primary",
+            write_signature()
+        );
+        assert_post_route!(
+            council_decision_with_signatures,
+            "council_decision",
+            "/api/v1/dag-db/council/decision",
+            "dagdb:council_decision:tenant-a:primary",
+            write_signature()
+        );
+
+        macro_rules! assert_get_route {
+            ($method:ident, $request:expr, $fixture:literal, $path_prefix:literal, $scope:literal) => {{
+                let body = fixture_response("responses", $fixture);
+                let server = TestServer::spawn("200 OK", body).await;
+                let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
+
+                let _ = client.$method($request).await.expect("lookup response");
+                let request = server.captured().await;
+
+                assert!(
+                    request
+                        .request_line
+                        .starts_with(concat!("GET ", $path_prefix)),
+                    "request line was {:?}",
+                    request.request_line
+                );
+                assert_eq!(request.header("x-exo-authority-scope"), Some($scope));
+                assert!(request.body.is_empty(), "GET body should be empty");
+            }};
+        }
+
+        assert_get_route!(
+            receipt_lookup,
+            receipt_lookup_request(),
+            "receipt_lookup",
+            "/api/v1/dag-db/receipts/",
+            "dagdb:receipt_lookup:tenant-a:primary"
+        );
+        assert_get_route!(
+            catalog_lookup,
+            catalog_lookup_request(),
+            "catalog_lookup",
+            "/api/v1/dag-db/catalog/",
+            "dagdb:catalog_lookup:tenant-a:primary"
+        );
+        assert_get_route!(
+            route_lookup,
+            route_lookup_request(),
+            "route_lookup",
+            "/api/v1/dag-db/routes/",
+            "dagdb:route_lookup:tenant-a:primary"
         );
     }
 
@@ -1943,13 +2577,14 @@ mod transport_tests {
 
     #[tokio::test]
     async fn signed_import_and_export_attach_write_signature_header() {
-        for (response_fixture, path, scope, idempotency_key, call) in [
+        for (response_fixture, path, scope, idempotency_key, call, approval_header) in [
             (
                 "import",
                 "/api/v1/dag-db/import",
                 "dagdb:import:tenant-a:primary",
                 "idem-import-1",
                 0_u8,
+                "x-exo-import-approval-signature",
             ),
             (
                 "export",
@@ -1957,28 +2592,22 @@ mod transport_tests {
                 "dagdb:export:tenant-a:primary",
                 "idem-export-1",
                 1_u8,
+                "x-exo-export-approval-signature",
             ),
         ] {
             let body = fixture_response("responses", response_fixture);
             let server = TestServer::spawn("200 OK", body).await;
             let client = DagDbHttpClient::new(&server.base_url, auth()).expect("client");
-            let signature = signature_value('e');
 
             match call {
                 0 => {
                     let _ = client
-                        .dagdb_import_with_signatures(
-                            import_request(),
-                            DagDbSignatureHeaders::write(signature.clone()),
-                        )
+                        .dagdb_import_with_signatures(import_request(), import_signatures())
                         .await;
                 }
                 _ => {
                     let _ = client
-                        .dagdb_export_with_signatures(
-                            export_request(),
-                            DagDbSignatureHeaders::write(signature.clone()),
-                        )
+                        .dagdb_export_with_signatures(export_request(), export_signatures())
                         .await;
                 }
             }
@@ -1990,12 +2619,10 @@ mod transport_tests {
                 request.request_line
             );
             assert_eq!(request.header("x-exo-authority-scope"), Some(scope));
-            assert_eq!(
-                request.header("x-exo-write-signature"),
-                Some(signature.as_str())
-            );
+            assert!(request.header("x-exo-write-signature").is_some());
             assert_eq!(request.header("x-exo-lifecycle-signature"), None);
             assert_eq!(request.header("x-exo-continuation-signature"), None);
+            assert!(request.header(approval_header).is_some());
             assert!(
                 request
                     .body
