@@ -102,11 +102,11 @@ commit: `26c5f35b`
 
 surface: Gateway state
 classification: Core runtime adapter
-red_command: `cargo test -p exo-gateway gateway_legacy_public_schema_writes_are_blocked`
-red_failure: not-claimed
-green_command: `cargo test -p exo-gateway --features production-db gateway_state`
-artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs`
-commit: not-claimed
+red_command: `cargo test -p exo-dag-db-postgres --features postgres gateway_state_records_are_dagdb_schema_contract` and `cargo test -p exo-gateway production_gateway_state_resolves_legacy_tables_in_dagdb_schema`
+red_failure: `DAG DB schema must enumerate gateway state family did_document`; `couldn't read .../20260623000005_create_gateway_legacy_table_contracts.sql: No such file or directory`
+green_command: `cargo test -p exo-dag-db-postgres --features postgres gateway_state_records_are_dagdb_schema_contract`; `cargo test -p exo-dag-db-postgres --features postgres --test migration_contract`; `cargo test -p exo-gateway production_gateway_state`; `cargo test -p exo-gateway quality_matrix_is_complete`
+artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000004_create_gateway_state_records_schema.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000005_create_gateway_legacy_table_contracts.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/src/postgres/mod.rs`
+commit: pending-current-commit
 
 ### QM-07
 

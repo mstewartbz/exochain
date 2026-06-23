@@ -38,6 +38,8 @@ const DID_DOCUMENT_CAPACITY_ADVISORY_LOCK_KEY: i64 = 1_014_400_003;
 const LOCATION_CONSENT_SCOPE: &str = "location";
 const BLOCKING_CONFLICT_NATURE_PATTERNS: [&str; 4] =
     ["%financial%", "%ownership%", "%personal%", "%family%"];
+#[cfg(feature = "production-db")]
+const DAGDB_RUNTIME_SEARCH_PATH: &str = "dagdb,public";
 
 #[derive(Debug, Error)]
 pub enum DbInitError {
@@ -178,61 +180,89 @@ pub struct GatewayIdentityErasureSummary {
 /// Create a connection pool and run migrations.
 ///
 /// The gateway's own migrations are applied first, against the default `public`
-/// schema. When the `production-db` feature is active, the DAG DB schema is then
+/// schema. When the `production-db` feature is active, the DAG DB schema is
 /// provisioned by its own ledgered migrator into the dedicated
-/// `exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA` schema, and every pooled
-/// connection's `search_path` includes that schema so bare-named DAG DB queries
-/// resolve. If the DAG DB migration fails, startup aborts (fail closed) so the
-/// gateway never serves DAG DB routes against an unprovisioned schema.
+/// `exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA` schema. The migration
+/// pool is then closed and the returned runtime pool is opened with a DAGDB-first
+/// `search_path`, so bare gateway table contracts resolve to the DAG DB schema
+/// and public tables remain rollback artifacts. If any migration fails, startup
+/// aborts (fail closed) so the gateway never serves DAG DB routes against an
+/// unprovisioned schema.
 pub async fn init_pool(database_url: &str) -> Result<PgPool, DbInitError> {
     let connect_options: PgConnectOptions = database_url
         .parse()
         .map_err(|source| DbInitError::ParseUrl { source })?;
-    // Resolve gateway tables in `public` (first on the path) and DAG DB tables in
-    // the dedicated DAG DB schema. The DAG DB schema is created by its ledgered
-    // migrator below; listing it here is harmless before it exists. The value
-    // must contain no spaces — Postgres splits the `-c` startup option string on
-    // whitespace — so the two schema names are comma-joined without a space.
     #[cfg(feature = "production-db")]
-    let connect_options = connect_options.options([(
-        "search_path",
-        format!(
-            "public,{}",
-            exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA
-        ),
-    )]);
+    let pool = {
+        {
+            let migration_options = connect_options.clone().options([(
+                "search_path",
+                format!(
+                    "public,{}",
+                    exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA
+                ),
+            )]);
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        // SQLx 0.8 bounds both waiting for a pooled connection and opening a
-        // new connection through acquire_timeout.
-        .acquire_timeout(Duration::from_secs(DB_POOL_ACQUIRE_TIMEOUT_SECS))
-        .connect_with(connect_options)
-        .await
-        .map_err(|source| DbInitError::Connect { source })?;
+            let migration_pool = PgPoolOptions::new()
+                .max_connections(10)
+                // SQLx 0.8 bounds both waiting for a pooled connection and opening a
+                // new connection through acquire_timeout.
+                .acquire_timeout(Duration::from_secs(DB_POOL_ACQUIRE_TIMEOUT_SECS))
+                .connect_with(migration_options)
+                .await
+                .map_err(|source| DbInitError::Connect { source })?;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .map_err(|source| DbInitError::Migrate { source })?;
+            sqlx::migrate!("./migrations")
+                .run(&migration_pool)
+                .await
+                .map_err(|source| DbInitError::Migrate { source })?;
 
-    // Provision the DAG DB schema through its own ledgered migrator so a deployed
-    // gateway no longer 500s on the first DAG DB call. The DAG DB migrator keeps
-    // its own `_sqlx_migrations` ledger inside the dedicated schema, so it cannot
-    // collide with the gateway's `public._sqlx_migrations` despite the two crates
-    // reusing the same integer migration versions.
-    #[cfg(feature = "production-db")]
-    {
-        exo_dag_db_postgres::postgres::run_migrations_in_schema(
-            &pool,
-            exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA,
-        )
-        .await
-        .map_err(|source| DbInitError::DagDbMigrate { source })?;
-        tracing::info!("DAG DB schema provisioned via the ledgered DAG DB migrator");
-    }
+            // Provision the DAG DB schema through its own ledgered migrator so a
+            // deployed gateway no longer 500s on the first DAG DB call. The DAG DB
+            // migrator keeps its own `_sqlx_migrations` ledger inside the dedicated
+            // schema, so it cannot collide with the gateway's `public._sqlx_migrations`
+            // despite the two crates reusing the same integer migration versions.
+            exo_dag_db_postgres::postgres::run_migrations_in_schema(
+                &migration_pool,
+                exo_dag_db_postgres::postgres::DAGDB_MIGRATION_SCHEMA,
+            )
+            .await
+            .map_err(|source| DbInitError::DagDbMigrate { source })?;
+            migration_pool.close().await;
+            tracing::info!("DAG DB schema provisioned via the ledgered DAG DB migrator");
 
-    tracing::info!("PostgreSQL connection pool ready and migrations applied");
+            let runtime_options =
+                connect_options.options([("search_path", DAGDB_RUNTIME_SEARCH_PATH.to_owned())]);
+            let runtime_pool = PgPoolOptions::new()
+                .max_connections(10)
+                .acquire_timeout(Duration::from_secs(DB_POOL_ACQUIRE_TIMEOUT_SECS))
+                .connect_with(runtime_options)
+                .await
+                .map_err(|source| DbInitError::Connect { source })?;
+            tracing::info!("PostgreSQL connection pool ready with DAG DB runtime search path");
+            runtime_pool
+        }
+    };
+
+    #[cfg(not(feature = "production-db"))]
+    let pool = {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            // SQLx 0.8 bounds both waiting for a pooled connection and opening a
+            // new connection through acquire_timeout.
+            .acquire_timeout(Duration::from_secs(DB_POOL_ACQUIRE_TIMEOUT_SECS))
+            .connect_with(connect_options)
+            .await
+            .map_err(|source| DbInitError::Connect { source })?;
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .map_err(|source| DbInitError::Migrate { source })?;
+
+        tracing::info!("PostgreSQL connection pool ready and migrations applied");
+        pool
+    };
     Ok(pool)
 }
 
@@ -2571,6 +2601,96 @@ pub(crate) mod tests {
             assert!(
                 migrations.contains(index_sql),
                 "gateway migration set must include runtime query index: {index_sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_gateway_state_has_no_explicit_public_schema_writes() {
+        let production = production_source().to_ascii_lowercase();
+        for table in [
+            "users",
+            "agents",
+            "decisions",
+            "delegations",
+            "audit_entries",
+            "constitutions",
+            "identity_scores",
+            "enrollment_log",
+            "hlc_state",
+            "livesafe_identities",
+            "scan_receipts",
+            "consent_anchors",
+            "trustee_shard_status",
+            "sessions",
+            "agent_roles",
+            "consent_records",
+            "authority_chains",
+            "layout_templates",
+            "feedback_issues",
+            "conflict_declarations",
+            "did_documents",
+            "avc_registry_state",
+        ] {
+            for verb in ["insert into", "update", "delete from"] {
+                let forbidden = format!("{verb} public.{table}");
+                assert!(
+                    !production.contains(&forbidden),
+                    "production gateway state must not schema-qualify public legacy table writes: {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_gateway_state_resolves_legacy_tables_in_dagdb_schema() {
+        let production = production_source();
+        assert!(
+            production.contains("DAGDB_RUNTIME_SEARCH_PATH"),
+            "production gateway pool must name a DAG DB-first runtime search path"
+        );
+        assert!(
+            production.contains("\"dagdb,public\""),
+            "production gateway pool must prefer DAG DB table contracts over public rollback tables"
+        );
+        assert!(
+            production.contains(
+                "connect_options.options([(\"search_path\", DAGDB_RUNTIME_SEARCH_PATH.to_owned())])"
+            ),
+            "returned production runtime pool must use the DAG DB-first search path"
+        );
+
+        let dagdb_gateway_contracts = include_str!(
+            "../../exo-dag-db-postgres/migrations/20260623000005_create_gateway_legacy_table_contracts.sql"
+        )
+        .to_ascii_lowercase();
+        for table in [
+            "users",
+            "agents",
+            "decisions",
+            "delegations",
+            "audit_entries",
+            "constitutions",
+            "identity_scores",
+            "enrollment_log",
+            "hlc_state",
+            "livesafe_identities",
+            "scan_receipts",
+            "consent_anchors",
+            "trustee_shard_status",
+            "sessions",
+            "agent_roles",
+            "consent_records",
+            "authority_chains",
+            "layout_templates",
+            "feedback_issues",
+            "conflict_declarations",
+            "did_documents",
+            "avc_registry_state",
+        ] {
+            assert!(
+                dagdb_gateway_contracts.contains(&format!("create table if not exists {table}")),
+                "DAG DB schema migration must own gateway legacy table contract {table}"
             );
         }
     }

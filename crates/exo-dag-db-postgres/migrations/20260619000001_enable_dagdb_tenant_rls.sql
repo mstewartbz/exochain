@@ -61,7 +61,8 @@ BEGIN
         'dagdb_node_economy_objects',
         'dagdb_node_economy_anchors',
         'dagdb_node_economy_meta',
-        'dagdb_zerodentity_records'
+        'dagdb_zerodentity_records',
+        'dagdb_gateway_state_records'
     ] LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tenant_table);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tenant_table);

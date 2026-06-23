@@ -37,9 +37,9 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs` | EXOCHAIN core | QM-04 moved production start and status commands to `DagDbNodeStore::open` with required `DATABASE_URL`, `EXO_DAGDB_TENANT_ID`, and `EXO_DAGDB_NAMESPACE`. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs` | EXOCHAIN core | QM-04 introduced a DAG DB-backed node store while retaining legacy SQLite construction only for direct test/dev compatibility. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs` | EXOCHAIN core | QM-05 moved production 0dentity startup to DAG DB-backed persistence for claims, scores, OTP state, sessions, attestations, emitted DAG nodes, and trust receipts. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs` | Core runtime adapter | Gateway still owns public-schema production tables for DID documents, users, agents, decisions, audit, LiveSafe, layout, and feedback state. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs` | Core runtime adapter | QM-06 splits gateway migrations from runtime serving: public migrations still run as rollback/history, but the returned production pool uses DAGDB-first `search_path` so gateway table contracts resolve in the `dagdb` schema. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs` | Core runtime adapter | DAG DB REST router currently mounts five live routes. The remaining documented routes are present as test-only handlers or DTO fixtures, not live production routes. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 46 traced table contracts exist after the QM-05 0dentity schema migration. Missing production state families continue to be added here first. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 69 traced table contracts exist after the QM-06 gateway-state migrations. Missing production state families continue to be added here first. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs` | Core runtime adapter | SDK exposes the same five-route subset. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | MCP exposes four agent-facing DAG DB tools, not the full REST surface. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | Production CommandBase uses `better-sqlite3`, `the_team.db`, `task_forces.db`, many SQLite DDL blocks, and browser durable state. |
@@ -177,24 +177,59 @@ not ready and stored claims, sessions, OTP challenges, attestations, scores, DAG
 nodes, and trust receipts only in `BTreeMap`, `BTreeSet`, and `Vec` fields. Its
 `open` method ignored `data_dir` and returned `Self::new()`.
 
-## Gateway Legacy Public Schema
+## Gateway DAG DB State
 
-`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs:178`
-through `:237` initializes the gateway public-schema migrator and then provisions
-the DAG DB schema when `production-db` is enabled. This is a gateway-plus-DAGDB
-hybrid, not a full migration away from gateway public tables.
+QM-06 keeps the gateway's existing table-shaped helper API but changes the
+production resolution boundary. `crates/exo-gateway/src/db.rs` now uses a
+migration pool with `public,dagdb` so the existing gateway migration ledger stays
+isolated, then closes it and returns a runtime pool with `dagdb,public`.
 
-Examples of still-active public-schema reads and writes:
+The DAG DB schema now owns two gateway state migrations:
 
-- `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs:267`
-  through `:330` inserts `did_documents`.
-- `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs:1880`
-  through `:1915` reads and updates `feedback_issues`.
+```text
+crates/exo-dag-db-postgres/migrations/20260623000004_create_gateway_state_records_schema.sql
+crates/exo-dag-db-postgres/migrations/20260623000005_create_gateway_legacy_table_contracts.sql
+```
 
-The full file contains production persistence for DID documents, users, agents,
-decisions, audit entries, LiveSafe identities, consent anchors, dashboard layout
-templates, feedback issues, and conflict declarations. Those must move behind
-DAG DB-backed interfaces before public-schema production writes can be blocked.
+`dagdb_gateway_state_records` is the closed family ledger for gateway state
+families:
+
+```text
+did_document
+session
+user
+agent
+decision
+delegation
+audit_entry
+constitution
+identity_score
+enrollment
+livesafe_identity
+scan_receipt
+consent_anchor
+trustee_shard
+agent_role
+consent_record
+authority_chain
+layout_template
+feedback_issue
+conflict_declaration
+avc_registry_state
+hlc_counter
+```
+
+The DAG DB legacy table-contract migration also creates DAGDB-schema copies of
+the gateway's production table contracts (`users`, `agents`, `decisions`,
+`audit_entries`, `sessions`, `did_documents`, `feedback_issues`, and the rest)
+with the final deterministic shapes, including `odentity_composite_basis_points`
+instead of the old floating LiveSafe score column.
+
+The public-schema gateway migrations still run for rollback/history and for
+older deployments, but production traffic receives the DAGDB-first runtime pool.
+The source guard `production_gateway_state_has_no_explicit_public_schema_writes`
+prevents future route code from bypassing that boundary with explicit
+`public.<table>` writes.
 
 ## DAG DB Foundation
 
@@ -207,9 +242,9 @@ canonical ledgered migration runner.
 
 Current inventory:
 
-- 17 SQL migration files exist under
+- 19 SQL migration files exist under
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations`.
-- Those migrations contain 46 `CREATE TABLE IF NOT EXISTS` table contracts.
+- Those migrations contain 69 `CREATE TABLE IF NOT EXISTS` table contracts.
 - Tenant RLS is centralized in
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`.
 
@@ -262,6 +297,35 @@ dagdb_lifecycle_actions
 dagdb_route_invalidation_events
 dagdb_continuation_records
 dagdb_zerodentity_records
+dagdb_gateway_state_records
+```
+
+The same DAG DB schema also owns these gateway runtime compatibility table
+contracts so the gateway's existing bare SQL resolves inside `dagdb`:
+
+```text
+users
+agents
+decisions
+delegations
+audit_entries
+constitutions
+identity_scores
+enrollment_log
+hlc_state
+livesafe_identities
+scan_receipts
+consent_anchors
+trustee_shard_status
+sessions
+agent_roles
+consent_records
+authority_chains
+layout_templates
+feedback_issues
+conflict_declarations
+did_documents
+avc_registry_state
 ```
 
 ## DAG DB REST, SDK, MCP Surface

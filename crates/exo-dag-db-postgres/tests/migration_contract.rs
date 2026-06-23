@@ -23,6 +23,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_default_routes",
     "dagdb_export_challenges",
     "dagdb_exports",
+    "dagdb_gateway_state_records",
     "dagdb_graph_canonicalization_decisions",
     "dagdb_graph_edge_tombstones",
     "dagdb_graph_edges",
@@ -71,6 +72,7 @@ const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
     "dagdb_default_routes",
     "dagdb_export_challenges",
     "dagdb_exports",
+    "dagdb_gateway_state_records",
     "dagdb_graph_canonicalization_decisions",
     "dagdb_graph_edge_tombstones",
     "dagdb_graph_edges",
@@ -451,6 +453,54 @@ fn zerodentity_records_are_dagdb_schema_contract() {
     assert!(
         rls_lower.contains("'dagdb_zerodentity_records'"),
         "DAG DB tenant RLS migration must enumerate 0dentity records"
+    );
+}
+
+#[test]
+fn gateway_state_records_are_dagdb_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    for family in [
+        "did_document",
+        "session",
+        "user",
+        "agent",
+        "decision",
+        "delegation",
+        "audit_entry",
+        "constitution",
+        "identity_score",
+        "enrollment",
+        "livesafe_identity",
+        "scan_receipt",
+        "consent_anchor",
+        "trustee_shard",
+        "agent_role",
+        "consent_record",
+        "authority_chain",
+        "layout_template",
+        "feedback_issue",
+        "conflict_declaration",
+        "avc_registry_state",
+        "hlc_counter",
+    ] {
+        assert!(
+            lower.contains(&format!("'{family}'")),
+            "DAG DB schema must enumerate gateway state family {family}"
+        );
+    }
+    assert!(
+        lower.contains("create table if not exists dagdb_gateway_state_records"),
+        "DAG DB schema must include the gateway durable state table"
+    );
+    assert!(lower.contains("state_family text not null"));
+    assert!(lower.contains("record_key text not null"));
+    assert!(lower.contains("cbor_payload bytea not null"));
+    assert!(lower.contains("primary key (tenant_id, namespace, state_family, record_key)"));
+
+    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(
+        rls_lower.contains("'dagdb_gateway_state_records'"),
+        "DAG DB tenant RLS migration must enumerate gateway state records"
     );
 }
 
