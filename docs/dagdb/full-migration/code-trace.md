@@ -248,6 +248,30 @@ Current inventory:
 - Tenant RLS is centralized in
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`.
 
+QM-09 expanded the live-path RLS contract metadata and seed rows to cover every
+new tenant table introduced by this migration wave:
+
+```text
+dagdb_gateway_state_records
+dagdb_node_commit_certificates
+dagdb_node_committed
+dagdb_node_consensus_meta
+dagdb_node_consensus_votes
+dagdb_node_dag_nodes
+dagdb_node_dag_parents
+dagdb_node_economy_anchors
+dagdb_node_economy_meta
+dagdb_node_economy_objects
+dagdb_node_trust_receipts
+dagdb_node_validators
+dagdb_zerodentity_records
+```
+
+The RED contract failed because these tables were present in the RLS migration
+but absent from the live-path metadata. GREEN evidence now covers source
+enumeration, missing-tenant-context denial, and cross-tenant read/write
+isolation for the expanded table set.
+
 The current DAG DB table contracts are:
 
 ```text
