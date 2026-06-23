@@ -136,7 +136,7 @@ red_command: `cargo test -p exo-dag-db-postgres --features postgres rls_migratio
 red_failure: `missing from tests: ["dagdb_gateway_state_records", "dagdb_node_commit_certificates", "dagdb_node_committed", "dagdb_node_consensus_meta", "dagdb_node_consensus_votes", "dagdb_node_dag_nodes", "dagdb_node_dag_parents", "dagdb_node_economy_anchors", "dagdb_node_economy_meta", "dagdb_node_economy_objects", "dagdb_node_trust_receipts", "dagdb_node_validators", "dagdb_zerodentity_records"]`
 green_command: `cargo test -p exo-dag-db-postgres --features postgres rls_migration_tenant_table_list_matches_test_metadata && cargo test -p exo-dag-db-postgres --features postgres rls_migration_source_enables_forced_tenant_policy_for_expected_tables && cargo test -p exo-dag-db-postgres --features postgres rls_requires_bound_tenant_context_for_live_path_tables && cargo test -p exo-dag-db-postgres --features postgres rls_blocks_cross_tenant_reads_and_writes_for_live_path_tables && cargo clippy -p exo-dag-db-postgres --features postgres --all-targets -- -D warnings && cargo fmt --all -- --check`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/tests/dagdb_tenant_rls_live_path_contract.rs`
-commit: pending-current-commit
+commit: `7d6ca65b`
 
 ### QM-10
 
