@@ -66,7 +66,7 @@ red_command: `cargo test -p exo-dag-db-postgres --features postgres root_bundle_
 red_failure: `assertion failed: lower.contains("create table if not exists dagdb_root_bundle_receipts")`
 green_command: `cargo test -p exo-dag-db-postgres --features postgres root_bundle_receipts_are_global_immutable_schema_contract` and `cargo test -p exo-dag-db-postgres --features postgres --test migration_contract`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000001_create_root_bundle_receipt_schema.sql`
-commit: qm02-schema-commit
+commit: `31971776`
 
 ### QM-03
 
