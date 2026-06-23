@@ -116,7 +116,7 @@ red_command: `cargo test -p exo-gateway dagdb_router_mounts_full_rest_surface_fa
 red_failure: `thread 'dagdb::tests::dagdb_router_mounts_full_rest_surface_fail_closed_without_db' panicked ... assertion 'left == right' failed ... left: 404 right: 503` for POST `/api/v1/dag-db/intake`; the first RED compile also failed until the new GET assertion helper existed.
 green_command: `cargo test -p exo-gateway dagdb_router && cargo test -p exo-gateway dagdb_full_rest_surface_has_governed_persistence_handlers && cargo test -p exo-gateway dagdb_handlers_cover_authorized_and_denied_branches_directly && cargo clippy -p exo-gateway --all-targets -- -D warnings && cargo fmt --all -- --check`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
-commit: pending-current-commit
+commit: `69d1360f`
 
 ### QM-08
 
