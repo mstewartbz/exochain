@@ -124,9 +124,9 @@ canonical ledgered migration runner.
 
 Fresh-base inventory:
 
-- 14 SQL migration files exist under
+- 15 SQL migration files exist under
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations`.
-- Those migrations contain 33 `CREATE TABLE IF NOT EXISTS` table contracts.
+- Those migrations contain 34 `CREATE TABLE IF NOT EXISTS` table contracts.
 - Tenant RLS is centralized in
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`.
 
@@ -134,6 +134,7 @@ The current DAG DB table contracts are:
 
 ```text
 dagdb_receipts
+dagdb_root_bundle_receipts
 dagdb_subject_receipt_heads
 dagdb_memory_objects
 dagdb_memory_edges

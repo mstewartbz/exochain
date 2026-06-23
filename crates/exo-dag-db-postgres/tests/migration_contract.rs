@@ -41,6 +41,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_memory_edges",
     "dagdb_memory_objects",
     "dagdb_receipts",
+    "dagdb_root_bundle_receipts",
     "dagdb_route_invalidation_events",
     "dagdb_route_receipts",
     "dagdb_subject_receipt_heads",
@@ -89,6 +90,10 @@ const EXPECTED_INDEXES: &[(&str, &str)] = &[
     (
         "idx_dagdb_receipts_event_type",
         "dagdb_receipts USING btree (tenant_id, namespace, event_type, event_hlc_physical_ms DESC, event_hlc_logical DESC)",
+    ),
+    (
+        "idx_dagdb_root_bundle_receipts_ceremony",
+        "dagdb_root_bundle_receipts USING btree (ceremony_id, verified_at_physical_ms DESC, verified_at_logical DESC)",
     ),
     (
         "uq_dagdb_memory_active_duplicate",
@@ -310,6 +315,22 @@ fn rls_migration_source_enables_forced_tenant_policy_for_expected_tables() {
     }
     assert!(!lower.contains("'dagdb_benchmark_runs'"));
     assert!(!lower.contains("'dagdb_lifecycle_rollbacks'"));
+    assert!(!lower.contains("'dagdb_root_bundle_receipts'"));
+}
+
+#[test]
+fn root_bundle_receipts_are_global_immutable_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(lower.contains("create table if not exists dagdb_root_bundle_receipts"));
+    assert!(lower.contains("bundle_id bytea primary key not null"));
+    assert!(lower.contains("root_bundle_hash bytea not null unique"));
+    assert!(lower.contains("verification_receipt_hash bytea not null unique"));
+    assert!(lower.contains("verification_receipt_body jsonb not null"));
+    assert!(lower.contains("immutable boolean not null default true"));
+    assert!(lower.contains("check (immutable = true)"));
+    assert!(lower.contains("prevent_dagdb_root_bundle_receipt_mutation"));
+    assert!(lower.contains("root_bundle_receipts_are_immutable"));
+    assert!(!lower.contains("dagdb_root_bundle_receipts (\n    tenant_id"));
 }
 
 #[tokio::test]
@@ -734,6 +755,16 @@ fn expected_constraint_snippets() -> &'static [(&'static str, &'static str)] {
         ("dagdb_receipts", "octet_length(receipt_hash) = 32"),
         ("dagdb_receipts", "subject_kind = ANY"),
         ("dagdb_receipts", "dagdb_export_completed"),
+        ("dagdb_root_bundle_receipts", "octet_length(bundle_id) = 32"),
+        (
+            "dagdb_root_bundle_receipts",
+            "octet_length(root_bundle_hash) = 32",
+        ),
+        (
+            "dagdb_root_bundle_receipts",
+            "octet_length(verification_receipt_hash) = 32",
+        ),
+        ("dagdb_root_bundle_receipts", "immutable = true"),
         ("dagdb_memory_objects", "node_type = ANY"),
         ("dagdb_memory_objects", "source_type = ANY"),
         ("dagdb_memory_objects", "consent_purpose = ANY"),
@@ -823,6 +854,26 @@ fn expected_columns() -> Vec<(&'static str, Vec<ColumnExpectation>)> {
                 col("receipt_body", "jsonb", false, None),
                 col("created_at_physical_ms", "bigint", false, None),
                 col("created_at_logical", "integer", false, None),
+            ],
+        ),
+        (
+            "dagdb_root_bundle_receipts",
+            vec![
+                col("bundle_id", "bytea", false, None),
+                col("root_bundle_hash", "bytea", false, None),
+                col("ceremony_id", "text", false, None),
+                col("issuer_did", "text", false, None),
+                col("issuer_public_key_hash", "bytea", false, None),
+                col("signing_set_hash", "bytea", false, None),
+                col("quorum_threshold", "integer", false, None),
+                col("verifier_version", "text", false, None),
+                col("verification_receipt_hash", "bytea", false, None),
+                col("verification_receipt_body", "jsonb", false, None),
+                col("verified_at_physical_ms", "bigint", false, None),
+                col("verified_at_logical", "integer", false, None),
+                col("created_at_physical_ms", "bigint", false, None),
+                col("created_at_logical", "integer", false, None),
+                col("immutable", "boolean", false, Some("true")),
             ],
         ),
         (
