@@ -72,11 +72,11 @@ commit: `31971776`
 
 surface: Root bundle
 classification: EXOCHAIN core
-red_command: `cargo test -p exo-root && cargo test -p exo-node avc::tests`
-red_failure: not-claimed
-green_command: `cargo test -p exo-root && cargo test -p exo-node avc::tests`
+red_command: `cargo test -p exo-node avc_root_trust_loader_records_dagdb_receipt_after_verification_before_registry_commit`
+red_failure: `root bundle DAG DB receipt must be recorded before the issuer registry commit`
+green_command: `cargo test -p exo-node avc_root_trust` and `cargo test -p exo-root`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/avc.rs`
-commit: not-claimed
+commit: qm03-root-bundle-commit
 
 ### QM-04
 

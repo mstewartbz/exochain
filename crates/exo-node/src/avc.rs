@@ -95,6 +95,8 @@ const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
 const AVC_REGISTRY_POSTGRES_TABLE: &str = "avc_registry_state";
 const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
 const AVC_REGISTRY_POSTGRES_LOCK_KEY: i64 = 0x4156_435F_5245_4749;
+const AVC_ROOT_BUNDLE_RECEIPT_SCHEMA_VERSION: &str = "dagdb_root_bundle_verification_receipt_v1";
+const AVC_ROOT_BUNDLE_RECEIPT_VERIFIER_VERSION: &str = "exo-node-avc-root-trust-loader-v1";
 const DEFAULT_AVC_RECEIPT_LIST_LIMIT: u32 = 50;
 const MAX_AVC_RECEIPT_LIST_LIMIT: u32 = 500;
 const WASM_PACKAGE_NAME: &str = "@exochain/exochain-wasm";
@@ -778,6 +780,154 @@ fn verify_current_or_pinned_legacy_avc_root_bundle(
     }
 }
 
+#[derive(Serialize)]
+struct RootBundleReceiptHashMaterial<'a> {
+    schema_version: &'static str,
+    bundle_id: Hash256,
+    root_bundle_hash: Hash256,
+    ceremony_id: &'a str,
+    issuer_did: &'a Did,
+    issuer_public_key_hash: Hash256,
+    signing_set_hash: Hash256,
+    quorum_threshold: u16,
+    verifier_version: &'static str,
+    verified_at: Timestamp,
+}
+
+struct RootBundleReceiptRecord {
+    root_bundle_hash: Hash256,
+    issuer_public_key_hash: Hash256,
+    signing_set_hash: Hash256,
+    verification_receipt_hash: Hash256,
+    verification_receipt_body: serde_json::Value,
+    verified_at: Timestamp,
+    created_at: Timestamp,
+}
+
+fn root_bundle_receipt_record(bundle: &RootTrustBundle) -> anyhow::Result<RootBundleReceiptRecord> {
+    let root_bundle_hash = hash_structured(bundle)
+        .map_err(|error| anyhow::anyhow!("AVC root bundle receipt hash failed: {error}"))?;
+    let issuer_public_key_hash =
+        Hash256::digest(bundle.issuer_delegation.issuer_public_key.as_bytes());
+    let signing_set_hash = hash_structured(&bundle.config.signing_set)
+        .map_err(|error| anyhow::anyhow!("AVC root bundle signing set hash failed: {error}"))?;
+    let verified_at = bundle.issuer_delegation.effective_at;
+    let material = RootBundleReceiptHashMaterial {
+        schema_version: AVC_ROOT_BUNDLE_RECEIPT_SCHEMA_VERSION,
+        bundle_id: bundle.bundle_id,
+        root_bundle_hash,
+        ceremony_id: &bundle.config.ceremony_id,
+        issuer_did: &bundle.issuer_delegation.issuer_did,
+        issuer_public_key_hash,
+        signing_set_hash,
+        quorum_threshold: bundle.config.threshold,
+        verifier_version: AVC_ROOT_BUNDLE_RECEIPT_VERIFIER_VERSION,
+        verified_at,
+    };
+    let verification_receipt_hash = hash_structured(&material).map_err(|error| {
+        anyhow::anyhow!("AVC root bundle verification receipt hash failed: {error}")
+    })?;
+    let verification_receipt_body = serde_json::json!({
+        "schema_version": AVC_ROOT_BUNDLE_RECEIPT_SCHEMA_VERSION,
+        "bundle_id": bundle.bundle_id.to_string(),
+        "root_bundle_hash": root_bundle_hash.to_string(),
+        "ceremony_id": bundle.config.ceremony_id,
+        "issuer_did": bundle.issuer_delegation.issuer_did.to_string(),
+        "issuer_public_key_hash": issuer_public_key_hash.to_string(),
+        "signing_set_hash": signing_set_hash.to_string(),
+        "quorum_threshold": bundle.config.threshold,
+        "verifier_version": AVC_ROOT_BUNDLE_RECEIPT_VERIFIER_VERSION,
+        "verified_at": {
+            "physical_ms": verified_at.physical_ms,
+            "logical": verified_at.logical
+        },
+    });
+
+    Ok(RootBundleReceiptRecord {
+        root_bundle_hash,
+        issuer_public_key_hash,
+        signing_set_hash,
+        verification_receipt_hash,
+        verification_receipt_body,
+        verified_at,
+        created_at: verified_at,
+    })
+}
+
+async fn insert_root_bundle_receipt(
+    pool: &PgPool,
+    bundle: &RootTrustBundle,
+    record: RootBundleReceiptRecord,
+) -> anyhow::Result<()> {
+    let verified_at_logical = i32::try_from(record.verified_at.logical).map_err(|_| {
+        anyhow::anyhow!("AVC root bundle verified_at logical counter is out of SQL range")
+    })?;
+    let created_at_logical = i32::try_from(record.created_at.logical).map_err(|_| {
+        anyhow::anyhow!("AVC root bundle created_at logical counter is out of SQL range")
+    })?;
+    sqlx::query(
+        "INSERT INTO dagdb_root_bundle_receipts \
+         (bundle_id, root_bundle_hash, ceremony_id, issuer_did, issuer_public_key_hash, \
+          signing_set_hash, quorum_threshold, verifier_version, verification_receipt_hash, \
+          verification_receipt_body, verified_at_physical_ms, verified_at_logical, \
+          created_at_physical_ms, created_at_logical, immutable) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true) \
+         ON CONFLICT (bundle_id) DO NOTHING",
+    )
+    .bind(bundle.bundle_id.as_bytes().to_vec())
+    .bind(record.root_bundle_hash.as_bytes().to_vec())
+    .bind(&bundle.config.ceremony_id)
+    .bind(bundle.issuer_delegation.issuer_did.to_string())
+    .bind(record.issuer_public_key_hash.as_bytes().to_vec())
+    .bind(record.signing_set_hash.as_bytes().to_vec())
+    .bind(i32::from(bundle.config.threshold))
+    .bind(AVC_ROOT_BUNDLE_RECEIPT_VERIFIER_VERSION)
+    .bind(record.verification_receipt_hash.as_bytes().to_vec())
+    .bind(record.verification_receipt_body)
+    .bind(i64::try_from(record.verified_at.physical_ms).map_err(|_| {
+        anyhow::anyhow!("AVC root bundle verified_at physical_ms is out of SQL range")
+    })?)
+    .bind(verified_at_logical)
+    .bind(i64::try_from(record.created_at.physical_ms).map_err(|_| {
+        anyhow::anyhow!("AVC root bundle created_at physical_ms is out of SQL range")
+    })?)
+    .bind(created_at_logical)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("failed to persist AVC root bundle DAG DB receipt: {error}")
+    })?;
+    Ok(())
+}
+
+fn persist_verified_root_bundle_receipt(
+    state: &AvcApiState,
+    bundle: &RootTrustBundle,
+) -> anyhow::Result<()> {
+    let AvcRegistryDurability::Postgres(pool) = &state.durability else {
+        return Ok(());
+    };
+    let record = root_bundle_receipt_record(bundle)?;
+    let pool = pool.clone();
+    let bundle = bundle.clone();
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+                anyhow::anyhow!("failed to create AVC root bundle receipt runtime: {error}")
+            })?;
+            runtime.block_on(insert_root_bundle_receipt(&pool, &bundle, record))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("AVC root bundle receipt worker panicked"))?,
+        Err(_) => {
+            let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+                anyhow::anyhow!("failed to create AVC root bundle receipt runtime: {error}")
+            })?;
+            runtime.block_on(insert_root_bundle_receipt(&pool, &bundle, record))
+        }
+    }
+}
+
 /// Load the configured AVC root trust bundle, verify it in-process, and
 /// register the delegated operational issuer public key.
 ///
@@ -893,6 +1043,7 @@ pub fn load_root_trust_bundle_from_path(
             "AVC durable revocation validation failed after root trust issuer registration: {error}"
         )
     })?;
+    persist_verified_root_bundle_receipt(state, &bundle)?;
     *registry = candidate;
 
     Ok(registration)
@@ -4471,6 +4622,22 @@ mod avc_root_trust_tests {
         }
     }
 
+    fn avc_state_with_unreachable_postgres() -> AvcApiState {
+        let signer: AvcReceiptSigner = Arc::new(|_| Signature::empty());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://exochain:test@127.0.0.1:1/exochain_test")
+            .expect("unreachable Postgres pool");
+        AvcApiState {
+            registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
+            validator_did: Did::new("did:exo:test-validator").expect("test DID"),
+            receipt_signer: signer,
+            external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
+            durability: AvcRegistryDurability::Postgres(pool),
+        }
+    }
+
     fn repo_root() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -4579,6 +4746,59 @@ mod avc_root_trust_tests {
         );
     }
 
+    #[tokio::test]
+    async fn avc_root_trust_valid_bundle_requires_dagdb_receipt_before_registering_issuer() {
+        let state = avc_state_with_unreachable_postgres();
+        let error = load_root_trust_bundle_from_path(&state, &installed_bundle_path())
+            .expect_err("valid bundle must not register without durable DAG DB receipt");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to persist AVC root bundle DAG DB receipt"),
+            "expected DAG DB receipt persistence failure, got: {error}"
+        );
+
+        let registry = state.registry.lock().expect("registry lock");
+        assert_eq!(registry.resolve_public_key(&root_issuer_did()), None);
+        assert_eq!(
+            registry.resolve_issuer_permission_grant(&root_issuer_did()),
+            None
+        );
+    }
+
+    #[test]
+    fn avc_root_trust_loader_records_dagdb_receipt_after_verification_before_registry_commit() {
+        let source = include_str!("avc.rs");
+        let function_start = source
+            .find("pub fn load_root_trust_bundle_from_path(")
+            .expect("root bundle loader function present");
+        let function_tail = &source[function_start..];
+        let function_end = function_tail
+            .find(
+                "\n// ---------------------------------------------------------------------------",
+            )
+            .expect("root bundle loader section ends before response shapes");
+        let loader_source = &function_tail[..function_end];
+        let verification_position = loader_source
+            .find("verify_current_or_pinned_legacy_avc_root_bundle(&bundle, expected_bundle_id)")
+            .expect("root bundle verification call present");
+        let receipt_position = loader_source
+            .find("persist_verified_root_bundle_receipt(state, &bundle)")
+            .expect("DAG DB root bundle receipt persistence call present");
+        let registry_commit_position = loader_source
+            .find("*registry = candidate;")
+            .expect("root issuer registry commit present");
+
+        assert!(
+            verification_position < receipt_position,
+            "root bundle DAG DB receipt must be recorded only after verification"
+        );
+        assert!(
+            receipt_position < registry_commit_position,
+            "root bundle DAG DB receipt must be recorded before the issuer registry commit"
+        );
+    }
+
     #[test]
     fn avc_root_trust_bundle_tamper_fails_closed_without_registering_issuer() {
         let mut bundle: RootTrustBundle =
@@ -4602,6 +4822,36 @@ mod avc_root_trust_tests {
         assert_eq!(registry.resolve_public_key(&expected_did), None);
         assert_eq!(
             registry.resolve_issuer_permission_grant(&expected_did),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn avc_root_trust_tamper_fails_before_dagdb_receipt_insert() {
+        let mut bundle: RootTrustBundle =
+            serde_json::from_slice(&std::fs::read(installed_bundle_path()).expect("read bundle"))
+                .expect("parse bundle");
+        bundle.transcript_hash = Hash256::from_bytes([42u8; 32]);
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        serde_json::to_writer(temp.as_file(), &bundle).expect("write tampered bundle");
+
+        let state = avc_state_with_unreachable_postgres();
+        let error = load_root_trust_bundle_from_path(&state, temp.path())
+            .expect_err("tampered bundle must fail before DAG DB receipt insert");
+        let message = error.to_string();
+        assert!(
+            message.contains("AVC root trust bundle verification failed"),
+            "expected verification failure, got: {error}"
+        );
+        assert!(
+            !message.contains("failed to persist AVC root bundle DAG DB receipt"),
+            "tampered bundle must not reach DAG DB receipt persistence: {error}"
+        );
+
+        let registry = state.registry.lock().expect("registry lock");
+        assert_eq!(registry.resolve_public_key(&root_issuer_did()), None);
+        assert_eq!(
+            registry.resolve_issuer_permission_grant(&root_issuer_did()),
             None
         );
     }
