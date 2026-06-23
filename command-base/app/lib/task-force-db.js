@@ -16,31 +16,29 @@
 
 'use strict';
 /**
- * Task Force Database — SEPARATE from the_team.db
+ * Task Force persistence — separate DAG DB namespace family from main CommandBase state.
  *
- * This is intentionally a standalone SQLite database so that:
- * 1. If the_team.db corrupts, task forces survive
- * 2. If Command Base server crashes, task force state persists
- * 3. Task forces can theoretically run without server.js at all
- *
- * Location: ../task_forces.db (same level as the_team.db)
+ * Production routes through the CommandBase DAG DB adapter. Test and
+ * development retain a compatibility SQL adapter behind the shared factory.
  */
 
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const path = require('node:path');
+const {
+  createTaskForceDb,
+  defaultTaskForceDbPath,
+} = require('./commandbase-db-factory');
 
-const DB_PATH = path.join(__dirname, '..', '..', 'task_forces.db');
+const DB_PATH = process.env.TASK_FORCE_DB_PATH || defaultTaskForceDbPath(path.join(__dirname, '..'));
 
 let db;
 
 function getDb() {
   if (db) return db;
 
-  db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('busy_timeout = 5000');
-  db.pragma('foreign_keys = ON');
+  db = createTaskForceDb({
+    dbPath: DB_PATH,
+    fileMustExist: false,
+  });
 
   initSchema();
   return db;

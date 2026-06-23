@@ -19,7 +19,7 @@
  * Task Force Engine — External, Durable Execution Teams
  *
  * KEY ARCHITECTURE DECISIONS:
- * 1. EXTERNAL: Uses its own DB (task_forces.db), not the_team.db
+ * 1. EXTERNAL: Uses its own DB (DAG DB task-force state), not DAG DB CommandBase state
  * 2. DURABLE: Processes survive server.js crashes, state persists independently
  * 3. ANTI-BIAS: Enforced architecturally — builders can't review their own work
  * 4. INSTANT CANCEL: SIGTERM -> SIGKILL with resource cleanup

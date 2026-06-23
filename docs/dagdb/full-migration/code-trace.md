@@ -44,7 +44,7 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | QM-11 exposes twelve MCP tools bound to canonical DAG DB DTO fixtures, with route-specific signature/finality carrier fields and fail-closed gateway proxy dispatch. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/mod.rs` | Core runtime adapter | QM-11 registers and dispatches all twelve DAG DB MCP tools through the production `ToolRegistry`. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/resources/tools_summary.rs` | Core runtime adapter | QM-11 categorizes all twelve DAG DB MCP tools as `dagdb` in the tool-summary resource. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | Production CommandBase uses `better-sqlite3`, `the_team.db`, `task_forces.db`, many SQLite DDL blocks, and browser durable state. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | QM-12 routes production CommandBase persistence through a DAG DB intake adapter, moves `better-sqlite3` to dev/test compatibility only, and sends durable dashboard UI state through the server adapter. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo` | Adjacent surface | Demo services create direct `pg.Pool` instances against `DATABASE_URL` and initialize demo-owned Postgres schemas. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/site` | Adjacent surface | Contact intake owns direct `CONTACT_DATABASE_URL` tables and rate-limit state. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/web` | Adjacent surface | Council, feedback, layout templates, onboarding, and auth compatibility paths use `localStorage`. |
@@ -509,6 +509,42 @@ tenant-scoped and RLS-protected.
 ## Adjacent Surfaces
 
 CommandBase:
+
+- QM-12 implementation files:
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/commandbase-db-factory.js`
+    chooses the production DAG DB adapter when `NODE_ENV=production` and
+    `COMMAND_BASE_ALLOW_DEV_SQLITE` is not set to `1`.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/commandbase-dagdb-adapter.js`
+    requires `COMMAND_BASE_DAGDB_GATEWAY_URL`,
+    `COMMAND_BASE_DAGDB_AUTH_TOKEN`, `COMMAND_BASE_DAGDB_TENANT_ID`,
+    `COMMAND_BASE_DAGDB_NAMESPACE`, owner/controller/submitted-by DIDs, and
+    `COMMAND_BASE_DAGDB_WRITE_SIGNATURE`. It records production operations to
+    `POST /api/v1/dag-db/intake` with tenant, namespace, idempotency,
+    authority-scope, and write-signature headers. SQL-shaped `.run`, `.get`,
+    and `.all` calls refuse to synthesize row or row-id results; the gateway
+    must return an explicit `commandbase_result`, or the adapter fails closed.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/sqlite-dev-db.js`
+    is the only direct `better-sqlite3` opener and is reached only through the
+    factory's development/test compatibility branch.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/commandbase-ui-state.js`
+    mounts `/api/dagdb/commandbase/ui-state` and records durable UI-state
+    mutations through the active adapter.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/public/dagdb-durable-state.js`
+    provides the browser facade that replaces direct durable dashboard
+    `localStorage` calls.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/services/wasm-loader.js`
+    fails closed if the EXOCHAIN WASM package is unavailable instead of
+    pretending trust evidence is present.
+- QM-12 RED evidence: `cd command-base/app && npm test` initially failed the new
+  `commandbase-dagdb-adapter.test.js` guard because `better-sqlite3` remained a
+  production dependency and the durable-state script was not mounted before
+  `app.js`.
+- QM-12 GREEN evidence: `node --test commandbase-dagdb-adapter.test.js` passed
+  3 tests, including a child-process gateway proof that adapter reads use real
+  `commandbase_result` bodies and fail closed when absent. `npm test` passed 52
+  tests for the CommandBase package.
+
+Baseline before QM-12:
 
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/server.js:20`
   and `:50` open `better-sqlite3` against `the_team.db`.
