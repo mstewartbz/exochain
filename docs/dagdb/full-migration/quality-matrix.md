@@ -96,7 +96,7 @@ red_command: `cargo test -p exo-dag-db-postgres --features postgres zerodentity_
 red_failure: `DAG DB schema must include the 0dentity durable record table`; `production node startup must open 0dentity through the DAG DB-backed store`
 green_command: `cargo test -p exo-dag-db-postgres --features postgres zerodentity_records_are_dagdb_schema_contract`; `cargo test -p exo-dag-db-postgres --features postgres --test migration_contract`; `cargo test -p exo-node zerodentity_restart_persists_dagdb_state`; `cargo test -p exo-node zerodentity`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000003_create_zerodentity_record_schema.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`
-commit: not-claimed
+commit: `26c5f35b`
 
 ### QM-06
 
