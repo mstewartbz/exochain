@@ -76,7 +76,7 @@ red_command: `cargo test -p exo-node avc_root_trust_loader_records_dagdb_receipt
 red_failure: `root bundle DAG DB receipt must be recorded before the issuer registry commit`
 green_command: `cargo test -p exo-node avc_root_trust` and `cargo test -p exo-root`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/avc.rs`
-commit: qm03-root-bundle-commit
+commit: `6b33a1b7`
 
 ### QM-04
 
