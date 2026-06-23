@@ -220,6 +220,9 @@ pub async fn build_persistent_graph_context_packet_with_layered_drilldown(
         task_hash: request.task_hash.clone(),
         audit_id: request.audit_id.clone(),
         token_budget: effective_token_budget, // pragma-allowlist-secret
+        max_memory_refs: request
+            .max_memory_refs
+            .map(|_| selection_request.max_memory_refs),
         selection: persistent_selection.selection.clone(),
         import_tracking_status: request.import_tracking_status.clone(),
     };
@@ -704,7 +707,12 @@ fn selection_request_from_packet(
     } else {
         request.token_budget
     };
-    let max_memory_refs = token_budget.min(64);
+    let derived_max_memory_refs = token_budget.min(64).max(1);
+    let max_memory_refs = request
+        .max_memory_refs
+        .map_or(derived_max_memory_refs, |max_memory_refs| {
+            max_memory_refs.clamp(1, derived_max_memory_refs)
+        });
     DagDbGraphContextSelectionRequest {
         tenant_id: request.tenant_id.clone(),
         namespace: request.namespace.clone(),
@@ -791,6 +799,7 @@ mod tests {
             task_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             audit_id: "audit-1".into(),
             token_budget: 128,
+            max_memory_refs: None,
             selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
                 tenant_id: "tenant-a".into(),
                 namespace: "primary".into(),
@@ -819,6 +828,55 @@ mod tests {
     }
 
     #[test]
+    fn persistent_context_selection_request_from_packet_honors_explicit_max_memory_refs() {
+        let request = DagDbGraphContextPacketBuildRequest {
+            tenant_id: "tenant-a".into(),
+            namespace: "primary".into(),
+            request_id: "req-explicit-max".into(),
+            task: "Build packet".into(),
+            task_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+            audit_id: "audit-explicit-max".into(),
+            token_budget: 128,
+            max_memory_refs: Some(7),
+            selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
+                tenant_id: "tenant-a".into(),
+                namespace: "primary".into(),
+                request_id: "req-explicit-max".into(),
+                task_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .into(),
+                selection_status: exo_dag_db_api::DagDbGraphContextSelectionStatus::Empty,
+                selected_memory_refs: Vec::new(),
+                selected_graph_edges: Vec::new(),
+                omitted_memory_refs: Vec::new(),
+                selection_trace: Vec::new(),
+                selected_token_estimate: 0,
+                token_budget: 128,
+                boundary_warnings: Vec::new(),
+            },
+            import_tracking_status: None,
+        };
+
+        let selection = selection_request_from_packet(&request);
+        assert_eq!(selection.token_budget, 128);
+        assert_eq!(selection.max_memory_refs, 7);
+
+        let zero_cap = DagDbGraphContextPacketBuildRequest {
+            max_memory_refs: Some(0),
+            ..request.clone()
+        };
+        assert_eq!(selection_request_from_packet(&zero_cap).max_memory_refs, 1);
+
+        let loose_cap = DagDbGraphContextPacketBuildRequest {
+            max_memory_refs: Some(128),
+            ..request
+        };
+        assert_eq!(
+            selection_request_from_packet(&loose_cap).max_memory_refs,
+            64
+        );
+    }
+
+    #[test]
     fn persistent_context_selection_request_from_packet_honors_caller_budget_below_class() {
         // The caller's token_budget is a hard ceiling: a debugging task whose class
         // budget is 8192 must NOT raise an explicit 2048 caller budget. The caller
@@ -831,6 +889,7 @@ mod tests {
             task_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             audit_id: "audit-2".into(),
             token_budget: 2_048,
+            max_memory_refs: None,
             selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
                 tenant_id: "tenant-a".into(),
                 namespace: "primary".into(),
@@ -865,6 +924,7 @@ mod tests {
             task_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             audit_id: "audit-2b".into(),
             token_budget: 0,
+            max_memory_refs: None,
             selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
                 tenant_id: "tenant-a".into(),
                 namespace: "primary".into(),
@@ -899,6 +959,7 @@ mod tests {
             task_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
             audit_id: "audit-3".into(),
             token_budget: 12_000,
+            max_memory_refs: None,
             selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
                 tenant_id: "tenant-a".into(),
                 namespace: "primary".into(),

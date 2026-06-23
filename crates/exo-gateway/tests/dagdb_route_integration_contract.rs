@@ -3115,6 +3115,7 @@ async fn context_packet_record_material(
         task_hash: request.task_hash.clone(),
         audit_id: request.idempotency_key.clone(),
         token_budget: selection.selection.token_budget,
+        max_memory_refs: None,
         selection: selection.selection.clone(),
         import_tracking_status: None,
     };

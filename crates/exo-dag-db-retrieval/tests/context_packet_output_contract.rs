@@ -155,6 +155,7 @@ fn packet_build_request(
         task_hash: selection.task_hash.clone(),
         audit_id: "audit-packet-contract".into(),
         token_budget: selection.token_budget,
+        max_memory_refs: None,
         selection,
         import_tracking_status,
     }
@@ -328,18 +329,21 @@ fn context_packet_output_contract_rejects_max_memory_refs_violation() {
         return;
     };
     let mut forged = selection;
-    let mut zero_token_template = template;
-    zero_token_template.token_estimate = 0;
-    let mut refs = Vec::new();
-    let token_budget = usize::try_from(forged.token_budget).expect("fixture token budget fits");
-    while refs.len() <= token_budget {
-        refs.push(zero_token_template.clone());
-    }
-    forged.selected_memory_refs = refs;
+    let mut first = template.clone();
+    first.memory_id = mem_id(0xd1);
+    first.citation_ref = "citation:max-memory-refs-1".into();
+    first.token_estimate = 0;
+    let mut second = template;
+    second.memory_id = mem_id(0xd2);
+    second.citation_ref = "citation:max-memory-refs-2".into();
+    second.token_estimate = 0;
+    forged.selected_memory_refs = vec![first, second];
     forged.selected_token_estimate = 0;
 
+    let mut request = packet_build_request(forged, None);
+    request.max_memory_refs = Some(1);
     assert_eq!(
-        build_graph_context_packet(&packet_build_request(forged, None)),
+        build_graph_context_packet(&request),
         Err(DomainError::ValidationFailed)
     );
 }

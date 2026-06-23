@@ -2131,8 +2131,11 @@ async fn persistent_context_packet_response(
         ));
     }
 
-    let build_request =
-        graph_context_packet_build_request(request, persistent_selection.selection.clone());
+    let build_request = graph_context_packet_build_request(
+        request,
+        &selection_request,
+        persistent_selection.selection.clone(),
+    );
     let packet = exo_dag_db_postgres::build_graph_context_packet(&build_request)
         .map_err(DagDbHandlerError::from_domain)?;
     let persistent = PersistentGraphContextPacket {
@@ -2786,6 +2789,12 @@ fn graph_context_selection_request_from_packet(
     } else {
         request.token_budget
     };
+    let derived_max_memory_refs = token_budget.min(64).max(1);
+    let max_memory_refs = request
+        .max_memory_refs
+        .map_or(derived_max_memory_refs, |max_memory_refs| {
+            max_memory_refs.clamp(1, derived_max_memory_refs)
+        });
     DagDbGraphContextSelectionRequest {
         tenant_id: request.tenant_id.clone(),
         namespace: request.namespace.clone(),
@@ -2793,7 +2802,7 @@ fn graph_context_selection_request_from_packet(
         task,
         task_hash: request.task_hash.clone(),
         token_budget,
-        max_memory_refs: token_budget.min(64),
+        max_memory_refs,
         catalog_hints: Vec::new(),
         requested_memory_ids: Vec::new(),
         force_revalidate: false,
@@ -2803,6 +2812,7 @@ fn graph_context_selection_request_from_packet(
 #[cfg(feature = "production-db")]
 fn graph_context_packet_build_request(
     request: &DagDbContextPacketRequest,
+    selection_request: &DagDbGraphContextSelectionRequest,
     selection: DagDbGraphContextSelectionResponse,
 ) -> DagDbGraphContextPacketBuildRequest {
     DagDbGraphContextPacketBuildRequest {
@@ -2813,6 +2823,9 @@ fn graph_context_packet_build_request(
         task_hash: request.task_hash.clone(),
         audit_id: request.idempotency_key.clone(),
         token_budget: selection.token_budget,
+        max_memory_refs: request
+            .max_memory_refs
+            .map(|_| selection_request.max_memory_refs),
         selection,
         import_tracking_status: None,
     }
@@ -3726,7 +3739,9 @@ fn context_packet_response_from_persistent(
     } else {
         (Some("database".to_owned()), None)
     };
-    let layered = context_packet_layered_fields(request, memory_refs.len(), false)?;
+    let verified_layer_evidence = persistent_context_packet_has_layered_evidence(persistent);
+    let layered =
+        context_packet_layered_fields(request, memory_refs.len(), verified_layer_evidence)?;
     Ok(DagDbContextPacketResponse {
         schema_version: exo_api::dagdb::DAGDB_CONTEXT_PACKET_RESPONSE_SCHEMA_VERSION.to_owned(),
         tenant_id: request.tenant_id.clone(),
@@ -3770,6 +3785,29 @@ fn context_packet_response_from_persistent(
         boundaries: Some(persistent.packet.boundaries.clone()),
         packet_markdown: Some(persistent.packet.markdown.clone()),
     })
+}
+
+#[cfg(feature = "production-db")]
+fn persistent_context_packet_has_layered_evidence(
+    persistent: &PersistentGraphContextPacket,
+) -> bool {
+    persistent
+        .selection
+        .selection
+        .selected_memory_refs
+        .iter()
+        .any(selected_context_ref_has_layered_evidence)
+}
+
+#[cfg(feature = "production-db")]
+fn selected_context_ref_has_layered_evidence(
+    selected: &exo_api::dagdb::DagDbSelectedContextRef,
+) -> bool {
+    selected.selection_reason == exo_dag_db_postgres::LAYERED_DRILLDOWN_SELECTION_REASON
+        || selected
+            .boundary_flags
+            .iter()
+            .any(|flag| flag.starts_with(exo_dag_db_postgres::LAYERED_DRILLDOWN_ROOT_FLAG_PREFIX))
 }
 
 #[cfg(feature = "production-db")]
@@ -9761,6 +9799,58 @@ mod tests {
         }
 
         #[test]
+        fn graph_context_selection_request_from_packet_honors_max_memory_refs() {
+            let cases = [
+                ("packet-selection-max-refs-preserved", Some(9), 512, 9),
+                ("packet-selection-max-refs-zero", Some(0), 512, 1),
+                ("packet-selection-max-refs-cap", Some(128), 32, 32),
+            ];
+
+            for (request_id, max_memory_refs, token_budget, expected_max_memory_refs) in cases {
+                let request = DagDbContextPacketRequest {
+                    token_budget,
+                    max_memory_refs,
+                    ..context_packet_request(request_id)
+                };
+
+                let selection_request = graph_context_selection_request_from_packet(&request);
+
+                assert_eq!(
+                    selection_request.max_memory_refs, expected_max_memory_refs,
+                    "case {request_id}"
+                );
+            }
+        }
+
+        #[test]
+        fn dagdb_context_packet_build_request_normalizes_explicit_max_memory_refs() {
+            let cases = [
+                ("packet-build-max-refs-preserved", Some(9), 512, Some(9)),
+                ("packet-build-max-refs-zero", Some(0), 512, Some(1)),
+                ("packet-build-max-refs-cap", Some(128), 32, Some(32)),
+                ("packet-build-max-refs-omitted", None, 512, None),
+            ];
+
+            for (request_id, max_memory_refs, token_budget, expected_max_memory_refs) in cases {
+                let request = DagDbContextPacketRequest {
+                    token_budget,
+                    max_memory_refs,
+                    ..context_packet_request(request_id)
+                };
+                let selection_request = graph_context_selection_request_from_packet(&request);
+                let selection = persistent_context_packet(Vec::new()).selection.selection;
+
+                let build_request =
+                    graph_context_packet_build_request(&request, &selection_request, selection);
+
+                assert_eq!(
+                    build_request.max_memory_refs, expected_max_memory_refs,
+                    "case {request_id}"
+                );
+            }
+        }
+
+        #[test]
         fn context_packet_response_from_persistent_marks_empty_and_database_modes() {
             let request = context_packet_request("packet-mode-request");
 
@@ -9846,6 +9936,38 @@ mod tests {
                 Some("flat_fallback_no_layer_evidence")
             );
             assert_eq!(auto_response.flat_fallback_used, Some(true));
+        }
+
+        #[test]
+        fn dagdb_context_packet_response_detects_persistent_layer_evidence() {
+            let request = DagDbContextPacketRequest {
+                layered_mode: Some("required".to_owned()),
+                max_layer_depth: Some(3),
+                require_layer_evidence: Some(true),
+                ..context_packet_request("persistent-layer-evidence")
+            };
+            let mut reason_ref = selected_context_ref();
+            reason_ref.selection_reason =
+                exo_dag_db_postgres::LAYERED_DRILLDOWN_SELECTION_REASON.to_owned();
+            let mut boundary_ref = selected_context_ref();
+            boundary_ref.memory_id = Hash256::digest(b"selected drilldown boundary").to_string();
+            boundary_ref.citation_ref = "cite:selected-boundary".to_owned();
+            boundary_ref.boundary_flags = vec![format!(
+                "{}{}",
+                exo_dag_db_postgres::LAYERED_DRILLDOWN_ROOT_FLAG_PREFIX,
+                reason_ref.memory_id
+            )];
+            let persistent = persistent_context_packet(vec![reason_ref, boundary_ref]);
+
+            let response = context_packet_response_from_persistent(&request, &persistent)
+                .expect("persistent layered evidence");
+
+            assert_eq!(
+                response.layered_status.as_deref(),
+                Some("layered_evidence_selected")
+            );
+            assert_eq!(response.flat_fallback_used, Some(false));
+            assert_eq!(response.selected_layers.as_ref().map(Vec::len), Some(2));
         }
 
         #[tokio::test]

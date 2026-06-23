@@ -465,6 +465,7 @@ async fn generate_m04_first_real_task_context_packet() {
         task_hash: task_hash.clone(),
         audit_id: format!("audit-{M04_TASK_ID}"),
         token_budget: M04_TOKEN_BUDGET, // pragma-allowlist-secret
+        max_memory_refs: None,
         selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
             tenant_id: M04_TENANT_ID.to_owned(),
             namespace: M04_NAMESPACE.to_owned(),
@@ -605,6 +606,7 @@ async fn generate_m07_repeated_task_context_packets() {
             task_hash: task_hash.clone(),
             audit_id: format!("audit-{}", repeat_task.task_id),
             token_budget: M07_TOKEN_BUDGET, // pragma-allowlist-secret
+            max_memory_refs: None,
             selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
                 tenant_id: M07_TENANT_ID.to_owned(),
                 namespace: M07_NAMESPACE.to_owned(),
@@ -735,6 +737,7 @@ fn base_packet_request() -> DagDbGraphContextPacketBuildRequest {
         task_hash: selection_request.task_hash.clone(),
         audit_id: "audit-persistent-context-1".to_owned(),
         token_budget: selection_request.token_budget,
+        max_memory_refs: None,
         selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
             tenant_id: selection_request.tenant_id.clone(),
             namespace: selection_request.namespace.clone(),
