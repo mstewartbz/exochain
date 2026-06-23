@@ -330,21 +330,46 @@ avc_registry_state
 
 ## DAG DB REST, SDK, MCP Surface
 
-`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs:601`
-through `:621` mounts five routes:
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
+now mounts the twelve documented DAG DB routes:
 
 ```text
+/api/v1/dag-db/intake
 /api/v1/dag-db/route
 /api/v1/dag-db/context-packet
+/api/v1/dag-db/validate
 /api/v1/dag-db/writeback
 /api/v1/dag-db/import
 /api/v1/dag-db/export
+/api/v1/dag-db/trust-check
+/api/v1/dag-db/council/decision
+/api/v1/dag-db/receipts/:receipt_hash
+/api/v1/dag-db/catalog/:catalog_id
+/api/v1/dag-db/routes/:route_id
 ```
 
-The test `dagdb_router_mounts_only_live_routes` currently asserts that intake,
-validate, trust-check, council decision, receipt lookup, catalog lookup, and
-route lookup are unmounted. That test must be inverted by RED/GREEN work for
-the full REST surface.
+The RED test
+`dagdb_router_mounts_full_rest_surface_fail_closed_without_db` observed a 404
+for POST `/api/v1/dag-db/intake` before the route surface was expanded. The
+GREEN route test now proves all twelve routes are mounted, auth-gated, and
+fail closed with 503 when no governed DAG DB pool is configured.
+
+The promoted route handlers no longer use generic scaffold authorization
+responses. They call route-specific persistence and lookup paths:
+
+- intake writes `dagdb_receipts`, `dagdb_subject_receipt_heads`,
+  `dagdb_memory_objects`, and parent edges in `dagdb_memory_edges`;
+- validate writes `dagdb_receipts`, `dagdb_subject_receipt_heads`, and
+  `dagdb_validation_reports`;
+- trust-check writes `dagdb_receipts`, `dagdb_subject_receipt_heads`,
+  `dagdb_inbound_agent_credentials`, and `dagdb_agent_safety_scores`;
+- council decision writes `dagdb_receipts`, `dagdb_subject_receipt_heads`, and
+  `dagdb_council_decisions`;
+- receipt, catalog, and route lookups read `dagdb_receipts`,
+  `dagdb_catalog_entries`, and `dagdb_route_receipts`.
+
+Live Postgres write/read proof is still gated by QM-19 and requires
+`EXO_DAGDB_TEST_DATABASE_URL`.
 
 `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs:64`
 through `:99` exposes SDK helpers for the same five routes.

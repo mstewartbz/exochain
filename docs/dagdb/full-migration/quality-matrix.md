@@ -24,7 +24,7 @@ implementation, then GREEN evidence recorded here.
 | QM-04 | Node DAG store | EXOCHAIN core | Source guard fails on production `SqliteDagStore::open(data_dir)`. | DAG DB node store persists DAG, parents, commits, certificates, receipts, economy state. |
 | QM-05 | 0dentity | EXOCHAIN core | Restart test fails because memory-only state disappears. | DAG DB-backed 0dentity reloads every record and `persistence_ready()` is true. |
 | QM-06 | Gateway state | Core runtime adapter | Guard fails on production public-schema gateway writes. | Gateway state writes/readbacks resolve through DAG DB store interfaces. |
-| QM-07 | Full REST surface | Core runtime adapter | Router test fails because only five routes are mounted. | All documented routes mount, auth gate, persist, and fail closed without DB. |
+| QM-07 | Full REST surface | Core runtime adapter | Router test fails because only five routes are mounted. | All documented routes mount; auth/session gates run; pool-backed promoted routes persist/read DAG DB tables; no-pool paths fail closed. |
 | QM-08 | Finality | EXOCHAIN core | Self-approved route/import/export/council tests fail. | Accepted/approved state requires independent finality authority. |
 | QM-09 | RLS | EXOCHAIN core | Tenant mismatch live test fails for each unlisted tenant table. | Every tenant table is RLS-protected and live mismatch test passes. |
 | QM-10 | Idempotency/replay | EXOCHAIN core | Duplicate key and mismatched request-hash tests fail for new routes. | Replay is stable; mismatched replay rejects mutation with receipt evidence. |
@@ -112,11 +112,11 @@ commit: `24fcdd99`
 
 surface: Full REST surface
 classification: Core runtime adapter
-red_command: `cargo test -p exo-gateway dagdb_router_mounts_full_rest_surface`
-red_failure: not-claimed
-green_command: `cargo test -p exo-gateway --features production-db dagdb`
+red_command: `cargo test -p exo-gateway dagdb_router_mounts_full_rest_surface_fail_closed_without_db`
+red_failure: `thread 'dagdb::tests::dagdb_router_mounts_full_rest_surface_fail_closed_without_db' panicked ... assertion 'left == right' failed ... left: 404 right: 503` for POST `/api/v1/dag-db/intake`; the first RED compile also failed until the new GET assertion helper existed.
+green_command: `cargo test -p exo-gateway dagdb_router && cargo test -p exo-gateway dagdb_full_rest_surface_has_governed_persistence_handlers && cargo test -p exo-gateway dagdb_handlers_cover_authorized_and_denied_branches_directly && cargo clippy -p exo-gateway --all-targets -- -D warnings && cargo fmt --all -- --check`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
-commit: not-claimed
+commit: pending-current-commit
 
 ### QM-08
 
