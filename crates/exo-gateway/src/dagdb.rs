@@ -7448,6 +7448,43 @@ mod tests {
     }
 
     #[test]
+    fn quality_matrix_is_complete() {
+        let matrix_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/dagdb/full-migration/quality-matrix.md");
+        let matrix = std::fs::read_to_string(&matrix_path).unwrap_or_else(|error| {
+            panic!(
+                "quality matrix must exist at {}: {error}",
+                matrix_path.display()
+            )
+        });
+        let required_fields = [
+            "red_command:",
+            "red_failure:",
+            "green_command:",
+            "artifact:",
+            "commit:",
+        ];
+
+        for index in 0..=19 {
+            let id = format!("QM-{index:02}");
+            let marker = format!("### {id}");
+            let section_start = matrix
+                .find(&marker)
+                .unwrap_or_else(|| panic!("quality matrix missing section {id}"));
+            let section_tail = &matrix[section_start..];
+            let section_end = section_tail.find("\n### QM-").unwrap_or(section_tail.len());
+            let section = &section_tail[..section_end];
+
+            for field in required_fields {
+                assert!(
+                    section.contains(field),
+                    "quality matrix section {id} missing {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dagdb_json_fixtures() {
         let fixtures = fixtures();
         assert_fixture::<DagDbIntakeRequest>(&fixtures, "requests", "intake");
