@@ -166,7 +166,7 @@ red_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/command-bas
 red_failure: RED failed in `commandbase-dagdb-adapter.test.js` because `better-sqlite3` was still present in production `dependencies` and `public/index.html` did not load `dagdb-durable-state.js` before `app.js`; the package also lacked a complete real test-script gate before QM-12.
 green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app && node --test commandbase-dagdb-adapter.test.js && npm test`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/commandbase-dagdb-adapter.test.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/commandbase-dagdb-adapter.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/commandbase-db-factory.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/sqlite-dev-db.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/lib/commandbase-ui-state.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/public/dagdb-durable-state.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/public/app.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/public/index.html`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/server.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/package.json`
-commit: not-claimed
+commit: `b905a847`
 
 ### QM-13
 
