@@ -2789,7 +2789,7 @@ fn graph_context_selection_request_from_packet(
     } else {
         request.token_budget
     };
-    let derived_max_memory_refs = token_budget.min(64).max(1);
+    let derived_max_memory_refs = token_budget.clamp(1, 64);
     let max_memory_refs = request
         .max_memory_refs
         .map_or(derived_max_memory_refs, |max_memory_refs| {
