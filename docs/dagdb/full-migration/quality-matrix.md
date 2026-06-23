@@ -126,7 +126,7 @@ red_command: `cargo test -p exo-gateway --features production-db dagdb_finality_
 red_failure: `error[E0425]: cannot find function 'import_finality_payload_hash' in this scope`; same RED compile failed for missing `export_finality_payload_hash` and `validate_council_decision_finality`.
 green_command: `cargo test -p exo-gateway --features production-db dagdb_finality_requires_independent_authority && cargo test -p exo-gateway --features production-db import_export_authorization && cargo test -p exo-gateway --features production-db dagdb_council_decision && cargo clippy -p exo-gateway --features production-db --all-targets -- -D warnings && cargo fmt --all -- --check`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
-commit: pending-current-commit
+commit: `c88d16b9`
 
 ### QM-09
 
