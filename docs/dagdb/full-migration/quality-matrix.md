@@ -46,7 +46,7 @@ red_command: `cd /Users/bobstewart/dev/exochain && git status --short --branch`
 red_failure: Original checkout reports branch `bob-stewart/cybermedica-adjacent-surface-contracts-20260526...origin/bob-stewart/cybermedica-adjacent-surface-contracts-20260526 [gone]` with many modified and untracked files.
 green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration && git status --short --branch && git rev-parse HEAD && git rev-parse origin/main`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/code-trace.md`
-commit: `76a2e327`
+commit: `1de3bb04`
 
 ### QM-01
 
@@ -56,7 +56,7 @@ red_command: `cargo test -p exo-gateway quality_matrix_is_complete`
 red_failure: `quality matrix must exist at /Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/../../docs/dagdb/full-migration/quality-matrix.md: No such file or directory (os error 2)`
 green_command: `cargo test -p exo-gateway quality_matrix_is_complete`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
-commit: `76a2e327`
+commit: `1de3bb04`
 
 ### QM-02
 
