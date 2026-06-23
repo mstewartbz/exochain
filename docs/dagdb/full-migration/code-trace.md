@@ -38,7 +38,7 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs` | EXOCHAIN core | QM-04 introduced a DAG DB-backed node store while retaining legacy SQLite construction only for direct test/dev compatibility. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs` | EXOCHAIN core | QM-05 moved production 0dentity startup to DAG DB-backed persistence for claims, scores, OTP state, sessions, attestations, emitted DAG nodes, and trust receipts. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs` | Core runtime adapter | QM-06 splits gateway migrations from runtime serving: public migrations still run as rollback/history, but the returned production pool uses DAGDB-first `search_path` so gateway table contracts resolve in the `dagdb` schema. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs` | Core runtime adapter | DAG DB REST router currently mounts five live routes. The remaining documented routes are present as test-only handlers or DTO fixtures, not live production routes. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs` | Core runtime adapter | QM-07 mounts all twelve documented REST routes; QM-10 wraps promoted write routes in DAG DB idempotency replay/conflict guards. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 69 traced table contracts exist after the QM-06 gateway-state migrations. Missing production state families continue to be added here first. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs` | Core runtime adapter | SDK exposes the same five-route subset. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | MCP exposes four agent-facing DAG DB tools, not the full REST surface. |
@@ -420,6 +420,33 @@ Route, context-packet, and writeback finality already used independent
 approval-authority checks. QM-08 extends that same boundary to import/export
 and council-decision persistence. Live signed Postgres proof remains covered by
 QM-19.
+
+## DAG DB Idempotency And Replay Boundary
+
+QM-10 extends DAG DB idempotency guards from import/export to the newly promoted
+write routes:
+
+```text
+dagdb.intake
+dagdb.validate
+dagdb.trust_check
+dagdb.council_decision
+```
+
+Each wrapper computes the same deterministic request hash as its persistence
+function, reserves `(tenant_id, namespace, route_name, idempotency_key)` in
+`dagdb_idempotency_keys`, and only then runs the existing route-specific
+mutation. A completed duplicate request replays the cached response body with
+`idempotency_status: replayed`; a reused key with a different request hash
+returns `409 idempotency_key_conflict` and emits operational receipt evidence.
+If persistence fails after reservation, the wrapper removes only the matching
+reserved row so the caller can retry without leaving a poisoned in-progress key.
+
+The RED source guard failed because `persist_idempotent_intake_response` and the
+other wrappers did not exist. The GREEN guard verifies that every promoted route
+has an explicit route constant, calls `reserve_gateway_idempotency_key`, stores
+with `store_gateway_idempotency_response`, and routes cleanup through the shared
+reservation delete helper.
 
 `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs:64`
 through `:99` exposes SDK helpers for the same five routes.

@@ -27,7 +27,7 @@ implementation, then GREEN evidence recorded here.
 | QM-07 | Full REST surface | Core runtime adapter | Router test fails because only five routes are mounted. | All documented routes mount; auth/session gates run; pool-backed promoted routes persist/read DAG DB tables; no-pool paths fail closed. |
 | QM-08 | Finality | EXOCHAIN core | Self-approved route/import/export/council tests fail. | Accepted/approved state requires independent finality authority. |
 | QM-09 | RLS | EXOCHAIN core | Tenant mismatch live test fails for each unlisted tenant table. | Every tenant table is RLS-protected and live mismatch test passes. |
-| QM-10 | Idempotency/replay | EXOCHAIN core | Duplicate key and mismatched request-hash tests fail for new routes. | Replay is stable; mismatched replay rejects mutation with receipt evidence. |
+| QM-10 | Idempotency/replay | Core runtime adapter | Duplicate key and mismatched request-hash tests fail for new routes. | Replay is stable; mismatched replay rejects mutation with receipt evidence. |
 | QM-11 | SDK/MCP parity | Core runtime adapter | Compile/source tests fail for missing route helpers/tools. | SDK and MCP expose all REST routes with typed requests and fail-closed errors. |
 | QM-12 | CommandBase | Adjacent surface | Guard fails on production SQLite and durable browser state. | CommandBase durable state uses DAG DB adapter; SQLite removed from production. |
 | QM-13 | Demo | Adjacent surface | Guard fails on direct demo service `pg.Pool` writes. | Demo services call DAG DB/gateway adapters; old SQL is test fixture or gone. |
@@ -141,11 +141,11 @@ commit: `7d6ca65b`
 ### QM-10
 
 surface: Idempotency/replay
-classification: EXOCHAIN core
+classification: Core runtime adapter
 red_command: `cargo test -p exo-gateway dagdb_idempotency_replay_contract`
-red_failure: not-claimed
-green_command: `cargo test -p exo-gateway dagdb_idempotency_replay_contract`
-artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
+red_failure: `persist_idempotent_intake_response must wrap dagdb.intake writes`
+green_command: `cargo test -p exo-gateway dagdb_idempotency_replay_contract && cargo test -p exo-gateway --features production-db dagdb_idempotency_replay_contract && cargo test -p exo-gateway --features production-db idempotency_error_helpers_return_stable_envelopes && cargo test -p exo-gateway --features production-db idempotency_db_error_and_short_circuit_paths_fail_closed && cargo test -p exo-gateway --features production-db dagdb_router && cargo clippy -p exo-gateway --features production-db --all-targets -- -D warnings && cargo fmt --all -- --check && cargo test -p exo-gateway quality_matrix_is_complete`
+artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/code-trace.md`
 commit: not-claimed
 
 ### QM-11

@@ -161,6 +161,14 @@ const CONTINUATION_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-continuation-approva
 #[cfg(feature = "production-db")]
 const WRITEBACK_CONTINUATION_EXPIRY_EPOCH_SECONDS: u64 = 4_102_444_800;
 #[cfg(feature = "production-db")]
+const INTAKE_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.intake";
+#[cfg(feature = "production-db")]
+const VALIDATE_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.validate";
+#[cfg(feature = "production-db")]
+const TRUST_CHECK_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.trust_check";
+#[cfg(feature = "production-db")]
+const COUNCIL_DECISION_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.council_decision";
+#[cfg(feature = "production-db")]
 const IMPORT_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.import";
 #[cfg(feature = "production-db")]
 const EXPORT_ROUTE_IDEMPOTENCY_NAME: &str = "dagdb.export";
@@ -1057,10 +1065,7 @@ async fn handle_dagdb_route_lookup(
 async fn intake_handler(ctx: &DagDbRouteContext, request: DagDbIntakeRequest) -> Response {
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
-        return match persist_intake_response(pool, request).await {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(response) => *response,
-        };
+        return persist_idempotent_intake_response(pool, request).await;
     }
     #[cfg(not(feature = "production-db"))]
     let _ = (ctx, &request);
@@ -1077,10 +1082,7 @@ async fn intake_handler(ctx: &DagDbRouteContext, request: DagDbIntakeRequest) ->
 async fn validate_handler(ctx: &DagDbRouteContext, request: DagDbValidateRequest) -> Response {
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
-        return match persist_validate_response(pool, request).await {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(response) => *response,
-        };
+        return persist_idempotent_validate_response(pool, request).await;
     }
     #[cfg(not(feature = "production-db"))]
     let _ = (ctx, &request);
@@ -1097,10 +1099,7 @@ async fn validate_handler(ctx: &DagDbRouteContext, request: DagDbValidateRequest
 async fn trust_check_handler(ctx: &DagDbRouteContext, request: DagDbTrustCheckRequest) -> Response {
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
-        return match persist_trust_check_response(pool, request).await {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(response) => *response,
-        };
+        return persist_idempotent_trust_check_response(pool, request).await;
     }
     #[cfg(not(feature = "production-db"))]
     let _ = (ctx, &request);
@@ -1120,10 +1119,7 @@ async fn council_decision_handler(
 ) -> Response {
     #[cfg(feature = "production-db")]
     if let Some(pool) = &ctx.pool {
-        return match persist_council_decision_response(pool, request).await {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(response) => *response,
-        };
+        return persist_idempotent_council_decision_response(pool, request).await;
     }
     #[cfg(not(feature = "production-db"))]
     let _ = (ctx, &request);
@@ -5504,6 +5500,315 @@ fn validate_response_from_request(
 }
 
 #[cfg(feature = "production-db")]
+async fn persist_idempotent_intake_response(
+    pool: &sqlx::PgPool,
+    request: DagDbIntakeRequest,
+) -> Response {
+    let response_seed =
+        match intake_response_from_request(request.clone(), INTAKE_ROUTE_IDEMPOTENCY_NAME) {
+            Ok(response) => response,
+            Err(response) => return *response,
+        };
+    let redacted_body = match intake_redacted_body(&request, &response_seed) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let request_hash = match request_hash(
+        INTAKE_ROUTE_IDEMPOTENCY_NAME,
+        &request.tenant_id,
+        &request.namespace,
+        &redacted_body,
+    ) {
+        Ok(request_hash) => request_hash,
+        Err(response) => return *response,
+    };
+    match reserve_gateway_idempotency_key(
+        pool,
+        &request.tenant_id,
+        &request.namespace,
+        INTAKE_ROUTE_IDEMPOTENCY_NAME,
+        &request.idempotency_key,
+        request_hash,
+        &request.submitted_by_did,
+        "intake",
+    )
+    .await
+    {
+        Ok(GatewayIdempotencyDecision::Reserved) => {}
+        Ok(GatewayIdempotencyDecision::Replayed(response)) => return response.response,
+        Ok(GatewayIdempotencyDecision::Failed(response)) | Err(response) => return *response,
+    }
+    match persist_intake_response(pool, request.clone()).await {
+        Ok(response) => {
+            if let Err(error) = store_gateway_idempotency_response(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                INTAKE_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                StatusCode::CREATED,
+                serde_json::to_value(&response)
+                    .map_err(|_| idempotency_unavailable_response("intake")),
+                None,
+                "intake",
+            )
+            .await
+            {
+                return *error;
+            }
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup_gateway_idempotency_reservation_for_route(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                INTAKE_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                "intake",
+            )
+            .await
+            {
+                return *cleanup_error;
+            }
+            *error
+        }
+    }
+}
+
+#[cfg(feature = "production-db")]
+async fn persist_idempotent_validate_response(
+    pool: &sqlx::PgPool,
+    request: DagDbValidateRequest,
+) -> Response {
+    let response_seed =
+        match validate_response_from_request(request.clone(), VALIDATE_ROUTE_IDEMPOTENCY_NAME) {
+            Ok(response) => response,
+            Err(response) => return *response,
+        };
+    let redacted_body = match validate_redacted_body(&request, &response_seed) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let request_hash = match request_hash(
+        VALIDATE_ROUTE_IDEMPOTENCY_NAME,
+        &request.tenant_id,
+        &request.namespace,
+        &redacted_body,
+    ) {
+        Ok(request_hash) => request_hash,
+        Err(response) => return *response,
+    };
+    match reserve_gateway_idempotency_key(
+        pool,
+        &request.tenant_id,
+        &request.namespace,
+        VALIDATE_ROUTE_IDEMPOTENCY_NAME,
+        &request.idempotency_key,
+        request_hash,
+        &request.validator_did,
+        "validate",
+    )
+    .await
+    {
+        Ok(GatewayIdempotencyDecision::Reserved) => {}
+        Ok(GatewayIdempotencyDecision::Replayed(response)) => return response.response,
+        Ok(GatewayIdempotencyDecision::Failed(response)) | Err(response) => return *response,
+    }
+    match persist_validate_response(pool, request.clone()).await {
+        Ok(response) => {
+            if let Err(error) = store_gateway_idempotency_response(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                VALIDATE_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                StatusCode::CREATED,
+                serde_json::to_value(&response)
+                    .map_err(|_| idempotency_unavailable_response("validate")),
+                None,
+                "validate",
+            )
+            .await
+            {
+                return *error;
+            }
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup_gateway_idempotency_reservation_for_route(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                VALIDATE_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                "validate",
+            )
+            .await
+            {
+                return *cleanup_error;
+            }
+            *error
+        }
+    }
+}
+
+#[cfg(feature = "production-db")]
+async fn persist_idempotent_trust_check_response(
+    pool: &sqlx::PgPool,
+    request: DagDbTrustCheckRequest,
+) -> Response {
+    let request_body = match request_json(&request) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let request_hash = match request_hash(
+        TRUST_CHECK_ROUTE_IDEMPOTENCY_NAME,
+        &request.tenant_id,
+        &request.namespace,
+        &request_body,
+    ) {
+        Ok(request_hash) => request_hash,
+        Err(response) => return *response,
+    };
+    match reserve_gateway_idempotency_key(
+        pool,
+        &request.tenant_id,
+        &request.namespace,
+        TRUST_CHECK_ROUTE_IDEMPOTENCY_NAME,
+        &request.idempotency_key,
+        request_hash,
+        &request.operator_did,
+        "trust-check",
+    )
+    .await
+    {
+        Ok(GatewayIdempotencyDecision::Reserved) => {}
+        Ok(GatewayIdempotencyDecision::Replayed(response)) => return response.response,
+        Ok(GatewayIdempotencyDecision::Failed(response)) | Err(response) => return *response,
+    }
+    match persist_trust_check_response(pool, request.clone()).await {
+        Ok(response) => {
+            if let Err(error) = store_gateway_idempotency_response(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                TRUST_CHECK_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                StatusCode::CREATED,
+                serde_json::to_value(&response)
+                    .map_err(|_| idempotency_unavailable_response("trust-check")),
+                None,
+                "trust-check",
+            )
+            .await
+            {
+                return *error;
+            }
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup_gateway_idempotency_reservation_for_route(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                TRUST_CHECK_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                "trust-check",
+            )
+            .await
+            {
+                return *cleanup_error;
+            }
+            *error
+        }
+    }
+}
+
+#[cfg(feature = "production-db")]
+async fn persist_idempotent_council_decision_response(
+    pool: &sqlx::PgPool,
+    request: DagDbCouncilDecisionRequest,
+) -> Response {
+    if let Err(error) = validate_council_decision_finality(&request) {
+        return error.into_response();
+    }
+    let request_body = match request_json(&request) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let request_hash = match request_hash(
+        COUNCIL_DECISION_ROUTE_IDEMPOTENCY_NAME,
+        &request.tenant_id,
+        &request.namespace,
+        &request_body,
+    ) {
+        Ok(request_hash) => request_hash,
+        Err(response) => return *response,
+    };
+    match reserve_gateway_idempotency_key(
+        pool,
+        &request.tenant_id,
+        &request.namespace,
+        COUNCIL_DECISION_ROUTE_IDEMPOTENCY_NAME,
+        &request.idempotency_key,
+        request_hash,
+        &request.approver_did,
+        "council decision",
+    )
+    .await
+    {
+        Ok(GatewayIdempotencyDecision::Reserved) => {}
+        Ok(GatewayIdempotencyDecision::Replayed(response)) => return response.response,
+        Ok(GatewayIdempotencyDecision::Failed(response)) | Err(response) => return *response,
+    }
+    match persist_council_decision_response(pool, request.clone()).await {
+        Ok(response) => {
+            if let Err(error) = store_gateway_idempotency_response(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                COUNCIL_DECISION_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                StatusCode::CREATED,
+                serde_json::to_value(&response)
+                    .map_err(|_| idempotency_unavailable_response("council decision")),
+                None,
+                "council decision",
+            )
+            .await
+            {
+                return *error;
+            }
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup_gateway_idempotency_reservation_for_route(
+                pool,
+                &request.tenant_id,
+                &request.namespace,
+                COUNCIL_DECISION_ROUTE_IDEMPOTENCY_NAME,
+                &request.idempotency_key,
+                request_hash,
+                "council decision",
+            )
+            .await
+            {
+                return *cleanup_error;
+            }
+            *error
+        }
+    }
+}
+
+#[cfg(feature = "production-db")]
 async fn persist_intake_response(
     pool: &sqlx::PgPool,
     request: DagDbIntakeRequest,
@@ -6910,6 +7215,10 @@ fn gateway_operational_actor(actor_did: &str) -> &str {
 #[cfg(feature = "production-db")]
 fn gateway_operation_from_route_name(route_name: &str) -> &'static str {
     match route_name {
+        INTAKE_ROUTE_IDEMPOTENCY_NAME => "intake",
+        VALIDATE_ROUTE_IDEMPOTENCY_NAME => "validate",
+        TRUST_CHECK_ROUTE_IDEMPOTENCY_NAME => "trust-check",
+        COUNCIL_DECISION_ROUTE_IDEMPOTENCY_NAME => "council decision",
         IMPORT_ROUTE_IDEMPOTENCY_NAME => "import",
         EXPORT_ROUTE_IDEMPOTENCY_NAME => "export",
         "dagdb.route" => "route",
@@ -7557,6 +7866,50 @@ async fn cleanup_export_idempotency_reservation(
             &request.tenant_id,
             &request.namespace,
             &request.idempotency_key,
+        )),
+    }
+}
+
+#[cfg(feature = "production-db")]
+#[allow(clippy::too_many_arguments)]
+async fn cleanup_gateway_idempotency_reservation_for_route(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    namespace: &str,
+    route_name: &'static str,
+    idempotency_key: &str,
+    request_hash: Hash256,
+    operation: &'static str,
+) -> Result<(), Box<Response>> {
+    match delete_gateway_idempotency_reservation(
+        pool,
+        tenant_id,
+        namespace,
+        route_name,
+        idempotency_key,
+        request_hash,
+    )
+    .await
+    {
+        Ok(rows_affected) if idempotency_reservation_cleanup_removed(rows_affected) => Ok(()),
+        Ok(rows_affected) => {
+            log_idempotency_cleanup_row_mismatch(
+                route_name,
+                operation,
+                tenant_id,
+                namespace,
+                idempotency_key,
+                rows_affected,
+            );
+            Err(idempotency_unavailable_response(operation))
+        }
+        Err(_) => Err(idempotency_unavailable_response_logged(
+            route_name,
+            "cleanup",
+            operation,
+            tenant_id,
+            namespace,
+            idempotency_key,
         )),
     }
 }
@@ -9212,6 +9565,63 @@ mod tests {
                 !source.contains(&removed_scaffold),
                 "DAG DB full REST surface must not route through removed scaffold helper {removed_scaffold}"
             );
+        }
+    }
+
+    #[test]
+    fn dagdb_idempotency_replay_contract() {
+        let source = include_str!("dagdb.rs");
+        for (route_fragments, constant_fragments, function_fragments) in [
+            (
+                &["dagdb", ".", "intake"][..],
+                &["INTAKE", "_ROUTE_IDEMPOTENCY_NAME"][..],
+                &["persist", "_idempotent_", "intake", "_response"][..],
+            ),
+            (
+                &["dagdb", ".", "validate"],
+                &["VALIDATE", "_ROUTE_IDEMPOTENCY_NAME"],
+                &["persist", "_idempotent_", "validate", "_response"],
+            ),
+            (
+                &["dagdb", ".", "trust_check"],
+                &["TRUST_CHECK", "_ROUTE_IDEMPOTENCY_NAME"],
+                &["persist", "_idempotent_", "trust_check", "_response"],
+            ),
+            (
+                &["dagdb", ".", "council_decision"],
+                &["COUNCIL_DECISION", "_ROUTE_IDEMPOTENCY_NAME"],
+                &["persist", "_idempotent_", "council_decision", "_response"],
+            ),
+        ] {
+            let route_name = route_fragments.concat();
+            let constant_name = constant_fragments.concat();
+            let function_name = function_fragments.concat();
+            let constant_marker = format!("const {constant_name}: &str = \"{route_name}\";");
+            assert!(
+                source.contains(&constant_marker),
+                "{constant_name} must pin {route_name} as the replay route name"
+            );
+            let function_marker = ["async fn ", &function_name].concat();
+            let start = source
+                .find(&function_marker)
+                .unwrap_or_else(|| panic!("{function_name} must wrap {route_name} writes"));
+            let end = source[start..]
+                .find("\n}\n\n#[cfg(feature = \"production-db\")]")
+                .map(|offset| start + offset)
+                .unwrap_or(source.len());
+            let body = &source[start..end];
+            for fragments in [
+                &["reserve_gateway", "_idempotency_key"][..],
+                &["store_gateway", "_idempotency_response"],
+                &["idempotency_key"],
+                &[&constant_name],
+            ] {
+                let needle = fragments.concat();
+                assert!(
+                    body.contains(&needle),
+                    "{function_name} must use {needle} for stable replay/conflict semantics"
+                );
+            }
         }
     }
 
