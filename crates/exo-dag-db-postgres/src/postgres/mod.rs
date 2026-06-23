@@ -38,7 +38,9 @@ pub const DAGDB_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../../migrations/20260623000001_create_root_bundle_receipt_schema.sql"),
     "\n",
-    include_str!("../../migrations/20260623000002_create_dagdb_node_store_schema.sql")
+    include_str!("../../migrations/20260623000002_create_dagdb_node_store_schema.sql"),
+    "\n",
+    include_str!("../../migrations/20260623000003_create_zerodentity_record_schema.sql")
 );
 
 /// SQL migration source for additive graph edge tombstone tables.

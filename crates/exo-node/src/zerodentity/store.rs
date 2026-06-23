@@ -31,29 +31,172 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    future::Future,
     path::Path,
     sync::{Arc, Mutex},
 };
 
 use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt};
 use exo_dag::dag::{DagNode, compute_node_hash};
-use serde::Serialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use super::types::{
     BehavioralSample, ClaimStatus, DeviceFingerprint, IdentityClaim, IdentitySession, OtpChallenge,
-    PeerAttestation, ZerodentityScore,
+    OtpChannel, OtpHmacSecret, OtpState, PeerAttestation, ZerodentityScore,
 };
 
 pub type ReceiptSigner = Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>;
 
-/// The current 0dentity store is intentionally volatile process memory.
-pub const ZERODENTITY_STORE_PERSISTENCE_READY: bool = false;
+/// Production 0dentity startup uses DAG DB-backed persistence.
+pub const ZERODENTITY_STORE_PERSISTENCE_READY: bool = true;
 /// Maximum future skew allowed between a caller-signed erasure timestamp and
 /// the trusted validation timestamp supplied by the runtime.
 pub const ZERODENTITY_ERASURE_MAX_FUTURE_SKEW_MS: u64 = 500;
 
-/// Startup warning emitted while 0dentity data is not durable.
-pub const ZERODENTITY_STORE_PERSISTENCE_WARNING: &str = "0dentity store is memory only; claims, sessions, OTPs, scores, and receipts are not durable across process restarts";
+/// Startup warning emitted if a caller chooses the test/dev in-memory store.
+pub const ZERODENTITY_STORE_PERSISTENCE_WARNING: &str =
+    "0dentity production startup requires DAG DB-backed persistence";
+
+#[derive(Debug, Clone, Default)]
+enum ZerodentityStoreBackend {
+    #[default]
+    Memory,
+    DagDb(PostgresZerodentityStore),
+}
+
+#[derive(Debug, Clone)]
+struct PostgresZerodentityStore {
+    pool: PgPool,
+    tenant_id: String,
+    namespace: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZerodentityRecordFamily {
+    Claim,
+    Score,
+    PreviousScore,
+    ScoreHistory,
+    DeviceFingerprint,
+    BehavioralSample,
+    OtpChallenge,
+    OtpLockout,
+    Attestation,
+    IdentitySession,
+    SessionNonce,
+    DagNode,
+    TrustReceipt,
+}
+
+impl ZerodentityRecordFamily {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Score => "score",
+            Self::PreviousScore => "previous_score",
+            Self::ScoreHistory => "score_history",
+            Self::DeviceFingerprint => "device_fingerprint",
+            Self::BehavioralSample => "behavioral_sample",
+            Self::OtpChallenge => "otp_challenge",
+            Self::OtpLockout => "otp_lockout",
+            Self::Attestation => "attestation",
+            Self::IdentitySession => "identity_session",
+            Self::SessionNonce => "session_nonce",
+            Self::DagNode => "dag_node",
+            Self::TrustReceipt => "trust_receipt",
+        }
+    }
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "claim" => Ok(Self::Claim),
+            "score" => Ok(Self::Score),
+            "previous_score" => Ok(Self::PreviousScore),
+            "score_history" => Ok(Self::ScoreHistory),
+            "device_fingerprint" => Ok(Self::DeviceFingerprint),
+            "behavioral_sample" => Ok(Self::BehavioralSample),
+            "otp_challenge" => Ok(Self::OtpChallenge),
+            "otp_lockout" => Ok(Self::OtpLockout),
+            "attestation" => Ok(Self::Attestation),
+            "identity_session" => Ok(Self::IdentitySession),
+            "session_nonce" => Ok(Self::SessionNonce),
+            "dag_node" => Ok(Self::DagNode),
+            "trust_receipt" => Ok(Self::TrustReceipt),
+            _ => anyhow::bail!("unknown 0dentity DAG DB state family {value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ZerodentityPersistedRow {
+    family: ZerodentityRecordFamily,
+    subject_did: String,
+    record_key: String,
+    secondary_key: String,
+    cbor_payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OtpChallengeRecord {
+    challenge_id: String,
+    subject_did: Did,
+    channel: OtpChannel,
+    hmac_secret: [u8; 32],
+    dispatched_ms: u64,
+    ttl_ms: u64,
+    attempts: u32,
+    max_attempts: u32,
+    state: OtpState,
+}
+
+impl From<&OtpChallenge> for OtpChallengeRecord {
+    fn from(challenge: &OtpChallenge) -> Self {
+        Self {
+            challenge_id: challenge.challenge_id.clone(),
+            subject_did: challenge.subject_did.clone(),
+            channel: challenge.channel.clone(),
+            hmac_secret: *challenge.hmac_secret.expose_secret(),
+            dispatched_ms: challenge.dispatched_ms,
+            ttl_ms: challenge.ttl_ms,
+            attempts: challenge.attempts,
+            max_attempts: challenge.max_attempts,
+            state: challenge.state.clone(),
+        }
+    }
+}
+
+impl TryFrom<OtpChallengeRecord> for OtpChallenge {
+    type Error = anyhow::Error;
+
+    fn try_from(record: OtpChallengeRecord) -> anyhow::Result<Self> {
+        let hmac_secret = OtpHmacSecret::new(record.hmac_secret)
+            .ok_or_else(|| anyhow::anyhow!("persisted OTP HMAC secret is all zero"))?;
+        Ok(Self {
+            challenge_id: record.challenge_id,
+            subject_did: record.subject_did,
+            channel: record.channel,
+            hmac_secret,
+            dispatched_ms: record.dispatched_ms,
+            ttl_ms: record.ttl_ms,
+            attempts: record.attempts,
+            max_attempts: record.max_attempts,
+            state: record.state,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OtpLockoutRecord {
+    subject_did: Did,
+    timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionNonceRecord {
+    session_token: String,
+    nonce: String,
+}
 
 #[derive(Clone)]
 pub struct ReceiptSigningContext {
@@ -145,6 +288,231 @@ pub(crate) fn otp_challenge_expired(challenge: &OtpChallenge, now_ms: u64) -> bo
         .is_none_or(|expires_at| now_ms >= expires_at)
 }
 
+fn block_on_zerodentity<T, F>(future: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| anyhow::anyhow!("0dentity DAG DB runtime: {error}"))?;
+            runtime.block_on(future)
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("0dentity DAG DB worker panicked"))?,
+        Err(_) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| anyhow::anyhow!("0dentity DAG DB runtime: {error}"))?;
+            runtime.block_on(future)
+        }
+    }
+}
+
+fn decode_cbor<T: DeserializeOwned>(bytes: &[u8], field: &str) -> anyhow::Result<T> {
+    ciborium::from_reader(bytes)
+        .map_err(|error| anyhow::anyhow!("{field} CBOR decode failed: {error}"))
+}
+
+fn payload_hash(payload: &[u8]) -> Vec<u8> {
+    Hash256::digest(payload).as_bytes().to_vec()
+}
+
+fn hash_key(hash: Hash256) -> String {
+    hex::encode(hash.as_bytes())
+}
+
+fn score_history_key(score: &ZerodentityScore) -> String {
+    format!(
+        "{:020}:{}",
+        score.computed_ms,
+        hex::encode(score.dag_state_hash.as_bytes())
+    )
+}
+
+fn fingerprint_key(fp: &DeviceFingerprint) -> String {
+    format!(
+        "{:020}:{}",
+        fp.captured_ms,
+        hex::encode(fp.composite_hash.as_bytes())
+    )
+}
+
+fn behavioral_key(sample: &BehavioralSample) -> String {
+    format!(
+        "{:020}:{}",
+        sample.captured_ms,
+        hex::encode(sample.sample_hash.as_bytes())
+    )
+}
+
+impl PostgresZerodentityStore {
+    fn new(pool: PgPool, tenant_id: String, namespace: String) -> Self {
+        Self {
+            pool,
+            tenant_id,
+            namespace,
+        }
+    }
+
+    async fn bind_tenant(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('exo.tenant_id', $1, true)")
+            .bind(&self.tenant_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    async fn begin(&self) -> anyhow::Result<Transaction<'_, Postgres>> {
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            anyhow::anyhow!("0dentity DAG DB transaction begin failed: {error}")
+        })?;
+        self.bind_tenant(&mut tx)
+            .await
+            .map_err(|error| anyhow::anyhow!("0dentity DAG DB tenant binding failed: {error}"))?;
+        Ok(tx)
+    }
+
+    async fn verify_schema(&self) -> anyhow::Result<()> {
+        let mut tx = self.begin().await?;
+        let present: bool =
+            sqlx::query_scalar("SELECT to_regclass('dagdb_zerodentity_records') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("0dentity DAG DB schema lookup failed: {error}")
+                })?;
+        tx.commit().await.map_err(|error| {
+            anyhow::anyhow!("0dentity DAG DB schema check commit failed: {error}")
+        })?;
+        if !present {
+            anyhow::bail!("DAG DB 0dentity schema is missing dagdb_zerodentity_records");
+        }
+        Ok(())
+    }
+
+    async fn load_rows(&self) -> anyhow::Result<Vec<ZerodentityPersistedRow>> {
+        let mut tx = self.begin().await?;
+        let rows = sqlx::query(
+            "SELECT state_family, subject_did, record_key, secondary_key, cbor_payload \
+             FROM dagdb_zerodentity_records \
+             WHERE tenant_id = $1 AND namespace = $2 \
+             ORDER BY state_family ASC, subject_did ASC, record_key ASC, secondary_key ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("0dentity DAG DB reload failed: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| anyhow::anyhow!("0dentity DAG DB reload commit failed: {error}"))?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ZerodentityPersistedRow {
+                    family: ZerodentityRecordFamily::from_str(row.try_get("state_family")?)?,
+                    subject_did: row.try_get("subject_did")?,
+                    record_key: row.try_get("record_key")?,
+                    secondary_key: row.try_get("secondary_key")?,
+                    cbor_payload: row.try_get("cbor_payload")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn upsert_payload(
+        &self,
+        family: ZerodentityRecordFamily,
+        subject_did: String,
+        record_key: String,
+        secondary_key: String,
+        cbor_payload: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "INSERT INTO dagdb_zerodentity_records \
+             (tenant_id, namespace, state_family, subject_did, record_key, secondary_key, cbor_payload, payload_hash) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (tenant_id, namespace, state_family, record_key, secondary_key) \
+             DO UPDATE SET subject_did = EXCLUDED.subject_did, \
+                           cbor_payload = EXCLUDED.cbor_payload, \
+                           payload_hash = EXCLUDED.payload_hash",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(family.as_str())
+        .bind(subject_did)
+        .bind(record_key)
+        .bind(secondary_key)
+        .bind(&cbor_payload)
+        .bind(payload_hash(&cbor_payload))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("0dentity DAG DB upsert failed: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| anyhow::anyhow!("0dentity DAG DB upsert commit failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn delete_record(
+        &self,
+        family: ZerodentityRecordFamily,
+        record_key: String,
+        secondary_key: String,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "DELETE FROM dagdb_zerodentity_records \
+             WHERE tenant_id = $1 AND namespace = $2 AND state_family = $3 \
+               AND record_key = $4 AND secondary_key = $5",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(family.as_str())
+        .bind(record_key)
+        .bind(secondary_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("0dentity DAG DB delete failed: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| anyhow::anyhow!("0dentity DAG DB delete commit failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn delete_subject_families(
+        &self,
+        subject_did: String,
+        families: Vec<ZerodentityRecordFamily>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.begin().await?;
+        for family in families {
+            sqlx::query(
+                "DELETE FROM dagdb_zerodentity_records \
+                 WHERE tenant_id = $1 AND namespace = $2 AND state_family = $3 AND subject_did = $4",
+            )
+            .bind(&self.tenant_id)
+            .bind(&self.namespace)
+            .bind(family.as_str())
+            .bind(&subject_did)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("0dentity DAG DB subject-family delete failed: {error}")
+            })?;
+        }
+        tx.commit().await.map_err(|error| {
+            anyhow::anyhow!("0dentity DAG DB subject-family delete commit failed: {error}")
+        })?;
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ZerodentityStore
 // ---------------------------------------------------------------------------
@@ -190,6 +558,8 @@ pub struct ZerodentityStore {
     dag_nodes: Vec<DagNode>,
     /// Trust receipts emitted for claim verification events (APE-72).
     trust_receipts: Vec<TrustReceipt>,
+    /// Persistence backend used by production startup and test/dev helpers.
+    backend: ZerodentityStoreBackend,
     /// Node identity signer used to emit verifiable trust receipts.
     receipt_signing: Option<ReceiptSigningContext>,
     #[cfg(test)]
@@ -241,11 +611,259 @@ impl ZerodentityStore {
 
     /// Open the 0dentity store.
     ///
-    /// In this in-memory implementation the `data_dir` argument is accepted but
-    /// ignored — all data lives in process memory only. The integration path
-    /// allows for future persistence scaling.
+    /// This compatibility entry point is reserved for tests and dev-only
+    /// callers. Production startup uses `open_dagdb`.
+    #[allow(dead_code)]
     pub fn open(_data_dir: &Path) -> anyhow::Result<Self> {
         Ok(Self::new())
+    }
+
+    /// Open the production 0dentity store from DAG DB and reload durable state.
+    pub async fn open_dagdb(
+        pool: PgPool,
+        tenant_id: String,
+        namespace: String,
+    ) -> anyhow::Result<Self> {
+        let backend = PostgresZerodentityStore::new(pool, tenant_id, namespace);
+        backend.verify_schema().await?;
+        let rows = backend.load_rows().await?;
+        let mut store = Self {
+            backend: ZerodentityStoreBackend::DagDb(backend),
+            ..Self::default()
+        };
+        store.load_dagdb_rows(rows)?;
+        Ok(store)
+    }
+
+    fn dagdb(&self) -> Option<&PostgresZerodentityStore> {
+        match &self.backend {
+            ZerodentityStoreBackend::Memory => None,
+            ZerodentityStoreBackend::DagDb(store) => Some(store),
+        }
+    }
+
+    fn load_dagdb_rows(&mut self, rows: Vec<ZerodentityPersistedRow>) -> anyhow::Result<()> {
+        for row in rows {
+            debug_assert!(row.secondary_key.is_ascii());
+            match row.family {
+                ZerodentityRecordFamily::Claim => {
+                    let claim: IdentityClaim = decode_cbor(&row.cbor_payload, "0dentity claim")?;
+                    self.claims
+                        .entry(row.subject_did)
+                        .or_default()
+                        .push((row.record_key, claim));
+                }
+                ZerodentityRecordFamily::Score => {
+                    let score: ZerodentityScore = decode_cbor(&row.cbor_payload, "0dentity score")?;
+                    self.scores.insert(row.subject_did, score);
+                }
+                ZerodentityRecordFamily::PreviousScore => {
+                    let score: ZerodentityScore =
+                        decode_cbor(&row.cbor_payload, "0dentity previous score")?;
+                    self.prev_scores.insert(row.subject_did, score);
+                }
+                ZerodentityRecordFamily::ScoreHistory => {
+                    let score: ZerodentityScore =
+                        decode_cbor(&row.cbor_payload, "0dentity score history")?;
+                    self.score_history
+                        .entry(row.subject_did)
+                        .or_default()
+                        .push(score);
+                }
+                ZerodentityRecordFamily::DeviceFingerprint => {
+                    let fingerprint: DeviceFingerprint =
+                        decode_cbor(&row.cbor_payload, "0dentity device fingerprint")?;
+                    self.fingerprints
+                        .entry(row.subject_did)
+                        .or_default()
+                        .push(fingerprint);
+                }
+                ZerodentityRecordFamily::BehavioralSample => {
+                    let sample: BehavioralSample =
+                        decode_cbor(&row.cbor_payload, "0dentity behavioral sample")?;
+                    self.behavioral
+                        .entry(row.subject_did)
+                        .or_default()
+                        .push(sample);
+                }
+                ZerodentityRecordFamily::OtpChallenge => {
+                    let persisted: OtpChallengeRecord =
+                        decode_cbor(&row.cbor_payload, "0dentity OTP challenge")?;
+                    let challenge = OtpChallenge::try_from(persisted)?;
+                    self.otp_challenges
+                        .insert(challenge.challenge_id.clone(), challenge);
+                }
+                ZerodentityRecordFamily::OtpLockout => {
+                    let lockout: OtpLockoutRecord =
+                        decode_cbor(&row.cbor_payload, "0dentity OTP lockout")?;
+                    self.otp_lockouts
+                        .entry(row.subject_did)
+                        .or_default()
+                        .push(lockout.timestamp_ms);
+                }
+                ZerodentityRecordFamily::Attestation => {
+                    let attestation: PeerAttestation =
+                        decode_cbor(&row.cbor_payload, "0dentity attestation")?;
+                    self.attestations.insert(
+                        (
+                            attestation.attester_did.as_str().to_owned(),
+                            attestation.target_did.as_str().to_owned(),
+                        ),
+                        attestation,
+                    );
+                }
+                ZerodentityRecordFamily::IdentitySession => {
+                    let session: IdentitySession =
+                        decode_cbor(&row.cbor_payload, "0dentity identity session")?;
+                    self.sessions.insert(session.session_token.clone(), session);
+                }
+                ZerodentityRecordFamily::SessionNonce => {
+                    let nonce: SessionNonceRecord =
+                        decode_cbor(&row.cbor_payload, "0dentity session nonce")?;
+                    self.session_request_nonces
+                        .insert((nonce.session_token, nonce.nonce));
+                }
+                ZerodentityRecordFamily::DagNode => {
+                    let node: DagNode = decode_cbor(&row.cbor_payload, "0dentity DAG node")?;
+                    self.dag_nodes.push(node);
+                }
+                ZerodentityRecordFamily::TrustReceipt => {
+                    let receipt: TrustReceipt =
+                        decode_cbor(&row.cbor_payload, "0dentity trust receipt")?;
+                    self.trust_receipts.push(receipt);
+                }
+            }
+        }
+
+        for claims in self.claims.values_mut() {
+            canonicalize_claim_entries(claims);
+        }
+        for fingerprints in self.fingerprints.values_mut() {
+            canonicalize_fingerprints(fingerprints);
+        }
+        for samples in self.behavioral.values_mut() {
+            canonicalize_behavioral_samples(samples);
+        }
+        self.dag_nodes.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then(left.hash.as_bytes().cmp(right.hash.as_bytes()))
+        });
+        self.trust_receipts.sort_by(|left, right| {
+            left.timestamp.cmp(&right.timestamp).then(
+                left.receipt_hash
+                    .as_bytes()
+                    .cmp(right.receipt_hash.as_bytes()),
+            )
+        });
+        Ok(())
+    }
+
+    fn persist_payload<T: Serialize + Send + 'static>(
+        &self,
+        family: ZerodentityRecordFamily,
+        subject_did: String,
+        record_key: String,
+        secondary_key: String,
+        value: &T,
+    ) -> anyhow::Result<()> {
+        let Some(dagdb) = self.dagdb().cloned() else {
+            return Ok(());
+        };
+        let payload = canonical_cbor(value)?;
+        block_on_zerodentity(async move {
+            dagdb
+                .upsert_payload(family, subject_did, record_key, secondary_key, payload)
+                .await
+        })
+    }
+
+    fn delete_dagdb_record(
+        &self,
+        family: ZerodentityRecordFamily,
+        record_key: String,
+        secondary_key: String,
+    ) -> anyhow::Result<()> {
+        let Some(dagdb) = self.dagdb().cloned() else {
+            return Ok(());
+        };
+        block_on_zerodentity(
+            async move { dagdb.delete_record(family, record_key, secondary_key).await },
+        )
+    }
+
+    fn delete_subject_families(
+        &self,
+        subject_did: String,
+        families: Vec<ZerodentityRecordFamily>,
+    ) -> anyhow::Result<()> {
+        let Some(dagdb) = self.dagdb().cloned() else {
+            return Ok(());
+        };
+        block_on_zerodentity(
+            async move { dagdb.delete_subject_families(subject_did, families).await },
+        )
+    }
+
+    fn persist_claim(
+        &self,
+        subject_did: &Did,
+        claim_id: &str,
+        claim: &IdentityClaim,
+    ) -> anyhow::Result<()> {
+        self.persist_payload(
+            ZerodentityRecordFamily::Claim,
+            subject_did.as_str().to_owned(),
+            claim_id.to_owned(),
+            String::new(),
+            claim,
+        )
+    }
+
+    fn persist_score_snapshot(
+        &self,
+        family: ZerodentityRecordFamily,
+        score: &ZerodentityScore,
+        secondary_key: String,
+    ) -> anyhow::Result<()> {
+        self.persist_payload(
+            family,
+            score.subject_did.as_str().to_owned(),
+            score.subject_did.as_str().to_owned(),
+            secondary_key,
+            score,
+        )
+    }
+
+    fn persist_otp_challenge(&self, challenge: &OtpChallenge) -> anyhow::Result<()> {
+        let record = OtpChallengeRecord::from(challenge);
+        self.persist_payload(
+            ZerodentityRecordFamily::OtpChallenge,
+            challenge.subject_did.as_str().to_owned(),
+            challenge.challenge_id.clone(),
+            String::new(),
+            &record,
+        )
+    }
+
+    fn persist_dag_node(&self, node: &DagNode) -> anyhow::Result<()> {
+        self.persist_payload(
+            ZerodentityRecordFamily::DagNode,
+            node.creator_did.as_str().to_owned(),
+            hash_key(node.hash),
+            String::new(),
+            node,
+        )
+    }
+
+    fn persist_trust_receipt(&self, receipt: &TrustReceipt) -> anyhow::Result<()> {
+        self.persist_payload(
+            ZerodentityRecordFamily::TrustReceipt,
+            receipt.actor_did.as_str().to_owned(),
+            hash_key(receipt.receipt_hash),
+            String::new(),
+            receipt,
+        )
     }
 
     fn trust_receipt(
@@ -389,7 +1007,9 @@ impl ZerodentityStore {
     // -----------------------------------------------------------------------
 
     /// Store an identity claim under the given claim ID.
+    #[allow(dead_code)]
     pub fn insert_claim(&mut self, claim_id: &str, claim: &IdentityClaim) -> anyhow::Result<()> {
+        self.persist_claim(&claim.subject_did, claim_id, claim)?;
         self.claims
             .entry(claim.subject_did.as_str().to_owned())
             .or_default()
@@ -399,10 +1019,12 @@ impl ZerodentityStore {
 
     /// Append a claim for a DID (mutable convenience method).
     #[allow(dead_code)]
-    pub fn put_claim(&mut self, claim: IdentityClaim) {
+    pub fn put_claim(&mut self, claim: IdentityClaim) -> anyhow::Result<()> {
         let key = claim.subject_did.as_str().to_owned();
         let claim_id = hex::encode(claim.claim_hash.as_bytes());
+        self.persist_claim(&claim.subject_did, &claim_id, &claim)?;
         self.claims.entry(key).or_default().push((claim_id, claim));
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -411,20 +1033,36 @@ impl ZerodentityStore {
 
     /// Append a device fingerprint for a DID.
     #[allow(dead_code)]
-    pub fn put_fingerprint(&mut self, did: &Did, fp: DeviceFingerprint) {
+    pub fn put_fingerprint(&mut self, did: &Did, fp: DeviceFingerprint) -> anyhow::Result<()> {
+        self.persist_payload(
+            ZerodentityRecordFamily::DeviceFingerprint,
+            did.as_str().to_owned(),
+            did.as_str().to_owned(),
+            fingerprint_key(&fp),
+            &fp,
+        )?;
         self.fingerprints
             .entry(did.as_str().to_owned())
             .or_default()
             .push(fp);
+        Ok(())
     }
 
     /// Append a behavioral sample for a DID.
     #[allow(dead_code)]
-    pub fn put_behavioral(&mut self, did: &Did, sample: BehavioralSample) {
+    pub fn put_behavioral(&mut self, did: &Did, sample: BehavioralSample) -> anyhow::Result<()> {
+        self.persist_payload(
+            ZerodentityRecordFamily::BehavioralSample,
+            did.as_str().to_owned(),
+            did.as_str().to_owned(),
+            behavioral_key(&sample),
+            &sample,
+        )?;
         self.behavioral
             .entry(did.as_str().to_owned())
             .or_default()
             .push(sample);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -433,8 +1071,22 @@ impl ZerodentityStore {
 
     /// Store a new score snapshot, shifting the current to `prev_scores`.
     #[allow(dead_code)]
-    pub fn put_score(&mut self, score: ZerodentityScore) {
+    pub fn put_score(&mut self, score: ZerodentityScore) -> anyhow::Result<()> {
         let key = score.subject_did.as_str().to_owned();
+        let previous = self.scores.get(&key).cloned();
+        if let Some(existing) = &previous {
+            self.persist_score_snapshot(
+                ZerodentityRecordFamily::PreviousScore,
+                existing,
+                String::new(),
+            )?;
+        }
+        self.persist_score_snapshot(ZerodentityRecordFamily::Score, &score, String::new())?;
+        self.persist_score_snapshot(
+            ZerodentityRecordFamily::ScoreHistory,
+            &score,
+            score_history_key(&score),
+        )?;
         if let Some(existing) = self.scores.remove(&key) {
             self.prev_scores.insert(key.clone(), existing);
         }
@@ -443,6 +1095,7 @@ impl ZerodentityStore {
             .or_default()
             .push(score.clone());
         self.scores.insert(key, score);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -451,15 +1104,28 @@ impl ZerodentityStore {
 
     /// Record an OTP lockout event at `timestamp_ms` for a DID.
     #[allow(dead_code)]
-    pub fn record_otp_lockout(&mut self, did: &Did, timestamp_ms: u64) {
+    pub fn record_otp_lockout(&mut self, did: &Did, timestamp_ms: u64) -> anyhow::Result<()> {
+        let record = OtpLockoutRecord {
+            subject_did: did.clone(),
+            timestamp_ms,
+        };
+        self.persist_payload(
+            ZerodentityRecordFamily::OtpLockout,
+            did.as_str().to_owned(),
+            did.as_str().to_owned(),
+            format!("{timestamp_ms:020}"),
+            &record,
+        )?;
         self.otp_lockouts
             .entry(did.as_str().to_owned())
             .or_default()
             .push(timestamp_ms);
+        Ok(())
     }
 
     /// Persist an OTP challenge.
     pub fn insert_otp_challenge(&mut self, challenge: &OtpChallenge) -> anyhow::Result<()> {
+        self.persist_otp_challenge(challenge)?;
         self.otp_challenges
             .insert(challenge.challenge_id.clone(), challenge.clone());
         Ok(())
@@ -468,6 +1134,7 @@ impl ZerodentityStore {
     /// Update the state of an existing OTP challenge.
     pub fn update_otp_challenge(&mut self, challenge: &OtpChallenge) -> anyhow::Result<()> {
         if self.otp_challenges.contains_key(&challenge.challenge_id) {
+            self.persist_otp_challenge(challenge)?;
             self.otp_challenges
                 .insert(challenge.challenge_id.clone(), challenge.clone());
         }
@@ -484,6 +1151,13 @@ impl ZerodentityStore {
             att.attester_did.as_str().to_owned(),
             att.target_did.as_str().to_owned(),
         );
+        self.persist_payload(
+            ZerodentityRecordFamily::Attestation,
+            att.target_did.as_str().to_owned(),
+            key.0.clone(),
+            key.1.clone(),
+            att,
+        )?;
         self.attestations.insert(key, att.clone());
         Ok(())
     }
@@ -504,6 +1178,13 @@ impl ZerodentityStore {
 
     /// Persist an identity session.
     pub fn insert_session(&mut self, session: &IdentitySession) -> anyhow::Result<()> {
+        self.persist_payload(
+            ZerodentityRecordFamily::IdentitySession,
+            session.subject_did.as_str().to_owned(),
+            session.session_token.clone(),
+            String::new(),
+            session,
+        )?;
         self.sessions
             .insert(session.session_token.clone(), session.clone());
         Ok(())
@@ -518,9 +1199,27 @@ impl ZerodentityStore {
         session_token: &str,
         nonce: &str,
     ) -> anyhow::Result<bool> {
-        Ok(self
-            .session_request_nonces
-            .insert((session_token.to_owned(), nonce.to_owned())))
+        let nonce_key = (session_token.to_owned(), nonce.to_owned());
+        if self.session_request_nonces.contains(&nonce_key) {
+            return Ok(false);
+        }
+        let subject_did = self.sessions.get(session_token).map_or_else(
+            || "unbound-session-nonce".to_owned(),
+            |session| session.subject_did.as_str().to_owned(),
+        );
+        let record = SessionNonceRecord {
+            session_token: session_token.to_owned(),
+            nonce: nonce.to_owned(),
+        };
+        self.persist_payload(
+            ZerodentityRecordFamily::SessionNonce,
+            subject_did,
+            session_token.to_owned(),
+            nonce.to_owned(),
+            &record,
+        )?;
+        self.session_request_nonces.insert(nonce_key);
+        Ok(true)
     }
 
     // -----------------------------------------------------------------------
@@ -761,7 +1460,15 @@ impl ZerodentityStore {
         let dag_node_hash = node.hash;
         let mut stored_claim = claim.clone();
         stored_claim.dag_node_hash = dag_node_hash;
-        self.insert_claim(claim_id, &stored_claim)?;
+        self.persist_claim(&stored_claim.subject_did, claim_id, &stored_claim)?;
+        self.persist_dag_node(&node)?;
+        if let Some(receipt) = &receipt {
+            self.persist_trust_receipt(receipt)?;
+        }
+        self.claims
+            .entry(stored_claim.subject_did.as_str().to_owned())
+            .or_default()
+            .push((claim_id.to_owned(), stored_claim));
         self.dag_nodes.push(node);
 
         // Emit TrustReceipt for verified claims.
@@ -790,8 +1497,8 @@ impl ZerodentityStore {
 
     /// Persist a new score snapshot (APE-72 alias for `put_score`).
     #[allow(dead_code)]
-    pub fn save_score(&mut self, score: ZerodentityScore) {
-        self.put_score(score);
+    pub fn save_score(&mut self, score: ZerodentityScore) -> anyhow::Result<()> {
+        self.put_score(score)
     }
 
     /// Return all recorded DAG nodes (APE-72 audit accessor).
@@ -880,6 +1587,40 @@ impl ZerodentityStore {
         let erasure_node = self.signed_dag_node(erasure_hash, timestamp)?;
         let dag_node_hash = erasure_node.hash;
         let receipt_hash = receipt.receipt_hash;
+        self.delete_subject_families(
+            key.clone(),
+            vec![
+                ZerodentityRecordFamily::Claim,
+                ZerodentityRecordFamily::Score,
+                ZerodentityRecordFamily::PreviousScore,
+                ZerodentityRecordFamily::ScoreHistory,
+                ZerodentityRecordFamily::DeviceFingerprint,
+                ZerodentityRecordFamily::BehavioralSample,
+                ZerodentityRecordFamily::OtpChallenge,
+                ZerodentityRecordFamily::OtpLockout,
+                ZerodentityRecordFamily::IdentitySession,
+            ],
+        )?;
+        if let Some(claims) = self.claims.get(&key) {
+            for (claim_id, claim) in claims {
+                self.persist_claim(did, claim_id, claim)?;
+            }
+        }
+        for session in self
+            .sessions
+            .values()
+            .filter(|session| session.subject_did.as_str() == did.as_str())
+        {
+            self.persist_payload(
+                ZerodentityRecordFamily::IdentitySession,
+                session.subject_did.as_str().to_owned(),
+                session.session_token.clone(),
+                String::new(),
+                session,
+            )?;
+        }
+        self.persist_dag_node(&erasure_node)?;
+        self.persist_trust_receipt(&receipt)?;
         self.dag_nodes.push(erasure_node);
         self.trust_receipts.push(receipt);
 
@@ -904,7 +1645,23 @@ impl ZerodentityStore {
     /// Remove expired OTP challenges that are still in `Pending` state.
     ///
     /// Returns the number of challenges cleaned up.
-    pub fn cleanup_expired_otp(&mut self, now_ms: u64) -> usize {
+    pub fn cleanup_expired_otp(&mut self, now_ms: u64) -> anyhow::Result<usize> {
+        let expired_pending_ids: Vec<String> = self
+            .otp_challenges
+            .iter()
+            .filter_map(|(challenge_id, challenge)| {
+                let expired = otp_challenge_expired(challenge, now_ms);
+                let pending = challenge.state == super::types::OtpState::Pending;
+                (expired && pending).then(|| challenge_id.clone())
+            })
+            .collect();
+        for challenge_id in &expired_pending_ids {
+            self.delete_dagdb_record(
+                ZerodentityRecordFamily::OtpChallenge,
+                challenge_id.clone(),
+                String::new(),
+            )?;
+        }
         let before = self.otp_challenges.len();
         self.otp_challenges.retain(|_, ch| {
             let expired = otp_challenge_expired(ch, now_ms);
@@ -912,7 +1669,7 @@ impl ZerodentityStore {
             // Remove if both expired and still pending
             !(expired && pending)
         });
-        before - self.otp_challenges.len()
+        Ok(before - self.otp_challenges.len())
     }
 }
 
@@ -1083,11 +1840,11 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_store_declares_persistence_not_ready() {
-        assert!(!ZerodentityStore::persistence_ready());
+    fn production_store_declares_dagdb_persistence_ready() {
+        assert!(ZerodentityStore::persistence_ready());
         assert!(
-            ZerodentityStore::persistence_warning().contains("memory only"),
-            "startup warning must plainly identify the volatile store"
+            ZerodentityStore::persistence_warning().contains("DAG DB"),
+            "startup warning must plainly identify the required durable store"
         );
     }
 
@@ -1095,7 +1852,7 @@ mod tests {
     fn put_and_get_score() {
         let mut store = ZerodentityStore::new();
         let d = did("did:exo:alice");
-        store.put_score(score_for(d.clone(), 5000));
+        store.put_score(score_for(d.clone(), 5000)).unwrap();
         assert_eq!(store.get_score(&d).unwrap().composite, 5000);
     }
 
@@ -1103,8 +1860,8 @@ mod tests {
     fn previous_score_after_update() {
         let mut store = ZerodentityStore::new();
         let d = did("did:exo:bob");
-        store.put_score(score_for(d.clone(), 4000));
-        store.put_score(score_for(d.clone(), 6000));
+        store.put_score(score_for(d.clone(), 4000)).unwrap();
+        store.put_score(score_for(d.clone(), 6000)).unwrap();
         assert_eq!(store.get_score(&d).unwrap().composite, 6000);
         assert_eq!(store.get_previous_score(&d).unwrap().composite, 4000);
     }
@@ -1113,9 +1870,9 @@ mod tests {
     fn score_history_returns_all_snapshots() {
         let mut store = ZerodentityStore::new();
         let d = did("did:exo:carol");
-        store.put_score(score_for(d.clone(), 1000));
-        store.put_score(score_for(d.clone(), 2000));
-        store.put_score(score_for(d.clone(), 3000));
+        store.put_score(score_for(d.clone(), 1000)).unwrap();
+        store.put_score(score_for(d.clone(), 2000)).unwrap();
+        store.put_score(score_for(d.clone(), 3000)).unwrap();
         let h = store.get_score_history(&d, None, None).unwrap();
         assert_eq!(h.len(), 3);
     }
@@ -1123,9 +1880,9 @@ mod tests {
     #[test]
     fn sample_scored_dids_returns_sorted() {
         let mut store = ZerodentityStore::new();
-        store.put_score(score_for(did("did:exo:c"), 1000));
-        store.put_score(score_for(did("did:exo:a"), 2000));
-        store.put_score(score_for(did("did:exo:b"), 3000));
+        store.put_score(score_for(did("did:exo:c"), 1000)).unwrap();
+        store.put_score(score_for(did("did:exo:a"), 2000)).unwrap();
+        store.put_score(score_for(did("did:exo:b"), 3000)).unwrap();
         let sampled = store.sample_scored_dids(10);
         assert_eq!(sampled.len(), 3);
         assert_eq!(sampled[0].as_str(), "did:exo:a");
@@ -1135,7 +1892,7 @@ mod tests {
     fn scored_dids_page_after_returns_successive_bounded_pages() {
         let mut store = ZerodentityStore::new();
         for did_str in ["did:exo:a", "did:exo:b", "did:exo:c"] {
-            store.put_score(score_for(did(did_str), 1000));
+            store.put_score(score_for(did(did_str), 1000)).unwrap();
         }
 
         let first_page = store.scored_dids_page_after(None, 2);
@@ -1163,7 +1920,7 @@ mod tests {
         let d = did("did:exo:dave");
         let now_ms: u64 = 86_400_000;
         let day_ago = now_ms - 86_400_000;
-        store.record_otp_lockout(&d, now_ms - 3_600_000);
+        store.record_otp_lockout(&d, now_ms - 3_600_000).unwrap();
         assert!(store.has_otp_lockout_since(&d, day_ago));
         assert!(!store.has_otp_lockout_since(&d, now_ms + 1));
     }
@@ -1172,7 +1929,7 @@ mod tests {
     fn put_claim_and_retrieve() {
         let mut store = ZerodentityStore::new();
         let d = did("did:exo:eve");
-        store.put_claim(claim(&d, ClaimType::Email));
+        store.put_claim(claim(&d, ClaimType::Email)).unwrap();
         let claims = store.get_claims(&d).unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].1.claim_type, ClaimType::Email);
@@ -1484,7 +2241,7 @@ mod tests {
     fn save_score_and_retrieve() {
         let mut store = ZerodentityStore::new();
         let d = did("did:exo:karen");
-        store.save_score(score_for(d.clone(), 7500));
+        store.save_score(score_for(d.clone(), 7500)).unwrap();
         assert_eq!(store.get_score(&d).unwrap().composite, 7500);
     }
 
@@ -1498,9 +2255,9 @@ mod tests {
         let d = did("did:exo:eraseme");
 
         // Set up: claim, score, session
-        store.put_claim(claim(&d, ClaimType::Email));
-        store.put_claim(claim(&d, ClaimType::Phone));
-        store.put_score(score_for(d.clone(), 7000));
+        store.put_claim(claim(&d, ClaimType::Email)).unwrap();
+        store.put_claim(claim(&d, ClaimType::Phone)).unwrap();
+        store.put_score(score_for(d.clone(), 7000)).unwrap();
         store
             .insert_session(&IdentitySession {
                 session_token: "tok-erase".into(),
@@ -1546,7 +2303,7 @@ mod tests {
     fn erase_did_emits_node_signed_erasure_receipt() {
         let (mut store, node_did, node_public_key) = signed_store(17);
         let d = did("did:exo:signed-erase");
-        store.put_claim(claim(&d, ClaimType::Email));
+        store.put_claim(claim(&d, ClaimType::Email)).unwrap();
 
         let evidence = store
             .erase_did_with_evidence(&d, Timestamp::new(8_000, 0), Timestamp::new(8_000, 0))
@@ -1572,7 +2329,7 @@ mod tests {
     fn erase_did_rejects_zero_timestamp() {
         let (mut store, _, _) = signed_store(18);
         let d = did("did:exo:zero-erase");
-        store.put_claim(claim(&d, ClaimType::Email));
+        store.put_claim(claim(&d, ClaimType::Email)).unwrap();
 
         let err = store
             .erase_did_with_evidence(&d, Timestamp::new(0, 0), Timestamp::new(8_000, 0))
@@ -1609,7 +2366,7 @@ mod tests {
     fn erase_did_rejects_timestamp_beyond_validation_clock_tolerance() {
         let (mut store, _, _) = signed_store(35);
         let d = did("did:exo:future-erase");
-        store.put_claim(claim(&d, ClaimType::Email));
+        store.put_claim(claim(&d, ClaimType::Email)).unwrap();
 
         let err = store
             .erase_did_with_evidence(
@@ -1649,24 +2406,28 @@ mod tests {
         let (mut store, _, _) = signed_store(19);
         let d = did("did:exo:fptest");
 
-        store.put_fingerprint(
-            &d,
-            DeviceFingerprint {
-                composite_hash: h(),
-                signal_hashes: BTreeMap::new(),
-                captured_ms: 1000,
-                consistency_score_bp: Some(9500),
-            },
-        );
-        store.put_behavioral(
-            &d,
-            BehavioralSample {
-                sample_hash: h(),
-                signal_type: BehavioralSignalType::KeystrokeDynamics,
-                captured_ms: 1000,
-                baseline_similarity_bp: Some(8000),
-            },
-        );
+        store
+            .put_fingerprint(
+                &d,
+                DeviceFingerprint {
+                    composite_hash: h(),
+                    signal_hashes: BTreeMap::new(),
+                    captured_ms: 1000,
+                    consistency_score_bp: Some(9500),
+                },
+            )
+            .unwrap();
+        store
+            .put_behavioral(
+                &d,
+                BehavioralSample {
+                    sample_hash: h(),
+                    signal_type: BehavioralSignalType::KeystrokeDynamics,
+                    captured_ms: 1000,
+                    baseline_similarity_bp: Some(8000),
+                },
+            )
+            .unwrap();
 
         assert!(!store.get_fingerprints(&d).unwrap().is_empty());
         assert!(!store.get_behavioral_samples(&d).unwrap().is_empty());
@@ -1747,7 +2508,7 @@ mod tests {
         };
         store.insert_otp_challenge(&verified).unwrap();
 
-        let cleaned = store.cleanup_expired_otp(2_000_000);
+        let cleaned = store.cleanup_expired_otp(2_000_000).unwrap();
         assert_eq!(cleaned, 1); // Only expired + pending
 
         assert!(store.get_otp_challenge("exp-001").unwrap().is_none());
@@ -1773,7 +2534,7 @@ mod tests {
         };
         store.insert_otp_challenge(&challenge).unwrap();
 
-        let cleaned = store.cleanup_expired_otp(1_000);
+        let cleaned = store.cleanup_expired_otp(1_000).unwrap();
 
         assert_eq!(cleaned, 1);
         assert!(store.get_otp_challenge("overflow-001").unwrap().is_none());

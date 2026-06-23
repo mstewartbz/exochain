@@ -540,8 +540,8 @@ mod tests {
         let did = td("store-01");
         let mut store = ZerodentityStore::new();
 
-        store.put_score(make_score(&did, 3_000, 1_000_000));
-        store.put_score(make_score(&did, 5_000, 2_000_000));
+        store.put_score(make_score(&did, 3_000, 1_000_000)).unwrap();
+        store.put_score(make_score(&did, 5_000, 2_000_000)).unwrap();
 
         assert_eq!(store.get_score(&did).unwrap().composite, 5_000);
         assert_eq!(store.get_previous_score(&did).unwrap().composite, 3_000);
@@ -558,7 +558,9 @@ mod tests {
         let target = td("target-isolated");
 
         for i in 0..100u32 {
-            store.put_score(make_score(&td(&format!("noise-{i}")), i * 100, 1_000_000));
+            store
+                .put_score(make_score(&td(&format!("noise-{i}")), i * 100, 1_000_000))
+                .unwrap();
         }
 
         assert!(store.get_score(&target).is_none());
@@ -573,7 +575,7 @@ mod tests {
         for (bp, ms) in [(1_000u32, 1_000u64), (2_000, 5_000), (3_000, 10_000)] {
             let mut s = make_score(&did, bp, ms);
             s.computed_ms = ms;
-            store.put_score(s);
+            store.put_score(s).unwrap();
         }
 
         let filtered = store
@@ -750,8 +752,12 @@ mod tests {
         let did = td("store-fingerprints-canonical-order");
         let mut store = ZerodentityStore::new();
 
-        store.put_fingerprint(&did, make_fingerprint("newer", 2_000));
-        store.put_fingerprint(&did, make_fingerprint("older", 1_000));
+        store
+            .put_fingerprint(&did, make_fingerprint("newer", 2_000))
+            .unwrap();
+        store
+            .put_fingerprint(&did, make_fingerprint("older", 1_000))
+            .unwrap();
 
         let captured: Vec<u64> = store
             .get_fingerprints(&did)
@@ -768,14 +774,18 @@ mod tests {
         let did = td("store-behavioral-canonical-order");
         let mut store = ZerodentityStore::new();
 
-        store.put_behavioral(
-            &did,
-            make_behavioral_sample("newer", BehavioralSignalType::MouseDynamics, 2_000),
-        );
-        store.put_behavioral(
-            &did,
-            make_behavioral_sample("older", BehavioralSignalType::KeystrokeDynamics, 1_000),
-        );
+        store
+            .put_behavioral(
+                &did,
+                make_behavioral_sample("newer", BehavioralSignalType::MouseDynamics, 2_000),
+            )
+            .unwrap();
+        store
+            .put_behavioral(
+                &did,
+                make_behavioral_sample("older", BehavioralSignalType::KeystrokeDynamics, 1_000),
+            )
+            .unwrap();
 
         let captured: Vec<u64> = store
             .get_behavioral_samples(&did)
@@ -1995,7 +2005,8 @@ mod tests {
         store
             .lock()
             .unwrap()
-            .put_score(make_score(&did, 4_000, 1_000));
+            .put_score(make_score(&did, 4_000, 1_000))
+            .unwrap();
 
         let resp = get_req(
             &app,
@@ -2015,7 +2026,7 @@ mod tests {
 
         {
             let mut s = store.lock().unwrap();
-            s.put_score(make_score(&alice, 4_000, 1_000));
+            s.put_score(make_score(&alice, 4_000, 1_000)).unwrap();
             s.insert_session(&make_session(&bob, bob_token, 1_000_000))
                 .unwrap();
         }
@@ -2043,7 +2054,7 @@ mod tests {
             for (bp, ms) in [(1_000u32, 1_000u64), (3_000, 5_000), (6_000, 9_000)] {
                 let mut score = make_score(&did, bp, ms);
                 score.computed_ms = ms;
-                s.put_score(score);
+                s.put_score(score).unwrap();
             }
         }
 
@@ -2682,7 +2693,7 @@ mod tests {
             for (bp, ms) in [(1_000u32, 1_000u64), (2_000, 5_000), (3_000, 10_000)] {
                 let mut score = make_score(&did, bp, ms);
                 score.computed_ms = ms;
-                s.put_score(score);
+                s.put_score(score).unwrap();
             }
         }
 
@@ -2862,7 +2873,7 @@ mod tests {
             let mut s = store.lock().unwrap();
             let claims = s.get_claims_slice(&did).unwrap();
             let score = ZerodentityScore::compute(&did, &claims, &[], &[], dispatched_ms + 2);
-            s.put_score(score);
+            s.put_score(score).unwrap();
         }
 
         let resp = get_with_auth(

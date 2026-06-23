@@ -36,10 +36,10 @@ git rev-parse origin/main
 |---|---|---|
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/main.rs` | EXOCHAIN core | QM-04 moved production start and status commands to `DagDbNodeStore::open` with required `DATABASE_URL`, `EXO_DAGDB_TENANT_ID`, and `EXO_DAGDB_NAMESPACE`. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/store.rs` | EXOCHAIN core | QM-04 introduced a DAG DB-backed node store while retaining legacy SQLite construction only for direct test/dev compatibility. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs` | EXOCHAIN core | 0dentity remains process-memory only. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs` | EXOCHAIN core | QM-05 moved production 0dentity startup to DAG DB-backed persistence for claims, scores, OTP state, sessions, attestations, emitted DAG nodes, and trust receipts. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs` | Core runtime adapter | Gateway still owns public-schema production tables for DID documents, users, agents, decisions, audit, LiveSafe, layout, and feedback state. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs` | Core runtime adapter | DAG DB REST router currently mounts five live routes. The remaining documented routes are present as test-only handlers or DTO fixtures, not live production routes. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 45 traced table contracts exist after QM-04 node-store schema migration. Missing production state families continue to be added here first. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres` | EXOCHAIN core | Dedicated Postgres DAG DB schema, migrator, tenant transaction binding, and 46 traced table contracts exist after the QM-05 0dentity schema migration. Missing production state families continue to be added here first. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exochain-sdk/src/dagdb.rs` | Core runtime adapter | SDK exposes the same five-route subset. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/dagdb.rs` | Core runtime adapter | MCP exposes four agent-facing DAG DB tools, not the full REST surface. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | Production CommandBase uses `better-sqlite3`, `the_team.db`, `task_forces.db`, many SQLite DDL blocks, and browser durable state. |
@@ -119,21 +119,63 @@ through `:236` defines `SqliteDagStore::open` and creates the SQLite tables
 `commit_certificates`, `validators`, `trust_receipts`, `economy_objects`,
 `economy_anchors`, and `economy_meta`.
 
-## 0dentity Volatile Store
+## 0dentity DAG DB Store
 
-`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs:49`
-through `:56` declares persistence not ready:
+QM-05 implementation moved production 0dentity startup to DAG DB:
 
 ```text
-49 /// The current 0dentity store is intentionally volatile process memory.
-50 pub const ZERODENTITY_STORE_PERSISTENCE_READY: bool = false;
-56 pub const ZERODENTITY_STORE_PERSISTENCE_WARNING: &str = "0dentity store is memory only; claims, sessions, OTPs, scores, and receipts are not durable across process restarts";
+crates/exo-node/src/main.rs:524
+let mut zerodentity_store = zerodentity::store::ZerodentityStore::open_dagdb(
+    gateway_pool.clone(),
+    dagdb_tenant_id.clone(),
+    dagdb_namespace.clone(),
+)
+.await?;
 ```
 
-`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs:152`
-through `:249` stores claims, sessions, OTP challenges, attestations, scores,
-DAG nodes, and trust receipts in `BTreeMap`, `BTreeSet`, and `Vec` fields. Its
-`open` method ignores `data_dir` and returns `Self::new()`.
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/zerodentity/store.rs`
+now exposes `ZerodentityStore::open_dagdb(pool, tenant_id, namespace)`, verifies
+`dagdb_zerodentity_records`, reloads rows in deterministic order, and keeps the
+in-memory view synchronized with DAG DB writes.
+
+The new tenant-owned record table is:
+
+```text
+crates/exo-dag-db-postgres/migrations/20260623000003_create_zerodentity_record_schema.sql
+dagdb_zerodentity_records
+```
+
+Its schema-enforced `state_family` values are:
+
+```text
+claim
+score
+previous_score
+score_history
+device_fingerprint
+behavioral_sample
+otp_challenge
+otp_lockout
+attestation
+identity_session
+session_nonce
+dag_node
+trust_receipt
+```
+
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`
+now includes `dagdb_zerodentity_records`, so production rows are covered by the
+same forced tenant policy as the node-store and DAG DB tables.
+
+`ZerodentityStore::open(data_dir)` remains only as a test/dev compatibility
+entry point. Production `start_node` no longer calls it.
+
+### Baseline Finding Before QM-05
+
+Before QM-05, `crates/exo-node/src/zerodentity/store.rs` declared persistence
+not ready and stored claims, sessions, OTP challenges, attestations, scores, DAG
+nodes, and trust receipts only in `BTreeMap`, `BTreeSet`, and `Vec` fields. Its
+`open` method ignored `data_dir` and returned `Self::new()`.
 
 ## Gateway Legacy Public Schema
 
@@ -165,9 +207,9 @@ canonical ledgered migration runner.
 
 Current inventory:
 
-- 16 SQL migration files exist under
+- 17 SQL migration files exist under
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations`.
-- Those migrations contain 45 `CREATE TABLE IF NOT EXISTS` table contracts.
+- Those migrations contain 46 `CREATE TABLE IF NOT EXISTS` table contracts.
 - Tenant RLS is centralized in
   `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260619000001_enable_dagdb_tenant_rls.sql`.
 
@@ -219,6 +261,7 @@ dagdb_lifecycle_rollbacks
 dagdb_lifecycle_actions
 dagdb_route_invalidation_events
 dagdb_continuation_records
+dagdb_zerodentity_records
 ```
 
 ## DAG DB REST, SDK, MCP Surface

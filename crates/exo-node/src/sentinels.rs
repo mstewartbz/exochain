@@ -523,7 +523,17 @@ fn check_otp_cleanup_with_time(
         };
     }
 
-    let cleaned = zstore.cleanup_expired_otp(now);
+    let cleaned = match zstore.cleanup_expired_otp(now) {
+        Ok(cleaned) => cleaned,
+        Err(error) => {
+            return SentinelStatus {
+                check: SentinelCheck::OtpCleanup,
+                healthy: false,
+                message: format!("OTP cleanup persistence failed: {error}"),
+                last_run_ms: now,
+            };
+        }
+    };
 
     SentinelStatus {
         check: SentinelCheck::OtpCleanup,
@@ -942,7 +952,9 @@ mod tests {
         {
             let did = Did::new("did:exo:scored").unwrap();
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+            store
+                .put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000))
+                .unwrap();
             store.inject_read_failure(crate::zerodentity::store::ZerodentityReadFailure::Claims);
         }
 
@@ -959,7 +971,9 @@ mod tests {
         {
             let did = Did::new("did:exo:scored").unwrap();
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+            store
+                .put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000))
+                .unwrap();
             store.inject_read_failure(
                 crate::zerodentity::store::ZerodentityReadFailure::Fingerprints,
             );
@@ -982,7 +996,9 @@ mod tests {
         {
             let did = Did::new("did:exo:scored").unwrap();
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+            store
+                .put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000))
+                .unwrap();
             store
                 .inject_read_failure(crate::zerodentity::store::ZerodentityReadFailure::Behavioral);
         }
@@ -1012,7 +1028,9 @@ mod tests {
             {
                 let did = Did::new(raw_did).unwrap();
                 let mut store = zerodentity.lock().unwrap();
-                store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+                store
+                    .put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000))
+                    .unwrap();
                 store.inject_read_failure(failure);
             }
 
@@ -1026,7 +1044,9 @@ mod tests {
         {
             let did = Did::new(raw_did).unwrap();
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+            store
+                .put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000))
+                .unwrap();
         }
 
         let status = check_score_integrity(&zerodentity);
@@ -1040,7 +1060,7 @@ mod tests {
             let mut score = ZerodentityScore::compute(&did, &[], &[], &[], 1000);
             score.composite = score.composite.saturating_add(1000).min(10_000);
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(score);
+            store.put_score(score).unwrap();
         }
 
         let status = check_score_integrity(&zerodentity);
@@ -1055,7 +1075,9 @@ mod tests {
         {
             let did = Did::new("did:exo:scored").unwrap();
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000));
+            store
+                .put_score(ZerodentityScore::compute(&did, &[], &[], &[], 1000))
+                .unwrap();
         }
 
         let status = check_score_integrity(&zerodentity);
@@ -1073,7 +1095,7 @@ mod tests {
             let mut score = ZerodentityScore::compute(&did, &[], &[], &[], 1000);
             score.composite = score.composite.saturating_add(1000).min(10_000);
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(score);
+            store.put_score(score).unwrap();
         }
 
         let status = check_score_integrity(&zerodentity);

@@ -57,6 +57,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_route_receipts",
     "dagdb_subject_receipt_heads",
     "dagdb_validation_reports",
+    "dagdb_zerodentity_records",
 ];
 
 const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
@@ -102,6 +103,7 @@ const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
     "dagdb_route_receipts",
     "dagdb_subject_receipt_heads",
     "dagdb_validation_reports",
+    "dagdb_zerodentity_records",
 ];
 
 const EXPECTED_INDEXES: &[(&str, &str)] = &[
@@ -405,6 +407,51 @@ fn node_store_tables_are_dagdb_schema_contract() {
             "DAG DB tenant RLS migration must enumerate node-store table {table}"
         );
     }
+}
+
+#[test]
+fn zerodentity_records_are_dagdb_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(
+        lower.contains("create table if not exists dagdb_zerodentity_records"),
+        "DAG DB schema must include the 0dentity durable record table"
+    );
+    assert!(lower.contains("state_family text not null"));
+    assert!(lower.contains("subject_did text not null"));
+    assert!(lower.contains("record_key text not null"));
+    assert!(lower.contains("secondary_key text not null"));
+    assert!(lower.contains("cbor_payload bytea not null"));
+    assert!(
+        lower.contains(
+            "primary key (tenant_id, namespace, state_family, record_key, secondary_key)"
+        )
+    );
+    for family in [
+        "claim",
+        "score",
+        "previous_score",
+        "score_history",
+        "device_fingerprint",
+        "behavioral_sample",
+        "otp_challenge",
+        "otp_lockout",
+        "attestation",
+        "identity_session",
+        "session_nonce",
+        "dag_node",
+        "trust_receipt",
+    ] {
+        assert!(
+            lower.contains(&format!("'{family}'")),
+            "0dentity durable state family {family} must be schema-enforced"
+        );
+    }
+
+    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(
+        rls_lower.contains("'dagdb_zerodentity_records'"),
+        "DAG DB tenant RLS migration must enumerate 0dentity records"
+    );
 }
 
 #[tokio::test]

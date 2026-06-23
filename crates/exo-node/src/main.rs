@@ -515,13 +515,22 @@ async fn start_node(
     let (dagdb_tenant_id, dagdb_namespace) = dagdb_node_scope_from_env()?;
 
     // Open DAG DB-backed node store.
-    let dag_store =
-        store::DagDbNodeStore::open(gateway_pool.clone(), dagdb_tenant_id, dagdb_namespace).await?;
+    let dag_store = store::DagDbNodeStore::open(
+        gateway_pool.clone(),
+        dagdb_tenant_id.clone(),
+        dagdb_namespace.clone(),
+    )
+    .await?;
     let height = dag_store.committed_height_value()?;
     tracing::info!(height, "DAG store opened");
 
-    // Open the 0dentity store.
-    let mut zerodentity_store = zerodentity::store::ZerodentityStore::open(data_dir)?;
+    // Open the DAG DB-backed 0dentity store.
+    let mut zerodentity_store = zerodentity::store::ZerodentityStore::open_dagdb(
+        gateway_pool.clone(),
+        dagdb_tenant_id.clone(),
+        dagdb_namespace.clone(),
+    )
+    .await?;
     let zd_receipt_signer: zerodentity::store::ReceiptSigner = {
         let identity = identity::load_or_create(data_dir)?;
         Arc::new(move |payload: &[u8]| identity.sign(payload))
@@ -1790,6 +1799,56 @@ mod tests {
             status_branch.contains("DagDbNodeStore::open"),
             "node status must read committed height from the DAG DB node store"
         );
+    }
+
+    #[test]
+    fn zerodentity_restart_persists_dagdb_state() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let start_node = production
+            .split("async fn start_node(")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("async fn load_configured_root_trust_bundle")
+                    .next()
+            })
+            .expect("start_node source present");
+        let store_source = include_str!("zerodentity/store.rs");
+        let store_production = store_source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("0dentity store production section present");
+
+        assert!(
+            start_node.contains("ZerodentityStore::open_dagdb"),
+            "production node startup must open 0dentity through the DAG DB-backed store"
+        );
+        assert!(
+            !start_node.contains("ZerodentityStore::open(data_dir)"),
+            "production node startup must not open the memory-only 0dentity store"
+        );
+        assert!(
+            store_production.contains("pub const ZERODENTITY_STORE_PERSISTENCE_READY: bool = true"),
+            "0dentity persistence_ready() must become true only after DAG DB reload is wired"
+        );
+        for (family, variant) in [
+            ("claim", "Claim"),
+            ("score", "Score"),
+            ("otp_challenge", "OtpChallenge"),
+            ("otp_lockout", "OtpLockout"),
+            ("attestation", "Attestation"),
+            ("identity_session", "IdentitySession"),
+            ("session_nonce", "SessionNonce"),
+            ("dag_node", "DagNode"),
+            ("trust_receipt", "TrustReceipt"),
+        ] {
+            assert!(
+                store_production.contains(&format!("ZerodentityRecordFamily::{variant}"))
+                    && store_production.contains(&format!("\"{family}\"")),
+                "0dentity DAG DB persistence must cover {family} records"
+            );
+        }
     }
 
     #[test]

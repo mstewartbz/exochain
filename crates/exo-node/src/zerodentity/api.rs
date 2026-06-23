@@ -1456,7 +1456,9 @@ mod tests {
         };
         store.insert_session(&session).unwrap();
         for timestamp in timestamps {
-            store.put_score(ZerodentityScore::compute(&did, &[], &[], &[], *timestamp));
+            store
+                .put_score(ZerodentityScore::compute(&did, &[], &[], &[], *timestamp))
+                .unwrap();
         }
 
         test_api_state(store)
