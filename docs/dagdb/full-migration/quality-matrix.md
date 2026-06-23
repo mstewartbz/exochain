@@ -106,7 +106,7 @@ red_command: `cargo test -p exo-dag-db-postgres --features postgres gateway_stat
 red_failure: `DAG DB schema must enumerate gateway state family did_document`; `couldn't read .../20260623000005_create_gateway_legacy_table_contracts.sql: No such file or directory`
 green_command: `cargo test -p exo-dag-db-postgres --features postgres gateway_state_records_are_dagdb_schema_contract`; `cargo test -p exo-dag-db-postgres --features postgres --test migration_contract`; `cargo test -p exo-gateway production_gateway_state`; `cargo test -p exo-gateway quality_matrix_is_complete`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/db.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000004_create_gateway_state_records_schema.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/migrations/20260623000005_create_gateway_legacy_table_contracts.sql`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-dag-db-postgres/src/postgres/mod.rs`
-commit: pending-current-commit
+commit: `24fcdd99`
 
 ### QM-07
 
