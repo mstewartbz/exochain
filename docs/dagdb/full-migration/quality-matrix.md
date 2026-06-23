@@ -146,7 +146,7 @@ red_command: `cargo test -p exo-gateway dagdb_idempotency_replay_contract`
 red_failure: `persist_idempotent_intake_response must wrap dagdb.intake writes`
 green_command: `cargo test -p exo-gateway dagdb_idempotency_replay_contract && cargo test -p exo-gateway --features production-db dagdb_idempotency_replay_contract && cargo test -p exo-gateway --features production-db idempotency_error_helpers_return_stable_envelopes && cargo test -p exo-gateway --features production-db idempotency_db_error_and_short_circuit_paths_fail_closed && cargo test -p exo-gateway --features production-db dagdb_router && cargo clippy -p exo-gateway --features production-db --all-targets -- -D warnings && cargo fmt --all -- --check && cargo test -p exo-gateway quality_matrix_is_complete`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/code-trace.md`
-commit: not-claimed
+commit: `5d691fec`
 
 ### QM-11
 
