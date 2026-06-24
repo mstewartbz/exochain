@@ -29,19 +29,12 @@
 
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { persistApeOnboarding, type ApeBoardMember } from '../../lib/apeOnboardingState'
 import { cn } from '../../lib/utils'
 
 // ── Board member role definitions ────────────────────────────────────
 
-interface BoardRole {
-  id: string
-  title: string
-  shortTitle: string
-  icon: string
-  description: string
-  capabilities: string[]
-  decisionClass: string
-}
+type BoardRole = ApeBoardMember
 
 const BOARD_ROLES: BoardRole[] = [
   {
@@ -200,7 +193,6 @@ export function OnboardPage() {
     setLaunching(true)
     setError('')
 
-    // Persist onboarding state to localStorage so the dashboard can read it
     const onboardingData = {
       displayName: displayName.trim(),
       email: email.trim(),
@@ -209,7 +201,7 @@ export function OnboardPage() {
       boardMembers: BOARD_ROLES.filter(r => selectedRoles.has(r.id)),
       createdAt: new Date().toISOString(),
     }
-    localStorage.setItem('ape_onboarding', JSON.stringify(onboardingData))
+    persistApeOnboarding(onboardingData)
 
     // A-031: Only seed the dev-bypass key when the build explicitly opts
     // in via VITE_ALLOW_DEV_BYPASS=true. In a production bundle this

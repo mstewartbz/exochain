@@ -23,6 +23,12 @@ interface ImportMetaEnv {
    * flag. ALWAYS unset in production builds. See docs/audit A-031.
    */
   readonly VITE_ALLOW_DEV_BYPASS?: string
+  readonly VITE_DAGDB_GATEWAY_URL?: string
+  readonly VITE_DAGDB_TENANT_ID?: string
+  readonly VITE_DAGDB_NAMESPACE?: string
+  readonly VITE_DAGDB_OWNER_DID?: string
+  readonly VITE_DAGDB_CONTROLLER_DID?: string
+  readonly VITE_DAGDB_SUBMITTED_BY_DID?: string
 }
 
 interface ImportMeta {

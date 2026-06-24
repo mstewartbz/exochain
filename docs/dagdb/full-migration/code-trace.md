@@ -643,6 +643,46 @@ Baseline before QM-14:
 
 Web:
 
+- QM-15 implementation files:
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/dagdbDurableState.ts`
+    defines the shared browser durable-state adapter for
+    `council-tickets`, `council-conversations`, `feedback-issues`,
+    `layout-templates`, and `ape-onboarding`. It records every family through
+    `POST /api/v1/dag-db/intake` with tenant, namespace, idempotency,
+    authority-scope, and token-derived authorization headers. The adapter
+    refuses to accept write/read/delete confirmations unless the response body
+    contains `web_durable_state_result`.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/council.ts`
+    now persists tickets and conversations via the DAG DB durable-state adapter.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/CouncilContext.tsx`
+    hydrates tickets and conversations from the DAG DB durable-state adapter
+    after mount.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/stores/feedbackStore.ts`
+    persists mandated-reporter feedback through the `feedback-issues` durable
+    family.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/stores/layoutTemplateStore.ts`
+    persists user layout templates and active template selection through the
+    `layout-templates` durable family.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/apeOnboardingState.ts`,
+    `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/pages/APE/OnboardPage.tsx`,
+    `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/pages/APE/APEDashboardPage.tsx`,
+    and `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/auth.tsx`
+    move onboarding data to the `ape-onboarding` durable family. Auth token,
+    dev-bypass, and theme compatibility keys remain browser-local by explicit
+    classification.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/dagdbDurableState.test.ts`
+    guards that durable product-state keys no longer appear in production web
+    source and that every durable family is represented in the DAG DB adapter.
+- QM-15 RED evidence: `npm test -- dagdbDurableState` failed because the
+  durable source still contained `df_council_tickets` and
+  `df_council_conversations`, and `web/src/lib/dagdbDurableState.ts` did not
+  exist.
+- QM-15 GREEN evidence: `npm test -- dagdbDurableState` passed 2 tests;
+  `npm test` passed 377 tests across 10 files; `npm run build` completed the
+  Vite production build. The build retained the existing chunk-size warning.
+
+Baseline before QM-15:
+
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/council.ts:279`
   through `:295` writes council tickets and conversations to `localStorage`.
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/stores/feedbackStore.ts:64`

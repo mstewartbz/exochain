@@ -20,10 +20,11 @@
  *  visibility across all modules and widgets.
  */
 
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
 import {
   type CouncilTicket, type Conversation, type ConversationMessage, type TicketTag, type TicketPriority,
   loadTickets, persistTickets, loadConversations, persistConversations,
+  hydrateTickets, hydrateConversations,
   createTicketFromConversation, generateCouncilResponse, getModuleGreeting,
   inferTags,
 } from './council'
@@ -68,6 +69,23 @@ export function CouncilProvider({ children, userName }: { children: ReactNode; u
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations())
   const [tickets, setTickets] = useState<CouncilTicket[]>(() => loadTickets())
+
+  useEffect(() => {
+    let mounted = true
+    hydrateConversations()
+      .then(next => {
+        if (mounted) setConversations(next)
+      })
+      .catch(() => undefined)
+    hydrateTickets()
+      .then(next => {
+        if (mounted) setTickets(next)
+      })
+      .catch(() => undefined)
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   const startConversation = useCallback((moduleContext: string, widgetId?: string) => {
     const greeting: ConversationMessage = {

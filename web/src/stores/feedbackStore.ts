@@ -26,6 +26,12 @@
  */
 
 import { create } from 'zustand'
+import {
+  cacheDagDbDurableState,
+  hydrateDagDbDurableState,
+  persistDagDbDurableState,
+  readCachedDagDbDurableState,
+} from '../lib/dagdbDurableState'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,41 +67,20 @@ export interface FeedbackIssue {
 }
 
 // ---------------------------------------------------------------------------
-// localStorage
+// DAG DB durable state
 // ---------------------------------------------------------------------------
 
-const LS_KEY = 'exo_feedback_issues'
-
 function loadIssues(): FeedbackIssue[] {
-  try {
-    return JSON.parse(localStorage.getItem(LS_KEY) || '[]')
-  } catch {
-    return []
-  }
+  return readCachedDagDbDurableState<FeedbackIssue[]>('feedback-issues', [])
 }
 
 function persistIssues(issues: FeedbackIssue[]) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(issues))
-  } catch { /* degrade gracefully */ }
+  cacheDagDbDurableState('feedback-issues', issues)
+  void persistDagDbDurableState('feedback-issues', issues).catch(() => undefined)
 }
 
-// ---------------------------------------------------------------------------
-// Server persistence
-// ---------------------------------------------------------------------------
-
-async function submitToServer(issue: FeedbackIssue) {
-  try {
-    await fetch('/api/v1/feedback-issues', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${localStorage.getItem('df_token')}`,
-        'x-exo-auth-observed-at-ms': String(issue.updatedAt),
-      },
-      body: JSON.stringify(issue),
-    })
-  } catch { /* best-effort */ }
+async function hydrateIssues(): Promise<FeedbackIssue[]> {
+  return hydrateDagDbDurableState<FeedbackIssue[]>('feedback-issues', [])
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +106,7 @@ interface FeedbackState {
   }) => FeedbackIssue
   updateIssueStatus: (id: string, status: IssueStatus, resolution?: string) => void
   dismissIssue: (id: string, reason: string) => void
+  hydrateIssues: () => Promise<void>
 
   // Computed
   openIssueCount: () => number
@@ -161,7 +147,6 @@ export const useFeedbackStore = create<FeedbackState>((set, get) => ({
     const next = [issue, ...issues]
     set({ issues: next, reporterOpen: false, reporterWidgetId: null, reporterModuleType: null })
     persistIssues(next)
-    submitToServer(issue)
     return issue
   },
 
@@ -183,6 +168,11 @@ export const useFeedbackStore = create<FeedbackState>((set, get) => ({
     )
     set({ issues: next })
     persistIssues(next)
+  },
+
+  hydrateIssues: async () => {
+    const issues = await hydrateIssues()
+    set({ issues })
   },
 
   openIssueCount: () => {

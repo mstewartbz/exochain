@@ -15,6 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
+import { loadCachedApeOnboarding } from './apeOnboardingState'
 import { api } from './api'
 import type { PaceStatus } from './types'
 
@@ -55,26 +56,13 @@ function readDevPreviewOnboarding(): { displayName: string; email: string } {
     displayName: DEV_PREVIEW_DISPLAY_NAME,
     email: DEV_PREVIEW_EMAIL,
   }
-  const stored = localStorage.getItem('ape_onboarding')
-
-  if (!stored) {
+  const onboarding = loadCachedApeOnboarding()
+  if (!onboarding) {
     return fallback
   }
-
-  try {
-    const parsed: unknown = JSON.parse(stored)
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return fallback
-    }
-
-    const onboarding = parsed as Record<string, unknown>
-    return {
-      displayName: nonEmptyString(onboarding.displayName, fallback.displayName),
-      email: nonEmptyString(onboarding.email, fallback.email),
-    }
-  } catch {
-    return fallback
+  return {
+    displayName: nonEmptyString(onboarding.displayName, fallback.displayName),
+    email: nonEmptyString(onboarding.email, fallback.email),
   }
 }
 

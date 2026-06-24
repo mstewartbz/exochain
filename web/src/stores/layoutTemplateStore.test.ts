@@ -20,21 +20,22 @@
  * - Template selection and activation
  * - Edit mode state management
  * - Draft layout mutations (updateDraftLayout, togglePanelVisibility)
- * - Template persistence (localStorage and server)
+ * - Template persistence through DAG DB durable state
  * - Create (saveAsTemplate), Read (getters), Update (saveTemplate, renameTemplate),
  *   and Delete (deleteTemplate) operations
  * - Template duplication with new names
  * - Computed selectors (getActiveTemplate, getEffectiveLayout, getEffectiveHiddenPanels)
  * - Edit mode draft merging with defaults
  * - Built-in template protection (immutability)
- * - localStorage corruption handling
- * - Server persistence (fire-and-forget) with fetch mocking
+ * - Empty durable-cache fallback handling
+ * - DAG DB intake persistence with fetch mocking
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, waitFor } from '@testing-library/react'
 import { useLayoutTemplateStore } from './layoutTemplateStore'
 import type { LayoutTemplate, LayoutItem } from '../data/defaultLayouts'
+import { readCachedDagDbDurableState } from '../lib/dagdbDurableState'
 
 // Mock the defaultLayouts module
 vi.mock('../data/defaultLayouts', () => {
@@ -115,11 +116,27 @@ const MOCK_BUILTINS: LayoutTemplate[] = [
   },
 ]
 
+function persistedLayoutState(): { templates: LayoutTemplate[]; activeId: string } {
+  return readCachedDagDbDurableState('layout-templates', {
+    templates: [],
+    activeId: 'builtin-default',
+  })
+}
+
+async function latestDagDbIntakeCall(): Promise<[string, RequestInit]> {
+  await waitFor(() => expect(global.fetch).toHaveBeenCalled())
+  return (global.fetch as any).mock.calls.at(-1) as [string, RequestInit]
+}
+
 describe('useLayoutTemplateStore', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
-    ;(global.fetch as any).mockResolvedValue({ ok: true })
+    ;(global.fetch as any).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ web_durable_state_result: { stored: true } }),
+    })
     // Properly reset the Zustand singleton state between tests
     useLayoutTemplateStore.setState({
       templates: [...MOCK_BUILTINS],
@@ -156,10 +173,10 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.draftHiddenPanels).toBeNull()
     })
 
-    it('should load user templates from localStorage', () => {
-      // Zustand is a singleton — we simulate "loading from localStorage" by
+    it('should load user templates from DAG DB durable cache', () => {
+      // Zustand is a singleton — we simulate loading from the durable cache by
       // setting state with a user template included, which mirrors what
-      // loadLocal() would produce on a fresh init.
+      // loadDurableLayoutState() would produce on a fresh init.
       const userTemplate: LayoutTemplate = {
         id: 'user-template-1',
         name: 'My Custom Template',
@@ -182,10 +199,7 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.activeTemplateId).toBe('user-template-1')
     })
 
-    it('should handle corrupted localStorage gracefully', () => {
-      localStorage.setItem('exo_layout_templates', 'invalid json')
-      localStorage.setItem('exo_active_template_id', 'builtin-default')
-
+    it('should handle empty DAG DB durable cache gracefully', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       expect(result.current.templates.length).toBe(2) // Falls back to built-ins
@@ -193,8 +207,6 @@ describe('useLayoutTemplateStore', () => {
     })
 
     it('should default to builtin-default if active template not found', () => {
-      localStorage.setItem('exo_active_template_id', 'nonexistent-template')
-
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       expect(result.current.activeTemplateId).toBe('builtin-default')
@@ -216,15 +228,17 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.activeTemplateId).toBe('builtin-compact')
     })
 
-    it('should persist active template to localStorage', () => {
+    it('should persist active template to DAG DB durable state', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
         result.current.selectTemplate('builtin-compact')
       })
 
-      const saved = localStorage.getItem('exo_active_template_id')
-      expect(saved).toBe('builtin-compact')
+      const saved = readCachedDagDbDurableState<{ activeId: string }>('layout-templates', {
+        activeId: 'missing',
+      })
+      expect(saved.activeId).toBe('builtin-compact')
     })
 
     it('should block template selection while in edit mode', () => {
@@ -524,7 +538,7 @@ describe('useLayoutTemplateStore', () => {
       expect(afterAttempt).toEqual(builtInTemplate)
     })
 
-    it('should persist template to localStorage', () => {
+    it('should persist template to DAG DB durable state', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
@@ -538,14 +552,12 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveTemplate()
       })
 
-      const saved = localStorage.getItem('exo_layout_templates')
-      expect(saved).toBeDefined()
-      const templates = JSON.parse(saved!)
+      const templates = persistedLayoutState().templates
       const test = templates.find((t: LayoutTemplate) => t.name === 'Test')
       expect(test?.layout[0].w).toBe(8)
     })
 
-    it('should call server API to persist template', () => {
+    it('should call DAG DB intake to persist template', async () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
@@ -556,15 +568,17 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveTemplate()
       })
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        '/api/v1/layout-templates',
-        expect.objectContaining({
-          method: 'PUT',
-          headers: expect.objectContaining({
-            'Content-Type': 'application/json',
-          }),
+      const [url, init] = await latestDagDbIntakeCall()
+      expect(url).toBe('/api/v1/dag-db/intake')
+      expect(init).toEqual(expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'x-exo-authority-scope': 'dagdb:intake:web-local-dev:decision-forum-web',
         }),
-      )
+      }))
+      const body = JSON.parse(init.body as string)
+      expect(body.requested_action).toBe('web:durable-state:layout-templates:write')
     })
   })
 
@@ -618,7 +632,7 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.draftHiddenPanels).toBeNull()
     })
 
-    it('should persist new template to localStorage', () => {
+    it('should persist new template to DAG DB durable state', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
@@ -627,14 +641,13 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveAsTemplate('Persisted')
       })
 
-      const saved = localStorage.getItem('exo_layout_templates')
-      const templates = JSON.parse(saved!)
+      const templates = persistedLayoutState().templates
       expect(templates.some((t: LayoutTemplate) => t.name === 'Persisted')).toBe(
         true,
       )
     })
 
-    it('should call server API for new template', () => {
+    it('should call DAG DB intake for new template', async () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
@@ -643,12 +656,10 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveAsTemplate('Server Save')
       })
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        '/api/v1/layout-templates',
-        expect.objectContaining({
-          method: 'PUT',
-        }),
-      )
+      const [url, init] = await latestDagDbIntakeCall()
+      expect(url).toBe('/api/v1/dag-db/intake')
+      const body = JSON.parse(init.body as string)
+      expect(body.requested_action).toBe('web:durable-state:layout-templates:write')
     })
 
     it('should generate unique IDs for multiple templates', () => {
@@ -711,7 +722,7 @@ describe('useLayoutTemplateStore', () => {
       expect(afterAttempt?.name).toBe(builtIn.name)
     })
 
-    it('should persist rename to localStorage', () => {
+    it('should persist rename to DAG DB durable state', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       let templateId: string
@@ -726,14 +737,13 @@ describe('useLayoutTemplateStore', () => {
         result.current.renameTemplate(templateId, 'Updated')
       })
 
-      const saved = localStorage.getItem('exo_layout_templates')
-      const templates = JSON.parse(saved!)
+      const templates = persistedLayoutState().templates
       expect(
         templates.find((t: LayoutTemplate) => t.id === templateId)?.name,
       ).toBe('Updated')
     })
 
-    it('should call server API on rename', () => {
+    it('should call DAG DB intake on rename', async () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       let templateId: string
@@ -750,12 +760,10 @@ describe('useLayoutTemplateStore', () => {
         result.current.renameTemplate(templateId, 'ServerRenamed')
       })
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        '/api/v1/layout-templates',
-        expect.objectContaining({
-          method: 'PUT',
-        }),
-      )
+      const [url, init] = await latestDagDbIntakeCall()
+      expect(url).toBe('/api/v1/dag-db/intake')
+      const body = JSON.parse(init.body as string)
+      expect(body.requested_action).toBe('web:durable-state:layout-templates:write')
     })
 
     it('should update timestamp on rename', () => {
@@ -874,7 +882,7 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.activeTemplateId).toBe(otherTemplate)
     })
 
-    it('should persist deletion to localStorage', () => {
+    it('should persist deletion to DAG DB durable state', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       let templateId: string
@@ -889,12 +897,11 @@ describe('useLayoutTemplateStore', () => {
         result.current.deleteTemplate(templateId)
       })
 
-      const saved = localStorage.getItem('exo_layout_templates')
-      const templates = JSON.parse(saved!)
+      const templates = persistedLayoutState().templates
       expect(templates.find((t: LayoutTemplate) => t.id === templateId)).toBeUndefined()
     })
 
-    it('should call server API on delete', () => {
+    it('should call DAG DB intake on delete', async () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       let templateId: string
@@ -911,12 +918,10 @@ describe('useLayoutTemplateStore', () => {
         result.current.deleteTemplate(templateId)
       })
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        `/api/v1/layout-templates/${templateId}`,
-        expect.objectContaining({
-          method: 'DELETE',
-        }),
-      )
+      const [url, init] = await latestDagDbIntakeCall()
+      expect(url).toBe('/api/v1/dag-db/intake')
+      const body = JSON.parse(init.body as string)
+      expect(body.requested_action).toBe('web:durable-state:layout-templates:write')
     })
   })
 
@@ -966,7 +971,7 @@ describe('useLayoutTemplateStore', () => {
       expect(result.current.activeTemplateId).toMatch(/^user-/)
     })
 
-    it('should persist duplicate to localStorage', () => {
+    it('should persist duplicate to DAG DB durable state', () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       const original = result.current.templates[0]
@@ -977,14 +982,13 @@ describe('useLayoutTemplateStore', () => {
         duplicateId = result.current.duplicateTemplate(original.id, 'Saved Copy')
       })
 
-      const saved = localStorage.getItem('exo_layout_templates')
-      const templates = JSON.parse(saved!)
+      const templates = persistedLayoutState().templates
       expect(
         templates.find((t: LayoutTemplate) => t.id === duplicateId),
       ).toBeDefined()
     })
 
-    it('should call server API on duplicate', () => {
+    it('should call DAG DB intake on duplicate', async () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       const original = result.current.templates[0]
@@ -995,12 +999,10 @@ describe('useLayoutTemplateStore', () => {
         result.current.duplicateTemplate(original.id, 'Server Copy')
       })
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        '/api/v1/layout-templates',
-        expect.objectContaining({
-          method: 'PUT',
-        }),
-      )
+      const [url, init] = await latestDagDbIntakeCall()
+      expect(url).toBe('/api/v1/dag-db/intake')
+      const body = JSON.parse(init.body as string)
+      expect(body.requested_action).toBe('web:durable-state:layout-templates:write')
     })
 
     it('should return empty string if source template not found', () => {
@@ -1250,11 +1252,11 @@ describe('useLayoutTemplateStore', () => {
   })
 
   // ──────────────────────────────────────────────────────────────────
-  // Server persistence
+  // DAG DB intake persistence
   // ──────────────────────────────────────────────────────────────────
 
-  describe('Server persistence', () => {
-    it('should send Authorization header with token from localStorage', () => {
+  describe('DAG DB intake persistence', () => {
+    it('should send Authorization header with token from auth compatibility storage', async () => {
       localStorage.setItem('df_token', 'test-token-123')
 
       const { result } = renderHook(() => useLayoutTemplateStore())
@@ -1265,17 +1267,13 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveAsTemplate('Auth Test')
       })
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Authorization: 'Bearer test-token-123',
-          }),
-        }),
-      )
+      const [, init] = await latestDagDbIntakeCall()
+      expect(init.headers).toEqual(expect.objectContaining({
+        Authorization: 'Bearer test-token-123',
+      }))
     })
 
-    it('should send gateway-required actor binding metadata', () => {
+    it('should send gateway-required actor binding metadata', async () => {
       localStorage.setItem('df_token', 'test-token-123')
 
       const { result } = renderHook(() => useLayoutTemplateStore())
@@ -1286,16 +1284,19 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveAsTemplate('Gateway Metadata')
       })
 
-      const [, init] = vi.mocked(global.fetch).mock.calls[0]
+      const [, init] = await latestDagDbIntakeCall()
       const headers = init?.headers as Record<string, string>
       const body = JSON.parse(init?.body as string)
 
-      expect(body.createdAt).toBeGreaterThan(0)
-      expect(body.updatedAt).toBeGreaterThan(0)
-      expect(headers['x-exo-auth-observed-at-ms']).toBe(String(body.updatedAt))
+      expect(body.tenant_id).toBe('web-local-dev')
+      expect(body.namespace).toBe('decision-forum-web')
+      expect(body.idempotency_key).toMatch(/^web-durable-state:layout-templates:write:/)
+      expect(body.payload_hash).toMatch(/^[a-f0-9]{64}$/)
+      expect(headers['x-exo-tenant-id']).toBe('web-local-dev')
+      expect(headers['x-exo-namespace']).toBe('decision-forum-web')
     })
 
-    it('should continue on server sync failure (fire-and-forget)', () => {
+    it('should keep in-memory state when DAG DB intake is unavailable', () => {
       ;(global.fetch as any).mockRejectedValueOnce(new Error('Network error'))
 
       const { result } = renderHook(() => useLayoutTemplateStore())
@@ -1307,11 +1308,10 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveAsTemplate('Fire and Forget')
       })
 
-      // Template should still be created locally
       expect(result.current.templates.length).toBeGreaterThan(2)
     })
 
-    it('should send canonical layout arrays for server validation', () => {
+    it('should send canonical layout durable-state request metadata', async () => {
       const { result } = renderHook(() => useLayoutTemplateStore())
 
       act(() => {
@@ -1320,11 +1320,12 @@ describe('useLayoutTemplateStore', () => {
         result.current.saveAsTemplate('Serialize')
       })
 
-      const callArgs = (global.fetch as any).mock.calls[0][1]
-      const body = JSON.parse(callArgs.body)
-      expect(Array.isArray(body.layout)).toBe(true)
-      expect(body.layout).toEqual([{ i: 'panel-1', x: 0, y: 0, w: 6, h: 4 }])
-      expect(body.hiddenPanels).toEqual([])
+      const [, init] = await latestDagDbIntakeCall()
+      const body = JSON.parse(init.body as string)
+      expect(body.requested_action).toBe('web:durable-state:layout-templates:write')
+      expect(body.keyword_texts).toEqual(['web', 'durable-state', 'layout-templates', 'write'])
+      expect(body.source_hash).toMatch(/^[a-f0-9]{64}$/)
+      expect(body.payload_hash).toMatch(/^[a-f0-9]{64}$/)
     })
   })
 })

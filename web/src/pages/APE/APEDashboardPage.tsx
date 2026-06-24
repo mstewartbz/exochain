@@ -18,33 +18,21 @@
  * APE Dashboard — Personalized post-onboarding dashboard that wraps the
  * grid system with the user's board of directors context.
  *
- * Reads onboarding data from localStorage (set during OnboardPage flow)
- * and displays the board roster alongside the main grid dashboard.
+ * Reads onboarding data from the DAG DB durable-state adapter and displays
+ * the board roster alongside the main grid dashboard.
  */
 
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { CommandCenterPage } from '../CommandCenterPage'
+import {
+  hydrateApeOnboarding,
+  loadCachedApeOnboarding,
+  type ApeOnboardingData,
+} from '../../lib/apeOnboardingState'
 import { cn } from '../../lib/utils'
 
-interface BoardMember {
-  id: string
-  title: string
-  shortTitle: string
-  icon: string
-  description: string
-  capabilities: string[]
-  decisionClass: string
-}
-
-interface OnboardingData {
-  displayName: string
-  email: string
-  boardName: string
-  governanceStyle: string
-  boardMembers: BoardMember[]
-  createdAt: string
-}
+type OnboardingData = ApeOnboardingData
 
 const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   idle: { label: 'Idle', color: 'text-slate-400' },
@@ -71,16 +59,18 @@ export function APEDashboardPage() {
   const [memberStatuses, setMemberStatuses] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    const raw = localStorage.getItem('ape_onboarding')
-    if (raw) {
-      try {
-        const data = JSON.parse(raw) as OnboardingData
-        setOnboarding(data)
-        // Initialize random statuses
-        const statuses: Record<string, string> = {}
-        data.boardMembers.forEach(m => { statuses[m.id] = randomStatus() })
-        setMemberStatuses(statuses)
-      } catch { /* ignore parse errors */ }
+    let mounted = true
+    const applyOnboarding = (data: OnboardingData | null) => {
+      if (!mounted || !data) return
+      setOnboarding(data)
+      const statuses: Record<string, string> = {}
+      data.boardMembers.forEach(m => { statuses[m.id] = randomStatus() })
+      setMemberStatuses(statuses)
+    }
+    applyOnboarding(loadCachedApeOnboarding())
+    hydrateApeOnboarding().then(applyOnboarding).catch(() => undefined)
+    return () => {
+      mounted = false
     }
   }, [])
 

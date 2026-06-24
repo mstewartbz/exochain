@@ -16,9 +16,9 @@
 
 /** layoutTemplateStore.ts — Zustand store for grid layout templates.
  *
- * Manages: template CRUD, edit mode with draft state, dual persistence
- * (localStorage immediate + server fire-and-forget), and forward-compatible
- * layout merging when new panels are added to the registry.
+ * Manages: template CRUD, edit mode with draft state, DAG DB-backed durable
+ * persistence, and forward-compatible layout merging when new panels are
+ * added to the registry.
  */
 
 import { create } from 'zustand'
@@ -29,73 +29,65 @@ import {
   mergeLayoutWithDefaults,
   type LayoutTemplate,
 } from '../data/defaultLayouts'
+import {
+  cacheDagDbDurableState,
+  hydrateDagDbDurableState,
+  persistDagDbDurableState,
+  readCachedDagDbDurableState,
+} from '../lib/dagdbDurableState'
 
 // ---------------------------------------------------------------------------
-// localStorage helpers
+// DAG DB durable state helpers
 // ---------------------------------------------------------------------------
 
-const LS_TEMPLATES_KEY = 'exo_layout_templates'
-const LS_ACTIVE_KEY = 'exo_active_template_id'
+type PersistedLayoutTemplateState = {
+  templates: LayoutTemplate[]
+  activeId: string
+}
 
-function loadLocal(): { templates: LayoutTemplate[]; activeId: string } {
-  try {
-    const raw = localStorage.getItem(LS_TEMPLATES_KEY)
-    const saved: LayoutTemplate[] = raw ? JSON.parse(raw) : []
-    const activeId = localStorage.getItem(LS_ACTIVE_KEY) || 'builtin-default'
-    // Merge built-ins (always authoritative) with user templates
-    const userTemplates = saved.filter(t => !t.isBuiltIn)
-    return { templates: [...builtins, ...userTemplates], activeId }
-  } catch {
-    return { templates: [...builtins], activeId: 'builtin-default' }
+function normalizePersistedLayoutState(
+  persisted: PersistedLayoutTemplateState,
+): { templates: LayoutTemplate[]; activeId: string } {
+  const userTemplates = Array.isArray(persisted.templates)
+    ? persisted.templates.filter(t => !t.isBuiltIn)
+    : []
+  const activeId = typeof persisted.activeId === 'string' && persisted.activeId
+    ? persisted.activeId
+    : 'builtin-default'
+  return { templates: [...builtins, ...userTemplates], activeId }
+}
+
+function loadDurableLayoutState(): { templates: LayoutTemplate[]; activeId: string } {
+  return normalizePersistedLayoutState(
+    readCachedDagDbDurableState<PersistedLayoutTemplateState>('layout-templates', {
+      templates: [],
+      activeId: 'builtin-default',
+    }),
+  )
+}
+
+function persistedLayoutState(
+  templates: LayoutTemplate[],
+  activeId: string,
+): PersistedLayoutTemplateState {
+  return {
+    templates: templates.filter(t => !t.isBuiltIn),
+    activeId,
   }
 }
 
-function persistLocal(templates: LayoutTemplate[], activeId: string) {
-  try {
-    // Only persist user templates — built-ins are embedded in code
-    const user = templates.filter(t => !t.isBuiltIn)
-    localStorage.setItem(LS_TEMPLATES_KEY, JSON.stringify(user))
-    localStorage.setItem(LS_ACTIVE_KEY, activeId)
-  } catch { /* quota exceeded — degrade gracefully */ }
+function persistLayoutState(templates: LayoutTemplate[], activeId: string) {
+  const persisted = persistedLayoutState(templates, activeId)
+  cacheDagDbDurableState('layout-templates', persisted)
+  void persistDagDbDurableState('layout-templates', persisted).catch(() => undefined)
 }
 
-// ---------------------------------------------------------------------------
-// Server persistence (fire-and-forget)
-// ---------------------------------------------------------------------------
-
-async function saveToServer(template: LayoutTemplate) {
-  try {
-    await fetch('/api/v1/layout-templates', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${localStorage.getItem('df_token')}`,
-        'x-exo-auth-observed-at-ms': String(template.updatedAt),
-      },
-      body: JSON.stringify({
-        id: template.id,
-        name: template.name,
-        layout: template.layout,
-        hiddenPanels: template.hiddenPanels,
-        isBuiltIn: template.isBuiltIn,
-        createdAt: template.createdAt,
-        updatedAt: template.updatedAt,
-      }),
-    })
-  } catch { /* server sync is best-effort */ }
-}
-
-async function deleteFromServer(id: string) {
-  try {
-    const observedAt = Date.now()
-    await fetch(`/api/v1/layout-templates/${id}`, {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem('df_token')}`,
-        'x-exo-auth-observed-at-ms': String(observedAt),
-      },
-    })
-  } catch { /* best-effort */ }
+async function hydrateLayoutState(): Promise<{ templates: LayoutTemplate[]; activeId: string }> {
+  const persisted = await hydrateDagDbDurableState<PersistedLayoutTemplateState>(
+    'layout-templates',
+    { templates: [], activeId: 'builtin-default' },
+  )
+  return normalizePersistedLayoutState(persisted)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +111,7 @@ interface LayoutTemplateState {
   renameTemplate: (id: string, name: string) => void
   deleteTemplate: (id: string) => void
   duplicateTemplate: (id: string, newName: string) => string
+  hydrateFromDurableState: () => Promise<void>
 
   // Computed
   getActiveTemplate: () => LayoutTemplate
@@ -126,7 +119,7 @@ interface LayoutTemplateState {
   getEffectiveHiddenPanels: () => string[]
 }
 
-const initial = loadLocal()
+const initial = loadDurableLayoutState()
 
 export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => ({
   templates: initial.templates,
@@ -139,7 +132,7 @@ export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => 
   selectTemplate: (id) => {
     if (get().editMode) return // blocked while editing
     set({ activeTemplateId: id })
-    persistLocal(get().templates, id)
+    persistLayoutState(get().templates, id)
   },
 
   // ── Edit mode ────────────────────────────────────────────────
@@ -188,8 +181,7 @@ export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => 
     }
     const next = templates.map(t => t.id === active.id ? updated : t)
     set({ templates: next, editMode: false, draftLayout: null, draftHiddenPanels: null })
-    persistLocal(next, activeTemplateId)
-    saveToServer(updated)
+    persistLayoutState(next, activeTemplateId)
   },
 
   // ── Save As (create new template from draft) ─────────────────
@@ -216,8 +208,7 @@ export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => 
       draftLayout: null,
       draftHiddenPanels: null,
     })
-    persistLocal(next, id)
-    saveToServer(newTemplate)
+    persistLayoutState(next, id)
     return id
   },
 
@@ -229,8 +220,7 @@ export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => 
     const updated = { ...t, name, updatedAt: Date.now() }
     const next = templates.map(x => x.id === id ? updated : x)
     set({ templates: next })
-    persistLocal(next, get().activeTemplateId)
-    saveToServer(updated)
+    persistLayoutState(next, get().activeTemplateId)
   },
 
   // ── Delete ───────────────────────────────────────────────────
@@ -241,8 +231,7 @@ export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => 
     const next = templates.filter(t => t.id !== id)
     const newActive = activeTemplateId === id ? 'builtin-default' : activeTemplateId
     set({ templates: next, activeTemplateId: newActive })
-    persistLocal(next, newActive)
-    deleteFromServer(id)
+    persistLayoutState(next, newActive)
   },
 
   // ── Duplicate ────────────────────────────────────────────────
@@ -262,9 +251,19 @@ export const useLayoutTemplateStore = create<LayoutTemplateState>((set, get) => 
     }
     const next = [...templates, dup]
     set({ templates: next, activeTemplateId: newId })
-    persistLocal(next, newId)
-    saveToServer(dup)
+    persistLayoutState(next, newId)
     return newId
+  },
+
+  hydrateFromDurableState: async () => {
+    const hydrated = await hydrateLayoutState()
+    set({
+      templates: hydrated.templates,
+      activeTemplateId: hydrated.activeId,
+      editMode: false,
+      draftLayout: null,
+      draftHiddenPanels: null,
+    })
   },
 
   // ── Computed ─────────────────────────────────────────────────

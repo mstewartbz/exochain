@@ -17,6 +17,7 @@
 import { expect, afterEach, vi } from 'vitest'
 import { cleanup } from '@testing-library/react'
 import '@testing-library/jest-dom'
+import { resetDagDbDurableStateForTests } from '../lib/dagdbDurableState'
 
 // Cleanup after each test
 afterEach(() => {
@@ -47,4 +48,5 @@ Object.defineProperty(window, 'localStorage', {
 // Reset localStorage before each test
 beforeEach(() => {
   localStorage.clear()
+  resetDagDbDurableStateForTests()
 })
