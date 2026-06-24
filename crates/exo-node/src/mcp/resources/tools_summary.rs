@@ -231,6 +231,8 @@ mod tests {
             .iter()
             .map(|d| d["count"].as_u64().unwrap())
             .sum();
-        assert_eq!(total, ToolRegistry::default().list().len() as u64);
+        let registry_total = u64::try_from(ToolRegistry::default().list().len())
+            .expect("registered MCP tool count fits in u64");
+        assert_eq!(total, registry_total);
     }
 }

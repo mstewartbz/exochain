@@ -41,4 +41,3 @@ function loadExochainWasm() {
 module.exports = {
   loadExochainWasm,
 };
-
