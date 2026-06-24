@@ -101,6 +101,7 @@ class CommandBaseReadPool {
       }
     }
     this._connections = [];
+    this._size = 0;
   }
 }
 

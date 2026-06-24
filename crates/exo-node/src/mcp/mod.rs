@@ -452,7 +452,8 @@ mod sse_tests {
             .unwrap();
         let res = router.oneshot(req).await.unwrap();
         assert_eq!(res.status(), 200);
-        let body_bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        let tools_inventory_read_limit = MAX_JSON_RPC_MESSAGE_BYTES * 64;
+        let body_bytes = axum::body::to_bytes(res.into_body(), tools_inventory_read_limit)
             .await
             .unwrap();
         let text = std::str::from_utf8(&body_bytes).unwrap();

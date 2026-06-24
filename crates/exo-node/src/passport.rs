@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(passport["standing"]["status"], "unknown");
         assert!(passport["standing"]["revoked"].is_null());
         assert_eq!(passport["consent"]["default_deny_enforced"], true);
-        assert_eq!(passport["persistence_ready"], false);
+        assert_eq!(passport["persistence_ready"], true);
     }
 
     #[tokio::test]

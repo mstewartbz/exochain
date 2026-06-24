@@ -789,6 +789,81 @@ run security:contact-intake && npm run security:contact-disclosure`, `cd web &&
 npm test -- dagdbDurableState`, and CyberMedica `npm run scan:hazards && npm
 run scan:secrets && npm run guard:adapter-contracts` all passed.
 
+## Coverage Gates
+
+QM-18 adds touched-code coverage gates for the migrated adjacent adapters and
+keeps the Rust coverage gate aligned with the repository's CI policy:
+
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app/package.json`
+  adds `npm run test:coverage`, requiring 90% line coverage for
+  `lib/commandbase-dagdb-adapter.js` and `lib/commandbase-db-factory.js`.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/package.json`
+  adds `npm run test:coverage`, requiring 90% line coverage for
+  `worker-db.js`.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/package.json`
+  adds `npm run test:coverage`, requiring 90% line coverage for
+  `src/lib/dagdbDurableState.ts`.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/package.json`
+  adds `npm run test:coverage:dagdb`, requiring 90% line coverage for
+  `packages/shared/src/dagdb-adapter.js`.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
+  adds `dagdb_full_migration_coverage_gate_contract`, which source-checks that
+  CommandBase app, CommandBase worker, web, demo, and CyberMedica expose
+  coverage scripts with explicit 90% thresholds and touched-file includes.
+
+QM-18 RED evidence:
+
+- `cargo tarpaulin --workspace --all-targets --fail-under 90` failed after
+  `exo-root` report generation with `missing section: CoverageFunctions`.
+  That command is recorded as a raw all-targets RED/tooling incompatibility, not
+  the supported CI coverage gate.
+- `cd command-base/app && npm run test:coverage` failed before additional
+  runtime branch tests with 71.23% line coverage.
+- `cd command-base/worker && npm run test:coverage` failed before extracting
+  `worker-db.js` and adding real adapter branch coverage with 32.57% line
+  coverage.
+- `cd web && npm run test:coverage` showed the durable-state source at 8.57%
+  line coverage before runtime fetch/response/error tests.
+- The supported CI tarpaulin command RED-failed stale full-surface contracts:
+  `crates/exo-gateway/tests/dagdb_cross_tenant.rs` still expected unmounted
+  404s instead of mounted 503 `database_unavailable` responses, and
+  `crates/exo-node/src/mcp/resources/tools_summary.rs` still asserted 44 tools
+  even though the full DAG DB MCP parity surface registers 52.
+- The same run also found `crates/exo-node/src/mcp/mod.rs` still read the
+  expanded `tools/list` response with a 64 KiB test cap, and
+  `crates/exo-node/src/passport.rs` still expected `persistence_ready` false
+  after QM-05 made 0dentity durable.
+
+QM-18 GREEN evidence:
+
+- `cd command-base/app && npm run test:coverage` passed with 93.85% line
+  coverage overall, 93.27% for `commandbase-dagdb-adapter.js`, and 95.07% for
+  `commandbase-db-factory.js`.
+- `cd command-base/worker && npm run test:coverage` passed with 100% line
+  coverage for `worker-db.js`.
+- `cd web && npm run test:coverage` passed with 97.71% line coverage for
+  `dagdbDurableState.ts`.
+- `cd demo && npm run test:coverage:dagdb` passed with 100% line coverage for
+  `packages/shared/src/dagdb-adapter.js`.
+- `cd cybermedica && npm run test:coverage` passed with package line coverage
+  above the coverage gate.
+- `bash tools/test_coverage_policy.sh` passed, proving the repo's coverage
+  claims and structural exclusions are disclosed and CI-bound.
+- `cargo test -p exo-gateway dagdb_full_migration_coverage_gate_contract`
+  passed, proving every migrated adjacent package still exposes the focused
+  coverage gate.
+- `cargo test -p exo-gateway --features production-db --test
+  dagdb_cross_tenant` passed with 5 tests after the mounted-route fail-closed
+  contract was updated.
+- `cargo test -p exo-node tools_summary`, `cargo test -p exo-node
+  sse_message_tools_list`, and `cargo test -p exo-node
+  passport_returns_profile_for_known_validator` all passed after the registry
+  count, tools/list response cap, and durable 0dentity readiness contracts were
+  updated.
+- `cargo tarpaulin --workspace --exclude exochain-wasm --exclude exo-proofs
+  --out xml --output-dir coverage --engine llvm --timeout 300 --fail-under 90`
+  passed with 91.05% coverage, 40711 of 44714 lines covered.
+
 ## Migration Rule
 
 Fresh-start all mutable durable state. Preserve only verified

@@ -20,35 +20,19 @@
 const path = require('path');
 const fs = require('fs');
 const {
-  createCommandBaseDb,
-  productionUsesDagDb,
-} = require('../app/lib/commandbase-db-factory');
+  databaseLabel,
+  openWorkerDatabase,
+  WORKER_DATABASE_ID,
+} = require('./worker-db');
 const { getMemberProfile, getAssignments, getSetting, setSetting } = require('./profiles');
 const { chooseModel, buildTaskPrompt, buildReviewPrompt, executeClaudeCommand } = require('./executor');
 
 const INBOX_PATH = process.env.INBOX_PATH || path.join(__dirname, '..', 'Teams inbox:Result');
 const OUTBOX_PATH = process.env.OUTBOX_PATH || path.join(__dirname, '..', "Stew's inbox:Owner");
 const POLL_INTERVAL = 10000; // 10 seconds
-const WORKER_DATABASE_ID = 'commandbase-worker';
-const DEFAULT_DEV_SQLITE_FILE = path.join(__dirname, '..', 'commandbase-worker-dev.sqlite');
 
 let db = null;
 let timer = null;
-
-function openWorkerDatabase(env = process.env) {
-  return createCommandBaseDb({
-    env,
-    databaseId: WORKER_DATABASE_ID,
-    dbPath: env.COMMAND_BASE_WORKER_DEV_SQLITE || DEFAULT_DEV_SQLITE_FILE,
-    fileMustExist: false,
-  });
-}
-
-function databaseLabel(env = process.env) {
-  return productionUsesDagDb(env)
-    ? 'DAG DB adapter commandbase-worker'
-    : env.COMMAND_BASE_WORKER_DEV_SQLITE || DEFAULT_DEV_SQLITE_FILE;
-}
 
 function localNow() {
   return new Date().toLocaleString('sv-SE', {

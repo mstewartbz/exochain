@@ -243,3 +243,125 @@ test('CommandBase DAG DB adapter uses real gateway results and fails closed when
     /missing commandbase_result/,
   );
 });
+
+test('CommandBase DAG DB adapter covers fail-closed local result branches', () => {
+  const {
+    CommandBaseDagDbAdapter,
+    requireDagDbConfig,
+  } = require('./lib/commandbase-dagdb-adapter');
+
+  assert.throws(
+    () => requireDagDbConfig({ COMMAND_BASE_DAGDB_GATEWAY_URL: 'http://127.0.0.1:1' }),
+    /missing required config/,
+  );
+
+  const db = new CommandBaseDagDbAdapter({
+    config: {
+      gatewayUrl: 'http://127.0.0.1:1/',
+      authToken: 'token',
+      tenantId: 'tenant-a',
+      namespace: 'primary',
+      ownerDid: 'did:exo:owner',
+      controllerDid: 'did:exo:controller',
+      submittedByDid: 'did:exo:submitter',
+      writeSignature: 'a'.repeat(128),
+    },
+    databaseId: 'branch-coverage',
+  });
+
+  assert.equal(db.config.gatewayUrl, 'http://127.0.0.1:1/');
+  assert.throws(() => db.transaction('not-a-function'), /requires a function/);
+  assert.equal(db.transaction((value) => `ok:${value}`)('value'), 'ok:value');
+  assert.deepEqual(db.statementResult('exec', {}), {
+    changes: 0,
+    lastInsertRowid: null,
+    row: undefined,
+    rows: [],
+  });
+  assert.deepEqual(db.statementResult('durable-state', {}), {
+    changes: 0,
+    lastInsertRowid: null,
+    row: undefined,
+    rows: [],
+  });
+  assert.deepEqual(db.statementResult('pragma', {}), {
+    changes: 0,
+    lastInsertRowid: null,
+    row: undefined,
+    rows: [],
+  });
+  assert.deepEqual(db.statementResult('get', { commandbase_result: { row: null } }).row, undefined);
+  assert.deepEqual(db.statementResult('all', { commandbase_result: { rows: [{ id: 1 }] } }).rows, [{ id: 1 }]);
+  assert.throws(
+    () => db.statementResult('run', { commandbase_result: { changes: '1' } }),
+    /must include integer changes/,
+  );
+  assert.throws(
+    () => db.statementResult('all', { commandbase_result: { rows: 'not-array' } }),
+    /rows array/,
+  );
+  assert.throws(
+    () => db.statementResult('unknown', { commandbase_result: {} }),
+    /unsupported operation kind/,
+  );
+
+  const readonly = new CommandBaseDagDbAdapter({
+    config: db.config,
+    readonly: true,
+  });
+  assert.throws(
+    () => readonly.recordSqlOperation('run', 'INSERT INTO tasks DEFAULT VALUES', []),
+    /read adapter refused write operation/,
+  );
+  assert.throws(
+    () => db.prepare('SELECT * FROM tasks').get(1),
+    /transport failed/,
+  );
+});
+
+test('CommandBase DB factory routes production callers to DAG DB and covers read-pool branches', () => {
+  const factory = require('./lib/commandbase-db-factory');
+  const env = {
+    ...adapterEnv('http://127.0.0.1:9999'),
+    NODE_ENV: 'production',
+  };
+
+  assert.equal(factory.productionUsesDagDb({ NODE_ENV: 'production' }), true);
+  assert.equal(
+    factory.productionUsesDagDb({ NODE_ENV: 'production', COMMAND_BASE_ALLOW_DEV_SQLITE: '1' }),
+    false,
+  );
+  assert.equal(factory.productionUsesDagDb({ NODE_ENV: 'development' }), false);
+  assert.match(factory.defaultCommandBaseDbPath('/tmp/app'), /commandbase-dev\.sqlite$/);
+  assert.match(factory.defaultTaskForceDbPath('/tmp/app'), /commandbase-task-forces-dev\.sqlite$/);
+
+  const db = factory.createCommandBaseDb({
+    env,
+    databaseId: 'factory-main',
+    readonly: true,
+  });
+  assert.equal(db.constructor.name, 'CommandBaseDagDbAdapter');
+  assert.equal(db.databaseId, 'factory-main');
+  assert.equal(db.readonly, true);
+
+  const taskForceDb = factory.createTaskForceDb({ env });
+  assert.equal(taskForceDb.databaseId, 'commandbase-task-forces');
+
+  const pool = factory.createCommandBaseReadPool({
+    env,
+    poolSize: 2,
+    databaseId: 'factory-pool',
+  });
+  assert.deepEqual(pool.stats(), { size: 2, busy: 0, idle: 2 });
+  const first = pool.acquire();
+  const second = pool.acquire();
+  assert.equal(pool.acquire(), null);
+  assert.equal(pool.read((fallback) => fallback.marker, { marker: 'fallback-used' }), 'fallback-used');
+  assert.throws(() => pool.read(() => 'unreachable'), /Read pool exhausted/);
+  pool.release(first);
+  assert.equal(pool.read((conn) => conn.databaseId), 'factory-pool');
+  pool.release(second);
+  assert.deepEqual(pool.stats(), { size: 2, busy: 0, idle: 2 });
+  pool.close();
+  assert.deepEqual(pool.stats(), { size: 0, busy: 0, idle: 0 });
+});

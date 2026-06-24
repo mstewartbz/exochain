@@ -9429,8 +9429,13 @@ mod tests {
             );
         }
         assert!(
-            worker_source.contains("../app/lib/commandbase-db-factory"),
-            "CommandBase worker must route production persistence through the DAG DB factory"
+            worker_source.contains("./worker-db"),
+            "CommandBase worker entrypoint must route persistence through worker-db"
+        );
+        let worker_db_source = repo_file("command-base/worker/worker-db.js");
+        assert!(
+            worker_db_source.contains("../app/lib/commandbase-db-factory"),
+            "CommandBase worker DB boundary must route production persistence through the DAG DB factory"
         );
 
         let app_package: serde_json::Value =
@@ -9490,6 +9495,83 @@ mod tests {
                 "web durable-state source guard must cover {family}"
             );
         }
+    }
+
+    #[test]
+    fn dagdb_full_migration_coverage_gate_contract() {
+        for (package_path, expected) in [
+            (
+                "command-base/app/package.json",
+                "--test-coverage-include=lib/commandbase-dagdb-adapter.js",
+            ),
+            (
+                "command-base/worker/package.json",
+                "--test-coverage-include=worker-db.js",
+            ),
+            (
+                "web/package.json",
+                "--coverage.include=src/lib/dagdbDurableState.ts",
+            ),
+            ("cybermedica/package.json", "--test-coverage-lines=90"),
+        ] {
+            let package: serde_json::Value =
+                serde_json::from_str(&repo_file(package_path)).expect("package.json parses");
+            let coverage = package
+                .get("scripts")
+                .and_then(|scripts| scripts.get("test:coverage"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("{package_path} missing test:coverage script"));
+            assert!(
+                coverage.contains(expected),
+                "{package_path} test:coverage script must contain {expected}"
+            );
+        }
+
+        let demo_package: serde_json::Value =
+            serde_json::from_str(&repo_file("demo/package.json")).expect("demo package parses");
+        let demo_coverage = demo_package["scripts"]["test:coverage:dagdb"]
+            .as_str()
+            .expect("demo DAG DB coverage script is a string");
+        assert!(
+            demo_coverage.contains("--coverage")
+                && demo_coverage
+                    .contains("--coverage.include=packages/shared/src/dagdb-adapter.js")
+                && demo_coverage.contains("--coverage.thresholds.lines=90"),
+            "demo DAG DB adapter coverage must enforce 90 percent focused adapter coverage"
+        );
+
+        let app_package: serde_json::Value =
+            serde_json::from_str(&repo_file("command-base/app/package.json"))
+                .expect("CommandBase app package parses");
+        let app_coverage = app_package["scripts"]["test:coverage"]
+            .as_str()
+            .expect("CommandBase app coverage script is a string");
+        assert!(
+            app_coverage.contains("--test-coverage-lines=90")
+                && app_coverage.contains("--test-coverage-include=lib/commandbase-db-factory.js"),
+            "CommandBase app coverage must enforce 90 percent focused adapter/factory coverage"
+        );
+
+        let worker_package: serde_json::Value =
+            serde_json::from_str(&repo_file("command-base/worker/package.json"))
+                .expect("CommandBase worker package parses");
+        let worker_coverage = worker_package["scripts"]["test:coverage"]
+            .as_str()
+            .expect("CommandBase worker coverage script is a string");
+        assert!(
+            worker_coverage.contains("--test-coverage-lines=90"),
+            "CommandBase worker coverage must enforce 90 percent focused worker-db coverage"
+        );
+
+        let web_package: serde_json::Value =
+            serde_json::from_str(&repo_file("web/package.json")).expect("web package parses");
+        let web_coverage = web_package["scripts"]["test:coverage"]
+            .as_str()
+            .expect("web coverage script is a string");
+        assert!(
+            web_coverage.contains("--coverage.thresholds.lines=90"),
+            "web durable-state coverage must enforce a 90 percent line threshold"
+        );
     }
 
     #[test]
