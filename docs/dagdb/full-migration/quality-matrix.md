@@ -206,7 +206,7 @@ red_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica
 red_failure: Focused RED `node --test tests/trust-adapter.test.mjs` failed because the activation result lacked `dagDbGatewayCallPathSource`, missing DAG DB gateway call-path evidence still allowed trust, and simulated/cached/overridden DAG DB evidence was not blocked; guard RED `npm run guard:adapter-contracts` failed MAC-006 coverage for the integration-map text and required source/test refs; package RED `npm run quality` failed legacy fixtures that did not include DAG DB gateway evidence and still expected five MAC requirements.
 green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica && node --test tests/trust-adapter.test.mjs && npm run guard:adapter-contracts && npm run quality`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/src/trust-adapter.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/tests/trust-adapter.test.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/tests/production-trust-activation.test.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/tests/root-trust-registry.test.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/tests/runtime-readiness.test.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/scripts/source-adapter-contract-guard.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/docs/context/EXOCHAIN_TO_CYBERMEDICA_INTEGRATION_MAP.md`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/code-trace.md`
-commit: not-claimed
+commit: `91cef77e`
 
 ### QM-17
 
