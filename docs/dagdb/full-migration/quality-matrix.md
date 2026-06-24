@@ -196,7 +196,7 @@ red_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/web && npm 
 red_failure: Focused RED `npm test -- dagdbDurableState` failed because durable source still matched `df_council_tickets|df_council_conversations`, and `web/src/lib/dagdbDurableState.ts` was missing.
 green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/web && npm test -- dagdbDurableState && npm test && npm run build`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/dagdbDurableState.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/dagdbDurableState.test.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/apeOnboardingState.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/council.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/CouncilContext.tsx`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/lib/auth.tsx`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/stores/feedbackStore.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/stores/layoutTemplateStore.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/pages/APE/OnboardPage.tsx`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/pages/APE/APEDashboardPage.tsx`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/vite-env.d.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/web/src/test/setup.ts`
-commit: not-claimed
+commit: `80b718c3`
 
 ### QM-16
 
