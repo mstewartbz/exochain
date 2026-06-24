@@ -16,13 +16,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ExoChain Demo — Local Development (no Docker)
-# Requires: PostgreSQL running locally with database 'exochain'
+# Requires an EXOCHAIN DAG DB gateway reachable at EXO_DEMO_DAGDB_GATEWAY_URL.
 set -euo pipefail
 
 DEMO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DEMO_DIR"
 
-export DATABASE_URL="${DATABASE_URL:-postgres://exochain:exochain_dev@localhost:5432/exochain}"
+: "${EXO_DEMO_DAGDB_GATEWAY_URL:?set EXO_DEMO_DAGDB_GATEWAY_URL to the EXOCHAIN DAG DB gateway origin}"
+: "${EXO_DEMO_DAGDB_AUTH_TOKEN:?set EXO_DEMO_DAGDB_AUTH_TOKEN}"
+: "${EXO_DEMO_DAGDB_TENANT_ID:?set EXO_DEMO_DAGDB_TENANT_ID}"
+: "${EXO_DEMO_DAGDB_NAMESPACE:?set EXO_DEMO_DAGDB_NAMESPACE}"
+: "${EXO_DEMO_DAGDB_OWNER_DID:?set EXO_DEMO_DAGDB_OWNER_DID}"
+: "${EXO_DEMO_DAGDB_CONTROLLER_DID:?set EXO_DEMO_DAGDB_CONTROLLER_DID}"
+: "${EXO_DEMO_DAGDB_SUBMITTED_BY_DID:?set EXO_DEMO_DAGDB_SUBMITTED_BY_DID}"
+: "${EXO_DEMO_DAGDB_WRITE_SIGNATURE:?set EXO_DEMO_DAGDB_WRITE_SIGNATURE}"
 
 echo "═══════════════════════════════════════════════════════════"
 echo "  ExoChain Demo — Starting Services"

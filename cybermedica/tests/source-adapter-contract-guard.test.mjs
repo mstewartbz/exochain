@@ -26,6 +26,7 @@ const EXPECTED_MINIMUM_ADAPTER_REQUIREMENT_IDS = Object.freeze([
   'MAC-003',
   'MAC-004',
   'MAC-005',
+  'MAC-006',
 ]);
 
 test('source adapter-contract guard enforces integration-map minimum adapter contract coverage', async () => {
@@ -36,7 +37,7 @@ test('source adapter-contract guard enforces integration-map minimum adapter con
   assert.equal(report.status, 'passed');
   assert.equal(report.exitCode, 0);
   assert.deepEqual(report.minimumAdapterRequirementIds, EXPECTED_MINIMUM_ADAPTER_REQUIREMENT_IDS);
-  assert.equal(report.minimumAdapterRequirementCount, 5);
+  assert.equal(report.minimumAdapterRequirementCount, 6);
   assert.equal(report.findingsCount, 0);
   assert.equal(report.exochainSourceExcluded, true);
   assert.equal(report.metadataOnly, true);

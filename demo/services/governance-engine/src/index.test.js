@@ -30,10 +30,9 @@ vi.mock('module', async (importOriginal) => {
   return { ...orig, createRequire: () => (id) => { if (id === '@exochain/exochain-wasm') return mockWasm; throw new Error(`Unexpected require('${id}') in test`); } };
 });
 
-vi.mock('pg', () => { const q = vi.fn(); const P = vi.fn(() => ({ query: q })); return { default: { Pool: P } }; });
 
 import { server } from './index.js';
-import pg from 'pg';
+import { getDemoServiceTestStore } from '@exochain/shared';
 
 let request;
 beforeAll(async () => { await new Promise((r) => server.listen(0, r)); request = supertest(server); });
@@ -103,7 +102,8 @@ describe('POST /api/authority/build', () => {
 
 describe('POST /api/evaluate', () => {
   it('evaluates decision with actor', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query
       .mockResolvedValueOnce({ rows: [{ id_hash: 'dec-001', title: 'Test', status: 'Voting', decision_class: 'Operational' }] })
       .mockResolvedValueOnce({ rows: [{ did: 'did:exo:alice', display_name: 'Alice', roles: ['Governor'], pace_status: 'Enrolled' }] })
@@ -114,7 +114,8 @@ describe('POST /api/evaluate', () => {
   });
 
   it('returns 404 when decision not found', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [] });
     const res = await request.post('/api/evaluate').send({ decision_id: 'missing', actor_did: 'did:exo:alice' });
     expect(res.status).toBe(404);

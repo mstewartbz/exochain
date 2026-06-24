@@ -23,6 +23,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_default_routes",
     "dagdb_export_challenges",
     "dagdb_exports",
+    "dagdb_gateway_state_records",
     "dagdb_graph_canonicalization_decisions",
     "dagdb_graph_edge_tombstones",
     "dagdb_graph_edges",
@@ -40,11 +41,24 @@ const EXPECTED_TABLES: &[&str] = &[
     "dagdb_lifecycle_rollbacks",
     "dagdb_memory_edges",
     "dagdb_memory_objects",
+    "dagdb_node_commit_certificates",
+    "dagdb_node_committed",
+    "dagdb_node_consensus_meta",
+    "dagdb_node_consensus_votes",
+    "dagdb_node_dag_nodes",
+    "dagdb_node_dag_parents",
+    "dagdb_node_economy_anchors",
+    "dagdb_node_economy_meta",
+    "dagdb_node_economy_objects",
+    "dagdb_node_trust_receipts",
+    "dagdb_node_validators",
     "dagdb_receipts",
+    "dagdb_root_bundle_receipts",
     "dagdb_route_invalidation_events",
     "dagdb_route_receipts",
     "dagdb_subject_receipt_heads",
     "dagdb_validation_reports",
+    "dagdb_zerodentity_records",
 ];
 
 const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
@@ -58,6 +72,7 @@ const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
     "dagdb_default_routes",
     "dagdb_export_challenges",
     "dagdb_exports",
+    "dagdb_gateway_state_records",
     "dagdb_graph_canonicalization_decisions",
     "dagdb_graph_edge_tombstones",
     "dagdb_graph_edges",
@@ -74,11 +89,23 @@ const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
     "dagdb_lifecycle_actions",
     "dagdb_memory_edges",
     "dagdb_memory_objects",
+    "dagdb_node_commit_certificates",
+    "dagdb_node_committed",
+    "dagdb_node_consensus_meta",
+    "dagdb_node_consensus_votes",
+    "dagdb_node_dag_nodes",
+    "dagdb_node_dag_parents",
+    "dagdb_node_economy_anchors",
+    "dagdb_node_economy_meta",
+    "dagdb_node_economy_objects",
+    "dagdb_node_trust_receipts",
+    "dagdb_node_validators",
     "dagdb_receipts",
     "dagdb_route_invalidation_events",
     "dagdb_route_receipts",
     "dagdb_subject_receipt_heads",
     "dagdb_validation_reports",
+    "dagdb_zerodentity_records",
 ];
 
 const EXPECTED_INDEXES: &[(&str, &str)] = &[
@@ -89,6 +116,10 @@ const EXPECTED_INDEXES: &[(&str, &str)] = &[
     (
         "idx_dagdb_receipts_event_type",
         "dagdb_receipts USING btree (tenant_id, namespace, event_type, event_hlc_physical_ms DESC, event_hlc_logical DESC)",
+    ),
+    (
+        "idx_dagdb_root_bundle_receipts_ceremony",
+        "dagdb_root_bundle_receipts USING btree (ceremony_id, verified_at_physical_ms DESC, verified_at_logical DESC)",
     ),
     (
         "uq_dagdb_memory_active_duplicate",
@@ -310,6 +341,167 @@ fn rls_migration_source_enables_forced_tenant_policy_for_expected_tables() {
     }
     assert!(!lower.contains("'dagdb_benchmark_runs'"));
     assert!(!lower.contains("'dagdb_lifecycle_rollbacks'"));
+    assert!(!lower.contains("'dagdb_root_bundle_receipts'"));
+}
+
+#[test]
+fn root_bundle_receipts_are_global_immutable_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(lower.contains("create table if not exists dagdb_root_bundle_receipts"));
+    assert!(lower.contains("bundle_id bytea primary key not null"));
+    assert!(lower.contains("root_bundle_hash bytea not null unique"));
+    assert!(lower.contains("verification_receipt_hash bytea not null unique"));
+    assert!(lower.contains("verification_receipt_body jsonb not null"));
+    assert!(lower.contains("immutable boolean not null default true"));
+    assert!(lower.contains("check (immutable = true)"));
+    assert!(lower.contains("prevent_dagdb_root_bundle_receipt_mutation"));
+    assert!(lower.contains("root_bundle_receipts_are_immutable"));
+    assert!(!lower.contains("dagdb_root_bundle_receipts (\n    tenant_id"));
+}
+
+#[test]
+fn node_store_tables_are_dagdb_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    for table in [
+        "dagdb_node_dag_nodes",
+        "dagdb_node_dag_parents",
+        "dagdb_node_committed",
+        "dagdb_node_consensus_meta",
+        "dagdb_node_consensus_votes",
+        "dagdb_node_commit_certificates",
+        "dagdb_node_validators",
+        "dagdb_node_trust_receipts",
+        "dagdb_node_economy_objects",
+        "dagdb_node_economy_anchors",
+        "dagdb_node_economy_meta",
+    ] {
+        assert!(
+            lower.contains(&format!("create table if not exists {table}")),
+            "DAG DB schema must include node-store table {table}"
+        );
+    }
+    assert!(lower.contains("tenant_id text not null"));
+    assert!(lower.contains("namespace text not null"));
+    assert!(lower.contains("cbor_payload bytea not null"));
+    assert!(lower.contains("receipt_hash bytea not null"));
+    assert!(lower.contains("primary key (tenant_id, namespace, receipt_hash)"));
+    assert!(lower.contains("anchor_hash bytea not null"));
+    assert!(lower.contains("primary key (tenant_id, namespace, anchor_hash)"));
+    assert!(lower.contains("idx_dagdb_node_committed_height"));
+    assert!(lower.contains("idx_dagdb_node_trust_receipts_actor"));
+
+    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    for table in [
+        "dagdb_node_dag_nodes",
+        "dagdb_node_dag_parents",
+        "dagdb_node_committed",
+        "dagdb_node_consensus_meta",
+        "dagdb_node_consensus_votes",
+        "dagdb_node_commit_certificates",
+        "dagdb_node_validators",
+        "dagdb_node_trust_receipts",
+        "dagdb_node_economy_objects",
+        "dagdb_node_economy_anchors",
+        "dagdb_node_economy_meta",
+    ] {
+        assert!(
+            rls_lower.contains(&format!("'{table}'")),
+            "DAG DB tenant RLS migration must enumerate node-store table {table}"
+        );
+    }
+}
+
+#[test]
+fn zerodentity_records_are_dagdb_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(
+        lower.contains("create table if not exists dagdb_zerodentity_records"),
+        "DAG DB schema must include the 0dentity durable record table"
+    );
+    assert!(lower.contains("state_family text not null"));
+    assert!(lower.contains("subject_did text not null"));
+    assert!(lower.contains("record_key text not null"));
+    assert!(lower.contains("secondary_key text not null"));
+    assert!(lower.contains("cbor_payload bytea not null"));
+    assert!(
+        lower.contains(
+            "primary key (tenant_id, namespace, state_family, record_key, secondary_key)"
+        )
+    );
+    for family in [
+        "claim",
+        "score",
+        "previous_score",
+        "score_history",
+        "device_fingerprint",
+        "behavioral_sample",
+        "otp_challenge",
+        "otp_lockout",
+        "attestation",
+        "identity_session",
+        "session_nonce",
+        "dag_node",
+        "trust_receipt",
+    ] {
+        assert!(
+            lower.contains(&format!("'{family}'")),
+            "0dentity durable state family {family} must be schema-enforced"
+        );
+    }
+
+    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(
+        rls_lower.contains("'dagdb_zerodentity_records'"),
+        "DAG DB tenant RLS migration must enumerate 0dentity records"
+    );
+}
+
+#[test]
+fn gateway_state_records_are_dagdb_schema_contract() {
+    let lower = DAGDB_SCHEMA_SQL.to_ascii_lowercase();
+    for family in [
+        "did_document",
+        "session",
+        "user",
+        "agent",
+        "decision",
+        "delegation",
+        "audit_entry",
+        "constitution",
+        "identity_score",
+        "enrollment",
+        "livesafe_identity",
+        "scan_receipt",
+        "consent_anchor",
+        "trustee_shard",
+        "agent_role",
+        "consent_record",
+        "authority_chain",
+        "layout_template",
+        "feedback_issue",
+        "conflict_declaration",
+        "avc_registry_state",
+        "hlc_counter",
+    ] {
+        assert!(
+            lower.contains(&format!("'{family}'")),
+            "DAG DB schema must enumerate gateway state family {family}"
+        );
+    }
+    assert!(
+        lower.contains("create table if not exists dagdb_gateway_state_records"),
+        "DAG DB schema must include the gateway durable state table"
+    );
+    assert!(lower.contains("state_family text not null"));
+    assert!(lower.contains("record_key text not null"));
+    assert!(lower.contains("cbor_payload bytea not null"));
+    assert!(lower.contains("primary key (tenant_id, namespace, state_family, record_key)"));
+
+    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(
+        rls_lower.contains("'dagdb_gateway_state_records'"),
+        "DAG DB tenant RLS migration must enumerate gateway state records"
+    );
 }
 
 #[tokio::test]
@@ -734,6 +926,16 @@ fn expected_constraint_snippets() -> &'static [(&'static str, &'static str)] {
         ("dagdb_receipts", "octet_length(receipt_hash) = 32"),
         ("dagdb_receipts", "subject_kind = ANY"),
         ("dagdb_receipts", "dagdb_export_completed"),
+        ("dagdb_root_bundle_receipts", "octet_length(bundle_id) = 32"),
+        (
+            "dagdb_root_bundle_receipts",
+            "octet_length(root_bundle_hash) = 32",
+        ),
+        (
+            "dagdb_root_bundle_receipts",
+            "octet_length(verification_receipt_hash) = 32",
+        ),
+        ("dagdb_root_bundle_receipts", "immutable = true"),
         ("dagdb_memory_objects", "node_type = ANY"),
         ("dagdb_memory_objects", "source_type = ANY"),
         ("dagdb_memory_objects", "consent_purpose = ANY"),
@@ -823,6 +1025,26 @@ fn expected_columns() -> Vec<(&'static str, Vec<ColumnExpectation>)> {
                 col("receipt_body", "jsonb", false, None),
                 col("created_at_physical_ms", "bigint", false, None),
                 col("created_at_logical", "integer", false, None),
+            ],
+        ),
+        (
+            "dagdb_root_bundle_receipts",
+            vec![
+                col("bundle_id", "bytea", false, None),
+                col("root_bundle_hash", "bytea", false, None),
+                col("ceremony_id", "text", false, None),
+                col("issuer_did", "text", false, None),
+                col("issuer_public_key_hash", "bytea", false, None),
+                col("signing_set_hash", "bytea", false, None),
+                col("quorum_threshold", "integer", false, None),
+                col("verifier_version", "text", false, None),
+                col("verification_receipt_hash", "bytea", false, None),
+                col("verification_receipt_body", "jsonb", false, None),
+                col("verified_at_physical_ms", "bigint", false, None),
+                col("verified_at_logical", "integer", false, None),
+                col("created_at_physical_ms", "bigint", false, None),
+                col("created_at_logical", "integer", false, None),
+                col("immutable", "boolean", false, Some("true")),
             ],
         ),
         (

@@ -913,7 +913,7 @@ SPDX-License-Identifier: Apache-2.0
       return '<section class="wp-section" id="architecture">' +
         '<h2>2. System Architecture</h2>' +
         editableBlock('architecture-intro',
-          '<p>Command Base runs as a modularized Node.js Express server with SQLite, vanilla JS frontend, and WebSocket real-time updates. ' +
+          '<p>Command Base runs as a modularized Node.js Express server with a DAG DB persistence adapter, vanilla JS frontend, and WebSocket real-time updates. ' +
           'The backend is split into a core server (~22,000 lines) and 16 domain-specific route modules. ' +
           'AI agent work is executed via Claude CLI terminal sessions for internal tasks, and external Task Forces for independent audit/development work. ' +
           'A DGX Spark GB10 (128GB RAM, Nemotron/qwen3-coder) handles free local inference via SSH tunnel. ' +
@@ -923,7 +923,7 @@ SPDX-License-Identifier: Apache-2.0
         '<h3>Technology Stack</h3>' +
         '<div class="wp-card-grid">' +
           techCard('Backend', 'Express.js (Node.js)', 'Core server ~22K lines + 16 route modules (~11K lines)') +
-          techCard('Database', 'SQLite (better-sqlite3)', 'WAL mode, ' + formatNum(data.database.table_count) + ' tables + separate task_forces.db') +
+          techCard('Persistence', 'DAG DB Adapter', 'Governed CommandBase records; dev compatibility schema reports ' + formatNum(data.database.table_count) + ' tables') +
           techCard('Frontend', 'Vanilla JS SPA', 'Hash-based routing, ~36,000 lines, no framework') +
           techCard('Real-Time', 'WebSocket (ws)', 'Live updates, heartbeat, reconnection with ring buffer replay') +
           techCard('AI Engine', 'Claude CLI + Ollama', 'CLI for code tasks, Ollama on DGX Spark for analysis') +
@@ -951,21 +951,21 @@ SPDX-License-Identifier: Apache-2.0
           '         +-------------+--------+--------+-------------+\n' +
           '         |             |                  |             |\n' +
           '  +------v-----+ +----v------+    +------v------+ +----v---------+\n' +
-          '  | <span class="type">SQLite DB</span>   | | <span class="type">Claude CLI</span> |    | <span class="type">DGX Spark</span>    | | <span class="type">Task Forces</span>  |\n' +
-          '  | the_team.db | | Terminals |    | Nemotron/    | | External DB  |\n' +
-          '  | ' + formatNum(data.database.table_count) + ' tables  | | (Sonnet)  |    | qwen3-coder  | | task_forces  |\n' +
-          '  +------+------+ +-----------+    | SSH :11435   | | .db          |\n' +
+          '  | <span class="type">DAG DB Adapter</span>   | | <span class="type">Claude CLI</span> |    | <span class="type">DGX Spark</span>    | | <span class="type">Task Forces</span>  |\n' +
+          '  | CommandBase state | | Terminals |    | Nemotron/    | | Task-force   |\n' +
+          '  | governed records  | | (Sonnet)  |    | qwen3-coder  | | state        |\n' +
+          '  +------+------+ +-----------+    | SSH :11435   | | governed     |\n' +
           '         |                         +------+-------+ +----+---------+\n' +
           '  +------v------+                         |              |\n' +
-          '  | <span class="type">task_forces</span> |                  <span class="cmt">Free inference</span>     <span class="cmt">Auto-guardian</span>\n' +
-          '  | .db (separate)|                 <span class="cmt">for analysis</span>      <span class="cmt">self-healing</span>\n' +
+          '  | <span class="type">Task-force</span> |                  <span class="cmt">Free inference</span>     <span class="cmt">Auto-guardian</span>\n' +
+          '  | <span class="type">state</span>      |                 <span class="cmt">for analysis</span>      <span class="cmt">self-healing</span>\n' +
           '  +-------------+\n' +
         '</div>' +
 
         '<h3>Key Design Decisions</h3>' +
         '<div class="wp-card">' +
           '<ul style="list-style:none;padding:0">' +
-            '<li style="margin-bottom:8px"><strong style="color:var(--accent)">SQLite over Postgres</strong> &mdash; Single-file deployment, zero config, WAL mode for concurrent reads. Sufficient for single-operator use case. Separate task_forces.db for external durability.</li>' +
+            '<li style="margin-bottom:8px"><strong style="color:var(--accent)">DAG DB adapter over local files</strong> &mdash; Production persistence records governed CommandBase operations through DAG DB. Test and development retain a compatibility SQL adapter behind the same factory seam.</li>' +
             '<li style="margin-bottom:8px"><strong style="color:var(--accent)">Vanilla JS over React/Vue</strong> &mdash; No build step, instant loading, full control. Hash-based routing with dynamic page rendering across 16+ pages.</li>' +
             '<li style="margin-bottom:8px"><strong style="color:var(--accent)">Claude CLI over API</strong> &mdash; Each agent gets a full terminal session with tool access, file I/O, and context persistence. API keys are backup only.</li>' +
             '<li style="margin-bottom:8px"><strong style="color:var(--accent)">Modularized Routes</strong> &mdash; 16 domain-specific route files (governance, companies, projects, etc.) extracted from the monolith. Core server handles DB setup, middleware, engines, and spawning.</li>' +
@@ -1144,8 +1144,8 @@ SPDX-License-Identifier: Apache-2.0
     function renderDatabase(schema) {
       var html = '<section class="wp-section" id="database">' +
         '<h2>5. Database Schema</h2>' +
-        '<p>' + formatNum(schema.table_count) + ' tables and ' + formatNum(schema.index_count) + ' indexes in SQLite. ' +
-        'The database uses WAL mode for concurrent reads, NORMAL synchronous for performance, and 256 MB memory-mapped I/O.</p>';
+        '<p>' + formatNum(schema.table_count) + ' tables and ' + formatNum(schema.index_count) + ' indexes in the CommandBase persistence contract. ' +
+        'Production state is recorded through the DAG DB adapter; local compatibility storage is limited to development and test runs.</p>';
 
       // Category map for grouping tables
       var categories = {
@@ -1256,7 +1256,7 @@ SPDX-License-Identifier: Apache-2.0
         { name: 'Tasks', route: '#tasks', desc: 'Full task list with filtering, sorting, bulk editing, task detail view, live agent monitor tab, and activity log. Includes queue management and task routing status.' },
         { name: 'Agents (Workspace)', route: '#workspace', desc: 'Live agent monitoring — see who is working, heartbeat status, progress, output streaming. Workspace sessions with phase tracking and handoffs.' },
         { name: 'Projects', route: '#projects', desc: 'Project management with phase tracking, executive assignment, repo linking, improvement pipeline, autonomous improvement cycles, and chamber-based idea generation.' },
-        { name: 'Task Forces', route: '#task-forces', desc: 'External execution teams that work ON Command Base without being inside it. Separate database (task_forces.db), anti-bias enforcement, instant cancellation, per-device resource monitoring (Mac/Spark), auto-guardian self-healing loop. Supports Claude CLI and Ollama/Spark adapters.' },
+        { name: 'Task Forces', route: '#task-forces', desc: 'External execution teams that work ON Command Base without being inside it. Separate database (DAG DB task-force state), anti-bias enforcement, instant cancellation, per-device resource monitoring (Mac/Spark), auto-guardian self-healing loop. Supports Claude CLI and Ollama/Spark adapters.' },
         { name: 'Companies', route: '#companies', desc: 'Multi-company management. Each company has its own team, executive leadership, domains, revenue tracking, and founding standards. Companies hierarchy: Company → Projects → Tasks.' },
         { name: 'Team', route: '#team', desc: 'Full team roster with member profiles, identity files (SOUL/HEARTBEAT/AGENTS), skills, tool assignments, adapter configuration, and performance rankings.' },
         { name: 'Org Chart', route: '#org-chart', desc: 'Visual chain of command — Board → C-Suite → Specialists. Reporting lines, department groupings, and hierarchy visualization.' },
@@ -1380,8 +1380,8 @@ SPDX-License-Identifier: Apache-2.0
           '<span class="cmt">// Project directory structure</span>\n' +
           'The Team/\n' +
           '<span class="str">  CLAUDE.md</span>              <span class="cmt">// System instructions for AI agents (~660 lines)</span>\n' +
-          '<span class="str">  the_team.db</span>            <span class="cmt">// Main SQLite database (WAL mode, ~133 tables)</span>\n' +
-          '<span class="str">  task_forces.db</span>         <span class="cmt">// Separate DB for Task Forces (survives server crashes)</span>\n' +
+          '<span class="str">  DAG DB CommandBase state</span>            <span class="cmt">// Main governed CommandBase state</span>\n' +
+          '<span class="str">  DAG DB task-force state</span>         <span class="cmt">// Separate governed task-force state</span>\n' +
           '<span class="str">  Teams inbox:Result/</span>    <span class="cmt">// INPUT: Max drops task files here</span>\n' +
           '<span class="str">  Team/</span>                  <span class="cmt">// Workspace + team member profiles (.md files)</span>\n' +
           '<span class="str">  Stew\'s inbox:Owner/</span>   <span class="cmt">// OUTPUT: Board delivers finished work here</span>\n' +
@@ -1389,7 +1389,7 @@ SPDX-License-Identifier: Apache-2.0
           '  app/\n' +
           '<span class="str">    server.js</span>             <span class="cmt">// Core Express backend — ~22,500 lines</span>\n' +
           '<span class="str">    logger.js</span>             <span class="cmt">// Structured JSON logger with console override</span>\n' +
-          '<span class="str">    package.json</span>          <span class="cmt">// Dependencies: express, better-sqlite3, ws, multer</span>\n' +
+          '<span class="str">    package.json</span>          <span class="cmt">// Dependencies: express, DAG DB adapter, ws, multer</span>\n' +
           '\n' +
           '    routes/                <span class="cmt">// 16 modularized route files (~11,000 lines total)</span>\n' +
           '<span class="str">      governance.js</span>       <span class="cmt">// 44 routes — ExoChain, approvals, escalations</span>\n' +
@@ -1410,7 +1410,7 @@ SPDX-License-Identifier: Apache-2.0
           '<span class="str">      ideas.js</span>            <span class="cmt">// 7 routes — idea board</span>\n' +
           '\n' +
           '    lib/\n' +
-          '<span class="str">      task-force-db.js</span>    <span class="cmt">// Separate SQLite DB for Task Forces</span>\n' +
+          '<span class="str">      task-force-db.js</span>    <span class="cmt">// Separate DAG DB Adapter for Task Forces</span>\n' +
           '<span class="str">      task-force-engine.js</span> <span class="cmt">// Task Force engine — spawn, kill, guardian, anti-bias</span>\n' +
           '<span class="str">      db.js</span>               <span class="cmt">// Database pool utilities</span>\n' +
           '<span class="str">      broadcast.js</span>        <span class="cmt">// WebSocket broadcast helpers</span>\n' +
@@ -1454,7 +1454,7 @@ SPDX-License-Identifier: Apache-2.0
         '<h3>Task Force Engine (lib/task-force-engine.js)</h3>' +
         '<div class="wp-card">' +
           '<ul style="list-style:none;padding:0;color:var(--text-2)">' +
-            '<li style="margin-bottom:8px"><strong style="color:var(--text)">Separate Database:</strong> task_forces.db — survives server crashes. Tables: task_forces, task_force_members, task_force_processes, task_force_logs, resource_profiles, bias_ledger</li>' +
+            '<li style="margin-bottom:8px"><strong style="color:var(--text)">Separate Database:</strong> DAG DB task-force state — survives server crashes. Tables: task_forces, task_force_members, task_force_processes, task_force_logs, resource_profiles, bias_ledger</li>' +
             '<li style="margin-bottom:8px"><strong style="color:var(--text)">Adapters:</strong> claude_cli (spawns CLI process with --dangerously-skip-permissions), ollama (HTTP to Spark via SSH tunnel)</li>' +
             '<li style="margin-bottom:8px"><strong style="color:var(--text)">Anti-Bias:</strong> Bias ledger tracks who built/designed/digested what. Builders cannot review their own work. Architectural enforcement, not policy.</li>' +
             '<li style="margin-bottom:8px"><strong style="color:var(--text)">Guardian:</strong> Auto-healing loop every 30s. Detects zombie PIDs, stale Ollama requests (&gt;10min), and auto-respawns failed agents up to 5 attempts.</li>' +
@@ -1611,7 +1611,7 @@ SPDX-License-Identifier: Apache-2.0
         '<div class="wp-card">' +
           '<p style="color:var(--text-2);margin-bottom:12px">Task Forces are external execution teams that operate independently from Command Base:</p>' +
           '<ul style="padding-left:20px;color:var(--text-2)">' +
-            '<li><strong>Own database</strong> — task_forces.db, separate from the_team.db. If server crashes, Task Force state persists.</li>' +
+            '<li><strong>Own DAG DB state</strong> — DAG DB task-force state, separate from DAG DB CommandBase state. If server crashes, Task Force state persists.</li>' +
             '<li><strong>Two adapters</strong> — <code>claude_cli</code> (spawns Claude terminal, can read/edit files) and <code>ollama</code> (HTTP to Spark, analysis only)</li>' +
             '<li><strong>Anti-bias</strong> — Bias ledger tracks who built/designed/digested what. Reviewers can never review their own work. Enforced architecturally.</li>' +
             '<li><strong>Auto-guardian</strong> — Every 30s: checks for zombie PIDs (signal 0), stale Ollama requests (&gt;10min), auto-respawns failed agents up to 5 attempts, re-activates failed forces.</li>' +

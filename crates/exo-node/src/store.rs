@@ -20,7 +20,7 @@
 //! This implementation mirrors `MemoryStore` from `exo-dag` but uses durable
 //! storage so state survives restarts.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, future::Future, path::Path};
 
 use exo_core::types::{Did, Hash256, Signature, Timestamp, TrustReceipt};
 use exo_dag::{
@@ -30,6 +30,7 @@ use exo_dag::{
 };
 use exo_economy::{EconomyObjectKind, EconomyRecordAnchor};
 use serde::{Serialize, de::DeserializeOwned};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 /// Map a SQLite / CBOR error into `DagError::StoreError`.
 fn store_err(e: impl std::fmt::Display) -> DagError {
@@ -128,13 +129,964 @@ fn validate_commit_certificate(cert: &CommitCertificate) -> DagResult<()> {
     Ok(())
 }
 
-/// SQLite-backed DAG store.
+/// Compatibility handle for node DAG persistence.
+///
+/// Test/dev callers may still construct the legacy SQLite backend directly via
+/// [`SqliteDagStore::open`]. Production startup uses [`DagDbNodeStore::open`],
+/// which returns this same handle backed by the tenant-scoped DAG DB tables.
 pub struct SqliteDagStore {
-    conn: Connection,
+    backend: NodeStoreBackend,
+}
+
+enum NodeStoreBackend {
+    #[allow(dead_code)]
+    LegacySqlite(Connection),
+    DagDb(PostgresDagNodeStore),
+}
+
+#[derive(Clone)]
+struct PostgresDagNodeStore {
+    pool: PgPool,
+    tenant_id: String,
+    namespace: String,
+}
+
+/// Production DAG DB-backed node store constructor.
+pub struct DagDbNodeStore;
+
+impl DagDbNodeStore {
+    /// Open the tenant-scoped DAG DB node store from an already-migrated pool.
+    pub async fn open(
+        pool: PgPool,
+        tenant_id: String,
+        namespace: String,
+    ) -> anyhow::Result<SqliteDagStore> {
+        validate_scope_component("tenant_id", &tenant_id)?;
+        validate_scope_component("namespace", &namespace)?;
+        let store = PostgresDagNodeStore {
+            pool,
+            tenant_id,
+            namespace,
+        };
+        store.verify_schema().await?;
+        Ok(SqliteDagStore {
+            backend: NodeStoreBackend::DagDb(store),
+        })
+    }
+}
+
+fn validate_scope_component(field: &str, value: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("DAG DB node store {field} must not be empty");
+    }
+    Ok(())
+}
+
+fn block_on_dagdb<T, F>(future: F) -> DagResult<T>
+where
+    T: Send + 'static,
+    F: Future<Output = DagResult<T>> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| store_err(format!("DAG DB node store runtime: {error}")))?;
+            runtime.block_on(future)
+        })
+        .join()
+        .map_err(|_| store_err("DAG DB node store worker panicked"))?,
+        Err(_) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|error| store_err(format!("DAG DB node store runtime: {error}")))?;
+            runtime.block_on(future)
+        }
+    }
+}
+
+impl SqliteDagStore {
+    fn dagdb(&self) -> Option<&PostgresDagNodeStore> {
+        match &self.backend {
+            NodeStoreBackend::LegacySqlite(_) => None,
+            NodeStoreBackend::DagDb(store) => Some(store),
+        }
+    }
+
+    fn sqlite_conn(&self) -> DagResult<&Connection> {
+        match &self.backend {
+            NodeStoreBackend::LegacySqlite(conn) => Ok(conn),
+            NodeStoreBackend::DagDb(_) => Err(store_err(
+                "legacy SQLite connection is unavailable for DAG DB-backed node store",
+            )),
+        }
+    }
+
+    fn sqlite_conn_mut(&mut self) -> DagResult<&mut Connection> {
+        match &mut self.backend {
+            NodeStoreBackend::LegacySqlite(conn) => Ok(conn),
+            NodeStoreBackend::DagDb(_) => Err(store_err(
+                "legacy SQLite connection is unavailable for DAG DB-backed node store",
+            )),
+        }
+    }
+}
+
+impl PostgresDagNodeStore {
+    async fn verify_schema(&self) -> anyhow::Result<()> {
+        let mut tx =
+            self.pool.begin().await.map_err(|error| {
+                anyhow::anyhow!("DAG DB node store schema check failed: {error}")
+            })?;
+        self.bind_tenant(&mut tx)
+            .await
+            .map_err(|error| anyhow::anyhow!("DAG DB node store tenant binding failed: {error}"))?;
+        let present: bool =
+            sqlx::query_scalar("SELECT to_regclass('dagdb_node_dag_nodes') IS NOT NULL")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("DAG DB node store schema lookup failed: {error}")
+                })?;
+        tx.commit().await.map_err(|error| {
+            anyhow::anyhow!("DAG DB node store schema check commit failed: {error}")
+        })?;
+        if !present {
+            anyhow::bail!("DAG DB node store schema is missing dagdb_node_dag_nodes");
+        }
+        Ok(())
+    }
+
+    async fn bind_tenant(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('exo.tenant_id', $1, true)")
+            .bind(&self.tenant_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    async fn begin(&self) -> DagResult<Transaction<'_, Postgres>> {
+        let mut tx = self.pool.begin().await.map_err(store_err)?;
+        self.bind_tenant(&mut tx).await.map_err(store_err)?;
+        Ok(tx)
+    }
+
+    async fn insert_node_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        node: &DagNode,
+    ) -> DagResult<()> {
+        let cbor = SqliteDagStore::encode_node(node)?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_dag_nodes (tenant_id, namespace, hash, cbor_payload) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(node.hash.as_bytes().to_vec())
+        .bind(cbor)
+        .execute(&mut **tx)
+        .await
+        .map_err(store_err)?;
+
+        for parent in &node.parents {
+            sqlx::query(
+                "INSERT INTO dagdb_node_dag_parents \
+                 (tenant_id, namespace, child_hash, parent_hash) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            )
+            .bind(&self.tenant_id)
+            .bind(&self.namespace)
+            .bind(node.hash.as_bytes().to_vec())
+            .bind(parent.as_bytes().to_vec())
+            .execute(&mut **tx)
+            .await
+            .map_err(store_err)?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_node_exists_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        hash: &Hash256,
+    ) -> DagResult<()> {
+        let present: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM dagdb_node_dag_nodes
+                 WHERE tenant_id = $1 AND namespace = $2 AND hash = $3
+             )",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(hash.as_bytes().to_vec())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(store_err)?;
+        if present {
+            Ok(())
+        } else {
+            Err(DagError::NodeNotFound(*hash))
+        }
+    }
+
+    async fn insert_committed_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        hash: &Hash256,
+        height: u64,
+    ) -> DagResult<()> {
+        let height = sqlite_u64_to_i64(height, "dagdb_node_committed.height")?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_committed (tenant_id, namespace, hash, height) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (tenant_id, namespace, hash) DO UPDATE SET height = EXCLUDED.height",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(hash.as_bytes().to_vec())
+        .bind(height)
+        .execute(&mut **tx)
+        .await
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn insert_certificate_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        cert: &CommitCertificate,
+    ) -> DagResult<()> {
+        let round = sqlite_u64_to_i64(cert.round, "dagdb_node_commit_certificates.round")?;
+        validate_commit_certificate(cert)?;
+        let cbor_buf = encode_cbor(cert, "dagdb_node_commit_certificates.cbor_data")?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_commit_certificates \
+             (tenant_id, namespace, node_hash, round, cbor_data) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(cert.node_hash.as_bytes().to_vec())
+        .bind(round)
+        .bind(cbor_buf)
+        .execute(&mut **tx)
+        .await
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn insert_receipt_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        receipt: &TrustReceipt,
+    ) -> DagResult<()> {
+        validate_signature(&receipt.signature, "dagdb_node_trust_receipts.signature")?;
+        let timestamp_ms = sqlite_u64_to_i64(
+            receipt.timestamp.physical_ms,
+            "dagdb_node_trust_receipts.timestamp_ms",
+        )?;
+        let buf = encode_cbor(receipt, "dagdb_node_trust_receipts.cbor_data")?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_trust_receipts \
+             (tenant_id, namespace, receipt_hash, actor_did, action_type, outcome, timestamp_ms, cbor_data) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(receipt.receipt_hash.as_bytes().to_vec())
+        .bind(receipt.actor_did.to_string())
+        .bind(receipt.action_type.as_str())
+        .bind(receipt.outcome.to_string())
+        .bind(timestamp_ms)
+        .bind(buf)
+        .execute(&mut **tx)
+        .await
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn get_sync_async(&self, hash: &Hash256) -> DagResult<Option<DagNode>> {
+        let mut tx = self.begin().await?;
+        let result: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_payload FROM dagdb_node_dag_nodes \
+             WHERE tenant_id = $1 AND namespace = $2 AND hash = $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(hash.as_bytes().to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        result
+            .map(|bytes| SqliteDagStore::decode_node(&bytes))
+            .transpose()
+    }
+
+    async fn put_many_sync_async(&self, nodes: Vec<DagNode>) -> DagResult<()> {
+        let mut tx = self.begin().await?;
+        for node in &nodes {
+            self.insert_node_tx(&mut tx, node).await?;
+        }
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn contains_sync_async(&self, hash: &Hash256) -> DagResult<bool> {
+        let mut tx = self.begin().await?;
+        let present: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM dagdb_node_dag_nodes
+                 WHERE tenant_id = $1 AND namespace = $2 AND hash = $3
+             )",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(hash.as_bytes().to_vec())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(present)
+    }
+
+    async fn tips_sync_async(&self) -> DagResult<Vec<Hash256>> {
+        let mut tx = self.begin().await?;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT node.hash FROM dagdb_node_dag_nodes node
+             WHERE node.tenant_id = $1
+               AND node.namespace = $2
+               AND NOT EXISTS (
+                   SELECT 1 FROM dagdb_node_dag_parents parent
+                   WHERE parent.tenant_id = node.tenant_id
+                     AND parent.namespace = node.namespace
+                     AND parent.parent_hash = node.hash
+               )
+             ORDER BY node.hash ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|bytes| decode_hash_bytes(&bytes, "dagdb_node_dag_nodes.hash"))
+            .collect()
+    }
+
+    async fn committed_height_sync_async(&self) -> DagResult<u64> {
+        let mut tx = self.begin().await?;
+        let height: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(height), 0) FROM dagdb_node_committed \
+             WHERE tenant_id = $1 AND namespace = $2",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        sqlite_i64_to_u64(height, "dagdb_node_committed.height")
+    }
+
+    async fn mark_committed_sync_async(&self, hash: Hash256, height: u64) -> DagResult<()> {
+        let mut tx = self.begin().await?;
+        self.ensure_node_exists_tx(&mut tx, &hash).await?;
+        self.insert_committed_tx(&mut tx, &hash, height).await?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn committed_nodes_in_range_async(
+        &self,
+        from_height: u64,
+        to_height: u64,
+    ) -> DagResult<Vec<(Hash256, u64)>> {
+        let from_height = sqlite_u64_to_i64(from_height, "dagdb_node_committed.from_height")?;
+        let to_height = sqlite_u64_to_i64(to_height, "dagdb_node_committed.to_height")?;
+        let mut tx = self.begin().await?;
+        let rows = sqlx::query(
+            "SELECT hash, height FROM dagdb_node_committed
+             WHERE tenant_id = $1 AND namespace = $2 AND height >= $3 AND height <= $4
+             ORDER BY height ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(from_height)
+        .bind(to_height)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|row| {
+                let hash: Vec<u8> = row.get("hash");
+                let height: i64 = row.get("height");
+                Ok((
+                    decode_hash_bytes(&hash, "dagdb_node_committed.hash")?,
+                    sqlite_i64_to_u64(height, "dagdb_node_committed.height")?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn save_consensus_round_async(&self, round: u64) -> DagResult<()> {
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_consensus_meta (tenant_id, namespace, key, value) \
+             VALUES ($1, $2, 'round', $3) \
+             ON CONFLICT (tenant_id, namespace, key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(round.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn load_consensus_round_async(&self) -> DagResult<u64> {
+        let mut tx = self.begin().await?;
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM dagdb_node_consensus_meta \
+             WHERE tenant_id = $1 AND namespace = $2 AND key = 'round'",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        value.map_or(Ok(0), |text| text.parse::<u64>().map_err(store_err))
+    }
+
+    async fn save_vote_async(&self, vote: Vote) -> DagResult<()> {
+        let round = sqlite_u64_to_i64(vote.round, "dagdb_node_consensus_votes.round")?;
+        validate_vote(&vote, "dagdb_node_consensus_votes")?;
+        let signature =
+            validate_ed25519_signature(&vote.signature, "dagdb_node_consensus_votes.signature")?;
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_consensus_votes \
+             (tenant_id, namespace, round, node_hash, voter_did, signature) \
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(round)
+        .bind(vote.node_hash.as_bytes().to_vec())
+        .bind(vote.voter.to_string())
+        .bind(signature.to_vec())
+        .execute(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn load_votes_for_round_async(&self, round: u64) -> DagResult<Vec<Vote>> {
+        let round_i64 = sqlite_u64_to_i64(round, "dagdb_node_consensus_votes.round")?;
+        let mut tx = self.begin().await?;
+        let rows = sqlx::query(
+            "SELECT node_hash, voter_did, signature FROM dagdb_node_consensus_votes \
+             WHERE tenant_id = $1 AND namespace = $2 AND round = $3 \
+             ORDER BY node_hash ASC, voter_did ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(round_i64)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|row| {
+                let hash_bytes: Vec<u8> = row.get("node_hash");
+                let voter_str: String = row.get("voter_did");
+                let sig_bytes: Vec<u8> = row.get("signature");
+                Ok(Vote {
+                    voter: decode_did(&voter_str, "dagdb_node_consensus_votes.voter_did")?,
+                    round,
+                    node_hash: decode_hash_bytes(
+                        &hash_bytes,
+                        "dagdb_node_consensus_votes.node_hash",
+                    )?,
+                    signature: decode_signature_bytes(
+                        &sig_bytes,
+                        "dagdb_node_consensus_votes.signature",
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    async fn save_certificate_async(&self, cert: CommitCertificate) -> DagResult<()> {
+        let mut tx = self.begin().await?;
+        self.insert_certificate_tx(&mut tx, &cert).await?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn load_certificates_async(&self) -> DagResult<Vec<CommitCertificate>> {
+        let mut tx = self.begin().await?;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_commit_certificates \
+             WHERE tenant_id = $1 AND namespace = $2 ORDER BY round ASC, node_hash ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|bytes| {
+                let cert: CommitCertificate = ciborium::from_reader(bytes.as_slice())
+                    .map_err(|e| store_err(format!("CBOR decode certificate: {e}")))?;
+                validate_commit_certificate(&cert)?;
+                Ok(cert)
+            })
+            .collect()
+    }
+
+    async fn load_certificate_for_hash_async(
+        &self,
+        hash: Hash256,
+    ) -> DagResult<Option<CommitCertificate>> {
+        let mut tx = self.begin().await?;
+        let result: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_commit_certificates \
+             WHERE tenant_id = $1 AND namespace = $2 AND node_hash = $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(hash.as_bytes().to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        result
+            .map(|bytes| {
+                let certificate: CommitCertificate = ciborium::from_reader(bytes.as_slice())
+                    .map_err(|e| store_err(format!("CBOR decode certificate: {e}")))?;
+                if certificate.node_hash != hash {
+                    return Err(store_err(
+                        "dagdb_node_commit_certificates.node_hash does not match CBOR certificate node_hash",
+                    ));
+                }
+                validate_commit_certificate(&certificate)?;
+                Ok(certificate)
+            })
+            .transpose()
+    }
+
+    async fn save_validator_set_async(&self, validators: BTreeSet<Did>) -> DagResult<()> {
+        let mut tx = self.begin().await?;
+        sqlx::query("DELETE FROM dagdb_node_validators WHERE tenant_id = $1 AND namespace = $2")
+            .bind(&self.tenant_id)
+            .bind(&self.namespace)
+            .execute(&mut *tx)
+            .await
+            .map_err(store_err)?;
+        for did in validators {
+            sqlx::query(
+                "INSERT INTO dagdb_node_validators (tenant_id, namespace, did) VALUES ($1, $2, $3)",
+            )
+            .bind(&self.tenant_id)
+            .bind(&self.namespace)
+            .bind(did.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(store_err)?;
+        }
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn load_validator_set_async(&self) -> DagResult<BTreeSet<Did>> {
+        let mut tx = self.begin().await?;
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT did FROM dagdb_node_validators \
+             WHERE tenant_id = $1 AND namespace = $2 ORDER BY did ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|did| decode_did(&did, "dagdb_node_validators.did"))
+            .collect()
+    }
+
+    async fn mark_committed_with_receipt_sync_async(
+        &self,
+        hash: Hash256,
+        height: u64,
+        receipt: TrustReceipt,
+    ) -> DagResult<()> {
+        if receipt.action_hash != hash {
+            return Err(store_err(
+                "dagdb_node_trust_receipts.action_hash must match committed node hash",
+            ));
+        }
+        let mut tx = self.begin().await?;
+        self.ensure_node_exists_tx(&mut tx, &hash).await?;
+        self.insert_committed_tx(&mut tx, &hash, height).await?;
+        self.insert_receipt_tx(&mut tx, &receipt).await?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn persist_commit_certificate_with_receipt_sync_async(
+        &self,
+        hash: Hash256,
+        height: u64,
+        cert: CommitCertificate,
+        receipt: TrustReceipt,
+    ) -> DagResult<()> {
+        if cert.node_hash != hash {
+            return Err(store_err(
+                "dagdb_node_commit_certificates.node_hash must match committed node hash",
+            ));
+        }
+        if receipt.action_hash != hash {
+            return Err(store_err(
+                "dagdb_node_trust_receipts.action_hash must match committed node hash",
+            ));
+        }
+        let mut tx = self.begin().await?;
+        self.ensure_node_exists_tx(&mut tx, &hash).await?;
+        self.insert_committed_tx(&mut tx, &hash, height).await?;
+        self.insert_certificate_tx(&mut tx, &cert).await?;
+        self.insert_receipt_tx(&mut tx, &receipt).await?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn load_receipt_async(&self, receipt_hash: Hash256) -> DagResult<Option<TrustReceipt>> {
+        let mut tx = self.begin().await?;
+        let result: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_trust_receipts \
+             WHERE tenant_id = $1 AND namespace = $2 AND receipt_hash = $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(receipt_hash.as_bytes().to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        result
+            .map(|data| {
+                ciborium::from_reader(&data[..])
+                    .map_err(|e| store_err(format!("CBOR decode receipt: {e}")))
+            })
+            .transpose()
+    }
+
+    async fn load_receipts_by_actor_async(
+        &self,
+        actor_did: String,
+        limit: u32,
+    ) -> DagResult<Vec<TrustReceipt>> {
+        let mut tx = self.begin().await?;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_trust_receipts \
+             WHERE tenant_id = $1 AND namespace = $2 AND actor_did = $3 \
+             ORDER BY timestamp_ms DESC, receipt_hash ASC LIMIT $4",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(actor_did)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|data| {
+                ciborium::from_reader(&data[..])
+                    .map_err(|e| store_err(format!("CBOR decode receipt: {e}")))
+            })
+            .collect()
+    }
+
+    async fn load_recent_receipts_async(&self, limit: u32) -> DagResult<Vec<TrustReceipt>> {
+        let mut tx = self.begin().await?;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_trust_receipts \
+             WHERE tenant_id = $1 AND namespace = $2 \
+             ORDER BY timestamp_ms DESC, receipt_hash ASC LIMIT $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|data| {
+                ciborium::from_reader(&data[..])
+                    .map_err(|e| store_err(format!("CBOR decode receipt: {e}")))
+            })
+            .collect()
+    }
+
+    async fn children_async(&self, parent_hash: Hash256) -> DagResult<Vec<Hash256>> {
+        let mut tx = self.begin().await?;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT child_hash FROM dagdb_node_dag_parents \
+             WHERE tenant_id = $1 AND namespace = $2 AND parent_hash = $3 \
+             ORDER BY child_hash ASC",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(parent_hash.as_bytes().to_vec())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        rows.into_iter()
+            .map(|bytes| decode_hash_bytes(&bytes, "dagdb_node_dag_parents.child_hash"))
+            .collect()
+    }
+
+    async fn committed_height_for_async(&self, hash: Hash256) -> DagResult<Option<u64>> {
+        let mut tx = self.begin().await?;
+        let height: Option<i64> = sqlx::query_scalar(
+            "SELECT height FROM dagdb_node_committed \
+             WHERE tenant_id = $1 AND namespace = $2 AND hash = $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(hash.as_bytes().to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        height
+            .map(|value| sqlite_i64_to_u64(value, "dagdb_node_committed.height"))
+            .transpose()
+    }
+
+    async fn put_committed_many_with_certificates_sync_async(
+        &self,
+        nodes: Vec<(DagNode, u64)>,
+        certificates: Vec<CommitCertificate>,
+    ) -> DagResult<()> {
+        if nodes.len() != certificates.len() {
+            return Err(store_err(format!(
+                "committed batch must include one certificate per node: got {} certificates for {} nodes",
+                certificates.len(),
+                nodes.len()
+            )));
+        }
+        let mut tx = self.begin().await?;
+        for ((node, height), certificate) in nodes.iter().zip(certificates.iter()) {
+            if certificate.node_hash != node.hash {
+                return Err(store_err(format!(
+                    "commit certificate node_hash {} does not match DAG node hash {}",
+                    certificate.node_hash, node.hash
+                )));
+            }
+            self.insert_node_tx(&mut tx, node).await?;
+            self.insert_committed_tx(&mut tx, &node.hash, *height)
+                .await?;
+            self.insert_certificate_tx(&mut tx, certificate).await?;
+        }
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn latest_economy_anchor_hash_sync_async(&self) -> DagResult<Hash256> {
+        let mut tx = self.begin().await?;
+        let value: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT value FROM dagdb_node_economy_meta \
+             WHERE tenant_id = $1 AND namespace = $2 AND key = 'latest_anchor_hash'",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        match value {
+            Some(bytes) => decode_hash_bytes(&bytes, "dagdb_node_economy_meta.latest_anchor_hash"),
+            None => Ok(Hash256::ZERO),
+        }
+    }
+
+    async fn latest_economy_anchor_hash_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> DagResult<Hash256> {
+        let value: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT value FROM dagdb_node_economy_meta \
+             WHERE tenant_id = $1 AND namespace = $2 AND key = 'latest_anchor_hash'",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(store_err)?;
+        match value {
+            Some(bytes) => decode_hash_bytes(&bytes, "dagdb_node_economy_meta.latest_anchor_hash"),
+            None => Ok(Hash256::ZERO),
+        }
+    }
+
+    async fn put_economy_object_sync_async(
+        &self,
+        object_kind: EconomyObjectKind,
+        object_id: Hash256,
+        content_hash: Hash256,
+        created_at: Timestamp,
+        object_cbor: Vec<u8>,
+    ) -> DagResult<EconomyRecordAnchor> {
+        if object_id == Hash256::ZERO {
+            return Err(store_err("economy object_id must not be Hash256::ZERO"));
+        }
+        if content_hash == Hash256::ZERO {
+            return Err(store_err("economy content_hash must not be Hash256::ZERO"));
+        }
+        if created_at == Timestamp::ZERO {
+            return Err(store_err("economy created_at must not be Timestamp::ZERO"));
+        }
+
+        let mut tx = self.begin().await?;
+        let previous_anchor_hash = self.latest_economy_anchor_hash_tx(&mut tx).await?;
+        let anchor = EconomyRecordAnchor {
+            anchor_hash: Hash256::ZERO,
+            previous_anchor_hash,
+            object_kind,
+            object_id,
+            object_hash: content_hash,
+            created_at,
+        }
+        .anchor()
+        .map_err(store_err)?;
+        let anchor_cbor = encode_cbor(&anchor, "dagdb_node_economy_anchors.cbor_data")?;
+        let created_physical_ms = sqlite_u64_to_i64(
+            created_at.physical_ms,
+            "dagdb_node_economy.created_physical_ms",
+        )?;
+        let created_logical = sqlite_u64_to_i64(
+            u64::from(created_at.logical),
+            "dagdb_node_economy.created_logical",
+        )?;
+
+        sqlx::query(
+            "INSERT INTO dagdb_node_economy_objects (
+                tenant_id, namespace, object_kind, object_id, content_hash,
+                created_physical_ms, created_logical, cbor_data
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(object_kind.label())
+        .bind(object_id.as_bytes().to_vec())
+        .bind(content_hash.as_bytes().to_vec())
+        .bind(created_physical_ms)
+        .bind(created_logical)
+        .bind(object_cbor)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| store_err(format!("insert DAG DB economy object: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO dagdb_node_economy_anchors (
+                tenant_id, namespace, anchor_hash, previous_anchor_hash, object_kind,
+                object_id, object_hash, created_physical_ms, created_logical, cbor_data
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(anchor.anchor_hash.as_bytes().to_vec())
+        .bind(anchor.previous_anchor_hash.as_bytes().to_vec())
+        .bind(object_kind.label())
+        .bind(object_id.as_bytes().to_vec())
+        .bind(content_hash.as_bytes().to_vec())
+        .bind(created_physical_ms)
+        .bind(created_logical)
+        .bind(anchor_cbor)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| store_err(format!("insert DAG DB economy anchor: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO dagdb_node_economy_meta (tenant_id, namespace, key, value) \
+             VALUES ($1, $2, 'latest_anchor_hash', $3) \
+             ON CONFLICT (tenant_id, namespace, key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(anchor.anchor_hash.as_bytes().to_vec())
+        .execute(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(anchor)
+    }
+
+    async fn get_economy_object_sync_async<T>(
+        &self,
+        object_kind: EconomyObjectKind,
+        object_id: Hash256,
+    ) -> DagResult<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let mut tx = self.begin().await?;
+        let result: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_economy_objects \
+             WHERE tenant_id = $1 AND namespace = $2 AND object_kind = $3 AND object_id = $4",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(object_kind.label())
+        .bind(object_id.as_bytes().to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        result
+            .map(|bytes| decode_cbor(&bytes, "dagdb_node_economy_objects.cbor_data"))
+            .transpose()
+    }
+
+    async fn get_economy_anchor_sync_async(
+        &self,
+        anchor_hash: Hash256,
+    ) -> DagResult<Option<EconomyRecordAnchor>> {
+        let mut tx = self.begin().await?;
+        let result: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT cbor_data FROM dagdb_node_economy_anchors \
+             WHERE tenant_id = $1 AND namespace = $2 AND anchor_hash = $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(anchor_hash.as_bytes().to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        result
+            .map(|bytes| decode_cbor(&bytes, "dagdb_node_economy_anchors.cbor_data"))
+            .transpose()
+    }
 }
 
 impl SqliteDagStore {
     /// Open (or create) the SQLite database in the given data directory.
+    #[allow(dead_code)]
     pub fn open(data_dir: &Path) -> anyhow::Result<Self> {
         let db_path = data_dir.join("dag.db");
         let conn = Connection::open(&db_path)?;
@@ -232,11 +1184,17 @@ impl SqliteDagStore {
             );",
         )?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            backend: NodeStoreBackend::LegacySqlite(conn),
+        })
     }
 
     /// Convenience accessor for the current committed height.
     pub fn committed_height_value(&self) -> DagResult<u64> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.committed_height_sync_async().await });
+        }
         self.committed_height_sync()
     }
 
@@ -261,10 +1219,18 @@ impl SqliteDagStore {
         from_height: u64,
         to_height: u64,
     ) -> DagResult<Vec<(Hash256, u64)>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move {
+                store
+                    .committed_nodes_in_range_async(from_height, to_height)
+                    .await
+            });
+        }
         let from_height = sqlite_u64_to_i64(from_height, "committed.from_height")?;
         let to_height = sqlite_u64_to_i64(to_height, "committed.to_height")?;
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached(
                 "SELECT hash, height FROM committed
                  WHERE height >= ?1 AND height <= ?2
@@ -297,7 +1263,11 @@ impl SqliteDagStore {
 
     /// Save the current consensus round number.
     pub fn save_consensus_round(&mut self, round: u64) -> DagResult<()> {
-        self.conn
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.save_consensus_round_async(round).await });
+        }
+        self.sqlite_conn_mut()?
             .execute(
                 "INSERT OR REPLACE INTO consensus_meta (key, value) VALUES ('round', ?1)",
                 params![round.to_string()],
@@ -308,7 +1278,11 @@ impl SqliteDagStore {
 
     /// Load the persisted consensus round number (0 if none).
     pub fn load_consensus_round(&self) -> DagResult<u64> {
-        let result: Result<String, _> = self.conn.query_row(
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.load_consensus_round_async().await });
+        }
+        let result: Result<String, _> = self.sqlite_conn()?.query_row(
             "SELECT value FROM consensus_meta WHERE key = 'round'",
             [],
             |row| row.get(0),
@@ -322,11 +1296,16 @@ impl SqliteDagStore {
 
     /// Persist a consensus vote.
     pub fn save_vote(&mut self, vote: &Vote) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let vote = vote.clone();
+            return block_on_dagdb(async move { store.save_vote_async(vote).await });
+        }
         let round = sqlite_u64_to_i64(vote.round, "consensus_votes.round")?;
         validate_vote(vote, "consensus_votes")?;
         let signature = validate_ed25519_signature(&vote.signature, "consensus_votes.signature")?;
 
-        self.conn
+        self.sqlite_conn_mut()?
             .execute(
                 "INSERT OR IGNORE INTO consensus_votes (round, node_hash, voter_did, signature) VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -342,9 +1321,13 @@ impl SqliteDagStore {
 
     /// Load all votes for a given round.
     pub fn load_votes_for_round(&self, round: u64) -> DagResult<Vec<Vote>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.load_votes_for_round_async(round).await });
+        }
         let round_i64 = sqlite_u64_to_i64(round, "consensus_votes.round")?;
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached(
                 "SELECT node_hash, voter_did, signature FROM consensus_votes WHERE round = ?1",
             )
@@ -375,6 +1358,11 @@ impl SqliteDagStore {
     /// Persist a commit certificate.
     #[allow(dead_code)]
     pub fn save_certificate(&mut self, cert: &CommitCertificate) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let cert = cert.clone();
+            return block_on_dagdb(async move { store.save_certificate_async(cert).await });
+        }
         let round = sqlite_u64_to_i64(cert.round, "commit_certificates.round")?;
         validate_commit_certificate(cert)?;
 
@@ -382,7 +1370,7 @@ impl SqliteDagStore {
         ciborium::into_writer(cert, &mut cbor_buf)
             .map_err(|e| store_err(format!("CBOR encode certificate: {e}")))?;
 
-        self.conn
+        self.sqlite_conn_mut()?
             .execute(
                 "INSERT OR IGNORE INTO commit_certificates (node_hash, round, cbor_data) VALUES (?1, ?2, ?3)",
                 params![
@@ -458,8 +1446,12 @@ impl SqliteDagStore {
 
     /// Load all persisted commit certificates.
     pub fn load_certificates(&self) -> DagResult<Vec<CommitCertificate>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.load_certificates_async().await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT cbor_data FROM commit_certificates ORDER BY round ASC")
             .map_err(store_err)?;
 
@@ -486,8 +1478,15 @@ impl SqliteDagStore {
         &self,
         hash: &Hash256,
     ) -> DagResult<Option<CommitCertificate>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            return block_on_dagdb(
+                async move { store.load_certificate_for_hash_async(hash).await },
+            );
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT cbor_data FROM commit_certificates WHERE node_hash = ?1")
             .map_err(store_err)?;
 
@@ -522,7 +1521,12 @@ impl SqliteDagStore {
     /// directly.
     #[allow(dead_code)]
     pub fn save_validator_set(&mut self, validators: &BTreeSet<Did>) -> DagResult<()> {
-        let tx = self.conn.transaction().map_err(store_err)?;
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let validators = validators.clone();
+            return block_on_dagdb(async move { store.save_validator_set_async(validators).await });
+        }
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
         tx.execute("DELETE FROM validators", [])
             .map_err(store_err)?;
         for did in validators {
@@ -538,8 +1542,12 @@ impl SqliteDagStore {
 
     /// Load the persisted validator set (empty if none saved).
     pub fn load_validator_set(&self) -> DagResult<BTreeSet<Did>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.load_validator_set_async().await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT did FROM validators ORDER BY did ASC")
             .map_err(store_err)?;
 
@@ -562,6 +1570,16 @@ impl SqliteDagStore {
     /// Save a trust receipt to the database.
     #[cfg(test)]
     pub fn save_receipt(&mut self, receipt: &TrustReceipt) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let receipt = receipt.clone();
+            return block_on_dagdb(async move {
+                let mut tx = store.begin().await?;
+                store.insert_receipt_tx(&mut tx, &receipt).await?;
+                tx.commit().await.map_err(store_err)?;
+                Ok(())
+            });
+        }
         validate_signature(&receipt.signature, "trust_receipts.signature")?;
         let timestamp_ms =
             sqlite_u64_to_i64(receipt.timestamp.physical_ms, "trust_receipts.timestamp_ms")?;
@@ -570,7 +1588,7 @@ impl SqliteDagStore {
         ciborium::into_writer(receipt, &mut buf)
             .map_err(|e| store_err(format!("CBOR encode receipt: {e}")))?;
 
-        self.conn
+        self.sqlite_conn_mut()?
             .execute(
                 "INSERT OR IGNORE INTO trust_receipts (receipt_hash, actor_did, action_type, outcome, timestamp_ms, cbor_data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -593,13 +1611,23 @@ impl SqliteDagStore {
         height: u64,
         receipt: &TrustReceipt,
     ) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            let receipt = receipt.clone();
+            return block_on_dagdb(async move {
+                store
+                    .mark_committed_with_receipt_sync_async(hash, height, receipt)
+                    .await
+            });
+        }
         if receipt.action_hash != *hash {
             return Err(store_err(
                 "trust_receipts.action_hash must match committed node hash",
             ));
         }
 
-        let tx = self.conn.transaction().map_err(store_err)?;
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
         Self::ensure_node_exists_tx(&tx, hash)?;
         Self::insert_committed_tx(&tx, hash, height)?;
         Self::insert_receipt_tx(&tx, receipt)?;
@@ -615,6 +1643,17 @@ impl SqliteDagStore {
         cert: &CommitCertificate,
         receipt: &TrustReceipt,
     ) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            let cert = cert.clone();
+            let receipt = receipt.clone();
+            return block_on_dagdb(async move {
+                store
+                    .persist_commit_certificate_with_receipt_sync_async(hash, height, cert, receipt)
+                    .await
+            });
+        }
         if cert.node_hash != *hash {
             return Err(store_err(
                 "commit_certificates.node_hash must match committed node hash",
@@ -626,7 +1665,7 @@ impl SqliteDagStore {
             ));
         }
 
-        let tx = self.conn.transaction().map_err(store_err)?;
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
         Self::ensure_node_exists_tx(&tx, hash)?;
         Self::insert_committed_tx(&tx, hash, height)?;
         Self::insert_certificate_tx(&tx, cert)?;
@@ -640,8 +1679,13 @@ impl SqliteDagStore {
         &self,
         receipt_hash: &Hash256,
     ) -> DagResult<Option<exo_core::types::TrustReceipt>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let receipt_hash = *receipt_hash;
+            return block_on_dagdb(async move { store.load_receipt_async(receipt_hash).await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT cbor_data FROM trust_receipts WHERE receipt_hash = ?1")
             .map_err(store_err)?;
 
@@ -669,8 +1713,15 @@ impl SqliteDagStore {
         actor_did: &str,
         limit: u32,
     ) -> DagResult<Vec<exo_core::types::TrustReceipt>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let actor_did = actor_did.to_owned();
+            return block_on_dagdb(async move {
+                store.load_receipts_by_actor_async(actor_did, limit).await
+            });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached(
                 "SELECT cbor_data FROM trust_receipts WHERE actor_did = ?1 ORDER BY timestamp_ms DESC LIMIT ?2",
             )
@@ -698,8 +1749,12 @@ impl SqliteDagStore {
         &self,
         limit: u32,
     ) -> DagResult<Vec<exo_core::types::TrustReceipt>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.load_recent_receipts_async(limit).await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached(
                 "SELECT cbor_data FROM trust_receipts
                  ORDER BY timestamp_ms DESC, receipt_hash ASC
@@ -726,8 +1781,13 @@ impl SqliteDagStore {
 
     /// Find all child nodes of a given parent hash.
     pub fn children(&self, parent_hash: &Hash256) -> DagResult<Vec<Hash256>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let parent_hash = *parent_hash;
+            return block_on_dagdb(async move { store.children_async(parent_hash).await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT child_hash FROM dag_parents WHERE parent_hash = ?1")
             .map_err(store_err)?;
 
@@ -749,8 +1809,15 @@ impl SqliteDagStore {
     /// Check whether a node hash is committed.
     #[allow(dead_code)]
     pub fn is_committed(&self, hash: &Hash256) -> DagResult<bool> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            return block_on_dagdb(async move {
+                Ok(store.committed_height_for_async(hash).await?.is_some())
+            });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT 1 FROM committed WHERE hash = ?1")
             .map_err(store_err)?;
         match stmt.query_row(params![hash.0.as_slice()], |_| Ok(())) {
@@ -762,8 +1829,13 @@ impl SqliteDagStore {
 
     /// Get the committed height for a specific hash (if committed).
     pub fn committed_height_for(&self, hash: &Hash256) -> DagResult<Option<u64>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            return block_on_dagdb(async move { store.committed_height_for_async(hash).await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT height FROM committed WHERE hash = ?1")
             .map_err(store_err)?;
 
@@ -824,8 +1896,13 @@ impl SqliteDagStore {
 
     /// Sync version of `DagStore::get`.
     pub fn get_sync(&self, hash: &Hash256) -> DagResult<Option<DagNode>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            return block_on_dagdb(async move { store.get_sync_async(&hash).await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT cbor_payload FROM dag_nodes WHERE hash = ?1")
             .map_err(store_err)?;
 
@@ -846,7 +1923,12 @@ impl SqliteDagStore {
 
     /// Persist a batch of DAG nodes atomically.
     pub fn put_many_sync(&mut self, nodes: &[DagNode]) -> DagResult<()> {
-        let tx = self.conn.transaction().map_err(store_err)?;
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let nodes = nodes.to_vec();
+            return block_on_dagdb(async move { store.put_many_sync_async(nodes).await });
+        }
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
         for node in nodes {
             Self::insert_node_tx(&tx, node)?;
         }
@@ -860,6 +1942,16 @@ impl SqliteDagStore {
         nodes: &[(DagNode, u64)],
         certificates: &[CommitCertificate],
     ) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let nodes = nodes.to_vec();
+            let certificates = certificates.to_vec();
+            return block_on_dagdb(async move {
+                store
+                    .put_committed_many_with_certificates_sync_async(nodes, certificates)
+                    .await
+            });
+        }
         if nodes.len() != certificates.len() {
             return Err(store_err(format!(
                 "committed batch must include one certificate per node: got {} certificates for {} nodes",
@@ -868,7 +1960,7 @@ impl SqliteDagStore {
             )));
         }
 
-        let tx = self.conn.transaction().map_err(store_err)?;
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
         for ((node, height), certificate) in nodes.iter().zip(certificates) {
             if certificate.node_hash != node.hash {
                 return Err(store_err(format!(
@@ -887,8 +1979,13 @@ impl SqliteDagStore {
     /// Sync version of `DagStore::contains`.
     #[allow(dead_code)]
     pub fn contains_sync(&self, hash: &Hash256) -> DagResult<bool> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            return block_on_dagdb(async move { store.contains_sync_async(&hash).await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT 1 FROM dag_nodes WHERE hash = ?1")
             .map_err(store_err)?;
 
@@ -901,8 +1998,12 @@ impl SqliteDagStore {
 
     /// Sync version of `DagStore::tips`.
     pub fn tips_sync(&self) -> DagResult<Vec<Hash256>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.tips_sync_async().await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached(
                 "SELECT hash FROM dag_nodes
                  WHERE hash NOT IN (SELECT parent_hash FROM dag_parents)
@@ -927,8 +2028,12 @@ impl SqliteDagStore {
 
     /// Sync version of `DagStore::committed_height`.
     pub fn committed_height_sync(&self) -> DagResult<u64> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(async move { store.committed_height_sync_async().await });
+        }
         let mut stmt = self
-            .conn
+            .sqlite_conn()?
             .prepare_cached("SELECT COALESCE(MAX(height), 0) FROM committed")
             .map_err(store_err)?;
 
@@ -940,12 +2045,19 @@ impl SqliteDagStore {
     /// Sync version of `DagStore::mark_committed`.
     #[allow(dead_code)]
     pub fn mark_committed_sync(&mut self, hash: &Hash256, height: u64) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let hash = *hash;
+            return block_on_dagdb(
+                async move { store.mark_committed_sync_async(hash, height).await },
+            );
+        }
         if !self.contains_sync(hash)? {
             return Err(DagError::NodeNotFound(*hash));
         }
 
         let height = sqlite_u64_to_i64(height, "committed.height")?;
-        self.conn
+        self.sqlite_conn_mut()?
             .execute(
                 "INSERT OR REPLACE INTO committed (hash, height) VALUES (?1, ?2)",
                 params![hash.0.as_slice(), height],
@@ -970,7 +2082,13 @@ impl SqliteDagStore {
 
     /// Return the latest deterministic HonorGood/economy object anchor hash.
     pub fn latest_economy_anchor_hash_sync(&self) -> DagResult<Hash256> {
-        let result: Result<Vec<u8>, rusqlite::Error> = self.conn.query_row(
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            return block_on_dagdb(
+                async move { store.latest_economy_anchor_hash_sync_async().await },
+            );
+        }
+        let result: Result<Vec<u8>, rusqlite::Error> = self.sqlite_conn()?.query_row(
             "SELECT value FROM economy_meta WHERE key = 'latest_anchor_hash'",
             [],
             |row| row.get(0),
@@ -991,6 +2109,23 @@ impl SqliteDagStore {
         created_at: Timestamp,
         object: &T,
     ) -> DagResult<EconomyRecordAnchor> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let object_id = *object_id;
+            let content_hash = *content_hash;
+            let object_cbor = encode_cbor(object, "dagdb_node_economy_objects.cbor_data")?;
+            return block_on_dagdb(async move {
+                store
+                    .put_economy_object_sync_async(
+                        object_kind,
+                        object_id,
+                        content_hash,
+                        created_at,
+                        object_cbor,
+                    )
+                    .await
+            });
+        }
         if *object_id == Hash256::ZERO {
             return Err(store_err("economy object_id must not be Hash256::ZERO"));
         }
@@ -1002,7 +2137,7 @@ impl SqliteDagStore {
         }
 
         let object_cbor = encode_cbor(object, "economy_objects.cbor_data")?;
-        let tx = self.conn.transaction().map_err(store_err)?;
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
         let previous_anchor_hash = Self::latest_economy_anchor_hash_tx(&tx)?;
         let anchor = EconomyRecordAnchor {
             anchor_hash: Hash256::ZERO,
@@ -1065,12 +2200,21 @@ impl SqliteDagStore {
     }
 
     /// Load one persisted economy object by kind and canonical object id.
-    pub fn get_economy_object_sync<T: DeserializeOwned>(
+    pub fn get_economy_object_sync<T: DeserializeOwned + Send + 'static>(
         &self,
         object_kind: EconomyObjectKind,
         object_id: &Hash256,
     ) -> DagResult<Option<T>> {
-        let result: Result<Vec<u8>, rusqlite::Error> = self.conn.query_row(
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let object_id = *object_id;
+            return block_on_dagdb(async move {
+                store
+                    .get_economy_object_sync_async(object_kind, object_id)
+                    .await
+            });
+        }
+        let result: Result<Vec<u8>, rusqlite::Error> = self.sqlite_conn()?.query_row(
             "SELECT cbor_data FROM economy_objects
              WHERE object_kind = ?1 AND object_id = ?2",
             params![object_kind.label(), object_id.0.as_slice()],
@@ -1088,7 +2232,14 @@ impl SqliteDagStore {
         &self,
         anchor_hash: &Hash256,
     ) -> DagResult<Option<EconomyRecordAnchor>> {
-        let result: Result<Vec<u8>, rusqlite::Error> = self.conn.query_row(
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let anchor_hash = *anchor_hash;
+            return block_on_dagdb(async move {
+                store.get_economy_anchor_sync_async(anchor_hash).await
+            });
+        }
+        let result: Result<Vec<u8>, rusqlite::Error> = self.sqlite_conn()?.query_row(
             "SELECT cbor_data FROM economy_anchors WHERE anchor_hash = ?1",
             params![anchor_hash.0.as_slice()],
             |row| row.get(0),
@@ -1318,7 +2469,8 @@ mod tests {
         hash[0] = 0xD0;
         let hash = Hash256::from_bytes(hash);
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO dag_nodes (hash, cbor_payload) VALUES (?1, ?2)",
                 rusqlite::params![hash.0.as_slice(), 7_i64],
@@ -1410,7 +2562,11 @@ mod tests {
     #[test]
     fn load_consensus_round_propagates_store_errors() {
         let store = temp_store();
-        store.conn.execute("DROP TABLE consensus_meta", []).unwrap();
+        store
+            .sqlite_conn()
+            .unwrap()
+            .execute("DROP TABLE consensus_meta", [])
+            .unwrap();
 
         let err = store.load_consensus_round().unwrap_err();
 
@@ -1447,7 +2603,8 @@ mod tests {
     fn load_votes_for_round_rejects_short_hash() {
         let store = temp_store();
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO consensus_votes (round, node_hash, voter_did, signature)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1466,7 +2623,8 @@ mod tests {
         let mut hash = [0u8; 32];
         hash[0] = 0xAB;
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO consensus_votes (round, node_hash, voter_did, signature)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1485,7 +2643,8 @@ mod tests {
         let mut hash = [0u8; 32];
         hash[0] = 0xAB;
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO consensus_votes (round, node_hash, voter_did, signature)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1504,7 +2663,8 @@ mod tests {
         let mut hash = [0u8; 32];
         hash[0] = 0xAB;
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO consensus_votes (round, node_hash, voter_did, signature)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1605,7 +2765,8 @@ mod tests {
         let mut cbor = Vec::new();
         ciborium::into_writer(&cert, &mut cbor).unwrap();
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO commit_certificates (node_hash, round, cbor_data)
                  VALUES (?1, ?2, ?3)",
@@ -1738,7 +2899,8 @@ mod tests {
         let mut cbor = Vec::new();
         ciborium::into_writer(&cert, &mut cbor).unwrap();
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO commit_certificates (node_hash, round, cbor_data)
                  VALUES (?1, ?2, ?3)",
@@ -1808,7 +2970,8 @@ mod tests {
         store.save_validator_set(&original).unwrap();
 
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute_batch(
                 "CREATE TEMP TRIGGER fail_validator_insert
                  BEFORE INSERT ON validators
@@ -1837,7 +3000,8 @@ mod tests {
     fn load_validator_set_rejects_invalid_did() {
         let store = temp_store();
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute("INSERT INTO validators (did) VALUES (?1)", ["not-a-did"])
             .unwrap();
 
@@ -2081,7 +3245,8 @@ mod tests {
     fn committed_nodes_in_range_rejects_short_hash() {
         let store = temp_store();
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO committed (hash, height) VALUES (?1, ?2)",
                 rusqlite::params![vec![0xCDu8; 31], 1_i64],
@@ -2098,7 +3263,8 @@ mod tests {
         let store = temp_store();
         let hash = Hash256::digest(b"committed-node");
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO committed (hash, height) VALUES (?1, ?2)",
                 rusqlite::params![hash.0.as_slice(), -1_i64],
@@ -2115,7 +3281,8 @@ mod tests {
         let store = temp_store();
         let hash = Hash256::digest(b"committed-node");
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO committed (hash, height) VALUES (?1, ?2)",
                 rusqlite::params![hash.0.as_slice(), -1_i64],
@@ -2132,7 +3299,8 @@ mod tests {
         let store = temp_store();
         let hash = Hash256::digest(b"committed-node");
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO committed (hash, height) VALUES (?1, ?2)",
                 rusqlite::params![hash.0.as_slice(), -1_i64],
@@ -2246,7 +3414,8 @@ mod tests {
         let store = temp_store();
         let parent = Hash256::digest(b"parent");
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO dag_parents (child_hash, parent_hash) VALUES (?1, ?2)",
                 rusqlite::params![vec![0xABu8; 31], parent.0.as_slice()],
@@ -2262,7 +3431,8 @@ mod tests {
     fn tips_rejects_short_hash() {
         let store = temp_store();
         store
-            .conn
+            .sqlite_conn()
+            .unwrap()
             .execute(
                 "INSERT INTO dag_nodes (hash, cbor_payload) VALUES (?1, ?2)",
                 rusqlite::params![vec![0xABu8; 31], vec![0x00u8]],

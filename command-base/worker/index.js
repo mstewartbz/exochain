@@ -17,25 +17,22 @@
 // The Team — Autonomous Worker
 // Polls for tasks and executes them via Claude Code CLI
 
-const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const {
+  databaseLabel,
+  openWorkerDatabase,
+  WORKER_DATABASE_ID,
+} = require('./worker-db');
 const { getMemberProfile, getAssignments, getSetting, setSetting } = require('./profiles');
 const { chooseModel, buildTaskPrompt, buildReviewPrompt, executeClaudeCommand } = require('./executor');
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'the_team.db');
 const INBOX_PATH = process.env.INBOX_PATH || path.join(__dirname, '..', 'Teams inbox:Result');
 const OUTBOX_PATH = process.env.OUTBOX_PATH || path.join(__dirname, '..', "Stew's inbox:Owner");
 const POLL_INTERVAL = 10000; // 10 seconds
 
-let db;
-try {
-  db = new Database(DB_PATH, { fileMustExist: true });
-  console.log(`[Worker] Connected to database at ${DB_PATH}`);
-} catch (err) {
-  console.error(`[Worker] Failed to open database: ${err.message}`);
-  process.exit(1);
-}
+let db = null;
+let timer = null;
 
 function localNow() {
   return new Date().toLocaleString('sv-SE', {
@@ -247,32 +244,62 @@ async function pollLoop() {
   }
 }
 
-// Main loop
-console.log(`[Worker] Starting autonomous worker. Polling every ${POLL_INTERVAL / 1000}s`);
-setSetting(db, 'worker_status', 'running');
-
 async function tick() {
   try {
     await pollLoop();
   } catch (err) {
     console.error(`[Worker] Poll loop error: ${err.message}`);
   }
-  setTimeout(tick, POLL_INTERVAL);
+  timer = setTimeout(tick, POLL_INTERVAL);
 }
 
-tick();
+function startWorker(options = {}) {
+  const env = options.env || process.env;
+  db = options.db || openWorkerDatabase(env);
+  console.log(`[Worker] Connected to ${databaseLabel(env)}`);
+  console.log(`[Worker] Starting autonomous worker. Polling every ${POLL_INTERVAL / 1000}s`);
+  setSetting(db, 'worker_status', 'running');
+  tick();
+  return db;
+}
 
-// Graceful shutdown
-process.on('SIGINT', () => {
+function shutdownWorker() {
   console.log('[Worker] Shutting down...');
-  setSetting(db, 'worker_status', 'stopped');
-  db.close();
-  process.exit(0);
-});
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  if (db) {
+    setSetting(db, 'worker_status', 'stopped');
+    db.close();
+    db = null;
+  }
+}
 
-process.on('SIGTERM', () => {
-  console.log('[Worker] Shutting down...');
-  setSetting(db, 'worker_status', 'stopped');
-  db.close();
-  process.exit(0);
-});
+if (require.main === module) {
+  try {
+    startWorker();
+  } catch (err) {
+    console.error(`[Worker] Failed to open persistence adapter: ${err.message}`);
+    process.exit(1);
+  }
+
+  // Graceful shutdown
+  process.on('SIGINT', () => {
+    shutdownWorker();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    shutdownWorker();
+    process.exit(0);
+  });
+}
+
+module.exports = {
+  databaseLabel,
+  openWorkerDatabase,
+  startWorker,
+  shutdownWorker,
+  WORKER_DATABASE_ID,
+};

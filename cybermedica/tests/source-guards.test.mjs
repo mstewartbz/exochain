@@ -137,7 +137,7 @@ test('source adapter-contract guard backs integration-map minimum adapter contra
   assert.equal(report.schema, 'cybermedica.source_adapter_contract_guard.v1');
   assert.equal(report.status, 'passed');
   assert.equal(report.exitCode, 0);
-  assert.equal(report.minimumAdapterRequirementCount, 5);
+  assert.equal(report.minimumAdapterRequirementCount, 6);
   assert.equal(report.findingsCount, 0);
   assert.equal(report.exochainSourceExcluded, true);
   assert.equal(report.metadataOnly, true);

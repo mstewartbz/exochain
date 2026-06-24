@@ -51,11 +51,8 @@ vi.mock('module', async (importOriginal) => {
   };
 });
 
-vi.mock('pg', () => {
-  return { default: { Pool: mockPg.Pool } };
-});
-
 import { server } from './index.js';
+import { getDemoServiceTestStore } from '@exochain/shared';
 
 let request;
 
@@ -68,6 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockPg.query.mockReset();
   mockPg.query.mockResolvedValue({ rows: [] });
+  getDemoServiceTestStore().query = mockPg.query;
 });
 
 afterAll(async () => {

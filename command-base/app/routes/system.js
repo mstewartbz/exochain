@@ -322,12 +322,22 @@ app.get('/api/system/health', (req, res) => {
     const uptimeSeconds = process.uptime();
     const uptimeHours = (uptimeSeconds / 3600).toFixed(1);
 
-    // Database stats
-    const dbStats = {
+    // Persistence stats. Production uses the DAG DB adapter; test/dev may use
+    // the compatibility SQL schema behind the same factory seam.
+    const isDagDbAdapter = typeof db.recordDurableState === 'function';
+    let dbStats = { tables: 0, size_mb: 'dagdb', total_rows: 0 };
+    if (!isDagDbAdapter) {
+      const devDbPath = process.env.DB_PATH || path.join(__dirname, '..', 'commandbase-dev.sqlite');
+      let sizeMb = '0.0';
+      try {
+        sizeMb = (fs.statSync(devDbPath).size / 1024 / 1024).toFixed(1);
+      } catch (_) {}
+      dbStats = {
         tables: db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table'").get().c,
-        size_mb: (fs.statSync(process.env.DB_PATH || path.join(__dirname, '..', 'the_team.db')).size / 1024 / 1024).toFixed(1),
+        size_mb: sizeMb,
         total_rows: 0
-    };
+      };
+    }
 
     // Key table row counts
     const tableCounts = {};
@@ -928,7 +938,7 @@ app.get('/api/whitepaper/code', (req, res) => {
     // Key server.js sections
     snippets.server_imports = {
       title: 'Server — Imports & Setup',
-      description: 'The server boots by loading Express, the SQLite driver (better-sqlite3), and core Node modules. It opens the database in WAL (Write-Ahead Logging) mode for concurrent read access, configures memory-mapped I/O (256 MB), and sets a busy timeout for lock contention. This initialization block is the foundation that every API route and background process depends on.',
+      description: 'The server boots by loading Express, the CommandBase DAG DB persistence adapter, and core Node modules. Production persistence is delegated to the EXOCHAIN DAG DB gateway boundary; test and development compatibility storage remains isolated behind the adapter factory.',
       language: 'javascript',
       file: 'server.js',
       code: readLines(serverPath, 1, 50)
@@ -1042,9 +1052,9 @@ app.get('/api/whitepaper/code', (req, res) => {
     try {
       const tables = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
       snippets.database_schema = {
-        title: 'Database Schema (All Tables)',
+        title: 'CommandBase Persistence Schema (Compatibility Tables)',
         language: 'sql',
-        file: 'the_team.db',
+        file: 'CommandBase persistence adapter',
         code: tables.map(t => `${t.sql};`).join('\n\n')
       };
     } catch (_) {}
@@ -1488,10 +1498,10 @@ app.get('/api/whitepaper/export', (req, res) => {
     // ── Architecture ──
     h(2, 'System Architecture');
     blank();
-    p('**Stack:** Express.js (Node.js) + SQLite (better-sqlite3) + Vanilla JS SPA + WebSocket (ws)');
+    p('**Stack:** Express.js (Node.js) + DAG DB Adapter + Vanilla JS SPA + WebSocket (ws)');
     p('**Backend:** Core server.js (~22,500 lines) + 16 route modules in app/routes/ (~11,000 lines)');
     p('**Frontend:** app.js (~36,000 lines) + styles.css (~34,000 lines) + index.html');
-    p('**Databases:** the_team.db (main, WAL mode) + task_forces.db (external task forces, separate for durability)');
+    p('**Persistence:** DAG DB CommandBase adapter for main state + DAG DB task-force state for external task-force durability');
     p('**Auth:** API key middleware — auto-generated 256-bit key, X-API-Key header or cb_auth cookie');
     p('**AI Inference:** Claude CLI (Sonnet/Opus/Haiku) for code tasks + Ollama on DGX Spark for free analysis');
     blank();
@@ -1579,7 +1589,7 @@ app.get('/api/whitepaper/export', (req, res) => {
     blank();
     p('External execution teams that operate independently from Command Base.');
     blank();
-    p('- **Separate database:** task_forces.db — survives server crashes');
+    p('- **Separate DAG DB state:** DAG DB task-force state — survives server crashes');
     p('- **Tables:** task_forces, task_force_members, task_force_processes, task_force_logs, resource_profiles, bias_ledger');
     p('- **Adapters:** claude_cli (file access, code editing) and ollama (Spark analysis, $0 cost)');
     p('- **Anti-bias:** Bias ledger tracks who built/designed/digested what. Builders cannot review their own work.');
@@ -1626,8 +1636,8 @@ app.get('/api/whitepaper/export', (req, res) => {
     p('```');
     p('The Team/');
     p('  CLAUDE.md                  # System instructions (~660 lines)');
-    p('  the_team.db                # Main SQLite database (WAL mode)');
-    p('  task_forces.db             # Separate DB for Task Forces');
+    p('  DAG DB CommandBase state                # Main governed CommandBase state');
+    p('  DAG DB task-force state             # Separate governed task-force state');
     p('  Teams inbox:Result/        # INPUT: task files dropped here');
     p('  Team/                      # Member profiles (.md files)');
     p("  Stew's inbox:Owner/        # OUTPUT: deliverables placed here");
@@ -1652,7 +1662,7 @@ app.get('/api/whitepaper/export', (req, res) => {
     p('      plugins.js             # 14 routes');
     p('      ideas.js               #  7 routes');
     p('    lib/');
-    p('      task-force-db.js       # Separate SQLite DB for Task Forces');
+    p('      task-force-db.js       # Separate DAG DB Adapter for Task Forces');
     p('      task-force-engine.js   # Spawn, kill, guardian, anti-bias');
     p('      db.js                  # Database pool utilities');
     p('      broadcast.js           # WebSocket broadcast helpers');

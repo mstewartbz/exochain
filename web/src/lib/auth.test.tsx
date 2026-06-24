@@ -16,6 +16,7 @@
 
 import { render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cacheDagDbDurableState } from './dagdbDurableState'
 import { AuthProvider, useAuth } from './auth'
 
 function renderedValue(value: unknown): string {
@@ -47,7 +48,7 @@ function renderAuthProvider() {
   )
 }
 
-describe('AuthProvider dev bypass onboarding storage', () => {
+describe('AuthProvider dev bypass onboarding durable state', () => {
   beforeEach(() => {
     vi.stubEnv('VITE_ALLOW_DEV_BYPASS', 'true')
     localStorage.setItem('df_dev_bypass', '1')
@@ -57,8 +58,7 @@ describe('AuthProvider dev bypass onboarding storage', () => {
     vi.unstubAllEnvs()
   })
 
-  it('falls back to the dev preview user when onboarding storage is malformed JSON', async () => {
-    localStorage.setItem('ape_onboarding', '{not-json')
+  it('falls back to the dev preview user when onboarding durable state is absent', async () => {
 
     renderAuthProvider()
 
@@ -69,13 +69,10 @@ describe('AuthProvider dev bypass onboarding storage', () => {
   })
 
   it('falls back to typed defaults when onboarding fields are not strings', async () => {
-    localStorage.setItem(
-      'ape_onboarding',
-      JSON.stringify({
-        displayName: { text: 'not a string' },
-        email: ['dev@example.invalid'],
-      })
-    )
+    cacheDagDbDurableState('ape-onboarding', {
+      displayName: { text: 'not a string' },
+      email: ['dev@example.invalid'],
+    })
 
     renderAuthProvider()
 
@@ -86,13 +83,14 @@ describe('AuthProvider dev bypass onboarding storage', () => {
   })
 
   it('uses valid onboarding strings for the dev preview user', async () => {
-    localStorage.setItem(
-      'ape_onboarding',
-      JSON.stringify({
-        displayName: 'Ada Lovelace',
-        email: 'ada@example.invalid',
-      })
-    )
+    cacheDagDbDurableState('ape-onboarding', {
+      displayName: 'Ada Lovelace',
+      email: 'ada@example.invalid',
+      boardName: 'Analytical Engines',
+      governanceStyle: 'consensus',
+      boardMembers: [],
+      createdAt: '2026-06-23T00:00:00.000Z',
+    })
 
     renderAuthProvider()
 

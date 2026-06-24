@@ -19,9 +19,9 @@ import http from 'node:http';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const wasm = require('@exochain/exochain-wasm');
-import pg from 'pg';
+import { createDemoServiceStore } from '@exochain/shared';
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const pool = createDemoServiceStore('provenance-writer');
 const PORT = process.env.PORT || 3006;
 
 function json(res, status, data) {

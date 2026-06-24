@@ -1466,8 +1466,8 @@ mod tests {
             let mut store = zerodentity.lock().unwrap();
             for i in 0..=scan_limit {
                 let did = Did::new(&format!("did:exo:alert{i:04}")).unwrap();
-                store.put_score(score_snapshot(&did, 9_000, 1000));
-                store.put_score(score_snapshot(&did, 7_000, 2000));
+                store.put_score(score_snapshot(&did, 9_000, 1000)).unwrap();
+                store.put_score(score_snapshot(&did, 7_000, 2000)).unwrap();
             }
         }
 
@@ -1488,12 +1488,16 @@ mod tests {
             let mut store = zerodentity.lock().unwrap();
             for i in 0..MAX_ZERODENTITY_ALERT_SCAN_PAGE_DIDS {
                 let did = Did::new(&format!("did:exo:prefix{i:04}")).unwrap();
-                store.put_score(score_snapshot(&did, 9_000, 1000));
+                store.put_score(score_snapshot(&did, 9_000, 1000)).unwrap();
             }
 
             let hidden_did = Did::new("did:exo:z-after-prefix").unwrap();
-            store.put_score(score_snapshot(&hidden_did, 9_000, 1000));
-            store.put_score(score_snapshot(&hidden_did, 7_000, 2000));
+            store
+                .put_score(score_snapshot(&hidden_did, 9_000, 1000))
+                .unwrap();
+            store
+                .put_score(score_snapshot(&hidden_did, 7_000, 2000))
+                .unwrap();
         }
 
         let (text, keyboard) = build_zerodentity_alerts_message(&zerodentity);
@@ -1513,12 +1517,16 @@ mod tests {
             let mut store = zerodentity.lock().unwrap();
             for i in 0..expected_scan_cap {
                 let did = Did::new(&format!("did:exo:prefix{i:04}")).unwrap();
-                store.put_score(score_snapshot(&did, 9_000, 1000));
+                store.put_score(score_snapshot(&did, 9_000, 1000)).unwrap();
             }
 
             let hidden_did = Did::new("did:exo:z-after-scan-cap").unwrap();
-            store.put_score(score_snapshot(&hidden_did, 9_000, 1000));
-            store.put_score(score_snapshot(&hidden_did, 7_000, 2000));
+            store
+                .put_score(score_snapshot(&hidden_did, 9_000, 1000))
+                .unwrap();
+            store
+                .put_score(score_snapshot(&hidden_did, 7_000, 2000))
+                .unwrap();
         }
 
         let (text, keyboard) = build_zerodentity_alerts_message(&zerodentity);
@@ -1540,8 +1548,12 @@ mod tests {
         let long_did = Did::new(&long_did_string).unwrap();
         {
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(score_snapshot(&long_did, 9_000, 1000));
-            store.put_score(score_snapshot(&long_did, 7_000, 2000));
+            store
+                .put_score(score_snapshot(&long_did, 9_000, 1000))
+                .unwrap();
+            store
+                .put_score(score_snapshot(&long_did, 7_000, 2000))
+                .unwrap();
         }
 
         let (text, keyboard) = build_zerodentity_alerts_message(&zerodentity);
@@ -1909,13 +1921,15 @@ mod tests {
         {
             let did = Did::new("did:exo:alerted").unwrap();
             let mut store = zerodentity.lock().unwrap();
-            store.put_score(crate::zerodentity::types::ZerodentityScore::compute(
-                &did,
-                &[],
-                &[],
-                &[],
-                1000,
-            ));
+            store
+                .put_score(crate::zerodentity::types::ZerodentityScore::compute(
+                    &did,
+                    &[],
+                    &[],
+                    &[],
+                    1000,
+                ))
+                .unwrap();
             store.inject_read_failure(
                 crate::zerodentity::store::ZerodentityReadFailure::Fingerprints,
             );

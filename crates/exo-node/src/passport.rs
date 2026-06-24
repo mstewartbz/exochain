@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(passport["standing"]["status"], "unknown");
         assert!(passport["standing"]["revoked"].is_null());
         assert_eq!(passport["consent"]["default_deny_enforced"], true);
-        assert_eq!(passport["persistence_ready"], false);
+        assert_eq!(passport["persistence_ready"], true);
     }
 
     #[tokio::test]
@@ -1132,7 +1132,7 @@ mod tests {
                 claim_count: 12,
                 symmetry: 6800,
             };
-            zd.put_score(score);
+            zd.put_score(score).unwrap();
         }
 
         let app = passport_test_routes(state);
@@ -1196,7 +1196,8 @@ mod tests {
                 dag_state_hash: exo_core::types::Hash256::digest(b"test"),
                 claim_count: 20,
                 symmetry: 10_000,
-            });
+            })
+            .unwrap();
         }
 
         let app = passport_test_routes(state);

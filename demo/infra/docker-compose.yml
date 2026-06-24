@@ -23,9 +23,20 @@ networks:
 volumes:
   pgdata:
 
+x-demo-dagdb-env: &demo-dagdb-env
+  EXO_DEMO_DAGDB_GATEWAY_URL: ${EXO_DEMO_DAGDB_GATEWAY_URL:?set EXO_DEMO_DAGDB_GATEWAY_URL to the EXOCHAIN DAG DB gateway origin}
+  EXO_DEMO_DAGDB_AUTH_TOKEN: ${EXO_DEMO_DAGDB_AUTH_TOKEN:?set EXO_DEMO_DAGDB_AUTH_TOKEN}
+  EXO_DEMO_DAGDB_TENANT_ID: ${EXO_DEMO_DAGDB_TENANT_ID:?set EXO_DEMO_DAGDB_TENANT_ID}
+  EXO_DEMO_DAGDB_NAMESPACE: ${EXO_DEMO_DAGDB_NAMESPACE:?set EXO_DEMO_DAGDB_NAMESPACE}
+  EXO_DEMO_DAGDB_OWNER_DID: ${EXO_DEMO_DAGDB_OWNER_DID:?set EXO_DEMO_DAGDB_OWNER_DID}
+  EXO_DEMO_DAGDB_CONTROLLER_DID: ${EXO_DEMO_DAGDB_CONTROLLER_DID:?set EXO_DEMO_DAGDB_CONTROLLER_DID}
+  EXO_DEMO_DAGDB_SUBMITTED_BY_DID: ${EXO_DEMO_DAGDB_SUBMITTED_BY_DID:?set EXO_DEMO_DAGDB_SUBMITTED_BY_DID}
+  EXO_DEMO_DAGDB_WRITE_SIGNATURE: ${EXO_DEMO_DAGDB_WRITE_SIGNATURE:?set EXO_DEMO_DAGDB_WRITE_SIGNATURE}
+
 services:
-  # ── PostgreSQL ──────────────────────────────────────────────────
+  # ── Legacy PostgreSQL fixture (not a production writer) ─────────
   postgres:
+    profiles: ["legacy-postgres-fixture"]
     image: postgres:16-alpine
     ports: ["5432:5432"]
     environment:
@@ -50,11 +61,9 @@ services:
         SERVICE: gateway-api
     ports: ["3000:3000"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3000
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: gateway-api
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]
 
   # ── Identity Service (3001) ────────────────────────────────────
@@ -66,11 +75,9 @@ services:
         SERVICE: identity-service
     ports: ["3001:3001"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3001
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: identity-service
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]
 
   # ── Consent Service (3002) ─────────────────────────────────────
@@ -82,11 +89,9 @@ services:
         SERVICE: consent-service
     ports: ["3002:3002"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3002
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: consent-service
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]
 
   # ── Governance Engine (3003) ───────────────────────────────────
@@ -98,11 +103,9 @@ services:
         SERVICE: governance-engine
     ports: ["3003:3003"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3003
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: governance-engine
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]
 
   # ── Decision Forge (3004) ──────────────────────────────────────
@@ -114,11 +117,9 @@ services:
         SERVICE: decision-forge
     ports: ["3004:3004"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3004
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: decision-forge
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]
 
   # ── Audit API (3007) ───────────────────────────────────────────
@@ -130,11 +131,9 @@ services:
         SERVICE: audit-api
     ports: ["3007:3007"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3007
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: audit-api
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]
 
   # ── Provenance Writer (3006) ───────────────────────────────────
@@ -146,9 +145,7 @@ services:
         SERVICE: provenance-writer
     ports: ["3006:3006"]
     environment:
+      <<: *demo-dagdb-env
       PORT: 3006
-      DATABASE_URL: postgres://exochain:exochain_dev@postgres:5432/exochain
       SERVICE_NAME: provenance-writer
-    depends_on:
-      postgres: { condition: service_healthy }
     networks: [exochain]

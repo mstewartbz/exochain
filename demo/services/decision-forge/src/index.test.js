@@ -57,7 +57,6 @@ vi.mock('module', async (importOriginal) => {
   return { ...orig, createRequire: () => (id) => { if (id === '@exochain/exochain-wasm') return mockWasm; throw new Error(`Unexpected require('${id}') in test`); } };
 });
 
-vi.mock('pg', () => { const q = vi.fn(); const P = vi.fn(() => ({ query: q })); return { default: { Pool: P } }; });
 
 import { server } from './index.js';
 

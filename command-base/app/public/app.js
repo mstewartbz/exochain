@@ -2061,7 +2061,7 @@
 
   function getDashboardWidgetConfig() {
     try {
-      var saved = localStorage.getItem('dashboard_widgets');
+      var saved = commandBaseDurableState.getItem('dashboard_widgets');
       if (saved) {
         var parsed = JSON.parse(saved);
         var savedIds = parsed.map(function(w) { return w.id; });
@@ -2080,37 +2080,37 @@
           }
         });
         // Migration v2: hide widgets covered by Business Overview section
-        if (!localStorage.getItem('dashboard_widgets_v2')) {
+        if (!commandBaseDurableState.getItem('dashboard_widgets_v2')) {
           var bizWidgets = ['spending', 'improvements', 'distribution', 'governance', 'goals'];
           parsed.forEach(function(w) {
             if (bizWidgets.indexOf(w.id) !== -1) w.visible = false;
           });
-          localStorage.setItem('dashboard_widgets_v2', '1');
+          commandBaseDurableState.setItem('dashboard_widgets_v2', '1');
         }
         // Migration v3: move tasks + team to Analytics page
-        if (!localStorage.getItem('dashboard_widgets_v3')) {
+        if (!commandBaseDurableState.getItem('dashboard_widgets_v3')) {
           var analyticsWidgets = ['tasks', 'team'];
           parsed.forEach(function(w) {
             if (analyticsWidgets.indexOf(w.id) !== -1) w.visible = false;
           });
-          localStorage.setItem('dashboard_widgets_v3', '1');
+          commandBaseDurableState.setItem('dashboard_widgets_v3', '1');
         }
         // Migration v4: fix sizes for 3-column grid (half → large)
-        if (!localStorage.getItem('dashboard_widgets_v4')) {
+        if (!commandBaseDurableState.getItem('dashboard_widgets_v4')) {
           parsed.forEach(function(w) {
             if (w.size === 'half') w.size = 'large';
           });
-          localStorage.setItem('dashboard_widgets_v4', '1');
+          commandBaseDurableState.setItem('dashboard_widgets_v4', '1');
         }
         // Migration v5: 24-column grid — validate size values
-        if (!localStorage.getItem('dashboard_widgets_v5')) {
+        if (!commandBaseDurableState.getItem('dashboard_widgets_v5')) {
           var validSizes = ['small', 'third', 'half', 'large', 'wide', 'full'];
           parsed.forEach(function(w) {
             if (validSizes.indexOf(w.size) === -1) w.size = 'half';
           });
-          localStorage.setItem('dashboard_widgets_v5', '1');
+          commandBaseDurableState.setItem('dashboard_widgets_v5', '1');
         }
-        localStorage.setItem('dashboard_widgets', JSON.stringify(parsed));
+        commandBaseDurableState.setItem('dashboard_widgets', JSON.stringify(parsed));
         return parsed.sort(function(a, b) { return a.order - b.order; });
       }
     } catch (e) { /* use defaults */ }
@@ -2120,15 +2120,15 @@
   }
 
   function saveDashboardWidgetConfig(config) {
-    localStorage.setItem('dashboard_widgets', JSON.stringify(config));
+    commandBaseDurableState.setItem('dashboard_widgets', JSON.stringify(config));
   }
 
   // ── Dashboard Lock ──
   function isDashboardLocked() {
-    return localStorage.getItem('dashboard_locked') === '1';
+    return commandBaseDurableState.getItem('dashboard_locked') === '1';
   }
   function setDashboardLocked(locked) {
-    localStorage.setItem('dashboard_locked', locked ? '1' : '0');
+    commandBaseDurableState.setItem('dashboard_locked', locked ? '1' : '0');
   }
 
   // ── Dashboard Layout Presets ──
@@ -2160,21 +2160,21 @@
 
   function getDashboardPresets() {
     try {
-      var saved = localStorage.getItem('dashboard_presets');
+      var saved = commandBaseDurableState.getItem('dashboard_presets');
       return saved ? JSON.parse(saved) : [];
     } catch (e) { return []; }
   }
 
   function saveDashboardPresets(presets) {
-    localStorage.setItem('dashboard_presets', JSON.stringify(presets));
+    commandBaseDurableState.setItem('dashboard_presets', JSON.stringify(presets));
   }
 
   function getActivePresetName() {
-    return localStorage.getItem('dashboard_active_preset') || '';
+    return commandBaseDurableState.getItem('dashboard_active_preset') || '';
   }
 
   function setActivePresetName(name) {
-    localStorage.setItem('dashboard_active_preset', name);
+    commandBaseDurableState.setItem('dashboard_active_preset', name);
   }
 
   function applyPreset(presetConfig) {
@@ -2311,7 +2311,7 @@
 
   function getGridLayout() {
     try {
-      var saved = localStorage.getItem('dashboard_grid_layout');
+      var saved = commandBaseDurableState.getItem('dashboard_grid_layout');
       if (saved) {
         var parsed = JSON.parse(saved);
         if (parsed.length > 0 && parsed[0].x !== undefined) {
@@ -2328,13 +2328,13 @@
     } catch(e) {}
     var oldConfig = getDashboardWidgetConfig();
     var migrated = migrateToGridLayout(oldConfig);
-    localStorage.setItem('dashboard_grid_layout', JSON.stringify(migrated));
+    commandBaseDurableState.setItem('dashboard_grid_layout', JSON.stringify(migrated));
     return migrated;
   }
 
   function saveGridLayout(layout) {
-    localStorage.setItem('dashboard_grid_layout', JSON.stringify(layout));
-    localStorage.setItem('dashboard_grid_updated', new Date().toISOString());
+    commandBaseDurableState.setItem('dashboard_grid_layout', JSON.stringify(layout));
+    commandBaseDurableState.setItem('dashboard_grid_updated', new Date().toISOString());
     syncLayoutToServer(layout);
   }
 
@@ -15789,7 +15789,7 @@
       +     '<button class="research-modal-close" id="research-modal-close">&times;</button>'
       +   '</div>'
       +   '<div class="research-modal-body">'
-      +     '<div class="config-field"><label>Title</label><input type="text" id="rp-title" placeholder="e.g. SQLite Performance Optimization" /></div>'
+      +     '<div class="config-field"><label>Title</label><input type="text" id="rp-title" placeholder="e.g. Persistence Performance Optimization" /></div>'
       +     '<div class="config-field"><label>Research Goal</label><textarea id="rp-goal" rows="3" placeholder="What do you want to investigate?"></textarea></div>'
       +     '<div class="config-field"><label>Methodology</label><textarea id="rp-methodology" rows="3" placeholder="How should the research be conducted? (approach, constraints, focus areas)"></textarea></div>'
       +     '<div class="research-modal-row">'
@@ -19568,7 +19568,7 @@
         +   '<div class="sb-tool-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></div>'
         +   '<div class="sb-tool-title">File Structure</div>'
         +   '<div class="sb-tool-desc">The Team dashboard app structure.</div>'
-        +   '<pre class="sb-file-tree">app/\n  public/\n    index.html\n    app.js\n    styles.css\n  server.js\n  package.json\n  the_team.db</pre>'
+        +   '<pre class="sb-file-tree">app/\n  public/\n    index.html\n    app.js\n    styles.css\n  server.js\n  package.json\n  DAG DB CommandBase state</pre>'
         + '</div>'
         + '<div class="site-builder-tool-card">'
         +   '<div class="sb-tool-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>'

@@ -31,10 +31,9 @@ vi.mock('module', async (importOriginal) => {
   return { ...orig, createRequire: () => (id) => { if (id === '@exochain/exochain-wasm') return mockWasm; throw new Error(`Unexpected require('${id}') in test`); } };
 });
 
-vi.mock('pg', () => { const q = vi.fn(); const P = vi.fn(() => ({ query: q })); return { default: { Pool: P } }; });
 
 import { server } from './index.js';
-import pg from 'pg';
+import { getDemoServiceTestStore } from '@exochain/shared';
 
 let request;
 beforeAll(async () => {
@@ -44,7 +43,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  const pool = new pg.Pool();
+  const pool = getDemoServiceTestStore();
+  pool.query = vi.fn();
   pool.query.mockResolvedValue({ rows: [] });
 });
 
@@ -56,7 +56,8 @@ describe('GET /health', () => {
 
 describe('GET /api/users', () => {
   it('returns user list', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [{ did: 'did:exo:alice', display_name: 'Alice', pace_status: 'Enrolled' }] });
     const res = await request.get('/api/users');
     expect(res.status).toBe(200);
@@ -67,7 +68,8 @@ describe('GET /api/users', () => {
 
 describe('GET /api/scores', () => {
   it('returns identity scores', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [{ did: 'did:exo:alice', score: 95, tier: 'Gold' }] });
     const res = await request.get('/api/scores');
     expect(res.status).toBe(200);
@@ -77,7 +79,8 @@ describe('GET /api/scores', () => {
 
 describe('GET /api/enrollment', () => {
   it('returns enrollment log', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [] });
     const res = await request.get('/api/enrollment');
     expect(res.status).toBe(200);

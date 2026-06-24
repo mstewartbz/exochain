@@ -257,80 +257,97 @@ async fn dagdb_authorization_failures_are_stable() {
     )
     .await;
 
-    let unmounted_council = app
-        .oneshot(json_request_with_headers(
+    assert_error(
+        app.oneshot(json_request_with_headers(
             "/api/v1/dag-db/council/decision",
             "dagdb:council_decision",
             &fixture::<DagDbCouncilDecisionRequest>(&fixtures, "requests", "council_decision"),
             HeaderCase::NoAuth,
         ))
         .await
-        .expect("unmounted council route response");
-    assert_eq!(unmounted_council.status(), StatusCode::NOT_FOUND);
+        .expect("council route authentication response"),
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated",
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn dagdb_unmounted_scaffold_routes_return_not_found() {
+async fn dagdb_full_surface_routes_fail_closed_without_database() {
     let app = dagdb_router::<()>();
     let fixtures = fixtures();
 
-    assert_post_not_found(
+    assert_post_error(
         app.clone(),
         "/api/v1/dag-db/intake",
         "dagdb:intake",
         fixture::<DagDbIntakeRequest>(&fixtures, "requests", "intake"),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
-    assert_post_not_found(
+    assert_post_error(
         app.clone(),
         "/api/v1/dag-db/validate",
         "dagdb:validate",
         fixture::<DagDbValidateRequest>(&fixtures, "requests", "validate"),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
-    assert_post_not_found(
+    assert_post_error(
         app.clone(),
         "/api/v1/dag-db/trust-check",
         "dagdb:trust_check",
         fixture::<DagDbTrustCheckRequest>(&fixtures, "requests", "trust_check"),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
-    assert_post_not_found(
+    assert_post_error(
         app.clone(),
         "/api/v1/dag-db/council/decision",
         "dagdb:council_decision",
         fixture::<DagDbCouncilDecisionRequest>(&fixtures, "requests", "council_decision"),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
 
     let receipt: DagDbReceiptLookupRequest = fixture(&fixtures, "requests", "receipt_lookup");
-    assert_get_not_found(
+    assert_get_error(
         app.clone(),
         &format!(
             "/api/v1/dag-db/receipts/{}?tenant_id={}&namespace={}",
             receipt.receipt_hash, receipt.tenant_id, receipt.namespace
         ),
         "dagdb:receipt_lookup",
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
     let catalog: DagDbCatalogLookupRequest = fixture(&fixtures, "requests", "catalog_lookup");
-    assert_get_not_found(
+    assert_get_error(
         app.clone(),
         &format!(
             "/api/v1/dag-db/catalog/{}?tenant_id={}&namespace={}",
             catalog.catalog_id, catalog.tenant_id, catalog.namespace
         ),
         "dagdb:catalog_lookup",
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
     let route: DagDbRouteLookupRequest = fixture(&fixtures, "requests", "route_lookup");
-    assert_get_not_found(
+    assert_get_error(
         app,
         &format!(
             "/api/v1/dag-db/routes/{}?tenant_id={}&namespace={}",
             route.route_id, route.tenant_id, route.namespace
         ),
         "dagdb:route_lookup",
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
     )
     .await;
 }
@@ -373,17 +390,6 @@ where
     assert_tenant_scope_mismatch(response).await;
 }
 
-async fn assert_post_not_found<T>(app: axum::Router, path: &str, action: &str, body: T)
-where
-    T: Serialize,
-{
-    let response = app
-        .oneshot(scoped_json_request("POST", path, action, "tenant-a", &body))
-        .await
-        .expect("DAG DB unmounted POST response");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
 async fn assert_post_error<T>(
     app: axum::Router,
     path: &str,
@@ -401,12 +407,18 @@ async fn assert_post_error<T>(
     assert_error(response, status, error_code).await;
 }
 
-async fn assert_get_not_found(app: axum::Router, uri: &str, action: &str) {
+async fn assert_get_error(
+    app: axum::Router,
+    uri: &str,
+    action: &str,
+    status: StatusCode,
+    error_code: &str,
+) {
     let response = app
         .oneshot(scoped_get_request(uri, action, "tenant-a"))
         .await
-        .expect("DAG DB unmounted GET response");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        .expect("DAG DB GET route error response");
+    assert_error(response, status, error_code).await;
 }
 
 fn scoped_json_request<T>(

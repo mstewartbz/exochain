@@ -32,6 +32,19 @@ const verifiedRootBundle = Object.freeze({
 });
 
 const verifiedDependency = Object.freeze({ verified: true });
+const verifiedDagDbGatewayCallPath = Object.freeze({
+  source: 'exochain_dagdb_gateway',
+  routePath: '/api/v1/dag-db/intake',
+  method: 'POST',
+  tenantBound: true,
+  namespaceBound: true,
+  authorityScopeHeader: 'x-exo-authority-scope',
+  failClosedUnavailable: true,
+  noSimulatedTrust: true,
+  routeContractHash: '4444444444444444444444444444444444444444444444444444444444444444',
+  requestHash: '5555555555555555555555555555555555555555555555555555555555555555',
+  receiptHash: '6666666666666666666666666666666666666666666666666666666666666666',
+});
 const DIGEST_A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const DIGEST_B = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const DIGEST_C = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
@@ -61,6 +74,7 @@ function activationInput(overrides = {}) {
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
     ...overrides,
   };
 }
@@ -180,6 +194,49 @@ test('production activation carries public-claim runtime-source trust-state-view
   assert.equal(result.publicClaimReviewProductionClaimLiftRuntimeSourceProviderRoleDashboardTrustStateViewHash, DIGEST_F);
   assert.equal(result.publicClaimReviewProductionClaimLiftRuntimeSourceReadinessRoleDashboardTrustStateViewHash, DIGEST_3);
   assert.ok(result.blockedBy.includes('root_bundle_absent'));
+});
+
+test('production activation names the DAG DB gateway call path in runtime evidence', () => {
+  const result = evaluateProductionTrustActivation(activationInput());
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.dagDbGatewayCallPathSource, 'exochain_dagdb_gateway');
+  assert.equal(result.dagDbGatewayCallPathRoute, '/api/v1/dag-db/intake');
+  assert.equal(result.dagDbGatewayCallPathReceiptHash, verifiedDagDbGatewayCallPath.receiptHash);
+  assert.equal(result.dagDbGatewayCallPathRequestHash, verifiedDagDbGatewayCallPath.requestHash);
+});
+
+test('production activation fails closed without DAG DB gateway call-path evidence', () => {
+  const result = evaluateProductionTrustActivation(
+    activationInput({
+      dagDbGatewayCallPath: null,
+    }),
+  );
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.state, TrustState.DENIED);
+  assert.equal(result.exochainProductionClaim, false);
+  assert.ok(result.blockedBy.includes('dagdb_gateway_call_path_absent'));
+  assert.doesNotMatch(result.claimLanguage, /verified for this CyberMedica action/i);
+});
+
+test('production activation denies simulated DAG DB trust by proximity', () => {
+  const result = evaluateProductionTrustActivation(
+    activationInput({
+      dagDbGatewayCallPath: {
+        ...verifiedDagDbGatewayCallPath,
+        locallySimulated: true,
+        cachedOutcome: true,
+        overrideApplied: true,
+      },
+    }),
+  );
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.exochainProductionClaim, false);
+  assert.ok(result.blockedBy.includes('dagdb_gateway_local_simulation_forbidden'));
+  assert.ok(result.blockedBy.includes('dagdb_gateway_cached_outcome_forbidden'));
+  assert.ok(result.blockedBy.includes('dagdb_gateway_override_forbidden'));
 });
 
 test('production activation fails closed on missing or mismatched public-claim runtime-source trust-state-view lineage', () => {

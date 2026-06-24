@@ -89,8 +89,13 @@ assertPresent(
 );
 assertPresent(
   contactSubmissionLib,
-  /CREATE TABLE IF NOT EXISTS site_contact_submissions/,
-  'contact-submission database backend must remain available',
+  /\/api\/v1\/dag-db\/intake/,
+  'contact-submission DAG DB backend must remain available',
+);
+assertAbsent(
+  contactSubmissionLib,
+  /site_contact_submissions|site_contact_rate_limits|CONTACT_DATABASE_URL/,
+  'contact-submission backend must not expose legacy public-table storage',
 );
 
 console.log('Contact-submission disclosure guard passed.');

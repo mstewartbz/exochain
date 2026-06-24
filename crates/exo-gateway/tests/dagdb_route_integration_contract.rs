@@ -376,15 +376,16 @@ async fn dagdb_routes_integration_contract() {
         idempotency_key: "idem-import-denied-no-consent".to_owned(),
         ..import_request.clone()
     };
-    let denied_import_signature =
-        import_signature(&db.pool, &keypair, &denied_import_request).await;
+    let denied_import_signatures =
+        import_signatures(&db.pool, &keypair, &denied_import_request).await;
     let denied_import = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &denied_import_request,
-            Some(denied_import_signature),
+            Some(denied_import_signatures.write_signature),
+            Some(denied_import_signatures.finality_signature),
         ))
         .await
         .expect("consent denied import response");
@@ -416,14 +417,15 @@ async fn dagdb_routes_integration_contract() {
         receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_approval_denied").await;
     let idempotency_before_import_consent_gap =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
-    let initial_import_signature = import_signature(&db.pool, &keypair, &import_request).await;
+    let initial_import_signatures = import_signatures(&db.pool, &keypair, &import_request).await;
     let import_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &import_request,
-            Some(initial_import_signature.clone()),
+            Some(initial_import_signatures.write_signature.clone()),
+            Some(initial_import_signatures.finality_signature.clone()),
         ))
         .await
         .expect("import response");
@@ -466,11 +468,12 @@ async fn dagdb_routes_integration_contract() {
     };
     let tenant_mismatch_import_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &tenant_mismatch_import,
-            Some(initial_import_signature.clone()),
+            Some(initial_import_signatures.write_signature.clone()),
+            Some(initial_import_signatures.finality_signature.clone()),
         ))
         .await
         .expect("import tenant mismatch response");
@@ -511,11 +514,12 @@ async fn dagdb_routes_integration_contract() {
     };
     let forged_import_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &forged_import_material,
-            Some(initial_import_signature),
+            Some(initial_import_signatures.write_signature.clone()),
+            Some(initial_import_signatures.finality_signature.clone()),
         ))
         .await
         .expect("forged import signature response");
@@ -543,14 +547,15 @@ async fn dagdb_routes_integration_contract() {
         approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let idempotency_before_import_success =
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.import").await;
-    let import_success_signature = import_signature(&db.pool, &keypair, &import_request).await;
+    let import_success_signatures = import_signatures(&db.pool, &keypair, &import_request).await;
     let import_success = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &import_request,
-            Some(import_success_signature.clone()),
+            Some(import_success_signatures.write_signature.clone()),
+            Some(import_success_signatures.finality_signature.clone()),
         ))
         .await
         .expect("import success response");
@@ -593,11 +598,12 @@ async fn dagdb_routes_integration_contract() {
         approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let import_replay = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &import_request,
-            Some(import_success_signature),
+            Some(import_success_signatures.write_signature),
+            Some(import_success_signatures.finality_signature),
         ))
         .await
         .expect("import replay response");
@@ -632,15 +638,16 @@ async fn dagdb_routes_integration_contract() {
     };
     let idempotency_conflicts_before_changed_import =
         receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_idempotency_conflict").await;
-    let changed_import_signature =
-        import_signature(&db.pool, &keypair, &changed_import_material).await;
+    let changed_import_signatures =
+        import_signatures(&db.pool, &keypair, &changed_import_material).await;
     let changed_import_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &changed_import_material,
-            Some(changed_import_signature),
+            Some(changed_import_signatures.write_signature),
+            Some(changed_import_signatures.finality_signature),
         ))
         .await
         .expect("changed import idempotency response");
@@ -2037,14 +2044,15 @@ async fn dagdb_routes_integration_contract() {
         idempotency_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb.export").await;
     let export_completed_before_export_consent_gap =
         receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await;
-    let export_write_signature = export_signature(&db.pool, &keypair, &export).await;
+    let export_consent_gap_signatures = export_signatures(&db.pool, &keypair, &export).await;
     let export_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_export_finality_signature(
             "/api/v1/dag-db/export",
             "dagdb:export",
             &export,
-            Some(export_write_signature),
+            Some(export_consent_gap_signatures.write_signature),
+            Some(export_consent_gap_signatures.finality_signature),
         ))
         .await
         .expect("export response");
@@ -2085,7 +2093,7 @@ async fn dagdb_routes_integration_contract() {
         active_import_export_consent_engine(),
         identity_registry_with_finality_authority(&keypair),
     );
-    let forged_export_signature = export_signature(&db.pool, &keypair, &export).await;
+    let forged_export_signatures = export_signatures(&db.pool, &keypair, &export).await;
     let signature_failures_before_forged_export =
         receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_signature_failure").await;
     let idempotency_before_forged_export =
@@ -2097,11 +2105,12 @@ async fn dagdb_routes_integration_contract() {
     };
     let forged_export_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_export_finality_signature(
             "/api/v1/dag-db/export",
             "dagdb:export",
             &forged_export_material,
-            Some(forged_export_signature),
+            Some(forged_export_signatures.write_signature),
+            Some(forged_export_signatures.finality_signature),
         ))
         .await
         .expect("forged export signature response");
@@ -2128,14 +2137,15 @@ async fn dagdb_routes_integration_contract() {
         receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_export_completed").await;
     let approval_counts_before_export_success =
         approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
-    let export_success_signature = export_signature(&db.pool, &keypair, &export).await;
+    let export_success_signatures = export_signatures(&db.pool, &keypair, &export).await;
     let export_success = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_export_finality_signature(
             "/api/v1/dag-db/export",
             "dagdb:export",
             &export,
-            Some(export_success_signature.clone()),
+            Some(export_success_signatures.write_signature.clone()),
+            Some(export_success_signatures.finality_signature.clone()),
         ))
         .await
         .expect("export success response");
@@ -2173,11 +2183,12 @@ async fn dagdb_routes_integration_contract() {
         approval_event_counts(&db.pool, TENANT_ID, NAMESPACE).await;
     let export_replay = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_export_finality_signature(
             "/api/v1/dag-db/export",
             "dagdb:export",
             &export,
-            Some(export_success_signature),
+            Some(export_success_signatures.write_signature),
+            Some(export_success_signatures.finality_signature),
         ))
         .await
         .expect("export replay response");
@@ -2207,15 +2218,16 @@ async fn dagdb_routes_integration_contract() {
     };
     let idempotency_conflicts_before_changed_export =
         receipt_event_count(&db.pool, TENANT_ID, NAMESPACE, "dagdb_idempotency_conflict").await;
-    let changed_export_signature =
-        export_signature(&db.pool, &keypair, &changed_export_material).await;
+    let changed_export_signatures =
+        export_signatures(&db.pool, &keypair, &changed_export_material).await;
     let changed_export_response = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_export_finality_signature(
             "/api/v1/dag-db/export",
             "dagdb:export",
             &changed_export_material,
-            Some(changed_export_signature),
+            Some(changed_export_signatures.write_signature),
+            Some(changed_export_signatures.finality_signature),
         ))
         .await
         .expect("changed export idempotency response");
@@ -2287,7 +2299,10 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("council error response");
-    assert_eq!(council_error.status(), StatusCode::NOT_FOUND);
+    assert_eq!(council_error.status(), StatusCode::BAD_REQUEST);
+    let council_error_body: DagDbErrorEnvelope = response_json(council_error).await;
+    assert_eq!(council_error_body.error_code, "invalid_request_shape");
+    assert_no_forbidden_material(&council_error_body.message);
 
     let writeback_request_metadata = DagDbWritebackRequest {
         tenant_id: TENANT_ID.to_owned(),
@@ -2384,9 +2399,10 @@ async fn dagdb_routes_integration_contract() {
     let provenance_body: DagDbErrorEnvelope = response_json(provenance_denied).await;
     assert_eq!(provenance_body.error_code, "provenance_denied");
 
-    // Regression (header-trust gap + synthetic scaffold success): reserved
-    // DTO-only surfaces must remain unmounted, while live mounted routes still
-    // fail closed when the standalone router has no DB-backed configuration.
+    // Regression (header-trust gap + synthetic scaffold success): the standalone
+    // router resolves the live integration context override in this process, so
+    // valid bearer calls must return typed persisted route DTOs while forged
+    // bearer calls fail closed.
     let standalone = dagdb_router::<()>();
     let fixtures = dagdb_fixtures();
     let trust_check = trust_check_request();
@@ -2401,7 +2417,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("forged bearer trust-check response");
-    assert_eq!(forged_trust.status(), StatusCode::NOT_FOUND);
+    assert_unauthenticated_without_standalone_session(forged_trust).await;
 
     let live_trust = standalone
         .clone()
@@ -2414,7 +2430,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer trust-check response");
-    assert_eq!(live_trust.status(), StatusCode::NOT_FOUND);
+    assert_success_schema(live_trust, "dagdb_trust_check_response_v1").await;
 
     let intake: DagDbIntakeRequest = dagdb_fixture(&fixtures, "intake");
     let live_intake = standalone
@@ -2428,7 +2444,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer intake response");
-    assert_eq!(live_intake.status(), StatusCode::NOT_FOUND);
+    assert_success_schema(live_intake, "dagdb_intake_response_v1").await;
 
     let route: DagDbRouteRequest = dagdb_fixture(&fixtures, "route");
     let live_route = standalone
@@ -2456,7 +2472,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer validate response");
-    assert_eq!(live_validation.status(), StatusCode::NOT_FOUND);
+    assert_success_schema(live_validation, "dagdb_validate_response_v1").await;
 
     let receipt: DagDbReceiptLookupRequest = dagdb_fixture(&fixtures, "receipt_lookup");
     let live_receipt = standalone
@@ -2470,7 +2486,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer receipt lookup response");
-    assert_eq!(live_receipt.status(), StatusCode::NOT_FOUND);
+    assert_not_found(live_receipt).await;
 
     let catalog: DagDbCatalogLookupRequest = dagdb_fixture(&fixtures, "catalog_lookup");
     let live_catalog = standalone
@@ -2484,7 +2500,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer catalog lookup response");
-    assert_eq!(live_catalog.status(), StatusCode::NOT_FOUND);
+    assert_not_found(live_catalog).await;
 
     let route_lookup: DagDbRouteLookupRequest = dagdb_fixture(&fixtures, "route_lookup");
     let live_route_lookup = standalone
@@ -2498,7 +2514,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer route lookup response");
-    assert_eq!(live_route_lookup.status(), StatusCode::NOT_FOUND);
+    assert_not_found(live_route_lookup).await;
 
     let forged_council = standalone
         .clone()
@@ -2511,7 +2527,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("forged bearer council response");
-    assert_eq!(forged_council.status(), StatusCode::NOT_FOUND);
+    assert_unauthenticated_without_standalone_session(forged_council).await;
 
     let live_council = standalone
         .clone()
@@ -2524,7 +2540,7 @@ async fn dagdb_routes_integration_contract() {
         ))
         .await
         .expect("live bearer council response");
-    assert_eq!(live_council.status(), StatusCode::NOT_FOUND);
+    assert_success_schema(live_council, "dagdb_council_decision_response_v1").await;
 
     db.cleanup().await;
 }
@@ -2561,14 +2577,15 @@ async fn writeback_rolls_back_usage_event_when_d5_continuation_persistence_fails
         requester_did: AGENT_DID.to_owned(),
         import_report: base_report(),
     };
-    let import_signature = import_signature(&db.pool, &keypair, &import_request).await;
+    let import_signatures = import_signatures(&db.pool, &keypair, &import_request).await;
     let import_success = app
         .clone()
-        .oneshot(scoped_post(
+        .oneshot(scoped_post_with_import_finality_signature(
             "/api/v1/dag-db/import",
             "dagdb:import",
             &import_request,
-            Some(import_signature),
+            Some(import_signatures.write_signature),
+            Some(import_signatures.finality_signature),
         ))
         .await
         .expect("seed import response");
@@ -3289,36 +3306,103 @@ fn writeback_d5_signatures(keypair: &KeyPair, request: &DagDbWritebackRequest) -
     (lifecycle_signature, continuation_signature)
 }
 
-async fn import_signature(
+struct OperationSignatures {
+    write_signature: String,
+    finality_signature: String,
+}
+
+async fn import_signatures(
     pool: &PgPool,
     keypair: &KeyPair,
     request: &DagDbImportRequest,
-) -> String {
+) -> OperationSignatures {
+    let authorization_payload_hash = import_authorization_payload_hash(pool, request).await;
+    let write_signature = sign_write_payload(keypair, authorization_payload_hash.as_bytes())
+        .expect("import signature");
+    let finality_payload_hash = import_finality_payload_hash(request, authorization_payload_hash);
+    let finality_signature = sign_write_payload(keypair, &finality_payload_hash)
+        .expect("import finality approval signature");
+    OperationSignatures {
+        write_signature,
+        finality_signature,
+    }
+}
+
+async fn export_signatures(
+    pool: &PgPool,
+    keypair: &KeyPair,
+    request: &DagDbExportRequest,
+) -> OperationSignatures {
+    let authorization_payload_hash = export_authorization_payload_hash(pool, request).await;
+    let write_signature = sign_write_payload(keypair, authorization_payload_hash.as_bytes())
+        .expect("export signature");
+    let finality_payload_hash = export_finality_payload_hash(request, authorization_payload_hash);
+    let finality_signature = sign_write_payload(keypair, &finality_payload_hash)
+        .expect("export finality approval signature");
+    OperationSignatures {
+        write_signature,
+        finality_signature,
+    }
+}
+
+async fn import_authorization_payload_hash(pool: &PgPool, request: &DagDbImportRequest) -> Hash256 {
     let selection =
         build_persistent_graph_context_selection(pool, &selection_request_for_import(request))
             .await
             .expect("selection for import signature");
-    sign_write_payload(
-        keypair,
-        &usage_event_payload_hash(&selection.selection).expect("import payload hash"),
+    Hash256::from_bytes(
+        usage_event_payload_hash(&selection.selection).expect("import payload hash"),
     )
-    .expect("import signature")
 }
 
-async fn export_signature(
-    pool: &PgPool,
-    keypair: &KeyPair,
-    request: &DagDbExportRequest,
-) -> String {
+async fn export_authorization_payload_hash(pool: &PgPool, request: &DagDbExportRequest) -> Hash256 {
     let selection =
         build_persistent_graph_context_selection(pool, &selection_request_for_export(request))
             .await
             .expect("selection for export signature");
-    sign_write_payload(
-        keypair,
-        &usage_event_payload_hash(&selection.selection).expect("export payload hash"),
+    Hash256::from_bytes(
+        usage_event_payload_hash(&selection.selection).expect("export payload hash"),
     )
-    .expect("export signature")
+}
+
+fn import_finality_payload_hash(
+    request: &DagDbImportRequest,
+    authorization_payload_hash: Hash256,
+) -> [u8; 32] {
+    decode_hex_hash(&gateway_hash_hex(
+        "dagdb.gateway.import.external_finality",
+        &(
+            &request.tenant_id,
+            &request.namespace,
+            &request.requester_did,
+            &request.idempotency_key,
+            &request.db_set_version,
+            &request.source_hash,
+            authorization_payload_hash.to_string(),
+            FINALITY_AUTHORITY_DID,
+            fixed_approval_timestamp(),
+        ),
+    ))
+}
+
+fn export_finality_payload_hash(
+    request: &DagDbExportRequest,
+    authorization_payload_hash: Hash256,
+) -> [u8; 32] {
+    decode_hex_hash(&gateway_hash_hex(
+        "dagdb.gateway.export.external_finality",
+        &(
+            &request.tenant_id,
+            &request.namespace,
+            &request.requester_did,
+            &request.idempotency_key,
+            &request.db_set_version,
+            export_request_hash(request).to_string(),
+            authorization_payload_hash.to_string(),
+            FINALITY_AUTHORITY_DID,
+            fixed_approval_timestamp(),
+        ),
+    ))
 }
 
 fn selection_request_for_import(
@@ -3935,6 +4019,72 @@ where
     request
 }
 
+fn scoped_post_with_import_finality_signature<T>(
+    path: &str,
+    action: &str,
+    body: &T,
+    write_signature: Option<String>,
+    import_approval_signature: Option<String>,
+) -> Request<Body>
+where
+    T: serde::Serialize,
+{
+    let mut request = scoped_post_with_bearer(BEARER, path, action, body, write_signature);
+    let headers = request.headers_mut();
+    if let Some(signature) = import_approval_signature {
+        headers.insert(
+            "x-exo-import-approval-signature",
+            signature.parse().expect("import approval signature header"),
+        );
+    }
+    headers.insert(
+        "x-exo-import-approval-did",
+        FINALITY_AUTHORITY_DID
+            .parse()
+            .expect("import approval DID header"),
+    );
+    headers.insert(
+        "x-exo-import-approval-timestamp",
+        fixed_approval_timestamp()
+            .parse()
+            .expect("import approval timestamp header"),
+    );
+    request
+}
+
+fn scoped_post_with_export_finality_signature<T>(
+    path: &str,
+    action: &str,
+    body: &T,
+    write_signature: Option<String>,
+    export_approval_signature: Option<String>,
+) -> Request<Body>
+where
+    T: serde::Serialize,
+{
+    let mut request = scoped_post_with_bearer(BEARER, path, action, body, write_signature);
+    let headers = request.headers_mut();
+    if let Some(signature) = export_approval_signature {
+        headers.insert(
+            "x-exo-export-approval-signature",
+            signature.parse().expect("export approval signature header"),
+        );
+    }
+    headers.insert(
+        "x-exo-export-approval-did",
+        FINALITY_AUTHORITY_DID
+            .parse()
+            .expect("export approval DID header"),
+    );
+    headers.insert(
+        "x-exo-export-approval-timestamp",
+        fixed_approval_timestamp()
+            .parse()
+            .expect("export approval timestamp header"),
+    );
+    request
+}
+
 fn scoped_post_with_d5_signatures<T>(
     path: &str,
     action: &str,
@@ -4092,6 +4242,28 @@ async fn response_json<T: DeserializeOwned>(response: axum::response::Response) 
     serde_json::from_slice(&bytes).expect("json body")
 }
 
+async fn assert_success_schema(response: axum::response::Response, expected_schema: &str) {
+    let status = response.status();
+    let body: JsonValue = response_json(response).await;
+    assert!(
+        matches!(status, StatusCode::OK | StatusCode::CREATED),
+        "mounted live DAG DB route must return typed persisted success: {body:?}"
+    );
+    assert_eq!(body["schema_version"], expected_schema);
+}
+
+async fn assert_not_found(response: axum::response::Response) {
+    let status = response.status();
+    let body: DagDbErrorEnvelope = response_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "mounted live DAG DB lookup must return typed not_found for absent rows: {body:?}"
+    );
+    assert_eq!(body.error_code, "not_found");
+    assert_no_forbidden_material(&body.message);
+}
+
 async fn assert_standalone_route_requires_write_signature(response: axum::response::Response) {
     let status = response.status();
     let body: DagDbErrorEnvelope = response_json(response).await;
@@ -4110,6 +4282,18 @@ async fn assert_standalone_route_requires_write_signature(response: axum::respon
         body.operational_event_type.as_deref(),
         Some("dagdb_signature_failure")
     );
+    assert_no_forbidden_material(&body.message);
+}
+
+async fn assert_unauthenticated_without_standalone_session(response: axum::response::Response) {
+    let status = response.status();
+    let body: DagDbErrorEnvelope = response_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "standalone DAG DB router must reject forged bearer state before persistence: {body:?}"
+    );
+    assert_eq!(body.error_code, "unauthenticated");
     assert_no_forbidden_material(&body.message);
 }
 

@@ -30,7 +30,9 @@
  * Every function throws on WASM error — callers are responsible for try/catch.
  */
 
-const wasm = require('../../../packages/exochain-wasm/wasm');
+const { loadExochainWasm } = require('./wasm-loader');
+
+const wasm = loadExochainWasm();
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 

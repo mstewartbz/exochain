@@ -97,6 +97,8 @@ const EXO_DAGDB_MCP_ENV_VARS: &[&str] = &[
     EXO_DAGDB_TENANT_ID_ENV,
     EXO_DAGDB_NAMESPACE_ENV,
 ];
+const EXO_DAGDB_NODE_TENANT_ID_ENV: &str = "EXO_DAGDB_TENANT_ID";
+const EXO_DAGDB_NODE_NAMESPACE_ENV: &str = "EXO_DAGDB_NAMESPACE";
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -456,12 +458,28 @@ fn avc_require_postgres_durability_from_env() -> anyhow::Result<bool> {
     }
 }
 
-fn warn_avc_non_postgres_durability(data_dir: &std::path::Path) {
-    tracing::warn!(
-        data_dir = %data_dir.display(),
-        required_env = avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV,
-        "PRODUCTION AVC DURABILITY WARNING: DATABASE_URL not configured; AVC registry runtime credentials, revocations, and trust receipts will use local file fallback in the node data directory, not Postgres"
-    );
+fn required_env_value(name: &str) -> anyhow::Result<String> {
+    match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => Ok(value),
+        Ok(_) => anyhow::bail!("{name} must not be empty"),
+        Err(std::env::VarError::NotPresent) => anyhow::bail!("{name} is required"),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} is not valid Unicode"),
+    }
+}
+
+fn dagdb_node_scope_from_env() -> anyhow::Result<(String, String)> {
+    Ok((
+        required_env_value(EXO_DAGDB_NODE_TENANT_ID_ENV)?,
+        required_env_value(EXO_DAGDB_NODE_NAMESPACE_ENV)?,
+    ))
+}
+
+async fn gateway_pool_from_env() -> anyhow::Result<sqlx::PgPool> {
+    let database_url = required_env_value("DATABASE_URL")?;
+    tracing::info!("DATABASE_URL configured - initializing gateway and DAG DB readiness pool");
+    exo_gateway::db::init_pool(&database_url)
+        .await
+        .map_err(|error| anyhow::anyhow!("gateway database initialization failed: {error}"))
 }
 
 /// Start all subsystems for a running node.
@@ -492,13 +510,27 @@ async fn start_node(
         "Node identity ready"
     );
 
-    // Open local DAG store.
-    let dag_store = store::SqliteDagStore::open(data_dir)?;
+    avc_require_postgres_durability_from_env()?;
+    let gateway_pool = gateway_pool_from_env().await?;
+    let (dagdb_tenant_id, dagdb_namespace) = dagdb_node_scope_from_env()?;
+
+    // Open DAG DB-backed node store.
+    let dag_store = store::DagDbNodeStore::open(
+        gateway_pool.clone(),
+        dagdb_tenant_id.clone(),
+        dagdb_namespace.clone(),
+    )
+    .await?;
     let height = dag_store.committed_height_value()?;
     tracing::info!(height, "DAG store opened");
 
-    // Open 0dentity store (shares the same dag.db, applies zerodentity migration).
-    let mut zerodentity_store = zerodentity::store::ZerodentityStore::open(data_dir)?;
+    // Open the DAG DB-backed 0dentity store.
+    let mut zerodentity_store = zerodentity::store::ZerodentityStore::open_dagdb(
+        gateway_pool.clone(),
+        dagdb_tenant_id.clone(),
+        dagdb_namespace.clone(),
+    )
+    .await?;
     let zd_receipt_signer: zerodentity::store::ReceiptSigner = {
         let identity = identity::load_or_create(data_dir)?;
         Arc::new(move |payload: &[u8]| identity.sign(payload))
@@ -1017,43 +1049,13 @@ async fn start_node(
         drop(alert_rx);
     }
 
-    let require_avc_postgres_durability = avc_require_postgres_durability_from_env()?;
-    let gateway_pool = match std::env::var("DATABASE_URL") {
-        Ok(database_url) => {
-            tracing::info!("DATABASE_URL configured - initializing gateway readiness pool");
-            Some(
-                exo_gateway::db::init_pool(&database_url)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("gateway database initialization failed: {error}")
-                    })?,
-            )
-        }
-        Err(std::env::VarError::NotPresent) => {
-            if require_avc_postgres_durability {
-                anyhow::bail!(
-                    "{} is enabled but DATABASE_URL is not configured; AVC registry would use the local file fallback, which does not meet production Postgres durability requirements",
-                    avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV
-                );
-            }
-            warn_avc_non_postgres_durability(data_dir);
-            tracing::warn!(
-                "DATABASE_URL not configured - /ready will remain unavailable until a database is configured"
-            );
-            None
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("DATABASE_URL is not valid Unicode");
-        }
-    };
-
     // Build the AVC API router (Autonomous Volition Credentials).
     let avc_state = Arc::new(
         avc::AvcApiState::with_durable_registry(
             data_dir,
             node_identity.did.clone(),
             Arc::clone(&sign_fn),
-            gateway_pool.clone(),
+            Some(gateway_pool.clone()),
         )
         .await?,
     );
@@ -1165,7 +1167,7 @@ async fn start_node(
 
     let serve_fut = exo_gateway::server::serve_with_extra_routes(
         gateway_config,
-        gateway_pool,
+        Some(gateway_pool),
         Some(extra_router),
     );
 
@@ -1264,7 +1266,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Status { data_dir } => {
             let data_dir = config::resolve_data_dir(data_dir)?;
             let node_identity = identity::load_or_create(&data_dir)?;
-            let dag_store = store::SqliteDagStore::open(&data_dir)?;
+            let gateway_pool = gateway_pool_from_env().await?;
+            let (dagdb_tenant_id, dagdb_namespace) = dagdb_node_scope_from_env()?;
+            let dag_store =
+                store::DagDbNodeStore::open(gateway_pool, dagdb_tenant_id, dagdb_namespace).await?;
 
             println!("Node:   {}", node_identity.did);
             println!("Height: {}", dag_store.committed_height_value()?);
@@ -1697,18 +1702,18 @@ mod tests {
         let source = include_str!("main.rs");
         let production = source.split("#[cfg(test)]").next().unwrap();
         let gateway_section = production
-            .split("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .split("let gateway_pool = gateway_pool_from_env().await?")
             .nth(1)
             .and_then(|section| section.split("let run_result = tokio::select!").next())
             .unwrap();
 
         assert!(
-            gateway_section.contains("exo_gateway::db::init_pool(&database_url)"),
+            production.contains("async fn gateway_pool_from_env()"),
             "node startup must initialize the gateway DB pool when DATABASE_URL is configured"
         );
         assert!(
             gateway_section.contains(
-                "serve_with_extra_routes(\n        gateway_config,\n        gateway_pool,"
+                "serve_with_extra_routes(\n        gateway_config,\n        Some(gateway_pool),"
             ),
             "node startup must pass the initialized DB pool to gateway readiness routes"
         );
@@ -1739,7 +1744,7 @@ mod tests {
         let source = include_str!("main.rs");
         let production = source.split("#[cfg(test)]").next().unwrap();
         let pool_index = production
-            .find("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .find("let gateway_pool = gateway_pool_from_env().await?")
             .expect("gateway pool initialization present");
         let avc_index = production
             .find("AvcApiState::with_durable_registry")
@@ -1749,9 +1754,101 @@ mod tests {
             "DATABASE_URL-backed pool must be initialized before AVC durable registry startup"
         );
         assert!(
-            production[avc_index..].contains("gateway_pool.clone()"),
+            production[avc_index..].contains("Some(gateway_pool.clone())"),
             "AVC durable registry must reuse the gateway database pool instead of requiring a separate /data-backed store"
         );
+    }
+
+    #[test]
+    fn node_production_startup_uses_dagdb_store_not_sqlite_dag_db() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let start_node = production
+            .split("async fn start_node(")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("async fn load_configured_root_trust_bundle")
+                    .next()
+            })
+            .expect("start_node source present");
+        let status_branch = production
+            .split("Command::Status { data_dir } =>")
+            .nth(1)
+            .and_then(|section| section.split("Command::Peers").next())
+            .expect("status command source present");
+
+        for (label, section) in [
+            ("start_node", start_node),
+            ("status command", status_branch),
+        ] {
+            assert!(
+                !section.contains("SqliteDagStore::open"),
+                "{label} must not open the legacy SQLite dag.db store in production"
+            );
+            assert!(
+                !section.contains("dag.db"),
+                "{label} must not reference the legacy SQLite dag.db file in production"
+            );
+        }
+        assert!(
+            start_node.contains("DagDbNodeStore::open"),
+            "production node startup must open the DAG DB node store"
+        );
+        assert!(
+            status_branch.contains("DagDbNodeStore::open"),
+            "node status must read committed height from the DAG DB node store"
+        );
+    }
+
+    #[test]
+    fn zerodentity_restart_persists_dagdb_state() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let start_node = production
+            .split("async fn start_node(")
+            .nth(1)
+            .and_then(|section| {
+                section
+                    .split("async fn load_configured_root_trust_bundle")
+                    .next()
+            })
+            .expect("start_node source present");
+        let store_source = include_str!("zerodentity/store.rs");
+        let store_production = store_source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("0dentity store production section present");
+
+        assert!(
+            start_node.contains("ZerodentityStore::open_dagdb"),
+            "production node startup must open 0dentity through the DAG DB-backed store"
+        );
+        assert!(
+            !start_node.contains("ZerodentityStore::open(data_dir)"),
+            "production node startup must not open the memory-only 0dentity store"
+        );
+        assert!(
+            store_production.contains("pub const ZERODENTITY_STORE_PERSISTENCE_READY: bool = true"),
+            "0dentity persistence_ready() must become true only after DAG DB reload is wired"
+        );
+        for (family, variant) in [
+            ("claim", "Claim"),
+            ("score", "Score"),
+            ("otp_challenge", "OtpChallenge"),
+            ("otp_lockout", "OtpLockout"),
+            ("attestation", "Attestation"),
+            ("identity_session", "IdentitySession"),
+            ("session_nonce", "SessionNonce"),
+            ("dag_node", "DagNode"),
+            ("trust_receipt", "TrustReceipt"),
+        ] {
+            assert!(
+                store_production.contains(&format!("ZerodentityRecordFamily::{variant}"))
+                    && store_production.contains(&format!("\"{family}\"")),
+                "0dentity DAG DB persistence must cover {family} records"
+            );
+        }
     }
 
     #[test]
@@ -1781,39 +1878,40 @@ mod tests {
     }
 
     #[test]
-    fn avc_registry_missing_database_url_warns_and_can_fail_closed() {
+    fn node_startup_requires_database_url_for_dagdb_node_store() {
         let source = include_str!("main.rs");
         let production = source.split("#[cfg(test)]").next().unwrap();
-        let gateway_section = production
-            .split("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+        let gateway_pool_from_env = production
+            .split("async fn gateway_pool_from_env()")
             .nth(1)
-            .and_then(|section| section.split("let avc_state = Arc::new").next())
-            .unwrap();
-        let missing_database_url_branch = gateway_section
-            .split("Err(std::env::VarError::NotPresent)")
+            .and_then(|section| section.split("/// Start all subsystems").next())
+            .expect("gateway_pool_from_env source present");
+        let start_node = production
+            .split("async fn start_node(")
             .nth(1)
-            .and_then(|section| section.split("Err(std::env::VarError::NotUnicode").next())
-            .unwrap();
+            .and_then(|section| {
+                section
+                    .split("async fn load_configured_root_trust_bundle")
+                    .next()
+            })
+            .expect("start_node source present");
 
         assert!(
-            production.contains("fn avc_require_postgres_durability_from_env"),
-            "node startup must expose an explicit AVC Postgres durability guard"
+            gateway_pool_from_env.contains("required_env_value(\"DATABASE_URL\")"),
+            "node startup must fail closed when DATABASE_URL is absent"
         );
         assert!(
-            production.contains("avc::AVC_REQUIRE_POSTGRES_DURABILITY_ENV"),
-            "AVC Postgres durability guard must use the AVC-owned env constant"
+            start_node.contains("let gateway_pool = gateway_pool_from_env().await?;"),
+            "node startup must initialize the database pool before opening durable stores"
         );
         assert!(
-            missing_database_url_branch.contains("if require_avc_postgres_durability"),
-            "missing DATABASE_URL branch must check the fail-closed AVC durability guard"
+            start_node.contains("DagDbNodeStore::open(")
+                && start_node.contains("gateway_pool.clone()"),
+            "node startup must use DATABASE_URL-backed DAG DB for canonical DAG state"
         );
         assert!(
-            missing_database_url_branch.contains("anyhow::bail!"),
-            "enabled AVC Postgres durability guard must fail closed without DATABASE_URL"
-        );
-        assert!(
-            missing_database_url_branch.contains("warn_avc_non_postgres_durability(data_dir)"),
-            "missing DATABASE_URL branch must warn operators before using local AVC file fallback"
+            !start_node.contains("warn_avc_non_postgres_durability"),
+            "node startup must not warn-and-fallback to local DAG persistence"
         );
     }
 
@@ -1822,14 +1920,19 @@ mod tests {
         let source = include_str!("main.rs");
         let production = source.split("#[cfg(test)]").next().unwrap();
         let gateway_section = production
-            .split("let gateway_pool = match std::env::var(\"DATABASE_URL\")")
+            .split("async fn gateway_pool_from_env()")
             .nth(1)
             .and_then(|section| section.split("if is_join").next())
             .unwrap();
+        let gateway_logging = gateway_section
+            .lines()
+            .filter(|line| line.contains("tracing::"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         for forbidden in ["%database_url", "{database_url}", "database_url ="] {
             assert!(
-                !gateway_section.contains(forbidden),
+                !gateway_logging.contains(forbidden),
                 "gateway DB initialization logs must not expose the database URL"
             );
         }

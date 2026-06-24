@@ -4,9 +4,8 @@
   "description": "Autonomous worker for The Team — processes tasks via Claude Code CLI",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "better-sqlite3": "^11.7.0"
+    "start": "node index.js",
+    "test": "node --test",
+    "test:coverage": "node --experimental-test-coverage --test-coverage-include=worker-db.js --test-coverage-lines=90 --test worker-dagdb-adapter.test.js"
   }
 }

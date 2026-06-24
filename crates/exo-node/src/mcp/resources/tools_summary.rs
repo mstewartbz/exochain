@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! `exochain://tools` — summary list of all 42 MCP tools grouped by domain.
+//! `exochain://tools` — summary list of all registered MCP tools grouped by domain.
 //!
 //! Walks the live [`ToolRegistry`] to compute the param count per tool so
 //! the summary stays in sync with the actual definitions.
@@ -34,7 +34,7 @@ pub fn definition() -> ResourceDefinition {
         uri: "exochain://tools".into(),
         name: "MCP Tools Summary".into(),
         description: Some(
-            "Summary of all 42 MCP tools grouped by domain (node, identity, \
+            "Summary of all registered MCP tools grouped by domain (node, identity, \
              consent, governance, authority, ledger, proofs, legal, escalation, \
              messaging, dagdb). Each entry includes the tool name, human-readable \
              description, domain, and parameter count computed from the \
@@ -86,9 +86,18 @@ fn domain_for(name: &str) -> &'static str {
         "exochain_send_encrypted"
         | "exochain_receive_encrypted"
         | "exochain_configure_death_trigger" => "messaging",
-        "dagdb_get_context_packet" | "dagdb_submit_writeback" | "dagdb_import" | "dagdb_export" => {
-            "dagdb"
-        }
+        "dagdb_intake"
+        | "dagdb_route"
+        | "dagdb_get_context_packet"
+        | "dagdb_validate"
+        | "dagdb_submit_writeback"
+        | "dagdb_import"
+        | "dagdb_export"
+        | "dagdb_trust_check"
+        | "dagdb_council_decision"
+        | "dagdb_receipt_lookup"
+        | "dagdb_catalog_lookup"
+        | "dagdb_route_lookup" => "dagdb",
         _ => "unknown",
     }
 }
@@ -186,13 +195,14 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_44_tools() {
+    fn read_matches_registered_tool_inventory() {
         let content = read(&NodeContext::empty());
         let text = content.text.expect("text present");
         let parsed: Value = serde_json::from_str(&text).expect("valid JSON");
-        assert_eq!(parsed["total"], 44);
+        let expected = ToolRegistry::default().list().len();
+        assert_eq!(parsed["total"], expected);
         let tools = parsed["tools"].as_array().expect("array");
-        assert_eq!(tools.len(), 44);
+        assert_eq!(tools.len(), expected);
     }
 
     #[test]
@@ -211,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_counts_sum_to_44() {
+    fn domain_counts_sum_to_registered_tool_inventory() {
         let content = read(&NodeContext::empty());
         let text = content.text.unwrap();
         let parsed: Value = serde_json::from_str(&text).unwrap();
@@ -221,6 +231,8 @@ mod tests {
             .iter()
             .map(|d| d["count"].as_u64().unwrap())
             .sum();
-        assert_eq!(total, 44);
+        let registry_total = u64::try_from(ToolRegistry::default().list().len())
+            .expect("registered MCP tool count fits in u64");
+        assert_eq!(total, registry_total);
     }
 }

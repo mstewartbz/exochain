@@ -22,6 +22,13 @@
  *  human presentment, and council-advised implementation planning.
  */
 
+import {
+  cacheDagDbDurableState,
+  hydrateDagDbDurableState,
+  persistDagDbDurableState,
+  readCachedDagDbDurableState,
+} from './dagdbDurableState'
+
 // ---------------------------------------------------------------------------
 // Ticket tag taxonomy
 // ---------------------------------------------------------------------------
@@ -269,30 +276,31 @@ export function createTicketFromConversation(
 }
 
 // ---------------------------------------------------------------------------
-// Local persistence
+// DAG DB durable persistence
 // ---------------------------------------------------------------------------
 
-const TICKETS_KEY = 'df_council_tickets'
-const CONVERSATIONS_KEY = 'df_council_conversations'
-
 export function persistTickets(tickets: CouncilTicket[]): void {
-  localStorage.setItem(TICKETS_KEY, JSON.stringify(tickets))
+  cacheDagDbDurableState('council-tickets', tickets)
+  void persistDagDbDurableState('council-tickets', tickets).catch(() => undefined)
 }
 
 export function loadTickets(): CouncilTicket[] {
-  try {
-    const raw = localStorage.getItem(TICKETS_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch { return [] }
+  return readCachedDagDbDurableState<CouncilTicket[]>('council-tickets', [])
+}
+
+export async function hydrateTickets(): Promise<CouncilTicket[]> {
+  return hydrateDagDbDurableState<CouncilTicket[]>('council-tickets', [])
 }
 
 export function persistConversations(conversations: Conversation[]): void {
-  localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations))
+  cacheDagDbDurableState('council-conversations', conversations)
+  void persistDagDbDurableState('council-conversations', conversations).catch(() => undefined)
 }
 
 export function loadConversations(): Conversation[] {
-  try {
-    const raw = localStorage.getItem(CONVERSATIONS_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch { return [] }
+  return readCachedDagDbDurableState<Conversation[]>('council-conversations', [])
+}
+
+export async function hydrateConversations(): Promise<Conversation[]> {
+  return hydrateDagDbDurableState<Conversation[]>('council-conversations', [])
 }

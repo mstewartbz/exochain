@@ -17,10 +17,14 @@
 // Command Base v2.0
 const express = require('express');
 const compression = require('compression');
-const Database = require('better-sqlite3');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const {
+  createCommandBaseDb,
+  defaultCommandBaseDbPath,
+} = require('./lib/commandbase-db-factory');
+const { mountCommandBaseUiStateRoutes } = require('./lib/commandbase-ui-state');
 
 // ── Structured logger — must come before any console.* calls ──
 const logger = require('./logger');
@@ -47,21 +51,17 @@ if (process.env.TRUST_PROXY) {
 }
 
 const PORT = process.env.PORT || 3000;
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'the_team.db');
+const DB_PATH = process.env.DB_PATH || defaultCommandBaseDbPath(__dirname);
 const INBOX_PATH = process.env.INBOX_PATH || path.join(__dirname, '..', 'Teams inbox:Result');
 const OUTBOX_PATH = process.env.OUTBOX_PATH || path.join(__dirname, '..', "Stew's inbox:Owner");
 
 let db;
 function openDatabase(dbPath) {
-  const d = new Database(dbPath, { fileMustExist: false });
-  d.pragma('journal_mode = WAL');
-  d.pragma('foreign_keys = ON');
-  d.pragma(`busy_timeout = ${parseInt(process.env.DB_BUSY_TIMEOUT || '5000', 10)}`);
-  d.pragma('synchronous = NORMAL');
-  d.pragma(`cache_size = ${parseInt(process.env.DB_CACHE_SIZE || '-65536', 10)}`);
-  d.pragma('temp_store = MEMORY');
-  d.pragma(`mmap_size = ${parseInt(process.env.DB_MMAP_SIZE || '268435456', 10)}`);
-  return d;
+  return createCommandBaseDb({
+    dbPath,
+    databaseId: 'commandbase-main',
+    fileMustExist: false,
+  });
 }
 
 try {
@@ -118,7 +118,7 @@ try {
 }
 
 // ── Prepared Statement Cache ──────────────────────────────────
-// better-sqlite3's db.prepare() parses and compiles SQL on every call.
+// The active persistence adapter's db.prepare() compiles or records SQL on every call.
 // With 1700+ inline prepare() calls, hot endpoints re-parse the same SQL
 // on every request. This cache ensures each unique SQL string is parsed
 // only once for the lifetime of the process.
@@ -241,7 +241,12 @@ function getBackupDir() {
 function verifyBackupIntegrity(backupPath) {
   let backupDb;
   try {
-    backupDb = new Database(backupPath, { readonly: true, fileMustExist: true });
+    backupDb = createCommandBaseDb({
+      dbPath: backupPath,
+      databaseId: 'commandbase-backup-verify',
+      fileMustExist: true,
+      readonly: true,
+    });
     const result = backupDb.pragma('integrity_check');
     const status = result && result.length === 1 && result[0].integrity_check === 'ok' ? 'ok' : JSON.stringify(result);
     if (status !== 'ok') {
@@ -271,6 +276,11 @@ function verifyBackupIntegrity(backupPath) {
 }
 
 function runDailyBackup() {
+  if (typeof db.backup !== 'function') {
+    console.log('[Backup] DAG DB adapter active; local compatibility backup skipped.');
+    return;
+  }
+
   const resolvedDir = getBackupDir();
   if (!fs.existsSync(resolvedDir)) {
     try { fs.mkdirSync(resolvedDir, { recursive: true }); }
@@ -281,10 +291,9 @@ function runDailyBackup() {
   const backupPath = path.join(resolvedDir, `the_team_${dateStr}.db`);
   if (fs.existsSync(backupPath)) return; // already done today
 
-  // CORRUPTION FIX: NEVER use fs.copyFileSync on a WAL-mode SQLite database.
+  // Compatibility SQL backup: never use fs.copyFileSync on a WAL-mode database.
   // It copies only the main file without the WAL, creating a corrupted snapshot.
-  // Under heavy write load (35+ intervals), this is guaranteed to corrupt.
-  // ONLY use db.backup() which is SQLite's native online backup API.
+  // Only use the adapter's online backup API.
   try {
     // Force WAL checkpoint before backup — flush all pending writes to main DB file
     try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (cpErr) {
@@ -300,7 +309,7 @@ function runDailyBackup() {
       .catch(e => {
         // db.backup() failed — DO NOT fall back to fs.copyFileSync (causes corruption)
         // Log the failure and skip this backup cycle. Next cycle will try again.
-        console.error(`[Backup] SQLite backup API failed: ${e.message}. Skipping this cycle (will retry next interval). DO NOT use fs.copyFileSync on WAL databases.`);
+        console.error(`[Backup] Compatibility backup API failed: ${e.message}. Skipping this cycle (will retry next interval). DO NOT use fs.copyFileSync on WAL databases.`);
         // Clean up partial backup file if it was created
         try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch (_) {}
       });
@@ -357,11 +366,11 @@ setInterval(() => {
   _backupIntervalId = setInterval(runDailyBackup, newMs);
 }, 5 * 60 * 1000);
 
-// ── WAL Checkpoint Scheduler (3 AM daily) ─────────────────────
-// SQLite auto-checkpoints at 1000 pages by default, which can cause brief
-// latency spikes under load. Running PASSIVE checkpoint at 3 AM keeps the
-// WAL file size manageable without blocking any active readers or writers.
+// ── Compatibility Checkpoint Scheduler (3 AM daily) ───────────
+// Test/dev SQL adapters may expose a WAL checkpoint. DAG DB production
+// adapters ignore this path because durability is owned by the gateway.
 function runWalCheckpoint() {
+  if (typeof db.recordDurableState === 'function') return;
   try {
     const result = db.pragma('wal_checkpoint(PASSIVE)');
     const info = result && result[0] ? result[0] : {};
@@ -715,7 +724,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS project_repos (
 db.exec(`INSERT OR IGNORE INTO system_settings (key, value) VALUES ('project_autonomous_interval', '120')`);
 
 // ── Migration: Remove CHECK constraint from member_tools ──────
-// SQLite CHECK constraints can't be altered, so recreate the table without it.
+// Compatibility SQL CHECK constraints cannot be altered in place, so recreate the table without it.
 // This allows oauth_token, session_token, and any future tool_type values.
 try {
   db.exec(`CREATE TABLE IF NOT EXISTS member_tools_new (
@@ -3639,6 +3648,8 @@ app.use('/api/v1', (req, res, next) => {
   }), res, next);
 });
 
+mountCommandBaseUiStateRoutes(app, db);
+
 // Static assets: type-specific Cache-Control durations via setHeaders so that
 // express.static's own header logic cannot overwrite them with max-age=0.
 // HTML: no-cache (always revalidate — entry point must never go stale).
@@ -4213,7 +4224,7 @@ function triggerOptimizationAuditForProject(taskId, now) {
     const forgeResult = db.prepare(`INSERT INTO tasks (title, description, status, priority, assigned_to, source_file, created_at, updated_at)
       VALUES (?,?,?,?,?,?,?,?)`).run(
       `[Optimization Audit] Forge: Skill optimization & pattern analysis — project: ${projectName}`,
-      `Auto-triggered on project task delivery (task #${taskId}).\n\nAnalyze completed work in project "${projectName}" (ID: ${projectId}).\n\n## STEP 1: Check existing skills\nRun: sqlite3 "../the_team.db" "SELECT id, name, category FROM skills WHERE status=\'active\' ORDER BY name;"\n\n## STEP 2: Check recent task patterns\nRun: sqlite3 "../the_team.db" "SELECT title, assigned_to FROM tasks WHERE status=\'delivered\' ORDER BY id DESC LIMIT 10;"\n\n## STEP 3: For each proposal, INSERT directly into skills_proposals\nRun: sqlite3 "../the_team.db" "INSERT INTO skills_proposals (skill_name, display_name, description, category, rationale, skill_content, target_members, proposed_by, proposal_type, parent_skill_id, status, created_at, updated_at) VALUES (\'skill-name\', \'Display Name\', \'What it does\', \'category\', \'Why this is needed — evidence from recent tasks\', \'The skill prompt content\', \'[]\', 16, \'new\', NULL, \'pending\', datetime(\'now\',\'localtime\'), datetime(\'now\',\'localtime\'));"\n\nPRIORITY ORDER: upgrade > merge > deprecate > new. Always check existing skills first.\nFor upgrades, set proposal_type=\'upgrade\' and parent_skill_id to the existing skill ID.`,
+      `Auto-triggered on project task delivery (task #${taskId}).\n\nAnalyze completed work in project "${projectName}" (ID: ${projectId}).\n\n## STEP 1: Check existing skills\nUse the CommandBase persistence API to list active skills ordered by name.\n\n## STEP 2: Check recent task patterns\nUse the CommandBase persistence API to inspect recently delivered tasks.\n\n## STEP 3: For each proposal, create a governed skills proposal through the CommandBase API so the DAG DB adapter records the operation.\n\nPRIORITY ORDER: upgrade > merge > deprecate > new. Always check existing skills first.\nFor upgrades, set proposal_type=\'upgrade\' and parent_skill_id to the existing skill ID.`,
       'routing', 'normal', FORGE_MEMBER_ID, `project:${projectId}`, now, now
     );
     const forgeTaskId = Number(forgeResult.lastInsertRowid);
@@ -9867,14 +9878,14 @@ const IMPROVEMENT_COMPONENTS = {
     efforts:  ['medium', 'small', 'medium', 'small', 'small', 'medium', 'medium', 'small', 'medium', 'small'],
     actions: ['Optimize', 'Cache', 'Batch', 'Preload', 'Debounce', 'Compress', 'Memoize', 'Parallelize', 'Minimize', 'Defer'],
     targets: [
-      ['database queries', 'Profile slow SQLite queries and add indexes on frequently filtered columns (status, priority, created_at) to cut read times.'],
+      ['database queries', 'Profile slow CommandBase persistence queries and add indexes on frequently filtered columns (status, priority, created_at) to cut read times.'],
       ['API response payloads', 'Trim unnecessary fields from API responses and return only the data each view needs to reduce bandwidth.'],
       ['page load time', 'Reduce time-to-interactive by deferring non-critical scripts and inlining critical CSS for the initial render path.'],
       ['client-side bundle', 'Audit and reduce the JavaScript bundle by removing unused dependencies and splitting heavy modules.'],
       ['list rendering', 'Replace full DOM re-renders with targeted updates to only changed items in long task and activity lists.'],
       ['WebSocket event handling', 'Throttle high-frequency WebSocket events on the client to prevent excessive DOM updates during rapid bursts.'],
       ['image and asset loading', 'Apply lazy loading to below-the-fold images and add proper cache-control headers for all static assets.'],
-      ['SQLite write operations', 'Wrap synchronous DB writes inside explicit transactions to reduce I/O overhead on bulk inserts.'],
+      ['persistence write operations', 'Wrap bulk adapter writes inside explicit transaction boundaries to reduce I/O overhead on bulk inserts.'],
       ['CSS paint operations', 'Reduce layout thrashing by consolidating DOM reads and writes and avoiding forced reflows in animation loops.'],
       ['in-memory caching layer', 'Add a short-lived in-memory cache for team_members and system_settings to reduce repeated DB round-trips.'],
       ['font loading strategy', 'Switch to font-display: swap and preload critical fonts to eliminate render-blocking font requests.'],
@@ -9971,7 +9982,7 @@ const IMPROVEMENT_COMPONENTS = {
       ['static asset cache headers', 'Set Cache-Control headers on JS, CSS, and image responses to reduce repeat load times for returning users.'],
       ['environment configuration', 'Move all hardcoded values (ports, timeouts, thresholds) to environment variables with documented defaults.'],
       ['API versioning strategy', 'Prefix all routes with /api/v1/ to enable non-breaking API evolution without affecting existing clients.'],
-      ['database backup routine', 'Schedule periodic SQLite backups to a timestamped file in a configurable backup directory.'],
+      ['database backup routine', 'Schedule periodic compatibility-store backups to a timestamped file in a configurable backup directory.'],
       ['response compression', 'Enable gzip/brotli compression middleware for JSON API responses to reduce payload sizes.'],
       ['error boundary middleware', 'Add a final Express error handler that returns structured JSON errors instead of HTML stack traces.'],
       ['connection timeout policy', 'Set explicit request and response timeouts to prevent hung connections from blocking the event loop.'],
@@ -22321,7 +22332,7 @@ function getDefaultSystemMapNodes() {
     // ── Task Lifecycle Flow ──
     { id: 'mission-control', category: 'process', label: 'Mission Control', subtitle: 'Task Input', icon: 'terminal', color: '#22C55E', x: 100, y: 100 },
     { id: 'api-mission', category: 'data', label: 'POST /api/mission', subtitle: 'Task Intake API', icon: 'api', color: '#3B82F6', x: 320, y: 100 },
-    { id: 'task-created', category: 'data', label: 'Task Created', subtitle: 'SQLite tasks table', icon: 'database', color: '#3B82F6', x: 540, y: 100 },
+    { id: 'task-created', category: 'data', label: 'Task Created', subtitle: 'DAG DB task record', icon: 'database', color: '#3B82F6', x: 540, y: 100 },
     { id: 'board-routing', category: 'governance', label: 'Board Routing', subtitle: 'Chain of Command', icon: 'route', color: '#A855F7', x: 760, y: 100 },
     { id: 'executive-assign', category: 'team', label: 'Executive Assignment', subtitle: 'C-Suite delegates', icon: 'user-tie', color: '#F97316', x: 980, y: 100 },
     { id: 'specialist-assign', category: 'team', label: 'Specialist Assignment', subtitle: 'Worker selected', icon: 'user-cog', color: '#F97316', x: 1200, y: 100 },
@@ -22336,7 +22347,7 @@ function getDefaultSystemMapNodes() {
     { id: 'specialists', category: 'team', label: 'Specialists', subtitle: '68 members', icon: 'users', color: '#F97316', x: 700, y: 480 },
 
     // ── Data Flow ──
-    { id: 'sqlite-db', category: 'data', label: 'SQLite Database', subtitle: 'the_team.db', icon: 'database', color: '#3B82F6', x: 100, y: 660 },
+    { id: 'dagdb-adapter', category: 'data', label: 'DAG DB Adapter', subtitle: 'CommandBase governed persistence', icon: 'database', color: '#3B82F6', x: 100, y: 660 },
     { id: 'express-server', category: 'data', label: 'Express Server', subtitle: 'server.js', icon: 'server', color: '#3B82F6', x: 400, y: 660 },
     { id: 'websocket', category: 'data', label: 'WebSocket', subtitle: 'Real-time events', icon: 'wifi', color: '#3B82F6', x: 700, y: 660 },
     { id: 'browser-ui', category: 'data', label: 'Browser UI', subtitle: 'app.js + index.html', icon: 'monitor', color: '#3B82F6', x: 1000, y: 660 },
@@ -22546,7 +22557,7 @@ server.listen(PORT, () => {
 
 // ── Graceful Shutdown ────────────────────────────────────────────
 // Intercepts SIGTERM/SIGINT, drains in-flight HTTP requests, flushes
-// the SQLite WAL, then closes the DB and exits cleanly.
+// the active persistence adapter, then closes the DB and exits cleanly.
 // Force-exits after 10 s if anything is still hanging.
 
 function gracefulShutdown(signal) {

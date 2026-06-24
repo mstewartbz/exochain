@@ -42,6 +42,20 @@ const DIGEST_D = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 const DIGEST_E = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const DIGEST_F = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
 
+const verifiedDagDbGatewayCallPath = Object.freeze({
+  source: 'exochain_dagdb_gateway',
+  routePath: '/api/v1/dag-db/intake',
+  method: 'POST',
+  tenantBound: true,
+  namespaceBound: true,
+  authorityScopeHeader: 'x-exo-authority-scope',
+  failClosedUnavailable: true,
+  noSimulatedTrust: true,
+  routeContractHash: DIGEST_4,
+  requestHash: DIGEST_5,
+  receiptHash: DIGEST_6,
+});
+
 const REQUIRED_ROLE_DASHBOARD_ROLES = [
   'auditor',
   'coordinator',
@@ -121,6 +135,7 @@ test('production Exochain trust claims remain inactive without verified root and
     'receipt_path_unverified',
     'privacy_boundary_unverified',
     'decision_forum_unverified',
+    'dagdb_gateway_call_path_absent',
   ]);
   assert.equal(result.exochainProductionClaim, false);
   assert.match(result.displayLabel, /inactive/i);
@@ -144,6 +159,7 @@ test('production activation distinguishes pending denied and verified evidence s
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
   });
 
   assert.equal(pending.allowed, false);
@@ -165,6 +181,7 @@ test('production activation distinguishes pending denied and verified evidence s
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
   });
 
   assert.equal(denied.allowed, false);
@@ -189,6 +206,7 @@ test('production activation distinguishes pending denied and verified evidence s
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
   });
 
   assert.equal(verified.allowed, true);
@@ -214,6 +232,7 @@ test('production activation denies root evidence that lacks immutable registry a
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
   });
 
   assert.equal(result.allowed, false);
@@ -243,6 +262,7 @@ test('production activation rejects protected or secret material in activation e
     receiptPath: { verified: true, debugPayload: { participantName: 'Participant Alice Example' } },
     privacyBoundary: { verified: true, telemetryPayload: { rawPhi: 'Participant Alice Example MRN: A-123' } },
     decisionForum: { verified: true, logPayload: { clientSecret: 'redacted-client-secret' } },
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
   });
 
   assert.equal(result.allowed, false);
@@ -275,6 +295,12 @@ test('production activation rejects simulated cached or overridden activation ev
     receiptPath: { verified: true, overrideApplied: true },
     privacyBoundary: { verified: true, cachedOutcome: true },
     decisionForum: { verified: true, simulated: true },
+    dagDbGatewayCallPath: {
+      ...verifiedDagDbGatewayCallPath,
+      locallySimulated: true,
+      cachedOutcome: true,
+      overrideApplied: true,
+    },
   });
 
   assert.equal(result.allowed, false);
@@ -286,6 +312,9 @@ test('production activation rejects simulated cached or overridden activation ev
   assert.ok(result.blockedBy.includes('receipt_path_override_forbidden'));
   assert.ok(result.blockedBy.includes('privacy_boundary_cached_outcome_forbidden'));
   assert.ok(result.blockedBy.includes('decision_forum_local_simulation_forbidden'));
+  assert.ok(result.blockedBy.includes('dagdb_gateway_local_simulation_forbidden'));
+  assert.ok(result.blockedBy.includes('dagdb_gateway_cached_outcome_forbidden'));
+  assert.ok(result.blockedBy.includes('dagdb_gateway_override_forbidden'));
   assert.doesNotMatch(result.claimLanguage, /verified for this CyberMedica action/i);
 });
 
@@ -299,6 +328,7 @@ test('production activation carries inactive public claim review lineage without
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
     publicClaimReviewRequired: true,
     publicClaimReviewLineage: inactivePublicClaimReviewLineage,
   });
@@ -367,6 +397,7 @@ test('production activation fails closed for missing or unsafe public claim revi
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
     publicClaimReviewRequired: true,
     publicClaimReviewLineage: null,
   });
@@ -377,6 +408,7 @@ test('production activation fails closed for missing or unsafe public claim revi
     receiptPath: verifiedDependency,
     privacyBoundary: verifiedDependency,
     decisionForum: verifiedDependency,
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
     publicClaimReviewRequired: true,
     publicClaimReviewLineage: {
       receiptHash: 'not-a-digest',

@@ -654,7 +654,7 @@ describe('council.ts — Council AI and ticket system', () => {
   // ─────────────────────────────────────────────────────────────
 
   describe('persistTickets and loadTickets', () => {
-    it('persists tickets to localStorage', () => {
+    it('persists tickets to DAG DB durable state cache', () => {
       const tickets: CouncilTicket[] = [
         {
           id: 'tkt-1',
@@ -722,15 +722,14 @@ describe('council.ts — Council AI and ticket system', () => {
       expect(loaded[0].id).toBe('tkt-2')
     })
 
-    it('handles corrupted localStorage gracefully', () => {
-      localStorage.setItem('df_council_tickets', 'not valid json')
+    it('loads an empty ticket list when the DAG DB durable cache is empty', () => {
       const loaded = loadTickets()
       expect(loaded).toEqual([])
     })
   })
 
   describe('persistConversations and loadConversations', () => {
-    it('persists conversations to localStorage', () => {
+    it('persists conversations to DAG DB durable state cache', () => {
       const conversations: Conversation[] = [
         {
           id: 'conv-1',
@@ -780,8 +779,7 @@ describe('council.ts — Council AI and ticket system', () => {
       expect(loaded[0].id).toBe('conv-2')
     })
 
-    it('handles corrupted localStorage gracefully', () => {
-      localStorage.setItem('df_council_conversations', 'invalid json xyz')
+    it('loads an empty conversation list when the DAG DB durable cache is empty', () => {
       const loaded = loadConversations()
       expect(loaded).toEqual([])
     })

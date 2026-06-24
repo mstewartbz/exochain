@@ -193,7 +193,14 @@ See [docs/guides/ARCHON-INTEGRATION.md](../docs/guides/ARCHON-INTEGRATION.md) fo
 
 | Variable | Description | Default |
 |---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string | `postgres://exochain:exochain@localhost:5432/exochain` |
+| `EXO_DEMO_DAGDB_GATEWAY_URL` | EXOCHAIN DAG DB gateway origin for demo persistence | Required |
+| `EXO_DEMO_DAGDB_AUTH_TOKEN` | Bearer token for the DAG DB gateway | Required |
+| `EXO_DEMO_DAGDB_TENANT_ID` | Tenant scope bound into every demo DAG DB request | Required |
+| `EXO_DEMO_DAGDB_NAMESPACE` | Namespace scope bound into every demo DAG DB request | Required |
+| `EXO_DEMO_DAGDB_OWNER_DID` | Owner DID recorded on demo DAG DB intake records | Required |
+| `EXO_DEMO_DAGDB_CONTROLLER_DID` | Controller DID recorded on demo DAG DB intake records | Required |
+| `EXO_DEMO_DAGDB_SUBMITTED_BY_DID` | Submitter DID recorded on demo DAG DB intake records | Required |
+| `EXO_DEMO_DAGDB_WRITE_SIGNATURE` | Write-signature header forwarded to the DAG DB gateway | Required |
 | `PORT` | Service listen port | Varies per service (see table above) |
 | `NODE_ENV` | Runtime environment | `development` |
 | `CROSSCHECKED_API_TOKENS` | CrossChecked API bearer principal map as JSON: `{"token":{"actor_did":"did:exo:...","role":"steward"}}`. Missing or malformed values make `/api` routes fail closed with `401`. | None |

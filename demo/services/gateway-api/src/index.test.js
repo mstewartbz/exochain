@@ -62,14 +62,9 @@ vi.mock('module', async (importOriginal) => {
   };
 });
 
-vi.mock('pg', () => {
-  const mockQuery = vi.fn();
-  const MockPool = vi.fn(() => ({ query: mockQuery }));
-  return { default: { Pool: MockPool } };
-});
 
 import { server } from './index.js';
-import pg from 'pg';
+import { getDemoServiceTestStore } from '@exochain/shared';
 
 let request;
 
@@ -85,7 +80,8 @@ afterAll(async () => {
 beforeEach(async () => {
   global._backlog = undefined;
   vi.clearAllMocks();
-  const pool = new pg.Pool();
+  const pool = getDemoServiceTestStore();
+  pool.query = vi.fn();
   pool.query.mockImplementation((sql) => {
     if (sql === 'SELECT 1') return Promise.resolve({ rows: [{ '?column?': 1 }] });
     if (typeof sql === 'string' && sql.includes('FROM users')) return Promise.resolve({ rows: [{ did: 'did:exo:alice', display_name: 'Alice', email: 'alice@example.com', roles: ['Governor'], status: 'active', pace_status: 'Enrolled' }] });
@@ -162,7 +158,8 @@ describe('GET /api/decisions', () => {
 
 describe('POST /api/decisions', () => {
   it('creates decision for enrolled PACE author', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query
       .mockResolvedValueOnce({ rows: [{ did: 'did:exo:alice', pace_status: 'Enrolled' }] })
       .mockResolvedValueOnce({ rows: [{ version: 1, payload: { name: 'ExoChain' } }] })
@@ -191,7 +188,8 @@ describe('POST /api/decisions', () => {
   });
 
   it('returns 404 when author not found', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [] });
     const res = await request
       .post('/api/decisions')
@@ -207,7 +205,8 @@ describe('POST /api/decisions', () => {
   });
 
   it('returns 403 when author not PACE enrolled', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [{ did: 'did:exo:bob', pace_status: 'Pending' }] });
     const res = await request
       .post('/api/decisions')
@@ -225,7 +224,8 @@ describe('POST /api/decisions', () => {
 
 describe('POST /api/decisions/vote', () => {
   it('records vote with valid clearance', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query
       .mockResolvedValueOnce({ rows: [{ payload: { id: 'test-id-001', votes: [] } }] })
       .mockResolvedValueOnce({ rows: [] });
@@ -237,7 +237,8 @@ describe('POST /api/decisions/vote', () => {
   });
 
   it('returns 404 when decision not found', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [] });
     const res = await request
       .post('/api/decisions/vote')
@@ -247,7 +248,8 @@ describe('POST /api/decisions/vote', () => {
 
   it('returns 403 on conflict of interest', async () => {
     mockWasm.wasm_check_conflicts.mockReturnValueOnce({ must_recuse: true, conflicts: [] });
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query.mockResolvedValueOnce({ rows: [{ payload: { id: 'test-id-001', votes: [] } }] });
     const res = await request
       .post('/api/decisions/vote')
@@ -259,7 +261,8 @@ describe('POST /api/decisions/vote', () => {
 
 describe('POST /api/decisions/transition', () => {
   it('transitions decision state', async () => {
-    const pool = new pg.Pool();
+    const pool = getDemoServiceTestStore();
+    pool.query = vi.fn();
     pool.query
       .mockResolvedValueOnce({ rows: [{ payload: { id: 'test-id-001', status: 'Draft', votes: [] }, status: 'Draft' }] })
       .mockResolvedValueOnce({ rows: [] });

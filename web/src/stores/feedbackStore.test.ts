@@ -15,8 +15,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, act, waitFor } from '@testing-library/react'
 import { useFeedbackStore, type FeedbackIssue, type IssueSeverity, type IssueCategory } from './feedbackStore'
+import { readCachedDagDbDurableState } from '../lib/dagdbDurableState'
 
 // Mock fetch
 global.fetch = vi.fn()
@@ -25,6 +26,11 @@ describe('feedbackStore.ts — Feedback store', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+    vi.mocked(global.fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ web_durable_state_result: { stored: true } }),
+    } as Response)
     // Properly reset Zustand singleton state between tests
     useFeedbackStore.setState({
       issues: [],
@@ -298,7 +304,7 @@ describe('feedbackStore.ts — Feedback store', () => {
       expect(issue?.sourceModuleType).toBe('unknown')
     })
 
-    it('persists issues to localStorage', () => {
+    it('persists issues to DAG DB durable state', () => {
       const { result } = renderHook(() => useFeedbackStore())
 
       act(() => {
@@ -311,20 +317,13 @@ describe('feedbackStore.ts — Feedback store', () => {
         })
       })
 
-      const stored = localStorage.getItem('exo_feedback_issues')
-      expect(stored).toBeTruthy()
-      const parsed = JSON.parse(stored!)
+      const parsed = readCachedDagDbDurableState<FeedbackIssue[]>('feedback-issues', [])
       expect(parsed).toHaveLength(1)
       expect(parsed[0].title).toBe('Persisted Issue')
       expect(result.current.issues).toHaveLength(1)
     })
 
-    it('submits to server', async () => {
-      vi.mocked(global.fetch).mockResolvedValue({
-        ok: true,
-        json: async () => ({}),
-      } as Response)
-
+    it('records feedback writes through DAG DB intake', async () => {
       localStorage.setItem('df_token', 'test-token')
 
       const { result } = renderHook(() => useFeedbackStore())
@@ -339,19 +338,25 @@ describe('feedbackStore.ts — Feedback store', () => {
         })
       })
 
+      await waitFor(() => expect(vi.mocked(global.fetch)).toHaveBeenCalled())
       expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
-        '/api/v1/feedback-issues',
+        '/api/v1/dag-db/intake',
         expect.objectContaining({
           method: 'POST',
           headers: expect.objectContaining({
             'Content-Type': 'application/json',
             Authorization: 'Bearer test-token',
+            'x-exo-authority-scope': 'dagdb:intake:web-local-dev:decision-forum-web',
           }),
         })
       )
+      const [, init] = vi.mocked(global.fetch).mock.calls[0]
+      const body = JSON.parse(init?.body as string)
+      expect(body.requested_action).toBe('web:durable-state:feedback-issues:write')
+      expect(body.keyword_texts).toEqual(['web', 'durable-state', 'feedback-issues', 'write'])
     })
 
-    it('sends gateway-required actor binding metadata', () => {
+    it('sends gateway-required actor binding metadata', async () => {
       localStorage.setItem('df_token', 'test-token')
 
       const { result } = renderHook(() => useFeedbackStore())
@@ -366,12 +371,17 @@ describe('feedbackStore.ts — Feedback store', () => {
         })
       })
 
+      await waitFor(() => expect(vi.mocked(global.fetch)).toHaveBeenCalled())
       const [, init] = vi.mocked(global.fetch).mock.calls[0]
       const headers = init?.headers as Record<string, string>
       const body = JSON.parse(init?.body as string)
 
-      expect(body.createdAt).toBeGreaterThan(0)
-      expect(headers['x-exo-auth-observed-at-ms']).toBe(String(body.updatedAt))
+      expect(body.tenant_id).toBe('web-local-dev')
+      expect(body.namespace).toBe('decision-forum-web')
+      expect(body.idempotency_key).toMatch(/^web-durable-state:feedback-issues:write:/)
+      expect(body.payload_hash).toMatch(/^[a-f0-9]{64}$/)
+      expect(headers['x-exo-tenant-id']).toBe('web-local-dev')
+      expect(headers['x-exo-namespace']).toBe('decision-forum-web')
     })
   })
 
@@ -476,7 +486,7 @@ describe('feedbackStore.ts — Feedback store', () => {
       expect(updated?.resolvedAt).toBeUndefined()
     })
 
-    it('persists updated issues to localStorage', () => {
+    it('persists updated issues to DAG DB durable state', () => {
       const { result } = renderHook(() => useFeedbackStore())
 
       let issueId: string
@@ -495,7 +505,7 @@ describe('feedbackStore.ts — Feedback store', () => {
         result.current.updateIssueStatus(issueId, 'in-progress')
       })
 
-      const stored = JSON.parse(localStorage.getItem('exo_feedback_issues')!)
+      const stored = readCachedDagDbDurableState<FeedbackIssue[]>('feedback-issues', [])
       expect(stored[0].status).toBe('in-progress')
     })
   })
@@ -551,7 +561,7 @@ describe('feedbackStore.ts — Feedback store', () => {
       expect(dismissed?.resolution).toBe('Working as designed')
     })
 
-    it('persists dismissal to localStorage', () => {
+    it('persists dismissal to DAG DB durable state', () => {
       const { result } = renderHook(() => useFeedbackStore())
 
       let issueId: string
@@ -570,7 +580,7 @@ describe('feedbackStore.ts — Feedback store', () => {
         result.current.dismissIssue(issueId, 'Duplicate')
       })
 
-      const stored = JSON.parse(localStorage.getItem('exo_feedback_issues')!)
+      const stored = readCachedDagDbDurableState<FeedbackIssue[]>('feedback-issues', [])
       expect(stored[0].status).toBe('dismissed')
       expect(stored[0].resolution).toBe('Duplicate')
     })
@@ -660,13 +670,8 @@ describe('feedbackStore.ts — Feedback store', () => {
   // ─────────────────────────────────────────────────────────────
 
   describe('Edge cases', () => {
-    it('handles corrupted localStorage gracefully', () => {
-      // Zustand is a singleton, so we can't re-init. Instead verify
-      // that the store remains functional after corrupting localStorage.
-      localStorage.setItem('exo_feedback_issues', 'not valid json')
-
+    it('starts empty when DAG DB durable cache has no feedback issues', () => {
       const { result } = renderHook(() => useFeedbackStore())
-      // Store should still be in its reset state (from beforeEach)
       expect(Array.isArray(result.current.issues)).toBe(true)
       expect(result.current.issues).toHaveLength(0)
     })

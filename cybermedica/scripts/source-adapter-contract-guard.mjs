@@ -316,6 +316,33 @@ const EXPECTED_MINIMUM_ADAPTER_REQUIREMENTS = Object.freeze([
       },
     ]),
   },
+  {
+    id: 'MAC-006',
+    contextText:
+      'It names the DAG DB gateway call path used for adjacent trust evidence and fails closed when that path is missing, simulated, cached, overridden, unavailable, or not bound to tenant and namespace.',
+    sourceContracts: Object.freeze([
+      {
+        pathRef: 'src/trust-adapter.mjs',
+        requiredTextRefs: Object.freeze([
+          'dagDbGatewayCallPathBlocks',
+          'dagdb_gateway_call_path_absent',
+          'dagdb_gateway_local_simulation_forbidden',
+          '/api/v1/dag-db/intake',
+        ]),
+      },
+    ]),
+    testContracts: Object.freeze([
+      {
+        pathRef: 'tests/trust-adapter.test.mjs',
+        requiredTextRefs: Object.freeze([
+          'dagDbGatewayCallPathSource',
+          'dagdb_gateway_call_path_absent',
+          'dagdb_gateway_local_simulation_forbidden',
+          '/api/v1/dag-db/intake',
+        ]),
+      },
+    ]),
+  },
 ]);
 
 function sha256Hex(value) {

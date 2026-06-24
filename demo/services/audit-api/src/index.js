@@ -19,9 +19,9 @@ import http from 'node:http';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const wasm = require('@exochain/exochain-wasm');
-import pg from 'pg';
+import { createDemoServiceStore } from '@exochain/shared';
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const pool = createDemoServiceStore('audit-api');
 const PORT = process.env.PORT || 3007;
 // Governance health endpoint requires a bearer token (Security panel condition — CR-001 amendment).
 // Set GOVERNANCE_API_TOKEN in the secrets manager; never in env files or Compose.

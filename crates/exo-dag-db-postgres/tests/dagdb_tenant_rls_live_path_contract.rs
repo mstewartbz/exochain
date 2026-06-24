@@ -28,6 +28,9 @@ const FAMILY_EXPORT: &str = "export";
 const FAMILY_IDEMPOTENCY: &str = "idempotency";
 const FAMILY_IMPORT: &str = "import";
 const FAMILY_LOOKUP: &str = "lookup";
+const FAMILY_NODE_STORE: &str = "node_store";
+const FAMILY_ZERODENTITY: &str = "zerodentity";
+const FAMILY_GATEWAY_STATE: &str = "gateway_state";
 
 const EXPORT_TABLES: &[&str] = &[
     "dagdb_exports",
@@ -244,6 +247,71 @@ const TENANT_TABLES: &[TenantTable] = &[
     TenantTable {
         name: "dagdb_continuation_records",
         families: &[FAMILY_IDEMPOTENCY, FAMILY_LOOKUP],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_dag_nodes",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 2,
+    },
+    TenantTable {
+        name: "dagdb_node_dag_parents",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_committed",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_consensus_meta",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_consensus_votes",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_commit_certificates",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_validators",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_trust_receipts",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_economy_objects",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_economy_anchors",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_node_economy_meta",
+        families: &[FAMILY_NODE_STORE],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_zerodentity_records",
+        families: &[FAMILY_ZERODENTITY],
+        expected_tenant_a_rows: 1,
+    },
+    TenantTable {
+        name: "dagdb_gateway_state_records",
+        families: &[FAMILY_GATEWAY_STATE],
         expected_tenant_a_rows: 1,
     },
 ];
@@ -970,6 +1038,143 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .bind(json!({"continuation": "pending"}))
     .execute(&mut *tx)
     .await?;
+    for (node_hash, cbor_byte) in [(0xc0_u8, 0x01_u8), (0xc1_u8, 0x02_u8)] {
+        sqlx::query(
+            "INSERT INTO dagdb_node_dag_nodes \
+             (tenant_id, namespace, hash, cbor_payload) \
+             VALUES ($1, 'default', $2, $3)",
+        )
+        .bind(tenant_id)
+        .bind(hb(node_hash))
+        .bind(vec![cbor_byte])
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO dagdb_node_dag_parents \
+         (tenant_id, namespace, child_hash, parent_hash) \
+         VALUES ($1, 'default', $2, $3)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc0))
+    .bind(hb(0xc1))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_committed \
+         (tenant_id, namespace, hash, height) \
+         VALUES ($1, 'default', $2, 1)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc0))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_consensus_meta \
+         (tenant_id, namespace, key, value) \
+         VALUES ($1, 'default', 'height', '1')",
+    )
+    .bind(tenant_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_consensus_votes \
+         (tenant_id, namespace, round, node_hash, voter_did, signature) \
+         VALUES ($1, 'default', 1, $2, 'did:exo:validator-rls', $3)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc0))
+    .bind(sig(0x11))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_commit_certificates \
+         (tenant_id, namespace, node_hash, round, cbor_data) \
+         VALUES ($1, 'default', $2, 1, $3)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc0))
+    .bind(vec![0x03_u8])
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_validators \
+         (tenant_id, namespace, did) \
+         VALUES ($1, 'default', 'did:exo:validator-rls')",
+    )
+    .bind(tenant_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_trust_receipts \
+         (tenant_id, namespace, receipt_hash, actor_did, action_type, outcome, timestamp_ms, \
+          cbor_data) \
+         VALUES ($1, 'default', $2, 'did:exo:validator-rls', 'commit', 'accepted', 1, $3)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc2))
+    .bind(vec![0x04_u8])
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_economy_objects \
+         (tenant_id, namespace, object_kind, object_id, content_hash, created_physical_ms, \
+          created_logical, cbor_data) \
+         VALUES ($1, 'default', 'credit', $2, $3, 1, 0, $4)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc3))
+    .bind(hb(0xc4))
+    .bind(vec![0x05_u8])
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_economy_anchors \
+         (tenant_id, namespace, anchor_hash, previous_anchor_hash, object_kind, object_id, \
+          object_hash, created_physical_ms, created_logical, cbor_data) \
+         VALUES ($1, 'default', $2, $3, 'credit', $4, $5, 1, 0, $6)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc5))
+    .bind(hb(0x00))
+    .bind(hb(0xc3))
+    .bind(hb(0xc4))
+    .bind(vec![0x06_u8])
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_node_economy_meta \
+         (tenant_id, namespace, key, value) \
+         VALUES ($1, 'default', 'last_anchor', $2)",
+    )
+    .bind(tenant_id)
+    .bind(hb(0xc5))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_zerodentity_records \
+         (tenant_id, namespace, state_family, subject_did, record_key, secondary_key, \
+          cbor_payload, payload_hash) \
+         VALUES ($1, 'default', 'claim', 'did:exo:zero-rls', 'claim-rls', '', $2, $3)",
+    )
+    .bind(tenant_id)
+    .bind(vec![0x07_u8])
+    .bind(hb(0xc6))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO dagdb_gateway_state_records \
+         (tenant_id, namespace, state_family, record_key, cbor_payload, payload_hash, \
+          json_projection, created_at_physical_ms, created_at_logical, updated_at_physical_ms, \
+          updated_at_logical) \
+         VALUES ($1, 'default', 'session', 'session-rls', $2, $3, $4, 1, 0, 1, 0)",
+    )
+    .bind(tenant_id)
+    .bind(vec![0x08_u8])
+    .bind(hb(0xc7))
+    .bind(json!({"session": "rls"}))
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await
 }
@@ -992,6 +1197,10 @@ async fn apply_live_path_schema(pool: &PgPool) {
 
 fn hb(byte: u8) -> Vec<u8> {
     vec![byte; 32]
+}
+
+fn sig(byte: u8) -> Vec<u8> {
+    vec![byte; 64]
 }
 
 struct TestDb {

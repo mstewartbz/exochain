@@ -34,7 +34,19 @@ pub mod route_invalidation;
 pub const DAGDB_SCHEMA_SQL: &str = concat!(
     include_str!("../../migrations/20260505000001_create_dagdb_schema.sql"),
     "\n",
-    include_str!("../../migrations/20260612000003_add_dagdb_memory_deep_detail_summary.sql")
+    include_str!("../../migrations/20260612000003_add_dagdb_memory_deep_detail_summary.sql"),
+    "\n",
+    include_str!("../../migrations/20260620000001_add_dagdb_operational_receipt_event_types.sql"),
+    "\n",
+    include_str!("../../migrations/20260623000001_create_root_bundle_receipt_schema.sql"),
+    "\n",
+    include_str!("../../migrations/20260623000002_create_dagdb_node_store_schema.sql"),
+    "\n",
+    include_str!("../../migrations/20260623000003_create_zerodentity_record_schema.sql"),
+    "\n",
+    include_str!("../../migrations/20260623000004_create_gateway_state_records_schema.sql"),
+    "\n",
+    include_str!("../../migrations/20260623000005_create_gateway_legacy_table_contracts.sql")
 );
 
 /// SQL migration source for additive graph edge tombstone tables.

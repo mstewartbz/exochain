@@ -39,6 +39,19 @@ const verifiedRootBundle = Object.freeze({
 });
 
 const verifiedDependency = Object.freeze({ verified: true });
+const verifiedDagDbGatewayCallPath = Object.freeze({
+  source: 'exochain_dagdb_gateway',
+  routePath: '/api/v1/dag-db/intake',
+  method: 'POST',
+  tenantBound: true,
+  namespaceBound: true,
+  authorityScopeHeader: 'x-exo-authority-scope',
+  failClosedUnavailable: true,
+  noSimulatedTrust: true,
+  routeContractHash: '4444444444444444444444444444444444444444444444444444444444444444',
+  requestHash: '5555555555555555555555555555555555555555555555555555555555555555',
+  receiptHash: '6666666666666666666666666666666666666666666666666666666666666666',
+});
 
 function verifiedRuntimeInput() {
   return {
@@ -54,6 +67,7 @@ function verifiedRuntimeInput() {
       receiptPath: verifiedDependency,
       privacyBoundary: verifiedDependency,
       decisionForum: verifiedDependency,
+      dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
     },
     dependencies: {
       gateway: { status: 'ready', checkedBy: 'did:exo:ops-runtime-alpha' },
@@ -268,6 +282,7 @@ test('runtime readiness degrades process health and blocks patterned health disc
       receiptPath: verifiedDependency,
       privacyBoundary: verifiedDependency,
       decisionForum: verifiedDependency,
+      dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
     },
     dependencies: {
       gateway: { status: 'ready' },

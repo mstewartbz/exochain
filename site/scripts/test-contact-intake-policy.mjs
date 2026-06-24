@@ -149,5 +149,10 @@ assert.match(
 );
 
 const storageSource = readFileSync(storagePath, 'utf8');
-assert.match(storageSource, /site_contact_rate_limits/, 'contact storage must include a rate-limit table');
-assert.match(storageSource, /ON CONFLICT \(bucket\) DO UPDATE/, 'contact rate limit must be atomic per bucket');
+assert.doesNotMatch(storageSource, /from ['"]pg['"]|new Pool|CONTACT_DATABASE_URL|DATABASE_URL/, 'contact storage must not open direct Postgres or read legacy database URLs');
+assert.doesNotMatch(storageSource, /site_contact_submissions|site_contact_rate_limits/, 'contact storage must not create legacy public contact tables');
+assert.match(storageSource, /SITE_DAGDB_GATEWAY_URL/, 'contact storage must require a DAG DB gateway URL');
+assert.match(storageSource, /\/api\/v1\/dag-db\/intake/, 'contact storage must write through DAG DB intake');
+assert.match(storageSource, /x-exo-write-signature/, 'contact storage must forward the DAG DB write signature');
+assert.match(storageSource, /site_contact_result/, 'contact storage must require explicit DAG DB contact result bodies');
+assert.match(storageSource, /request_count/, 'contact rate limit must use DAG DB-returned request counts');

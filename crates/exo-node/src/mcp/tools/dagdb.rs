@@ -1,7 +1,10 @@
 //! DAG DB MCP tools — the canonical agent-facing surface.
 //!
-//! These four tools (`dagdb_get_context_packet`, `dagdb_submit_writeback`,
-//! `dagdb_import`, `dagdb_export`) are the unified Rust home for the DAG DB MCP
+//! These twelve tools (`dagdb_intake`, `dagdb_route`,
+//! `dagdb_get_context_packet`, `dagdb_validate`, `dagdb_submit_writeback`,
+//! `dagdb_import`, `dagdb_export`, `dagdb_trust_check`,
+//! `dagdb_council_decision`, `dagdb_receipt_lookup`, `dagdb_catalog_lookup`,
+//! and `dagdb_route_lookup`) are the unified Rust home for the DAG DB MCP
 //! surface (GAP-012 P1-C). They supersede the legacy, unversioned,
 //! markdown-returning sidecar surface while keeping this upstream package
 //! self-contained.
@@ -34,8 +37,11 @@ use std::{future::Future, thread};
 
 #[cfg(feature = "dagdb-gateway-proxy")]
 use exochain_sdk::dagdb::{
-    BearerToken, DagDbAuthConfig, DagDbClientError, DagDbContextPacketRequest, DagDbExportRequest,
-    DagDbHttpClient, DagDbImportRequest, DagDbSignatureHeaders, DagDbWritebackRequest,
+    BearerToken, DagDbAuthConfig, DagDbCatalogLookupRequest, DagDbClientError,
+    DagDbContextPacketRequest, DagDbCouncilDecisionRequest, DagDbExportRequest, DagDbHttpClient,
+    DagDbImportRequest, DagDbIntakeRequest, DagDbReceiptLookupRequest, DagDbRouteLookupRequest,
+    DagDbRouteRequest, DagDbSignatureHeaders, DagDbTrustCheckRequest, DagDbValidateRequest,
+    DagDbWritebackRequest,
 };
 use serde_json::{Value, json};
 
@@ -75,15 +81,26 @@ const DAGDB_SIGNATURE_MATERIAL_INVALID: &str = "dagdb_signature_material_invalid
 const DAGDB_GATEWAY_REQUEST_FAILED: &str = "dagdb_gateway_request_failed";
 #[cfg(feature = "dagdb-gateway-proxy")]
 const DAGDB_RUNTIME_BRIDGE_FAILED: &str = "dagdb_runtime_bridge_failed";
+const DAGDB_INTAKE_TOOL: &str = "dagdb_intake";
+const DAGDB_ROUTE_TOOL: &str = "dagdb_route";
 const DAGDB_GET_CONTEXT_PACKET_TOOL: &str = "dagdb_get_context_packet";
+const DAGDB_VALIDATE_TOOL: &str = "dagdb_validate";
 const DAGDB_SUBMIT_WRITEBACK_TOOL: &str = "dagdb_submit_writeback";
 const DAGDB_IMPORT_TOOL: &str = "dagdb_import";
 const DAGDB_EXPORT_TOOL: &str = "dagdb_export";
+const DAGDB_TRUST_CHECK_TOOL: &str = "dagdb_trust_check";
+const DAGDB_COUNCIL_DECISION_TOOL: &str = "dagdb_council_decision";
+const DAGDB_RECEIPT_LOOKUP_TOOL: &str = "dagdb_receipt_lookup";
+const DAGDB_CATALOG_LOOKUP_TOOL: &str = "dagdb_catalog_lookup";
+const DAGDB_ROUTE_LOOKUP_TOOL: &str = "dagdb_route_lookup";
 const MAX_ID_ARRAY_ITEMS: usize = 256;
 const MAX_TOKEN_BUDGET: u64 = 1_000_000;
 const SIGNATURE_HEX_CHARS: usize = 128;
 const SIGNATURE_PATTERN: &str = "^[0-9a-f]{128}$";
 const WRITE_SIGNATURE_HEADER: &str = "x-exo-write-signature";
+const DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-default-route-approval-signature";
+const DEFAULT_ROUTE_APPROVAL_DID_HEADER: &str = "x-exo-default-route-approval-did";
+const DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-default-route-approval-timestamp";
 const CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-context-packet-approval-signature";
 const CONTEXT_PACKET_APPROVAL_DID_HEADER: &str = "x-exo-context-packet-approval-did";
 const CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-context-packet-approval-timestamp";
@@ -93,6 +110,12 @@ const LIFECYCLE_APPROVAL_DID_HEADER: &str = "x-exo-lifecycle-approval-did";
 const CONTINUATION_APPROVAL_DID_HEADER: &str = "x-exo-continuation-approval-did";
 const LIFECYCLE_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-lifecycle-approval-timestamp";
 const CONTINUATION_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-continuation-approval-timestamp";
+const IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-import-approval-signature";
+const IMPORT_FINALITY_APPROVAL_DID_HEADER: &str = "x-exo-import-approval-did";
+const IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-import-approval-timestamp";
+const EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER: &str = "x-exo-export-approval-signature";
+const EXPORT_FINALITY_APPROVAL_DID_HEADER: &str = "x-exo-export-approval-did";
+const EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER: &str = "x-exo-export-approval-timestamp";
 const KG_IMPORT_REPORT_SCHEMA: &str = "dagdb_kg_dry_run_import_report_v1";
 const KG_IMPORT_CANDIDATES_SCHEMA: &str = "dagdb_markdown_kg_import_candidates_v1";
 const ECHOED_STRING_FIELDS: &[(&str, &str)] = &[
@@ -311,6 +334,118 @@ fn empty_object_schema(description: &str) -> Value {
         "additionalProperties": false,
         "description": description,
     })
+}
+
+fn fixture_request_schema(
+    tool_name: &str,
+    fixture_name: &str,
+    description: &str,
+) -> ToolDefinition {
+    let fixtures: Value = match serde_json::from_str(include_str!(
+        "../../../../exo-dag-db-api/fixtures/json/all_dto_fixtures.json"
+    )) {
+        Ok(fixtures) => fixtures,
+        Err(error) => panic!("DAG DB fixture set parses for MCP schema binding: {error}"),
+    };
+    let request = fixtures
+        .get("requests")
+        .and_then(|requests| requests.get(fixture_name))
+        .unwrap_or_else(|| panic!("missing DAG DB request fixture {fixture_name}"));
+    let Value::Object(fields) = request else {
+        panic!("DAG DB request fixture {fixture_name} must be an object");
+    };
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for (name, value) in fields {
+        properties.insert(name.clone(), schema_for_fixture_field(name, value));
+        required.push(name.clone());
+    }
+    for header in required_signature_headers(tool_name).iter().copied() {
+        properties.insert(header.to_owned(), schema_for_signature_header(header));
+        required.push(header.to_owned());
+    }
+    ToolDefinition {
+        name: tool_name.to_owned(),
+        description: description.to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        }),
+    }
+}
+
+fn schema_for_fixture_field(name: &str, value: &Value) -> Value {
+    match value {
+        Value::String(_) if name.ends_with("_did") || name == "requester_did" => {
+            did_schema("DID field bound from the canonical DAG DB DTO fixture.")
+        }
+        Value::String(text)
+            if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            hash_schema(
+                "64-character lowercase hex hash field bound from the canonical DAG DB DTO fixture.",
+            )
+        }
+        Value::String(_) => {
+            safe_string_schema("String field bound from the canonical DAG DB DTO fixture.")
+        }
+        Value::Bool(_) => json!({"type": "boolean"}),
+        Value::Number(number) if number.is_u64() || number.is_i64() => json!({"type": "integer"}),
+        Value::Number(_) => json!({"type": "integer"}),
+        Value::Array(items) => {
+            let item_schema = items
+                .iter()
+                .find(|item| !item.is_null())
+                .map(|item| schema_for_fixture_field(name, item))
+                .unwrap_or_else(|| {
+                    safe_string_schema("Array item bound from the canonical DAG DB DTO fixture.")
+                });
+            json!({
+                "type": "array",
+                "maxItems": MAX_ID_ARRAY_ITEMS,
+                "items": item_schema,
+            })
+        }
+        Value::Object(_) if name == "import_report" => import_report_schema(),
+        Value::Object(_) => json!({
+            "type": "object",
+            "additionalProperties": true,
+        }),
+        Value::Null => json!({
+            "anyOf": [
+                {"type": "string", "maxLength": 4096},
+                {"type": "boolean"},
+                {"type": "integer"},
+                {"type": "array", "maxItems": MAX_ID_ARRAY_ITEMS},
+                {"type": "object"},
+                {"type": "null"}
+            ],
+        }),
+    }
+}
+
+fn schema_for_signature_header(header: &'static str) -> Value {
+    match header {
+        DEFAULT_ROUTE_APPROVAL_DID_HEADER
+        | CONTEXT_PACKET_APPROVAL_DID_HEADER
+        | LIFECYCLE_APPROVAL_DID_HEADER
+        | CONTINUATION_APPROVAL_DID_HEADER
+        | IMPORT_FINALITY_APPROVAL_DID_HEADER
+        | EXPORT_FINALITY_APPROVAL_DID_HEADER => {
+            did_schema("External finality authority DID forwarded as a gateway header.")
+        }
+        DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER
+        | CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER
+        | LIFECYCLE_APPROVAL_TIMESTAMP_HEADER
+        | CONTINUATION_APPROVAL_TIMESTAMP_HEADER
+        | IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER
+        | EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER => approval_timestamp_schema(
+            "External finality approval timestamp forwarded as a gateway header.",
+        ),
+        _ => signature_schema("Gateway signature header forwarded to the DAG DB runtime adapter."),
+    }
 }
 
 fn import_report_schema() -> Value {
@@ -552,6 +687,16 @@ fn is_approval_timestamp_header_value(value: &str) -> bool {
 #[cfg(feature = "dagdb-gateway-proxy")]
 fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
+        DAGDB_INTAKE_TOOL
+        | DAGDB_VALIDATE_TOOL
+        | DAGDB_TRUST_CHECK_TOOL
+        | DAGDB_COUNCIL_DECISION_TOOL => &[WRITE_SIGNATURE_HEADER],
+        DAGDB_ROUTE_TOOL => &[
+            WRITE_SIGNATURE_HEADER,
+            DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+            DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+            DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
+        ],
         DAGDB_SUBMIT_WRITEBACK_TOOL => &[
             WRITE_SIGNATURE_HEADER,
             LIFECYCLE_SIGNATURE_HEADER,
@@ -567,7 +712,18 @@ fn required_signature_headers(tool_name: &str) -> &'static [&'static str] {
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
             CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
         ],
-        DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => &[WRITE_SIGNATURE_HEADER],
+        DAGDB_IMPORT_TOOL => &[
+            WRITE_SIGNATURE_HEADER,
+            IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            IMPORT_FINALITY_APPROVAL_DID_HEADER,
+            IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+        ],
+        DAGDB_EXPORT_TOOL => &[
+            WRITE_SIGNATURE_HEADER,
+            EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            EXPORT_FINALITY_APPROVAL_DID_HEADER,
+            EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+        ],
         _ => &[],
     }
 }
@@ -712,9 +868,25 @@ fn require_approval_timestamp_param(
 fn signature_headers_for_tool(
     tool_name: &str,
     params: &Value,
-) -> Result<DagDbSignatureHeaders, ToolResult> {
+) -> Result<Option<DagDbSignatureHeaders>, ToolResult> {
     match tool_name {
-        DAGDB_SUBMIT_WRITEBACK_TOOL => Ok(DagDbSignatureHeaders::writeback(
+        DAGDB_INTAKE_TOOL
+        | DAGDB_VALIDATE_TOOL
+        | DAGDB_TRUST_CHECK_TOOL
+        | DAGDB_COUNCIL_DECISION_TOOL => Ok(Some(DagDbSignatureHeaders::write(
+            require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
+        ))),
+        DAGDB_ROUTE_TOOL => Ok(Some(DagDbSignatureHeaders::default_route(
+            require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
+            require_signature_param(tool_name, params, DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER)?,
+            require_did_header_param(tool_name, params, DEFAULT_ROUTE_APPROVAL_DID_HEADER)?,
+            require_approval_timestamp_param(
+                tool_name,
+                params,
+                DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
+            )?,
+        ))),
+        DAGDB_SUBMIT_WRITEBACK_TOOL => Ok(Some(DagDbSignatureHeaders::writeback(
             require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
             require_signature_param(tool_name, params, LIFECYCLE_SIGNATURE_HEADER)?,
             require_signature_param(tool_name, params, CONTINUATION_SIGNATURE_HEADER)?,
@@ -730,8 +902,8 @@ fn signature_headers_for_tool(
                 params,
                 CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
             )?,
-        )),
-        DAGDB_GET_CONTEXT_PACKET_TOOL => Ok(DagDbSignatureHeaders::context_packet(
+        ))),
+        DAGDB_GET_CONTEXT_PACKET_TOOL => Ok(Some(DagDbSignatureHeaders::context_packet(
             require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
             require_signature_param(tool_name, params, CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER)?,
             require_did_header_param(tool_name, params, CONTEXT_PACKET_APPROVAL_DID_HEADER)?,
@@ -740,10 +912,28 @@ fn signature_headers_for_tool(
                 params,
                 CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
             )?,
-        )),
-        DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => Ok(DagDbSignatureHeaders::write(
+        ))),
+        DAGDB_IMPORT_TOOL => Ok(Some(DagDbSignatureHeaders::dagdb_import(
             require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
-        )),
+            require_signature_param(tool_name, params, IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER)?,
+            require_did_header_param(tool_name, params, IMPORT_FINALITY_APPROVAL_DID_HEADER)?,
+            require_approval_timestamp_param(
+                tool_name,
+                params,
+                IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+            )?,
+        ))),
+        DAGDB_EXPORT_TOOL => Ok(Some(DagDbSignatureHeaders::dagdb_export(
+            require_signature_param(tool_name, params, WRITE_SIGNATURE_HEADER)?,
+            require_signature_param(tool_name, params, EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER)?,
+            require_did_header_param(tool_name, params, EXPORT_FINALITY_APPROVAL_DID_HEADER)?,
+            require_approval_timestamp_param(
+                tool_name,
+                params,
+                EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+            )?,
+        ))),
+        DAGDB_RECEIPT_LOOKUP_TOOL | DAGDB_CATALOG_LOOKUP_TOOL | DAGDB_ROUTE_LOOKUP_TOOL => Ok(None),
         _ => Err(fail_closed_response(
             tool_name,
             DAGDB_REQUEST_DECODE_FAILED,
@@ -759,6 +949,9 @@ fn proxy_dto_params(params: &Value) -> Value {
     if let Value::Object(map) = &mut dto_params {
         for header in [
             WRITE_SIGNATURE_HEADER,
+            DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+            DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+            DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
             CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
             CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
@@ -768,6 +961,12 @@ fn proxy_dto_params(params: &Value) -> Value {
             CONTINUATION_APPROVAL_DID_HEADER,
             LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
             CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
+            IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            IMPORT_FINALITY_APPROVAL_DID_HEADER,
+            IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+            EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            EXPORT_FINALITY_APPROVAL_DID_HEADER,
+            EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
         ] {
             map.remove(header);
         }
@@ -1005,7 +1204,7 @@ fn dispatch_configured(
     tool_name: &str,
     params: &Value,
     scope: DagDbProxyScope,
-    signatures: DagDbSignatureHeaders,
+    signatures: Option<DagDbSignatureHeaders>,
 ) -> ToolResult {
     let client = match proxy_client(scope) {
         Ok(client) => client,
@@ -1013,10 +1212,52 @@ fn dispatch_configured(
     };
 
     match tool_name {
+        DAGDB_INTAKE_TOOL => {
+            let request: DagDbIntakeRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
+            };
+            proxy_result(tool_name, async move {
+                client.intake_with_signatures(request, signatures).await
+            })
+        }
+        DAGDB_ROUTE_TOOL => {
+            let request: DagDbRouteRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
+            };
+            proxy_result(tool_name, async move {
+                client.route_with_signatures(request, signatures).await
+            })
+        }
         DAGDB_GET_CONTEXT_PACKET_TOOL => {
             let request: DagDbContextPacketRequest = match parse_proxy_request(tool_name, params) {
                 Ok(request) => request,
                 Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
             };
             proxy_result(tool_name, async move {
                 client
@@ -1024,10 +1265,35 @@ fn dispatch_configured(
                     .await
             })
         }
+        DAGDB_VALIDATE_TOOL => {
+            let request: DagDbValidateRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
+            };
+            proxy_result(tool_name, async move {
+                client.validate_with_signatures(request, signatures).await
+            })
+        }
         DAGDB_SUBMIT_WRITEBACK_TOOL => {
             let request: DagDbWritebackRequest = match parse_proxy_request(tool_name, params) {
                 Ok(request) => request,
                 Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
             };
             proxy_result(tool_name, async move {
                 client.writeback_with_signatures(request, signatures).await
@@ -1037,6 +1303,14 @@ fn dispatch_configured(
             let request: DagDbImportRequest = match parse_proxy_request(tool_name, params) {
                 Ok(request) => request,
                 Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
             };
             proxy_result(tool_name, async move {
                 client
@@ -1049,11 +1323,85 @@ fn dispatch_configured(
                 Ok(request) => request,
                 Err(result) => return result,
             };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
+            };
             proxy_result(tool_name, async move {
                 client
                     .dagdb_export_with_signatures(request, signatures)
                     .await
             })
+        }
+        DAGDB_TRUST_CHECK_TOOL => {
+            let request: DagDbTrustCheckRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
+            };
+            proxy_result(tool_name, async move {
+                client
+                    .trust_check_with_signatures(request, signatures)
+                    .await
+            })
+        }
+        DAGDB_COUNCIL_DECISION_TOOL => {
+            let request: DagDbCouncilDecisionRequest = match parse_proxy_request(tool_name, params)
+            {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            let Some(signatures) = signatures else {
+                return fail_closed_response(
+                    tool_name,
+                    DAGDB_SIGNATURE_MATERIAL_MISSING,
+                    "DAG DB gateway signature material is incomplete; no DAG DB operation was performed.",
+                    json!({ "missing_signature_header": WRITE_SIGNATURE_HEADER }),
+                );
+            };
+            proxy_result(tool_name, async move {
+                client
+                    .council_decision_with_signatures(request, signatures)
+                    .await
+            })
+        }
+        DAGDB_RECEIPT_LOOKUP_TOOL => {
+            let request: DagDbReceiptLookupRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(
+                tool_name,
+                async move { client.receipt_lookup(request).await },
+            )
+        }
+        DAGDB_CATALOG_LOOKUP_TOOL => {
+            let request: DagDbCatalogLookupRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(
+                tool_name,
+                async move { client.catalog_lookup(request).await },
+            )
+        }
+        DAGDB_ROUTE_LOOKUP_TOOL => {
+            let request: DagDbRouteLookupRequest = match parse_proxy_request(tool_name, params) {
+                Ok(request) => request,
+                Err(result) => return result,
+            };
+            proxy_result(tool_name, async move { client.route_lookup(request).await })
         }
         _ => fail_closed_response(
             tool_name,
@@ -1062,6 +1410,26 @@ fn dispatch_configured(
             json!({}),
         ),
     }
+}
+
+/// Tool definition for `dagdb_intake`.
+#[must_use]
+pub fn intake_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_INTAKE_TOOL,
+        "intake",
+        "Submit a governed DAG DB intake request through the runtime MCP surface.",
+    )
+}
+
+/// Tool definition for `dagdb_route`.
+#[must_use]
+pub fn route_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_ROUTE_TOOL,
+        "route",
+        "Persist a governed DAG DB route decision through the runtime MCP surface.",
+    )
 }
 
 /// Tool definition for `dagdb_get_context_packet`.
@@ -1174,6 +1542,16 @@ pub fn get_context_packet_definition() -> ToolDefinition {
             "additionalProperties": false,
         }),
     }
+}
+
+/// Tool definition for `dagdb_validate`.
+#[must_use]
+pub fn validate_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_VALIDATE_TOOL,
+        "validate",
+        "Persist a governed DAG DB validation report through the runtime MCP surface.",
+    )
 }
 
 /// Tool definition for `dagdb_submit_writeback`.
@@ -1337,6 +1715,22 @@ pub fn import_definition() -> ToolDefinition {
         WRITE_SIGNATURE_HEADER.to_owned(),
         signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
     );
+    properties.insert(
+        IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER.to_owned(),
+        signature_schema(
+            "External import finality approval signature forwarded as `x-exo-import-approval-signature`.",
+        ),
+    );
+    properties.insert(
+        IMPORT_FINALITY_APPROVAL_DID_HEADER.to_owned(),
+        did_schema("External DID that signed the import finality approval."),
+    );
+    properties.insert(
+        IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER.to_owned(),
+        approval_timestamp_schema(
+            "External import finality approval timestamp forwarded as `x-exo-import-approval-timestamp`.",
+        ),
+    );
 
     ToolDefinition {
         name: DAGDB_IMPORT_TOOL.to_owned(),
@@ -1352,7 +1746,10 @@ pub fn import_definition() -> ToolDefinition {
                 "source_hash",
                 "requester_did",
                 "import_report",
-                WRITE_SIGNATURE_HEADER
+                WRITE_SIGNATURE_HEADER,
+                IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+                IMPORT_FINALITY_APPROVAL_DID_HEADER,
+                IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER
             ],
             "additionalProperties": false,
         }),
@@ -1396,6 +1793,22 @@ pub fn export_definition() -> ToolDefinition {
         WRITE_SIGNATURE_HEADER.to_owned(),
         signature_schema("Gateway write signature forwarded as `x-exo-write-signature`."),
     );
+    properties.insert(
+        EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER.to_owned(),
+        signature_schema(
+            "External export finality approval signature forwarded as `x-exo-export-approval-signature`.",
+        ),
+    );
+    properties.insert(
+        EXPORT_FINALITY_APPROVAL_DID_HEADER.to_owned(),
+        did_schema("External DID that signed the export finality approval."),
+    );
+    properties.insert(
+        EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER.to_owned(),
+        approval_timestamp_schema(
+            "External export finality approval timestamp forwarded as `x-exo-export-approval-timestamp`.",
+        ),
+    );
 
     ToolDefinition {
         name: DAGDB_EXPORT_TOOL.to_owned(),
@@ -1413,11 +1826,64 @@ pub fn export_definition() -> ToolDefinition {
                 "included_graph_styles",
                 "included_writeback_idempotency_keys",
                 "include_preview_context",
-                WRITE_SIGNATURE_HEADER
+                WRITE_SIGNATURE_HEADER,
+                EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+                EXPORT_FINALITY_APPROVAL_DID_HEADER,
+                EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER
             ],
             "additionalProperties": false,
         }),
     }
+}
+
+/// Tool definition for `dagdb_trust_check`.
+#[must_use]
+pub fn trust_check_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_TRUST_CHECK_TOOL,
+        "trust_check",
+        "Persist a governed DAG DB agent trust-check request through the runtime MCP surface.",
+    )
+}
+
+/// Tool definition for `dagdb_council_decision`.
+#[must_use]
+pub fn council_decision_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_COUNCIL_DECISION_TOOL,
+        "council_decision",
+        "Persist a governed DAG DB council decision through the runtime MCP surface.",
+    )
+}
+
+/// Tool definition for `dagdb_receipt_lookup`.
+#[must_use]
+pub fn receipt_lookup_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_RECEIPT_LOOKUP_TOOL,
+        "receipt_lookup",
+        "Lookup a DAG DB receipt through the runtime MCP surface.",
+    )
+}
+
+/// Tool definition for `dagdb_catalog_lookup`.
+#[must_use]
+pub fn catalog_lookup_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_CATALOG_LOOKUP_TOOL,
+        "catalog_lookup",
+        "Lookup a DAG DB catalog entry through the runtime MCP surface.",
+    )
+}
+
+/// Tool definition for `dagdb_route_lookup`.
+#[must_use]
+pub fn route_lookup_definition() -> ToolDefinition {
+    fixture_request_schema(
+        DAGDB_ROUTE_LOOKUP_TOOL,
+        "route_lookup",
+        "Lookup a DAG DB route receipt through the runtime MCP surface.",
+    )
 }
 
 /// Dispatch a tool through the current adapter boundary.
@@ -1453,10 +1919,28 @@ fn dispatch(tool_name: &str, params: &Value, context: &NodeContext) -> ToolResul
     dispatch_configured(tool_name, params, scope, signatures)
 }
 
+/// Execute `dagdb_intake`.
+#[must_use]
+pub fn execute_intake(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_INTAKE_TOOL, params, context)
+}
+
+/// Execute `dagdb_route`.
+#[must_use]
+pub fn execute_route(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_ROUTE_TOOL, params, context)
+}
+
 /// Execute `dagdb_get_context_packet`.
 #[must_use]
 pub fn execute_get_context_packet(params: &Value, context: &NodeContext) -> ToolResult {
     dispatch(DAGDB_GET_CONTEXT_PACKET_TOOL, params, context)
+}
+
+/// Execute `dagdb_validate`.
+#[must_use]
+pub fn execute_validate(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_VALIDATE_TOOL, params, context)
 }
 
 /// Execute `dagdb_submit_writeback`.
@@ -1475,6 +1959,36 @@ pub fn execute_import(params: &Value, context: &NodeContext) -> ToolResult {
 #[must_use]
 pub fn execute_export(params: &Value, context: &NodeContext) -> ToolResult {
     dispatch(DAGDB_EXPORT_TOOL, params, context)
+}
+
+/// Execute `dagdb_trust_check`.
+#[must_use]
+pub fn execute_trust_check(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_TRUST_CHECK_TOOL, params, context)
+}
+
+/// Execute `dagdb_council_decision`.
+#[must_use]
+pub fn execute_council_decision(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_COUNCIL_DECISION_TOOL, params, context)
+}
+
+/// Execute `dagdb_receipt_lookup`.
+#[must_use]
+pub fn execute_receipt_lookup(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_RECEIPT_LOOKUP_TOOL, params, context)
+}
+
+/// Execute `dagdb_catalog_lookup`.
+#[must_use]
+pub fn execute_catalog_lookup(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_CATALOG_LOOKUP_TOOL, params, context)
+}
+
+/// Execute `dagdb_route_lookup`.
+#[must_use]
+pub fn execute_route_lookup(params: &Value, context: &NodeContext) -> ToolResult {
+    dispatch(DAGDB_ROUTE_LOOKUP_TOOL, params, context)
 }
 
 #[cfg(test)]
@@ -1509,12 +2023,91 @@ mod tests {
             .clone()
     }
 
+    #[test]
+    fn mcp_dagdb_tool_surface_covers_full_rest_parity() {
+        let definitions = [
+            intake_definition(),
+            route_definition(),
+            get_context_packet_definition(),
+            validate_definition(),
+            submit_writeback_definition(),
+            import_definition(),
+            export_definition(),
+            trust_check_definition(),
+            council_decision_definition(),
+            receipt_lookup_definition(),
+            catalog_lookup_definition(),
+            route_lookup_definition(),
+        ];
+        let names: Vec<String> = definitions
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                DAGDB_INTAKE_TOOL,
+                DAGDB_ROUTE_TOOL,
+                DAGDB_GET_CONTEXT_PACKET_TOOL,
+                DAGDB_VALIDATE_TOOL,
+                DAGDB_SUBMIT_WRITEBACK_TOOL,
+                DAGDB_IMPORT_TOOL,
+                DAGDB_EXPORT_TOOL,
+                DAGDB_TRUST_CHECK_TOOL,
+                DAGDB_COUNCIL_DECISION_TOOL,
+                DAGDB_RECEIPT_LOOKUP_TOOL,
+                DAGDB_CATALOG_LOOKUP_TOOL,
+                DAGDB_ROUTE_LOOKUP_TOOL,
+            ]
+        );
+
+        let executor_cases: [(fn(&Value, &NodeContext) -> ToolResult, &str); 12] = [
+            (execute_intake, "intake"),
+            (execute_route, "route"),
+            (execute_get_context_packet, "context_packet"),
+            (execute_validate, "validate"),
+            (execute_submit_writeback, "writeback"),
+            (execute_import, "import"),
+            (execute_export, "export"),
+            (execute_trust_check, "trust_check"),
+            (execute_council_decision, "council_decision"),
+            (execute_receipt_lookup, "receipt_lookup"),
+            (execute_catalog_lookup, "catalog_lookup"),
+            (execute_route_lookup, "route_lookup"),
+        ];
+        for (executor, fixture_name) in executor_cases {
+            let params = match fixture_name {
+                "import" => valid_import_params(),
+                "export" => valid_export_params(),
+                _ => request_fixture(fixture_name),
+            };
+            let result = executor(&params, &NodeContext::empty());
+            assert!(
+                result.is_error,
+                "unconfigured DAG DB MCP executor {fixture_name} must fail closed"
+            );
+        }
+    }
+
     fn schema_signature_value(byte: char) -> String {
         byte.to_string().repeat(SIGNATURE_HEX_CHARS)
     }
 
     fn add_required_signature_material(tool_name: &str, params: &mut Value) {
         match tool_name {
+            DAGDB_INTAKE_TOOL
+            | DAGDB_VALIDATE_TOOL
+            | DAGDB_TRUST_CHECK_TOOL
+            | DAGDB_COUNCIL_DECISION_TOOL => {
+                params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+            }
+            DAGDB_ROUTE_TOOL => {
+                params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+                params[DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER] =
+                    json!(schema_signature_value('b'));
+                params[DEFAULT_ROUTE_APPROVAL_DID_HEADER] = json!("did:exo:route-authority");
+                params[DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+            }
             DAGDB_GET_CONTEXT_PACKET_TOOL => {
                 params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
                 params[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] =
@@ -1531,8 +2124,19 @@ mod tests {
                 params[LIFECYCLE_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
                 params[CONTINUATION_APPROVAL_TIMESTAMP_HEADER] = json!("2026-06-20T00:00:01Z");
             }
-            DAGDB_IMPORT_TOOL | DAGDB_EXPORT_TOOL => {
+            DAGDB_IMPORT_TOOL => {
                 params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+                params[IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER] =
+                    json!(schema_signature_value('b'));
+                params[IMPORT_FINALITY_APPROVAL_DID_HEADER] = json!("did:exo:import-authority");
+                params[IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+            }
+            DAGDB_EXPORT_TOOL => {
+                params[WRITE_SIGNATURE_HEADER] = json!(schema_signature_value('a'));
+                params[EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER] =
+                    json!(schema_signature_value('b'));
+                params[EXPORT_FINALITY_APPROVAL_DID_HEADER] = json!("did:exo:export-authority");
+                params[EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
             }
             _ => {}
         }
@@ -1694,6 +2298,15 @@ mod tests {
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
+    fn add_route_signatures(mut params: Value) -> Value {
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER] = json!(signature_value('b'));
+        params[DEFAULT_ROUTE_APPROVAL_DID_HEADER] = json!("did:exo:route-authority");
+        params[DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
     fn add_context_packet_signatures(mut params: Value) -> Value {
         params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
         params[CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER] = json!(signature_value('d'));
@@ -1715,8 +2328,83 @@ mod tests {
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
+    fn add_import_signatures(mut params: Value) -> Value {
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER] = json!(signature_value('b'));
+        params[IMPORT_FINALITY_APPROVAL_DID_HEADER] = json!("did:exo:import-authority");
+        params[IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn add_export_signatures(mut params: Value) -> Value {
+        params[WRITE_SIGNATURE_HEADER] = json!(signature_value('a'));
+        params[EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER] = json!(signature_value('b'));
+        params[EXPORT_FINALITY_APPROVAL_DID_HEADER] = json!("did:exo:export-authority");
+        params[EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER] = json!(approval_timestamp());
+        params
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
     fn write_signature_expectations() -> Vec<(&'static str, String)> {
         vec![(WRITE_SIGNATURE_HEADER, signature_value('a'))]
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn route_signature_expectations() -> Vec<(&'static str, String)> {
+        vec![
+            (WRITE_SIGNATURE_HEADER, signature_value('a')),
+            (
+                DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+                signature_value('b'),
+            ),
+            (
+                DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+                "did:exo:route-authority".to_owned(),
+            ),
+            (
+                DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
+                approval_timestamp().to_owned(),
+            ),
+        ]
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn import_signature_expectations() -> Vec<(&'static str, String)> {
+        vec![
+            (WRITE_SIGNATURE_HEADER, signature_value('a')),
+            (
+                IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+                signature_value('b'),
+            ),
+            (
+                IMPORT_FINALITY_APPROVAL_DID_HEADER,
+                "did:exo:import-authority".to_owned(),
+            ),
+            (
+                IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+                approval_timestamp().to_owned(),
+            ),
+        ]
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn export_signature_expectations() -> Vec<(&'static str, String)> {
+        vec![
+            (WRITE_SIGNATURE_HEADER, signature_value('a')),
+            (
+                EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+                signature_value('b'),
+            ),
+            (
+                EXPORT_FINALITY_APPROVAL_DID_HEADER,
+                "did:exo:export-authority".to_owned(),
+            ),
+            (
+                EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+                approval_timestamp().to_owned(),
+            ),
+        ]
     }
 
     #[cfg(feature = "dagdb-gateway-proxy")]
@@ -1836,6 +2524,9 @@ mod tests {
         assert_eq!(request_body["namespace"], "primary");
         for signature_header in [
             WRITE_SIGNATURE_HEADER,
+            DEFAULT_ROUTE_APPROVAL_SIGNATURE_HEADER,
+            DEFAULT_ROUTE_APPROVAL_DID_HEADER,
+            DEFAULT_ROUTE_APPROVAL_TIMESTAMP_HEADER,
             CONTEXT_PACKET_APPROVAL_SIGNATURE_HEADER,
             CONTEXT_PACKET_APPROVAL_DID_HEADER,
             CONTEXT_PACKET_APPROVAL_TIMESTAMP_HEADER,
@@ -1843,6 +2534,14 @@ mod tests {
             CONTINUATION_SIGNATURE_HEADER,
             LIFECYCLE_APPROVAL_DID_HEADER,
             CONTINUATION_APPROVAL_DID_HEADER,
+            LIFECYCLE_APPROVAL_TIMESTAMP_HEADER,
+            CONTINUATION_APPROVAL_TIMESTAMP_HEADER,
+            IMPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            IMPORT_FINALITY_APPROVAL_DID_HEADER,
+            IMPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
+            EXPORT_FINALITY_APPROVAL_SIGNATURE_HEADER,
+            EXPORT_FINALITY_APPROVAL_DID_HEADER,
+            EXPORT_FINALITY_APPROVAL_TIMESTAMP_HEADER,
         ] {
             assert!(
                 !request.body.contains(signature_header),
@@ -1850,6 +2549,50 @@ mod tests {
                 request.body
             );
         }
+    }
+
+    #[cfg(feature = "dagdb-gateway-proxy")]
+    fn assert_live_lookup_proxy(
+        execute: fn(&Value, &NodeContext) -> ToolResult,
+        params: Value,
+        response_fixture_name: &str,
+        expected_path_prefix: &str,
+        expected_scope: &str,
+    ) {
+        let server = TestServer::spawn("200 OK", response_fixture(response_fixture_name));
+        let context = gateway_context(server.base_url.clone());
+
+        let result = execute(&params, &context);
+        assert!(
+            !result.is_error,
+            "live lookup proxy result was an error: {result:?}"
+        );
+        let body = result_json(&result);
+        assert!(
+            body["schema_version"]
+                .as_str()
+                .expect("schema_version")
+                .starts_with("dagdb_"),
+            "live lookup proxy returned DTO JSON: {body}"
+        );
+
+        let request = server.captured();
+        assert!(
+            request.request_line.starts_with(expected_path_prefix),
+            "request line was {:?}",
+            request.request_line
+        );
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer super-secret-token-value")
+        );
+        assert_eq!(request.header("x-exo-tenant-id"), Some("tenant-a"));
+        assert_eq!(request.header("x-exo-namespace"), Some("primary"));
+        assert_eq!(
+            request.header("x-exo-authority-scope"),
+            Some(expected_scope)
+        );
+        assert!(request.body.is_empty(), "GET body must be empty");
     }
 
     fn valid_import_params() -> Value {
@@ -2008,6 +2751,24 @@ mod tests {
     #[test]
     fn configured_gateway_proxies_all_dagdb_mcp_tools_with_auth_and_tenant_scope() {
         assert_live_proxy(
+            execute_intake,
+            add_write_signature(request_fixture("intake")),
+            "intake",
+            "POST /api/v1/dag-db/intake ",
+            "dagdb:intake:tenant-a:primary",
+            "idem-intake-1",
+            write_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_route,
+            add_route_signatures(request_fixture("route")),
+            "route",
+            "POST /api/v1/dag-db/route ",
+            "dagdb:route:tenant-a:primary",
+            "idem-route-1",
+            route_signature_expectations(),
+        );
+        assert_live_proxy(
             execute_get_context_packet,
             add_context_packet_signatures(request_fixture("context_packet")),
             "context_packet",
@@ -2015,6 +2776,15 @@ mod tests {
             "dagdb:context_packet:tenant-a:primary",
             "idem-packet-1",
             context_packet_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_validate,
+            add_write_signature(request_fixture("validate")),
+            "validate",
+            "POST /api/v1/dag-db/validate ",
+            "dagdb:validate:tenant-a:primary",
+            "idem-validate-1",
+            write_signature_expectations(),
         );
         assert_live_proxy(
             execute_submit_writeback,
@@ -2027,21 +2797,60 @@ mod tests {
         );
         assert_live_proxy(
             execute_import,
-            add_write_signature(scoped_import_params()),
+            add_import_signatures(scoped_import_params()),
             "import",
             "POST /api/v1/dag-db/import ",
             "dagdb:import:tenant-a:primary",
             "idem-import-1",
-            write_signature_expectations(),
+            import_signature_expectations(),
         );
         assert_live_proxy(
             execute_export,
-            add_write_signature(scoped_export_params()),
+            add_export_signatures(scoped_export_params()),
             "export",
             "POST /api/v1/dag-db/export ",
             "dagdb:export:tenant-a:primary",
             "idem-export-1",
+            export_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_trust_check,
+            add_write_signature(request_fixture("trust_check")),
+            "trust_check",
+            "POST /api/v1/dag-db/trust-check ",
+            "dagdb:trust_check:tenant-a:primary",
+            "idem-trust-1",
             write_signature_expectations(),
+        );
+        assert_live_proxy(
+            execute_council_decision,
+            add_write_signature(request_fixture("council_decision")),
+            "council_decision",
+            "POST /api/v1/dag-db/council/decision ",
+            "dagdb:council_decision:tenant-a:primary",
+            "idem-council-1",
+            write_signature_expectations(),
+        );
+        assert_live_lookup_proxy(
+            execute_receipt_lookup,
+            request_fixture("receipt_lookup"),
+            "receipt_lookup",
+            "GET /api/v1/dag-db/receipts/",
+            "dagdb:receipt_lookup:tenant-a:primary",
+        );
+        assert_live_lookup_proxy(
+            execute_catalog_lookup,
+            request_fixture("catalog_lookup"),
+            "catalog_lookup",
+            "GET /api/v1/dag-db/catalog/",
+            "dagdb:catalog_lookup:tenant-a:primary",
+        );
+        assert_live_lookup_proxy(
+            execute_route_lookup,
+            request_fixture("route_lookup"),
+            "route_lookup",
+            "GET /api/v1/dag-db/routes/",
+            "dagdb:route_lookup:tenant-a:primary",
         );
     }
 
@@ -2677,10 +3486,13 @@ mod tests {
         add_required_signature_material(DAGDB_IMPORT_TOOL, &mut import_params);
         let import_validator =
             JSONSchema::compile(&import_definition().input_schema).expect("import schema compiles");
-        assert!(
-            import_validator.validate(&import_params).is_ok(),
-            "import schema must accept a valid DagDbImportRequest payload"
-        );
+        if let Err(errors) = import_validator.validate(&import_params) {
+            let msgs: Vec<String> = errors.map(|err| err.to_string()).collect();
+            panic!(
+                "import schema must accept a valid DagDbImportRequest payload: {}",
+                msgs.join("; ")
+            );
+        }
 
         let mut export_params = valid_export_params();
         let _export: DagDbExportRequest = serde_json::from_value(export_params.clone())
@@ -2688,9 +3500,12 @@ mod tests {
         add_required_signature_material(DAGDB_EXPORT_TOOL, &mut export_params);
         let export_validator =
             JSONSchema::compile(&export_definition().input_schema).expect("export schema compiles");
-        assert!(
-            export_validator.validate(&export_params).is_ok(),
-            "export schema must accept a valid DagDbExportRequest payload"
-        );
+        if let Err(errors) = export_validator.validate(&export_params) {
+            let msgs: Vec<String> = errors.map(|err| err.to_string()).collect();
+            panic!(
+                "export schema must accept a valid DagDbExportRequest payload: {}",
+                msgs.join("; ")
+            );
+        }
     }
 }
