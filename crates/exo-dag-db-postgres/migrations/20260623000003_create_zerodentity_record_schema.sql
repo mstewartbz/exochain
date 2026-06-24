@@ -29,3 +29,10 @@ CREATE INDEX IF NOT EXISTS idx_dagdb_zerodentity_records_subject
 
 CREATE INDEX IF NOT EXISTS idx_dagdb_zerodentity_records_family
     ON dagdb_zerodentity_records USING btree (tenant_id, namespace, state_family, record_key, secondary_key);
+
+ALTER TABLE dagdb_zerodentity_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dagdb_zerodentity_records FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS dagdb_tenant_isolation ON dagdb_zerodentity_records;
+CREATE POLICY dagdb_tenant_isolation ON dagdb_zerodentity_records
+    USING (tenant_id = dagdb_current_tenant_id())
+    WITH CHECK (tenant_id = dagdb_current_tenant_id());

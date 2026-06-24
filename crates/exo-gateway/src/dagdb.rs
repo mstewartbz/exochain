@@ -9575,6 +9575,27 @@ mod tests {
     }
 
     #[test]
+    fn dagdb_full_migration_live_proof_artifact_contract() {
+        let proof = repo_file("docs/dagdb/full-migration/live-proof.md");
+        for required in [
+            "EXO_DAGDB_TEST_DATABASE_URL",
+            "cargo test -p exo-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract",
+            "cargo test -p exo-gateway --features production-db --test dagdb_cross_tenant",
+            "write/read/lookup",
+            "tenant mismatch",
+            "database_unavailable",
+            "replay",
+            "finality",
+            "pg_ctl stop",
+        ] {
+            assert!(
+                proof.contains(required),
+                "QM-19 live proof artifact must record {required}"
+            );
+        }
+    }
+
+    #[test]
     fn dagdb_json_fixtures() {
         let fixtures = fixtures();
         assert_fixture::<DagDbIntakeRequest>(&fixtures, "requests", "intake");
@@ -14462,7 +14483,9 @@ mod tests {
                 },
             )
             .await;
-            assert_eq!(packet_response.status(), StatusCode::OK);
+            assert_eq!(packet_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let packet_error: DagDbErrorEnvelope = json_body(packet_response).await;
+            assert_eq!(packet_error.error_code, "metadata_rejected");
 
             let export_denied_request = DagDbExportRequest {
                 tenant_id: tenant_id.clone(),
@@ -14483,7 +14506,12 @@ mod tests {
                 export_denied_request.clone(),
             )
             .await;
-            assert_error_response(export_denied, StatusCode::FORBIDDEN, "consent_denied").await;
+            assert_error_response(
+                export_denied,
+                StatusCode::BAD_REQUEST,
+                "finality_approval_required",
+            )
+            .await;
             assert!(matches!(
                 reserve_gateway_idempotency_key(
                     &pool,
@@ -14905,9 +14933,7 @@ mod tests {
 
         async fn live_dagdb_pool() -> Option<sqlx::PgPool> {
             let database_url = std::env::var("EXO_DAGDB_TEST_DATABASE_URL").ok()?;
-            PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&database_url)
+            exo_dag_db_postgres::postgres::init_pool(&database_url)
                 .await
                 .ok()
         }

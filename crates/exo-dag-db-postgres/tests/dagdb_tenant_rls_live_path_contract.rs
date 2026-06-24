@@ -1038,7 +1038,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .bind(json!({"continuation": "pending"}))
     .execute(&mut *tx)
     .await?;
-    for (node_hash, cbor_byte) in [(0xc0, 0x01), (0xc1, 0x02)] {
+    for (node_hash, cbor_byte) in [(0xc0_u8, 0x01_u8), (0xc1_u8, 0x02_u8)] {
         sqlx::query(
             "INSERT INTO dagdb_node_dag_nodes \
              (tenant_id, namespace, hash, cbor_payload) \
@@ -1094,7 +1094,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     )
     .bind(tenant_id)
     .bind(hb(0xc0))
-    .bind(vec![0x03])
+    .bind(vec![0x03_u8])
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1113,7 +1113,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     )
     .bind(tenant_id)
     .bind(hb(0xc2))
-    .bind(vec![0x04])
+    .bind(vec![0x04_u8])
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1125,7 +1125,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .bind(tenant_id)
     .bind(hb(0xc3))
     .bind(hb(0xc4))
-    .bind(vec![0x05])
+    .bind(vec![0x05_u8])
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1139,7 +1139,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
     .bind(hb(0x00))
     .bind(hb(0xc3))
     .bind(hb(0xc4))
-    .bind(vec![0x06])
+    .bind(vec![0x06_u8])
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1158,7 +1158,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
          VALUES ($1, 'default', 'claim', 'did:exo:zero-rls', 'claim-rls', '', $2, $3)",
     )
     .bind(tenant_id)
-    .bind(vec![0x07])
+    .bind(vec![0x07_u8])
     .bind(hb(0xc6))
     .execute(&mut *tx)
     .await?;
@@ -1170,7 +1170,7 @@ async fn seed_live_path_rows(pool: &PgPool, tenant_id: &str) -> sqlx::Result<()>
          VALUES ($1, 'default', 'session', 'session-rls', $2, $3, $4, 1, 0, 1, 0)",
     )
     .bind(tenant_id)
-    .bind(vec![0x08])
+    .bind(vec![0x08_u8])
     .bind(hb(0xc7))
     .bind(json!({"session": "rls"}))
     .execute(&mut *tx)

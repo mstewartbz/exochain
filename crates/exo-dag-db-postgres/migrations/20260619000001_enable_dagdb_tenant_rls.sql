@@ -64,6 +64,9 @@ BEGIN
         'dagdb_zerodentity_records',
         'dagdb_gateway_state_records'
     ] LOOP
+        IF to_regclass(tenant_table) IS NULL THEN
+            CONTINUE;
+        END IF;
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tenant_table);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tenant_table);
         EXECUTE format('DROP POLICY IF EXISTS dagdb_tenant_isolation ON %I', tenant_table);

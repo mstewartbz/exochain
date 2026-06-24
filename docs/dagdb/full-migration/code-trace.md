@@ -394,8 +394,11 @@ responses. They call route-specific persistence and lookup paths:
 - receipt, catalog, and route lookups read `dagdb_receipts`,
   `dagdb_catalog_entries`, and `dagdb_route_receipts`.
 
-Live Postgres write/read proof is still gated by QM-19 and requires
-`EXO_DAGDB_TEST_DATABASE_URL`.
+Live Postgres write/read proof is recorded in
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/live-proof.md`.
+The final QM-19 run used an isolated local Postgres cluster and proved mounted
+route write/read/lookup, tenant mismatch, `database_unavailable`, replay, and
+finality behavior before stopping the server with `pg_ctl stop`.
 
 ## DAG DB Finality Boundary
 
@@ -420,8 +423,8 @@ production DAG DB import and export routes:
 
 Route, context-packet, and writeback finality already used independent
 approval-authority checks. QM-08 extends that same boundary to import/export
-and council-decision persistence. Live signed Postgres proof remains covered by
-QM-19.
+and council-decision persistence. QM-19 live proof verifies these signed paths
+against Postgres.
 
 ## DAG DB Idempotency And Replay Boundary
 
