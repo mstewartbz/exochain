@@ -604,6 +604,36 @@ Baseline before QM-13:
 
 Site:
 
+- QM-14 implementation files:
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/src/lib/contact-submissions.ts`
+    now requires `SITE_DAGDB_GATEWAY_URL`, `SITE_DAGDB_AUTH_TOKEN`,
+    tenant/namespace, owner/controller/submitted-by DIDs, and
+    `SITE_DAGDB_WRITE_SIGNATURE`. Every submission, rate-limit, notification,
+    and recent-list operation posts to `POST /api/v1/dag-db/intake` with tenant,
+    namespace, idempotency, authority-scope, and write-signature headers.
+  - The contact adapter refuses to synthesize durable state. Submission creation
+    requires `site_contact_result.submission`; rate limiting requires
+    `site_contact_result.request_count`; notification updates require
+    `site_contact_result.notification_updated`; recent listing requires
+    `site_contact_result.submissions`.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/package.json`
+    no longer declares `pg` or `@types/pg`.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/scripts/test-contact-intake-policy.mjs`
+    guards against direct Postgres imports, legacy public contact tables,
+    legacy contact DB environment variables, and missing DAG DB intake evidence.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/scripts/assert-no-contact-submission-disclosure.mjs`
+    keeps internal support disclosure decoupled from contact submissions and
+    guards that the contact backend remains DAG DB-backed.
+- QM-14 RED evidence: `npm run security:contact-intake` failed with
+  `AssertionError [ERR_ASSERTION]: contact storage must not open direct
+  Postgres or read legacy database URLs`.
+- QM-14 GREEN evidence: `npm run security:contact-intake`,
+  `npm run security:contact-disclosure`, `npm run typecheck`, and
+  `npm run build` passed. The lockfile refresh reported the existing site npm
+  audit findings: 7 vulnerabilities (3 moderate, 4 high).
+
+Baseline before QM-14:
+
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/src/lib/contact-submissions.ts:60`
   names `CONTACT_DATABASE_URL`.
 - `:124` through `:163` creates `site_contact_submissions` and

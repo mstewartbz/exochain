@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-import { Pool, type PoolClient } from 'pg';
+import { createHash } from 'node:crypto';
 import type { ContactRateLimitBucket } from './contact-intake-policy';
 
 export type ContactSubmissionInput = {
@@ -34,31 +34,34 @@ export type ContactSubmission = ContactSubmissionInput & {
   notificationError: string;
 };
 
-type ContactSubmissionRow = {
-  id: string;
-  submitted_at: string;
-  name: string;
-  email: string;
-  organization: string;
-  role: string;
-  intended_use: string;
-  user_agent: string;
-  forwarded_for: string;
-  notification_status: string;
-  notification_error: string;
+type SiteDagDbConfig = {
+  gatewayUrl: string;
+  authToken: string;
+  tenantId: string;
+  namespace: string;
+  ownerDid: string;
+  controllerDid: string;
+  submittedByDid: string;
+  writeSignature: string;
 };
 
-type ContactRateLimitRow = {
-  request_count: number | string;
+type SiteContactResult = {
+  submission?: unknown;
+  submissions?: unknown;
+  notification_updated?: unknown;
+  request_count?: unknown;
 };
 
-type ContactSubmissionPoolGlobal = typeof globalThis & {
-  __exoContactSubmissionPool?: Pool;
-  __exoContactSubmissionSchemaReady?: Promise<void>;
-};
-
-const CONTACT_DATABASE_URL_ENV = 'CONTACT_DATABASE_URL';
-const DATABASE_URL_ENV = 'DATABASE_URL';
+const SITE_DAGDB_GATEWAY_URL_ENV = 'SITE_DAGDB_GATEWAY_URL';
+const SITE_DAGDB_AUTH_TOKEN_ENV = 'SITE_DAGDB_AUTH_TOKEN';
+const SITE_DAGDB_TENANT_ID_ENV = 'SITE_DAGDB_TENANT_ID';
+const SITE_DAGDB_NAMESPACE_ENV = 'SITE_DAGDB_NAMESPACE';
+const SITE_DAGDB_OWNER_DID_ENV = 'SITE_DAGDB_OWNER_DID';
+const SITE_DAGDB_CONTROLLER_DID_ENV = 'SITE_DAGDB_CONTROLLER_DID';
+const SITE_DAGDB_SUBMITTED_BY_DID_ENV = 'SITE_DAGDB_SUBMITTED_BY_DID';
+const SITE_DAGDB_WRITE_SIGNATURE_ENV = 'SITE_DAGDB_WRITE_SIGNATURE';
+const SITE_CONTACT_RESULT_FIELD = 'site_contact_result';
+const CONTACT_INTAKE_PATH = '/api/v1/dag-db/intake';
 const MAX_TEXT_LENGTH = 1000;
 
 function normalizeSecret(value: string | undefined): string {
@@ -73,198 +76,211 @@ function normalizeSecret(value: string | undefined): string {
   return normalized;
 }
 
-function getDatabaseUrl(): string {
-  const contactDatabaseUrl = normalizeSecret(process.env[CONTACT_DATABASE_URL_ENV]);
-  const databaseUrl = normalizeSecret(process.env[DATABASE_URL_ENV]);
-  const resolved = contactDatabaseUrl || databaseUrl;
-
-  if (!resolved) {
-    throw new Error(
-      `Contact submission database is not configured. Set ${CONTACT_DATABASE_URL_ENV} on the site service.`,
-    );
+function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
+  const value = normalizeSecret(env[key]);
+  if (!value) {
+    throw new Error(`Site contact DAG DB adapter is not configured. Set ${key}.`);
   }
-
-  return resolved;
+  return value;
 }
 
-function getPool(): Pool {
-  const globalState = globalThis as ContactSubmissionPoolGlobal;
-
-  if (!globalState.__exoContactSubmissionPool) {
-    globalState.__exoContactSubmissionPool = new Pool({
-      connectionString: getDatabaseUrl(),
-      max: 4,
-      ssl: { rejectUnauthorized: false },
-    });
-  }
-
-  return globalState.__exoContactSubmissionPool;
+function requireSiteDagDbConfig(env: NodeJS.ProcessEnv = process.env): SiteDagDbConfig {
+  const gatewayUrl = requireEnv(env, SITE_DAGDB_GATEWAY_URL_ENV).replace(/\/+$/u, '');
+  return {
+    gatewayUrl,
+    authToken: requireEnv(env, SITE_DAGDB_AUTH_TOKEN_ENV),
+    tenantId: requireEnv(env, SITE_DAGDB_TENANT_ID_ENV),
+    namespace: requireEnv(env, SITE_DAGDB_NAMESPACE_ENV),
+    ownerDid: requireEnv(env, SITE_DAGDB_OWNER_DID_ENV),
+    controllerDid: requireEnv(env, SITE_DAGDB_CONTROLLER_DID_ENV),
+    submittedByDid: requireEnv(env, SITE_DAGDB_SUBMITTED_BY_DID_ENV),
+    writeSignature: requireEnv(env, SITE_DAGDB_WRITE_SIGNATURE_ENV),
+  };
 }
 
 function truncate(value: string): string {
   return value.slice(0, MAX_TEXT_LENGTH);
 }
 
-function fromRow(row: ContactSubmissionRow): ContactSubmission {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  }
+
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(',')}}`;
+}
+
+function sha256Hex(value: unknown): string {
+  return createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+function contactResult(value: unknown): SiteContactResult {
+  if (!isRecord(value) || !isRecord(value[SITE_CONTACT_RESULT_FIELD])) {
+    throw new Error('Site contact DAG DB response missing site_contact_result; refusing to synthesize contact state.');
+  }
+  return value[SITE_CONTACT_RESULT_FIELD] as SiteContactResult;
+}
+
+function isContactSubmission(value: unknown): value is ContactSubmission {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return [
+    'id',
+    'submittedAt',
+    'name',
+    'email',
+    'organization',
+    'role',
+    'intendedUse',
+    'userAgent',
+    'forwardedFor',
+    'notificationStatus',
+    'notificationError',
+  ].every((field) => typeof value[field] === 'string');
+}
+
+function contactSubmissionInput(input: ContactSubmissionInput): ContactSubmissionInput {
   return {
-    id: row.id,
-    submittedAt: row.submitted_at,
-    name: row.name,
-    email: row.email,
-    organization: row.organization,
-    role: row.role,
-    intendedUse: row.intended_use,
-    userAgent: row.user_agent,
-    forwardedFor: row.forwarded_for,
-    notificationStatus: row.notification_status,
-    notificationError: row.notification_error,
+    name: truncate(input.name),
+    email: truncate(input.email),
+    organization: truncate(input.organization),
+    role: truncate(input.role),
+    intendedUse: truncate(input.intendedUse),
+    userAgent: truncate(input.userAgent),
+    forwardedFor: truncate(input.forwardedFor),
   };
 }
 
-async function ensureSchemaWithClient(client: PoolClient): Promise<void> {
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS site_contact_submissions (
-      id BIGSERIAL PRIMARY KEY,
-      submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL,
-      organization TEXT NOT NULL DEFAULT '',
-      role TEXT NOT NULL DEFAULT '',
-      intended_use TEXT NOT NULL DEFAULT '',
-      user_agent TEXT NOT NULL DEFAULT '',
-      forwarded_for TEXT NOT NULL DEFAULT '',
-      notification_status TEXT NOT NULL DEFAULT 'pending',
-      notification_error TEXT NOT NULL DEFAULT ''
-    )
-  `);
+async function readJson(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
 
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS site_contact_submissions_submitted_at_idx
-      ON site_contact_submissions (submitted_at DESC, id DESC)
-  `);
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new Error(`Site contact DAG DB response was not JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS site_contact_submissions_email_idx
-      ON site_contact_submissions (email)
-  `);
+async function postContactIntake(
+  kind: string,
+  operation: unknown,
+  consentPurpose: 'retrieval' | 'writeback',
+  parentMemoryIds: string[] | null = null,
+): Promise<SiteContactResult> {
+  const config = requireSiteDagDbConfig();
+  const sourceMaterial = {
+    kind,
+    operation,
+    contract: 'site.contact.dagdb.v1',
+  };
+  const sourceHash = sha256Hex(sourceMaterial);
+  const payloadHash = sha256Hex(operation);
+  const idempotencyKey = `site-contact-${kind}-${sha256Hex({
+    sourceHash,
+    payloadHash,
+    tenantId: config.tenantId,
+    namespace: config.namespace,
+  })}`;
+  const body = {
+    tenant_id: config.tenantId,
+    namespace: config.namespace,
+    idempotency_key: idempotencyKey,
+    source_type: 'generated',
+    source_hash: sourceHash,
+    payload_hash: payloadHash,
+    owner_did: config.ownerDid,
+    controller_did: config.controllerDid,
+    submitted_by_did: config.submittedByDid,
+    consent_purpose: consentPurpose,
+    requested_action: `site:contact:${kind}`,
+    title_text: `site contact ${kind}`,
+    summary_text: stableJson(operation).slice(0, MAX_TEXT_LENGTH),
+    payload_uri_hash: null,
+    parent_memory_ids: parentMemoryIds,
+    edge_types: null,
+    access_policy_hash: null,
+    declared_rights_hash: null,
+    keyword_texts: ['site', 'contact', kind],
+  };
 
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS site_contact_rate_limits (
-      bucket TEXT PRIMARY KEY,
-      window_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      request_count INTEGER NOT NULL DEFAULT 0
-    )
-  `);
+  const response = await fetch(`${config.gatewayUrl}${CONTACT_INTAKE_PATH}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.authToken}`,
+      'Content-Type': 'application/json',
+      'x-exo-tenant-id': config.tenantId,
+      'x-exo-namespace': config.namespace,
+      'x-exo-authority-scope': `dagdb:intake:${config.tenantId}:${config.namespace}`,
+      'x-exo-write-signature': config.writeSignature,
+    },
+    body: JSON.stringify(body),
+  });
 
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS site_contact_rate_limits_window_idx
-      ON site_contact_rate_limits (window_started_at)
-  `);
+  const parsed = await readJson(response);
+  if (!response.ok) {
+    throw new Error(`Site contact DAG DB intake failed with status ${response.status}: ${stableJson(parsed).slice(0, MAX_TEXT_LENGTH)}`);
+  }
+
+  return contactResult(parsed);
 }
 
 export async function ensureContactSubmissionSchema(): Promise<void> {
-  const globalState = globalThis as ContactSubmissionPoolGlobal;
-
-  if (!globalState.__exoContactSubmissionSchemaReady) {
-    globalState.__exoContactSubmissionSchemaReady = (async () => {
-      const client = await getPool().connect();
-      try {
-        await ensureSchemaWithClient(client);
-      } finally {
-        client.release();
-      }
-    })();
-  }
-
-  return globalState.__exoContactSubmissionSchemaReady;
+  requireSiteDagDbConfig();
 }
 
 export async function createContactSubmission(
   input: ContactSubmissionInput,
 ): Promise<ContactSubmission> {
-  await ensureContactSubmissionSchema();
-
-  const result = await getPool().query<ContactSubmissionRow>(
-    `
-      INSERT INTO site_contact_submissions (
-        name,
-        email,
-        organization,
-        role,
-        intended_use,
-        user_agent,
-        forwarded_for
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING
-        id::text,
-        submitted_at::text,
-        name,
-        email,
-        organization,
-        role,
-        intended_use,
-        user_agent,
-        forwarded_for,
-        notification_status,
-        notification_error
-    `,
-    [
-      truncate(input.name),
-      truncate(input.email),
-      truncate(input.organization),
-      truncate(input.role),
-      truncate(input.intendedUse),
-      truncate(input.userAgent),
-      truncate(input.forwardedFor),
-    ],
+  const result = await postContactIntake(
+    'submission',
+    { submission: contactSubmissionInput(input) },
+    'writeback',
   );
 
-  const row = result.rows[0];
-  if (!row) {
-    throw new Error('Contact submission insert did not return a row.');
+  if (!isContactSubmission(result.submission)) {
+    throw new Error('Site contact DAG DB submission response is missing a valid submission record.');
   }
 
-  return fromRow(row);
+  return result.submission;
 }
 
 async function incrementContactRateLimit(
   bucket: ContactRateLimitBucket,
 ): Promise<number> {
-  await ensureContactSubmissionSchema();
-
-  const result = await getPool().query<ContactRateLimitRow>(
-    `
-      INSERT INTO site_contact_rate_limits (
-        bucket,
-        window_started_at,
-        request_count
-      )
-      VALUES ($1, CURRENT_TIMESTAMP, 1)
-      ON CONFLICT (bucket) DO UPDATE
-      SET window_started_at = CASE
-            WHEN site_contact_rate_limits.window_started_at <=
-              CURRENT_TIMESTAMP - ($2::integer * INTERVAL '1 second')
-            THEN CURRENT_TIMESTAMP
-            ELSE site_contact_rate_limits.window_started_at
-          END,
-          request_count = CASE
-            WHEN site_contact_rate_limits.window_started_at <=
-              CURRENT_TIMESTAMP - ($2::integer * INTERVAL '1 second')
-            THEN 1
-            ELSE site_contact_rate_limits.request_count + 1
-          END
-      RETURNING request_count
-    `,
-    [bucket.bucket, bucket.windowSeconds],
+  const result = await postContactIntake(
+    'rate-limit',
+    {
+      bucket: {
+        bucket: bucket.bucket,
+        maxRequests: bucket.maxRequests,
+        windowSeconds: bucket.windowSeconds,
+      },
+    },
+    'writeback',
   );
+  const requestCount = Number(result.request_count);
 
-  const row = result.rows[0];
-  if (!row) {
-    throw new Error('Contact rate-limit update did not return a row.');
+  if (!Number.isInteger(requestCount) || requestCount < 0) {
+    throw new Error('Site contact DAG DB rate-limit response is missing request_count.');
   }
 
-  return Number(row.request_count);
+  return requestCount;
 }
 
 export async function assertContactSubmissionRateLimit(
@@ -285,39 +301,28 @@ export async function updateContactSubmissionNotification(
   status: 'sent' | 'not_configured' | 'failed',
   error: string,
 ): Promise<void> {
-  await ensureContactSubmissionSchema();
-
-  await getPool().query(
-    `
-      UPDATE site_contact_submissions
-      SET notification_status = $2,
-          notification_error = $3
-      WHERE id = $1
-    `,
-    [id, status, truncate(error)],
+  const result = await postContactIntake(
+    'notification',
+    {
+      id,
+      status,
+      error: truncate(error),
+    },
+    'writeback',
+    [id],
   );
+
+  if (result.notification_updated !== true) {
+    throw new Error('Site contact DAG DB notification response did not confirm notification_updated.');
+  }
 }
 
 export async function listRecentContactSubmissions(): Promise<ContactSubmission[]> {
-  await ensureContactSubmissionSchema();
+  const result = await postContactIntake('recent', { limit: 50 }, 'retrieval');
 
-  const result = await getPool().query<ContactSubmissionRow>(`
-    SELECT
-      id::text,
-      submitted_at::text,
-      name,
-      email,
-      organization,
-      role,
-      intended_use,
-      user_agent,
-      forwarded_for,
-      notification_status,
-      notification_error
-    FROM site_contact_submissions
-    ORDER BY submitted_at DESC, id DESC
-    LIMIT 50
-  `);
+  if (!Array.isArray(result.submissions) || !result.submissions.every(isContactSubmission)) {
+    throw new Error('Site contact DAG DB recent response is missing submission records.');
+  }
 
-  return result.rows.map(fromRow);
+  return result.submissions;
 }

@@ -183,9 +183,9 @@ commit: `ba1008fb`
 surface: Site
 classification: Adjacent surface
 red_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/site && npm run security:contact-intake && npm run security:contact-disclosure`
-red_failure: not-claimed
+red_failure: Focused RED `npm run security:contact-intake` failed with `AssertionError [ERR_ASSERTION]: contact storage must not open direct Postgres or read legacy database URLs` because `site/src/lib/contact-submissions.ts` still imported `pg`, read `CONTACT_DATABASE_URL`/`DATABASE_URL`, and created `site_contact_submissions` plus `site_contact_rate_limits`.
 green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/site && npm run typecheck && npm run build && npm run security:contact-intake && npm run security:contact-disclosure`
-artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/src/lib/contact-submissions.ts`
+artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/src/lib/contact-submissions.ts`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/scripts/test-contact-intake-policy.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/scripts/assert-no-contact-submission-disclosure.mjs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/package.json`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/site/package-lock.json`
 commit: not-claimed
 
 ### QM-15
