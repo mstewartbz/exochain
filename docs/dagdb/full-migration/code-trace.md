@@ -46,9 +46,9 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/resources/tools_summary.rs` | Core runtime adapter | QM-11 categorizes all twelve DAG DB MCP tools as `dagdb` in the tool-summary resource. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | QM-12 routes production CommandBase persistence through a DAG DB intake adapter, moves `better-sqlite3` to dev/test compatibility only, and sends durable dashboard UI state through the server adapter. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo` | Adjacent surface | QM-13 routes demo service persistence through `@exochain/shared`'s DAG DB adapter, removes service `pg` production dependencies, and marks legacy SQL init files as fixture-only. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/site` | Adjacent surface | Contact intake owns direct `CONTACT_DATABASE_URL` tables and rate-limit state. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/web` | Adjacent surface | Council, feedback, layout templates, onboarding, and auth compatibility paths use `localStorage`. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica` | Adjacent surface | Trust adapter/runtime configuration code records evidence boundaries but is not a live DB owner on `origin/main`. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/site` | Adjacent surface | QM-14 routes contact intake through the gateway DAG DB intake adapter and removes production `CONTACT_DATABASE_URL`/direct `pg` ownership. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/web` | Adjacent surface | QM-15 routes durable council, feedback, layout-template, and APE onboarding state through the DAG DB durable-state adapter; only classified ephemeral compatibility keys remain browser-local. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica` | Adjacent surface | QM-16 requires CyberMedica trust activation evidence to name the DAG DB gateway intake route and fail closed on missing, simulated, cached, or overridden DAG DB trust evidence. |
 
 ## Core Node Store
 
@@ -699,13 +699,44 @@ Baseline before QM-15:
 CyberMedica:
 
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/src/trust-adapter.mjs`
-  evaluates trust evidence source boundaries and blocks local simulation, cached
-  outcomes, payload disclosure, and unverified activation.
+  now evaluates a DAG DB gateway call-path evidence object in addition to root,
+  gateway, receipt, privacy, and Decision Forum evidence. Verified activation
+  requires `source: exochain_dagdb_gateway`, `routePath: /api/v1/dag-db/intake`,
+  `method: POST`, tenant and namespace binding, the
+  `x-exo-authority-scope` authority header, unavailable-gateway fail-closed
+  evidence, no-simulation policy evidence, and digest-shaped route, request,
+  and receipt hashes.
+- The same adapter blocks `dagdb_gateway_call_path_absent`,
+  `dagdb_gateway_local_simulation_forbidden`,
+  `dagdb_gateway_cached_outcome_forbidden`, and
+  `dagdb_gateway_override_forbidden`, so CyberMedica cannot lift a production
+  trust claim by naming EXOCHAIN generally or by replaying local/cached trust.
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/src/runtime-configuration-source.mjs`
   evaluates runtime configuration sources and adapters.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/scripts/source-adapter-contract-guard.mjs`
+  adds MAC-006, binding the integration map, adapter source, and adapter tests
+  to the DAG DB gateway evidence route.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica/docs/context/EXOCHAIN_TO_CYBERMEDICA_INTEGRATION_MAP.md`
+  now includes the DAG DB gateway evidence path and the minimum adapter
+  contract requirement that the path fail closed when missing, simulated,
+  cached, overridden, unavailable, or not bound to tenant and namespace.
+- QM-16 RED evidence: `node --test tests/trust-adapter.test.mjs` failed because
+  the adapter output lacked `dagDbGatewayCallPathSource`, allowed missing DAG DB
+  evidence, and allowed simulated DAG DB trust; `npm run guard:adapter-contracts`
+  failed MAC-006 coverage for the integration map, adapter source, and tests;
+  the package-level `npm run quality` then failed older fixtures that treated
+  root/gateway/receipt/privacy/Decision Forum evidence as sufficient without
+  DAG DB call-path evidence.
+- QM-16 GREEN evidence: `node --test tests/trust-adapter.test.mjs` passed 9
+  tests; `npm run guard:adapter-contracts` passed with `findingsCount: 0`;
+  `npm run quality` passed CyberMedica lint/typecheck, dependency audit, source
+  hazard scan, source secret scan, guard suite, build artifact generation,
+  1005 tests, and coverage.
 
-CyberMedica remains adjacent until a tested DAG DB or gateway call path proves
-the boundary. It must not claim EXOCHAIN constitutional enforcement by proximity.
+CyberMedica remains adjacent. It may name a verified EXOCHAIN production trust
+claim only when runtime evidence includes the tested DAG DB gateway call path;
+otherwise it stays inactive or denied and must not claim constitutional
+enforcement by proximity.
 
 ## Migration Rule
 

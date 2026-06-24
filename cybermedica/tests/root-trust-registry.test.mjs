@@ -49,6 +49,20 @@ const digest7 = '777777777777777777777777777777777777777777777777777777777777777
 const digest8 = '8888888888888888888888888888888888888888888888888888888888888888';
 const digest9 = '9999999999999999999999999999999999999999999999999999999999999999';
 
+const verifiedDagDbGatewayCallPath = Object.freeze({
+  source: 'exochain_dagdb_gateway',
+  routePath: '/api/v1/dag-db/intake',
+  method: 'POST',
+  tenantBound: true,
+  namespaceBound: true,
+  authorityScopeHeader: 'x-exo-authority-scope',
+  failClosedUnavailable: true,
+  noSimulatedTrust: true,
+  routeContractHash: digest4,
+  requestHash: digest5,
+  receiptHash: digest6,
+});
+
 function certifier(index, overrides = {}) {
   const padded = String(index).padStart(2, '0');
   return {
@@ -451,6 +465,7 @@ test('root trust bundle provider stays inactive until roster registry config and
     receiptPath: { verified: true },
     privacyBoundary: { verified: true },
     decisionForum: { verified: true },
+    dagDbGatewayCallPath: verifiedDagDbGatewayCallPath,
   });
 
   assert.equal(activation.allowed, true);

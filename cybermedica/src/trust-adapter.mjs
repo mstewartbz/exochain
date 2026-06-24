@@ -27,6 +27,8 @@ const REQUIRED_DKG_PARTICIPANTS = 13;
 const REQUIRED_THRESHOLD_SIGNATURE = '7-of-13';
 const HEX_64 = /^[0-9a-f]{64}$/u;
 const EXOCHAIN_GATEWAY_SOURCE = 'exochain_gateway';
+const EXOCHAIN_DAGDB_GATEWAY_SOURCE = 'exochain_dagdb_gateway';
+const EXOCHAIN_DAGDB_INTAKE_ROUTE = '/api/v1/dag-db/intake';
 const EXOCHAIN_NODE_RECEIPT_SOURCE = 'exochain_node_receipt_store';
 const EXOCHAIN_DECISION_FORUM_SOURCE = 'exochain_decision_forum';
 const EXOCHAIN_DECISION_FORUM_RECEIPT_SOURCE = 'exochain_decision_forum_receipts';
@@ -234,6 +236,75 @@ function activationReplayBoundaryBlocks(activation) {
     ...replayBoundaryBlocks(activation.privacyBoundary, 'privacy_boundary'),
     ...replayBoundaryBlocks(activation.decisionForum, 'decision_forum'),
   ];
+}
+
+function dagDbGatewayCallPathBlocks(callPath) {
+  if (callPath === null || callPath === undefined || typeof callPath !== 'object') {
+    return ['dagdb_gateway_call_path_absent'];
+  }
+
+  const blocks = [];
+  if (callPath.source !== EXOCHAIN_DAGDB_GATEWAY_SOURCE) {
+    blocks.push('dagdb_gateway_call_path_source_unverified');
+  }
+  if (callPath.routePath !== EXOCHAIN_DAGDB_INTAKE_ROUTE) {
+    blocks.push('dagdb_gateway_call_path_route_unverified');
+  }
+  if (callPath.method !== 'POST') {
+    blocks.push('dagdb_gateway_call_path_method_unverified');
+  }
+  if (callPath.tenantBound !== true) {
+    blocks.push('dagdb_gateway_call_path_tenant_unbound');
+  }
+  if (callPath.namespaceBound !== true) {
+    blocks.push('dagdb_gateway_call_path_namespace_unbound');
+  }
+  if (callPath.authorityScopeHeader !== 'x-exo-authority-scope') {
+    blocks.push('dagdb_gateway_call_path_authority_scope_absent');
+  }
+  if (callPath.failClosedUnavailable !== true) {
+    blocks.push('dagdb_gateway_call_path_fail_closed_absent');
+  }
+  if (callPath.noSimulatedTrust !== true) {
+    blocks.push('dagdb_gateway_call_path_simulation_policy_absent');
+  }
+  if (callPath.locallySimulated === true || callPath.simulated === true) {
+    blocks.push('dagdb_gateway_local_simulation_forbidden');
+  }
+  if (callPath.cacheHit === true || callPath.cachedOutcome === true || callPath.cachedReceipt === true) {
+    blocks.push('dagdb_gateway_cached_outcome_forbidden');
+  }
+  if (callPath.overrideApplied === true || callPath.overrideUsed === true) {
+    blocks.push('dagdb_gateway_override_forbidden');
+  }
+  if (!isDigest(callPath.routeContractHash)) {
+    blocks.push('dagdb_gateway_call_path_contract_hash_invalid');
+  }
+  if (!isDigest(callPath.requestHash)) {
+    blocks.push('dagdb_gateway_call_path_request_hash_invalid');
+  }
+  if (!isDigest(callPath.receiptHash)) {
+    blocks.push('dagdb_gateway_call_path_receipt_hash_invalid');
+  }
+  return blocks;
+}
+
+function dagDbGatewayCallPathSummary(callPath) {
+  if (callPath === null || callPath === undefined || typeof callPath !== 'object') {
+    return {
+      receiptHash: null,
+      requestHash: null,
+      route: null,
+      source: null,
+    };
+  }
+
+  return {
+    receiptHash: isDigest(callPath.receiptHash) ? callPath.receiptHash : null,
+    requestHash: isDigest(callPath.requestHash) ? callPath.requestHash : null,
+    route: hasText(callPath.routePath) ? callPath.routePath : null,
+    source: hasText(callPath.source) ? callPath.source : null,
+  };
 }
 
 function gatewayPayloadBlocks(value) {
@@ -866,6 +937,7 @@ export function evaluateProductionTrustActivation(input) {
       timeoutBlock: 'decision_forum_timeout',
       statusBlock: 'decision_forum_status_unverified',
     }),
+    ...dagDbGatewayCallPathBlocks(activation.dagDbGatewayCallPath),
     ...publicClaimReviewLineageBlocks(activation),
     ...activationReplayBoundaryBlocks(activation),
     ...activationEvidencePayloadBlocks(activation),
@@ -873,6 +945,7 @@ export function evaluateProductionTrustActivation(input) {
   const state = classifyFailureState(activation.rootBundle, blockedBy);
   const allowed = state === TrustState.VERIFIED;
   const claimReview = publicClaimReviewSummary(activation);
+  const dagDbGatewayCallPath = dagDbGatewayCallPathSummary(activation.dagDbGatewayCallPath);
 
   return {
     schema: 'cybermedica.production_trust_activation.v1',
@@ -929,6 +1002,10 @@ export function evaluateProductionTrustActivation(input) {
     publicClaimReviewReceiptHash: claimReview.receiptHash,
     publicClaimReviewStatus: claimReview.status,
     publicClaimReviewTrustState: claimReview.trustState,
+    dagDbGatewayCallPathReceiptHash: dagDbGatewayCallPath.receiptHash,
+    dagDbGatewayCallPathRequestHash: dagDbGatewayCallPath.requestHash,
+    dagDbGatewayCallPathRoute: dagDbGatewayCallPath.route,
+    dagDbGatewayCallPathSource: dagDbGatewayCallPath.source,
     displayLabel: allowed ? 'Verified Exochain receipt path' : `Trust fabric ${state}`,
     claimLanguage: allowed
       ? 'Exochain receipt path verified for this CyberMedica action.'
