@@ -35,7 +35,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 455 | `find crates -name '*.rs'` |
-| Rust LOC | 363351 | `wc -l` |
+| Rust LOC | 363363 | `wc -l` |
 | Workspace tests | 6,000 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
@@ -113,7 +113,7 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 363351 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 363363 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
          cryptographic proofs, 6,000 listed workspace tests
 
