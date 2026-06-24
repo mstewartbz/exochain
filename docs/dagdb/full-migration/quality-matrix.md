@@ -216,7 +216,7 @@ red_command: `cargo test -p exo-gateway dagdb_full_migration_source_hygiene_guar
 red_failure: Repo-level source hygiene RED failed with `CommandBase worker must not depend on production better-sqlite3`, proving the remaining worker production SQLite path was still outside the QM-12 CommandBase app migration.
 green_command: `cargo test -p exo-gateway dagdb_full_migration_source_hygiene_guard`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/app && npm test`; `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker && npm test`; `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/demo && npm run test:services -- dagdb-adapter-contract`; `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/site && npm run security:contact-intake && npm run security:contact-disclosure`; `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/web && npm test -- dagdbDurableState`; `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica && npm run scan:hazards && npm run scan:secrets && npm run guard:adapter-contracts`
 artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/index.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/package.json`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/worker-dagdb-adapter.test.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/docs/dagdb/full-migration/code-trace.md`
-commit: not-claimed
+commit: `4af99012`
 
 ### QM-18
 
