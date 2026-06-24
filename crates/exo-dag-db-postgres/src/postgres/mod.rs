@@ -76,6 +76,11 @@ pub const DAGDB_EXPORT_SCHEMA_SQL: &str =
 pub const DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL: &str =
     include_str!("../../migrations/20260620000001_add_dagdb_operational_receipt_event_types.sql");
 
+/// SQL migration source for the PR #708 operational event-type and tenant RLS expansion.
+pub const DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL: &str = include_str!(
+    "../../migrations/20260623000006_add_dagdb_operational_event_types_and_rls_expansion.sql"
+);
+
 /// SQL migration source for additive KG export finality/outbox subject support.
 pub const DAGDB_EXPORT_FINALITY_OUTBOX_SCHEMA_SQL: &str =
     include_str!("../../migrations/20260511000002_create_dagdb_export_finality_outbox_schema.sql");
@@ -502,6 +507,12 @@ mod tests {
                 .iter()
                 .any(|migration| migration.version == 20260607000003),
             "DAG DB PRD17C lifecycle schema migration must be registered"
+        );
+        assert!(
+            migrator()
+                .iter()
+                .any(|migration| migration.version == 20260623000006),
+            "DAG DB PR #708 operational event/RLS expansion migration must be registered"
         );
     }
 

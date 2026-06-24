@@ -1,15 +1,16 @@
 #![cfg(feature = "postgres")]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::process;
+use std::{fs, path::PathBuf, process};
 
 use exo_dag_db_postgres::postgres::{
     CATALOG_ROOT_HASH_SEMANTICS, DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL,
-    DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL, DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL,
-    DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL, DAGDB_TENANT_RLS_SCHEMA_SQL,
-    bind_tenant_context, init_pool,
+    DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL,
+    DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL, DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL,
+    DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL, DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL,
+    DAGDB_TENANT_RLS_SCHEMA_SQL, bind_tenant_context, init_pool, run_migrations_in_schema,
 };
-use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
+use sqlx::{Connection, PgConnection, Pool, Postgres, Row, Transaction, migrate::Migrator};
 
 const EXPECTED_TABLES: &[&str] = &[
     "dagdb_agent_safety_scores",
@@ -106,6 +107,62 @@ const EXPECTED_TENANT_RLS_TABLES: &[&str] = &[
     "dagdb_subject_receipt_heads",
     "dagdb_validation_reports",
     "dagdb_zerodentity_records",
+];
+
+const PR708_NEW_TENANT_RLS_TABLES: &[&str] = &[
+    "dagdb_node_dag_nodes",
+    "dagdb_node_dag_parents",
+    "dagdb_node_committed",
+    "dagdb_node_consensus_meta",
+    "dagdb_node_consensus_votes",
+    "dagdb_node_commit_certificates",
+    "dagdb_node_validators",
+    "dagdb_node_trust_receipts",
+    "dagdb_node_economy_objects",
+    "dagdb_node_economy_anchors",
+    "dagdb_node_economy_meta",
+    "dagdb_zerodentity_records",
+    "dagdb_gateway_state_records",
+];
+
+const PR708_NEW_MIGRATION_VERSIONS: &[i64] = &[
+    20260623000001,
+    20260623000002,
+    20260623000003,
+    20260623000004,
+    20260623000005,
+    20260623000006,
+];
+
+const LAST_SUCCESSFUL_DEPLOYED_MIGRATION_FILES: &[&str] = &[
+    "20260505000001_create_dagdb_schema.sql",
+    "20260505000002_create_dagdb_graph_schema.sql",
+    "20260511000001_create_dagdb_export_persistence_schema.sql",
+    "20260511000002_create_dagdb_export_finality_outbox_schema.sql",
+    "20260602000001_create_dagdb_graph_edge_tombstones.sql",
+    "20260602000002_create_dagdb_layered_graph_schema.sql",
+    "20260607000001_create_prd17_default_route_schema.sql",
+    "20260607000002_create_prd17_context_packet_schema.sql",
+    "20260607000003_create_prd17_lifecycle_schema.sql",
+    "20260612000001_create_dagdb_telemetry_facet_node_type.sql",
+    "20260612000002_add_dagdb_graph_layers_aggregate_summary.sql",
+    "20260612000003_add_dagdb_memory_deep_detail_summary.sql",
+    "20260619000001_enable_dagdb_tenant_rls.sql",
+    "20260620000001_add_dagdb_operational_receipt_event_types.sql",
+];
+
+const OPERATIONAL_RECEIPT_EVENT_TYPES: &[&str] = &[
+    "dagdb_approval_request_submitted",
+    "dagdb_approval_granted",
+    "dagdb_approval_denied",
+    "dagdb_record_accepted",
+    "dagdb_import_completed",
+    "dagdb_export_completed",
+    "dagdb_replay_detected",
+    "dagdb_idempotency_conflict",
+    "dagdb_rls_tenant_violation",
+    "dagdb_signature_failure",
+    "dagdb_council_operator_decision",
 ];
 
 const EXPECTED_INDEXES: &[(&str, &str)] = &[
@@ -304,6 +361,18 @@ const EXPECTED_INDEXES: &[(&str, &str)] = &[
     ),
 ];
 
+fn final_tenant_rls_schema_sql() -> String {
+    format!(
+        "{DAGDB_TENANT_RLS_SCHEMA_SQL}\n{DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL}"
+    )
+}
+
+fn final_operational_event_schema_sql() -> String {
+    format!(
+        "{DAGDB_EXPORT_SCHEMA_SQL}\n{DAGDB_OPERATIONAL_RECEIPT_EVENT_TYPES_SCHEMA_SQL}\n{DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL}"
+    )
+}
+
 #[tokio::test]
 async fn schema_matches_declared_table_and_index_contract() {
     let Some(mut db) = TestDb::maybe_new("migration_contract").await else {
@@ -321,7 +390,7 @@ async fn schema_matches_declared_table_and_index_contract() {
 
 #[test]
 fn rls_migration_source_enables_forced_tenant_policy_for_expected_tables() {
-    let lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    let lower = final_tenant_rls_schema_sql().to_ascii_lowercase();
     let normalized_sql_literal = lower.replace("''", "'");
     assert!(lower.contains("enable row level security"));
     assert!(lower.contains("force row level security"));
@@ -342,6 +411,45 @@ fn rls_migration_source_enables_forced_tenant_policy_for_expected_tables() {
     assert!(!lower.contains("'dagdb_benchmark_runs'"));
     assert!(!lower.contains("'dagdb_lifecycle_rollbacks'"));
     assert!(!lower.contains("'dagdb_root_bundle_receipts'"));
+}
+
+#[test]
+fn pr708_additive_migration_owns_post_deploy_contract_expansion() {
+    let restored_export = DAGDB_EXPORT_SCHEMA_SQL.to_ascii_lowercase();
+    assert!(restored_export.contains("export_challenge_verified"));
+    for event_type in OPERATIONAL_RECEIPT_EVENT_TYPES {
+        assert!(
+            !restored_export.contains(event_type),
+            "restored applied export migration must not absorb PR #708 event type {event_type}"
+        );
+    }
+
+    let restored_rls = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    for table in PR708_NEW_TENANT_RLS_TABLES {
+        assert!(
+            !restored_rls.contains(&format!("'{table}'")),
+            "restored applied tenant RLS migration must not absorb PR #708 table {table}"
+        );
+    }
+
+    let final_event_sql = final_operational_event_schema_sql().to_ascii_lowercase();
+    let additive = DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL.to_ascii_lowercase();
+    for event_type in OPERATIONAL_RECEIPT_EVENT_TYPES {
+        assert!(
+            final_event_sql.contains(event_type),
+            "final operational event contract must accept event type {event_type}"
+        );
+        assert!(
+            additive.contains(event_type),
+            "PR #708 additive migration must accept operational event type {event_type}"
+        );
+    }
+    for table in PR708_NEW_TENANT_RLS_TABLES {
+        assert!(
+            additive.contains(&format!("'{table}'")),
+            "PR #708 additive migration must force tenant RLS on {table}"
+        );
+    }
 }
 
 #[test]
@@ -390,7 +498,7 @@ fn node_store_tables_are_dagdb_schema_contract() {
     assert!(lower.contains("idx_dagdb_node_committed_height"));
     assert!(lower.contains("idx_dagdb_node_trust_receipts_actor"));
 
-    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    let rls_lower = final_tenant_rls_schema_sql().to_ascii_lowercase();
     for table in [
         "dagdb_node_dag_nodes",
         "dagdb_node_dag_parents",
@@ -449,7 +557,7 @@ fn zerodentity_records_are_dagdb_schema_contract() {
         );
     }
 
-    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    let rls_lower = final_tenant_rls_schema_sql().to_ascii_lowercase();
     assert!(
         rls_lower.contains("'dagdb_zerodentity_records'"),
         "DAG DB tenant RLS migration must enumerate 0dentity records"
@@ -497,7 +605,7 @@ fn gateway_state_records_are_dagdb_schema_contract() {
     assert!(lower.contains("cbor_payload bytea not null"));
     assert!(lower.contains("primary key (tenant_id, namespace, state_family, record_key)"));
 
-    let rls_lower = DAGDB_TENANT_RLS_SCHEMA_SQL.to_ascii_lowercase();
+    let rls_lower = final_tenant_rls_schema_sql().to_ascii_lowercase();
     assert!(
         rls_lower.contains("'dagdb_gateway_state_records'"),
         "DAG DB tenant RLS migration must enumerate gateway state records"
@@ -510,10 +618,6 @@ async fn rls_policies_fail_closed_without_tenant_context() {
         return;
     };
     db.apply_schema().await;
-    sqlx::raw_sql(DAGDB_TENANT_RLS_SCHEMA_SQL)
-        .execute(&mut db.conn)
-        .await
-        .expect("apply DAG DB tenant RLS schema");
 
     assert_rls_catalog_state(&mut db.conn).await;
     let rls_test_role = assume_rls_checked_role(&mut db.conn, &db.schema).await;
@@ -599,6 +703,14 @@ async fn migration_rollback_leaves_no_partial_schema() {
         .execute(&mut db.conn)
         .await
         .expect("apply PRD17 lifecycle schema inside rollback transaction");
+    sqlx::raw_sql(DAGDB_TENANT_RLS_SCHEMA_SQL)
+        .execute(&mut db.conn)
+        .await
+        .expect("apply DAG DB tenant RLS schema inside rollback transaction");
+    sqlx::raw_sql(DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL)
+        .execute(&mut db.conn)
+        .await
+        .expect("apply PR #708 operational event/RLS schema inside rollback transaction");
     sqlx::raw_sql("ROLLBACK")
         .execute(&mut db.conn)
         .await
@@ -638,6 +750,37 @@ async fn init_pool_runs_registered_migrations_in_clean_schema() {
     );
 
     pool.close().await;
+}
+
+#[tokio::test]
+async fn pr708_migrator_upgrades_from_last_successful_deployed_ledger() {
+    let Some(db) = TestDb::maybe_new("pr708_upgrade_contract").await else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.database_url)
+        .await
+        .expect("connect upgrade regression pool");
+    let last_successful_migration_dir =
+        create_last_successful_deployed_migration_dir("pr708_upgrade_contract");
+    let last_successful_migrator = Migrator::new(last_successful_migration_dir.as_path())
+        .await
+        .expect("load last successful deployed DAG DB migrations");
+
+    run_migrator_in_schema(&pool, &last_successful_migrator, &db.schema).await;
+    run_migrations_in_schema(&pool, &db.schema)
+        .await
+        .expect("PR #708 migrator must upgrade last successful deployed ledger");
+
+    assert_recorded_versions(&pool, &db.schema, PR708_NEW_MIGRATION_VERSIONS).await;
+    assert_tables_present(&pool, &db.schema, PR708_NEW_TENANT_RLS_TABLES).await;
+    assert_schema_rls_forced(&pool, &db.schema, PR708_NEW_TENANT_RLS_TABLES).await;
+    assert_operational_event_types_accepted(&pool, &db.schema).await;
+
+    pool.close().await;
+    fs::remove_dir_all(&last_successful_migration_dir)
+        .expect("remove last successful deployed migration test directory");
 }
 
 async fn assert_tables(conn: &mut PgConnection) {
@@ -791,6 +934,153 @@ async fn assert_rls_catalog_state(conn: &mut PgConnection) {
         assert!(!qual.contains("true"));
         assert!(!with_check.contains("true"));
     }
+}
+
+fn create_last_successful_deployed_migration_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("exo_dagdb_{label}_{}", process::id()));
+    if dir.exists() {
+        fs::remove_dir_all(&dir).expect("remove stale last successful migration test directory");
+    }
+    fs::create_dir_all(&dir).expect("create last successful migration test directory");
+
+    let source_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for filename in LAST_SUCCESSFUL_DEPLOYED_MIGRATION_FILES {
+        let source = source_dir.join(filename);
+        let destination = dir.join(filename);
+        let copied = fs::copy(&source, &destination)
+            .unwrap_or_else(|err| panic!("copy migration {filename} into test directory: {err}"));
+        assert!(copied > 0, "migration {filename} must not be empty");
+    }
+
+    dir
+}
+
+async fn run_migrator_in_schema(pool: &Pool<Postgres>, migrator: &Migrator, schema: &str) {
+    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+        .execute(pool)
+        .await
+        .expect("create migration test schema");
+    let mut conn = pool.acquire().await.expect("acquire migration connection");
+    sqlx::query(&format!("SET search_path TO {schema}, public"))
+        .execute(&mut *conn)
+        .await
+        .expect("set migration search_path");
+    migrator
+        .run(&mut *conn)
+        .await
+        .expect("run test migrator in schema");
+    conn.close()
+        .await
+        .expect("close migration-scoped connection");
+}
+
+async fn assert_recorded_versions(pool: &Pool<Postgres>, schema: &str, expected_versions: &[i64]) {
+    let actual_versions: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT version FROM {schema}._sqlx_migrations ORDER BY version"
+    ))
+    .fetch_all(pool)
+    .await
+    .expect("query DAG DB migration ledger versions");
+    for expected_version in expected_versions {
+        assert!(
+            actual_versions.contains(expected_version),
+            "migration ledger must record version {expected_version}"
+        );
+    }
+    assert_eq!(
+        actual_versions.last().copied(),
+        expected_versions.last().copied(),
+        "PR #708 upgrade must leave the additive migration as the latest recorded DAG DB version"
+    );
+}
+
+async fn assert_tables_present(pool: &Pool<Postgres>, schema: &str, tables: &[&str]) {
+    for table in tables {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+             SELECT 1 FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = $2 \
+             )",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|err| panic!("query presence for table {table}: {err}"));
+        assert!(exists, "PR #708 upgrade must create DAG DB table {table}");
+    }
+}
+
+async fn assert_schema_rls_forced(pool: &Pool<Postgres>, schema: &str, tables: &[&str]) {
+    for table in tables {
+        let row = sqlx::query(
+            "SELECT relrowsecurity, relforcerowsecurity \
+             FROM pg_class rel \
+             JOIN pg_namespace ns ON ns.oid = rel.relnamespace \
+             WHERE ns.nspname = $1 AND rel.relname = $2",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|err| panic!("query RLS state for upgraded table {table}: {err}"));
+        assert!(
+            row.get::<bool, _>("relrowsecurity"),
+            "PR #708 upgrade must enable RLS on {table}"
+        );
+        assert!(
+            row.get::<bool, _>("relforcerowsecurity"),
+            "PR #708 upgrade must force RLS on {table}"
+        );
+    }
+}
+
+async fn assert_operational_event_types_accepted(pool: &Pool<Postgres>, schema: &str) {
+    let mut conn = pool
+        .acquire()
+        .await
+        .expect("acquire event insert connection");
+    sqlx::query(&format!("SET search_path TO {schema}, public"))
+        .execute(&mut *conn)
+        .await
+        .expect("set event insert search_path");
+    let mut tx = conn.begin().await.expect("begin event insert transaction");
+    bind_tenant_context(&mut tx, "tenant-pr708-upgrade")
+        .await
+        .expect("bind upgrade tenant context");
+    for (index, event_type) in OPERATIONAL_RECEIPT_EVENT_TYPES.iter().enumerate() {
+        insert_receipt_event_type_tx(&mut tx, index, event_type)
+            .await
+            .unwrap_or_else(|err| panic!("insert operational event type {event_type}: {err}"));
+    }
+    tx.commit().await.expect("commit event insert transaction");
+    conn.close().await.expect("close event insert connection");
+}
+
+async fn insert_receipt_event_type_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    index: usize,
+    event_type: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    let seed = u8::try_from(index + 1).expect("operational event fixture index fits u8");
+    sqlx::query(
+        "INSERT INTO dagdb_receipts \
+         (receipt_hash, tenant_id, namespace, subject_kind, subject_id, prev_receipt_hash, seq, \
+          event_type, actor_did, event_hlc_physical_ms, event_hlc_logical, event_hash, \
+          receipt_body, created_at_physical_ms, created_at_logical) \
+         VALUES ($1, 'tenant-pr708-upgrade', 'dag-db', 'memory', $2, $3, $4, $5, \
+                 'did:exo:pr708-upgrade-regression', 1, 0, $6, $7, 1, 0)",
+    )
+    .bind(vec![seed; 32])
+    .bind(vec![seed.saturating_add(32); 32])
+    .bind(vec![seed.saturating_add(64); 32])
+    .bind(i64::try_from(index + 1).expect("operational event fixture sequence fits i64"))
+    .bind(event_type)
+    .bind(vec![seed.saturating_add(96); 32])
+    .bind(serde_json::json!({ "event_type": event_type }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn assume_rls_checked_role(conn: &mut PgConnection, schema: &str) -> Option<String> {
@@ -1221,6 +1511,14 @@ impl TestDb {
             .execute(&mut self.conn)
             .await
             .expect("apply PRD17 lifecycle schema");
+        sqlx::raw_sql(DAGDB_TENANT_RLS_SCHEMA_SQL)
+            .execute(&mut self.conn)
+            .await
+            .expect("apply DAG DB tenant RLS schema");
+        sqlx::raw_sql(DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL)
+            .execute(&mut self.conn)
+            .await
+            .expect("apply PR #708 operational event/RLS schema");
     }
 }
 
