@@ -738,6 +738,57 @@ claim only when runtime evidence includes the tested DAG DB gateway call path;
 otherwise it stays inactive or denied and must not claim constitutional
 enforcement by proximity.
 
+## Source Hygiene
+
+QM-17 adds a repository-level source hygiene guard in
+`/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-gateway/src/dagdb.rs`
+named `dagdb_full_migration_source_hygiene_guard`. It pins the high-risk
+production persistence boundaries created by the migration:
+
+- CommandBase app production dependencies must not include `better-sqlite3`.
+- CommandBase worker production dependencies must not include `better-sqlite3`,
+  must expose `npm test`, and must route persistence through
+  `../app/lib/commandbase-db-factory`.
+- CommandBase worker production source must not import `better-sqlite3`, create
+  a `Database`, or hard-code the legacy `the_team.db` file.
+- Site contact persistence must not contain `CONTACT_DATABASE_URL`, direct `pg`
+  imports, or the legacy `site_contact_submissions` and
+  `site_contact_rate_limits` table names.
+- Demo services must not open direct `new pg.Pool` persistence.
+- Web durable-state guard coverage must list `council-tickets`,
+  `council-conversations`, `feedback-issues`, `layout-templates`, and
+  `ape-onboarding`.
+
+QM-17 also closes the remaining CommandBase worker SQLite path:
+
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/index.js`
+  now imports `createCommandBaseDb` and `productionUsesDagDb` from the shared
+  CommandBase DAG DB factory. In production it opens database id
+  `commandbase-worker` through `CommandBaseDagDbAdapter`; development SQLite is
+  reachable only through the factory's explicit non-production/dev flag path.
+- The worker module no longer starts its poll loop on import. `startWorker`,
+  `shutdownWorker`, `openWorkerDatabase`, and `databaseLabel` are exported so
+  tests can verify the production persistence contract without launching the
+  autonomous loop.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/package.json`
+  removes production `better-sqlite3` and adds a real `node --test` gate.
+- `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base/worker/worker-dagdb-adapter.test.js`
+  proves the worker source has no production SQLite dependency/import and that
+  production opens `CommandBaseDagDbAdapter` without starting the poll loop.
+
+QM-17 RED evidence: `cargo test -p exo-gateway
+dagdb_full_migration_source_hygiene_guard` failed with `CommandBase worker must
+not depend on production better-sqlite3`.
+
+QM-17 GREEN evidence: `cargo test -p exo-gateway
+dagdb_full_migration_source_hygiene_guard`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo fmt --all -- --check`,
+`cd command-base/app && npm test`, `cd command-base/worker && npm test`,
+`cd demo && npm run test:services -- dagdb-adapter-contract`, `cd site && npm
+run security:contact-intake && npm run security:contact-disclosure`, `cd web &&
+npm test -- dagdbDurableState`, and CyberMedica `npm run scan:hazards && npm
+run scan:secrets && npm run guard:adapter-contracts` all passed.
+
 ## Migration Rule
 
 Fresh-start all mutable durable state. Preserve only verified

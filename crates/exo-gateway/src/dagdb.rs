@@ -9386,6 +9386,112 @@ mod tests {
         }
     }
 
+    fn repo_file(path: &str) -> String {
+        let file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path);
+        std::fs::read_to_string(&file_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file_path.display()))
+    }
+
+    #[test]
+    fn dagdb_full_migration_source_hygiene_guard() {
+        let worker_package: serde_json::Value =
+            serde_json::from_str(&repo_file("command-base/worker/package.json"))
+                .expect("worker package.json parses");
+        assert!(
+            !worker_package
+                .get("dependencies")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|deps| deps.contains_key("better-sqlite3")),
+            "CommandBase worker must not depend on production better-sqlite3"
+        );
+        assert_eq!(
+            worker_package
+                .get("scripts")
+                .and_then(|scripts| scripts.get("test"))
+                .and_then(serde_json::Value::as_str),
+            Some("node --test"),
+            "CommandBase worker must expose a real source-hygiene test contract"
+        );
+
+        let worker_source = repo_file("command-base/worker/index.js");
+        for forbidden in [
+            "require('better-sqlite3')",
+            "require(\"better-sqlite3\")",
+            "new Database",
+            "the_team.db",
+            "DB_PATH",
+        ] {
+            assert!(
+                !worker_source.contains(forbidden),
+                "CommandBase worker production source must not contain {forbidden}"
+            );
+        }
+        assert!(
+            worker_source.contains("../app/lib/commandbase-db-factory"),
+            "CommandBase worker must route production persistence through the DAG DB factory"
+        );
+
+        let app_package: serde_json::Value =
+            serde_json::from_str(&repo_file("command-base/app/package.json"))
+                .expect("CommandBase app package.json parses");
+        assert!(
+            !app_package
+                .get("dependencies")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|deps| deps.contains_key("better-sqlite3")),
+            "CommandBase app must not depend on production better-sqlite3"
+        );
+
+        let site_contact = repo_file("site/src/lib/contact-submissions.ts");
+        for forbidden in [
+            "CONTACT_DATABASE_URL",
+            "site_contact_submissions",
+            "site_contact_rate_limits",
+            "from 'pg'",
+            "from \"pg\"",
+        ] {
+            assert!(
+                !site_contact.contains(forbidden),
+                "site contact persistence must not contain legacy direct Postgres token {forbidden}"
+            );
+        }
+
+        for service in [
+            "audit-api",
+            "consent-service",
+            "crosschecked-api",
+            "decision-forge",
+            "gateway-api",
+            "governance-engine",
+            "identity-service",
+            "livesafe-api",
+            "provenance-writer",
+            "vitallock-api",
+        ] {
+            let source = repo_file(&format!("demo/services/{service}/src/index.js"));
+            assert!(
+                !source.contains("new pg.Pool"),
+                "demo service {service} must not open direct pg.Pool persistence"
+            );
+        }
+
+        let web_guard = repo_file("web/src/lib/dagdbDurableState.test.ts");
+        for family in [
+            "council-tickets",
+            "council-conversations",
+            "feedback-issues",
+            "layout-templates",
+            "ape-onboarding",
+        ] {
+            assert!(
+                web_guard.contains(family),
+                "web durable-state source guard must cover {family}"
+            );
+        }
+    }
+
     #[test]
     fn dagdb_json_fixtures() {
         let fixtures = fixtures();
