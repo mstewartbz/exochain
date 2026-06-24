@@ -4,9 +4,11 @@
 use std::{collections::BTreeSet, process, str::FromStr};
 
 use exo_dag_db_postgres::postgres::{
-    DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL, DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL,
-    DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL, DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL,
-    DAGDB_TENANT_RLS_SCHEMA_SQL, begin_tenant_transaction,
+    DAGDB_EXPORT_SCHEMA_SQL, DAGDB_GRAPH_SCHEMA_SQL,
+    DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL,
+    DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL, DAGDB_PRD17_DEFAULT_ROUTE_SCHEMA_SQL,
+    DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL, DAGDB_SCHEMA_SQL, DAGDB_TENANT_RLS_SCHEMA_SQL,
+    begin_tenant_transaction,
 };
 use serde_json::json;
 use sqlx::{
@@ -455,16 +457,25 @@ async fn rls_blocks_cross_tenant_reads_and_writes_for_live_path_tables() {
 }
 
 fn rls_migration_tenant_tables() -> BTreeSet<&'static str> {
-    DAGDB_TENANT_RLS_SCHEMA_SQL
-        .lines()
-        .filter_map(|line| {
-            let table = line.trim().trim_end_matches(',');
-            table
-                .strip_prefix('\'')
-                .and_then(|table| table.strip_suffix('\''))
-                .filter(|table| table.starts_with("dagdb_"))
-        })
+    rls_migration_sources()
+        .into_iter()
+        .flat_map(|migration_sql| migration_sql.lines().filter_map(tenant_table_from_rls_line))
         .collect()
+}
+
+fn rls_migration_sources() -> [&'static str; 2] {
+    [
+        DAGDB_TENANT_RLS_SCHEMA_SQL,
+        DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL,
+    ]
+}
+
+fn tenant_table_from_rls_line(line: &'static str) -> Option<&'static str> {
+    let table = line.trim().trim_end_matches(',');
+    table
+        .strip_prefix('\'')
+        .and_then(|table| table.strip_suffix('\''))
+        .filter(|table| table.starts_with("dagdb_"))
 }
 
 fn tested_tenant_tables() -> BTreeSet<&'static str> {
@@ -1187,6 +1198,7 @@ async fn apply_live_path_schema(pool: &PgPool) {
         DAGDB_PRD17_CONTEXT_PACKET_SCHEMA_SQL,
         DAGDB_PRD17_LIFECYCLE_SCHEMA_SQL,
         DAGDB_TENANT_RLS_SCHEMA_SQL,
+        DAGDB_OPERATIONAL_EVENT_TYPES_AND_RLS_EXPANSION_SCHEMA_SQL,
     ] {
         sqlx::raw_sql(migration_sql)
             .execute(pool)
