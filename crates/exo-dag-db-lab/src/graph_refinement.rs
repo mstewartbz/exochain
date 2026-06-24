@@ -5314,8 +5314,12 @@ mod tests {
 
     #[test]
     fn graph_refinement_dataset_artifact_branch_vectors() {
-        let root = repo_root_path();
-        let dataset_dir = reset_refinement_test_dir("dataset-artifact-branches");
+        let _guard = TARGET_ARTIFACT_LOCK
+            .lock()
+            .expect("target artifact lock should not be poisoned");
+        let root = reset_refinement_test_dir("dataset-artifact-branches-root");
+        let dataset_dir = root.join("dataset");
+        fs::create_dir_all(&dataset_dir).expect("create dataset fixture dir");
 
         assert!(
             derive_dataset_graph_refinement_report(&root, &dataset_dir)
