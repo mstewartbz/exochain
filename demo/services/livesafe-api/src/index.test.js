@@ -44,17 +44,15 @@ vi.mock('module', async (importOriginal) => {
 });
 
 const mockQuery = vi.hoisted(() => vi.fn());
-vi.mock('pg', () => {
-  const Pool = vi.fn(() => ({ query: mockQuery }));
-  return { default: { Pool } };
-});
 
 import { server } from './index.js';
+import { getDemoServiceTestStore } from '@exochain/shared';
 
 const request = supertest(server);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getDemoServiceTestStore().query = mockQuery;
 });
 
 afterAll(async () => {

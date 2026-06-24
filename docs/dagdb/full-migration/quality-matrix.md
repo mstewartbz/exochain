@@ -173,9 +173,9 @@ commit: `b905a847`
 surface: Demo
 classification: Adjacent surface
 red_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/demo && npm test && npm run test:services && npm run test:react`
-red_failure: not-claimed
-green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/demo && npm test && npm run test:services && npm run test:react`
-artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo`
+red_failure: Focused RED `npm run test:services -- dagdb-adapter-contract` failed because `demo/services/audit-api/src/index.js` still imported `pg` directly, constructed `new pg.Pool({ connectionString: process.env.DATABASE_URL })`, and the legacy SQL init fixture notice did not exist.
+green_command: `cd /Users/bobstewart/dev/exochain-dagdb-full-migration/demo && npm run test:services -- dagdb-adapter-contract && npm run test:services && npm test && npm run test:react`
+artifact: `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/packages/shared/src/dagdb-adapter.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/packages/shared/src/index.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/services/gateway-api/src/dagdb-adapter-contract.test.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/services/*/src/index.js`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/services/*/package.json`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/infra/docker-compose.yml`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/infra/postgres/init/README.md`; `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/package-lock.json`
 commit: not-claimed
 
 ### QM-14

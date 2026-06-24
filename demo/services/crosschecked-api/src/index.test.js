@@ -47,13 +47,16 @@ vi.mock('module', async (importOriginal) => {
 
 // ── DB Mocks ──
 const mockQuery = vi.hoisted(() => vi.fn());
-vi.mock('pg', () => { const P = vi.fn(() => ({ query: mockQuery })); return { default: { Pool: P } }; });
 
 import { server } from './index.js';
+import { getDemoServiceTestStore } from '@exochain/shared';
 
 let request;
 beforeAll(async () => { await new Promise(r => server.listen(0, r)); request = supertest(server); });
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  getDemoServiceTestStore().query = mockQuery;
+});
 afterAll(async () => { await new Promise(r => server.close(r)); });
 
 function withAuth(req, token = 'reviewer-token') {

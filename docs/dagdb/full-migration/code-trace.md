@@ -45,7 +45,7 @@ git rev-parse origin/main
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/tools/mod.rs` | Core runtime adapter | QM-11 registers and dispatches all twelve DAG DB MCP tools through the production `ToolRegistry`. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/crates/exo-node/src/mcp/resources/tools_summary.rs` | Core runtime adapter | QM-11 categorizes all twelve DAG DB MCP tools as `dagdb` in the tool-summary resource. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/command-base` | Adjacent surface | QM-12 routes production CommandBase persistence through a DAG DB intake adapter, moves `better-sqlite3` to dev/test compatibility only, and sends durable dashboard UI state through the server adapter. |
-| `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo` | Adjacent surface | Demo services create direct `pg.Pool` instances against `DATABASE_URL` and initialize demo-owned Postgres schemas. |
+| `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo` | Adjacent surface | QM-13 routes demo service persistence through `@exochain/shared`'s DAG DB adapter, removes service `pg` production dependencies, and marks legacy SQL init files as fixture-only. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/site` | Adjacent surface | Contact intake owns direct `CONTACT_DATABASE_URL` tables and rate-limit state. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/web` | Adjacent surface | Council, feedback, layout templates, onboarding, and auth compatibility paths use `localStorage`. |
 | `/Users/bobstewart/dev/exochain-dagdb-full-migration/cybermedica` | Adjacent surface | Trust adapter/runtime configuration code records evidence boundaries but is not a live DB owner on `origin/main`. |
@@ -559,6 +559,41 @@ Baseline before QM-12:
   notification preferences, mode selection, and collapse state in `localStorage`.
 
 Demo:
+
+- QM-13 implementation files:
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/packages/shared/src/dagdb-adapter.js`
+    defines the shared demo DAG DB store. Production requires
+    `EXO_DEMO_DAGDB_GATEWAY_URL`, gateway bearer token, tenant/namespace,
+    owner/controller/submitted-by DIDs, and write signature. It posts every
+    query-shaped operation to `POST /api/v1/dag-db/intake` with tenant,
+    namespace, idempotency, authority-scope, and write-signature headers, then
+    refuses to synthesize query results unless the gateway returns explicit
+    `demo_result.rows`.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/packages/shared/src/index.js`
+    exports `createDemoServiceStore` and keeps `getPool()` as a DAG DB adapter
+    alias for older shared callers.
+  - Every `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/services/*/src/index.js`
+    entrypoint now uses `createDemoServiceStore(<service-name>)` instead of
+    constructing `pg.Pool` from `DATABASE_URL`.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/infra/docker-compose.yml`
+    injects `EXO_DEMO_DAGDB_*` settings into services and places the legacy
+    Postgres container behind the `legacy-postgres-fixture` profile.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/infra/postgres/init/README.md`
+    states the SQL init directory is fixture-only and must not be mounted as a
+    production writer.
+  - `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/services/gateway-api/src/dagdb-adapter-contract.test.js`
+    is the QM-13 source guard covering service entrypoints, shared adapter
+    exports, and the fixture-only SQL notice.
+- QM-13 RED evidence: `npm run test:services -- dagdb-adapter-contract` failed
+  because `demo/services/audit-api/src/index.js` still imported `pg` directly
+  and constructed `new pg.Pool({ connectionString: process.env.DATABASE_URL })`;
+  the fixture-only README was also missing.
+- QM-13 GREEN evidence: `npm run test:services -- dagdb-adapter-contract`
+  passed 2 tests; `npm run test:services` passed 173 tests; `npm test` passed
+  183 tests; `npm run test:react` passed 10 tests. The React suite emitted its
+  existing `act(...)` and `--localstorage-file` warnings.
+
+Baseline before QM-13:
 
 - `/Users/bobstewart/dev/exochain-dagdb-full-migration/demo/services/*/src/index.js`
   services open `new pg.Pool({ connectionString: process.env.DATABASE_URL })`.

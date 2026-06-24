@@ -14,17 +14,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// @exochain/shared — Database pool + WASM initialization
-import pg from 'pg';
+// @exochain/shared — DAG DB persistence adapter + WASM initialization
+export {
+  createDemoServiceStore,
+  getDemoServiceTestStore,
+  requireDemoDagDbConfig,
+  resetDemoServiceTestStore,
+} from './dagdb-adapter.js';
+import { createDemoServiceStore } from './dagdb-adapter.js';
 
 let pool = null;
 let wasmModule = null;
 
 export function getPool() {
   if (!pool) {
-    pool = new pg.Pool({
-      connectionString: process.env.DATABASE_URL || 'postgres://exochain:exochain_dev@localhost:5432/exochain',
-    });
+    pool = createDemoServiceStore('shared');
   }
   return pool;
 }
