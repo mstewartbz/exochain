@@ -656,6 +656,7 @@ fn base_packet_request() -> exo_dag_db_api::DagDbGraphContextPacketBuildRequest 
         task_hash: selection_request.task_hash.clone(),
         audit_id: "audit-persistent-context-write-1".to_owned(),
         token_budget: selection_request.token_budget,
+        max_memory_refs: None,
         selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
             tenant_id: selection_request.tenant_id.clone(),
             namespace: selection_request.namespace.clone(),

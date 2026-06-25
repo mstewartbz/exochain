@@ -716,11 +716,14 @@ fn validate_request(request: &DagDbGraphContextPacketBuildRequest) -> DomainResu
         return Err(DomainError::ValidationFailed);
     }
 
-    let token_budget =
-        usize::try_from(request.token_budget).map_err(|_| DomainError::ArithmeticOverflow {
-            operation: "context_packet_token_budget_usize",
+    let max_memory_refs = request.max_memory_refs.unwrap_or(request.token_budget);
+    let max_ref_count =
+        usize::try_from(max_memory_refs.min(request.token_budget)).map_err(|_| {
+            DomainError::ArithmeticOverflow {
+                operation: "context_packet_max_memory_refs_usize",
+            }
         })?;
-    if request.selection.selected_memory_refs.len() > token_budget {
+    if request.selection.selected_memory_refs.len() > max_ref_count {
         return Err(DomainError::ValidationFailed);
     }
 
@@ -1147,6 +1150,7 @@ mod tests {
             task_hash: selection.task_hash.clone(),
             audit_id: "audit-m02".into(),
             token_budget: selection.token_budget,
+            max_memory_refs: None,
             selection,
             import_tracking_status,
         }
@@ -1574,6 +1578,7 @@ mod tests {
             task_hash: selection.task_hash.clone(),
             audit_id: "audit-m02".into(),
             token_budget: selection.token_budget,
+            max_memory_refs: None,
             selection: {
                 let mut mismatched = selection;
                 mismatched.token_budget = mismatched.token_budget.saturating_add(1);

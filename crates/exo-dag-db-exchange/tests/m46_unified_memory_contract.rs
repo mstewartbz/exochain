@@ -419,6 +419,7 @@ fn context_packet_generation_contract_surface_builds_metadata_only_packet() {
         task_hash: selection.task_hash.clone(),
         audit_id: "audit-m46-contract".to_owned(),
         token_budget: selection.token_budget,
+        max_memory_refs: None,
         selection,
         import_tracking_status: None,
     })

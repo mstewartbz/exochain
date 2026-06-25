@@ -1247,6 +1247,8 @@ pub struct DagDbGraphContextPacketBuildRequest {
     pub task_hash: String,
     pub audit_id: String,
     pub token_budget: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_refs: Option<u32>,
     pub selection: DagDbGraphContextSelectionResponse,
     pub import_tracking_status: Option<DagDbContextPacketImportTrackingStatus>,
 }
@@ -1638,7 +1640,7 @@ mod tests {
     }
 
     #[test]
-    fn dagdb_graph_context_packet_dtos_deny_unknown_fields() {
+    fn dagdb_graph_context_packet_build_request_round_trips() {
         let selection = DagDbGraphContextSelectionResponse {
             tenant_id: "tenant-a".into(),
             namespace: "primary".into(),
@@ -1661,14 +1663,34 @@ mod tests {
             task_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             audit_id: "audit-1".into(),
             token_budget: 1_000,
+            max_memory_refs: Some(7),
             selection,
             import_tracking_status: None,
         };
         let serialized = serde_json::to_value(&request).expect("serialize request");
+        assert_eq!(serialized["max_memory_refs"], serde_json::json!(7));
         let parsed: DagDbGraphContextPacketBuildRequest =
-            serde_json::from_value(serialized).expect("deserialize request");
+            serde_json::from_value(serialized.clone()).expect("deserialize request");
         assert_eq!(parsed, request);
 
+        let mut without_max = serialized;
+        without_max
+            .as_object_mut()
+            .expect("request object")
+            .remove("max_memory_refs");
+        let parsed_without_max: DagDbGraphContextPacketBuildRequest =
+            serde_json::from_value(without_max).expect("deserialize default max refs");
+        assert_eq!(parsed_without_max.max_memory_refs, None);
+
+        let mut omitted_request = request;
+        omitted_request.max_memory_refs = None;
+        let serialized_without_max =
+            serde_json::to_value(&omitted_request).expect("serialize omitted max refs");
+        assert!(serialized_without_max.get("max_memory_refs").is_none());
+    }
+
+    #[test]
+    fn dagdb_graph_context_packet_dtos_deny_unknown_fields() {
         let forged = r#"{
           "tenant_id": "tenant-a",
           "namespace": "primary",

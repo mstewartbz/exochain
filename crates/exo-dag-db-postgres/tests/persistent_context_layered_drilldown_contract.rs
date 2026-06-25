@@ -714,6 +714,7 @@ fn packet_request(token_budget: u32) -> DagDbGraphContextPacketBuildRequest {
         task_hash: h(0xaa),
         audit_id: "audit-drilldown-1".to_owned(),
         token_budget,
+        max_memory_refs: None,
         selection: exo_dag_db_api::DagDbGraphContextSelectionResponse {
             tenant_id: TENANT.to_owned(),
             namespace: NAMESPACE.to_owned(),
