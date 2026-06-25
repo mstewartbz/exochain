@@ -33,6 +33,12 @@ grep -F 'DATABASE_URL: postgres://exochain:test@localhost:5432/exochain_test' "$
 grep -F 'cargo test -p exo-gateway --lib --features production-db' "$workflow" >/dev/null \
   || fail "Gate 13 must run exo-gateway DB-backed library tests"
 
+grep -F 'EXO_DAGDB_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}' "$workflow" >/dev/null \
+  || fail "Gate 13 must pass its live PostgreSQL URL to DAG DB migration regressions"
+
+grep -F 'cargo test -p exo-dag-db-postgres --features postgres --test migration_contract pr708_migrator_upgrades_from_last_successful_deployed_ledger' "$workflow" >/dev/null \
+  || fail "Gate 13 must run the DAG DB PR #708 upgrade regression"
+
 grep -F -- '--test-threads=1' "$workflow" >/dev/null \
   || fail "DB-backed gateway library tests must run serially against the shared CI database"
 
