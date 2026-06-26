@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use exo_dag_db_api::{MemoryEdgeKind, MemoryGraphStyle, MemoryNodeKind};
@@ -50,6 +51,8 @@ pub const GRAPH_EXPLORER_LIVE_EXPORT_FAILED_SCHEMA_MISMATCH: &str =
 pub const GRAPH_EXPLORER_MAX_NODE_ROWS_READ: u16 = 500;
 pub const GRAPH_EXPLORER_MAX_EDGE_ROWS_READ: u16 = 1000;
 pub const GRAPH_EXPLORER_MAX_GRAPH_VIEW_ROWS_READ: u16 = 100;
+
+static ARTIFACT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GraphExplorerError {
@@ -1068,8 +1071,8 @@ pub fn write_graph_explorer_artifacts(
     let snapshot_body = json_body(snapshot)?;
     let inspector_body = json_body(inspector_details)?;
     let summary_body = graph_explorer_summary_markdown(snapshot);
-    fs::write(&snapshot_path, snapshot_body.as_bytes()).map_err(io_error)?;
-    fs::write(&inspector_path, inspector_body.as_bytes()).map_err(io_error)?;
+    atomic_write_artifact(&snapshot_path, &snapshot_body)?;
+    atomic_write_artifact(&inspector_path, &inspector_body)?;
     fs::write(&summary_path, summary_body.as_bytes()).map_err(io_error)?;
     if repo_relative(target_dir) == GRAPH_EXPLORER_TARGET_DIR {
         write_graph_explorer_dataset_artifacts(
@@ -1090,6 +1093,34 @@ pub fn write_graph_explorer_artifacts(
             })?
             .to_string(),
     })
+}
+
+fn atomic_write_artifact(path: &Path, body: &str) -> Result<(), GraphExplorerError> {
+    let parent = path.parent().ok_or_else(|| GraphExplorerError::Io {
+        reason: "artifact path must have a parent directory".into(),
+    })?;
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| GraphExplorerError::Io {
+            reason: "artifact path must end in a UTF-8 file name".into(),
+        })?;
+    let counter = ARTIFACT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        counter
+    ));
+    if let Err(error) = fs::write(&temp_path, body.as_bytes()) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(io_error(error));
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(io_error(error));
+    }
+    Ok(())
 }
 
 pub fn generate_unavailable_graph_explorer_artifacts(
@@ -2251,8 +2282,8 @@ fn write_graph_explorer_dataset_artifacts(
     let snapshot_path = dataset_dir.join("snapshot.json");
     let inspector_path = dataset_dir.join("node_inspector_details.json");
     let summary_path = dataset_dir.join("graph_explorer_summary.md");
-    fs::write(&snapshot_path, snapshot_body.as_bytes()).map_err(io_error)?;
-    fs::write(&inspector_path, inspector_body.as_bytes()).map_err(io_error)?;
+    atomic_write_artifact(&snapshot_path, snapshot_body)?;
+    atomic_write_artifact(&inspector_path, inspector_body)?;
     fs::write(&summary_path, summary_body.as_bytes()).map_err(io_error)?;
 
     let artifact_hashes = GraphExplorerDatasetArtifactHashes {
@@ -2725,6 +2756,17 @@ mod tests {
         let second = get_graph_explorer_snapshot(&graph_input()).expect("snapshot");
         assert_eq!(first.snapshot_id, second.snapshot_id);
         assert_eq!(first.artifact_hash, second.artifact_hash);
+    }
+
+    #[test]
+    fn graph_explorer_artifact_writer_replaces_reader_visible_json_atomically() {
+        let source = include_str!("graph_explorer.rs");
+        let direct_snapshot_write = ["fs::write", "(&snapshot_path"].join("");
+        let direct_inspector_write = ["fs::write", "(&inspector_path"].join("");
+        assert!(source.contains("atomic_write_artifact(&snapshot_path"));
+        assert!(source.contains("atomic_write_artifact(&inspector_path"));
+        assert!(!source.contains(&direct_snapshot_write));
+        assert!(!source.contains(&direct_inspector_write));
     }
 
     #[test]
