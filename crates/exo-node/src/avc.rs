@@ -69,7 +69,13 @@ use exo_avc::{
     avc_action_commitment_hash, avc_action_descriptor_hash, avc_action_signature_payload,
     create_trust_receipt_with_evidence, require_supported_avc_protocol_version, validate_avc,
 };
-use exo_core::{Did, Hash256, PublicKey, Signature, Timestamp, crypto, hash::hash_structured};
+use exo_core::{
+    Did, Hash256, PublicKey, Signature, Timestamp, crypto,
+    hash::hash_structured,
+    hlc::HybridClock,
+    types::{ReceiptOutcome, TrustReceipt},
+};
+use exo_dag::dag::{DagNode, compute_node_hash};
 use exo_root::{RootSignature, RootTrustBundle, verify_root_bundle, verify_root_signature};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -79,6 +85,8 @@ const MAX_AVC_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_AVC_API_CONCURRENT_REQUESTS: usize = 64;
 pub const AVC_ROOT_TRUST_BUNDLE_ENV: &str = "EXO_AVC_ROOT_TRUST_BUNDLE";
 pub const AVC_REQUIRE_POSTGRES_DURABILITY_ENV: &str = "EXO_AVC_REQUIRE_POSTGRES_DURABILITY";
+pub const AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV: &str =
+    "EXO_AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY";
 pub const AVC_ROOT_TRUST_CEREMONY_ID: &str = "avc-exo-ceremony-2026";
 pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
     "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58";
@@ -97,6 +105,8 @@ const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
 const AVC_REGISTRY_POSTGRES_LOCK_KEY: i64 = 0x4156_435F_5245_4749;
 const AVC_ROOT_BUNDLE_RECEIPT_SCHEMA_VERSION: &str = "dagdb_root_bundle_verification_receipt_v1";
 const AVC_ROOT_BUNDLE_RECEIPT_VERIFIER_VERSION: &str = "exo-node-avc-root-trust-loader-v1";
+const AVC_EXOCHAIN_FINALITY_DAG_DOMAIN: &str = "exo.avc.receipt.exochain_finality.v1";
+const AVC_EXOCHAIN_FINALITY_ACTION_TYPE: &str = "avc.receipt.exochain_finality";
 const DEFAULT_AVC_RECEIPT_LIST_LIMIT: u32 = 50;
 const MAX_AVC_RECEIPT_LIST_LIMIT: u32 = 500;
 const WASM_PACKAGE_NAME: &str = "@exochain/exochain-wasm";
@@ -138,17 +148,46 @@ struct AvcExternalTimestampResponse {
     signature_hex: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum AvcExternalTimestampFailure {
+    #[error(
+        "AVC external timestamp authority is not configured; set {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV}, {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV}, and {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV}"
+    )]
+    Unconfigured,
+    #[error("AVC external timestamp authority is unreachable: {reason}")]
+    Unreachable { reason: String },
+    #[error("AVC external timestamp authority returned non-success status {status}")]
+    Rejected { status: String },
+    #[error("AVC external timestamp authority response was invalid: {reason}")]
+    InvalidResponse { reason: String },
+    #[error("AVC external timestamp authority proof was invalid: {reason}")]
+    InvalidProof { reason: String },
+}
+
+impl AvcExternalTimestampFailure {
+    const fn operator_class(&self) -> &'static str {
+        match self {
+            Self::Unconfigured => "unconfigured",
+            Self::Unreachable { .. } => "unreachable",
+            Self::Rejected { .. } => "rejected",
+            Self::InvalidResponse { .. } => "invalid_response",
+            Self::InvalidProof { .. } => "invalid_proof",
+        }
+    }
+}
+
+fn external_timestamp_error_class(err: &anyhow::Error) -> &'static str {
+    err.downcast_ref::<AvcExternalTimestampFailure>()
+        .map_or("unknown", AvcExternalTimestampFailure::operator_class)
+}
+
 impl AvcReceiptExternalTimestampSource {
     async fn issue_proof(
         &self,
         subject_hash: Hash256,
     ) -> anyhow::Result<AvcReceiptExternalTimestampProof> {
         match self {
-            Self::Unconfigured => {
-                anyhow::bail!(
-                    "AVC external timestamp authority is not configured; set {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV}, {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV}, and {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV}"
-                );
-            }
+            Self::Unconfigured => Err(AvcExternalTimestampFailure::Unconfigured.into()),
             Self::Http {
                 endpoint,
                 authority_did,
@@ -165,28 +204,36 @@ impl AvcReceiptExternalTimestampSource {
                     .json(&request)
                     .send()
                     .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("AVC external timestamp authority request failed: {error}")
+                    .map_err(|error| AvcExternalTimestampFailure::Unreachable {
+                        reason: error.to_string(),
                     })?;
                 let status = response.status();
                 if !status.is_success() {
-                    anyhow::bail!(
-                        "AVC external timestamp authority returned non-success status {status}"
-                    );
+                    return Err(AvcExternalTimestampFailure::Rejected {
+                        status: status.to_string(),
+                    }
+                    .into());
                 }
                 let wire: AvcExternalTimestampResponse =
                     response.json().await.map_err(|error| {
-                        anyhow::anyhow!(
-                            "AVC external timestamp authority response was not valid JSON: {error}"
-                        )
+                        AvcExternalTimestampFailure::InvalidResponse {
+                            reason: error.to_string(),
+                        }
                     })?;
-                let proof = external_timestamp_proof_from_wire(wire)?;
+                let proof = external_timestamp_proof_from_wire(wire).map_err(|error| {
+                    AvcExternalTimestampFailure::InvalidResponse {
+                        reason: error.to_string(),
+                    }
+                })?;
                 validate_external_timestamp_proof(
                     &proof,
                     subject_hash,
                     authority_did,
                     authority_public_key,
-                )?;
+                )
+                .map_err(|error| AvcExternalTimestampFailure::InvalidProof {
+                    reason: error.to_string(),
+                })?;
                 Ok(proof)
             }
             #[cfg(test)]
@@ -210,7 +257,10 @@ impl AvcReceiptExternalTimestampSource {
                     subject_hash,
                     authority_did,
                     authority_public_key,
-                )?;
+                )
+                .map_err(|error| AvcExternalTimestampFailure::InvalidProof {
+                    reason: error.to_string(),
+                })?;
                 Ok(proof)
             }
         }
@@ -284,6 +334,101 @@ fn parse_signature_hex(raw: &str, label: &str) -> anyhow::Result<Signature> {
     Ok(Signature::from_bytes(buf))
 }
 
+#[derive(Serialize)]
+struct AvcReceiptFinalityPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    receipt: &'a AvcTrustReceipt,
+    external_timestamp_subject_hash: Option<&'a Hash256>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AvcExochainFinalityCommitment {
+    finality_hash: Hash256,
+    finality_height: u64,
+    finality_receipt_hash: Hash256,
+}
+
+fn avc_receipt_finality_payload_hash(receipt: &AvcTrustReceipt) -> anyhow::Result<Hash256> {
+    let external_timestamp_subject_hash = receipt
+        .external_timestamp_proof
+        .as_ref()
+        .map(|proof| &proof.subject_hash);
+    hash_structured(&AvcReceiptFinalityPayload {
+        domain: AVC_EXOCHAIN_FINALITY_DAG_DOMAIN,
+        schema_version: AVC_SCHEMA_VERSION,
+        receipt,
+        external_timestamp_subject_hash,
+    })
+    .map_err(|error| anyhow::anyhow!("AVC EXOCHAIN finality payload hash failed: {error}"))
+}
+
+fn build_exochain_finality_node_and_receipt(
+    receipt: &AvcTrustReceipt,
+    validator_did: &Did,
+    receipt_signer: &AvcReceiptSigner,
+) -> anyhow::Result<(DagNode, TrustReceipt)> {
+    let payload_hash = avc_receipt_finality_payload_hash(receipt)?;
+    let parents = receipt
+        .previous_receipt_hash
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let node_hash = compute_node_hash(&parents, &payload_hash, validator_did, &receipt.created_at)
+        .map_err(|error| anyhow::anyhow!("AVC EXOCHAIN finality node hash failed: {error}"))?;
+    let node = DagNode {
+        hash: node_hash,
+        parents,
+        payload_hash,
+        creator_did: validator_did.clone(),
+        timestamp: receipt.created_at,
+        signature: (receipt_signer)(node_hash.as_bytes()),
+    };
+    let finality_receipt = TrustReceipt::new(
+        validator_did.clone(),
+        receipt.receipt_id,
+        None,
+        AVC_EXOCHAIN_FINALITY_ACTION_TYPE.to_owned(),
+        node.hash,
+        ReceiptOutcome::Executed,
+        receipt.created_at,
+        &|bytes| (receipt_signer)(bytes),
+    )
+    .map_err(|error| anyhow::anyhow!("AVC EXOCHAIN finality trust receipt failed: {error}"))?;
+    Ok((node, finality_receipt))
+}
+
+fn commit_exochain_finality(
+    finality_store: &Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
+    receipt: &AvcTrustReceipt,
+    validator_did: &Did,
+    receipt_signer: &AvcReceiptSigner,
+) -> anyhow::Result<Option<AvcExochainFinalityCommitment>> {
+    let Some(finality_store) = finality_store else {
+        return Ok(None);
+    };
+    let (node, finality_receipt) =
+        build_exochain_finality_node_and_receipt(receipt, validator_did, receipt_signer)?;
+    let mut store = finality_store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("AVC EXOCHAIN finality store mutex poisoned"))?;
+    let finality_height = match store.committed_height_for(&node.hash)? {
+        Some(height) => height,
+        None => store
+            .committed_height_value()?
+            .checked_add(1)
+            .ok_or_else(|| {
+                anyhow::anyhow!("AVC EXOCHAIN finality height overflow for {}", node.hash)
+            })?,
+    };
+    store.put_committed_node_with_receipt_sync(&node, finality_height, &finality_receipt)?;
+    Ok(Some(AvcExochainFinalityCommitment {
+        finality_hash: node.hash,
+        finality_height,
+        finality_receipt_hash: finality_receipt.receipt_hash,
+    }))
+}
+
 #[derive(Clone)]
 enum AvcRegistryDurability {
     #[cfg(test)]
@@ -299,6 +444,9 @@ pub struct AvcApiState {
     validator_did: Did,
     receipt_signer: AvcReceiptSigner,
     external_timestamp_source: AvcReceiptExternalTimestampSource,
+    receipt_clock: Arc<Mutex<HybridClock>>,
+    require_external_timestamp: bool,
+    finality_store: Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
     durability: AvcRegistryDurability,
 }
 
@@ -320,11 +468,29 @@ impl AvcApiState {
         receipt_signer: AvcReceiptSigner,
         external_timestamp_source: AvcReceiptExternalTimestampSource,
     ) -> Self {
+        Self::new_with_external_timestamp_source_and_finality_store(
+            validator_did,
+            receipt_signer,
+            external_timestamp_source,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_external_timestamp_source_and_finality_store(
+        validator_did: Did,
+        receipt_signer: AvcReceiptSigner,
+        external_timestamp_source: AvcReceiptExternalTimestampSource,
+        finality_store: Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
+    ) -> Self {
         Self {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did,
             receipt_signer,
             external_timestamp_source,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: false,
+            finality_store,
             durability: AvcRegistryDurability::None,
         }
     }
@@ -340,6 +506,7 @@ impl AvcApiState {
         validator_did: Did,
         receipt_signer: AvcReceiptSigner,
         database_pool: Option<PgPool>,
+        finality_store: Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
     ) -> anyhow::Result<Self> {
         let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
         let (registry, durability) = match database_pool {
@@ -365,6 +532,9 @@ impl AvcApiState {
             validator_did,
             receipt_signer,
             external_timestamp_source: configured_external_timestamp_source_from_env()?,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: configured_require_external_timestamp_from_env()?,
+            finality_store,
             durability,
         })
     }
@@ -423,7 +593,8 @@ fn configured_external_timestamp_source_from_env()
                 url_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
                 did_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
                 key_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
-                "AVC external timestamp authority is not configured; receipt emission will fail closed"
+                require_env = AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV,
+                "AVC external timestamp authority is not configured; receipt emission will use local EXOCHAIN HLC finality unless external timestamp proof is explicitly required"
             );
             Ok(AvcReceiptExternalTimestampSource::Unconfigured)
         }
@@ -431,6 +602,23 @@ fn configured_external_timestamp_source_from_env()
             "AVC external timestamp authority configuration is incomplete; set {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV}, {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV}, and {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV} together"
         ),
     }
+}
+
+fn configured_require_external_timestamp_from_env() -> anyhow::Result<bool> {
+    let value = match std::env::var(AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV} must be valid UTF-8");
+        }
+    };
+    if value == "1" || value.eq_ignore_ascii_case("true") {
+        return Ok(true);
+    }
+    if value == "0" || value.eq_ignore_ascii_case("false") {
+        return Ok(false);
+    }
+    anyhow::bail!("{AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV} must be true/false or 1/0")
 }
 
 fn load_file_durable_registry(path: &FsPath) -> anyhow::Result<InMemoryAvcRegistry> {
@@ -1100,6 +1288,12 @@ pub struct EmitReceiptRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EmitReceiptResponse {
     pub receipt_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exochain_finality_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exochain_finality_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exochain_finality_receipt_hash: Option<String>,
     pub receipt: AvcTrustReceipt,
     pub validation: AvcValidationResult,
 }
@@ -1197,11 +1391,48 @@ fn persistence_error(err: anyhow::Error) -> ApiError {
 }
 
 fn external_timestamp_error(err: anyhow::Error) -> ApiError {
-    tracing::error!(err = %err, "AVC external timestamp authority unavailable");
+    let error_class = external_timestamp_error_class(&err);
+    tracing::error!(
+        err = %err,
+        error_class = error_class,
+        "AVC external timestamp authority unavailable"
+    );
     (
         StatusCode::SERVICE_UNAVAILABLE,
         "AVC external timestamp authority unavailable".into(),
     )
+}
+
+fn exochain_finality_error(err: anyhow::Error) -> ApiError {
+    tracing::error!(err = %err, "AVC EXOCHAIN finality persistence failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AVC EXOCHAIN finality persistence failed".into(),
+    )
+}
+
+fn local_hlc_timestamp_error(err: anyhow::Error) -> ApiError {
+    tracing::error!(err = %err, "AVC local HLC timestamp failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "AVC local HLC timestamp failed".into(),
+    )
+}
+
+struct AvcReceiptTimestampEvidence {
+    trusted_now: Timestamp,
+    provenance: AvcReceiptTimestampProvenance,
+    external_timestamp_proof: Option<AvcReceiptExternalTimestampProof>,
+}
+
+fn trusted_local_hlc_timestamp(state: &AvcApiState) -> anyhow::Result<Timestamp> {
+    let mut clock = state
+        .receipt_clock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("AVC receipt HLC mutex poisoned"))?;
+    clock
+        .now()
+        .map_err(|error| anyhow::anyhow!("AVC receipt HLC could not advance: {error}"))
 }
 
 async fn trusted_external_timestamp_proof(
@@ -1215,6 +1446,31 @@ async fn trusted_external_timestamp_proof(
         .map_err(external_timestamp_error)
 }
 
+async fn trusted_receipt_timestamp_evidence(
+    state: &AvcApiState,
+    subject_hash: Hash256,
+) -> ApiResult<AvcReceiptTimestampEvidence> {
+    if matches!(
+        state.external_timestamp_source,
+        AvcReceiptExternalTimestampSource::Unconfigured
+    ) && !state.require_external_timestamp
+    {
+        let trusted_now = trusted_local_hlc_timestamp(state).map_err(local_hlc_timestamp_error)?;
+        return Ok(AvcReceiptTimestampEvidence {
+            trusted_now,
+            provenance: AvcReceiptTimestampProvenance::LocalHybridLogicalClock,
+            external_timestamp_proof: None,
+        });
+    }
+
+    let external_timestamp_proof = trusted_external_timestamp_proof(state, subject_hash).await?;
+    Ok(AvcReceiptTimestampEvidence {
+        trusted_now: external_timestamp_proof.issued_at,
+        provenance: AvcReceiptTimestampProvenance::ExternalTimestampAuthority,
+        external_timestamp_proof: Some(external_timestamp_proof),
+    })
+}
+
 fn avc_receipt_list_limit(limit: Option<u32>) -> usize {
     let capped = limit
         .unwrap_or(DEFAULT_AVC_RECEIPT_LIST_LIMIT)
@@ -1222,6 +1478,32 @@ fn avc_receipt_list_limit(limit: Option<u32>) -> usize {
     match usize::try_from(capped) {
         Ok(value) => value,
         Err(_) => usize::from(u16::MAX),
+    }
+}
+
+fn emit_receipt_response(
+    receipt: AvcTrustReceipt,
+    validation: AvcValidationResult,
+) -> EmitReceiptResponse {
+    EmitReceiptResponse {
+        receipt_hash: format!("{}", receipt.receipt_id),
+        exochain_finality_hash: None,
+        exochain_finality_height: None,
+        exochain_finality_receipt_hash: None,
+        receipt,
+        validation,
+    }
+}
+
+fn attach_exochain_finality(
+    response: &mut EmitReceiptResponse,
+    commitment: Option<AvcExochainFinalityCommitment>,
+) {
+    if let Some(commitment) = commitment {
+        response.exochain_finality_hash = Some(format!("{}", commitment.finality_hash));
+        response.exochain_finality_height = Some(commitment.finality_height);
+        response.exochain_finality_receipt_hash =
+            Some(format!("{}", commitment.finality_receipt_hash));
     }
 }
 
@@ -1572,11 +1854,12 @@ async fn handle_emit_receipt(
         action_descriptor_hash,
         previous_receipt_hash,
     };
-    let external_timestamp_proof =
-        trusted_external_timestamp_proof(&state, evidence_subject.hash().map_err(map_avc_error)?)
+    let timestamp_evidence =
+        trusted_receipt_timestamp_evidence(&state, evidence_subject.hash().map_err(map_avc_error)?)
             .await?;
-    let trusted_now = external_timestamp_proof.issued_at;
-    let response = with_registry_blocking(state, true, move |registry| {
+    let trusted_now = timestamp_evidence.trusted_now;
+    let state_for_registry = Arc::clone(&state);
+    let mut response = with_registry_blocking(state_for_registry, true, move |registry| {
         let credential_id = require_registered_credential(registry, &submitted_request)?;
         verify_subject_action_signature(
             registry,
@@ -1601,11 +1884,7 @@ async fn handle_emit_receipt(
                 action_commitment_hash,
                 &validation,
             )?;
-            return Ok(EmitReceiptResponse {
-                receipt_hash: format!("{}", receipt.receipt_id),
-                receipt,
-                validation,
-            });
+            return Ok(emit_receipt_response(receipt, validation));
         }
         if registry.receipt_chain_head() != previous_receipt_hash {
             return Err((
@@ -1620,10 +1899,8 @@ async fn handle_emit_receipt(
                 action_commitment_hash: Some(action_commitment_hash),
                 action_descriptor: Some(action_descriptor),
                 previous_receipt_hash,
-                timestamp_provenance: Some(
-                    AvcReceiptTimestampProvenance::ExternalTimestampAuthority,
-                ),
-                external_timestamp_proof: Some(external_timestamp_proof),
+                timestamp_provenance: Some(timestamp_evidence.provenance),
+                external_timestamp_proof: timestamp_evidence.external_timestamp_proof,
             },
             validator_did,
             trusted_now,
@@ -1631,13 +1908,17 @@ async fn handle_emit_receipt(
         )
         .map_err(map_avc_error)?;
         store_receipt_idempotent(registry, receipt.clone())?;
-        Ok(EmitReceiptResponse {
-            receipt_hash: format!("{}", receipt.receipt_id),
-            receipt,
-            validation,
-        })
+        Ok(emit_receipt_response(receipt, validation))
     })
     .await?;
+    let finality = commit_exochain_finality(
+        &state.finality_store,
+        &response.receipt,
+        &state.validator_did,
+        &state.receipt_signer,
+    )
+    .map_err(exochain_finality_error)?;
+    attach_exochain_finality(&mut response, finality);
     Ok(Json(response))
 }
 
@@ -1795,6 +2076,7 @@ mod tests {
     use axum::{
         body::{self, Body},
         http::{Method, Request},
+        response::IntoResponse,
     };
     use exo_authority::permission::Permission;
     use exo_avc::{
@@ -1812,6 +2094,16 @@ mod tests {
     const SUBJECT_SEED: [u8; 32] = [0x22; 32];
     const VALIDATOR_SEED: [u8; 32] = [0x33; 32];
     const TIMESTAMP_AUTHORITY_SEED: [u8; 32] = [0x44; 32];
+
+    #[derive(Clone, Copy)]
+    enum TestTimestampAuthorityMode {
+        Valid,
+        NonSuccess,
+        InvalidJson,
+        WrongSubject,
+        WrongAuthority,
+        BadSignature,
+    }
 
     fn issuer_keypair() -> KeyPair {
         KeyPair::from_secret_bytes(ISSUER_SEED).expect("valid seed")
@@ -1857,6 +2149,15 @@ mod tests {
         }
     }
 
+    fn http_external_timestamp_source(endpoint: String) -> AvcReceiptExternalTimestampSource {
+        AvcReceiptExternalTimestampSource::Http {
+            endpoint: Arc::new(endpoint),
+            authority_did: timestamp_authority_did(),
+            authority_public_key: timestamp_authority_keypair().public,
+            client: reqwest::Client::new(),
+        }
+    }
+
     fn fresh_state() -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
         let state = AvcApiState::new_with_external_timestamp_source(
@@ -1869,11 +2170,26 @@ mod tests {
         Arc::new(state)
     }
 
+    fn fresh_state_with_finality_store(
+        finality_store: Arc<Mutex<crate::store::SqliteDagStore>>,
+    ) -> Arc<AvcApiState> {
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::new_with_external_timestamp_source_and_finality_store(
+            validator_did(),
+            signer,
+            fixed_external_timestamp_source(Timestamp::new(1_600_000, 0)),
+            Some(finality_store),
+        );
+        seed_avc_trust_keys(&state);
+        Arc::new(state)
+    }
+
     async fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let mut state = AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None)
-            .await
-            .expect("durable AVC state");
+        let mut state =
+            AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None, None)
+                .await
+                .expect("durable AVC state");
         state.external_timestamp_source =
             fixed_external_timestamp_source(Timestamp::new(1_600_000, 0));
         seed_avc_trust_keys(&state);
@@ -1995,6 +2311,120 @@ mod tests {
             .await
             .unwrap()
             .to_vec()
+    }
+
+    async fn serve_test_timestamp_authority(
+        mode: TestTimestampAuthorityMode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        #[derive(Deserialize)]
+        struct CapturedExternalTimestampRequest {
+            schema_version: u16,
+            domain: String,
+            subject_hash: String,
+        }
+
+        async fn issue_timestamp(
+            State(mode): State<TestTimestampAuthorityMode>,
+            axum::Json(request): axum::Json<CapturedExternalTimestampRequest>,
+        ) -> axum::response::Response {
+            assert_eq!(request.schema_version, AVC_SCHEMA_VERSION);
+            assert_eq!(request.domain, exo_avc::AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN);
+            if matches!(mode, TestTimestampAuthorityMode::NonSuccess) {
+                return (StatusCode::BAD_GATEWAY, "timestamp authority unavailable")
+                    .into_response();
+            }
+            if matches!(mode, TestTimestampAuthorityMode::InvalidJson) {
+                return (StatusCode::OK, "not-json").into_response();
+            }
+            let subject_hash =
+                parse_hash_anyhow(&request.subject_hash, "test timestamp subject hash").unwrap();
+            let signed_subject_hash = match mode {
+                TestTimestampAuthorityMode::WrongSubject => Hash256::from_bytes([0xAB; 32]),
+                _ => subject_hash,
+            };
+            let authority_did = match mode {
+                TestTimestampAuthorityMode::WrongAuthority => {
+                    Did::new("did:exo:wrong-timestamp-authority").unwrap()
+                }
+                _ => timestamp_authority_did(),
+            };
+            let issued_at = Timestamp::new(1_700_000, 7);
+            let mut proof = AvcReceiptExternalTimestampProof::signed(
+                authority_did,
+                signed_subject_hash,
+                issued_at,
+                |bytes| timestamp_authority_keypair().sign(bytes),
+            )
+            .unwrap();
+            if matches!(mode, TestTimestampAuthorityMode::BadSignature) {
+                proof.signature = Signature::empty();
+            }
+
+            axum::Json(serde_json::json!({
+                "authority_did": proof.authority_did.to_string(),
+                "subject_hash": proof.subject_hash.to_string(),
+                "issued_at_physical_ms": proof.issued_at.physical_ms,
+                "issued_at_logical": proof.issued_at.logical,
+                "signature_hex": proof.signature.to_string(),
+            }))
+            .into_response()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/", post(issue_timestamp))
+            .with_state(mode);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    async fn emit_baseline_receipt_with_source(
+        external_timestamp_source: AvcReceiptExternalTimestampSource,
+    ) -> (StatusCode, Arc<AvcApiState>, Vec<u8>) {
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState::new_with_external_timestamp_source(
+            validator_did(),
+            signer,
+            external_timestamp_source,
+        );
+        seed_avc_trust_keys(&state);
+        let state = Arc::new(state);
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let response = avc_router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let response_body = read_body(response).await;
+        (status, state, response_body)
     }
 
     fn unreachable_postgres_pool() -> PgPool {
@@ -2127,6 +2557,7 @@ mod tests {
         let cred_id = credential.id().unwrap();
         let body = serde_json::to_vec(&IssueRequest { credential }).unwrap();
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2217,13 +2648,18 @@ mod tests {
         std::fs::write(dir.path().join(AVC_REGISTRY_DURABLE_STATE_FILE), []).unwrap();
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
 
-        let error =
-            match AvcApiState::with_durable_registry(dir.path(), validator_did(), signer, None)
-                .await
-            {
-                Ok(_) => panic!("empty AVC durable registry file must fail closed at startup"),
-                Err(error) => error.to_string(),
-            };
+        let error = match AvcApiState::with_durable_registry(
+            dir.path(),
+            validator_did(),
+            signer,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("empty AVC durable registry file must fail closed at startup"),
+            Err(error) => error.to_string(),
+        };
 
         assert!(error.contains("AVC durable registry"));
         assert!(error.contains("is empty"));
@@ -2286,6 +2722,7 @@ mod tests {
             validator_did(),
             Arc::clone(&signer),
             Some(pool.clone()),
+            None,
         )
         .await
         {
@@ -2299,6 +2736,9 @@ mod tests {
             validator_did: validator_did(),
             receipt_signer: signer,
             external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: false,
+            finality_store: None,
             durability: AvcRegistryDurability::Postgres(pool.clone()),
         };
         seed_avc_trust_keys(&state);
@@ -2336,6 +2776,7 @@ mod tests {
             validator_did(),
             Arc::clone(&signer),
             Some(pool.clone()),
+            None,
         )
         .await
         .expect("Postgres AVC state");
@@ -2395,6 +2836,7 @@ mod tests {
         })
         .unwrap();
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2416,6 +2858,7 @@ mod tests {
             validator_did(),
             signer,
             Some(pool.clone()),
+            None,
         )
         .await
         .expect("reloaded Postgres AVC state");
@@ -2773,6 +3216,7 @@ mod tests {
 
         let app = avc_router(Arc::clone(&state));
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2847,6 +3291,219 @@ mod tests {
             validator_keypair().public_key()
         ));
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_commits_exochain_finality_node_and_trust_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let finality_store = Arc::new(Mutex::new(
+            crate::store::SqliteDagStore::open(dir.path()).unwrap(),
+        ));
+        let state = fresh_state_with_finality_store(Arc::clone(&finality_store));
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router(Arc::clone(&state));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        let finality_hash = parse_hash_anyhow(
+            parsed
+                .exochain_finality_hash
+                .as_deref()
+                .expect("configured AVC receipt emission must return EXOCHAIN finality hash"),
+            "AVC EXOCHAIN finality hash",
+        )
+        .unwrap();
+        let finality_height = parsed
+            .exochain_finality_height
+            .expect("configured AVC receipt emission must return EXOCHAIN finality height");
+        let finality_receipt_hash = parse_hash_anyhow(
+            parsed.exochain_finality_receipt_hash.as_deref().expect(
+                "configured AVC receipt emission must return EXOCHAIN finality receipt hash",
+            ),
+            "AVC EXOCHAIN finality receipt hash",
+        )
+        .unwrap();
+
+        {
+            let store = finality_store.lock().unwrap();
+            assert!(
+                store.contains_sync(&finality_hash).unwrap(),
+                "EXOCHAIN finality DAG node must be durably stored"
+            );
+            assert_eq!(store.committed_height_sync().unwrap(), finality_height);
+            let finality_receipt = store
+                .load_receipt(&finality_receipt_hash)
+                .unwrap()
+                .expect("EXOCHAIN finality trust receipt must be durably stored");
+            assert_eq!(finality_receipt.actor_did, validator_did());
+            assert_eq!(
+                finality_receipt.action_type,
+                "avc.receipt.exochain_finality"
+            );
+            assert_eq!(finality_receipt.action_hash, finality_hash);
+            assert!(finality_receipt.verify_hash().unwrap());
+            assert!(crypto::verify(
+                &finality_receipt.signing_payload().unwrap(),
+                &finality_receipt.signature,
+                validator_keypair().public_key()
+            ));
+        }
+
+        let replay = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replayed: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(replay).await).unwrap();
+        assert_eq!(replayed.receipt_hash, parsed.receipt_hash);
+        assert_eq!(
+            replayed.exochain_finality_hash,
+            parsed.exochain_finality_hash
+        );
+        assert_eq!(
+            replayed.exochain_finality_height,
+            parsed.exochain_finality_height
+        );
+        assert_eq!(
+            replayed.exochain_finality_receipt_hash,
+            parsed.exochain_finality_receipt_hash
+        );
+        assert_eq!(
+            finality_store
+                .lock()
+                .unwrap()
+                .committed_height_sync()
+                .unwrap(),
+            finality_height
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_uses_local_hlc_finality_when_external_timestamp_not_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let finality_store = Arc::new(Mutex::new(
+            crate::store::SqliteDagStore::open(dir.path()).unwrap(),
+        ));
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+        let state = AvcApiState {
+            registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
+            validator_did: validator_did(),
+            receipt_signer: signer,
+            external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: false,
+            finality_store: Some(Arc::clone(&finality_store)),
+            durability: AvcRegistryDurability::None,
+        };
+        seed_avc_trust_keys(&state);
+        let state = Arc::new(state);
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            validation: request.clone(),
+            subject_signature: sign_action(&request, &subject_keypair()),
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let response = avc_router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let parsed: EmitReceiptResponse =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        assert_eq!(
+            parsed.receipt.timestamp_provenance,
+            Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock)
+        );
+        assert_eq!(parsed.receipt.external_timestamp_proof, None);
+        assert_eq!(parsed.receipt.created_at, Timestamp::new(1_000_000, 0));
+        let finality_hash = parse_hash_anyhow(
+            parsed
+                .exochain_finality_hash
+                .as_deref()
+                .expect("local EXOCHAIN finality receipt must return finality hash"),
+            "AVC EXOCHAIN finality hash",
+        )
+        .unwrap();
+        let finality_receipt_hash = parse_hash_anyhow(
+            parsed
+                .exochain_finality_receipt_hash
+                .as_deref()
+                .expect("local EXOCHAIN finality receipt must return finality receipt hash"),
+            "AVC EXOCHAIN finality receipt hash",
+        )
+        .unwrap();
+
+        let store = finality_store.lock().unwrap();
+        assert!(
+            store.contains_sync(&finality_hash).unwrap(),
+            "local-HLC AVC receipt must still commit an EXOCHAIN finality DAG node"
+        );
+        let finality_receipt = store
+            .load_receipt(&finality_receipt_hash)
+            .unwrap()
+            .expect("local-HLC AVC finality trust receipt must be durably stored");
+        assert_eq!(finality_receipt.action_hash, finality_hash);
+        assert!(finality_receipt.verify_hash().unwrap());
     }
 
     #[tokio::test]
@@ -3265,13 +3922,168 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receipt_emit_fails_closed_when_external_timestamp_authority_is_unavailable() {
+    async fn receipt_emit_accepts_http_external_timestamp_authority_proof() {
+        let (endpoint, timestamp_authority) =
+            serve_test_timestamp_authority(TestTimestampAuthorityMode::Valid).await;
+        let request = AvcValidationRequest {
+            credential: baseline_credential(),
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let credential_id = request.credential.id().unwrap();
+        let action_id = request.action.as_ref().unwrap().action_id;
+        let action_commitment_hash = avc_action_commitment_hash(
+            &request.credential,
+            request.action.as_ref().unwrap(),
+            &request.now,
+        )
+        .unwrap();
+        let action_descriptor = AvcActionDescriptor::from_action(request.action.as_ref().unwrap());
+        let action_descriptor_hash = avc_action_descriptor_hash(&action_descriptor).unwrap();
+        let (status, state, response_body) =
+            emit_baseline_receipt_with_source(http_external_timestamp_source(endpoint)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let parsed: EmitReceiptResponse = serde_json::from_slice(&response_body).unwrap();
+        let proof = parsed.receipt.external_timestamp_proof.as_ref().unwrap();
+        let evidence_subject_hash = AvcReceiptEvidenceSubject {
+            credential_id,
+            action_id,
+            action_commitment_hash,
+            action_descriptor_hash,
+            previous_receipt_hash: None,
+        }
+        .hash()
+        .unwrap();
+        assert_eq!(proof.authority_did, timestamp_authority_did());
+        assert_eq!(proof.subject_hash, evidence_subject_hash);
+        assert_eq!(parsed.receipt.created_at, Timestamp::new(1_700_000, 7));
+        assert_eq!(
+            parsed.receipt.timestamp_provenance,
+            Some(AvcReceiptTimestampProvenance::ExternalTimestampAuthority)
+        );
+        assert!(
+            proof
+                .verify_signature(timestamp_authority_keypair().public_key())
+                .unwrap()
+        );
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_for_http_external_timestamp_non_success_status() {
+        let (endpoint, timestamp_authority) =
+            serve_test_timestamp_authority(TestTimestampAuthorityMode::NonSuccess).await;
+
+        let (status, state, _) =
+            emit_baseline_receipt_with_source(http_external_timestamp_source(endpoint)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_for_http_external_timestamp_invalid_json() {
+        let (endpoint, timestamp_authority) =
+            serve_test_timestamp_authority(TestTimestampAuthorityMode::InvalidJson).await;
+
+        let (status, state, _) =
+            emit_baseline_receipt_with_source(http_external_timestamp_source(endpoint)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_for_http_external_timestamp_wrong_subject() {
+        let (endpoint, timestamp_authority) =
+            serve_test_timestamp_authority(TestTimestampAuthorityMode::WrongSubject).await;
+
+        let (status, state, _) =
+            emit_baseline_receipt_with_source(http_external_timestamp_source(endpoint)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_for_http_external_timestamp_wrong_authority() {
+        let (endpoint, timestamp_authority) =
+            serve_test_timestamp_authority(TestTimestampAuthorityMode::WrongAuthority).await;
+
+        let (status, state, _) =
+            emit_baseline_receipt_with_source(http_external_timestamp_source(endpoint)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_for_http_external_timestamp_bad_signature() {
+        let (endpoint, timestamp_authority) =
+            serve_test_timestamp_authority(TestTimestampAuthorityMode::BadSignature).await;
+
+        let (status, state, _) =
+            emit_baseline_receipt_with_source(http_external_timestamp_source(endpoint)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_for_unreachable_http_external_timestamp_authority() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let (status, state, _) = emit_baseline_receipt_with_source(http_external_timestamp_source(
+            format!("http://{address}"),
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[test]
+    fn external_timestamp_diagnostics_distinguish_unconfigured_from_unreachable() {
+        let source = include_str!("avc.rs");
+        let production = source
+            .split("\n// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .unwrap();
+        assert!(
+            production.contains("AvcExternalTimestampFailure::Unconfigured"),
+            "operator diagnostics must keep missing TSA configuration distinct from runtime reachability failures"
+        );
+        assert!(
+            production.contains("AvcExternalTimestampFailure::Unreachable"),
+            "operator diagnostics must classify configured-but-unreachable TSA failures separately"
+        );
+        assert!(
+            production.contains("external_timestamp_error_class"),
+            "the 503 path must attach a stable operator-facing TSA error class before returning the generic public error"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_fails_closed_when_external_timestamp_authority_is_required_but_unconfigured()
+     {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
         let state = AvcApiState {
             registry: Arc::new(Mutex::new(InMemoryAvcRegistry::new())),
             validator_did: validator_did(),
             receipt_signer: signer,
             external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: true,
+            finality_store: None,
             durability: AvcRegistryDurability::None,
         };
         seed_avc_trust_keys(&state);
@@ -4618,6 +5430,9 @@ mod avc_root_trust_tests {
             validator_did: Did::new("did:exo:test-validator").expect("test DID"),
             receipt_signer: signer,
             external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: false,
+            finality_store: None,
             durability: AvcRegistryDurability::None,
         }
     }
@@ -4634,6 +5449,9 @@ mod avc_root_trust_tests {
             validator_did: Did::new("did:exo:test-validator").expect("test DID"),
             receipt_signer: signer,
             external_timestamp_source: AvcReceiptExternalTimestampSource::Unconfigured,
+            receipt_clock: Arc::new(Mutex::new(HybridClock::new())),
+            require_external_timestamp: false,
+            finality_store: None,
             durability: AvcRegistryDurability::Postgres(pool),
         }
     }

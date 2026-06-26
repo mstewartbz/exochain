@@ -1056,6 +1056,7 @@ async fn start_node(
             node_identity.did.clone(),
             Arc::clone(&sign_fn),
             Some(gateway_pool.clone()),
+            Some(Arc::clone(&shared_store)),
         )
         .await?,
     );

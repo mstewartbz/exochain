@@ -60,21 +60,25 @@ EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID
 EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX
 ```
 
-The runtime receipt route is therefore expected to fail closed on receipt
-emission until all three values are configured together. This is intentional:
-EXOCHAIN code can verify the authority signature and bind it into a receipt, but
-it must not pretend that EXOCHAIN's own database clock or local HLC is an
-independent timestamp authority.
+The runtime receipt route must fail closed on external timestamp proof when
+`EXO_AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY=true` or when an external authority
+is configured but unreachable or unverifiable. When strict external proof is not
+required and the authority triplet is absent, receipt emission may proceed only
+as internal or EXOCHAIN-finality evidence using local HLC provenance; it must not
+be described as independent timestamp authority.
 
 The production receipt boundary is:
 
 1. Canonicalize and hash the AVC action descriptor.
 2. Canonicalize and hash the receipt evidence subject: credential id, action id,
    action commitment hash, action descriptor hash, and prior receipt hash.
-3. Request a signed external timestamp proof for that evidence-subject hash.
+3. If external proof is configured or required, request a signed external
+   timestamp proof for that evidence-subject hash; otherwise use local HLC
+   provenance only.
 4. Verify the returned authority DID, subject hash, public-key signature, and
    timestamp.
-5. Validate the AVC at the externally issued timestamp.
+5. Validate the AVC at the trusted timestamp source for the active evidence
+   class.
 6. Mint the EXOCHAIN validator-signed receipt with the embedded action
    descriptor, descriptor hash, previous-receipt link, and external timestamp
    proof.

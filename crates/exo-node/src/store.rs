@@ -434,6 +434,26 @@ impl PostgresDagNodeStore {
         Ok(())
     }
 
+    async fn put_committed_node_with_receipt_sync_async(
+        &self,
+        node: DagNode,
+        height: u64,
+        receipt: TrustReceipt,
+    ) -> DagResult<()> {
+        if receipt.action_hash != node.hash {
+            return Err(store_err(
+                "dagdb_node_trust_receipts.action_hash must match committed node hash",
+            ));
+        }
+        let mut tx = self.begin().await?;
+        self.insert_node_tx(&mut tx, &node).await?;
+        self.insert_committed_tx(&mut tx, &node.hash, height)
+            .await?;
+        self.insert_receipt_tx(&mut tx, &receipt).await?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
     async fn contains_sync_async(&self, hash: &Hash256) -> DagResult<bool> {
         let mut tx = self.begin().await?;
         let present: bool = sqlx::query_scalar(
@@ -1932,6 +1952,37 @@ impl SqliteDagStore {
         for node in nodes {
             Self::insert_node_tx(&tx, node)?;
         }
+        tx.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Atomically persist a DAG node, committed marker, and proving trust receipt.
+    pub fn put_committed_node_with_receipt_sync(
+        &mut self,
+        node: &DagNode,
+        height: u64,
+        receipt: &TrustReceipt,
+    ) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let node = node.clone();
+            let receipt = receipt.clone();
+            return block_on_dagdb(async move {
+                store
+                    .put_committed_node_with_receipt_sync_async(node, height, receipt)
+                    .await
+            });
+        }
+        if receipt.action_hash != node.hash {
+            return Err(store_err(
+                "trust_receipts.action_hash must match committed node hash",
+            ));
+        }
+
+        let tx = self.sqlite_conn_mut()?.transaction().map_err(store_err)?;
+        Self::insert_node_tx(&tx, node)?;
+        Self::insert_committed_tx(&tx, &node.hash, height)?;
+        Self::insert_receipt_tx(&tx, receipt)?;
         tx.commit().map_err(store_err)?;
         Ok(())
     }
