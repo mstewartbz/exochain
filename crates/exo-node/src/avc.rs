@@ -4619,16 +4619,44 @@ mod tests {
         // as a generic "authority unavailable": the public 503 message carries the
         // stable operator class so callers seeing only the response — not the node
         // logs — can tell a verification/config failure from upstream downtime.
-        let err: anyhow::Error = AvcExternalTimestampFailure::InvalidProof {
-            reason: "RFC 3161 TSA signer public key did not match any pinned SPKI DER".to_owned(),
+        // Cover every failure class so each operator_class arm is exercised.
+        let cases = [
+            (AvcExternalTimestampFailure::Unconfigured, "unconfigured"),
+            (
+                AvcExternalTimestampFailure::Unreachable {
+                    reason: "connection refused".to_owned(),
+                },
+                "unreachable",
+            ),
+            (
+                AvcExternalTimestampFailure::Rejected {
+                    status: "503 Service Unavailable".to_owned(),
+                },
+                "rejected",
+            ),
+            (
+                AvcExternalTimestampFailure::InvalidResponse {
+                    reason: "malformed DER".to_owned(),
+                },
+                "invalid_response",
+            ),
+            (
+                AvcExternalTimestampFailure::InvalidProof {
+                    reason: "RFC 3161 TSA signer public key did not match any pinned SPKI DER"
+                        .to_owned(),
+                },
+                "invalid_proof",
+            ),
+        ];
+        for (failure, expected_class) in cases {
+            let err: anyhow::Error = failure.into();
+            let (status, message) = external_timestamp_error(err);
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                message.contains(expected_class),
+                "public TSA error must carry operator class '{expected_class}', got: {message}"
+            );
         }
-        .into();
-        let (status, message) = external_timestamp_error(err);
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            message.contains("invalid_proof"),
-            "public TSA error must carry the operator class, got: {message}"
-        );
     }
 
     #[tokio::test]
