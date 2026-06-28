@@ -30,9 +30,84 @@ pub struct HealthResponse {
     pub dagdb_runtime_reason: Option<String>,
 }
 
+/// Public EXOCHAIN discovery document served from `/.well-known/exochain.json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExochainDiscoveryResponse {
+    pub base_url: String,
+    pub routes: ExochainDiscoveryRoutes,
+    pub sdk: ExochainSdkDiscovery,
+    pub mcp: ExochainMcpDiscovery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExochainDiscoveryRoutes {
+    pub health: String,
+    pub ready: String,
+    pub avc: ExochainAvcDiscoveryRoutes,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExochainAvcDiscoveryRoutes {
+    pub issue: String,
+    pub validate: String,
+    pub receipts_emit: String,
+    pub receipts_get: String,
+    pub protocol: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExochainSdkDiscovery {
+    pub rust: String,
+    pub typescript: String,
+    pub python: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExochainMcpDiscovery {
+    pub public_transport: bool,
+    pub transports: Vec<String>,
+    pub capabilities: Vec<String>,
+}
+
+impl ExochainDiscoveryResponse {
+    #[must_use]
+    pub fn canonical() -> Self {
+        Self {
+            base_url: "https://exochain.io".to_owned(),
+            routes: ExochainDiscoveryRoutes {
+                health: "/health".to_owned(),
+                ready: "/ready".to_owned(),
+                avc: ExochainAvcDiscoveryRoutes {
+                    issue: "/api/v1/avc/issue".to_owned(),
+                    validate: "/api/v1/avc/validate".to_owned(),
+                    receipts_emit: "/api/v1/avc/receipts/emit".to_owned(),
+                    receipts_get: "/api/v1/avc/receipts/:hash".to_owned(),
+                    protocol: "/api/v1/avc/protocol".to_owned(),
+                },
+            },
+            sdk: ExochainSdkDiscovery {
+                rust: "crates/exochain-sdk".to_owned(),
+                typescript: "packages/exochain-sdk".to_owned(),
+                python: "packages/exochain-py".to_owned(),
+            },
+            mcp: ExochainMcpDiscovery {
+                public_transport: false,
+                transports: vec!["stdio".to_owned(), "loopback-sse".to_owned()],
+                capabilities: vec![
+                    "tools".to_owned(),
+                    "resources".to_owned(),
+                    "prompts".to_owned(),
+                ],
+            },
+        }
+    }
+}
+
 /// REST API route definitions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RestRoute {
+    /// GET /.well-known/exochain.json
+    ExochainDiscovery,
     /// GET /health
     Health,
     /// GET /ready
@@ -97,7 +172,8 @@ impl RestRoute {
     /// Get the HTTP method for this route.
     pub fn method(&self) -> &str {
         match self {
-            RestRoute::Health
+            RestRoute::ExochainDiscovery
+            | RestRoute::Health
             | RestRoute::Ready
             | RestRoute::GatewayMetrics
             | RestRoute::DbHealth
@@ -131,6 +207,7 @@ impl RestRoute {
     /// Get the path pattern for this route.
     pub fn path(&self) -> &str {
         match self {
+            RestRoute::ExochainDiscovery => "/.well-known/exochain.json",
             RestRoute::Health => "/health",
             RestRoute::Ready => "/ready",
             RestRoute::GatewayMetrics => "/gateway/metrics",
@@ -166,6 +243,7 @@ impl RestRoute {
     /// All defined routes.
     pub fn all() -> Vec<RestRoute> {
         vec![
+            RestRoute::ExochainDiscovery,
             RestRoute::Health,
             RestRoute::Ready,
             RestRoute::GatewayMetrics,
@@ -207,6 +285,7 @@ mod tests {
 
     #[test]
     fn test_route_methods() {
+        assert_eq!(RestRoute::ExochainDiscovery.method(), "GET");
         assert_eq!(RestRoute::Health.method(), "GET");
         assert_eq!(RestRoute::Ready.method(), "GET");
         assert_eq!(RestRoute::GatewayMetrics.method(), "GET");
@@ -231,6 +310,10 @@ mod tests {
 
     #[test]
     fn test_route_paths() {
+        assert_eq!(
+            RestRoute::ExochainDiscovery.path(),
+            "/.well-known/exochain.json"
+        );
         assert_eq!(RestRoute::Health.path(), "/health");
         assert_eq!(RestRoute::Ready.path(), "/ready");
         assert_eq!(RestRoute::GatewayMetrics.path(), "/gateway/metrics");
@@ -312,9 +395,38 @@ mod tests {
     }
 
     #[test]
+    fn discovery_document_advertises_public_api_sdk_and_mcp_boundaries() {
+        let discovery = ExochainDiscoveryResponse::canonical();
+
+        assert_eq!(discovery.base_url, "https://exochain.io");
+        assert_eq!(discovery.routes.health, "/health");
+        assert_eq!(discovery.routes.ready, "/ready");
+        assert_eq!(discovery.routes.avc.issue, "/api/v1/avc/issue");
+        assert_eq!(discovery.routes.avc.validate, "/api/v1/avc/validate");
+        assert_eq!(
+            discovery.routes.avc.receipts_emit,
+            "/api/v1/avc/receipts/emit"
+        );
+        assert_eq!(
+            discovery.routes.avc.receipts_get,
+            "/api/v1/avc/receipts/:hash"
+        );
+        assert_eq!(discovery.routes.avc.protocol, "/api/v1/avc/protocol");
+        assert_eq!(discovery.sdk.rust, "crates/exochain-sdk");
+        assert_eq!(discovery.sdk.typescript, "packages/exochain-sdk");
+        assert_eq!(discovery.sdk.python, "packages/exochain-py");
+        assert!(!discovery.mcp.public_transport);
+        assert_eq!(discovery.mcp.transports, vec!["stdio", "loopback-sse"]);
+        assert_eq!(
+            discovery.mcp.capabilities,
+            vec!["tools", "resources", "prompts"]
+        );
+    }
+
+    #[test]
     fn test_all_routes() {
         let routes = RestRoute::all();
-        assert_eq!(routes.len(), 29);
+        assert_eq!(routes.len(), 30);
     }
 
     #[test]
@@ -325,6 +437,7 @@ mod tests {
             .map(|route| (route.method(), route.path()))
             .collect();
         let expected = BTreeSet::from([
+            ("GET", "/.well-known/exochain.json"),
             ("GET", "/health"),
             ("GET", "/ready"),
             ("GET", "/gateway/metrics"),

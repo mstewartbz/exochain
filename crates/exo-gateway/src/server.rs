@@ -87,7 +87,7 @@ use crate::{
     error::{GatewayError, Result},
     graphql,
     handlers::health_handler as db_health_handler,
-    rest::HealthResponse,
+    rest::{ExochainDiscoveryResponse, HealthResponse},
 };
 
 const XSRF_COOKIE_PREFIX: &str = "XSRF-TOKEN=";
@@ -2368,6 +2368,11 @@ async fn handle_ready(State(state): State<AppState>) -> (StatusCode, Json<Health
     (http_status, Json(body))
 }
 
+/// GET /.well-known/exochain.json — public discovery for API, SDK, and MCP.
+async fn handle_exochain_discovery() -> Json<ExochainDiscoveryResponse> {
+    Json(ExochainDiscoveryResponse::canonical())
+}
+
 async fn probe_dagdb_runtime_status(state: &AppState) -> DagDbRuntimeStatus {
     let Some(pool) = &state.pool else {
         return dagdb_runtime_status_from_probe(false, None);
@@ -4519,6 +4524,7 @@ fn build_unlayered_router(state: AppState) -> Router {
 
     Router::new()
         // Probes
+        .route("/.well-known/exochain.json", get(handle_exochain_discovery))
         .route("/health", get(handle_health))
         .route("/ready", get(handle_ready))
         .route("/gateway/metrics", get(handle_metrics))
@@ -4996,7 +5002,7 @@ mod tests {
     };
 
     use axum::{
-        body::Body,
+        body::{Body, to_bytes},
         extract::ConnectInfo,
         http::{Request, header},
     };
@@ -5019,6 +5025,43 @@ mod tests {
 
     async fn probe() -> StatusCode {
         StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn discovery_route_returns_public_api_sdk_and_mcp_metadata() {
+        let app = build_router(state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/exochain.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["base_url"], "https://exochain.io");
+        assert_eq!(payload["routes"]["health"], "/health");
+        assert_eq!(payload["routes"]["ready"], "/ready");
+        assert_eq!(payload["routes"]["avc"]["issue"], "/api/v1/avc/issue");
+        assert_eq!(
+            payload["routes"]["avc"]["receipts_emit"],
+            "/api/v1/avc/receipts/emit"
+        );
+        assert_eq!(payload["routes"]["avc"]["protocol"], "/api/v1/avc/protocol");
+        assert_eq!(payload["sdk"]["rust"], "crates/exochain-sdk");
+        assert_eq!(payload["sdk"]["typescript"], "packages/exochain-sdk");
+        assert_eq!(payload["sdk"]["python"], "packages/exochain-py");
+        assert_eq!(payload["mcp"]["public_transport"], false);
+        assert_eq!(payload["mcp"]["transports"][0], "stdio");
+        assert_eq!(payload["mcp"]["transports"][1], "loopback-sse");
+        assert_eq!(payload["mcp"]["capabilities"][0], "tools");
+        assert_eq!(payload["mcp"]["capabilities"][1], "resources");
+        assert_eq!(payload["mcp"]["capabilities"][2], "prompts");
     }
 
     fn base64_standard(bytes: &[u8]) -> String {

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
 
 # A DID on the exo network: "did:exo:" followed by a base58-alphanumeric suffix.
 Did = Annotated[
@@ -72,8 +72,66 @@ class QuorumResult(BaseModel):
     abstentions: int
 
 
+class ExochainAvcDiscoveryRoutes(BaseModel):
+    """AVC route paths from the public EXOCHAIN discovery document."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    issue: str
+    validate_route: str = Field(alias="validate")
+    receipts_emit: str
+    receipts_get: str
+    protocol: str
+
+
+class ExochainDiscoveryRoutes(BaseModel):
+    """Public route paths from the canonical EXOCHAIN node."""
+
+    model_config = ConfigDict(frozen=True)
+
+    health: str
+    ready: str
+    avc: ExochainAvcDiscoveryRoutes
+
+
+class ExochainSdkDiscovery(BaseModel):
+    """SDK package locations advertised by the canonical EXOCHAIN node."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rust: str
+    typescript: str
+    python: str
+
+
+class ExochainMcpDiscovery(BaseModel):
+    """MCP capability metadata; public_transport false means discovery only."""
+
+    model_config = ConfigDict(frozen=True)
+
+    public_transport: StrictBool
+    transports: tuple[str, ...]
+    capabilities: tuple[str, ...]
+
+
+class ExochainDiscoveryResponse(BaseModel):
+    """Public EXOCHAIN discovery document."""
+
+    model_config = ConfigDict(frozen=True)
+
+    base_url: str
+    routes: ExochainDiscoveryRoutes
+    sdk: ExochainSdkDiscovery
+    mcp: ExochainMcpDiscovery
+
+
 __all__ = [
     "Did",
+    "ExochainAvcDiscoveryRoutes",
+    "ExochainDiscoveryResponse",
+    "ExochainDiscoveryRoutes",
+    "ExochainMcpDiscovery",
+    "ExochainSdkDiscovery",
     "Hash256Hex",
     "Outcome",
     "QuorumResult",
