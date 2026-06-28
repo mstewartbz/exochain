@@ -976,7 +976,10 @@ mod tests {
             minimal_unsigned_integer_bytes(&[0x80u8, 0x01]).to_vec(),
             vec![0x80u8, 0x01]
         );
-        assert_eq!(minimal_unsigned_integer_bytes(&[0u8, 0, 0]).to_vec(), vec![0u8]);
+        assert_eq!(
+            minimal_unsigned_integer_bytes(&[0u8, 0, 0]).to_vec(),
+            vec![0u8]
+        );
     }
 
     #[test]
