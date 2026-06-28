@@ -204,6 +204,20 @@ fn der_integer_from_positive_bytes(bytes: &[u8]) -> Vec<u8> {
     der_tlv(DER_INTEGER, &positive_integer_value_bytes(bytes))
 }
 
+/// Minimal unsigned big-endian representation of an integer: leading zero bytes
+/// removed (keeping at least one byte). This is the canonical value the TSA
+/// echoes back and that `parse_positive_integer_bytes` reconstructs from the
+/// response — so the request-side `nonce_hex` must use the SAME canonicalization,
+/// otherwise a nonce whose first byte is `0x00` fails the nonce-equality check
+/// (`canonical_hex` does not strip leading zeros) and the whole emit fails closed.
+fn minimal_unsigned_integer_bytes(bytes: &[u8]) -> &[u8] {
+    let first_non_zero = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len().saturating_sub(1));
+    &bytes[first_non_zero..]
+}
+
 fn encode_oid_arc(mut arc: u32, out: &mut Vec<u8>) {
     let mut stack = [0u8; 5];
     let mut len = 1usize;
@@ -286,7 +300,9 @@ pub(crate) fn build_timestamp_request(
 
     Ok(Rfc3161TimestampRequest {
         der: der_sequence(&request),
-        nonce_hex: hex::encode(nonce),
+        // Canonical (leading-zero-stripped) nonce value, matching what the TSA
+        // echoes and what `parse_positive_integer_bytes` yields from the response.
+        nonce_hex: hex::encode(minimal_unsigned_integer_bytes(&nonce)),
         message_imprint_sha256,
     })
 }
@@ -949,6 +965,42 @@ mod tests {
     use exo_core::{Hash256, Timestamp};
 
     use super::*;
+
+    #[test]
+    fn minimal_unsigned_integer_bytes_strips_leading_zeros() {
+        assert_eq!(
+            minimal_unsigned_integer_bytes(&[0u8, 0, 0x12, 0x34]).to_vec(),
+            vec![0x12u8, 0x34]
+        );
+        assert_eq!(
+            minimal_unsigned_integer_bytes(&[0x80u8, 0x01]).to_vec(),
+            vec![0x80u8, 0x01]
+        );
+        assert_eq!(minimal_unsigned_integer_bytes(&[0u8, 0, 0]).to_vec(), vec![0u8]);
+    }
+
+    #[test]
+    fn nonce_hex_matches_der_roundtrip_for_leading_zero_nonce() {
+        // Regression: a nonce whose first byte is 0x00. The DER INTEGER encoding
+        // strips the leading zero, so the request-side nonce_hex must use the same
+        // canonical (leading-zero-stripped) form that parse_positive_integer_bytes
+        // reconstructs from the TSA's echoed response. Before the fix the request
+        // stored hex of the full 32 bytes (with the 0x00), so the nonce-equality
+        // check failed and the whole emit fell through to a fail-closed 503.
+        let mut nonce = [0u8; 32];
+        nonce[1] = 0x12;
+        nonce[31] = 0x34;
+        let request_nonce_hex = hex::encode(minimal_unsigned_integer_bytes(&nonce));
+        let der = der_integer_from_positive_bytes(&nonce);
+        let mut reader = DerReader::new(&der);
+        let tlv = reader.read_tlv().expect("nonce DER integer");
+        let parsed = parse_positive_integer_bytes(tlv).expect("parse nonce integer");
+        assert_eq!(
+            request_nonce_hex,
+            hex::encode(parsed),
+            "request nonce_hex must equal the canonical value parsed back from the echoed DER integer"
+        );
+    }
 
     const MICROSOFT_FIXTURE_RESPONSE_DER_BASE64: &str =
         include_str!("fixtures/microsoft_rfc3161_timestamp_response.b64");
