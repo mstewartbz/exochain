@@ -125,8 +125,8 @@ pub use receipt::{
     AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN, AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
     AVC_RECEIPT_SIGNING_DOMAIN, AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProof,
     AvcReceiptExternalTimestampProofKind, AvcReceiptRfc3161TimestampProof,
-    AvcReceiptTimestampProvenance, AvcTrustReceipt, AvcTrustReceiptEvidence, create_trust_receipt,
-    create_trust_receipt_with_evidence,
+    AvcReceiptRfc3161TrustAnchorKind, AvcReceiptTimestampProvenance, AvcTrustReceipt,
+    AvcTrustReceiptEvidence, create_trust_receipt, create_trust_receipt_with_evidence,
 };
 pub use registry::{
     AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, InMemoryAvcRegistry,

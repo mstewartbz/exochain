@@ -170,6 +170,13 @@ impl AvcReceiptExternalTimestampProofKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvcReceiptRfc3161TrustAnchorKind {
+    SignerSpki,
+    IssuingCaSpki,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvcReceiptRfc3161TimestampProof {
     pub message_imprint_sha256_hex: String,
     pub token_der_base64: String,
@@ -178,6 +185,12 @@ pub struct AvcReceiptRfc3161TimestampProof {
     pub nonce_hex: String,
     pub tsa_subject: String,
     pub tsa_public_key_spki_der_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsa_trust_anchor_kind: Option<AvcReceiptRfc3161TrustAnchorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsa_trust_anchor_spki_der_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsa_issuer_subject: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +626,14 @@ mod tests {
                         .to_owned(),
                 tsa_public_key_spki_der_hex: "30820122300d06092a864886f70d01010105000382010f"
                     .to_owned(),
+                tsa_trust_anchor_kind: Some(AvcReceiptRfc3161TrustAnchorKind::IssuingCaSpki),
+                tsa_trust_anchor_spki_der_hex: Some(
+                    "30820222300d06092a864886f70d01010105000382020f".to_owned(),
+                ),
+                tsa_issuer_subject: Some(
+                    "CN=Microsoft Public RSA Timestamping CA 2020,O=Microsoft Corporation,C=US"
+                        .to_owned(),
+                ),
             },
         );
         let mut rfc3161_bytes = Vec::new();

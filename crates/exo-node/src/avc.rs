@@ -66,9 +66,9 @@ use exo_avc::{
     AVC_PROTOCOL_DEPRECATION_WINDOW_DAYS, AVC_PROTOCOL_VERSION, AVC_SCHEMA_VERSION,
     AutonomousVolitionCredential, AvcActionDescriptor, AvcActionRequest, AvcDecision,
     AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProof, AvcReceiptRfc3161TimestampProof,
-    AvcReceiptTimestampProvenance, AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite,
-    AvcRevocation, AvcTrustReceipt, AvcTrustReceiptEvidence, AvcValidationRequest,
-    AvcValidationResult, InMemoryAvcRegistry, avc_action_commitment_hash,
+    AvcReceiptRfc3161TrustAnchorKind, AvcReceiptTimestampProvenance, AvcRegistryDurableState,
+    AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt, AvcTrustReceiptEvidence,
+    AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry, avc_action_commitment_hash,
     avc_action_descriptor_hash, avc_action_signature_payload, create_trust_receipt_with_evidence,
     require_supported_avc_protocol_version, validate_avc,
 };
@@ -107,6 +107,7 @@ pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV: &str =
     "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID";
 pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV: &str =
     "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX";
+pub const AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV: &str = "EXO_AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX";
 pub const AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV: &str = "EXO_AVC_RFC3161_TIMESTAMP_POLICY_OID";
 const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
 const AVC_REGISTRY_POSTGRES_TABLE: &str = "avc_registry_state";
@@ -136,6 +137,7 @@ enum AvcReceiptExternalTimestampSource {
         endpoint: Arc<String>,
         authority_did: Did,
         authority_public_key_spki_der_hexes: Arc<Vec<String>>,
+        issuing_ca_spki_der_hexes: Arc<Vec<String>>,
         policy_oid: Arc<String>,
         client: reqwest::Client,
     },
@@ -320,6 +322,7 @@ impl AvcReceiptExternalTimestampSource {
                 endpoint,
                 authority_did,
                 authority_public_key_spki_der_hexes,
+                issuing_ca_spki_der_hexes,
                 policy_oid,
                 client,
             } => {
@@ -352,17 +355,33 @@ impl AvcReceiptExternalTimestampSource {
                         reason: error.to_string(),
                     }
                 })?;
-                let verified = crate::avc_rfc3161::verify_timestamp_response_with_spki_pins(
+                let trust_anchors = crate::avc_rfc3161::Rfc3161TrustAnchors::new(
+                    authority_public_key_spki_der_hexes.as_ref().clone(),
+                    issuing_ca_spki_der_hexes.as_ref().clone(),
+                )
+                .map_err(|error| AvcExternalTimestampFailure::InvalidProof {
+                    reason: error.to_string(),
+                })?;
+                let verified = crate::avc_rfc3161::verify_timestamp_response_with_trust_anchors(
                     &response_der,
                     subject_hash,
                     request.message_imprint_sha256,
                     &request.nonce_hex,
                     policy_oid.as_str(),
-                    authority_public_key_spki_der_hexes.as_slice(),
+                    &trust_anchors,
                 )
                 .map_err(|error| AvcExternalTimestampFailure::InvalidProof {
                     reason: error.to_string(),
                 })?;
+                let (tsa_trust_anchor_kind, tsa_issuer_subject) = match verified.trust_anchor.kind {
+                    crate::avc_rfc3161::Rfc3161TrustAnchorKind::SignerSpki => {
+                        (AvcReceiptRfc3161TrustAnchorKind::SignerSpki, None)
+                    }
+                    crate::avc_rfc3161::Rfc3161TrustAnchorKind::IssuingCaSpki => (
+                        AvcReceiptRfc3161TrustAnchorKind::IssuingCaSpki,
+                        Some(verified.trust_anchor.subject.clone()),
+                    ),
+                };
                 Ok(AvcReceiptExternalTimestampProof::rfc3161(
                     authority_did.clone(),
                     verified.subject_hash,
@@ -375,6 +394,9 @@ impl AvcReceiptExternalTimestampSource {
                         nonce_hex: verified.nonce_hex,
                         tsa_subject: verified.tsa_subject,
                         tsa_public_key_spki_der_hex: verified.tsa_public_key_spki_der_hex,
+                        tsa_trust_anchor_kind: Some(tsa_trust_anchor_kind),
+                        tsa_trust_anchor_spki_der_hex: Some(verified.trust_anchor.spki_der_hex),
+                        tsa_issuer_subject,
                     },
                 ))
             }
@@ -433,6 +455,9 @@ impl AvcReceiptExternalTimestampSource {
                     nonce_hex: nonce_hex.clone(),
                     tsa_subject: tsa_subject.clone(),
                     tsa_public_key_spki_der_hex: tsa_public_key_spki_der_hex.clone(),
+                    tsa_trust_anchor_kind: Some(AvcReceiptRfc3161TrustAnchorKind::SignerSpki),
+                    tsa_trust_anchor_spki_der_hex: Some(tsa_public_key_spki_der_hex.clone()),
+                    tsa_issuer_subject: None,
                 },
             )),
         }
@@ -827,6 +852,10 @@ where
         read(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV)?,
         AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
     )?;
+    let issuing_ca_spki = clean_optional_env_value(
+        read(AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV)?,
+        AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+    )?;
     let policy_oid = clean_optional_env_value(
         read(AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV)?,
         AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
@@ -836,6 +865,7 @@ where
         && endpoint.is_none()
         && authority_did.is_none()
         && authority_public_key.is_none()
+        && issuing_ca_spki.is_none()
         && policy_oid.is_none()
     {
         tracing::warn!(
@@ -843,6 +873,7 @@ where
             url_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
             did_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
             key_env = AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+            ca_env = AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
             policy_env = AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
             require_env = AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV,
             "AVC external timestamp authority is not configured; receipt emission will use local EXOCHAIN HLC finality unless external timestamp proof is explicitly required"
@@ -862,6 +893,11 @@ where
             if policy_oid.is_some() {
                 anyhow::bail!(
                     "{AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV} is only valid with {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV}={AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161}"
+                );
+            }
+            if issuing_ca_spki.is_some() {
+                anyhow::bail!(
+                    "{AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV} is only valid with {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV}={AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161}"
                 );
             }
             let endpoint = endpoint.unwrap_or_default();
@@ -889,12 +925,28 @@ where
                 authority_did,
                 AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
             )?;
-            let authority_public_key_spki_der_hexes = parse_non_empty_hex_string_set(
-                &require_optional_env_value(
-                    authority_public_key,
+            if authority_public_key.is_none() && issuing_ca_spki.is_none() {
+                anyhow::bail!(
+                    "RFC 3161 AVC timestamp authority requires at least one trust anchor; set either {AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV} for signer leaf SPKI pins or {AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV} for issuing CA SPKI pins"
+                );
+            }
+            let authority_public_key_spki_der_hexes = match authority_public_key {
+                Some(authority_public_key) => parse_non_empty_hex_string_set(
+                    &authority_public_key,
                     AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
                 )?,
-                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+                None => Vec::new(),
+            };
+            let issuing_ca_spki_der_hexes = match issuing_ca_spki {
+                Some(issuing_ca_spki) => parse_non_empty_hex_string_set(
+                    &issuing_ca_spki,
+                    AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+                )?,
+                None => Vec::new(),
+            };
+            crate::avc_rfc3161::Rfc3161TrustAnchors::new(
+                authority_public_key_spki_der_hexes.clone(),
+                issuing_ca_spki_der_hexes.clone(),
             )?;
             let policy_oid =
                 require_optional_env_value(policy_oid, AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV)?;
@@ -907,6 +959,7 @@ where
                 endpoint: Arc::new(endpoint),
                 authority_did,
                 authority_public_key_spki_der_hexes: Arc::new(authority_public_key_spki_der_hexes),
+                issuing_ca_spki_der_hexes: Arc::new(issuing_ca_spki_der_hexes),
                 policy_oid: Arc::new(policy_oid),
                 client: external_timestamp_http_client()?,
             })
@@ -2416,6 +2469,7 @@ mod tests {
     const MICROSOFT_PUBLIC_RSA_TSA_DID: &str = "did:exo:microsoft-public-rsa-tsa";
     const MICROSOFT_FIXTURE_SIGNER_SPKI_HEX: &str = "30820222300d06092a864886f70d01010105000382020f003082020a0282020100b4a59f9bfba5d36eff77c4656fc327fe0d1052fbcba98d95b32ded23c536b454aca53668999383dc11d3f0b911f91ae130981bd558c0285372b1a2bd70b49789f3c648806b3c282cf4fe32db896b2449ab57a439cf8066a8c8483eb66112f6675a9092e073bb8d849e8bf9f1982effd44afe9792e0dcf992c5bf1dd8855c011c52c350789b107a5c8d2791e97dc1ad5d61bdb07c6a687eb6859b164ec53f5e361b782c7d1105256e79b6ba64da634bfd20b5f9bbaa2222c8fea9e8f4734d36cc9d5aac1e757f77fad6d331f1f90f90359e7052a2a64d9241f6153ce77fb6a57e6b0df2b7dae358f7f5813809b36ea82911d4246e231abd43325034a19b2708be01dd4274b6d3bb138fc33e9092f7b4e75a84fb8fa8cc2c6820a075fc30431d0ef5329eec54af6c0118b3502795d0a5fca1c6642395bd436a8f22f5d092ded3ff860fdff29ea5c6585a573a36ae9ef67f70a44e8633783397bac71d1bda68aa70f8a2e3f8a2d9985e29a9652444fb08a96915286cdf0ca0e85fdfa2343142f3e76d60f8372c7a9618d68f09a82dcc7ac351520ad6af2c2972df704b452953538a8a53169af1ded837b12aa67f573b4498d2e98ebca157ad61fbaf197ef626a2722b5d9d34e4b009d18ef7a474a4f7960ee544c7e67d953cbd73623745182734fd123aa3466d2e37f874a17c4f84d7cf62a7856f23d7186c73698533eb3c77a9370203010001";
     const MICROSOFT_LIVE_SIGNER_SPKI_HEX_20260627: &str = "30820222300d06092a864886f70d01010105000382020f003082020a02820201009d7834a47690ecf5409659fe1d966b24570ba0a6de9215b5c8bf9034152014552c8d920a6aaa8de28209b09337a6cd2b24d48eee7742351b990d7d9682eaf7024efb797ae5a015ea6663ba6555de0cd4422e5756e00d3f35f8f327b5d791d1218ebf358215c4a51ef30bec1b68d37eb0f4b1ccb01905e89b0c53fb5f0b39c17d19b48b0dd5adbe5eae5bbd6a77911332b70b244e3ba746078b64bfed069db7ec955d44f14043d8d844aa42a94068fefd718c12d1095dcf6a52a39c67dbdcc37853b8d5caa89f1474a17275b9084451a019946bab32803cc54abf1ede0f774cf34b1548af504d0698b7db5f971e0f51add45719eb1fc92d5013ce4e7e0561db331c092159153d3a9248c8d0e8a4ca75c9eade91f4738005269fe096f729ab453d7f36488c9186bdda62b2195197bed142d5214a3c47bc29f72c2ff1a904303874900ec1a1e8d5f60f445fb12c84b53001c8069efb6c351c1c930d372695334b12e40b7828f580d05d2168f458e6320ed8e343ff224d663a7b2d6f6fda87963223e478089dd4f93fd318936560d9eee129464d04d6c0fe1b2006cba867e217f3d5af8c437d69b17dd52e0e255ba29e62ac2cefcc2db9e5ee292e0f474dea803461ec320d09dcb35dac33d1ceb6eef6400fd366579fbd6f2bf71b4c5c06284257068ec93c5b851cedc7ea56a6c83e376873c6710732dc5dc5723f8a797322f0be430203010001";
+    const MICROSOFT_FIXTURE_CA_SPKI_HEX: &str = "30820222300d06092a864886f70d01010105000382020f003082020a02820201009e7ce75263fde0c59f057d63b50622a31c1ed7e79733d11305bd6546477791c15d706f7fb2ab43970c4aa1521c6aa0dbfa89858a8e431c2e1105c6f24078d70b0324fe5dd3398b60a018f19c6fde5624b8b0ec7ccb8812abc660e3d44401fe61b9784891044a7b7431b3c4a0a74d8a1c0ce711afd2b1a87c9d6a39849335c739e446c14fbbaadf0c7799786d566b5c084af964a4e428a1350b166f34f59d1962543c2e9ee2e45f58722165c802b09faca337f911e1f92ab9459f1a6328a4dabf07c53fa5da199196506f1365a893a20468025a9c7af6e2aa2a14cf562de0544ae773faa2f9d47c036322033d243749e1ed2a883466e6c39388442d04b19df5585dd4c69dc6819c1eb442b12e6b3bdca1bf67e3247ae6950d042179a9e0384306278a50647e799e02344ddcb56e2ebd20d055e4a9f61d5268f57c51611fc93c601a33ac46979ec48bde47530f4d57fb82df2163ae1734f3ba8b2506b0482df1cd8fc45f3b13e08eec0dbc4e98cdab978b8a2ba784a6ead176e390da14e4986d614ae59806e9c518dbf6d4ab78376d002a66deb929c69ec04277672344a1bbf7e4d7fac4de85ac0ea317de38efe347bc28de58b09067733c9607827279e14c5b72417dd7802a1ce88457bc539c3d5aebdc3f513c708c4ba0a483cc20813aed2159d8f328dbbc6394b007596de5d421001632cd1dddc443bf4f52bf055177ad5ebd0203010001";
     const MICROSOFT_FIXTURE_TSA_SUBJECT: &str = "C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, OU=Microsoft America Operations, OU=nShield TSS ESN:A500-05E0-D947, CN=Microsoft Public RSA Time Stamping Authority";
 
     #[derive(Clone, Copy)]
@@ -2488,6 +2542,7 @@ mod tests {
             authority_public_key_spki_der_hexes: Arc::new(vec![
                 MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_owned(),
             ]),
+            issuing_ca_spki_der_hexes: Arc::new(Vec::new()),
             policy_oid: Arc::new(
                 crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID.to_owned(),
             ),
@@ -6051,6 +6106,250 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(empty_pin_err.contains("member 2 is empty"));
+    }
+
+    #[test]
+    fn rfc3161_env_config_accepts_explicit_pinned_issuing_ca_without_leaf_pin() {
+        let source = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161,
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://timestamp.acs.microsoft.com",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                "did:exo:microsoft-public-rsa-tsa",
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+                MICROSOFT_FIXTURE_CA_SPKI_HEX,
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
+                crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+            ),
+        ])
+        .unwrap();
+
+        match source {
+            AvcReceiptExternalTimestampSource::Rfc3161 {
+                authority_public_key_spki_der_hexes,
+                issuing_ca_spki_der_hexes,
+                ..
+            } => {
+                assert!(authority_public_key_spki_der_hexes.is_empty());
+                assert_eq!(
+                    issuing_ca_spki_der_hexes.as_slice(),
+                    &[MICROSOFT_FIXTURE_CA_SPKI_HEX.to_owned()]
+                );
+            }
+            _ => panic!("rfc3161 kind must construct the RFC 3161 timestamp source"),
+        }
+    }
+
+    #[test]
+    fn external_timestamp_source_debug_redacts_transport_clients_and_pin_material() {
+        let rfc3161 = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161,
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://timestamp.acs.microsoft.com",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                "did:exo:microsoft-public-rsa-tsa",
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+                MICROSOFT_FIXTURE_CA_SPKI_HEX,
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
+                crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+            ),
+        ])
+        .unwrap();
+        let rfc3161_debug = format!("{rfc3161:?}");
+        assert!(rfc3161_debug.contains("AvcReceiptExternalTimestampSource::Rfc3161"));
+        assert!(rfc3161_debug.contains("http://timestamp.acs.microsoft.com"));
+        assert!(rfc3161_debug.contains("did:exo:microsoft-public-rsa-tsa"));
+        assert!(rfc3161_debug.contains(crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID));
+        assert!(!rfc3161_debug.contains(MICROSOFT_FIXTURE_CA_SPKI_HEX));
+        assert!(!rfc3161_debug.contains("client"));
+
+        let http = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://127.0.0.1:3000",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                "did:exo:timestamp-authority",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+                &timestamp_authority_keypair().public.to_string(),
+            ),
+        ])
+        .unwrap();
+        let http_debug = format!("{http:?}");
+        assert!(http_debug.contains("AvcReceiptExternalTimestampSource::HttpJson"));
+        assert!(http_debug.contains("http://127.0.0.1:3000"));
+        assert!(http_debug.contains("did:exo:timestamp-authority"));
+        assert!(!http_debug.contains(&timestamp_authority_keypair().public.to_string()));
+        assert!(!http_debug.contains("client"));
+
+        assert_eq!(
+            format!("{:?}", AvcReceiptExternalTimestampSource::Unconfigured),
+            "AvcReceiptExternalTimestampSource::Unconfigured"
+        );
+
+        let fixed = fixed_external_timestamp_source(Timestamp::new(1_600_000, 0));
+        let fixed_debug = format!("{fixed:?}");
+        assert!(fixed_debug.contains("AvcReceiptExternalTimestampSource::Fixed"));
+        assert!(fixed_debug.contains("did:exo:timestamp-authority"));
+        assert!(fixed_debug.contains("issued_at"));
+
+        let fixed_rfc3161 = fixed_rfc3161_external_timestamp_source();
+        let fixed_rfc3161_debug = format!("{fixed_rfc3161:?}");
+        assert!(fixed_rfc3161_debug.contains("AvcReceiptExternalTimestampSource::FixedRfc3161"));
+        assert!(fixed_rfc3161_debug.contains("did:exo:microsoft-public-rsa-tsa"));
+        assert!(
+            fixed_rfc3161_debug.contains(crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID)
+        );
+        assert!(!fixed_rfc3161_debug.contains(MICROSOFT_FIXTURE_SIGNER_SPKI_HEX));
+    }
+
+    #[test]
+    fn rfc3161_env_config_rejects_missing_leaf_and_ca_trust_anchors() {
+        let err = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161,
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://timestamp.acs.microsoft.com",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                "did:exo:microsoft-public-rsa-tsa",
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
+                crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV));
+        assert!(err.contains(AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV));
+    }
+
+    #[test]
+    fn external_timestamp_env_config_rejects_cross_protocol_and_malformed_values() {
+        let json_ca_err = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_JSON_ED25519,
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://127.0.0.1:3000",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                "did:exo:timestamp-authority",
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+                &timestamp_authority_keypair().public.to_string(),
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+                MICROSOFT_FIXTURE_CA_SPKI_HEX,
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(json_ca_err.contains(AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV));
+        assert!(json_ca_err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161));
+
+        let json_did_err = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://127.0.0.1:3000",
+            ),
+            (AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV, "not-a-did"),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV,
+                &timestamp_authority_keypair().public.to_string(),
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(json_did_err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV));
+
+        let rfc3161_missing_endpoint_err = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161,
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV,
+                "did:exo:microsoft-public-rsa-tsa",
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+                MICROSOFT_FIXTURE_CA_SPKI_HEX,
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
+                crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(rfc3161_missing_endpoint_err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV));
+
+        let rfc3161_did_err = external_timestamp_source_from_pairs(vec![
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161,
+            ),
+            (
+                AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV,
+                "http://timestamp.acs.microsoft.com",
+            ),
+            (AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV, "not-a-did"),
+            (
+                AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV,
+                MICROSOFT_FIXTURE_CA_SPKI_HEX,
+            ),
+            (
+                AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV,
+                crate::avc_rfc3161::MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(rfc3161_did_err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_DID_ENV));
+
+        let unknown_kind_err = external_timestamp_source_from_pairs(vec![(
+            AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV,
+            "not-a-supported-kind",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(unknown_kind_err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_JSON_ED25519));
+        assert!(unknown_kind_err.contains(AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_RFC3161));
     }
 
     #[test]
