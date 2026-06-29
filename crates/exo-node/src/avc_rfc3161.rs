@@ -16,6 +16,8 @@
 
 //! RFC 3161 timestamp request and response verification for AVC receipts.
 
+use std::collections::BTreeSet;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cms::{
     cert::CertificateChoices,
@@ -28,7 +30,10 @@ use exo_avc::AvcReceiptEvidenceSubject;
 use exo_core::{Hash256, Timestamp};
 use ring::signature;
 use sha2::{Digest as _, Sha256};
-use x509_cert::{Certificate, ext::pkix::SubjectKeyIdentifier};
+use x509_cert::{
+    Certificate,
+    ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectKeyIdentifier},
+};
 
 #[cfg(test)]
 pub(crate) const MICROSOFT_ARTIFACT_SIGNING_POLICY_OID: &str = "1.3.6.1.4.1.601.10.3.1";
@@ -42,6 +47,9 @@ const CMS_MESSAGE_DIGEST_ATTRIBUTE_OID: &str = "1.2.840.113549.1.9.4";
 const CMS_CONTENT_TYPE_ATTRIBUTE_OID: &str = "1.2.840.113549.1.9.3";
 const RSA_ENCRYPTION_OID: &str = "1.2.840.113549.1.1.1";
 const SHA256_WITH_RSA_ENCRYPTION_OID: &str = "1.2.840.113549.1.1.11";
+const SHA384_WITH_RSA_ENCRYPTION_OID: &str = "1.2.840.113549.1.1.12";
+const SHA512_WITH_RSA_ENCRYPTION_OID: &str = "1.2.840.113549.1.1.13";
+const ID_KP_TIME_STAMPING_OID: &str = "1.3.6.1.5.5.7.3.8";
 const RFC3161_NONCE_DOMAIN: &[u8] = b"exo.avc.rfc3161.nonce.v1";
 const DER_BOOLEAN: u8 = 0x01;
 const DER_INTEGER: u8 = 0x02;
@@ -69,6 +77,80 @@ pub(crate) struct Rfc3161VerifiedTimestamp {
     pub nonce_hex: String,
     pub tsa_subject: String,
     pub tsa_public_key_spki_der_hex: String,
+    pub trust_anchor: Rfc3161VerifiedTrustAnchor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Rfc3161TrustAnchorKind {
+    SignerSpki,
+    IssuingCaSpki,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rfc3161VerifiedTrustAnchor {
+    pub kind: Rfc3161TrustAnchorKind,
+    pub spki_der_hex: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rfc3161TrustAnchors {
+    signer_spki_der_hexes: Vec<String>,
+    issuing_ca_spki_der_hexes: Vec<String>,
+}
+
+impl Rfc3161TrustAnchors {
+    pub(crate) fn new(
+        signer_spki_der_hexes: Vec<String>,
+        issuing_ca_spki_der_hexes: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        let mut seen = BTreeSet::new();
+        let signer_spki_der_hexes = canonicalize_trust_anchor_set(
+            signer_spki_der_hexes,
+            "RFC 3161 signer SPKI trust anchor",
+            &mut seen,
+        )?;
+        let issuing_ca_spki_der_hexes = canonicalize_trust_anchor_set(
+            issuing_ca_spki_der_hexes,
+            "RFC 3161 issuing CA SPKI trust anchor",
+            &mut seen,
+        )?;
+        if signer_spki_der_hexes.is_empty() && issuing_ca_spki_der_hexes.is_empty() {
+            anyhow::bail!("at least one RFC 3161 trust anchor is required");
+        }
+        Ok(Self {
+            signer_spki_der_hexes,
+            issuing_ca_spki_der_hexes,
+        })
+    }
+
+    fn signer_spki_der_hexes(&self) -> &[String] {
+        self.signer_spki_der_hexes.as_slice()
+    }
+
+    fn issuing_ca_spki_der_hexes(&self) -> &[String] {
+        self.issuing_ca_spki_der_hexes.as_slice()
+    }
+}
+
+fn canonicalize_trust_anchor_set(
+    raw_pins: Vec<String>,
+    label: &str,
+    seen: &mut BTreeSet<String>,
+) -> anyhow::Result<Vec<String>> {
+    let mut pins = Vec::with_capacity(raw_pins.len());
+    for (index, raw_pin) in raw_pins.into_iter().enumerate() {
+        let pin = canonical_hex(&raw_pin, label)
+            .map_err(|error| anyhow::anyhow!("{label} member {} is invalid: {error}", index + 1))?;
+        if !seen.insert(pin.clone()) {
+            anyhow::bail!(
+                "{label} member {} duplicates an existing trust anchor",
+                index + 1
+            );
+        }
+        pins.push(pin);
+    }
+    Ok(pins)
 }
 
 #[derive(Clone, Copy)]
@@ -735,13 +817,190 @@ fn verify_cms_signature(
     Ok(spki_der_hex)
 }
 
-fn verify_timestamp_response_with_optional_spki_pin(
+fn timestamp_ms_within_certificate_validity(
+    cert: &Certificate,
+    timestamp: Timestamp,
+    role: &str,
+) -> anyhow::Result<()> {
+    let validity = cert.tbs_certificate().validity();
+    let issued_at_ms = u128::from(timestamp.physical_ms);
+    let not_before_ms = validity.not_before.to_unix_duration().as_millis();
+    let not_after_ms = validity.not_after.to_unix_duration().as_millis();
+    if issued_at_ms < not_before_ms {
+        anyhow::bail!("TSA {role} certificate was not valid at RFC 3161 genTime");
+    }
+    if issued_at_ms > not_after_ms {
+        anyhow::bail!("TSA {role} certificate expired before RFC 3161 genTime");
+    }
+    Ok(())
+}
+
+fn validate_tsa_signer_certificate(cert: &Certificate, issued_at: Timestamp) -> anyhow::Result<()> {
+    timestamp_ms_within_certificate_validity(cert, issued_at, "signer")?;
+    let eku = cert
+        .tbs_certificate()
+        .get_extension::<ExtendedKeyUsage>()
+        .map_err(|error| anyhow::anyhow!("TSA signer EKU extension parse failed: {error}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("TSA signer certificate has no Extended Key Usage extension")
+        })?;
+    if !eku
+        .1
+        .0
+        .iter()
+        .any(|oid| oid.to_string() == ID_KP_TIME_STAMPING_OID)
+    {
+        anyhow::bail!("TSA signer certificate EKU does not assert id-kp-timeStamping");
+    }
+    if let Some((_critical, basic_constraints)) = cert
+        .tbs_certificate()
+        .get_extension::<BasicConstraints>()
+        .map_err(|error| {
+            anyhow::anyhow!("TSA signer basicConstraints extension parse failed: {error}")
+        })?
+        && basic_constraints.ca
+    {
+        anyhow::bail!("TSA signer certificate must not assert CA:TRUE");
+    }
+    if let Some((_critical, key_usage)) = cert
+        .tbs_certificate()
+        .get_extension::<KeyUsage>()
+        .map_err(|error| anyhow::anyhow!("TSA signer keyUsage extension parse failed: {error}"))?
+        && !key_usage.digital_signature()
+        && !key_usage.non_repudiation()
+    {
+        anyhow::bail!("TSA signer keyUsage does not permit timestamp signing");
+    }
+    Ok(())
+}
+
+fn validate_tsa_issuing_ca_certificate(
+    cert: &Certificate,
+    issued_at: Timestamp,
+) -> anyhow::Result<()> {
+    timestamp_ms_within_certificate_validity(cert, issued_at, "issuing CA")?;
+    let basic_constraints = cert
+        .tbs_certificate()
+        .get_extension::<BasicConstraints>()
+        .map_err(|error| {
+            anyhow::anyhow!("TSA issuing CA basicConstraints extension parse failed: {error}")
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!("TSA issuing CA certificate has no basicConstraints extension")
+        })?;
+    if !basic_constraints.1.ca {
+        anyhow::bail!("TSA issuing CA certificate does not assert CA:TRUE");
+    }
+    let key_usage = cert
+        .tbs_certificate()
+        .get_extension::<KeyUsage>()
+        .map_err(|error| {
+            anyhow::anyhow!("TSA issuing CA keyUsage extension parse failed: {error}")
+        })?
+        .ok_or_else(|| anyhow::anyhow!("TSA issuing CA certificate has no keyUsage extension"))?;
+    if !key_usage.1.key_cert_sign() {
+        anyhow::bail!("TSA issuing CA keyUsage does not assert keyCertSign");
+    }
+    Ok(())
+}
+
+fn rsa_verification_params_for_oid(
+    sig_alg_oid: &str,
+) -> anyhow::Result<&'static signature::RsaParameters> {
+    if sig_alg_oid == SHA256_WITH_RSA_ENCRYPTION_OID {
+        Ok(&signature::RSA_PKCS1_2048_8192_SHA256)
+    } else if sig_alg_oid == SHA384_WITH_RSA_ENCRYPTION_OID {
+        Ok(&signature::RSA_PKCS1_2048_8192_SHA384)
+    } else if sig_alg_oid == SHA512_WITH_RSA_ENCRYPTION_OID {
+        Ok(&signature::RSA_PKCS1_2048_8192_SHA512)
+    } else {
+        anyhow::bail!(
+            "TSA certificate signature algorithm {sig_alg_oid} is not RSA-PKCS1 SHA-256/384/512"
+        )
+    }
+}
+
+fn verify_certificate_signed_by(
+    cert: &Certificate,
+    issuer_modulus: &[u8],
+    issuer_exponent: &[u8],
+) -> anyhow::Result<()> {
+    let verification_params =
+        rsa_verification_params_for_oid(&cert.signature_algorithm().oid.to_string())?;
+    let tbs_der = cert.tbs_certificate().to_der().map_err(|error| {
+        anyhow::anyhow!("TSA signer tbsCertificate DER encoding failed: {error}")
+    })?;
+    let signature_bytes = cert.signature().as_bytes().ok_or_else(|| {
+        anyhow::anyhow!("TSA signer certificate signature has unused BIT STRING bits")
+    })?;
+    signature::RsaPublicKeyComponents {
+        n: issuer_modulus,
+        e: issuer_exponent,
+    }
+    .verify(verification_params, &tbs_der, signature_bytes)
+    .map_err(|_| {
+        anyhow::anyhow!("TSA signer certificate signature did not verify against the pinned CA")
+    })?;
+    Ok(())
+}
+
+fn direct_signer_trust_anchor(
+    signer_spki_der_hex: &str,
+    signer_subject: &str,
+    trust_anchors: &Rfc3161TrustAnchors,
+) -> Option<Rfc3161VerifiedTrustAnchor> {
+    trust_anchors
+        .signer_spki_der_hexes()
+        .iter()
+        .any(|expected| expected == signer_spki_der_hex)
+        .then(|| Rfc3161VerifiedTrustAnchor {
+            kind: Rfc3161TrustAnchorKind::SignerSpki,
+            spki_der_hex: signer_spki_der_hex.to_owned(),
+            subject: signer_subject.to_owned(),
+        })
+}
+
+fn signer_chains_to_pinned_ca(
+    signer_cert: &Certificate,
+    certificates: &[&Certificate],
+    trust_anchors: &Rfc3161TrustAnchors,
+    issued_at: Timestamp,
+) -> anyhow::Result<Rfc3161VerifiedTrustAnchor> {
+    let signer_issuer = signer_cert.tbs_certificate().issuer();
+    for candidate in certificates {
+        if candidate.tbs_certificate().subject() != signer_issuer {
+            continue;
+        }
+        let (ca_spki_hex, ca_modulus, ca_exponent) =
+            match rsa_public_key_components_from_certificate(candidate) {
+                Ok(components) => components,
+                Err(_) => continue,
+            };
+        if !trust_anchors
+            .issuing_ca_spki_der_hexes()
+            .iter()
+            .any(|expected| expected == &ca_spki_hex)
+        {
+            continue;
+        }
+        validate_tsa_issuing_ca_certificate(candidate, issued_at)?;
+        verify_certificate_signed_by(signer_cert, &ca_modulus, &ca_exponent)?;
+        return Ok(Rfc3161VerifiedTrustAnchor {
+            kind: Rfc3161TrustAnchorKind::IssuingCaSpki,
+            spki_der_hex: ca_spki_hex,
+            subject: candidate.tbs_certificate().subject().to_string(),
+        });
+    }
+    anyhow::bail!("RFC 3161 TSA signer certificate did not chain to any pinned CA trust anchor")
+}
+
+fn verify_timestamp_response_with_optional_trust_anchors(
     response_der: &[u8],
     expected_subject_hash: Hash256,
     expected_message_imprint_sha256: [u8; 32],
     expected_nonce_hex: &str,
     expected_policy_oid: &str,
-    expected_tsa_spki_der_hexes: Option<&[String]>,
+    trust_anchors: Option<&Rfc3161TrustAnchors>,
 ) -> anyhow::Result<Rfc3161VerifiedTimestamp> {
     let (status, token_der) = parse_timestamp_response_status(response_der)
         .map_err(|error| anyhow::anyhow!("malformed RFC 3161 timestamp response: {error}"))?;
@@ -814,22 +1073,34 @@ fn verify_timestamp_response_with_optional_spki_pin(
     let signer_cert = signer_certificate(signer_info, &certificate_refs)?;
     let signer_spki_der_hex = verify_cms_signature(signer_info, signer_cert, &signed_attrs_der)?;
     let verified_signer_subject = signer_cert.tbs_certificate().subject().to_string();
-    if let Some(expected_tsa_spki_der_hexes) = expected_tsa_spki_der_hexes {
-        if expected_tsa_spki_der_hexes.is_empty() {
-            anyhow::bail!("expected TSA SPKI DER pin set must not be empty");
+    let trust_anchor = if let Some(trust_anchors) = trust_anchors {
+        validate_tsa_signer_certificate(signer_cert, tst_info.issued_at)?;
+        direct_signer_trust_anchor(
+            &signer_spki_der_hex,
+            &verified_signer_subject,
+            trust_anchors,
+        )
+        .map(Ok)
+        .unwrap_or_else(|| {
+            signer_chains_to_pinned_ca(
+                signer_cert,
+                &certificate_refs,
+                trust_anchors,
+                tst_info.issued_at,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "RFC 3161 TSA signer did not match any configured trust anchor: {error}"
+                )
+            })
+        })?
+    } else {
+        Rfc3161VerifiedTrustAnchor {
+            kind: Rfc3161TrustAnchorKind::SignerSpki,
+            spki_der_hex: signer_spki_der_hex.clone(),
+            subject: verified_signer_subject.clone(),
         }
-        let mut signer_matched_pin = false;
-        for expected_tsa_spki_der_hex in expected_tsa_spki_der_hexes {
-            let expected_spki = canonical_hex(expected_tsa_spki_der_hex, "expected TSA SPKI DER")?;
-            if signer_spki_der_hex == expected_spki {
-                signer_matched_pin = true;
-                break;
-            }
-        }
-        if !signer_matched_pin {
-            anyhow::bail!("RFC 3161 TSA signer public key did not match any pinned SPKI DER");
-        }
-    }
+    };
     Ok(Rfc3161VerifiedTimestamp {
         issued_at: tst_info.issued_at,
         subject_hash: expected_subject_hash,
@@ -840,6 +1111,7 @@ fn verify_timestamp_response_with_optional_spki_pin(
         nonce_hex: tst_info.nonce_hex,
         tsa_subject: verified_signer_subject,
         tsa_public_key_spki_der_hex: signer_spki_der_hex,
+        trust_anchor,
     })
 }
 
@@ -852,31 +1124,33 @@ fn verify_timestamp_response(
     expected_policy_oid: &str,
     expected_tsa_spki_der_hex: &str,
 ) -> anyhow::Result<Rfc3161VerifiedTimestamp> {
-    verify_timestamp_response_with_spki_pins(
+    let trust_anchors =
+        Rfc3161TrustAnchors::new(vec![expected_tsa_spki_der_hex.to_owned()], Vec::new())?;
+    verify_timestamp_response_with_trust_anchors(
         response_der,
         expected_subject_hash,
         expected_message_imprint_sha256,
         expected_nonce_hex,
         expected_policy_oid,
-        &[expected_tsa_spki_der_hex.to_owned()],
+        &trust_anchors,
     )
 }
 
-pub(crate) fn verify_timestamp_response_with_spki_pins(
+pub(crate) fn verify_timestamp_response_with_trust_anchors(
     response_der: &[u8],
     expected_subject_hash: Hash256,
     expected_message_imprint_sha256: [u8; 32],
     expected_nonce_hex: &str,
     expected_policy_oid: &str,
-    expected_tsa_spki_der_hexes: &[String],
+    trust_anchors: &Rfc3161TrustAnchors,
 ) -> anyhow::Result<Rfc3161VerifiedTimestamp> {
-    verify_timestamp_response_with_optional_spki_pin(
+    verify_timestamp_response_with_optional_trust_anchors(
         response_der,
         expected_subject_hash,
         expected_message_imprint_sha256,
         expected_nonce_hex,
         expected_policy_oid,
-        Some(expected_tsa_spki_der_hexes),
+        Some(trust_anchors),
     )
 }
 
@@ -888,7 +1162,7 @@ fn inspect_timestamp_response_without_spki_pin(
     expected_nonce_hex: &str,
     expected_policy_oid: &str,
 ) -> anyhow::Result<Rfc3161VerifiedTimestamp> {
-    verify_timestamp_response_with_optional_spki_pin(
+    verify_timestamp_response_with_optional_trust_anchors(
         response_der,
         expected_subject_hash,
         expected_message_imprint_sha256,
@@ -1011,6 +1285,7 @@ mod tests {
         "891d95ab4a3aedc63c9c32b800ad15679ecd94917eb35967004f9882ac6ae69a";
     const MICROSOFT_FIXTURE_NONCE_HEX: &str = "a173ce171bc853e8";
     const MICROSOFT_FIXTURE_SIGNER_SPKI_HEX: &str = "30820222300d06092a864886f70d01010105000382020f003082020a0282020100b4a59f9bfba5d36eff77c4656fc327fe0d1052fbcba98d95b32ded23c536b454aca53668999383dc11d3f0b911f91ae130981bd558c0285372b1a2bd70b49789f3c648806b3c282cf4fe32db896b2449ab57a439cf8066a8c8483eb66112f6675a9092e073bb8d849e8bf9f1982effd44afe9792e0dcf992c5bf1dd8855c011c52c350789b107a5c8d2791e97dc1ad5d61bdb07c6a687eb6859b164ec53f5e361b782c7d1105256e79b6ba64da634bfd20b5f9bbaa2222c8fea9e8f4734d36cc9d5aac1e757f77fad6d331f1f90f90359e7052a2a64d9241f6153ce77fb6a57e6b0df2b7dae358f7f5813809b36ea82911d4246e231abd43325034a19b2708be01dd4274b6d3bb138fc33e9092f7b4e75a84fb8fa8cc2c6820a075fc30431d0ef5329eec54af6c0118b3502795d0a5fca1c6642395bd436a8f22f5d092ded3ff860fdff29ea5c6585a573a36ae9ef67f70a44e8633783397bac71d1bda68aa70f8a2e3f8a2d9985e29a9652444fb08a96915286cdf0ca0e85fdfa2343142f3e76d60f8372c7a9618d68f09a82dcc7ac351520ad6af2c2972df704b452953538a8a53169af1ded837b12aa67f573b4498d2e98ebca157ad61fbaf197ef626a2722b5d9d34e4b009d18ef7a474a4f7960ee544c7e67d953cbd73623745182734fd123aa3466d2e37f874a17c4f84d7cf62a7856f23d7186c73698533eb3c77a9370203010001";
+    const MICROSOFT_FIXTURE_CA_SPKI_HEX: &str = "30820222300d06092a864886f70d01010105000382020f003082020a02820201009e7ce75263fde0c59f057d63b50622a31c1ed7e79733d11305bd6546477791c15d706f7fb2ab43970c4aa1521c6aa0dbfa89858a8e431c2e1105c6f24078d70b0324fe5dd3398b60a018f19c6fde5624b8b0ec7ccb8812abc660e3d44401fe61b9784891044a7b7431b3c4a0a74d8a1c0ce711afd2b1a87c9d6a39849335c739e446c14fbbaadf0c7799786d566b5c084af964a4e428a1350b166f34f59d1962543c2e9ee2e45f58722165c802b09faca337f911e1f92ab9459f1a6328a4dabf07c53fa5da199196506f1365a893a20468025a9c7af6e2aa2a14cf562de0544ae773faa2f9d47c036322033d243749e1ed2a883466e6c39388442d04b19df5585dd4c69dc6819c1eb442b12e6b3bdca1bf67e3247ae6950d042179a9e0384306278a50647e799e02344ddcb56e2ebd20d055e4a9f61d5268f57c51611fc93c601a33ac46979ec48bde47530f4d57fb82df2163ae1734f3ba8b2506b0482df1cd8fc45f3b13e08eec0dbc4e98cdab978b8a2ba784a6ead176e390da14e4986d614ae59806e9c518dbf6d4ab78376d002a66deb929c69ec04277672344a1bbf7e4d7fac4de85ac0ea317de38efe347bc28de58b09067733c9607827279e14c5b72417dd7802a1ce88457bc539c3d5aebdc3f513c708c4ba0a483cc20813aed2159d8f328dbbc6394b007596de5d421001632cd1dddc443bf4f52bf055177ad5ebd0203010001";
 
     fn evidence_subject() -> AvcReceiptEvidenceSubject {
         AvcReceiptEvidenceSubject {
@@ -1052,6 +1327,26 @@ mod tests {
             MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
             MICROSOFT_FIXTURE_SIGNER_SPKI_HEX,
         )
+    }
+
+    fn verify_microsoft_fixture_with_trust_anchors(
+        anchors: Rfc3161TrustAnchors,
+    ) -> anyhow::Result<Rfc3161VerifiedTimestamp> {
+        verify_timestamp_response_with_trust_anchors(
+            &microsoft_fixture_response_der(),
+            microsoft_fixture_subject_hash(),
+            microsoft_fixture_message_imprint(),
+            MICROSOFT_FIXTURE_NONCE_HEX,
+            MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+            &anchors,
+        )
+    }
+
+    fn microsoft_fixture_signed_data() -> SignedData {
+        let response_der = microsoft_fixture_response_der();
+        let (_status, token_der) = parse_timestamp_response_status(&response_der).unwrap();
+        let content_info = ContentInfo::from_der(token_der).unwrap();
+        SignedData::from_der(&content_info.content.to_der().unwrap()).unwrap()
     }
 
     fn read_tlv_error(bytes: &[u8]) -> String {
@@ -1218,6 +1513,220 @@ mod tests {
     }
 
     #[test]
+    fn verifier_accepts_microsoft_fixture_with_only_pinned_issuing_ca_spki() {
+        let anchors =
+            Rfc3161TrustAnchors::new(Vec::new(), vec![MICROSOFT_FIXTURE_CA_SPKI_HEX.to_owned()])
+                .unwrap();
+
+        let verified = verify_microsoft_fixture_with_trust_anchors(anchors).unwrap();
+
+        assert_eq!(
+            verified.tsa_public_key_spki_der_hex,
+            MICROSOFT_FIXTURE_SIGNER_SPKI_HEX
+        );
+        assert_eq!(
+            verified.trust_anchor.kind,
+            Rfc3161TrustAnchorKind::IssuingCaSpki
+        );
+        assert_eq!(
+            verified.trust_anchor.spki_der_hex,
+            MICROSOFT_FIXTURE_CA_SPKI_HEX
+        );
+        assert!(
+            verified
+                .trust_anchor
+                .subject
+                .contains("Microsoft Public RSA Timestamping CA 2020")
+        );
+    }
+
+    #[test]
+    fn verifier_records_direct_signer_pin_as_signer_trust_anchor() {
+        let anchors = Rfc3161TrustAnchors::new(
+            vec![MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_owned()],
+            Vec::new(),
+        )
+        .unwrap();
+
+        let verified = verify_microsoft_fixture_with_trust_anchors(anchors).unwrap();
+
+        assert_eq!(
+            verified.trust_anchor.kind,
+            Rfc3161TrustAnchorKind::SignerSpki
+        );
+        assert_eq!(
+            verified.trust_anchor.spki_der_hex,
+            MICROSOFT_FIXTURE_SIGNER_SPKI_HEX
+        );
+        assert_eq!(verified.trust_anchor.subject, verified.tsa_subject);
+    }
+
+    #[test]
+    fn verifier_prefers_direct_signer_pin_when_leaf_and_ca_anchors_both_match() {
+        let anchors = Rfc3161TrustAnchors::new(
+            vec![MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_owned()],
+            vec![MICROSOFT_FIXTURE_CA_SPKI_HEX.to_owned()],
+        )
+        .unwrap();
+
+        let verified = verify_microsoft_fixture_with_trust_anchors(anchors).unwrap();
+
+        assert_eq!(
+            verified.trust_anchor.kind,
+            Rfc3161TrustAnchorKind::SignerSpki
+        );
+        assert_eq!(
+            verified.trust_anchor.spki_der_hex,
+            MICROSOFT_FIXTURE_SIGNER_SPKI_HEX
+        );
+        assert_eq!(verified.trust_anchor.subject, verified.tsa_subject);
+    }
+
+    #[test]
+    fn verifier_inspection_without_pins_records_signer_identity_without_falling_open_for_runtime() {
+        let verified = inspect_timestamp_response_without_spki_pin(
+            &microsoft_fixture_response_der(),
+            microsoft_fixture_subject_hash(),
+            microsoft_fixture_message_imprint(),
+            MICROSOFT_FIXTURE_NONCE_HEX,
+            MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            verified.trust_anchor.kind,
+            Rfc3161TrustAnchorKind::SignerSpki
+        );
+        assert_eq!(
+            verified.trust_anchor.spki_der_hex,
+            MICROSOFT_FIXTURE_SIGNER_SPKI_HEX
+        );
+        assert_eq!(verified.trust_anchor.subject, verified.tsa_subject);
+    }
+
+    #[test]
+    fn trust_anchor_config_canonicalizes_case_and_rejects_cross_set_duplicates() {
+        let uppercase_signer = MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_ascii_uppercase();
+        let anchors = Rfc3161TrustAnchors::new(vec![uppercase_signer], Vec::new()).unwrap();
+
+        assert_eq!(
+            anchors.signer_spki_der_hexes(),
+            &[MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_owned()]
+        );
+
+        let duplicate = Rfc3161TrustAnchors::new(
+            vec![MICROSOFT_FIXTURE_CA_SPKI_HEX.to_owned()],
+            vec![MICROSOFT_FIXTURE_CA_SPKI_HEX.to_owned()],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(duplicate.contains("duplicates an existing trust anchor"));
+    }
+
+    #[test]
+    fn verifier_rejects_unrelated_trust_anchors_without_falling_open() {
+        let anchors = Rfc3161TrustAnchors::new(
+            Vec::new(),
+            vec!["30820122300d06092a864886f70d01010105000382010f".to_owned()],
+        )
+        .unwrap();
+
+        let err = verify_microsoft_fixture_with_trust_anchors(anchors)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("trust anchor"),
+            "unrelated CA pins must fail closed with trust-anchor context, got: {err}"
+        );
+    }
+
+    #[test]
+    fn trust_anchor_config_requires_at_least_one_non_empty_pin_set() {
+        let err = Rfc3161TrustAnchors::new(Vec::new(), Vec::new())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("at least one RFC 3161 trust anchor"));
+    }
+
+    #[test]
+    fn chain_policy_requires_timestamping_leaf_and_real_ca_issuer() {
+        let signed_data = microsoft_fixture_signed_data();
+        let certificate_refs = certificate_set(&signed_data).unwrap();
+        let issued_at = Timestamp::new(1_782_571_620_539, 0);
+        let signer = certificate_refs
+            .iter()
+            .copied()
+            .find(|cert| {
+                cert.tbs_certificate()
+                    .subject()
+                    .to_string()
+                    .contains("Microsoft Public RSA Time Stamping Authority")
+            })
+            .unwrap();
+        let issuing_ca = certificate_refs
+            .iter()
+            .copied()
+            .find(|cert| {
+                cert.tbs_certificate()
+                    .subject()
+                    .to_string()
+                    .contains("Microsoft Public RSA Timestamping CA 2020")
+            })
+            .unwrap();
+
+        validate_tsa_signer_certificate(signer, issued_at).unwrap();
+        validate_tsa_issuing_ca_certificate(issuing_ca, issued_at).unwrap();
+
+        let signer_as_ca = validate_tsa_issuing_ca_certificate(signer, issued_at)
+            .unwrap_err()
+            .to_string();
+        assert!(signer_as_ca.contains("CA:TRUE"));
+
+        let ca_as_signer = validate_tsa_signer_certificate(issuing_ca, issued_at)
+            .unwrap_err()
+            .to_string();
+        assert!(ca_as_signer.contains("must not assert CA:TRUE"));
+    }
+
+    #[test]
+    fn certificate_policy_rejects_out_of_validity_window_and_unsupported_signature_algorithms() {
+        let signed_data = microsoft_fixture_signed_data();
+        let certificate_refs = certificate_set(&signed_data).unwrap();
+        let signer = certificate_refs
+            .iter()
+            .copied()
+            .find(|cert| {
+                cert.tbs_certificate()
+                    .subject()
+                    .to_string()
+                    .contains("Microsoft Public RSA Time Stamping Authority")
+            })
+            .unwrap();
+
+        let not_yet_valid = validate_tsa_signer_certificate(signer, Timestamp::new(0, 0))
+            .unwrap_err()
+            .to_string();
+        assert!(not_yet_valid.contains("not valid"));
+
+        let expired = validate_tsa_signer_certificate(signer, Timestamp::new(4_102_444_800_000, 0))
+            .unwrap_err()
+            .to_string();
+        assert!(expired.contains("expired"));
+
+        assert!(rsa_verification_params_for_oid(SHA256_WITH_RSA_ENCRYPTION_OID).is_ok());
+        assert!(rsa_verification_params_for_oid(SHA384_WITH_RSA_ENCRYPTION_OID).is_ok());
+        assert!(rsa_verification_params_for_oid(SHA512_WITH_RSA_ENCRYPTION_OID).is_ok());
+
+        let unsupported = rsa_verification_params_for_oid(RSA_ENCRYPTION_OID)
+            .unwrap_err()
+            .to_string();
+        assert!(unsupported.contains("not RSA-PKCS1 SHA-256/384/512"));
+    }
+
+    #[test]
     fn verifier_rejects_fixture_with_wrong_nonce_imprint_policy_missing_cert_pin_or_signature() {
         let response_der = microsoft_fixture_response_der();
 
@@ -1275,18 +1784,23 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(wrong_pin.contains("public key"));
+        assert!(wrong_pin.contains("trust anchor"));
 
-        let accepted_by_second_pin = verify_timestamp_response_with_spki_pins(
+        let signer_trust_anchors = Rfc3161TrustAnchors::new(
+            vec![
+                "30820122300d06092a864886f70d01010105000382010f".to_owned(),
+                MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_owned(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let accepted_by_second_pin = verify_timestamp_response_with_trust_anchors(
             &response_der,
             microsoft_fixture_subject_hash(),
             microsoft_fixture_message_imprint(),
             MICROSOFT_FIXTURE_NONCE_HEX,
             MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
-            &[
-                "30820122300d06092a864886f70d01010105000382010f".to_owned(),
-                MICROSOFT_FIXTURE_SIGNER_SPKI_HEX.to_owned(),
-            ],
+            &signer_trust_anchors,
         )
         .unwrap();
         assert_eq!(
@@ -1294,17 +1808,10 @@ mod tests {
             MICROSOFT_FIXTURE_SIGNER_SPKI_HEX
         );
 
-        let empty_pin_set = verify_timestamp_response_with_spki_pins(
-            &response_der,
-            microsoft_fixture_subject_hash(),
-            microsoft_fixture_message_imprint(),
-            MICROSOFT_FIXTURE_NONCE_HEX,
-            MICROSOFT_ARTIFACT_SIGNING_POLICY_OID,
-            &[],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(empty_pin_set.contains("must not be empty"));
+        let empty_pin_set = Rfc3161TrustAnchors::new(Vec::new(), Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(empty_pin_set.contains("at least one RFC 3161 trust anchor"));
 
         let mut bad_signature = response_der;
         *bad_signature.last_mut().unwrap() ^= 0x01;
