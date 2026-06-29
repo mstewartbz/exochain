@@ -24,6 +24,7 @@ import { HttpTransport } from './transport/http.js';
 import type {
   AutomatedSettlementRequest,
   EconomyObjectResponse,
+  ExochainDiscoveryResponse,
   HealthResponse,
   Did,
   Hash256,
@@ -35,6 +36,7 @@ import {
   validateDecisionState,
   validateDidResponse,
   validateEconomyObjectResponse,
+  validateExochainDiscoveryResponse,
   validateHashResponse,
   type JsonObject,
 } from './validation.js';
@@ -350,5 +352,12 @@ export class ExochainClient {
   /** Gateway health probe. */
   public async health(): Promise<HealthResponse> {
     return this.#http.health();
+  }
+
+  /** Public EXOCHAIN discovery document from `/.well-known/exochain.json`. */
+  public async discover(): Promise<ExochainDiscoveryResponse> {
+    return validateExochainDiscoveryResponse(
+      await this.#http.get('/.well-known/exochain.json'),
+    );
   }
 }

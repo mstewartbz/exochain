@@ -27,10 +27,11 @@ from types import TracebackType
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from .errors import KernelError, TransportError
 from .transport.http import HttpTransport
-from .types import TrustReceipt
+from .types import ExochainDiscoveryResponse, TrustReceipt
 
 
 class ExochainClient:
@@ -66,6 +67,14 @@ class ExochainClient:
     async def health(self) -> dict[str, Any]:
         """Probe the fabric's ``/health`` endpoint."""
         return await self._transport.health()
+
+    async def discover(self) -> ExochainDiscoveryResponse:
+        """Fetch and validate ``/.well-known/exochain.json``."""
+        body = await self._transport.get("/.well-known/exochain.json")
+        try:
+            return ExochainDiscoveryResponse.model_validate(body)
+        except ValidationError as exc:
+            raise TransportError(f"malformed discovery document: {exc}") from exc
 
     async def submit_action(self, action: dict[str, Any]) -> TrustReceipt:
         """Submit an action to the constitutional kernel and get a receipt back."""

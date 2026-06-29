@@ -62,3 +62,107 @@ async def test_client_accepts_configured_httpx_timeout() -> None:
     )
     assert isinstance(client.transport, HttpTransport)
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_discover_validates_public_discovery_document() -> None:
+    """The high-level client validates the well-known discovery payload."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/.well-known/exochain.json"
+        return httpx.Response(
+            200,
+            json={
+                "base_url": "https://exochain.io",
+                "routes": {
+                    "health": "/health",
+                    "ready": "/ready",
+                    "avc": {
+                        "issue": "/api/v1/avc/issue",
+                        "validate": "/api/v1/avc/validate",
+                        "receipts_emit": "/api/v1/avc/receipts/emit",
+                        "receipts_get": "/api/v1/avc/receipts/:hash",
+                        "protocol": "/api/v1/avc/protocol",
+                    },
+                },
+                "sdk": {
+                    "rust": "crates/exochain-sdk",
+                    "typescript": "packages/exochain-sdk",
+                    "python": "packages/exochain-py",
+                },
+                "mcp": {
+                    "public_transport": False,
+                    "transports": ["stdio", "loopback-sse"],
+                    "capabilities": ["tools", "resources", "prompts"],
+                },
+            },
+        )
+
+    transport = HttpTransport("https://fabric.example", timeout=httpx.Timeout(1.0))
+    await transport._client.aclose()
+    transport._client = httpx.AsyncClient(
+        base_url="https://fabric.example",
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(1.0),
+    )
+    client = ExochainClient.from_transport(transport)
+
+    discovery = await client.discover()
+
+    assert discovery.base_url == "https://exochain.io"
+    assert discovery.routes.avc.validate_route == "/api/v1/avc/validate"
+    assert discovery.routes.avc.receipts_emit == "/api/v1/avc/receipts/emit"
+    assert discovery.sdk.python == "packages/exochain-py"
+    assert discovery.mcp.public_transport is False
+    assert discovery.mcp.transports == ("stdio", "loopback-sse")
+    assert discovery.mcp.capabilities == ("tools", "resources", "prompts")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_discover_rejects_malformed_mcp_metadata() -> None:
+    """Malformed MCP discovery metadata fails closed."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "base_url": "https://exochain.io",
+                "routes": {
+                    "health": "/health",
+                    "ready": "/ready",
+                    "avc": {
+                        "issue": "/api/v1/avc/issue",
+                        "validate": "/api/v1/avc/validate",
+                        "receipts_emit": "/api/v1/avc/receipts/emit",
+                        "receipts_get": "/api/v1/avc/receipts/:hash",
+                        "protocol": "/api/v1/avc/protocol",
+                    },
+                },
+                "sdk": {
+                    "rust": "crates/exochain-sdk",
+                    "typescript": "packages/exochain-sdk",
+                    "python": "packages/exochain-py",
+                },
+                "mcp": {
+                    "public_transport": "false",
+                    "transports": ["stdio", "loopback-sse"],
+                    "capabilities": ["tools", "resources", "prompts"],
+                },
+            },
+        )
+
+    transport = HttpTransport("https://fabric.example", timeout=httpx.Timeout(1.0))
+    await transport._client.aclose()
+    transport._client = httpx.AsyncClient(
+        base_url="https://fabric.example",
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(1.0),
+    )
+    client = ExochainClient.from_transport(transport)
+
+    with pytest.raises(TransportError):
+        await client.discover()
+
+    await client.close()

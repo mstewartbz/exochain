@@ -55,7 +55,17 @@ from .governance.vote import Vote, VoteChoice
 from .identity.did import is_did, validate_did
 from .identity.keypair import Identity, derive_did
 from .transport.http import HttpTransport
-from .types import Did, Hash256Hex, QuorumResult, TrustReceipt
+from .types import (
+    Did,
+    ExochainAvcDiscoveryRoutes,
+    ExochainDiscoveryResponse,
+    ExochainDiscoveryRoutes,
+    ExochainMcpDiscovery,
+    ExochainSdkDiscovery,
+    Hash256Hex,
+    QuorumResult,
+    TrustReceipt,
+)
 
 __version__ = "0.1.0"
 
@@ -77,8 +87,13 @@ __all__ = [
     "DecisionBuilder",
     "DecisionStatus",
     "Did",
+    "ExochainAvcDiscoveryRoutes",
+    "ExochainDiscoveryResponse",
+    "ExochainDiscoveryRoutes",
     "ExochainClient",
     "ExochainError",
+    "ExochainMcpDiscovery",
+    "ExochainSdkDiscovery",
     "GovernanceError",
     "Hash256Hex",
     "HlcTimestamp",

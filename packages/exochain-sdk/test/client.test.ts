@@ -24,13 +24,16 @@ import type { Hash256 } from '../src/types.js';
 const HASH_64 = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' as Hash256;
 
 interface RecordedFetch {
+  readonly inputs: (RequestInfo | URL)[];
   readonly calls: RequestInit[];
   readonly fetch: typeof fetch;
 }
 
 function jsonFetch(body: unknown, status = 200): RecordedFetch {
+  const inputs: (RequestInfo | URL)[] = [];
   const calls: RequestInit[] = [];
-  const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    inputs.push(input);
     if (init !== undefined) {
       calls.push(init);
     }
@@ -39,7 +42,7 @@ function jsonFetch(body: unknown, status = 200): RecordedFetch {
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  return { calls, fetch: fetchImpl };
+  return { inputs, calls, fetch: fetchImpl };
 }
 
 test('health rejects malformed gateway payloads instead of trusting casts', async () => {
@@ -64,6 +67,80 @@ test('health accepts a valid gateway payload', async () => {
   strictEqual(health.status, 'ok');
   strictEqual(health.version, '0.1.0');
   strictEqual(health.uptime, 42);
+});
+
+test('discover fetches and validates the public EXOCHAIN discovery document', async () => {
+  const transport = jsonFetch({
+    base_url: 'https://exochain.io',
+    routes: {
+      health: '/health',
+      ready: '/ready',
+      avc: {
+        issue: '/api/v1/avc/issue',
+        validate: '/api/v1/avc/validate',
+        receipts_emit: '/api/v1/avc/receipts/emit',
+        receipts_get: '/api/v1/avc/receipts/:hash',
+        protocol: '/api/v1/avc/protocol',
+      },
+    },
+    sdk: {
+      rust: 'crates/exochain-sdk',
+      typescript: 'packages/exochain-sdk',
+      python: 'packages/exochain-py',
+    },
+    mcp: {
+      public_transport: false,
+      transports: ['stdio', 'loopback-sse'],
+      capabilities: ['tools', 'resources', 'prompts'],
+    },
+  });
+  const client = new ExochainClient({
+    baseUrl: 'https://gateway.example',
+    fetch: transport.fetch,
+  });
+
+  const discovery = await client.discover();
+
+  strictEqual(String(transport.inputs[0]), 'https://gateway.example/.well-known/exochain.json');
+  strictEqual(discovery.base_url, 'https://exochain.io');
+  strictEqual(discovery.routes.avc.receipts_emit, '/api/v1/avc/receipts/emit');
+  strictEqual(discovery.sdk.typescript, 'packages/exochain-sdk');
+  strictEqual(discovery.mcp.public_transport, false);
+  strictEqual(discovery.mcp.transports[1], 'loopback-sse');
+  strictEqual(discovery.mcp.capabilities[2], 'prompts');
+});
+
+test('discover rejects malformed MCP discovery metadata', async () => {
+  const transport = jsonFetch({
+    base_url: 'https://exochain.io',
+    routes: {
+      health: '/health',
+      ready: '/ready',
+      avc: {
+        issue: '/api/v1/avc/issue',
+        validate: '/api/v1/avc/validate',
+        receipts_emit: '/api/v1/avc/receipts/emit',
+        receipts_get: '/api/v1/avc/receipts/:hash',
+        protocol: '/api/v1/avc/protocol',
+      },
+    },
+    sdk: {
+      rust: 'crates/exochain-sdk',
+      typescript: 'packages/exochain-sdk',
+      python: 'packages/exochain-py',
+    },
+    mcp: {
+      public_transport: 'false',
+      transports: ['stdio', 'loopback-sse'],
+      capabilities: ['tools', 'resources', 'prompts'],
+    },
+  });
+  const client = new ExochainClient({
+    baseUrl: 'https://gateway.example',
+    fetch: transport.fetch,
+  });
+
+  await rejects(() => client.discover(), TransportError);
 });
 
 test('identity.register rejects malformed DID response payloads', async () => {
