@@ -19,20 +19,31 @@ fetch() {
   local body="${TMP_DIR}/${name}.body"
   local status
 
-  if ! status="$(
-    curl -sS \
-      --max-time 20 \
-      "${CURL_DNS_ARGS[@]}" \
-      -X "${method}" \
-      -D "${headers}" \
-      -o "${body}" \
-      -w '%{http_code}' \
-      "${BASE_URL}${path}"
-  )"; then
-    fail "${path} request failed before an HTTP response was accepted"
+  if [ -n "${DOH_URL}" ]; then
+    status="$(
+      curl -sS \
+        --max-time 20 \
+        --doh-url "${DOH_URL}" \
+        -X "${method}" \
+        -D "${headers}" \
+        -o "${body}" \
+        -w '%{http_code}' \
+        "${BASE_URL}${path}"
+    )" || fail "${path} request failed before an HTTP response was accepted"
+  else
+    status="$(
+      curl -sS \
+        --max-time 20 \
+        -X "${method}" \
+        -D "${headers}" \
+        -o "${body}" \
+        -w '%{http_code}' \
+        "${BASE_URL}${path}"
+    )" || fail "${path} request failed before an HTTP response was accepted"
   fi
+
   printf '%s\t%s\t%s\n' "${name}" "${status}" "${path}"
-  if rg -i '(^server:.*fly|^via:.*fly\.io|fly-request-id:)' "${headers}" >/dev/null; then
+  if grep -E -i '(^server:.*fly|^via:.*fly\.io|fly-request-id:)' "${headers}" >/dev/null; then
     sed -n '1,40p' "${headers}" >&2
     fail "${path} still traverses deprecated Fly infrastructure"
   fi
@@ -54,12 +65,6 @@ require_status() {
 
 command -v curl >/dev/null || fail "curl is required"
 command -v jq >/dev/null || fail "jq is required"
-command -v rg >/dev/null || fail "rg is required"
-
-CURL_DNS_ARGS=()
-if [ -n "${DOH_URL}" ]; then
-  CURL_DNS_ARGS=(--doh-url "${DOH_URL}")
-fi
 
 fetch health /health
 require_status "${FETCH_STATUS}" 200 /health
