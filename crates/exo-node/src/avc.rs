@@ -1708,11 +1708,18 @@ fn external_timestamp_error(err: anyhow::Error) -> ApiError {
     tracing::error!(
         err = %err,
         error_class = error_class,
-        "AVC external timestamp authority unavailable"
+        "AVC external timestamp proof could not be obtained"
     );
+    // Surface the stable operator class in the PUBLIC message too. Callers (the
+    // emit smoke, operators) often see only the response, not the node logs, and
+    // a blanket "authority unavailable" misreads a signer-SPKI pin rejection
+    // (class=invalid_proof) or a TSA-returned error status (class=rejected) as
+    // upstream downtime (class=unreachable) — exactly the misdiagnosis we hit in
+    // production. The class tokens are already the sanctioned operator-facing
+    // classification, so this leaks no response detail.
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        "AVC external timestamp authority unavailable".into(),
+        format!("AVC external timestamp proof could not be obtained (class: {error_class})"),
     )
 }
 
@@ -4604,6 +4611,52 @@ mod tests {
             production.contains("external_timestamp_error_class"),
             "the 503 path must attach a stable operator-facing TSA error class before returning the generic public error"
         );
+    }
+
+    #[test]
+    fn external_timestamp_error_surfaces_operator_class_in_public_message() {
+        // A signer-SPKI pin rejection (the production misdiagnosis) must not read
+        // as a generic "authority unavailable": the public 503 message carries the
+        // stable operator class so callers seeing only the response — not the node
+        // logs — can tell a verification/config failure from upstream downtime.
+        // Cover every failure class so each operator_class arm is exercised.
+        let cases = [
+            (AvcExternalTimestampFailure::Unconfigured, "unconfigured"),
+            (
+                AvcExternalTimestampFailure::Unreachable {
+                    reason: "connection refused".to_owned(),
+                },
+                "unreachable",
+            ),
+            (
+                AvcExternalTimestampFailure::Rejected {
+                    status: "503 Service Unavailable".to_owned(),
+                },
+                "rejected",
+            ),
+            (
+                AvcExternalTimestampFailure::InvalidResponse {
+                    reason: "malformed DER".to_owned(),
+                },
+                "invalid_response",
+            ),
+            (
+                AvcExternalTimestampFailure::InvalidProof {
+                    reason: "RFC 3161 TSA signer public key did not match any pinned SPKI DER"
+                        .to_owned(),
+                },
+                "invalid_proof",
+            ),
+        ];
+        for (failure, expected_class) in cases {
+            let err: anyhow::Error = failure.into();
+            let (status, message) = external_timestamp_error(err);
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                message.contains(expected_class),
+                "public TSA error must carry operator class '{expected_class}', got: {message}"
+            );
+        }
     }
 
     #[tokio::test]
