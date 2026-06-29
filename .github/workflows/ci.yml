@@ -292,6 +292,8 @@ jobs:
         run: bash tools/test_railway_entrypoint_args.sh
       - name: Deployment readiness probes
         run: bash tools/test_deployment_readiness_probes.sh
+      - name: Public route verifier portability
+        run: bash tools/test_public_route_verifier_portability.sh
       - name: Docker production database feature contract
         run: bash tools/test_docker_production_db_feature.sh
       - name: Agent prompt boundary contract
