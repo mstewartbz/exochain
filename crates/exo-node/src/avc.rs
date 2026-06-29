@@ -87,6 +87,12 @@ use tower::limit::ConcurrencyLimitLayer;
 const MAX_AVC_API_BODY_BYTES: usize = 64 * 1024;
 const MAX_AVC_API_CONCURRENT_REQUESTS: usize = 64;
 const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const AVC_RFC3161_TIMESTAMP_FETCH_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(250), Duration::from_millis(1_000)];
+#[cfg(test)]
+const AVC_RFC3161_TIMESTAMP_FETCH_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(0), Duration::from_millis(0)];
 pub const AVC_ROOT_TRUST_BUNDLE_ENV: &str = "EXO_AVC_ROOT_TRUST_BUNDLE";
 pub const AVC_REQUIRE_POSTGRES_DURABILITY_ENV: &str = "EXO_AVC_REQUIRE_POSTGRES_DURABILITY";
 pub const AVC_REQUIRE_EXTERNAL_TIMESTAMP_AUTHORITY_ENV: &str =
@@ -260,6 +266,87 @@ fn external_timestamp_error_class(err: &anyhow::Error) -> &'static str {
         .map_or("unknown", AvcExternalTimestampFailure::operator_class)
 }
 
+fn rfc3161_fetch_status_is_retryable(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+fn rfc3161_fetch_retry_delay(attempt_index: usize) -> Option<Duration> {
+    AVC_RFC3161_TIMESTAMP_FETCH_RETRY_DELAYS
+        .get(attempt_index)
+        .copied()
+}
+
+async fn wait_before_rfc3161_fetch_retry(delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+}
+
+async fn fetch_rfc3161_timestamp_response(
+    client: &reqwest::Client,
+    endpoint: &str,
+    request_der: &[u8],
+) -> Result<Vec<u8>, AvcExternalTimestampFailure> {
+    let max_attempts = AVC_RFC3161_TIMESTAMP_FETCH_RETRY_DELAYS.len() + 1;
+    for attempt_index in 0..max_attempts {
+        let attempt = attempt_index + 1;
+        let response = client
+            .post(endpoint)
+            .header("Content-Type", "application/timestamp-query")
+            .header("Accept", "application/timestamp-reply")
+            .body(request_der.to_vec())
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(delay) = rfc3161_fetch_retry_delay(attempt_index) {
+                    tracing::warn!(
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        err = %error,
+                        "retrying RFC 3161 timestamp authority fetch after transport failure"
+                    );
+                    wait_before_rfc3161_fetch_retry(delay).await;
+                    continue;
+                }
+                return Err(AvcExternalTimestampFailure::Unreachable {
+                    reason: format!("after {attempt} attempts: {error}"),
+                });
+            }
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|error| AvcExternalTimestampFailure::InvalidResponse {
+                    reason: error.to_string(),
+                });
+        }
+        if rfc3161_fetch_status_is_retryable(status) {
+            if let Some(delay) = rfc3161_fetch_retry_delay(attempt_index) {
+                tracing::warn!(
+                    attempt = attempt,
+                    max_attempts = max_attempts,
+                    status = %status,
+                    "retrying RFC 3161 timestamp authority fetch after transient status"
+                );
+                wait_before_rfc3161_fetch_retry(delay).await;
+                continue;
+            }
+        }
+        return Err(AvcExternalTimestampFailure::Rejected {
+            status: status.to_string(),
+        });
+    }
+    Err(AvcExternalTimestampFailure::Unreachable {
+        reason: format!("exhausted {max_attempts} RFC 3161 timestamp fetch attempts"),
+    })
+}
+
 impl AvcReceiptExternalTimestampSource {
     async fn issue_proof(
         &self,
@@ -333,28 +420,9 @@ impl AvcReceiptExternalTimestampSource {
                 .map_err(|error| AvcExternalTimestampFailure::InvalidProof {
                     reason: error.to_string(),
                 })?;
-                let response = client
-                    .post(endpoint.as_str())
-                    .header("Content-Type", "application/timestamp-query")
-                    .header("Accept", "application/timestamp-reply")
-                    .body(request.der)
-                    .send()
-                    .await
-                    .map_err(|error| AvcExternalTimestampFailure::Unreachable {
-                        reason: error.to_string(),
-                    })?;
-                let status = response.status();
-                if !status.is_success() {
-                    return Err(AvcExternalTimestampFailure::Rejected {
-                        status: status.to_string(),
-                    }
-                    .into());
-                }
-                let response_der = response.bytes().await.map_err(|error| {
-                    AvcExternalTimestampFailure::InvalidResponse {
-                        reason: error.to_string(),
-                    }
-                })?;
+                let response_der =
+                    fetch_rfc3161_timestamp_response(client, endpoint.as_str(), &request.der)
+                        .await?;
                 let trust_anchors = crate::avc_rfc3161::Rfc3161TrustAnchors::new(
                     authority_public_key_spki_der_hexes.as_ref().clone(),
                     issuing_ca_spki_der_hexes.as_ref().clone(),
@@ -2445,6 +2513,11 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use axum::{
         body::{self, Body},
         http::{Method, Request},
@@ -2820,6 +2893,51 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), handle)
+    }
+
+    async fn serve_test_rfc3161_timestamp_authority_sequence(
+        responses: Vec<(StatusCode, Vec<u8>)>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        async fn issue_timestamp(
+            State((responses, attempts)): State<(
+                Arc<Mutex<VecDeque<(StatusCode, Vec<u8>)>>>,
+                Arc<AtomicUsize>,
+            )>,
+            headers: axum::http::HeaderMap,
+            body: axum::body::Bytes,
+        ) -> axum::response::Response {
+            assert_eq!(
+                headers
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/timestamp-query")
+            );
+            assert!(!body.is_empty(), "RFC 3161 request body must be DER");
+            attempts.fetch_add(1, Ordering::SeqCst);
+            let (status, response_der) = responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Vec::new()));
+            (
+                status,
+                [("content-type", "application/timestamp-reply")],
+                response_der,
+            )
+                .into_response()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/", post(issue_timestamp))
+            .with_state((responses, Arc::clone(&attempts)));
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), attempts, handle)
     }
 
     async fn emit_baseline_receipt_with_source(
@@ -4644,6 +4762,50 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn rfc3161_timestamp_fetch_retries_transient_status_before_success() {
+        let (endpoint, attempts, timestamp_authority) =
+            serve_test_rfc3161_timestamp_authority_sequence(vec![
+                (StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
+                (StatusCode::TOO_MANY_REQUESTS, Vec::new()),
+                (StatusCode::OK, vec![0x30, 0x00]),
+            ])
+            .await;
+
+        let response_der = fetch_rfc3161_timestamp_response(
+            &reqwest::Client::new(),
+            endpoint.as_str(),
+            &[0x30, 0x01, 0x00],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response_der, vec![0x30, 0x00]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        timestamp_authority.abort();
+    }
+
+    #[tokio::test]
+    async fn receipt_emit_does_not_retry_rfc3161_verification_failures() {
+        let (endpoint, attempts, timestamp_authority) =
+            serve_test_rfc3161_timestamp_authority_sequence(vec![(
+                StatusCode::OK,
+                vec![0x30, 0x03, 0x02],
+            )])
+            .await;
+
+        let (status, state, _) = emit_baseline_receipt_with_source_and_strict(
+            rfc3161_external_timestamp_source(endpoint),
+            true,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         timestamp_authority.abort();
     }
 
