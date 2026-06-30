@@ -1,6 +1,6 @@
 # AVC Issue 713 Production Closure Proof
 
-Status: PR-bound closure candidate.
+Status: Closed after PR #722 merge and deployment.
 
 This packet records the production evidence and code-level hardening for GitHub
 issue `#713`: intermittent AVC receipt emission fail-closing with RFC 3161 TSA
@@ -18,21 +18,20 @@ unavailability.
 Observed on 2026-06-29 against `https://exochain.io`:
 
 - Railway production service `exochain` was deployed from
-  `38d30e1a6c8a68581f6ae166f82642b9f4f88473`.
+  `38d30e1a6c8a68581f6ae166f82642b9f4f88473` during the production smoke
+  evidence window; PR `#722` later merged and deployed as
+  `61f8b021fe29fb4fb945adedee362feab42aca66`.
 - `GET /ready` returned `status: ok`, `dagdb_runtime_status: dagdb_active`,
   and `dagdb_runtime_reason: db_probe_ok`.
 - Authenticated `GET /api/v1/avc/protocol` returned protocol version `1`,
   schema version `1`, and WASM package `@exochain/exochain-wasm`.
-- Railway HTTP logs recorded 27 successful authenticated production calls to
-  `POST /api/v1/avc/receipts/emit` between
-  `2026-06-29T16:31:52.491712167Z` and
-  `2026-06-29T16:46:44.032478126Z`, all HTTP `200`.
-- Production Postgres `dagdb.avc_registry_state` contained 64 AVC receipts for
-  actor `did:exo:44sVCyeMCcef7PzAeM8jY7qpRUpmaQxabaC4etXeE9zr`.
+- Railway HTTP logs show 27/27 authenticated production `POST /api/v1/avc/receipts/emit` calls returned `200` after `#718`.
+- Production AVC registry readback found 64 receipts for actor
+  `did:exo:44sVCyeMCcef7PzAeM8jY7qpRUpmaQxabaC4etXeE9zr`.
 - All 64 read back through `GET /api/v1/avc/receipts?actor=...` with
   `timestamp_provenance: ExternalTimestampAuthority` and RFC 3161 proof.
-- The 27 post-fix trust-anchor receipts included 18 `signer_spki` anchors and
-  9 `issuing_ca_spki` anchors.
+- The 27 post-`#718` trust-anchor receipts included 18 `signer_spki` anchors
+  and 9 `issuing_ca_spki` anchors.
 - `dagdb.dagdb_node_committed` and `dagdb.dagdb_node_trust_receipts` each
   contained 64 EXOCHAIN finality rows for `avc.receipt.exochain_finality`.
 
@@ -73,8 +72,8 @@ Latest observed EXOCHAIN finality row:
 ## Code Closure
 
 The residual valid scope of `#713` after PRs `#714` and `#718` was genuine
-transient RFC 3161 TSA fetch failure. This branch adds bounded retry/backoff
-only around the RFC 3161 HTTP fetch path:
+transient RFC 3161 TSA fetch failure. PR `#722` adds bounded retry/backoff only
+around the RFC 3161 HTTP fetch path:
 
 - retryable: request transport failures, HTTP `5xx`, and HTTP `429`;
 - not retryable: malformed DER, nonce/imprint/policy mismatch, trust-anchor
@@ -85,7 +84,7 @@ only around the RFC 3161 HTTP fetch path:
 
 ## Verification
 
-Commands run from `/Users/bobstewart/dev/exochain-avc-rfc3161-retry`:
+Commands recorded for PR `#722`:
 
 ```bash
 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/Users/bobstewart/dev/exochain/target cargo test -p exo-node rfc3161_timestamp_fetch_retries_transient_status_before_success -- --nocapture
@@ -105,12 +104,13 @@ Results:
 - operator-class diagnostic test: passed;
 - format check: passed;
 - diff whitespace check: passed;
-- focused `exo-node` clippy: passed.
+- focused `exo-node` clippy: passed;
+- `main` EXOCHAIN Constitutional CI for
+  `61f8b021fe29fb4fb945adedee362feab42aca66`: passed.
 
 ## Disposition
 
-`#713` may be closed after this branch is merged, deployed, and the issue comment
-links this packet plus the production receipt evidence above. The production
-blocker is no longer open: post-`#718` production emitted and read back 27/27
-RFC 3161 AVC receipts with trust-anchor evidence, and this branch completes the
-remaining bounded retry/backoff hardening requested by the issue title.
+`#713` is closed as `COMPLETED`. The production blocker is no longer open:
+post-`#718` production emitted and read back authenticated RFC 3161 AVC receipts
+with trust-anchor evidence, and PR `#722` completed the remaining bounded
+retry/backoff hardening requested by the issue title.
