@@ -51,6 +51,46 @@ See `.github/workflows/release.yml` for the automated release workflow:
 7. GitHub Release artifacts are attached to `v<version>`.
 8. Crates are published to crates.io in dependency order unless the run is a dry run.
 
+### Release Signing Key Setup
+
+Live releases require an approved OpenPGP signing key controlled by the release
+maintainer. The public key and full fingerprint must be configured as repository
+variables so the release workflow can import the key on the GitHub runner before
+executing `git tag -v`.
+
+Create the signing key locally:
+
+```bash
+gpg --quick-generate-key "Bob Stewart EXOCHAIN Release Signing <bob@bobstewart.com>" ed25519 sign 2y
+```
+
+Record the full fingerprint and export the public key:
+
+```bash
+RELEASE_SIGNING_UID="Bob Stewart EXOCHAIN Release Signing <bob@bobstewart.com>"
+RELEASE_SIGNING_FINGERPRINT="$(gpg --with-colons --fingerprint "$RELEASE_SIGNING_UID" | awk -F: '/^fpr:/ { print $10; exit }')"
+gpg --armor --export "$RELEASE_SIGNING_FINGERPRINT" > exochain-release-signing-public.asc
+git config --global user.signingkey "$RELEASE_SIGNING_FINGERPRINT"
+git config --global tag.gpgSign true
+```
+
+Configure the repository variables used by `.github/workflows/release.yml`:
+
+```bash
+gh variable set EXOCHAIN_RELEASE_SIGNING_FINGERPRINT --repo exochain/exochain --body "$RELEASE_SIGNING_FINGERPRINT"
+gh variable set EXOCHAIN_RELEASE_SIGNING_PUBLIC_KEY_ASC --repo exochain/exochain < exochain-release-signing-public.asc
+gh gpg-key add exochain-release-signing-public.asc --title "EXOCHAIN Release Signing"
+```
+
+Create and verify the signed release tag only after the key is configured:
+
+```bash
+git fetch origin main --tags
+git tag -s v0.2.0-beta "$(git rev-parse origin/main)" -m "EXOCHAIN v0.2.0-beta"
+git tag -v v0.2.0-beta
+git push origin v0.2.0-beta
+```
+
 ### Dry Run
 
 Trigger via the GitHub Actions UI with `dry_run=true`. This runs CI and builds
