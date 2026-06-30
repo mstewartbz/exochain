@@ -262,6 +262,8 @@ jobs:
         run: bash tools/test_github_issue_workflow_boundaries.sh
       - name: CI tool installer supply-chain hardening
         run: bash tools/test_ci_supply_chain_hardening.sh
+      - name: Cross-platform target cache boundary
+        run: bash tools/test_cross_platform_target_cache_boundary.sh
       - name: Core npm package supply-chain hardening
         run: bash tools/test_npm_core_package_hygiene.sh
       - name: Release workflow ref binding
@@ -535,14 +537,17 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
-          key: ${{ matrix.target }}
+          key: gate16-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}
+          workspaces: ". -> target/gate16-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}"
+      - name: Isolate Cargo target dir
+        run: echo "CARGO_TARGET_DIR=target/gate16-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}" >> "$GITHUB_ENV"
       - name: Build exochain binary
         run: bash tools/ci_cargo_retry.sh cargo build --release --bin exochain --target ${{ matrix.target }}
       - name: Upload binary artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: exochain-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/exochain
+          path: target/gate16-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}/${{ matrix.target }}/release/exochain
           retention-days: 30
 
   # -----------------------------------------------------------------------
