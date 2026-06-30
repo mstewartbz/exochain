@@ -35,7 +35,7 @@ MAJOR.MINOR.PATCH
 The workspace version is set in `Cargo.toml`:
 ```toml
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-beta"
 ```
 
 ## Release Process
@@ -81,10 +81,10 @@ resolution requiring retraction.
 
 ```bash
 # Yank a specific crate version (repeats for each affected crate)
-cargo yank --version 0.1.0 exo-core
+cargo yank --version 0.2.0-beta exo-core
 
 # Restore a yank if issued in error
-cargo yank --version 0.1.0 exo-core --undo
+cargo yank --version 0.2.0-beta exo-core --undo
 ```
 
 Yanks must be logged as a governance action: open an issue with label

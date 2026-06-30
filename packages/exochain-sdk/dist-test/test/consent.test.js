@@ -1,3 +1,18 @@
+// Copyright 2026 Exochain Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at:
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { strictEqual, ok, rejects, notStrictEqual } from 'node:assert/strict';
@@ -5,7 +20,7 @@ import { BailmentBuilder } from '../src/consent/bailment.js';
 import { ConsentError, IdentityError } from '../src/errors.js';
 const BAILOR = 'did:exo:alice';
 const BAILEE = 'did:exo:bob';
-const CREATED_AT_MS = 1_700_000_000_000;
+const CREATED_AT_MS = 1700000000000;
 const CREATED_AT_LOGICAL = 7;
 test('BailmentBuilder happy path produces a full proposal', async () => {
     const p = await new BailmentBuilder(BAILOR, BAILEE)
@@ -56,7 +71,7 @@ test('BailmentBuilder rejects invalid HLC timestamp fields', async () => {
     await rejects(async () => new BailmentBuilder(BAILOR, BAILEE)
         .scope('data')
         .durationHours(1)
-        .createdAtHlc(CREATED_AT_MS, 0x1_0000_0000)
+        .createdAtHlc(CREATED_AT_MS, 4294967296)
         .build(), ConsentError);
 });
 test('BailmentBuilder rejects invalid DIDs at construction', () => {
