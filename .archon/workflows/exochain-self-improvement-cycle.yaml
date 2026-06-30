@@ -113,12 +113,42 @@ nodes:
         violations:
           type: string
 
+  # ── Stage 6: AVC Proof Evidence Gate ─────────────────────
+  - id: avc_proof_evidence
+    command: exoforge-avc-proof-evidence
+    depends_on: [validate_constitution]
+    when: "$validate_constitution.output.passed == 'true' && $validate_constitution.output.governance_disposition == 'APPROVE'"
+    description: Require ExoForge battery evidence and EXOCHAIN AVC receipt readback before PR creation
+    completion_gate: exochain_avc_receipt_readback_verified
+    self_approval: forbidden
+    trusted_authority: exochain_avc_receipt_readback
+    output_format:
+      type: object
+      properties:
+        verified:
+          type: boolean
+        completion_gate:
+          type: string
+          enum: [exochain_avc_receipt_readback_verified]
+        exoforge_run_id:
+          type: string
+        avc_receipt_hash:
+          type: string
+        avc_finality_hash:
+          type: string
+        avc_finality_height:
+          type: string
+        rfc3161_trust_anchor:
+          type: string
+        blocking_reason:
+          type: string
+
   # ── Stage 6: Finalize or Remediate ────────────────────────
   - id: create_pr
     command: archon-finalize-pr
-    depends_on: [validate_constitution]
-    when: "$validate_constitution.output.passed == 'true' && $validate_constitution.output.governance_disposition == 'APPROVE'"
-    description: Create governance-approved PR with full audit trail
+    depends_on: [avc_proof_evidence]
+    when: "$avc_proof_evidence.output.verified == 'true'"
+    description: Create governance-approved PR only after verified EXOCHAIN AVC proof evidence
     trigger_rule: all_success
 
   - id: remediate
@@ -144,6 +174,7 @@ nodes:
       - **Syntaxis generation**: $generate_syntaxis.output
       - **Implementation**: $implement.output
       - **Validation**: $validate_constitution.output
+      - **AVC proof evidence**: $avc_proof_evidence.output
       - **PR creation**: $create_pr.output
       END_UNTRUSTED_WORKFLOW_NODE_OUTPUTS
 
@@ -170,6 +201,6 @@ nodes:
       3. Output a summary of what was escalated
 
       Use `gh issue create` for GitHub operations.
-    depends_on: [council_review, generate_syntaxis, implement, validate_constitution, create_pr]
+    depends_on: [council_review, generate_syntaxis, implement, validate_constitution, avc_proof_evidence, create_pr]
     trigger_rule: all_done
     description: Auto-escalate blocking failures to council via GitHub issue
