@@ -149,6 +149,34 @@ if grep -F -- '--skip-clean' <<<"$coverage_gate_block" >/dev/null; then
   fail "default workspace coverage gate must clean instrumentation before measuring the 90% threshold"
 fi
 
+coverage_timeout="$(
+  awk '
+    $1 == "--timeout" {
+      print $2
+      found = 1
+      exit
+    }
+    $1 ~ /^--timeout=/ {
+      sub(/^--timeout=/, "", $1)
+      print $1
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' <<<"$coverage_gate_block"
+)" || fail "default workspace coverage gate must set an explicit tarpaulin timeout"
+
+[[ "$coverage_timeout" =~ ^[0-9]+$ ]] \
+  || fail "coverage gate tarpaulin timeout must be a positive integer"
+
+if (( coverage_timeout < 600 )); then
+  fail "coverage gate tarpaulin timeout must be at least 600 seconds for instrumented workspace variance"
+fi
+
 if grep -nE '90%[+[:space:]-]*line coverage|Coverage.*>=90|Coverage.*>= 90' README.md .github/workflows/ci.yml docs/guides/GETTING-STARTED.md \
   | grep -viE 'scoped|tarpaulin.toml|not independently verified outside CI' >/tmp/coverage-policy-claims.txt; then
   if grep -nE 'exclude-files|--exclude' tarpaulin.toml .github/workflows/ci.yml >/dev/null; then
