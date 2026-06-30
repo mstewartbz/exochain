@@ -100,6 +100,8 @@ jobs:
         # code belongs in a separate dedicated tarpaulin pass under
         # `--features unaudited-pedagogical-proofs`; it is not in scope
         # for the default workspace coverage gate.
+        # The largest LLVM-instrumented test binaries can run close to
+        # five minutes; keep runner variance out of the coverage claim.
         run: |
           cargo tarpaulin \
             --workspace \
@@ -108,7 +110,7 @@ jobs:
             --out xml \
             --output-dir coverage \
             --engine llvm \
-            --timeout 300 \
+            --timeout 900 \
             --fail-under 90
       - name: Upload coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
