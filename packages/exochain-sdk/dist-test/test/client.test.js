@@ -1,3 +1,18 @@
+// Copyright 2026 Exochain Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at:
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 import { test } from 'node:test';
 import { rejects, strictEqual } from 'node:assert/strict';
 import { ExochainClient } from '../src/client.js';
@@ -5,8 +20,10 @@ import { TransportError } from '../src/errors.js';
 import { validateDid } from '../src/identity/did.js';
 const HASH_64 = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 function jsonFetch(body, status = 200) {
+    const inputs = [];
     const calls = [];
-    const fetchImpl = (async (_input, init) => {
+    const fetchImpl = (async (input, init) => {
+        inputs.push(input);
         if (init !== undefined) {
             calls.push(init);
         }
@@ -15,7 +32,7 @@ function jsonFetch(body, status = 200) {
             headers: { 'content-type': 'application/json' },
         });
     });
-    return { calls, fetch: fetchImpl };
+    return { inputs, calls, fetch: fetchImpl };
 }
 test('health rejects malformed gateway payloads instead of trusting casts', async () => {
     const transport = jsonFetch({ status: 'ok', version: '0.1.0', uptime: 'not-a-number' });
@@ -35,6 +52,75 @@ test('health accepts a valid gateway payload', async () => {
     strictEqual(health.status, 'ok');
     strictEqual(health.version, '0.1.0');
     strictEqual(health.uptime, 42);
+});
+test('discover fetches and validates the public EXOCHAIN discovery document', async () => {
+    const transport = jsonFetch({
+        base_url: 'https://exochain.io',
+        routes: {
+            health: '/health',
+            ready: '/ready',
+            avc: {
+                issue: '/api/v1/avc/issue',
+                validate: '/api/v1/avc/validate',
+                receipts_emit: '/api/v1/avc/receipts/emit',
+                receipts_get: '/api/v1/avc/receipts/:hash',
+                protocol: '/api/v1/avc/protocol',
+            },
+        },
+        sdk: {
+            rust: 'crates/exochain-sdk',
+            typescript: 'packages/exochain-sdk',
+            python: 'packages/exochain-py',
+        },
+        mcp: {
+            public_transport: false,
+            transports: ['stdio', 'loopback-sse'],
+            capabilities: ['tools', 'resources', 'prompts'],
+        },
+    });
+    const client = new ExochainClient({
+        baseUrl: 'https://gateway.example',
+        fetch: transport.fetch,
+    });
+    const discovery = await client.discover();
+    strictEqual(String(transport.inputs[0]), 'https://gateway.example/.well-known/exochain.json');
+    strictEqual(discovery.base_url, 'https://exochain.io');
+    strictEqual(discovery.routes.avc.receipts_emit, '/api/v1/avc/receipts/emit');
+    strictEqual(discovery.sdk.typescript, 'packages/exochain-sdk');
+    strictEqual(discovery.mcp.public_transport, false);
+    strictEqual(discovery.mcp.transports[1], 'loopback-sse');
+    strictEqual(discovery.mcp.capabilities[2], 'prompts');
+});
+test('discover rejects malformed MCP discovery metadata', async () => {
+    const transport = jsonFetch({
+        base_url: 'https://exochain.io',
+        routes: {
+            health: '/health',
+            ready: '/ready',
+            avc: {
+                issue: '/api/v1/avc/issue',
+                validate: '/api/v1/avc/validate',
+                receipts_emit: '/api/v1/avc/receipts/emit',
+                receipts_get: '/api/v1/avc/receipts/:hash',
+                protocol: '/api/v1/avc/protocol',
+            },
+        },
+        sdk: {
+            rust: 'crates/exochain-sdk',
+            typescript: 'packages/exochain-sdk',
+            python: 'packages/exochain-py',
+        },
+        mcp: {
+            public_transport: 'false',
+            transports: ['stdio', 'loopback-sse'],
+            capabilities: ['tools', 'resources', 'prompts'],
+        },
+    });
+    const client = new ExochainClient({
+        baseUrl: 'https://gateway.example',
+        fetch: transport.fetch,
+    });
+    await rejects(() => client.discover(), TransportError);
 });
 test('identity.register rejects malformed DID response payloads', async () => {
     const transport = jsonFetch({ did: 'not-a-did' });

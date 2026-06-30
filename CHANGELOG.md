@@ -25,6 +25,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-beta] - 2026-06-30
+
+### Production Proof
+
+- AVC production emit/readback proof is documented for issue `#713`: 64/64
+  listed receipts read back with `ExternalTimestampAuthority` and RFC 3161
+  proof, with 27 trust-anchor receipts split into 18 `signer_spki` and
+  9 `issuing_ca_spki` anchors.
+- DAG DB production readiness is documented through the active `/ready`
+  runtime state and production DB integration gates.
+
+### Release
+
+- Workspace, Rust SDK, TypeScript SDK, Python SDK, and WASM package release
+  metadata are aligned for `v0.2.0-beta`.
+- CI Gate 9 now rejects release-version skew across first-party package
+  metadata and cross-SDK `PROTOCOL_VERSION` constants.
+
 ### Security / Correctness
 
 Driven by the 2026-04-19 full-repo review
