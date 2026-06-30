@@ -103,11 +103,35 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           RELEASE_TAG: ${{ needs.validate-release-inputs.outputs.tag }}
+          EXOCHAIN_RELEASE_SIGNING_PUBLIC_KEY_ASC: ${{ vars.EXOCHAIN_RELEASE_SIGNING_PUBLIC_KEY_ASC }}
+          EXOCHAIN_RELEASE_SIGNING_FINGERPRINT: ${{ vars.EXOCHAIN_RELEASE_SIGNING_FINGERPRINT }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then
             echo "Dry run: signed tag requirement is skipped."
             exit 0
+          fi
+
+          signing_key_fingerprint="$(printf '%s' "$EXOCHAIN_RELEASE_SIGNING_FINGERPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+          if ! [[ "$signing_key_fingerprint" =~ ^[0-9A-F]{40}$ ]]; then
+            echo "EXOCHAIN_RELEASE_SIGNING_FINGERPRINT must be a 40-character OpenPGP fingerprint." >&2
+            exit 1
+          fi
+          if [ -z "$EXOCHAIN_RELEASE_SIGNING_PUBLIC_KEY_ASC" ]; then
+            echo "EXOCHAIN_RELEASE_SIGNING_PUBLIC_KEY_ASC repository variable is required." >&2
+            exit 1
+          fi
+
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          printf '%s\n' "$EXOCHAIN_RELEASE_SIGNING_PUBLIC_KEY_ASC" | gpg --batch --import
+
+          imported_fingerprint="$(gpg --batch --with-colons --fingerprint "$signing_key_fingerprint" | awk -F: '/^fpr:/ { print toupper($10); exit }')"
+          if [ "$imported_fingerprint" != "$signing_key_fingerprint" ]; then
+            echo "Imported release signing public key does not match EXOCHAIN_RELEASE_SIGNING_FINGERPRINT." >&2
+            exit 1
           fi
 
           git fetch --tags --force
