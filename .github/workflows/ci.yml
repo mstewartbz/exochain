@@ -277,6 +277,8 @@ jobs:
         run: bash tools/test_release_signed_tag_trust_boundary.sh
       - name: Release reusable CI boundary
         run: bash tools/test_release_reusable_ci_boundary.sh
+      - name: Release SBOM boundary
+        run: bash tools/test_release_sbom_boundary.sh
       - name: Release version alignment
         run: bash tools/test_release_version_alignment.sh
       - name: Release dry-run publication boundary

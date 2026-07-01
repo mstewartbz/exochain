@@ -263,7 +263,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}
         run: |
-          cargo cyclonedx -f json --workspace
+          cargo cyclonedx -f json --all
           # Rename outputs to include version for unambiguous identification
           for f in *.cdx.json; do
             mv "$f" "exochain-${RELEASE_VERSION}-${f}"
