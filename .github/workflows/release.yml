@@ -328,8 +328,85 @@ jobs:
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}
         run: |
           set -euo pipefail
+          crate_version_published() {
+            local crate="$1"
+            local response_file
+            local http_code
+            response_file="$(mktemp)"
+            http_code="$(curl -sS -H 'User-Agent: exochain-release-workflow (https://github.com/exochain/exochain)' -o "$response_file" -w '%{http_code}' "https://crates.io/api/v1/crates/${crate}/${RELEASE_VERSION}")"
+            case "$http_code" in
+              200)
+                rm -f "$response_file"
+                return 0
+                ;;
+              404)
+                rm -f "$response_file"
+                return 1
+                ;;
+              *)
+                echo "Unexpected crates.io response while checking ${crate} ${RELEASE_VERSION}: HTTP ${http_code}" >&2
+                cat "$response_file" >&2
+                rm -f "$response_file"
+                exit 1
+                ;;
+            esac
+          }
+
+          publish_crate_with_retry() {
+            local crate="$1"
+            local attempt=1
+            local max_attempts=6
+            local output
+            local status
+            local retry_after
+            local retry_epoch
+            local now_epoch
+            local retry_seconds
+
+            while [ "$attempt" -le "$max_attempts" ]; do
+              set +e
+              output="$(cargo publish -p "$crate" --allow-dirty 2>&1)"
+              status=$?
+              set -e
+              printf '%s\n' "$output"
+
+              if [ "$status" -eq 0 ]; then
+                return 0
+              fi
+
+              if crate_version_published "$crate"; then
+                echo "${crate} ${RELEASE_VERSION} is now published; continuing after publish response status ${status}."
+                return 0
+              fi
+
+              if grep -F 'status 429 Too Many Requests' <<<"$output" >/dev/null; then
+                retry_after="$(sed -nE 's/.*try again after (.* GMT) and see.*/\1/p' <<<"$output" | tail -n 1)"
+                if [ -n "$retry_after" ]; then
+                  retry_epoch="$(date -u -d "$retry_after" +%s)"
+                  now_epoch="$(date -u +%s)"
+                  retry_seconds=$((retry_epoch - now_epoch + 15))
+                  if [ "$retry_seconds" -lt 60 ]; then
+                    retry_seconds=60
+                  fi
+                else
+                  retry_seconds=$((attempt * 120))
+                fi
+                echo "crates.io rate limit while publishing ${crate}; sleeping ${retry_seconds}s before retry ${attempt}/${max_attempts}."
+                sleep "$retry_seconds"
+                attempt=$((attempt + 1))
+                continue
+              fi
+
+              return "$status"
+            done
+
+            echo "Failed to publish ${crate} ${RELEASE_VERSION} after ${max_attempts} attempts." >&2
+            return 1
+          }
+
           CRATES=(
             exochain-core
             exochain-dag-db-api
@@ -364,10 +441,18 @@ jobs:
             exochain-wasm
           )
           for crate in "${CRATES[@]}"; do
+            if crate_version_published "$crate"; then
+              echo "${crate} ${RELEASE_VERSION} is already published; skipping."
+              continue
+            fi
             echo "Dry-running $crate..."
             cargo publish -p "$crate" --dry-run --allow-dirty
+            if crate_version_published "$crate"; then
+              echo "${crate} ${RELEASE_VERSION} became available after dry-run; skipping publish."
+              continue
+            fi
             echo "Publishing $crate..."
-            cargo publish -p "$crate" --allow-dirty
+            publish_crate_with_retry "$crate"
             # crates.io index propagation delay
             sleep 30
           done
