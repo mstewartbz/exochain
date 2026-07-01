@@ -22,7 +22,7 @@ The live proof covers:
 `EXO_DAGDB_TEST_DATABASE_URL` was not set in the starting environment, so a live
 runtime smoke could not be claimed without provisioning Postgres evidence.
 
-`cargo test -p exo-gateway dagdb_full_migration_live_proof_artifact_contract`
+`cargo test -p exochain-gateway dagdb_full_migration_live_proof_artifact_contract`
 failed before this file existed:
 
 ```text
@@ -32,7 +32,7 @@ failed to read .../docs/dagdb/full-migration/live-proof.md: No such file or dire
 The first live gateway run exposed stale contracts and migration defects:
 
 ```text
-cargo test -p exo-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract -- --nocapture
+cargo test -p exochain-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract -- --nocapture
 ```
 
 RED failures included:
@@ -78,13 +78,13 @@ Commands:
 
 ```bash
 EXO_DAGDB_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/exochain_qm19 \
-  cargo test -p exo-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract -- --nocapture
+  cargo test -p exochain-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract -- --nocapture
 
 EXO_DAGDB_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/exochain_qm19 \
-  cargo test -p exo-gateway --features production-db --test dagdb_cross_tenant -- --nocapture
+  cargo test -p exochain-gateway --features production-db --test dagdb_cross_tenant -- --nocapture
 
 EXO_DAGDB_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/exochain_qm19 \
-  cargo test -p exo-gateway --features production-db live_idempotency -- --nocapture
+  cargo test -p exochain-gateway --features production-db live_idempotency -- --nocapture
 ```
 
 Results:
