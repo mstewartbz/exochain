@@ -27,7 +27,10 @@
 #   - License compliance (Apache-2.0; no copyleft contamination)
 
 name: EXOCHAIN Constitutional CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -272,6 +275,8 @@ jobs:
         run: bash tools/test_release_version_input_boundary.sh
       - name: Release signed-tag trust boundary
         run: bash tools/test_release_signed_tag_trust_boundary.sh
+      - name: Release reusable CI boundary
+        run: bash tools/test_release_reusable_ci_boundary.sh
       - name: Release version alignment
         run: bash tools/test_release_version_alignment.sh
       - name: Release dry-run publication boundary
