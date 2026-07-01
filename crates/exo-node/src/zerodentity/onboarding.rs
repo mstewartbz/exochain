@@ -377,7 +377,7 @@ fn first_touch_onboarding_refusal() -> (StatusCode, Json<serde_json::Value>) {
         "refusing POST /api/v1/0dentity/claims: first-touch onboarding \
          is gated. See fix-onyx-4-r1-onboarding-auth initiative. To opt \
          in for a dev cluster, build with \
-         --features exo-node/unaudited-zerodentity-first-touch-onboarding."
+         --features exochain-node/unaudited-zerodentity-first-touch-onboarding."
     );
     (
         StatusCode::FORBIDDEN,

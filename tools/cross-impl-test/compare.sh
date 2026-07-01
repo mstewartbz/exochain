@@ -201,7 +201,7 @@ run_hash_vectors() {
     log_info "Verifying $hash_vector_count canonical hash vector(s)..."
 
     if EXOCHAIN_CROSS_IMPL_HASH_VECTORS="$vectors_dir" \
-        cargo test -p exo-core cross_impl_hash_vectors_match_golden -- --exact --nocapture \
+        cargo test -p exochain-core cross_impl_hash_vectors_match_golden -- --exact --nocapture \
         > "$output_dir/rust_hash_vectors.txt" 2>&1; then
         log_pass "Rust canonical hash vectors passed"
     else

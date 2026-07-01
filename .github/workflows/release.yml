@@ -313,29 +313,52 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Verify crates.io namespace ownership
+        env:
+          EXOCHAIN_CRATES_IO_ALLOWED_OWNERS: ${{ vars.EXOCHAIN_CRATES_IO_ALLOWED_OWNERS }}
+        run: node tools/check_cratesio_namespace_ownership.mjs
+
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
           CRATES=(
-            exo-core
-            exo-identity
-            exo-consent
-            exo-authority
-            exo-dag
-            exo-proofs
-            exo-gatekeeper
-            exo-governance
-            exo-escalation
-            exo-legal
-            exo-tenant
-            exo-api
-            exo-gateway
-            decision-forum
+            exochain-core
+            exochain-dag-db-api
+            exochain-identity
+            exochain-api
+            exochain-authority
+            exochain-avc
+            exochain-consent
+            exochain-dag-db-core
+            exochain-dag-db-graph
+            exochain-dag-db-domain
+            exochain-dag-db-retrieval
+            exochain-dag-db-exchange
+            exochain-dag
+            exochain-dag-db-postgres
+            exochain-gatekeeper
+            exochain-governance
+            exochain-escalation
+            exochain-tenant
+            exochain-catapult
+            exochain-legal
+            exochain-decision-forum
+            exochain-consensus
+            exochain-dag-db-lab
+            exochain-economy
+            exochain-gateway
+            exochain-messaging
+            exochain-root
+            exochain-sdk
+            exochain-node
+            exochain-proofs
             exochain-wasm
           )
           for crate in "${CRATES[@]}"; do
+            echo "Dry-running $crate..."
+            cargo publish -p "$crate" --dry-run --allow-dirty
             echo "Publishing $crate..."
             cargo publish -p "$crate" --allow-dirty
             # crates.io index propagation delay

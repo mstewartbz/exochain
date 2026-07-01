@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-catapult"
+name = "exochain-catapult"
 description = "EXOCHAIN Catapult — franchise business incubator with FM 3-05 operational doctrine"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,16 +25,20 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_catapult"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
-exo-identity = { path = "../exo-identity" }
-exo-consent = { path = "../exo-consent" }
-exo-authority = { path = "../exo-authority" }
-exo-tenant = { path = "../exo-tenant" }
-exo-escalation = { path = "../exo-escalation" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
+exo-consent = { package = "exochain-consent", path = "../exo-consent", version = "=0.2.0-beta" }
+exo-authority = { package = "exochain-authority", path = "../exo-authority", version = "=0.2.0-beta" }
+exo-tenant = { package = "exochain-tenant", path = "../exo-tenant", version = "=0.2.0-beta" }
+exo-escalation = { package = "exochain-escalation", path = "../exo-escalation", version = "=0.2.0-beta" }
 ciborium = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

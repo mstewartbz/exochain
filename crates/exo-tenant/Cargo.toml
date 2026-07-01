@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-tenant"
+name = "exochain-tenant"
 description = "EXOCHAIN constitutional trust fabric — multi-tenant isolation, cold storage, sharding"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,12 +25,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_tenant"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
-exo-identity = { path = "../exo-identity" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }

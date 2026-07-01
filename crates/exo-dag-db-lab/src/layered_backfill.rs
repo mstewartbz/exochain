@@ -1394,12 +1394,12 @@ mod tests {
             vec![
                 surface(
                     "flat_retrieval",
-                    "cargo test -p exo-dag-db-retrieval kg_retrieval",
+                    "cargo test -p exochain-dag-db-retrieval kg_retrieval",
                     "passed",
                 ),
                 surface(
                     "context_packets",
-                    "cargo test -p exo-dag-db-retrieval context_packet_output",
+                    "cargo test -p exochain-dag-db-retrieval context_packet_output",
                     "passed",
                 ),
             ],

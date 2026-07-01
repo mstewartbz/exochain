@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-governance"
+name = "exochain-governance"
 description = "EXOCHAIN constitutional trust fabric — legislative legitimacy: quorum, clearance, crosscheck, challenge, delegation, deliberation"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,15 +25,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_governance"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
 ciborium = { workspace = true }
-exo-identity = { path = "../exo-identity" }
-exo-consent = { path = "../exo-consent" }
-exo-authority = { path = "../exo-authority" }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
+exo-consent = { package = "exochain-consent", path = "../exo-consent", version = "=0.2.0-beta" }
+exo-authority = { package = "exochain-authority", path = "../exo-authority", version = "=0.2.0-beta" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }

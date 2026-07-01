@@ -34,7 +34,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 # Build the distributed node binary and standalone gateway with DB-backed
 # adjudication enabled for production container deployments.
-RUN cargo build --release --bin exochain --bin exo-gateway --features exo-gateway/production-db
+RUN cargo build --release --bin exochain --bin exo-gateway --features exochain-gateway/production-db
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

@@ -627,7 +627,7 @@ def main() -> None:
     print("To integrate:")
     print(f"  1. Copy {snake_name}.rs into the appropriate crate's src/ directory")
     print(f"  2. Add 'pub mod {snake_name};' to the crate's lib.rs")
-    print(f"  3. Run: cargo test -p exo-gatekeeper")
+    print(f"  3. Run: cargo test -p exochain-gatekeeper")
 
 
 if __name__ == "__main__":

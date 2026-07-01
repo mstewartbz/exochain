@@ -10,14 +10,14 @@ mkdir -p "$REPORT_DIR"
 
 metadata="$(cargo metadata --format-version=1 --no-deps)"
 required=(
-  exo-dag-db-api
-  exo-dag-db-core
-  exo-dag-db-graph
-  exo-dag-db-domain
-  exo-dag-db-retrieval
-  exo-dag-db-exchange
-  exo-dag-db-postgres
-  exo-dag-db-lab
+  exochain-dag-db-api
+  exochain-dag-db-core
+  exochain-dag-db-graph
+  exochain-dag-db-domain
+  exochain-dag-db-retrieval
+  exochain-dag-db-exchange
+  exochain-dag-db-postgres
+  exochain-dag-db-lab
 )
 
 missing=()
@@ -38,13 +38,13 @@ forbidden_edges="$(
     | @tsv
   ' <<<"$metadata" | awk '
     function rank(name) {
-      if (name == "exo-dag-db-core") return 1
-      if (name == "exo-dag-db-graph") return 2
-      if (name == "exo-dag-db-domain") return 3
-      if (name == "exo-dag-db-retrieval") return 4
-      if (name == "exo-dag-db-exchange") return 5
-      if (name == "exo-dag-db-postgres") return 6
-      if (name == "exo-dag-db-lab") return 7
+      if (name == "exochain-dag-db-core") return 1
+      if (name == "exochain-dag-db-graph") return 2
+      if (name == "exochain-dag-db-domain") return 3
+      if (name == "exochain-dag-db-retrieval") return 4
+      if (name == "exochain-dag-db-exchange") return 5
+      if (name == "exochain-dag-db-postgres") return 6
+      if (name == "exochain-dag-db-lab") return 7
       return 0
     }
     {
@@ -63,16 +63,16 @@ forbidden_exo_api_edges="$(
     | select(.source == null)
     | .name as $from
     | select([
-        "exo-dag-db-core",
-        "exo-dag-db-graph",
-        "exo-dag-db-domain",
-        "exo-dag-db-retrieval",
-        "exo-dag-db-exchange",
-        "exo-dag-db-postgres",
-        "exo-dag-db-lab"
+        "exochain-dag-db-core",
+        "exochain-dag-db-graph",
+        "exochain-dag-db-domain",
+        "exochain-dag-db-retrieval",
+        "exochain-dag-db-exchange",
+        "exochain-dag-db-postgres",
+        "exochain-dag-db-lab"
       ] | index($from))
     | (.dependencies // [])[]
-    | select(.source == null and .name == "exo-api")
+    | select(.source == null and .name == "exochain-api")
     | "\($from) -> \(.name)"
   ' <<<"$metadata"
 )"

@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-gatekeeper"
+name = "exochain-gatekeeper"
 description = "EXOCHAIN judicial branch — CGR kernel, combinator algebra, invariant enforcement, Holon runtime, MCP middleware"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,14 +25,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_gatekeeper"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-api = { path = "../exo-api" }
-exo-consent = { path = "../exo-consent" }
-exo-core = { path = "../exo-core" }
-exo-identity = { path = "../exo-identity" }
+exo-api = { package = "exochain-api", path = "../exo-api", version = "=0.2.0-beta" }
+exo-consent = { package = "exochain-consent", path = "../exo-consent", version = "=0.2.0-beta" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 ciborium = { workspace = true }
@@ -46,15 +50,15 @@ hex = { workspace = true }
 allow-simulated-tee = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-exo-dag-db-core = { path = "../exo-dag-db-core" }
-exo-dag-db-domain = { path = "../exo-dag-db-domain" }
-exo-dag-db-exchange = { path = "../exo-dag-db-exchange" }
-exo-dag-db-postgres = { path = "../exo-dag-db-postgres", features = ["postgres"] }
+exo-dag-db-core = { package = "exochain-dag-db-core", path = "../exo-dag-db-core", version = "=0.2.0-beta" }
+exo-dag-db-domain = { package = "exochain-dag-db-domain", path = "../exo-dag-db-domain", version = "=0.2.0-beta" }
+exo-dag-db-exchange = { package = "exochain-dag-db-exchange", path = "../exo-dag-db-exchange", version = "=0.2.0-beta" }
+exo-dag-db-postgres = { package = "exochain-dag-db-postgres", path = "../exo-dag-db-postgres", version = "=0.2.0-beta", features = ["postgres"] }
 sqlx = { workspace = true }
 
 [dev-dependencies]
-exo-api = { path = "../exo-api" }
-exo-core = { path = "../exo-core" }
+exo-api = { package = "exochain-api", path = "../exo-api", version = "=0.2.0-beta" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 

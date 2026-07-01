@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-proofs"
+name = "exochain-proofs"
 description = "EXOCHAIN zero-knowledge proof skeleton -- UNAUDITED, pedagogical only. See crate README."
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -24,6 +24,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[lib]
+name = "exo_proofs"
+path = "src/lib.rs"
 
 [lints]
 workspace = true
@@ -39,7 +43,7 @@ workspace = true
 unaudited-pedagogical-proofs = []
 
 [dependencies]
-exo-core = { path = "../exo-core" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
 serde = { workspace = true }
 blake3 = { workspace = true }
 sha2 = { workspace = true }

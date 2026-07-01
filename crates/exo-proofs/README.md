@@ -75,11 +75,11 @@ the feature flag anywhere downstream.
 
 ## Tests
 
-- **Default build (feature OFF):** `cargo test -p exo-proofs` runs the
+- **Default build (feature OFF):** `cargo test -p exochain-proofs` runs the
   refusal integration tests in `tests/refusal.rs`, verifying that every
   gated entry point errors out. Unit tests inside each module are
   `#[cfg(feature = "unaudited-pedagogical-proofs")]` and do not run.
-- **Pedagogical build (feature ON):** `cargo test -p exo-proofs --features
+- **Pedagogical build (feature ON):** `cargo test -p exochain-proofs --features
   unaudited-pedagogical-proofs` runs the full 79-test suite exercising the
   skeleton's internal consistency.
 

@@ -96,7 +96,7 @@ jobs:
       - name: Run coverage
         # exochain-wasm: excluded — wasm bindings are exercised by the JS
         # bridge tests (Gate 21), not tarpaulin.
-        # exo-proofs: excluded — the entire crate is gated behind
+        # exochain-proofs: excluded — the entire crate is gated behind
         # `unaudited-pedagogical-proofs` (default OFF) after PR #106.
         # With the feature OFF, the crate compiles to refusal stubs that
         # tarpaulin correctly reports as 0% covered. Testing the gated
@@ -109,7 +109,7 @@ jobs:
           cargo tarpaulin \
             --workspace \
             --exclude exochain-wasm \
-            --exclude exo-proofs \
+            --exclude exochain-proofs \
             --out xml \
             --output-dir coverage \
             --engine llvm \
@@ -283,6 +283,8 @@ jobs:
         run: bash tools/test_release_dry_run_boundaries.sh
       - name: Release publish completion boundary
         run: bash tools/test_release_publish_boundaries.sh
+      - name: Crates.io release packaging boundary
+        run: bash tools/test_cratesio_release_packaging.sh
       - name: WASM npm package boundary
         run: bash tools/test_wasm_npm_package_boundary.sh
       - name: Repo truth and public claims
@@ -436,11 +438,11 @@ jobs:
       - name: Run DAG DB migration upgrade regression
         env:
           EXO_DAGDB_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
-        run: cargo test -p exo-dag-db-postgres --features postgres --test migration_contract pr708_migrator_upgrades_from_last_successful_deployed_ledger -- --nocapture
+        run: cargo test -p exochain-dag-db-postgres --features postgres --test migration_contract pr708_migrator_upgrades_from_last_successful_deployed_ledger -- --nocapture
       - name: Run DB-backed gateway library tests
-        run: cargo test -p exo-gateway --lib --features production-db -- --test-threads=1
+        run: cargo test -p exochain-gateway --lib --features production-db -- --test-threads=1
       - name: Run DB-backed integration tests
-        run: cargo test --workspace --test '*' --features exo-gateway/production-db
+        run: cargo test --workspace --test '*' --features exochain-gateway/production-db
       - name: Stop Postgres
         if: always()
         run: docker compose -f docker-compose.ci.yml down
@@ -472,10 +474,10 @@ jobs:
         if: steps.filter.outputs.node == 'true'
       - name: Run exo-node unit and integration tests
         if: steps.filter.outputs.node == 'true'
-        run: cargo test -p exo-node
+        run: cargo test -p exochain-node
       - name: Run exo-dag consensus tests
         if: steps.filter.outputs.node == 'true'
-        run: cargo test -p exo-dag -- consensus
+        run: cargo test -p exochain-dag -- consensus
 
   # -----------------------------------------------------------------------
   # Gate 15: State sync and join test
@@ -503,16 +505,16 @@ jobs:
         if: steps.filter.outputs.sync == 'true'
       - name: Run sync engine tests
         if: steps.filter.outputs.sync == 'true'
-        run: cargo test -p exo-node -- sync
+        run: cargo test -p exochain-node -- sync
       - name: Run store tests
         if: steps.filter.outputs.sync == 'true'
-        run: cargo test -p exo-node -- store
+        run: cargo test -p exochain-node -- store
       - name: Run wire protocol tests
         if: steps.filter.outputs.sync == 'true'
-        run: cargo test -p exo-node -- wire
+        run: cargo test -p exochain-node -- wire
       - name: Run metrics tests
         if: steps.filter.outputs.sync == 'true'
-        run: cargo test -p exo-node -- metrics
+        run: cargo test -p exochain-node -- metrics
 
   # -----------------------------------------------------------------------
   # Gate 16: Cross-platform binary build
@@ -577,7 +579,7 @@ jobs:
       - name: Run 0dentity module coverage
         run: |
           cargo tarpaulin \
-            --packages exo-node \
+            --packages exochain-node \
             --include-files "crates/exo-node/src/zerodentity/**" \
             --out xml \
             --output-dir coverage-zerodentity \
@@ -610,7 +612,7 @@ jobs:
       - name: Run exo-root coverage
         run: |
           cargo tarpaulin \
-            --packages exo-root \
+            --packages exochain-root \
             --include-files "crates/exo-root/src/**" \
             --out xml \
             --out stdout \
@@ -644,7 +646,7 @@ jobs:
       - name: Run root genesis portal coverage
         run: |
           cargo tarpaulin \
-            --packages exo-node \
+            --packages exochain-node \
             --include-files "crates/exo-node/src/root_genesis.rs" \
             --out xml \
             --output-dir coverage-root-genesis-portal \

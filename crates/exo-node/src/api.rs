@@ -336,7 +336,7 @@ async fn handle_propose(
         tracing::warn!(
             "refusing POST /api/v1/governance/propose: raw admin governance \
              proposal shortcut is gated. Build with \
-             --features exo-node/unaudited-admin-governance-shortcut only for \
+             --features exochain-node/unaudited-admin-governance-shortcut only for \
              isolated development clusters."
         );
         return Err((
@@ -382,7 +382,7 @@ async fn handle_broadcast(
         tracing::warn!(
             "refusing POST /api/v1/governance/broadcast: raw admin governance \
              event broadcast shortcut is gated. Build with \
-             --features exo-node/unaudited-admin-governance-shortcut only for \
+             --features exochain-node/unaudited-admin-governance-shortcut only for \
              isolated development clusters."
         );
         return Err((
@@ -483,7 +483,7 @@ async fn handle_validator_change(
             "refusing POST /api/v1/governance/validators: admin bearer \
              shortcut is gated. See fix-admin-governance-bypass \
              initiative. To opt in for a dev cluster, build with \
-             --features exo-node/unaudited-admin-governance-shortcut."
+             --features exochain-node/unaudited-admin-governance-shortcut."
         );
         return Err((
             StatusCode::FORBIDDEN,

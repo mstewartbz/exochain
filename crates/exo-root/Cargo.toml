@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-root"
+name = "exochain-root"
 description = "EXOCHAIN root genesis authority ceremony, FROST DKG, threshold signatures, and trust bundle verification"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,12 +25,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_root"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
-exo-authority = { path = "../exo-authority" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-authority = { package = "exochain-authority", path = "../exo-authority", version = "=0.2.0-beta" }
 frost-ristretto255 = { workspace = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
