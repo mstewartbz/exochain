@@ -114,6 +114,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_nil_tenant_id_for_all_strategies() {
+        let strategies = [
+            ShardStrategy::HashBased { total_shards: 16 },
+            ShardStrategy::RangeBased { shard_size: 16 },
+            ShardStrategy::Geographic {
+                region: "us-east-1".into(),
+            },
+            ShardStrategy::Single,
+        ];
+
+        for strategy in strategies {
+            assert!(strategy.assign(Uuid::nil()).is_err());
+        }
+    }
+
+    #[test]
+    fn geographic_strategy_uses_single_region_shard() {
+        let strategy = ShardStrategy::Geographic {
+            region: "eu-central-1".into(),
+        };
+        let shard = strategy.assign(Uuid::from_bytes([7u8; 16])).unwrap();
+        assert_eq!(shard, 0);
+    }
+
+    #[test]
     fn range_based_rejects_zero_shard_size() {
         let strategy = ShardStrategy::RangeBased { shard_size: 0 };
         assert!(strategy.assign(Uuid::from_bytes([1u8; 16])).is_err());

@@ -46,7 +46,7 @@ assert_exochain_build_enables_production_db() {
       }
       if (command ~ /--bin[[:space:]]+exochain/) {
         found = 1
-        if (command !~ /--features[[:space:]][^\\n]*exo-gateway\/production-db/) {
+        if (command !~ /--features[[:space:]][^\\n]*exochain-gateway\/production-db/) {
           bad = 1
         }
       }
@@ -57,7 +57,7 @@ assert_exochain_build_enables_production_db() {
       }
     }
   ' "$file"; then
-    fail "$file must build exochain with --features exo-gateway/production-db"
+    fail "$file must build exochain with --features exochain-gateway/production-db"
   fi
 }
 

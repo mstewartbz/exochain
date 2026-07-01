@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-gateway"
+name = "exochain-gateway"
 description = "EXOCHAIN constitutional trust fabric — HTTP gateway server with default-deny pattern"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,22 +25,26 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_gateway"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-decision-forum = { path = "../decision-forum" }
-exo-core = { path = "../exo-core" }
-exo-api = { path = "../exo-api" }
-exo-dag-db-core = { path = "../exo-dag-db-core" }
-exo-dag-db-domain = { path = "../exo-dag-db-domain" }
-exo-dag-db-exchange = { path = "../exo-dag-db-exchange" }
-exo-dag-db-postgres = { path = "../exo-dag-db-postgres", default-features = false, optional = true }
-exo-identity = { path = "../exo-identity" }
-exo-consent = { path = "../exo-consent" }
-exo-gatekeeper = { path = "../exo-gatekeeper" }
-exo-governance = { path = "../exo-governance" }
-exo-legal = { path = "../exo-legal" }
+decision-forum = { package = "exochain-decision-forum", path = "../decision-forum", version = "=0.2.0-beta" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-api = { package = "exochain-api", path = "../exo-api", version = "=0.2.0-beta" }
+exo-dag-db-core = { package = "exochain-dag-db-core", path = "../exo-dag-db-core", version = "=0.2.0-beta" }
+exo-dag-db-domain = { package = "exochain-dag-db-domain", path = "../exo-dag-db-domain", version = "=0.2.0-beta" }
+exo-dag-db-exchange = { package = "exochain-dag-db-exchange", path = "../exo-dag-db-exchange", version = "=0.2.0-beta" }
+exo-dag-db-postgres = { package = "exochain-dag-db-postgres", path = "../exo-dag-db-postgres", version = "=0.2.0-beta", default-features = false, optional = true }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
+exo-consent = { package = "exochain-consent", path = "../exo-consent", version = "=0.2.0-beta" }
+exo-gatekeeper = { package = "exochain-gatekeeper", path = "../exo-gatekeeper", version = "=0.2.0-beta" }
+exo-governance = { package = "exochain-governance", path = "../exo-governance", version = "=0.2.0-beta" }
+exo-legal = { package = "exochain-legal", path = "../exo-legal", version = "=0.2.0-beta" }
 bs58 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -65,6 +69,10 @@ tracing-subscriber = { workspace = true }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 async-stream = { workspace = true }
+
+[[bin]]
+name = "exo-gateway"
+path = "src/main.rs"
 
 [[bin]]
 name = "dagdb_writeback_sign"

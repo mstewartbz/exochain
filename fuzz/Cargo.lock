@@ -374,31 +374,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "exo-authority"
+name = "exo-fuzz"
+version = "0.0.0"
+dependencies = [
+ "ciborium",
+ "exochain-core",
+ "exochain-governance",
+ "libfuzzer-sys",
+ "ml-dsa",
+ "pkcs8 0.11.0-rc.11",
+ "serde_json",
+ "sha3",
+ "signature 3.0.0-rc.10",
+ "spki 0.8.0-rc.4",
+]
+
+[[package]]
+name = "exochain-authority"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
- "exo-core",
- "exo-identity",
+ "exochain-core",
+ "exochain-identity",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "exo-consent"
+name = "exochain-consent"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-core",
+ "exochain-core",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "exo-core"
+name = "exochain-core"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
@@ -417,31 +433,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-fuzz"
-version = "0.0.0"
-dependencies = [
- "ciborium",
- "exo-core",
- "exo-governance",
- "libfuzzer-sys",
- "ml-dsa",
- "pkcs8 0.11.0-rc.11",
- "serde_json",
- "sha3",
- "signature 3.0.0-rc.10",
- "spki 0.8.0-rc.4",
-]
-
-[[package]]
-name = "exo-governance"
+name = "exochain-governance"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-authority",
- "exo-consent",
- "exo-core",
- "exo-identity",
+ "exochain-authority",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-identity",
  "serde",
  "serde_json",
  "thiserror",
@@ -449,14 +449,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-identity"
+name = "exochain-identity"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "bs58",
  "chacha20poly1305",
  "ciborium",
- "exo-core",
+ "exochain-core",
  "getrandom 0.2.16",
  "hkdf",
  "serde",

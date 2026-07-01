@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-legal"
+name = "exochain-legal"
 description = "EXOCHAIN constitutional trust fabric — litigation-grade evidence, eDiscovery, privilege, fiduciary duty"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,15 +25,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_legal"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
-exo-identity = { path = "../exo-identity" }
-exo-authority = { path = "../exo-authority" }
-exo-governance = { path = "../exo-governance" }
-exo-gatekeeper = { path = "../exo-gatekeeper" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
+exo-authority = { package = "exochain-authority", path = "../exo-authority", version = "=0.2.0-beta" }
+exo-governance = { package = "exochain-governance", path = "../exo-governance", version = "=0.2.0-beta" }
+exo-gatekeeper = { package = "exochain-gatekeeper", path = "../exo-gatekeeper", version = "=0.2.0-beta" }
 serde = { workspace = true }
 ciborium = { workspace = true }
 blake3 = { workspace = true }

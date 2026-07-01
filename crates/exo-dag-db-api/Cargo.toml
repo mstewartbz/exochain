@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-dag-db-api"
+name = "exochain-dag-db-api"
 description = "EXOCHAIN DAG DB API DTO wire contracts"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -24,6 +24,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[lib]
+name = "exo_dag_db_api"
+path = "src/lib.rs"
 
 [lints]
 workspace = true

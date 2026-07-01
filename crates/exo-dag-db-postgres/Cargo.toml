@@ -1,5 +1,5 @@
 [package]
-name = "exo-dag-db-postgres"
+name = "exochain-dag-db-postgres"
 description = "EXOCHAIN DAG DB PostgreSQL persistence adapters"
 version.workspace = true
 edition.workspace = true
@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[lib]
+name = "exo_dag_db_postgres"
+path = "src/lib.rs"
 
 [lints]
 workspace = true
@@ -16,14 +20,14 @@ default = []
 postgres = ["dep:sqlx", "dep:tokio", "dep:tracing"]
 
 [dependencies]
-exo-dag-db-api = { path = "../exo-dag-db-api" }
-exo-core = { path = "../exo-core" }
-exo-dag = { path = "../exo-dag" }
-exo-dag-db-core = { path = "../exo-dag-db-core" }
-exo-dag-db-domain = { path = "../exo-dag-db-domain" }
-exo-dag-db-exchange = { path = "../exo-dag-db-exchange" }
-exo-dag-db-graph = { path = "../exo-dag-db-graph" }
-exo-dag-db-retrieval = { path = "../exo-dag-db-retrieval" }
+exo-dag-db-api = { package = "exochain-dag-db-api", path = "../exo-dag-db-api", version = "=0.2.0-beta" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-dag = { package = "exochain-dag", path = "../exo-dag", version = "=0.2.0-beta" }
+exo-dag-db-core = { package = "exochain-dag-db-core", path = "../exo-dag-db-core", version = "=0.2.0-beta" }
+exo-dag-db-domain = { package = "exochain-dag-db-domain", path = "../exo-dag-db-domain", version = "=0.2.0-beta" }
+exo-dag-db-exchange = { package = "exochain-dag-db-exchange", path = "../exo-dag-db-exchange", version = "=0.2.0-beta" }
+exo-dag-db-graph = { package = "exochain-dag-db-graph", path = "../exo-dag-db-graph", version = "=0.2.0-beta" }
+exo-dag-db-retrieval = { package = "exochain-dag-db-retrieval", path = "../exo-dag-db-retrieval", version = "=0.2.0-beta" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, optional = true }

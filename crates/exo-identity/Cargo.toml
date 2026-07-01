@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-identity"
+name = "exochain-identity"
 description = "EXOCHAIN constitutional trust fabric — privacy-preserving identity adjudication"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,11 +25,15 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_identity"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
 serde = { workspace = true }
 ciborium = { workspace = true }
 blake3 = { workspace = true }

@@ -24,6 +24,7 @@ manifest="Cargo.toml"
 python3 - <<'PY'
 import sys
 import tomllib
+from pathlib import Path
 
 with open("Cargo.toml", "rb") as manifest:
     cargo = tomllib.load(manifest)
@@ -35,13 +36,14 @@ bans = deny["bans"]
 if bans.get("wildcards") != "deny":
     print('cargo-deny must reject wildcard dependency requirements: set [bans].wildcards = "deny"', file=sys.stderr)
     sys.exit(1)
-if bans.get("allow-wildcard-paths") is not True:
-    print("cargo-deny must allow only private path dependency wildcards: set [bans].allow-wildcard-paths = true", file=sys.stderr)
+if bans.get("allow-wildcard-paths") is not False:
+    print("cargo-deny must reject path dependency wildcards for publishable workspace packages: set [bans].allow-wildcard-paths = false", file=sys.stderr)
     sys.exit(1)
 
 workspace_package = cargo["workspace"].get("package", {})
-if workspace_package.get("publish") is not False:
-    print("workspace packages must inherit publish = false so cargo-deny can allow private path dependency wildcards only", file=sys.stderr)
+workspace_version = workspace_package.get("version")
+if not isinstance(workspace_version, str) or not workspace_version:
+    print("workspace package version must be set before checking path dependency release pins", file=sys.stderr)
     sys.exit(1)
 
 dependencies = cargo["workspace"]["dependencies"]
@@ -56,6 +58,40 @@ if unpinned:
     print("workspace dependencies must be exactly pinned:", file=sys.stderr)
     for dependency in unpinned:
         print(f"  - {dependency}", file=sys.stderr)
+    sys.exit(1)
+
+def dependency_tables(manifest):
+    for table_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+        yield table_name, manifest.get(table_name, {})
+    for target_name, target in manifest.get("target", {}).items():
+        for table_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+            yield f"target.{target_name}.{table_name}", target.get(table_name, {})
+
+expected_path_version = f"={workspace_version}"
+path_pin_violations = []
+manifest_paths = [Path(member) / "Cargo.toml" for member in sorted(cargo["workspace"]["members"])]
+manifest_paths.extend(Path(path) for path in ("fuzz/Cargo.toml",))
+
+for manifest_path in manifest_paths:
+    if not manifest_path.exists():
+        continue
+    with manifest_path.open("rb") as member_manifest:
+        member_cargo = tomllib.load(member_manifest)
+    for table_name, table in dependency_tables(member_cargo):
+        for dependency_name, spec in sorted(table.items()):
+            if not isinstance(spec, dict) or "path" not in spec:
+                continue
+            version = spec.get("version")
+            if version != expected_path_version:
+                path_pin_violations.append(
+                    f"{manifest_path}:{table_name}.{dependency_name} "
+                    f"path={spec['path']!r} version={version!r}"
+                )
+
+if path_pin_violations:
+    print("publishable workspace path dependencies must be exactly release-pinned:", file=sys.stderr)
+    for violation in path_pin_violations:
+        print(f"  - {violation}", file=sys.stderr)
     sys.exit(1)
 PY
 

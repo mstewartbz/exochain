@@ -25,6 +25,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exochain_sdk"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
@@ -32,12 +36,12 @@ workspace = true
 # Core crates (only those actually `use`d today; see removed-deps
 # note in commit message when adding back — avoid drift between
 # `pub use` surface and dependency graph)
-exo-core = { path = "../exo-core" }
-exo-dag-db-api = { path = "../exo-dag-db-api" }
-exo-identity = { path = "../exo-identity" }
-exo-gatekeeper = { path = "../exo-gatekeeper" }
-exo-avc = { path = "../exo-avc" }
-exo-economy = { path = "../exo-economy" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+exo-dag-db-api = { package = "exochain-dag-db-api", path = "../exo-dag-db-api", version = "=0.2.0-beta" }
+exo-identity = { package = "exochain-identity", path = "../exo-identity", version = "=0.2.0-beta" }
+exo-gatekeeper = { package = "exochain-gatekeeper", path = "../exo-gatekeeper", version = "=0.2.0-beta" }
+exo-avc = { package = "exochain-avc", path = "../exo-avc", version = "=0.2.0-beta" }
+exo-economy = { package = "exochain-economy", path = "../exo-economy", version = "=0.2.0-beta" }
 
 # Serialization
 serde = { workspace = true }

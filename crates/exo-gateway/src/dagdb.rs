@@ -9576,8 +9576,8 @@ mod tests {
         let proof = repo_file("docs/dagdb/full-migration/live-proof.md");
         for required in [
             "EXO_DAGDB_TEST_DATABASE_URL",
-            "cargo test -p exo-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract",
-            "cargo test -p exo-gateway --features production-db --test dagdb_cross_tenant",
+            "cargo test -p exochain-gateway --features production-db --test dagdb_route_integration_contract dagdb_routes_integration_contract",
+            "cargo test -p exochain-gateway --features production-db --test dagdb_cross_tenant",
             "write/read/lookup",
             "tenant mismatch",
             "database_unavailable",

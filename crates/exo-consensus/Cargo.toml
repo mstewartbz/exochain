@@ -15,7 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-consensus"
+name = "exochain-consensus"
+description = "EXOCHAIN constitutional trust fabric — consensus proofs and model quorum coordination"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,11 +35,15 @@ serde.workspace = true
 thiserror.workspace = true
 
 # Local
-exo-core = { path = "../exo-core" }
-decision-forum = { path = "../decision-forum" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
+decision-forum = { package = "exochain-decision-forum", path = "../decision-forum", version = "=0.2.0-beta" }
 
 [dev-dependencies]
 proptest.workspace = true
+
+[lib]
+name = "exo_consensus"
+path = "src/lib.rs"
 
 [lints]
 workspace = true

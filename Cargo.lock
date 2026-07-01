@@ -1154,24 +1154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "decision-forum"
-version = "0.2.0-beta"
-dependencies = [
- "blake3",
- "exo-authority",
- "exo-consent",
- "exo-core",
- "exo-gatekeeper",
- "exo-governance",
- "exo-identity",
- "exo-legal",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "uuid",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1401,14 +1383,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-api"
+name = "exochain-api"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-core",
- "exo-dag-db-api",
- "exo-identity",
+ "exochain-core",
+ "exochain-dag-db-api",
+ "exochain-identity",
  "jsonschema",
  "serde",
  "serde_json",
@@ -1417,41 +1399,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-authority"
+name = "exochain-authority"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
- "exo-core",
- "exo-identity",
+ "exochain-core",
+ "exochain-identity",
  "serde",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-avc"
+name = "exochain-avc"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-authority",
- "exo-core",
+ "exochain-authority",
+ "exochain-core",
  "serde",
  "sha2",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-catapult"
+name = "exochain-catapult"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-authority",
- "exo-consent",
- "exo-core",
- "exo-escalation",
- "exo-identity",
- "exo-tenant",
+ "exochain-authority",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-escalation",
+ "exochain-identity",
+ "exochain-tenant",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -1459,29 +1441,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-consensus"
+name = "exochain-consensus"
 version = "0.2.0-beta"
 dependencies = [
- "decision-forum",
- "exo-core",
+ "exochain-core",
+ "exochain-decision-forum",
  "proptest",
  "serde",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-consent"
+name = "exochain-consent"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-core",
+ "exochain-core",
  "serde",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-core"
+name = "exochain-core"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
@@ -1502,14 +1484,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag"
+name = "exochain-dag"
 version = "0.2.0-beta"
 dependencies = [
  "async-trait",
  "blake3",
  "ciborium",
  "criterion",
- "exo-core",
+ "exochain-core",
  "proptest",
  "serde",
  "serde_json",
@@ -1520,7 +1502,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-api"
+name = "exochain-dag-db-api"
 version = "0.2.0-beta"
 dependencies = [
  "serde",
@@ -1528,30 +1510,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-core"
+name = "exochain-dag-db-core"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-core",
- "exo-dag-db-api",
+ "exochain-core",
+ "exochain-dag-db-api",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-dag-db-domain"
+name = "exochain-dag-db-domain"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-authority",
- "exo-avc",
- "exo-consent",
- "exo-core",
- "exo-dag-db-api",
- "exo-dag-db-core",
- "exo-dag-db-graph",
- "exo-identity",
+ "exochain-authority",
+ "exochain-avc",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-dag-db-api",
+ "exochain-dag-db-core",
+ "exochain-dag-db-graph",
+ "exochain-identity",
  "serde",
  "serde_json",
  "sha2",
@@ -1559,18 +1541,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-exchange"
+name = "exochain-dag-db-exchange"
 version = "0.2.0-beta"
 dependencies = [
- "exo-authority",
- "exo-avc",
- "exo-consent",
- "exo-core",
- "exo-dag-db-api",
- "exo-dag-db-core",
- "exo-dag-db-domain",
- "exo-dag-db-graph",
- "exo-dag-db-retrieval",
+ "exochain-authority",
+ "exochain-avc",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-dag-db-api",
+ "exochain-dag-db-core",
+ "exochain-dag-db-domain",
+ "exochain-dag-db-graph",
+ "exochain-dag-db-retrieval",
  "serde",
  "serde_json",
  "sha2",
@@ -1578,12 +1560,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-graph"
+name = "exochain-dag-db-graph"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-core",
- "exo-dag-db-api",
+ "exochain-core",
+ "exochain-dag-db-api",
  "serde",
  "serde_json",
  "sha2",
@@ -1591,18 +1573,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-lab"
+name = "exochain-dag-db-lab"
 version = "0.2.0-beta"
 dependencies = [
  "criterion",
- "exo-core",
- "exo-dag-db-api",
- "exo-dag-db-core",
- "exo-dag-db-domain",
- "exo-dag-db-exchange",
- "exo-dag-db-graph",
- "exo-dag-db-postgres",
- "exo-dag-db-retrieval",
+ "exochain-core",
+ "exochain-dag-db-api",
+ "exochain-dag-db-core",
+ "exochain-dag-db-domain",
+ "exochain-dag-db-exchange",
+ "exochain-dag-db-graph",
+ "exochain-dag-db-postgres",
+ "exochain-dag-db-retrieval",
  "serde",
  "serde_json",
  "sha2",
@@ -1612,17 +1594,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-postgres"
+name = "exochain-dag-db-postgres"
 version = "0.2.0-beta"
 dependencies = [
- "exo-core",
- "exo-dag",
- "exo-dag-db-api",
- "exo-dag-db-core",
- "exo-dag-db-domain",
- "exo-dag-db-exchange",
- "exo-dag-db-graph",
- "exo-dag-db-retrieval",
+ "exochain-core",
+ "exochain-dag",
+ "exochain-dag-db-api",
+ "exochain-dag-db-core",
+ "exochain-dag-db-domain",
+ "exochain-dag-db-exchange",
+ "exochain-dag-db-graph",
+ "exochain-dag-db-retrieval",
  "serde",
  "serde_json",
  "sqlx",
@@ -1632,14 +1614,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-dag-db-retrieval"
+name = "exochain-dag-db-retrieval"
 version = "0.2.0-beta"
 dependencies = [
- "exo-core",
- "exo-dag-db-api",
- "exo-dag-db-core",
- "exo-dag-db-domain",
- "exo-dag-db-graph",
+ "exochain-core",
+ "exochain-dag-db-api",
+ "exochain-dag-db-core",
+ "exochain-dag-db-domain",
+ "exochain-dag-db-graph",
  "serde",
  "serde_json",
  "sha2",
@@ -1647,44 +1629,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-economy"
+name = "exochain-decision-forum"
+version = "0.2.0-beta"
+dependencies = [
+ "blake3",
+ "exochain-authority",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-gatekeeper",
+ "exochain-governance",
+ "exochain-identity",
+ "exochain-legal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "uuid",
+]
+
+[[package]]
+name = "exochain-economy"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-core",
+ "exochain-core",
  "serde",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-escalation"
+name = "exochain-escalation"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-core",
- "exo-gatekeeper",
- "exo-governance",
- "exo-identity",
+ "exochain-core",
+ "exochain-gatekeeper",
+ "exochain-governance",
+ "exochain-identity",
  "serde",
  "thiserror 2.0.17",
  "uuid",
 ]
 
 [[package]]
-name = "exo-gatekeeper"
+name = "exochain-gatekeeper"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
- "exo-api",
- "exo-consent",
- "exo-core",
- "exo-dag-db-core",
- "exo-dag-db-domain",
- "exo-dag-db-exchange",
- "exo-dag-db-postgres",
- "exo-identity",
+ "exochain-api",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-dag-db-core",
+ "exochain-dag-db-domain",
+ "exochain-dag-db-exchange",
+ "exochain-dag-db-postgres",
+ "exochain-identity",
  "hex",
  "serde",
  "serde_json",
@@ -1696,7 +1696,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-gateway"
+name = "exochain-gateway"
 version = "0.2.0-beta"
 dependencies = [
  "async-graphql",
@@ -1708,18 +1708,18 @@ dependencies = [
  "bs58",
  "chrono",
  "ciborium",
- "decision-forum",
- "exo-api",
- "exo-consent",
- "exo-core",
- "exo-dag-db-core",
- "exo-dag-db-domain",
- "exo-dag-db-exchange",
- "exo-dag-db-postgres",
- "exo-gatekeeper",
- "exo-governance",
- "exo-identity",
- "exo-legal",
+ "exochain-api",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-dag-db-core",
+ "exochain-dag-db-domain",
+ "exochain-dag-db-exchange",
+ "exochain-dag-db-postgres",
+ "exochain-decision-forum",
+ "exochain-gatekeeper",
+ "exochain-governance",
+ "exochain-identity",
+ "exochain-legal",
  "getrandom 0.2.16",
  "hex",
  "percent-encoding",
@@ -1739,15 +1739,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-governance"
+name = "exochain-governance"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-authority",
- "exo-consent",
- "exo-core",
- "exo-identity",
+ "exochain-authority",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-identity",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -1755,14 +1755,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-identity"
+name = "exochain-identity"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "bs58",
  "chacha20poly1305",
  "ciborium",
- "exo-core",
+ "exochain-core",
  "getrandom 0.2.16",
  "hkdf",
  "proptest",
@@ -1775,16 +1775,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-legal"
+name = "exochain-legal"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-authority",
- "exo-core",
- "exo-gatekeeper",
- "exo-governance",
- "exo-identity",
+ "exochain-authority",
+ "exochain-core",
+ "exochain-gatekeeper",
+ "exochain-governance",
+ "exochain-identity",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -1792,12 +1792,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-messaging"
+name = "exochain-messaging"
 version = "0.2.0-beta"
 dependencies = [
  "ciborium",
- "exo-core",
- "exo-identity",
+ "exochain-core",
+ "exochain-identity",
  "hex",
  "hkdf",
  "serde",
@@ -1810,7 +1810,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-node"
+name = "exochain-node"
 version = "0.2.0-beta"
 dependencies = [
  "anyhow",
@@ -1827,20 +1827,20 @@ dependencies = [
  "der 0.8.0",
  "directories",
  "ed25519-dalek",
- "exo-api",
- "exo-authority",
- "exo-avc",
- "exo-consent",
- "exo-core",
- "exo-dag",
- "exo-economy",
- "exo-escalation",
- "exo-gatekeeper",
- "exo-gateway",
- "exo-governance",
- "exo-identity",
- "exo-legal",
- "exo-root",
+ "exochain-api",
+ "exochain-authority",
+ "exochain-avc",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-dag",
+ "exochain-economy",
+ "exochain-escalation",
+ "exochain-gatekeeper",
+ "exochain-gateway",
+ "exochain-governance",
+ "exochain-identity",
+ "exochain-legal",
+ "exochain-root",
  "exochain-sdk",
  "futures",
  "getrandom 0.2.16",
@@ -1880,12 +1880,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-proofs"
+name = "exochain-proofs"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "ciborium",
- "exo-core",
+ "exochain-core",
  "serde",
  "serde_json",
  "sha2",
@@ -1893,14 +1893,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-root"
+name = "exochain-root"
 version = "0.2.0-beta"
 dependencies = [
  "argon2",
  "chacha20poly1305",
  "ciborium",
- "exo-authority",
- "exo-core",
+ "exochain-authority",
+ "exochain-core",
  "frost-ristretto255",
  "hkdf",
  "rand 0.8.6",
@@ -1913,29 +1913,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-tenant"
-version = "0.2.0-beta"
-dependencies = [
- "blake3",
- "exo-core",
- "exo-identity",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "uuid",
-]
-
-[[package]]
 name = "exochain-sdk"
 version = "0.2.0-beta"
 dependencies = [
  "blake3",
- "exo-avc",
- "exo-core",
- "exo-dag-db-api",
- "exo-economy",
- "exo-gatekeeper",
- "exo-identity",
+ "exochain-avc",
+ "exochain-core",
+ "exochain-dag-db-api",
+ "exochain-economy",
+ "exochain-gatekeeper",
+ "exochain-identity",
  "reqwest",
  "serde",
  "serde_json",
@@ -1945,27 +1932,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "exochain-tenant"
+version = "0.2.0-beta"
+dependencies = [
+ "blake3",
+ "exochain-core",
+ "exochain-identity",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "uuid",
+]
+
+[[package]]
 name = "exochain-wasm"
 version = "0.2.0-beta"
 dependencies = [
- "decision-forum",
  "ed25519-dalek",
- "exo-api",
- "exo-authority",
- "exo-avc",
- "exo-catapult",
- "exo-consent",
- "exo-core",
- "exo-dag",
- "exo-economy",
- "exo-escalation",
- "exo-gatekeeper",
- "exo-governance",
- "exo-identity",
- "exo-legal",
- "exo-messaging",
- "exo-proofs",
- "exo-tenant",
+ "exochain-api",
+ "exochain-authority",
+ "exochain-avc",
+ "exochain-catapult",
+ "exochain-consent",
+ "exochain-core",
+ "exochain-dag",
+ "exochain-decision-forum",
+ "exochain-economy",
+ "exochain-escalation",
+ "exochain-gatekeeper",
+ "exochain-governance",
+ "exochain-identity",
+ "exochain-legal",
+ "exochain-messaging",
+ "exochain-proofs",
+ "exochain-tenant",
  "getrandom 0.2.16",
  "hex",
  "js-sys",

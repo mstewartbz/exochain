@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "exo-economy"
+name = "exochain-economy"
 description = "EXOCHAIN custody-native transaction economy — quote, settle, and revenue-share scaffolding with zero-priced launch policy"
 documentation = "https://docs.exochain.io"
 version.workspace = true
@@ -25,11 +25,15 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "exo_economy"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-exo-core = { path = "../exo-core" }
+exo-core = { package = "exochain-core", path = "../exo-core", version = "=0.2.0-beta" }
 serde = { workspace = true }
 ciborium = { workspace = true }
 thiserror = { workspace = true }

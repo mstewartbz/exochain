@@ -275,11 +275,11 @@ git -C "$REPO_ROOT" cat-file -e "$verifier_commit^{commit}" 2>/dev/null \
 mkdir -p "$verifier_source"
 git -C "$REPO_ROOT" archive "$verifier_commit" | tar -x -C "$verifier_source"
 
-verification_command="CARGO_TARGET_DIR=$REPO_ROOT/target-root-trust-$verifier_short cargo run -p exo-node -- genesis verify-bundle --input $verify_input"
+verification_command="CARGO_TARGET_DIR=$REPO_ROOT/target-root-trust-$verifier_short cargo run -p exochain-node -- genesis verify-bundle --input $verify_input"
 if ! (
   cd "$verifier_source" &&
   CARGO_TARGET_DIR="$REPO_ROOT/target-root-trust-$verifier_short" \
-    cargo run -p exo-node -- genesis verify-bundle --input "$verify_input" \
+    cargo run -p exochain-node -- genesis verify-bundle --input "$verify_input" \
       >"$verification_output" 2>"$verification_error"
 ); then
   cat "$verification_error" || true
