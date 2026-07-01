@@ -69,8 +69,12 @@ def dependency_tables(manifest):
 
 expected_path_version = f"={workspace_version}"
 path_pin_violations = []
-for member in sorted(cargo["workspace"]["members"]):
-    manifest_path = Path(member) / "Cargo.toml"
+manifest_paths = [Path(member) / "Cargo.toml" for member in sorted(cargo["workspace"]["members"])]
+manifest_paths.extend(Path(path) for path in ("fuzz/Cargo.toml",))
+
+for manifest_path in manifest_paths:
+    if not manifest_path.exists():
+        continue
     with manifest_path.open("rb") as member_manifest:
         member_cargo = tomllib.load(member_manifest)
     for table_name, table in dependency_tables(member_cargo):
