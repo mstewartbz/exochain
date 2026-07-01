@@ -51,6 +51,22 @@ grep -F 'if: ${{ !inputs.dry_run }}' <<<"$wasm_publish_block" >/dev/null \
 
 grep -F 'CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}' <<<"$publish_block" >/dev/null \
   || fail "publish job must use the crates.io registry token"
+grep -F 'RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}' <<<"$publish_block" >/dev/null \
+  || fail "publish job must bind crates.io checks to the validated release version"
+grep -F 'crate_version_published()' <<<"$publish_block" >/dev/null \
+  || fail "publish job must support resumable partial publication checks"
+grep -F 'https://crates.io/api/v1/crates/${crate}/${RELEASE_VERSION}' <<<"$publish_block" >/dev/null \
+  || fail "publish job must check whether each crate version already exists on crates.io"
+grep -F "User-Agent: exochain-release-workflow (https://github.com/exochain/exochain)" <<<"$publish_block" >/dev/null \
+  || fail "publish job must identify itself to crates.io version checks"
+grep -F 'if crate_version_published "$crate"; then' <<<"$publish_block" >/dev/null \
+  || fail "publish job must skip crate versions already published by a prior partial release"
+grep -F 'status 429 Too Many Requests' <<<"$publish_block" >/dev/null \
+  || fail "publish job must classify crates.io rate-limit responses"
+grep -F 'try again after' <<<"$publish_block" >/dev/null \
+  || fail "publish job must parse crates.io retry-after evidence"
+grep -F 'sleep "$retry_seconds"' <<<"$publish_block" >/dev/null \
+  || fail "publish job must wait before retrying crates.io rate-limited publishes"
 grep -F 'cargo publish -p "$crate" --allow-dirty' <<<"$publish_block" >/dev/null \
   || fail "publish job must publish every crate in the dependency-ordered loop"
 grep -F 'NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}' <<<"$wasm_publish_block" >/dev/null \
