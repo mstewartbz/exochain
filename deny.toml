@@ -93,10 +93,10 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
-# External wildcard dependency requirements weaken the supply-chain gate.
-# Private workspace path dependencies are the only allowed wildcard form.
+# External and path wildcard dependency requirements weaken the supply-chain gate.
+# Publishable workspace path dependencies must carry exact package versions.
 wildcards = "deny"
-allow-wildcard-paths = true
+allow-wildcard-paths = false
 highlight = "all"
 
 deny = [
