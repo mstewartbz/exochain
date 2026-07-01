@@ -55,6 +55,10 @@ grep -F 'cargo publish -p "$crate" --allow-dirty' <<<"$publish_block" >/dev/null
   || fail "publish job must publish every crate in the dependency-ordered loop"
 grep -F 'NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}' <<<"$wasm_publish_block" >/dev/null \
   || fail "publish-wasm-npm job must use the npm automation token"
+grep -F 'name: Verify npm org publish access' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must verify npm org publish access before building the package"
+grep -F 'npm org ls exochain "$npm_user" --json --registry=https://registry.npmjs.org' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must fail closed when NPM_TOKEN lacks exochain org publish rights"
 grep -F 'npm publish --access public --provenance' <<<"$wasm_publish_block" >/dev/null \
   || fail "publish-wasm-npm must publish the public package with npm provenance"
 grep -F 'npm pack --dry-run' <<<"$wasm_publish_block" >/dev/null \

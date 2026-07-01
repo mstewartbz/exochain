@@ -44,7 +44,13 @@ grep -F 'wasm-pack build crates/exochain-wasm --target nodejs --scope exochain' 
 grep -F 'npm publish --access public --provenance' "$release_workflow" >/dev/null \
   || fail "release workflow must publish npm package with provenance"
 grep -F 'NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}' "$release_workflow" >/dev/null \
-  || fail "release workflow must use the npm token only at publish step"
+  || fail "release workflow must use the npm token for authenticated npm release steps"
+grep -F 'name: Verify npm org publish access' "$release_workflow" >/dev/null \
+  || fail "release workflow must verify npm org publish access before building the package"
+grep -F 'npm whoami --registry=https://registry.npmjs.org' "$release_workflow" >/dev/null \
+  || fail "release workflow must verify the npm token identity before publishing"
+grep -F 'npm org ls exochain "$npm_user" --json --registry=https://registry.npmjs.org' "$release_workflow" >/dev/null \
+  || fail "release workflow must verify npm token membership in the exochain org"
 grep -F 'id-token: write' "$release_workflow" >/dev/null \
   || fail "release workflow must grant OIDC for npm provenance"
 
