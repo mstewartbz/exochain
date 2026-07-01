@@ -263,19 +263,26 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}
         run: |
+          set -euo pipefail
           cargo cyclonedx -f json --all
-          # Rename outputs to include version for unambiguous identification
-          for f in *.cdx.json; do
-            mv "$f" "exochain-${RELEASE_VERSION}-${f}"
-          done
+          mkdir -p sbom
+          sbom_count=0
+          while IFS= read -r -d '' f; do
+            cp "$f" "sbom/exochain-${RELEASE_VERSION}-$(basename "$f")"
+            sbom_count=$((sbom_count + 1))
+          done < <(find crates -type f -name '*.cdx.json' -print0 | sort -z)
+          if [ "$sbom_count" -eq 0 ]; then
+            echo "cargo cyclonedx produced no crate SBOM files under crates/." >&2
+            exit 1
+          fi
           echo "SBOM artifacts:"
-          ls -lh "exochain-${RELEASE_VERSION}"-*.cdx.json
+          ls -lh "sbom/exochain-${RELEASE_VERSION}"-*.cdx.json
 
       - name: Upload SBOM artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: sbom-${{ needs.validate-release-inputs.outputs.version }}
-          path: exochain-${{ needs.validate-release-inputs.outputs.version }}-*.cdx.json
+          path: sbom/exochain-${{ needs.validate-release-inputs.outputs.version }}-*.cdx.json
           retention-days: 2555  # 7 years — governance software retention policy
 
       # ── SLSA provenance attestation ──────────────────────────────────────
@@ -400,6 +407,30 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+
+      - name: Verify npm org publish access
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is required to publish @exochain/exochain-wasm." >&2
+            exit 1
+          fi
+          npm_user="$(npm whoami --registry=https://registry.npmjs.org)"
+          export NPM_USER="$npm_user"
+          npm org ls exochain "$npm_user" --json --registry=https://registry.npmjs.org > npm-org-membership.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const user = process.env.NPM_USER;
+          const membership = JSON.parse(fs.readFileSync('npm-org-membership.json', 'utf8'));
+          const role = membership[user];
+          if (!['owner', 'admin', 'developer'].includes(role)) {
+            throw new Error(`NPM_TOKEN authenticates as ${user}, which is not an exochain npm org owner/admin/developer. Create an npm automation token for an account with @exochain publish rights and store it as NPM_TOKEN.`);
+          }
+          console.log(`NPM_TOKEN authenticates as ${user} with exochain npm org role ${role}.`);
+          NODE
 
       - name: Install wasm-pack
         run: bash tools/ci_cargo_retry.sh cargo install wasm-pack --version 0.14.0 --locked

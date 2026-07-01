@@ -51,7 +51,9 @@ if grep -F 'cargo cyclonedx -f json --workspace' <<<"$sbom_block" >/dev/null; th
   fail "cargo-cyclonedx 0.5.9 does not support --workspace in the release SBOM job"
 fi
 
-grep -F 'path: exochain-${{ needs.validate-release-inputs.outputs.version }}-*.cdx.json' <<<"$sbom_block" >/dev/null \
+grep -F "find crates -type f -name '*.cdx.json'" <<<"$sbom_block" >/dev/null \
+  || fail "release SBOM job must collect cargo-cyclonedx crate-local SBOM output"
+grep -F 'path: sbom/exochain-${{ needs.validate-release-inputs.outputs.version }}-*.cdx.json' <<<"$sbom_block" >/dev/null \
   || fail "release SBOM artifacts must be uploaded with versioned names"
 grep -F 'uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45' <<<"$sbom_block" >/dev/null \
   || fail "release build provenance must remain attested by the pinned SLSA action"
