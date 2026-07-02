@@ -45,12 +45,21 @@ grep -F 'npm publish --access public --provenance' "$release_workflow" >/dev/nul
   || fail "release workflow must publish npm package with provenance"
 grep -F 'NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}' "$release_workflow" >/dev/null \
   || fail "release workflow must use the npm token for authenticated npm release steps"
-grep -F 'name: Verify npm org publish access' "$release_workflow" >/dev/null \
-  || fail "release workflow must verify npm org publish access before building the package"
+grep -F 'name: Verify npm registry authentication' "$release_workflow" >/dev/null \
+  || fail "release workflow must verify npm registry authentication before building the package"
+grep -F 'npm ping --registry=https://registry.npmjs.org' "$release_workflow" >/dev/null \
+  || fail "release workflow must verify npm registry reachability before publishing"
 grep -F 'npm whoami --registry=https://registry.npmjs.org' "$release_workflow" >/dev/null \
   || fail "release workflow must verify the npm token identity before publishing"
-grep -F 'npm org ls exochain "$npm_user" --json --registry=https://registry.npmjs.org' "$release_workflow" >/dev/null \
-  || fail "release workflow must verify npm token membership in the exochain org"
+if grep -F 'npm org ls exochain' "$release_workflow" >/dev/null; then
+  fail "release workflow must not use npm org membership endpoints as publish preflight"
+fi
+grep -F 'npm_package_version_published()' "$release_workflow" >/dev/null \
+  || fail "release workflow must support resumable npm package publication checks"
+grep -F 'npm view "@exochain/exochain-wasm@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org' "$release_workflow" >/dev/null \
+  || fail "release workflow must check whether the WASM npm package version is already published"
+grep -F '@exochain/exochain-wasm ${RELEASE_VERSION} is already published; skipping npm publish.' "$release_workflow" >/dev/null \
+  || fail "release workflow must skip already-published WASM npm package versions"
 grep -F 'id-token: write' "$release_workflow" >/dev/null \
   || fail "release workflow must grant OIDC for npm provenance"
 
