@@ -113,6 +113,18 @@ doctrinal authority. Ratification: merging the PR that lands this file
 ratifies A-001 retroactively, setting the precedent that self-binding still
 generates ratification evidence.
 
+**A-001 addendum (2026-07-02) - principal-held v2 artifact surfaced and
+hashed.** The delivered copy of working-plan v2 survived with the principal
+(moved, not deleted) and was returned for hashing. Exact-bytes BLAKE3 of the
+principal-held artifact:
+`65a1d4d77e06fa4ffbca8254bfb20fb3c05ec9467c6fbe918f03e6c46e15fb5a`
+(hashed as received; no canonicalization applied to another party's
+artifact). The section-2 fallibility clause is directly readable in that
+artifact at its "Division of labor" rationale paragraph. Remaining lineage
+gap, stated exactly: the v1-to-v2 byte diff is reconstructable only from the
+session transcript, because v1 was never delivered off the ephemeral store.
+Everything else about A-001 is now record, not testimony.
+
 ## Doctrine citations resolve to content addresses
 
 | Cited rule | Address |
