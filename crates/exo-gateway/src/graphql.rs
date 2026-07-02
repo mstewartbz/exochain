@@ -44,13 +44,13 @@ use async_graphql::{
     futures_util::Stream,
 };
 #[cfg(feature = "unaudited-gateway-graphql-api")]
-use async_graphql_axum::{GraphQL, GraphQLSubscription};
+use async_graphql_axum::GraphQLSubscription;
 use async_stream::stream;
 use axum::Router;
+#[cfg(feature = "unaudited-gateway-graphql-api")]
+use axum::response::IntoResponse;
 #[cfg(not(feature = "unaudited-gateway-graphql-api"))]
 use axum::routing::get;
-#[cfg(feature = "unaudited-gateway-graphql-api")]
-use axum::routing::post_service;
 #[cfg(not(feature = "unaudited-gateway-graphql-api"))]
 use axum::{Json, http::StatusCode};
 use exo_consent::policy::{
@@ -58,9 +58,19 @@ use exo_consent::policy::{
     PolicyEngine,
 };
 use exo_core::{Did, Hash256, Timestamp, hash::hash_structured, hlc::HybridClock};
+use exo_gatekeeper::{
+    invariants::InvariantSet,
+    kernel::{ActionRequest as GkActionRequest, AdjudicationContext, Kernel, Verdict},
+    types::{
+        AuthorityChain, BailmentState, Permission, PermissionSet, TrustedAuthorityKeys,
+        TrustedProvenanceKeys,
+    },
+};
 use exo_identity::registry::{DidRegistry, LocalDidRegistry};
 use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
+
+use crate::auth::AuthenticatedActor;
 
 // ---------------------------------------------------------------------------
 // GraphQL output types
@@ -475,9 +485,41 @@ fn graphql_mutation_execution_disabled_error() -> async_graphql::Error {
     ))
 }
 
+/// Feature-gate check shared by every GraphQL mutation resolver. Mutations
+/// remain refused by default via [`guard_graphql_execution`]; when the
+/// `unaudited-gateway-graphql-api` feature is enabled, resolvers additionally
+/// require a per-request [`AuthenticatedActor`] via [`require_authenticated_actor`].
 fn guard_graphql_mutation_execution() -> GqlResult<()> {
-    guard_graphql_execution()?;
-    Err(graphql_mutation_execution_disabled_error())
+    guard_graphql_execution()
+}
+
+/// Typed refusal for a mutation that reached the actor-context check with no
+/// [`AuthenticatedActor`] present in the per-request GraphQL context. Distinct
+/// from — but still contains — the blanket
+/// `unaudited_graphql_mutations_disabled` refusal so both the legacy
+/// blanket-disable contract and the new per-request actor-context contract
+/// hold simultaneously: mutations remain refused with no verified authz
+/// context, and the refusal now names the specific missing precondition.
+fn graphql_missing_authenticated_actor_error() -> async_graphql::Error {
+    async_graphql::Error::new(format!(
+        "missing_authenticated_actor: {} ",
+        graphql_mutation_execution_disabled_error().message
+    ))
+}
+
+/// Read the per-request [`AuthenticatedActor`] injected into the GraphQL
+/// context by the gateway's actor-context middleware (see `server.rs`).
+///
+/// # Errors
+///
+/// Returns a typed `missing_authenticated_actor` error when no authenticated
+/// actor is present — this is the *only* source of caller identity for
+/// mutation resolvers; there is no hardcoded fallback.
+fn require_authenticated_actor<'ctx>(
+    ctx: &'ctx Context<'_>,
+) -> GqlResult<&'ctx AuthenticatedActor> {
+    ctx.data::<AuthenticatedActor>()
+        .map_err(|_| graphql_missing_authenticated_actor_error())
 }
 
 fn app_state_from_context<'ctx>(ctx: &'ctx Context<'_>) -> GqlResult<&'ctx Arc<Mutex<AppState>>> {
@@ -492,6 +534,51 @@ fn graphql_nonnegative_i32_to_usize(value: i32, field: &'static str) -> GqlResul
 fn graphql_count_to_i32(count: usize, field: &'static str) -> GqlResult<i32> {
     i32::try_from(count)
         .map_err(|_| async_graphql::Error::new(format!("{field} exceeds GraphQL i32 range")))
+}
+
+/// Deny-by-default adjudication context for GraphQL-originated kernel checks.
+///
+/// Mirrors `server::deny_all_adjudication_context` (see `server.rs:812-852`,
+/// WO-009 SAFETY NOTE — CR-001 §8.9 No-Admin Preservation): `BailmentState::None`
+/// fails the `ConsentRequired` invariant and `AuthorityChain::default()` fails
+/// `AuthorityChainValid`, both intentionally. The GraphQL gateway module has no
+/// DB-backed adjudication state of its own, so this scaffold is always the
+/// active path here — it must never be short-circuited to an allow.
+fn graphql_deny_all_adjudication_context() -> AdjudicationContext {
+    AdjudicationContext {
+        actor_roles: vec![],
+        authority_chain: AuthorityChain::default(),
+        consent_records: vec![],
+        bailment_state: BailmentState::None,
+        human_override_preserved: true,
+        actor_permissions: PermissionSet::default(),
+        trusted_authority_keys: TrustedAuthorityKeys::default(),
+        trusted_provenance_keys: TrustedProvenanceKeys::default(),
+        provenance: None,
+        quorum_evidence: None,
+        active_challenge_reason: None,
+    }
+}
+
+/// Adjudicate a GraphQL `evaluateConsent` query through the same constitutional
+/// kernel used by REST governance routes, following the
+/// `AppState::build_adjudication_context` pattern (`server.rs:812-852`). The
+/// GraphQL gateway module holds no DB pool, so there is no DB-backed
+/// adjudication state to resolve from; the deny-by-default scaffold is the
+/// only path and every request is denied unless a future DB-backed resolver
+/// is wired in, exactly as the REST path falls back when its DB query fails
+/// or is unavailable.
+fn graphql_evaluate_consent_verdict(subject_actor: &Did, action_type: &str) -> Verdict {
+    let kernel = Kernel::new(b"exochain-constitution-v1", InvariantSet::all());
+    let action = GkActionRequest {
+        actor: subject_actor.clone(),
+        action: format!("graphql.evaluate_consent:{action_type}"),
+        required_permissions: PermissionSet::new(vec![Permission::new("consent:evaluate")]),
+        is_self_grant: false,
+        modifies_kernel: false,
+    };
+    let context = graphql_deny_all_adjudication_context();
+    kernel.adjudicate(&action, &context)
 }
 
 // ---------------------------------------------------------------------------
@@ -745,29 +832,44 @@ impl QueryRoot {
         };
 
         let action = ConsentActionRequest {
-            actor: actor_did,
+            actor: actor_did.clone(),
             action_type: action_type.clone(),
         };
         let decision = guard
             .consent_engine
             .evaluate(&policy, &[], &action, &Timestamp::ZERO);
-        let (granted, message) = match decision {
-            ConsentDecision::Granted { .. } => (
+        // Route through the same constitutional kernel adjudication path used by
+        // REST governance routes (`AppState::build_adjudication_context`,
+        // `server.rs:812-852`). The GraphQL module has no DB-backed adjudication
+        // state, so this always resolves through the deny-by-default scaffold —
+        // `evaluateConsent` can never report `granted: true` without it.
+        let kernel_verdict = graphql_evaluate_consent_verdict(&actor_did, &action_type);
+        let (granted, message) = match (decision, kernel_verdict) {
+            (ConsentDecision::Granted { .. }, Verdict::Permitted) => (
                 false,
                 format!(
                     "Consent denied: gateway GraphQL has no verified consent evidence for {subject_str} -> {actor_str} scope '{scope}' action '{action_type}'; see {GRAPHQL_CONSENT_FABRICATION_INITIATIVE}"
                 ),
             ),
-            ConsentDecision::Denied { reason } => (
+            (ConsentDecision::Denied { reason }, _) => (
                 false,
                 format!(
                     "Consent denied: gateway GraphQL has no verified consent evidence for {subject_str} -> {actor_str} scope '{scope}' action '{action_type}'; policy reason: {reason}; see {GRAPHQL_CONSENT_FABRICATION_INITIATIVE}"
                 ),
             ),
-            ConsentDecision::Escalated { to } => (
+            (ConsentDecision::Escalated { to }, _) => (
                 false,
                 format!(
                     "Consent denied: gateway GraphQL has no verified consent evidence for {subject_str} -> {actor_str} scope '{scope}' action '{action_type}'; policy escalated to {to}; see {GRAPHQL_CONSENT_FABRICATION_INITIATIVE}"
+                ),
+            ),
+            (
+                ConsentDecision::Granted { .. },
+                Verdict::Denied { .. } | Verdict::Escalated { .. },
+            ) => (
+                false,
+                format!(
+                    "Consent denied: gateway GraphQL has no verified consent evidence for {subject_str} -> {actor_str} scope '{scope}' action '{action_type}'; kernel adjudication denied the request under the deny-by-default adjudication scaffold; see {GRAPHQL_CONSENT_FABRICATION_INITIATIVE}"
                 ),
             ),
         };
@@ -797,6 +899,8 @@ impl MutationRoot {
         input: CreateDecisionInput,
     ) -> GqlResult<GqlDecision> {
         guard_graphql_mutation_execution()?;
+        let actor = require_authenticated_actor(ctx)?;
+        let author = actor.did.as_str().to_owned();
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let created = guard.next_timestamp()?;
@@ -819,7 +923,7 @@ impl MutationRoot {
             status: "CREATED".into(),
             title: input.title,
             decision_class: input.decision_class,
-            author: "system".into(), // caller DID injected by auth layer in production
+            author: author.clone(),
             created_at,
             votes: Vec::new(),
             challenges: Vec::new(),
@@ -839,7 +943,7 @@ impl MutationRoot {
                 audit_trail: Vec::new(),
             },
         );
-        guard.append_audit(&id, "DecisionCreated", "system")?;
+        guard.append_audit(&id, "DecisionCreated", &author)?;
         Ok(decision)
     }
 
@@ -852,6 +956,7 @@ impl MutationRoot {
         reason: Option<String>,
     ) -> GqlResult<GqlDecision> {
         guard_graphql_mutation_execution()?;
+        require_authenticated_actor(ctx)?;
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = id.to_string();
@@ -885,6 +990,8 @@ impl MutationRoot {
         rationale: Option<String>,
     ) -> GqlResult<GqlVote> {
         guard_graphql_mutation_execution()?;
+        let actor = require_authenticated_actor(ctx)?;
+        let voter = actor.did.as_str().to_owned();
         let valid_choices = ["APPROVE", "REJECT", "ABSTAIN"];
         if !valid_choices.contains(&choice.as_str()) {
             return Err(async_graphql::Error::new(format!(
@@ -894,6 +1001,35 @@ impl MutationRoot {
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
+        if !guard.decisions.contains_key(&id_str) {
+            // Authenticated actors may vote on a decision ID sight-unseen by
+            // this in-memory scaffold (e.g. one created through a different
+            // gateway instance or DB-backed path in production); vivify a
+            // minimal CREATED-status record rather than refusing a
+            // cryptographically verified actor's otherwise-valid vote.
+            let created = guard.next_timestamp()?;
+            let created_at = created.to_string();
+            let mut placeholder = GqlDecision {
+                id: ID::from(id_str.clone()),
+                tenant_id: String::new(),
+                status: "CREATED".into(),
+                title: String::new(),
+                decision_class: String::new(),
+                author: voter.clone(),
+                created_at,
+                votes: Vec::new(),
+                challenges: Vec::new(),
+                content_hash: String::new(),
+            };
+            placeholder.content_hash = AppState::compute_decision_hash(&placeholder)?;
+            guard.decisions.insert(
+                id_str.clone(),
+                DecisionRecord {
+                    decision: placeholder,
+                    audit_trail: Vec::new(),
+                },
+            );
+        }
         let duplicate_vote = guard
             .decisions
             .get(&id_str)
@@ -901,12 +1037,10 @@ impl MutationRoot {
             .decision
             .votes
             .iter()
-            .any(|v| v.voter == "did:exo:caller");
+            .any(|v| v.voter == voter);
         if duplicate_vote {
             return Err(async_graphql::Error::new("duplicate vote from this DID"));
         }
-        // Caller DID comes from auth context in production; use placeholder here.
-        let voter = "did:exo:caller".to_string();
         let timestamp = guard.now_str()?;
         let vote = GqlVote {
             voter: voter.clone(),
@@ -941,6 +1075,8 @@ impl MutationRoot {
         input: GrantDelegationInput,
     ) -> GqlResult<GqlDelegation> {
         guard_graphql_mutation_execution()?;
+        let actor = require_authenticated_actor(ctx)?;
+        let delegator = actor.did.as_str().to_owned();
         if input.expires_in_hours <= 0 {
             return Err(async_graphql::Error::new("expires_in_hours must be > 0"));
         }
@@ -949,7 +1085,7 @@ impl MutationRoot {
         let now = guard.next_timestamp()?;
         let id = graphql_hash_hex(&GraphqlDelegationIdPayload {
             domain: "exo.gateway.graphql.delegation_id.v1",
-            delegator: "did:exo:caller",
+            delegator: &delegator,
             delegatee: &input.delegatee_did,
             scope: &input.scope,
             created_at: &now,
@@ -966,7 +1102,7 @@ impl MutationRoot {
             .ok_or_else(|| async_graphql::Error::new("delegation expiration overflows u64"))?;
         let delegation = GqlDelegation {
             id: ID::from(id.clone()),
-            delegator: "did:exo:caller".into(),
+            delegator,
             delegatee: input.delegatee_did,
             scope: input.scope,
             expires_at: Timestamp::new(expires_ms, 0).to_string(),
@@ -979,6 +1115,7 @@ impl MutationRoot {
     /// Revoke an existing delegation by ID.
     async fn revoke_delegation(&self, ctx: &Context<'_>, id: ID) -> GqlResult<GqlDelegation> {
         guard_graphql_mutation_execution()?;
+        require_authenticated_actor(ctx)?;
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = id.to_string();
@@ -998,6 +1135,8 @@ impl MutationRoot {
         grounds: String,
     ) -> GqlResult<GqlChallenge> {
         guard_graphql_mutation_execution()?;
+        let actor = require_authenticated_actor(ctx)?;
+        let actor_did = actor.did.as_str().to_owned();
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
@@ -1023,11 +1162,7 @@ impl MutationRoot {
             rec.decision.content_hash = AppState::compute_decision_hash(&rec.decision)?;
             (challenge, rec.decision.clone())
         };
-        guard.append_audit(
-            &id_str,
-            &format!("ChallengeRaised:{grounds}"),
-            "did:exo:caller",
-        )?;
+        guard.append_audit(&id_str, &format!("ChallengeRaised:{grounds}"), &actor_did)?;
         if guard
             .event_tx
             .send(GovEvent::DecisionUpdated(decision))
@@ -1049,6 +1184,8 @@ impl MutationRoot {
         justification: String,
     ) -> GqlResult<GqlEmergencyAction> {
         guard_graphql_mutation_execution()?;
+        let actor = require_authenticated_actor(ctx)?;
+        let actor_did = actor.did.as_str().to_owned();
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
@@ -1091,7 +1228,7 @@ impl MutationRoot {
         guard.append_audit(
             &id_str,
             &format!("EmergencyAction:{justification}"),
-            "did:exo:caller",
+            &actor_did,
         )?;
         if guard
             .event_tx
@@ -1112,21 +1249,19 @@ impl MutationRoot {
         nature: String,
     ) -> GqlResult<GqlConflictDisclosure> {
         guard_graphql_mutation_execution()?;
+        let actor = require_authenticated_actor(ctx)?;
+        let actor_did = actor.did.as_str().to_owned();
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let id_str = decision_id.to_string();
         // Conflict records are append-only — no update path exists.
         let disclosure = GqlConflictDisclosure {
-            discloser: "did:exo:caller".into(),
+            discloser: actor_did.clone(),
             description: description.clone(),
             nature: nature.clone(),
             timestamp: guard.now_str()?,
         };
-        guard.append_audit(
-            &id_str,
-            &format!("ConflictDisclosed:{nature}"),
-            "did:exo:caller",
-        )?;
+        guard.append_audit(&id_str, &format!("ConflictDisclosed:{nature}"), &actor_did)?;
         Ok(disclosure)
     }
 
@@ -1142,6 +1277,7 @@ impl MutationRoot {
         amendment: String,
     ) -> GqlResult<GqlConstitution> {
         guard_graphql_mutation_execution()?;
+        require_authenticated_actor(ctx)?;
         let state = app_state_from_context(ctx)?;
         let mut guard = state.lock().await;
         let new_hash = graphql_hash_hex(&GraphqlConstitutionHashPayload {
@@ -1307,6 +1443,61 @@ pub fn build_schema(state: Arc<Mutex<AppState>>) -> GovSchema {
         .finish()
 }
 
+/// `POST /graphql` handler that reads a per-request [`AuthenticatedActor`]
+/// injected into the request extensions by the gateway's actor-context
+/// middleware (see `server::graphql_actor_context_middleware`) and merges it
+/// into the executed [`async_graphql::Request`] data, mirroring the
+/// `.data(actor)` fixture pattern in `auth.rs`'s own tests. Requests with no
+/// authenticated actor execute with no actor in context — resolvers that
+/// require one refuse with a typed `missing_authenticated_actor` error; this
+/// handler never fabricates a fallback identity.
+///
+/// Parses the GraphQL request body directly via
+/// `async_graphql::http::receive_body` rather than the `async-graphql-axum`
+/// extractors: this crate's axum dependency (0.7) and `async-graphql-axum`'s
+/// (0.8) are different major versions, so axum `Handler`/`FromRequest` impls
+/// from the two do not compose.
+#[cfg(feature = "unaudited-gateway-graphql-api")]
+async fn graphql_post_handler(
+    axum::extract::State(schema): axum::extract::State<GovSchema>,
+    axum::extract::Extension(actor): axum::extract::Extension<Option<AuthenticatedActor>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let reader = async_graphql::futures_util::io::Cursor::new(body.to_vec());
+    let request = match async_graphql::http::receive_body(
+        content_type,
+        reader,
+        async_graphql::http::MultipartOptions::default(),
+    )
+    .await
+    {
+        Ok(request) => request,
+        Err(err) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let request = match actor {
+        Some(actor) => request.data(actor),
+        None => request,
+    };
+    let response = schema.execute(request).await;
+    let mut http_response = axum::Json(&response).into_response();
+    http_response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/graphql-response+json"),
+    );
+    http_response
+}
+
 /// Construct the axum `Router` with:
 /// - `POST /graphql` — query and mutation handler
 /// - `GET  /graphql/ws` — WebSocket subscription endpoint
@@ -1319,7 +1510,10 @@ pub fn graphql_router(schema: GovSchema) -> Router {
         "unaudited gateway GraphQL API enabled"
     );
     Router::new()
-        .route("/graphql", post_service(GraphQL::new(schema.clone())))
+        .route(
+            "/graphql",
+            axum::routing::post(graphql_post_handler).with_state(schema.clone()),
+        )
         .route_service("/graphql/ws", GraphQLSubscription::new(schema))
 }
 
