@@ -49,7 +49,10 @@ CLAIM_FILES=(
   docs/reference/CRATE-REFERENCE.md
   docs/ASI-REPORT-FEATURE.md
   docs/architecture/THREAT-MODEL.md
+  docs/architecture/ARCHITECTURE.md
   docs/decision-forum/SYSTEM-DOCUMENTATION.md
+  docs/decision-forum/USER-MANUAL.md
+  docs/guides/developer-onboarding.md
 )
 
 for f in "${CLAIM_FILES[@]}"; do

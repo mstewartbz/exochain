@@ -205,7 +205,7 @@ for first-week work:
 | `exo-consent`        | Bailment lifecycle, consent policies, default-deny gatekeeper                           |
 | `exo-authority`      | Authority chains, delegation registry, permission model, Ed25519 link verification      |
 | `exo-dag`            | Immutable DAG ledger, Merkle Mountain Range, Sparse Merkle Tree, BFT consensus adapter  |
-| `exo-proofs`         | SNARK, STARK, ZKML proof systems, unified verifier                                      |
+| `exo-proofs`         | SNARK, STARK, ZKML proof-system skeletons (unaudited, pedagogical — not production cryptography), unified verifier |
 | `exo-gatekeeper`     | CGR Kernel, 8 invariants, 6 MCP rules, combinator algebra, holons, TEE attestation       |
 | `exo-governance`     | Decisions, quorum, challenge, crosscheck, deliberation, conflict, audit, succession     |
 | `exo-escalation`     | Sybil detection, triage, 7-stage adjudication, kanban board, feedback loop              |
