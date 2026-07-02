@@ -71,10 +71,21 @@ grep -F 'cargo publish -p "$crate" --allow-dirty' <<<"$publish_block" >/dev/null
   || fail "publish job must publish every crate in the dependency-ordered loop"
 grep -F 'NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}' <<<"$wasm_publish_block" >/dev/null \
   || fail "publish-wasm-npm job must use the npm automation token"
-grep -F 'name: Verify npm org publish access' <<<"$wasm_publish_block" >/dev/null \
-  || fail "publish-wasm-npm must verify npm org publish access before building the package"
-grep -F 'npm org ls exochain "$npm_user" --json --registry=https://registry.npmjs.org' <<<"$wasm_publish_block" >/dev/null \
-  || fail "publish-wasm-npm must fail closed when NPM_TOKEN lacks exochain org publish rights"
+grep -F 'name: Verify npm registry authentication' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must verify npm registry authentication before building the package"
+grep -F 'npm ping --registry=https://registry.npmjs.org' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must verify npm registry reachability before publishing"
+grep -F 'npm whoami --registry=https://registry.npmjs.org' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must verify npm token identity before publishing"
+if grep -F 'npm org ls exochain' <<<"$wasm_publish_block" >/dev/null; then
+  fail "publish-wasm-npm must not use npm org membership endpoints as publish preflight"
+fi
+grep -F 'npm_package_version_published()' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must support resumable npm package publication checks"
+grep -F 'npm view "@exochain/exochain-wasm@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must check whether the WASM npm package version already exists"
+grep -F '@exochain/exochain-wasm ${RELEASE_VERSION} is already published; skipping npm publish.' <<<"$wasm_publish_block" >/dev/null \
+  || fail "publish-wasm-npm must skip already-published WASM npm package versions"
 grep -F 'npm publish --access public --provenance' <<<"$wasm_publish_block" >/dev/null \
   || fail "publish-wasm-npm must publish the public package with npm provenance"
 grep -F 'npm pack --dry-run' <<<"$wasm_publish_block" >/dev/null \

@@ -493,7 +493,7 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Verify npm org publish access
+      - name: Verify npm registry authentication
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -503,19 +503,9 @@ jobs:
             echo "NPM_TOKEN is required to publish @exochain/exochain-wasm." >&2
             exit 1
           fi
+          npm ping --registry=https://registry.npmjs.org
           npm_user="$(npm whoami --registry=https://registry.npmjs.org)"
-          export NPM_USER="$npm_user"
-          npm org ls exochain "$npm_user" --json --registry=https://registry.npmjs.org > npm-org-membership.json
-          node - <<'NODE'
-          const fs = require('node:fs');
-          const user = process.env.NPM_USER;
-          const membership = JSON.parse(fs.readFileSync('npm-org-membership.json', 'utf8'));
-          const role = membership[user];
-          if (!['owner', 'admin', 'developer'].includes(role)) {
-            throw new Error(`NPM_TOKEN authenticates as ${user}, which is not an exochain npm org owner/admin/developer. Create an npm automation token for an account with @exochain publish rights and store it as NPM_TOKEN.`);
-          }
-          console.log(`NPM_TOKEN authenticates as ${user} with exochain npm org role ${role}.`);
-          NODE
+          echo "NPM_TOKEN authenticates to npm registry as ${npm_user}; npm publish will perform the authoritative package permission check."
 
       - name: Install wasm-pack
         run: bash tools/ci_cargo_retry.sh cargo install wasm-pack --version 0.14.0 --locked
@@ -555,7 +545,35 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+          RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm_package_version_published() {
+            local output
+            local status
+
+            set +e
+            output="$(npm view "@exochain/exochain-wasm@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org 2>&1)"
+            status=$?
+            set -e
+
+            if [ "$status" -eq 0 ] && [ "$output" = "$RELEASE_VERSION" ]; then
+              return 0
+            fi
+            if grep -E 'E404|404 Not Found' <<<"$output" >/dev/null; then
+              return 1
+            fi
+
+            printf '%s\n' "$output" >&2
+            return "$status"
+          }
+
+          if npm_package_version_published; then
+            echo "@exochain/exochain-wasm ${RELEASE_VERSION} is already published; skipping npm publish."
+            exit 0
+          fi
+
+          npm publish --access public --provenance
         working-directory: packages/exochain-wasm/wasm
 
   # -----------------------------------------------------------------------
