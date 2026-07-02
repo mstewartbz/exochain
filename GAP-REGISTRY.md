@@ -999,6 +999,15 @@ events with named review evidence, never lane outcomes.
 - **D8 - Doctrine:** every `unaudited-*` default flip is a ratification event
   with named review evidence. Applies to all feature-gated rows.
 
+Decision queue (not ratified): D9 - AI-IRB council charter. Design frozen at
+`governance/proposals/D9-COUNCIL-CHARTER-PROPOSAL.md`, canonical BLAKE3
+`c1e89db47a30849d41e6db9c4c23d52d9dfbf3a820f2695dcdbcade6d42bd6af`; additive,
+blocked-by D3/D4/D5 evidence maturity. Landing the proposal object in this
+repository is not enactment; enactment requires explicit principal
+ratification recorded against that hash. The coordinator's own seat record and
+loop charter, including the amendment ratchet, live at
+`governance/proposals/SEAT-000-COORDINATOR-RECORD.md`.
+
 Claim frame for VCG-002 and all public materials: EXOCHAIN makes power
 constitutional; the safety property is the governed channel, not the model
 mind. Safety claims are stated as invariant five-tuples (invariant, adversary,
