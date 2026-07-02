@@ -15,7 +15,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Guard GAP-REGISTRY.md and closed GAP ULTRAPLANs against stale closure claims.
+# Guard GAP-REGISTRY.md as the single systemic-integrity execution ledger.
 
 set -euo pipefail
 
@@ -42,17 +42,85 @@ assert_lacks() {
   fi
 }
 
-ultraplan_count=$(find gap -maxdepth 1 -name 'ULTRAPLAN-*.md' | wc -l | tr -d ' ')
+assert_no_matches() {
+  local description=$1
+  shift
+  local matches
+  matches=$("$@" || true)
+  if [[ -n "$matches" ]]; then
+    printf '%s\n' "$matches" >&2
+    fail "$description"
+  fi
+}
 
-assert_contains GAP-REGISTRY.md "\\*\\*Current ULTRAPLAN files:\\*\\* $ultraplan_count"
-assert_contains GAP-REGISTRY.md "Basalt reconciliation"
-assert_contains GAP-REGISTRY.md "GAP-004.*Onyx-4 remediation PRs #117-#124"
-assert_contains GAP-REGISTRY.md "GAP-011.*feature-gated unaudited axes"
+assert_no_matches "critical gaps must be tracked only in GAP-REGISTRY.md" \
+  find . -maxdepth 1 -name 'GAP-REGISTRY-*.md'
 
-assert_contains gap/ULTRAPLAN-GAP-002-EVIDENCE-BUNDLE.md "verify_with_signer_keys"
-assert_lacks gap/ULTRAPLAN-GAP-002-EVIDENCE-BUNDLE.md \
-  "placeholder for full cryptographic verification|Production systems will resolve signer DIDs|signature is non-empty"
+if [[ -d docs/superpowers/plans ]]; then
+  assert_no_matches "systemic-integrity plans must be consolidated into GAP-REGISTRY.md" \
+    find docs/superpowers/plans -maxdepth 1 -name '*systemic-integrity*.md'
+fi
 
-assert_lacks GAP-REGISTRY.md "GAP-002:[^\\n]*16 tests|GAP-002:[^\\n]*offline-verifiable signatures"
+if [[ -e EXOCHAIN_REAL_PROOF_BACKEND_HEAVY_LIFT_PLAN.md ]]; then
+  fail "proof backend plan must be consolidated into GAP-REGISTRY.md"
+fi
+
+assert_contains GAP-REGISTRY.md "^# EXOCHAIN Systemic Integrity Ledger$"
+assert_contains GAP-REGISTRY.md "\\*\\*Authority:\\*\\* single source of truth"
+assert_contains GAP-REGISTRY.md "^## Single Source Rule$"
+assert_contains GAP-REGISTRY.md "^## Execution Protocol$"
+assert_contains GAP-REGISTRY.md "^## Execution Board$"
+assert_contains GAP-REGISTRY.md "^## System Closure Gate$"
+assert_contains GAP-REGISTRY.md "bash tools/test_gap_registry_truth.sh"
+
+for id in \
+  VCG-001 VCG-002 VCG-003 VCG-004 VCG-005 VCG-006 VCG-007 \
+  VCG-008 VCG-009 VCG-010 VCG-011 VCG-012 VCG-013 VCG-014
+do
+  heading_count=$(grep -c "^## $id -" GAP-REGISTRY.md)
+  if [[ "$heading_count" != "1" ]]; then
+    fail "$id must have exactly one detailed ledger section"
+  fi
+  assert_contains GAP-REGISTRY.md "\\| $id \\|"
+done
+
+assert_contains GAP-REGISTRY.md "VCG-001 \\| P0 \\| Open"
+assert_contains GAP-REGISTRY.md "VCG-002 \\| P0 \\| Open"
+assert_contains GAP-REGISTRY.md "VCG-003 \\| P0 \\| Open"
+assert_contains GAP-REGISTRY.md "VCG-004 \\| P0 \\| Open"
+assert_contains GAP-REGISTRY.md "eDiscovery export is not an open origin-main gap"
+assert_contains GAP-REGISTRY.md "No VCG row is closed at ledger creation"
+
+assert_lacks GAP-REGISTRY.md "T[O]DO|future[[:space:]-]+phase|postpone|synthesize"
+
+# Cargo package names: gate commands must use the exochain-* crates.io
+# namespace. Directory names under crates/ keep exo-*; commands must not.
+assert_lacks GAP-REGISTRY.md "[-]p exo-(node|gateway|gatekeeper|core|tenant|governance|proofs)([^-a-z]|$)"
+assert_contains GAP-REGISTRY.md "cargo test -p exochain-proofs"
+assert_contains GAP-REGISTRY.md "cargo test -p exochain-node mcp"
+assert_contains GAP-REGISTRY.md "cargo test -p exochain-gatekeeper tee"
+assert_contains GAP-REGISTRY.md "cargo test -p exochain-core hlc"
+assert_contains GAP-REGISTRY.md "cargo test -p exochain-tenant"
+
+# Amended-ledger anchors: released source snapshot, ratified decisions,
+# doctrine line, and the claim frame that binds VCG-002.
+assert_contains GAP-REGISTRY.md "2d4baec1fc84bc5e71a9d5b9d1c35e7bff4aeee1"
+assert_contains GAP-REGISTRY.md "^## Ratified Decisions$"
+assert_contains GAP-REGISTRY.md "ratification precedes authority; authority follows evidence"
+assert_contains GAP-REGISTRY.md "invariant, adversary, evidence, detection, failure"
+
+# Every VCG section keeps the full row shape.
+for label in "Evidence:" "Failure mode:" "Next red test:" "Remediation track:" "Closure gate:"; do
+  label_count=$(grep -c "^${label}$" GAP-REGISTRY.md)
+  if [[ "$label_count" != "14" ]]; then
+    fail "expected 14 '${label}' sections, found ${label_count}"
+  fi
+done
+
+# VCG-004's generic gate commands pass on untouched main; closure requires the
+# named red tests, and the ledger must keep saying so.
+assert_contains GAP-REGISTRY.md "necessary but not"
+assert_contains GAP-REGISTRY.md "mcp_mutation_effect"
+assert_contains GAP-REGISTRY.md "cgr_proof_fail_closed"
 
 echo "GAP registry truth test passed"

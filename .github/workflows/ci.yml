@@ -758,6 +758,69 @@ jobs:
           [ "$RUST_COUNT" -eq 165 ] || (echo "WASM export count changed from 165 to $RUST_COUNT — update bridge tests" && exit 1)
 
   # -----------------------------------------------------------------------
+  # Gate 23: Unaudited feature matrix
+  #
+  # Every `unaudited-*` feature is default-off, so nothing else in CI ever
+  # compiles the gated code — feature-gated surfaces can rot invisibly
+  # (GAP-REGISTRY.md amendment, 2026-07-02). Each feature is exercised in
+  # isolation so cross-feature interaction cannot mask breakage. Adding an
+  # `unaudited-*` feature to any crate requires adding a matrix entry here.
+  # -----------------------------------------------------------------------
+  unaudited-feature-matrix:
+    name: "Gate 23 — Unaudited Features (${{ matrix.feature }})"
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: exochain-node
+            feature: unaudited-admin-governance-shortcut
+          - package: exochain-node
+            feature: unaudited-crosschecked-receipt-anchor
+          - package: exochain-node
+            feature: unaudited-mcp-simulation-tools
+          - package: exochain-node
+            feature: unaudited-zerodentity-first-touch-onboarding
+          - package: exochain-node
+            feature: unaudited-infrastructure-holons
+          - package: exochain-node
+            feature: unaudited-zerodentity-device-behavioral-axes
+          - package: exochain-gateway
+            feature: unaudited-gateway-graphql-api
+          - package: exochain-proofs
+            feature: unaudited-pedagogical-proofs
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dorny/paths-filter@6852f92c20ea7fd3b0c25de3b5112db3a98da050
+        id: filter
+        with:
+          filters: |
+            crates:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        if: steps.filter.outputs.crates == 'true'
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+        if: steps.filter.outputs.crates == 'true'
+      - name: Matrix completeness — every unaudited feature has an entry
+        run: |
+          missing=0
+          for feat in $(grep -rhoE '^unaudited-[a-z-]+' crates/*/Cargo.toml | sort -u); do
+            if ! grep -q "feature: ${feat}$" .github/workflows/ci.yml; then
+              echo "unaudited feature '${feat}' has no Gate 23 matrix entry"
+              missing=1
+            fi
+          done
+          exit $missing
+      - name: Test with the single unaudited feature enabled
+        if: steps.filter.outputs.crates == 'true'
+        run: cargo test -p ${{ matrix.package }} --features ${{ matrix.feature }}
+
+  # -----------------------------------------------------------------------
   # Constitutional gate: all must pass
   # -----------------------------------------------------------------------
   all-gates:
@@ -786,6 +849,7 @@ jobs:
       - build-wasm
       - test-bridge
       - wasm-sync
+      - unaudited-feature-matrix
     steps:
       - name: All quality gates passed
         run: echo "All CR-001 Section 8.8 quality gates satisfied."
