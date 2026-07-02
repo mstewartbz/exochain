@@ -342,7 +342,7 @@ fn fixture_request_schema(
     description: &str,
 ) -> ToolDefinition {
     let fixtures: Value = match serde_json::from_str(include_str!(
-        "../../../../exo-dag-db-api/fixtures/json/all_dto_fixtures.json"
+        "../../../fixtures/dagdb/all_dto_fixtures.json"
     )) {
         Ok(fixtures) => fixtures,
         Err(error) => panic!("DAG DB fixture set parses for MCP schema binding: {error}"),
@@ -2008,8 +2008,7 @@ mod tests {
     #[cfg(feature = "dagdb-gateway-proxy")]
     use crate::mcp::context::DagDbGatewayConfig;
 
-    const FIXTURES: &str =
-        include_str!("../../../../exo-dag-db-api/fixtures/json/all_dto_fixtures.json");
+    const FIXTURES: &str = include_str!("../../../fixtures/dagdb/all_dto_fixtures.json");
 
     fn fixtures() -> Value {
         serde_json::from_str(FIXTURES).expect("DAG DB fixture set parses")

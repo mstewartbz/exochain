@@ -52,6 +52,33 @@ const cratePackageMap = new Map(
 );
 
 const failures = [];
+const canonicalDagDbFixturePath = path.join(
+  repoRoot,
+  "crates/exo-dag-db-api/fixtures/json/all_dto_fixtures.json",
+);
+const nodeDagDbFixturePath = path.join(
+  repoRoot,
+  "crates/exo-node/fixtures/dagdb/all_dto_fixtures.json",
+);
+const nodeDagDbToolPath = path.join(repoRoot, "crates/exo-node/src/mcp/tools/dagdb.rs");
+const nodeDagDbToolSource = fs.readFileSync(nodeDagDbToolPath, "utf8");
+
+if (nodeDagDbToolSource.includes("../../../../exo-dag-db-api/fixtures/json/all_dto_fixtures.json")) {
+  failures.push("exochain-node must not include DAG DB fixtures from outside its package tarball");
+}
+if (!nodeDagDbToolSource.includes("../../../fixtures/dagdb/all_dto_fixtures.json")) {
+  failures.push("exochain-node DAG DB MCP schema binding must use its packaged DAG DB fixture copy");
+}
+if (!fs.existsSync(nodeDagDbFixturePath)) {
+  failures.push("exochain-node package must include fixtures/dagdb/all_dto_fixtures.json");
+} else {
+  const nodeDagDbFixture = fs.readFileSync(nodeDagDbFixturePath, "utf8");
+  const canonicalDagDbFixture = fs.readFileSync(canonicalDagDbFixturePath, "utf8");
+  if (nodeDagDbFixture !== canonicalDagDbFixture) {
+    failures.push("exochain-node packaged DAG DB fixture must match the canonical exo-dag-db-api fixture");
+  }
+}
+
 const requiredBinaryNamesByLegacyDir = new Map([
   ["exo-gateway", "exo-gateway"],
   ["exo-node", "exochain"],
