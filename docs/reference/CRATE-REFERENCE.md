@@ -347,12 +347,22 @@ Append-only directed acyclic graph with BFT consensus and authenticated data str
 | Metric | Value |
 |--------|-------|
 | LOC | 1,916 |
-| Tests | 61 |
+| Tests | 118 |
 | Files | 7 |
 
 ### Purpose
 
-Zero-knowledge proof system for EXOCHAIN. Provides R1CS circuit abstraction for expressing arithmetic circuits, SNARK proof generation and verification, STARK proof generation and verification, a zero-knowledge machine learning (ZKML) verifier for AI model attestation, and a unified proof verifier dispatching across proof types.
+Unaudited, pedagogical zero-knowledge proof *skeleton* for EXOCHAIN — not
+production cryptography (see GAP-REGISTRY.md VCG-001). Provides R1CS circuit
+abstraction for expressing arithmetic circuits, a structural (unaudited,
+pedagogical) SNARK proof generation and verification API, a structural
+(unaudited, pedagogical) STARK proof generation and verification API, a
+hash-based (not production cryptography) zero-knowledge machine learning
+(ZKML) attestation module for AI model provenance binding, and a unified
+proof verifier dispatching across proof types. Every public entry point in
+the SNARK, STARK, and ZKML modules refuses (fails closed) unless the crate's
+`unaudited-pedagogical-proofs` feature is explicitly enabled; the crate is not
+linked into default production builds.
 
 ### Dependencies
 
@@ -373,35 +383,48 @@ Zero-knowledge proof system for EXOCHAIN. Provides R1CS circuit abstraction for 
 | `ConstraintSystem::enforce()` | fn | Add an R1CS constraint |
 | `ConstraintSystem::verify()` | fn | Check all constraints are satisfied by current witness values |
 
-#### `snark` — SNARK Proof System
+#### `snark` — SNARK Proof System (pedagogical skeleton, not production cryptography)
+
+Uses BLAKE3 hash "stand-ins" in place of elliptic-curve pairings; this is a
+structural demonstration of the SNARK API shape, not a sound zero-knowledge
+argument. Refuses to run outside `unaudited-pedagogical-proofs`.
 
 | Item | Kind | Description |
 |------|------|-------------|
-| `SnarkProof` | struct | Proof bytes, circuit hash, public inputs, timestamp |
-| `ProvingKey` | struct | Key material for proof generation |
-| `VerifyingKey` | struct | Key material for proof verification |
-| `setup()` | fn | Generate proving and verifying keys from a circuit |
-| `prove()` | fn | Generate a SNARK proof from a circuit and proving key |
-| `verify()` | fn | Verify a SNARK proof against a verifying key |
+| `SnarkProof` | struct | Proof bytes, circuit hash, public inputs, timestamp (pedagogical, not production cryptography) |
+| `ProvingKey` | struct | Key material for proof generation (pedagogical, not production cryptography) |
+| `VerifyingKey` | struct | Key material for proof verification (pedagogical, not production cryptography) |
+| `setup()` | fn | Generate proving and verifying keys from a circuit (pedagogical, not production cryptography) |
+| `prove()` | fn | Generate a SNARK-shaped proof from a circuit and proving key (pedagogical, not production cryptography) |
+| `verify()` | fn | Verify a SNARK-shaped proof against a verifying key (pedagogical, not production cryptography) |
 
-#### `stark` — STARK Proof System
+#### `stark` — STARK Proof System (pedagogical skeleton, not production cryptography)
+
+FRI layers are simulated with iterative hashing rather than actual polynomial
+commitment. This is a structural demonstration of the STARK API shape, not a
+hardened proof system. Refuses to run outside `unaudited-pedagogical-proofs`.
 
 | Item | Kind | Description |
 |------|------|-------------|
-| `StarkProof` | struct | Transparent proof: trace commitment, query responses, FRI layers |
-| `StarkConfig` | struct | Configuration: field size, expansion factor, security level |
-| `TraceTable` | struct | Execution trace as a 2D array of field elements |
-| `FriLayer` | struct | FRI commitment layer for proof compression |
-| `prove()` | fn | Generate a STARK proof from a trace table |
-| `verify()` | fn | Verify a STARK proof (no trusted setup required) |
+| `StarkProof` | struct | Transparent proof: trace commitment, query responses, FRI layers (pedagogical, not production cryptography) |
+| `StarkConfig` | struct | Configuration: field size, expansion factor, security level (pedagogical, not production cryptography) |
+| `TraceTable` | struct | Execution trace as a 2D array of field elements (pedagogical, not production cryptography) |
+| `FriLayer` | struct | FRI commitment layer for proof compression; hash-simulated, not a real polynomial commitment |
+| `prove()` | fn | Generate a STARK-shaped proof from a trace table (pedagogical, not production cryptography) |
+| `verify()` | fn | Verify a STARK-shaped proof (no trusted setup required; pedagogical, not production cryptography) |
 
-#### `zkml` — Zero-Knowledge ML Verification
+#### `zkml` — Zero-Knowledge ML Verification (hash-based simulation, not a real ZK circuit)
+
+Binds model, input, and output via BLAKE3 hashing rather than executing the
+model inside a ZK circuit. Sufficient for model-provenance binding demos, not
+for a cryptographic soundness claim. Refuses to run outside
+`unaudited-pedagogical-proofs`.
 
 | Item | Kind | Description |
 |------|------|-------------|
 | `ZkmlAttestation` | struct | Model attestation: model hash, input hash, output hash, proof |
 | `ModelCommitment` | struct | Commitment to model weights without revealing them |
-| `InferenceProof` | struct | Proof that inference was run on committed model |
+| `InferenceProof` | struct | Hash-based binding that inference ran on the committed model |
 | `verify_inference()` | fn | Verify that a model output corresponds to given input and committed model |
 
 #### `verifier` — Unified Proof Verifier
@@ -410,21 +433,24 @@ Zero-knowledge proof system for EXOCHAIN. Provides R1CS circuit abstraction for 
 |------|------|-------------|
 | `ProofType` | enum | Snark, Stark, Zkml |
 | `UnifiedProof` | struct | Wraps any proof type with metadata |
-| `ProofVerifier` | struct | Multi-backend verifier dispatching to SNARK/STARK/ZKML |
+| `ProofVerifier` | struct | Dispatches to the SNARK/STARK/ZKML pedagogical skeletons above (structural dispatch, not a production multi-backend verifier) |
 | `ProofVerifier::verify()` | fn | Verify any proof type through unified interface |
 
 ### Key Invariants Enforced
 
-- R1CS constraints are satisfied or verification fails (soundness)
-- SNARK proofs are zero-knowledge: verifier learns nothing beyond the statement
-- STARK proofs require no trusted setup (transparency)
-- ZKML attestation cryptographically binds model identity to inference output
+- R1CS constraints are satisfied or verification fails (structural soundness of the constraint system itself)
+- SNARK module: fails closed (refuses) outside `unaudited-pedagogical-proofs`; the proof is hash-based, not a real zero-knowledge argument
+- STARK module: fails closed (refuses) outside `unaudited-pedagogical-proofs`; no trusted setup is required, but the FRI layer is hash-simulated, not a hardened polynomial commitment
+- ZKML module: fails closed (refuses) outside `unaudited-pedagogical-proofs`; attestation binds model identity to inference output via hashing, not a ZK circuit over the model
 
 ### Test Coverage Summary
 
-61 tests covering: circuit constraint synthesis and verification, SNARK setup/prove/verify round-trips, STARK prove/verify, ZKML attestation verification, unified verifier dispatch, proof serialization determinism.
+118 tests covering: circuit constraint synthesis and verification, SNARK setup/prove/verify round-trips, STARK prove/verify, ZKML attestation verification, unified verifier dispatch, proof serialization determinism, and fail-closed refusal behavior when `unaudited-pedagogical-proofs` is disabled.
 
-> See also: [[ARCHITECTURE]] Section 6 (Proof System), [[CONSTITUTIONAL-PROOFS]] Proof 10 (Zero-Knowledge Soundness)
+> See also: [[ARCHITECTURE]] Section 6 (Proof System). This crate's
+> SNARK/STARK/ZKML cryptography is unaudited and pedagogical, not production
+> cryptography; it is distinct from the constitutional (protocol-property)
+> formal proofs in [[CONSTITUTIONAL-PROOFS]], which do not depend on it.
 
 ---
 
@@ -1169,7 +1195,7 @@ P2P networking and external API types. Provides peer-to-peer protocol message ty
 | exo-core | 3,949 | 191 | 10 | Foundational types, HLC, crypto, BCTS |
 | exo-gatekeeper | 2,875 | 133 | 9 | Judicial branch: kernel, invariants, combinators |
 | exo-dag | 2,590 | 86 | 7 | Append-only DAG, BFT consensus, Merkle structures |
-| exo-proofs | 1,916 | 61 | 7 | ZK proofs: SNARK, STARK, ZKML |
+| exo-proofs | 1,916 | 118 | 7 | ZK proof skeletons: SNARK, STARK, ZKML (unaudited, pedagogical — not production cryptography) |
 | exo-identity | 1,533 | 67 | 7 | DID management, risk, Shamir, PACE, keys |
 | exo-governance | 1,236 | 69 | 9 | Quorum, clearance, crosscheck, challenge, audit |
 | exo-authority | 1,235 | 66 | 6 | Authority chains, delegation, permissions |

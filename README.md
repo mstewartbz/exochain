@@ -115,7 +115,8 @@ Catalyst is named explicitly.
 ```
 Layer 1: CGR Kernel         (Rust, 31 crates, 368034 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 6,046 listed workspace tests
+         production Ed25519/BLAKE3 cryptography plus unaudited pedagogical
+         SNARK/STARK/ZKML skeletons, 6,046 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -211,7 +212,7 @@ These runtime docs do not claim billing savings or thesis acceptance.
 | `exo-dag-db-*` | Split DAG DB and graph-governed agent memory runtime crates |
 | `exo-gateway` | External gateway: REST, GraphQL, auth, health probes (28 endpoints) |
 | `exo-identity` | Decentralized Identity (DID), key management, Shamir secret sharing, vault |
-| `exo-proofs` | SNARK, STARK, ZKML proof systems, verifier infrastructure |
+| `exo-proofs` | SNARK, STARK, ZKML proof-system skeletons (unaudited, pedagogical — not production cryptography), verifier infrastructure |
 | `exo-authority` | Authority delegation, role-based access, attestation chains |
 | `exo-legal` | Legal compliance, audit admissibility, provenance tracking |
 | `exo-consent` | Bailment contracts, consent policies, gatekeeper enforcement |

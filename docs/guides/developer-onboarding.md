@@ -121,7 +121,7 @@ crate.
 
 ```bash
 # Release build — needed for reasonable startup time.
-cargo build --release -p exo-node
+cargo build --release -p exochain-node
 
 # Status on a fresh install: creates ~/.exochain/ and reports a clean state.
 ./target/release/exochain status
@@ -515,7 +515,7 @@ If you want a tight sequence to follow, here it is:
 - [ ] `git clone git@github.com:exochain/exochain.git && cd exochain`
 - [ ] `cargo build --workspace` (5 min)
 - [ ] `cargo test --workspace` (2 min; expect 0 failures)
-- [ ] `cargo build --release -p exo-node` (3 min)
+- [ ] `cargo build --release -p exochain-node` (3 min)
 - [ ] `./target/release/exochain status` — confirm data dir creation
 - [ ] `./target/release/exochain init`
 - [ ] `./target/release/exochain start --validator` (separate shell)
