@@ -142,6 +142,60 @@ impl BackendId {
 }
 
 // ---------------------------------------------------------------------------
+// AuditStatus / backend descriptor registry
+// ---------------------------------------------------------------------------
+
+/// The audit/review status carried by each entry in [`default_registry`].
+///
+/// This is a minimal accessor, not a verification mechanism: it exists so
+/// tests (and future callers) can ask "does a production-reviewed backend
+/// exist yet?" without hardcoding backend ids. Today every registered
+/// backend is [`AuditStatus::Pedagogical`] — no [`AuditStatus::ProductionReviewed`]
+/// entry exists until VCG-001b lands a real production backend with a wired
+/// verifier (see `tests/refusal.rs`'s standing red).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditStatus {
+    /// Structural/pedagogical stand-in only — not a production trust claim.
+    /// Gated behind the `unaudited-pedagogical-proofs` feature at
+    /// verification time (see [`crate::guard_unaudited`]).
+    Pedagogical,
+    /// A production backend that has undergone cryptographic review and
+    /// carries its own audit evidence. Exempt from the pedagogical
+    /// unaudited-refusal gate. No backend holds this status yet — it is
+    /// introduced here only so the registry has somewhere to record one
+    /// once VCG-001b lands.
+    ProductionReviewed,
+}
+
+/// A single entry in [`default_registry`]: a known [`BackendId`] paired with
+/// its [`AuditStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendDescriptor {
+    /// The backend this descriptor describes.
+    pub backend_id: BackendId,
+    /// Whether this backend is pedagogical or has been production-reviewed.
+    pub audit_status: AuditStatus,
+}
+
+/// Returns the crate's default backend registry as descriptors.
+///
+/// This is the minimal audit-status accessor named in the VCG-001a
+/// hardening pass: it lets callers (and tests) inspect what backends are
+/// registered and whether any of them are [`AuditStatus::ProductionReviewed`]
+/// without reaching into [`ProofEnvelope::verify`] internals. Today this
+/// returns exactly one entry — the unaudited blake3 stand-in, marked
+/// [`AuditStatus::Pedagogical`] — because no production backend has been
+/// registered yet (VCG-001b, ratified decision D1, out of scope for
+/// VCG-001a).
+#[must_use]
+pub fn default_registry() -> Vec<BackendDescriptor> {
+    vec![BackendDescriptor {
+        backend_id: BackendId::UnauditedBlake3Standin,
+        audit_status: AuditStatus::Pedagogical,
+    }]
+}
+
+// ---------------------------------------------------------------------------
 // ProofEnvelope
 // ---------------------------------------------------------------------------
 
@@ -199,34 +253,45 @@ impl ProofEnvelope {
     /// unaudited, explicitly opted into.
     ///
     /// This lane (VCG-001a) does not implement per-backend proof
-    /// verification logic beyond the fail-closed registry and unaudited
-    /// gate: no production backend exists yet (VCG-001b, ratified decision
-    /// D1, out of scope here), and the crate's existing unaudited blake3
-    /// stand-in verification lives in `snark.rs` / `stark.rs` / `zkml.rs`
-    /// via `verifier::verify_any`, which this envelope type does not
-    /// re-implement or bypass.
+    /// verification logic: no production backend exists yet (VCG-001b,
+    /// ratified decision D1, out of scope here), and this method does not
+    /// wire up or bypass the crate's existing unaudited blake3 stand-in
+    /// verification in `snark.rs` / `stark.rs` / `zkml.rs` /
+    /// `verifier::verify_any`. Fail-closed: **every** backend currently
+    /// registered returns a typed error here — there is no verifier wired
+    /// for any backend at this stage. This is a deliberate success-shaped
+    /// surface trap avoidance: `verify()` must never report `Ok(true)`
+    /// unless it actually verified something.
     ///
     /// Behavior:
-    /// - Unknown/unregistered backend id → always
-    ///   `Err(ProofError::InvalidProofFormat)` (fail-closed registry).
-    /// - [`UNAUDITED_BLAKE3_STANDIN_BACKEND_ID`] → refuses with
+    /// - Unknown/unregistered backend id → `Err(ProofError::InvalidProofFormat)`
+    ///   (fail-closed registry, checked first via [`Self::validate_backend`]).
+    /// - [`UNAUDITED_BLAKE3_STANDIN_BACKEND_ID`] → first refuses with
     ///   `Err(ProofError::UnauditedImplementation)` unless the
-    ///   `unaudited-pedagogical-proofs` feature is enabled, mirroring
-    ///   [`crate::guard_unaudited`].
+    ///   `unaudited-pedagogical-proofs` feature is enabled (mirroring
+    ///   [`crate::guard_unaudited`]); if that guard passes, still refuses
+    ///   with `Err(ProofError::VerificationFailed)` because no verifier is
+    ///   wired for this backend yet — construction/wrapping of an envelope
+    ///   for this backend is feature-gated as above, but *verification* is
+    ///   not implemented at all in VCG-001a. Real verification arrives with
+    ///   VCG-001b.
     pub fn verify(&self) -> Result<bool> {
         self.validate_backend()?;
 
         match self.backend_id {
             BackendId::UnauditedBlake3Standin => {
                 crate::guard_unaudited("envelope::ProofEnvelope::verify")?;
-                // Unaudited pedagogical stand-in: this lane only proves the
-                // envelope/registry shape is usable once opted in. It does
-                // not assert any cryptographic soundness result — callers
-                // wanting concrete verification of the wrapped proof bytes
-                // must go through the existing per-backend verifier (e.g.
-                // `verifier::verify_any`), which this method does not
-                // duplicate.
-                Ok(true)
+                // Even once opted into the unaudited pedagogical stand-in,
+                // no verifier is wired for it yet at this stage: this lane
+                // (VCG-001a) only establishes the envelope/registry shape.
+                // Returning `Ok(true)` here would be a success-shaped
+                // surface that verifies nothing. Fail closed instead.
+                Err(ProofError::VerificationFailed(format!(
+                    "no verifier is wired for backend {:?} yet; \
+                     ProofEnvelope::verify is a fail-closed stub until \
+                     VCG-001b lands real per-backend verification",
+                    self.backend_id
+                )))
             }
             BackendId::Unknown(_) => unreachable!(
                 "validate_backend() above must have already refused an unregistered backend id"

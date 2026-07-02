@@ -138,6 +138,15 @@ fn proof_envelope_rejects_json_bytes() {
 // (b) unknown-backend-id fail-closed
 // ---------------------------------------------------------------------------
 
+/// Direct-construction path: an envelope built in-process (no
+/// serialization involved) naming an unregistered backend id must fail
+/// closed at `validate_backend()`. This is distinct from
+/// `envelope_backend_registry_rejects_unregistered_numeric_id` below, which
+/// exercises the *post-deserialization* path (a backend id that only
+/// becomes "unknown" after a CBOR round-trip). The two paths are kept
+/// separate because they exercise different code: this test never touches
+/// `ciborium`, so it isolates `validate_backend()`'s own logic from the
+/// (de)serialization layer.
 #[test]
 fn envelope_with_unknown_backend_id_fails_closed() {
     let mut envelope = sample_envelope();
@@ -153,6 +162,14 @@ fn envelope_with_unknown_backend_id_fails_closed() {
     );
 }
 
+/// Post-deserialization path: a raw numeric backend id with no registry
+/// entry must still fail closed *after* a full CBOR encode/decode
+/// round-trip, not just when constructed directly in-process. This
+/// complements `envelope_with_unknown_backend_id_fails_closed` above (the
+/// direct-construction case) by proving the wire format itself cannot be
+/// used to smuggle an unregistered backend id past validation — e.g. a
+/// hand-crafted or future-version envelope on the wire that names a
+/// backend id this build doesn't recognize.
 #[test]
 fn envelope_backend_registry_rejects_unregistered_numeric_id() {
     // Even if a caller round-trips an envelope through CBOR with a raw
@@ -192,15 +209,22 @@ fn envelope_wrapping_unaudited_backend_refuses_without_feature() {
     );
 }
 
+/// With the opt-in feature enabled, *constructing/wrapping* the unaudited
+/// pedagogical backend in an envelope is allowed — but `verify()` still
+/// fails closed, because no verifier is wired for any backend at this
+/// stage (see the `ProofEnvelope::verify` doc comment). This test must NOT
+/// claim execution/verification succeeds: it asserts on the specific
+/// no-verifier-wired error, not on `Ok`.
 #[cfg(feature = "unaudited-pedagogical-proofs")]
 #[test]
-fn envelope_wrapping_unaudited_backend_executes_with_feature_enabled() {
+fn envelope_wrapping_unaudited_backend_construction_allowed_but_verify_fails_closed() {
     let envelope = sample_envelope(); // backend_id == UNAUDITED_BLAKE3_STANDIN_BACKEND_ID
 
-    // With the opt-in feature enabled, the unaudited pedagogical backend is
-    // allowed to execute (it may still return Ok(false) for an unverifiable
-    // stand-in proof, but it must not hard-refuse with
-    // UnauditedImplementation).
+    // With the opt-in feature enabled, the unaudited pedagogical backend no
+    // longer hard-refuses at the `guard_unaudited` gate — but verification
+    // itself is not implemented in this lane (VCG-001a). `verify()` must
+    // still fail closed with a typed "no verifier wired" error, never
+    // `Ok(true)`.
     let result = envelope.verify();
     assert!(
         !matches!(
@@ -208,6 +232,116 @@ fn envelope_wrapping_unaudited_backend_executes_with_feature_enabled() {
             Err(exo_proofs::error::ProofError::UnauditedImplementation { .. })
         ),
         "with 'unaudited-pedagogical-proofs' enabled, the unaudited backend must not \
-         hard-refuse with UnauditedImplementation, got {result:?}"
+         hard-refuse at the guard_unaudited gate with UnauditedImplementation, got {result:?}"
     );
+    assert!(
+        matches!(
+            result,
+            Err(exo_proofs::error::ProofError::VerificationFailed(_))
+        ),
+        "verify() must still fail closed with VerificationFailed (no verifier wired yet, \
+         arrives with VCG-001b) rather than reporting success, got {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (d) real negative fixtures for the envelope wire format
+// ---------------------------------------------------------------------------
+
+/// Truncating a valid canonical-CBOR encoding at any prefix length shorter
+/// than the full encoding must fail to deserialize — never silently decode
+/// a partial/corrupted envelope as if it were valid.
+#[test]
+fn truncated_cbor_bytes_fail_to_deserialize() {
+    let envelope = sample_envelope();
+    let full = cbor_bytes(&envelope);
+    assert!(
+        full.len() > 16,
+        "sanity: sample envelope encoding should be long enough to exercise several cut points"
+    );
+
+    // Cut at several byte lengths: very early (mid-header), mid-way through
+    // the map, and one byte short of the full encoding.
+    let cut_points = [1usize, 4, full.len() / 4, full.len() / 2, full.len() - 1];
+
+    for cut in cut_points {
+        let truncated = &full[..cut];
+        let result: Result<ProofEnvelope, _> = ciborium::from_reader(truncated);
+        assert!(
+            result.is_err(),
+            "truncated CBOR bytes (cut at {cut} of {} total) must fail to deserialize, got Ok",
+            full.len()
+        );
+    }
+}
+
+/// Constructs canonical CBOR bytes naming a `statement_kind` value that is
+/// not one of the five registered [`ProofStatementKind`] variants (by
+/// splicing an out-of-registry variant-name string into an otherwise valid
+/// encoding, since this crate's enums serialize as their variant name, not
+/// a raw numeric discriminant — see the module's canonical-CBOR
+/// convention). Deserialization must fail closed rather than silently
+/// accept, coerce, or default an unrecognized statement kind.
+#[test]
+fn unknown_statement_kind_code_fails_closed() {
+    let envelope = sample_envelope();
+    let valid = cbor_bytes(&envelope);
+
+    // `statement_kind`'s value in the sample envelope encodes as the
+    // 20-byte CBOR text string `"GovernanceCompliance"` (0x74 prefix +
+    // 20 length bytes). Replace it with a same-shape but unregistered
+    // variant name so the map structure otherwise stays byte-for-byte
+    // valid CBOR — only the statement-kind discriminant itself is bogus.
+    let needle = {
+        let mut bytes = Vec::new();
+        bytes.push(0x74u8); // CBOR text string, length 20
+        bytes.extend_from_slice(b"GovernanceCompliance");
+        bytes
+    };
+    let replacement = {
+        let mut bytes = Vec::new();
+        bytes.push(0x74u8); // CBOR text string, length 20 (same length, valid CBOR)
+        bytes.extend_from_slice(b"NotARealStatementKnd"); // 20 bytes, unregistered name
+        bytes
+    };
+    assert_eq!(
+        needle.len(),
+        replacement.len(),
+        "sanity: splice must preserve overall byte layout so only the discriminant changes"
+    );
+
+    let position = valid
+        .windows(needle.len())
+        .position(|window| window == needle.as_slice())
+        .expect("sample envelope encoding must contain the statement_kind value bytes");
+
+    let mut corrupted = valid.clone();
+    corrupted[position..position + replacement.len()].copy_from_slice(&replacement);
+
+    let result: Result<ProofEnvelope, _> = ciborium::from_reader(corrupted.as_slice());
+    assert!(
+        result.is_err(),
+        "an out-of-registry statement-kind discriminant must fail closed at deserialization, \
+         got Ok({result:?})"
+    );
+}
+
+/// Bytes that are not CBOR at all (not merely a truncated/corrupted valid
+/// encoding) must fail to deserialize as a [`ProofEnvelope`].
+#[test]
+fn garbage_bytes_fail_to_deserialize() {
+    let garbage_fixtures: [&[u8]; 4] = [
+        &[],
+        &[0xFF, 0xFF, 0xFF, 0xFF],
+        b"not cbor at all, just ascii text padding to be non-trivially long",
+        &[0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09],
+    ];
+
+    for garbage in garbage_fixtures {
+        let result: Result<ProofEnvelope, _> = ciborium::from_reader(garbage);
+        assert!(
+            result.is_err(),
+            "garbage bytes {garbage:?} must fail to deserialize as ProofEnvelope, got Ok"
+        );
+    }
 }
