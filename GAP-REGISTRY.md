@@ -141,7 +141,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 
 | ID | Priority | Status | Classification | Owner role | Blocked claim | Next red test or guard | Closure gate |
 |----|----------|--------|----------------|------------|---------------|------------------------|--------------|
-| VCG-001 | P0 | Open | EXOCHAIN core | Proof architecture | Production SNARK/STARK/ZKML soundness | `crates/exo-proofs` production backend absence tests | `cargo test -p exochain-proofs` plus backend feature gates |
+| VCG-001 | P0 | Red | EXOCHAIN core | Proof architecture | Production SNARK/STARK/ZKML soundness | `crates/exo-proofs` production backend absence tests | `cargo test -p exochain-proofs` plus backend feature gates |
 | VCG-002 | P0 | Open | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
 | VCG-003 | P0 | Open | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Open | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
@@ -159,9 +159,33 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 ## VCG-001 - Production ZK Proof Backend Absent
 
 **Priority:** P0
-**Status:** Open
+**Status:** Red
 **Classification:** EXOCHAIN core
 **Owner role:** Proof architecture
+
+Lane record (2026-07-02, branch `vcg/001a-proof-envelope`):
+
+- Red evidence: `tests/envelope.rs` (documented compile-red, then behavioral)
+  and the ignored standing red
+  `production_backend_variant_executes_without_unaudited_flag`, independently
+  verified to fail for the documented reasons (red commit `4f4c4b66`; hardened
+  `d64184a4`).
+- Green-local for the envelope remediation item: statement registry +
+  `ProofEnvelope` with canonical CBOR; `verify()` fails closed for every
+  backend (no success path exists in the match); negative fixtures for
+  truncated CBOR, spliced unknown statement-kind, and garbage bytes; gates
+  exit 0 in both feature configurations plus clippy `-D warnings`.
+- Adversarial review: first pass refuted (major - success-shaped `verify()`,
+  missing fixtures, inert standing red); hardening applied; re-refutation
+  verdict NOT-REFUTED.
+- Forward coupling for VCG-001b: `default_registry()`/`AuditStatus` exist so
+  the standing red asserts against reality. VCG-001b must add a genuine
+  `BackendId` variant with a wired verifier; flipping an `AuditStatus` tag
+  cannot turn the standing red green because `verify()` has no success arm
+  for the pedagogical id.
+- Row stays Red, not Green: this lane delivers the envelope/registry
+  remediation item only; production backend soundness (D1: RISC Zero,
+  server-side) and external cryptographic review remain open.
 
 Evidence:
 
