@@ -143,7 +143,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 |----|----------|--------|----------------|------------|---------------|------------------------|--------------|
 | VCG-001 | P0 | Open | EXOCHAIN core | Proof architecture | Production SNARK/STARK/ZKML soundness | `crates/exo-proofs` production backend absence tests | `cargo test -p exochain-proofs` plus backend feature gates |
 | VCG-002 | P0 | Open | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
-| VCG-003 | P0 | Open | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
+| VCG-003 | P0 | Red | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Open | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Open | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
 | VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
@@ -305,9 +305,49 @@ cargo fmt --all -- --check
 ## VCG-003 - GraphQL Surface Is Default-Off and Unaudited
 
 **Priority:** P0
-**Status:** Open
+**Status:** Red
 **Classification:** Core runtime adapter
 **Owner role:** Gateway
+
+Lane record (2026-07-02, branch `vcg/003-graphql-actor-context`):
+
+- Premise correction discovered in RED: the nine hardcoded actor literals were
+  dead code behind an unconditional mutation kill-switch
+  (`guard_graphql_mutation_execution` refused every mutation regardless of the
+  feature flag). Red tests were adapted honestly: refusals must carry a
+  dedicated `missing_authenticated_actor` code, and injecting a real actor
+  must be provably observable (red commit `1ebc48ac`, independently verified).
+- First green (`58ac5b11`) REFUTED, two criticals: it removed the kill-switch
+  (unscoped security-posture change self-authorized by the lane's own test),
+  `cast_vote` fabricated placeholder decisions for nonexistent ids, and
+  `advance_decision` carried a decorative actor check while caller-controlled
+  `reason` became the audit actor.
+- Corrective (`59ea1604`): kill-switch restored as the final unconditional
+  gate, sequenced `guard_graphql_execution` then `require_authenticated_actor`
+  then refusal, so error types are honest per configuration; fabrication
+  reverted to fail-closed not-found; `advance_decision` binds the checked
+  actor DID and `reason` never flows into identity; meta-test strengthened to
+  count the refusal call in all nine resolvers. Re-refutation across six
+  lenses: NOT-REFUTED. Gates: feature-off 18/18, feature-on 31/31 plus one
+  ignored, clippy both configs `-D warnings` clean.
+- Delivered: genuine per-request `AuthenticatedActor` middleware (real Ed25519
+  verification via `auth::authenticate`), all nine literals eliminated,
+  `evaluateConsent` routed through the deny-by-default kernel path, standing
+  red `mutations_execute_with_actor_after_adjudication_wiring` (ignored) that
+  fails at the kill-switch.
+- Independent convergence: a parallel corrective derivation reached the same
+  unique guard ordering, recorded as corroborating evidence.
+- Residuals for the follow-on adjudication lane: (a) the standing red is the
+  only tripwire against removing the kill-switch without real core-backed
+  wiring - a PR deleting `refuse_graphql_mutation_execution` without
+  un-ignoring and passing that test is suspect by construction; (b)
+  `revoke_delegation` and `amend_constitution` discard the checked actor
+  because those resolvers have no audit call yet - identity binding must be
+  completed there when mutations actually execute.
+- Row stays Red: actor plumbing and no-fabrication are delivered; the row's
+  full goal (every resolver routed through core-backed consent, authority,
+  and proof services, with mutations executing) remains open, gated on the
+  VCG-001 envelope path and core adjudication wiring.
 
 Evidence:
 
