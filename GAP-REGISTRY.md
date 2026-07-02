@@ -144,7 +144,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-001 | P0 | Open | EXOCHAIN core | Proof architecture | Production SNARK/STARK/ZKML soundness | `crates/exo-proofs` production backend absence tests | `cargo test -p exochain-proofs` plus backend feature gates |
 | VCG-002 | P0 | Open | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
 | VCG-003 | P0 | Open | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
-| VCG-004 | P0 | Open | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
+| VCG-004 | P0 | Red | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Open | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
 | VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
 | VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
@@ -362,9 +362,40 @@ cargo clippy -p exochain-gateway --features production-db --all-targets -- -D wa
 ## VCG-004 - MCP Runtime Actions and CGR Proof Verification Are Not Fully Wired
 
 **Priority:** P0
-**Status:** Open
+**Status:** Red
 **Classification:** Core runtime adapter
 **Owner role:** MCP runtime
+
+Lane record (2026-07-02, branch `vcg/004a-cgr-lock-and-reclass`, sub-lane
+VCG-004a):
+
+- Red evidence: regression lock
+  `cgr_proof_fail_closed_with_wellformed_envelope` (passes by design - a
+  semantically complete request with a REAL Merkle checkpoint root from a live
+  in-memory store still refuses) and ignored standing red
+  `cgr_real_verification_consumes_envelope` (fails at the fail-closed handler
+  until the VCG-001b verifier and VCG-004b wiring land). Red commit
+  `1441f740`; independently verified: full suite 1311 passed, both tests
+  behave exactly as documented.
+- Green-local for this sub-lane: stale Cargo.toml commentary corrected
+  downward (the superseded hardcoded-true middleware description removed -
+  middleware.rs verifies signed constitutional context on every tools/call);
+  honest three-class tool doc-classification (live read-only vs
+  unconditionally fail-closed vs feature-gated simulation); the five dangling
+  `Initiatives/fix-mcp-*.md` refusal-payload citations now resolve to real
+  pointer files referencing this row. Zero behavior change verified by
+  adversarial review (all handler/dispatch/error-payload code untouched).
+- Adversarial review: content clean across all three lenses; two findings
+  were artifacts of the lane's fork point predating the ledger landing,
+  resolved by merging ratified main (`069b9af8`) into this branch so the
+  Initiatives citations resolve within the branch's own history.
+- Process note: this lane's executor read the pre-ledger registry at its
+  fork point and proceeded on the frozen work order; the merge repairs the
+  citation lineage without content changes.
+- Row stays Red: the mutation-effect half (D2 bridge, `NodeContext` network
+  handle, mutations routed through `reactor::submit_proposal` and domain
+  crates) is sub-lane VCG-004b and remains open; the CGR verification half
+  inherits VCG-001's ceiling.
 
 Evidence:
 
