@@ -112,6 +112,11 @@ fn zkml_daubert_admissibility_refuses_by_default() {
 /// pedagogical refusal gate because they carry their own audit evidence.
 #[ignore = "red until VCG-001b lands a production backend"]
 #[test]
+// `vcg-001b-production-backend` is intentionally not declared in Cargo.toml
+// (see the doc comment above) — it fences code that must not compile until
+// VCG-001b lands. Mirrors the same `#[allow(unexpected_cfgs)]`-on-intentional-
+// future-cfg convention already used in `crates/exo-gateway/src/dagdb.rs`.
+#[allow(unexpected_cfgs)]
 fn production_backend_variant_executes_without_unaudited_flag() {
     #[cfg(feature = "vcg-001b-production-backend")]
     {

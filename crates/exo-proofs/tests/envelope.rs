@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::expect_used)]
+
 //! RED-stage tests for the VCG-001a proof envelope + statement registry.
 //!
 //! Lane VCG-001a (see `GAP-REGISTRY.md` "VCG-001 - Production ZK Proof Backend
