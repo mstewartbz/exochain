@@ -72,8 +72,8 @@ Before proposing the branch:
 ```bash
 cargo test -p exochain-root --test root_genesis
 cargo test -p exochain-node genesis
-cargo tarpaulin --packages exo-root --include-files "crates/exo-root/src/**" --fail-under 100
-cargo tarpaulin --packages exo-node --include-files "crates/exo-node/src/root_genesis.rs" --fail-under 100
+cargo tarpaulin --packages exochain-root --include-files "crates/exo-root/src/**" --fail-under 100
+cargo tarpaulin --packages exochain-node --include-files "crates/exo-node/src/root_genesis.rs" --fail-under 100
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo doc --workspace --no-deps

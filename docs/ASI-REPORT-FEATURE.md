@@ -68,7 +68,7 @@ The flagship invariant, stated as a five-tuple:
 | **Detection** | `exo-authority` chain-integrity verification and `exo-governance` crosscheck/clearance checks run on every adjudicated action; a broken or missing lineage link fails the check. |
 | **Failure mode** | If detection is bypassed or the fabric is not wired into the acting surface, the surface can present authority-shaped output (e.g. an approval, a signature-shaped artifact) that has no real lineage — this is a governed-channel failure, not evidence that alignment or intent was compromised. |
 
-EXOCHAIN is a constitutional trust fabric: 20 Rust workspace packages, 124165 lines of Rust under `crates/`, 3,001 listed tests, and a formal proof chain demonstrating its intended governance properties.
+EXOCHAIN is a constitutional trust fabric: 20 Rust workspace packages, 124165 lines of Rust under `crates/`, 3,001 listed tests, and a protocol/state-machine formal proof chain (`docs/proofs/CONSTITUTIONAL-PROOFS.md`) demonstrating its intended governance properties — distinct from SNARK/STARK/ZKML cryptography, which remains unaudited and pedagogical (GAP-REGISTRY.md VCG-001).
 
 It implements a three-branch constitutional model — legislative, executive, and judicial — where:
 
@@ -244,7 +244,7 @@ The conventional approach to AI safety assumes we need to solve alignment — ma
 
 The analogy is constitutional democracy. We don't require every citizen to have perfect values. We require every action to comply with constitutional constraints — and we enforce those constraints through an independent judiciary that cannot be overruled by popular vote or executive fiat.
 
-EXOCHAIN is that judiciary for AI systems. Its five constitutional properties, backed by formal proofs and 3,001 listed workspace tests, provide the structural guarantee that:
+EXOCHAIN is that judiciary for AI systems. Its five constitutional properties, backed by the protocol/state-machine formal proofs in `docs/proofs/CONSTITUTIONAL-PROOFS.md` and 3,001 listed workspace tests, provide the structural guarantee that:
 
 1. No AI system can grant itself capabilities
 2. No AI system can forge consensus
@@ -252,7 +252,7 @@ EXOCHAIN is that judiciary for AI systems. Its five constitutional properties, b
 4. A human can always intervene
 5. The rules themselves cannot be changed
 
-These aren't aspirational. They're enforced at the type level, the runtime level, and the cryptographic level. They are as immutable as the code that implements them — and that code is verified by formal proofs, 3,001 listed workspace tests, and a constitutional governance process that governs its own evolution.
+These aren't aspirational. They're enforced at the type level and the runtime level today — real Ed25519 signatures, BLAKE3 hashing, and constitutional invariants checked on every adjudicated action. Cryptographic-level enforcement (SNARK/STARK/ZKML proofs over model behavior and compliance) is roadmap, not delivered: `exo-proofs` ships unaudited, pedagogical proof-system skeletons, fails closed unless explicitly enabled, and is gated on external cryptographic review (GAP-REGISTRY.md VCG-001). "Formal proofs" here means the ten protocol/state-machine proofs in `docs/proofs/CONSTITUTIONAL-PROOFS.md` that the AEGIS constitutional properties hold across reachable system states — a distinct claim from SNARK/STARK/ZKML cryptography, which is not yet production. The type- and runtime-level enforcement is as immutable as the code that implements it and the append-only DAG it writes to; that code is verified by the protocol/state-machine formal proofs above, 3,001 listed workspace tests, and a constitutional governance process that governs its own evolution.
 
 ---
 
@@ -279,7 +279,7 @@ These aren't aspirational. They're enforced at the type level, the runtime level
 
 ## What's Next
 
-EXOCHAIN is open for review. The codebase, documentation, formal proofs, and governance artifacts are available for inspection. The council resolution (CR-001) establishing the AEGIS/SYBIL framework has been drafted and is pending ratification.
+EXOCHAIN is open for review. The codebase, documentation, protocol/state-machine formal proofs (`docs/proofs/CONSTITUTIONAL-PROOFS.md`), and governance artifacts are available for inspection. The council resolution (CR-001) establishing the AEGIS/SYBIL framework has been drafted and is pending ratification.
 
 The question isn't whether we need constitutional governance for superintelligent systems. The question is whether we'll build it before we need it.
 

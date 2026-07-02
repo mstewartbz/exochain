@@ -45,8 +45,11 @@ CLAIM_FILES=(
   README.md
   governance/sub_agents.md
   governance/traceability_matrix.md
+  governance/COUNCIL-ASSESSMENT-EXO-VS-EXOCHAIN.md
   docs/reference/CRATE-REFERENCE.md
   docs/ASI-REPORT-FEATURE.md
+  docs/architecture/THREAT-MODEL.md
+  docs/decision-forum/SYSTEM-DOCUMENTATION.md
 )
 
 for f in "${CLAIM_FILES[@]}"; do
@@ -59,6 +62,21 @@ for f in "${CLAIM_FILES[@]}"; do
       fail "$f:$ln mentions SNARK/STARK/ZKML/zero-knowledge with no qualifier within two lines (see GAP-REGISTRY.md VCG-002)"
     fi
   done < <(grep -nE 'SNARK|STARK|ZKML|zkML|zero-knowledge' "$f" || true)
+done
+
+# Maturity-strength language ("cryptographic level", "formal proofs") in the
+# same claim surfaces must be qualified OR explicitly disambiguated as
+# protocol/state-machine proofs (docs/proofs/CONSTITUTIONAL-PROOFS.md scope).
+MATURITY_QUALIFIER="$QUALIFIER|protocol[- ]level|state-machine|CONSTITUTIONAL-PROOFS"
+for f in "${CLAIM_FILES[@]}"; do
+  while IFS=: read -r ln _; do
+    [[ -n "$ln" ]] || continue
+    start=$(( ln > 2 ? ln - 2 : 1 ))
+    ctx=$(sed -n "${start},$(( ln + 2 ))p" "$f")
+    if ! grep -Eq "$MATURITY_QUALIFIER" <<<"$ctx"; then
+      fail "$f:$ln claims 'cryptographic level' or 'formal proofs' with no qualifier or protocol-proof disambiguation within two lines (see GAP-REGISTRY.md VCG-002)"
+    fi
+  done < <(grep -nE 'cryptographic level|formal proofs?' "$f" || true)
 done
 
 # The literal drifted completion claims can never reappear.
@@ -87,7 +105,7 @@ LIVING_SURFACES=(
   governance/threat_matrix.md
   governance/quality_gates.md
 )
-if grep -rnE '[-]p exo-[a-z][a-z-]*' "${LIVING_SURFACES[@]}" 2>/dev/null; then
+if grep -rnE '[-]p exo-[a-z][a-z-]*|[-][-]packages?[= ]exo-[a-z][a-z-]*' "${LIVING_SURFACES[@]}" 2>/dev/null; then
   fail "living docs cite old exo-* package names in cargo commands; use exochain-* (historical records under docs/audit/ and docs/proof/ are exempt and stay as written)"
 fi
 
