@@ -132,6 +132,63 @@ fn validate_governance_proposal_payload(payload: &[u8]) -> Result<ValidatorChang
     Ok(change)
 }
 
+/// Derive a placeholder public-key resolver entry for a newly-added
+/// validator DID.
+///
+/// KNOWN GAP: the canonical `ValidatorChange::AddValidator` payload (see
+/// `wire.rs`) carries only the target DID, not its Ed25519 public key. A DID
+/// is a one-way hash of its owning key (`did_from_public_key` in
+/// `identity.rs`), so the real public key cannot be recovered from the DID
+/// alone. This derives a deterministic 32-byte placeholder so the resolver
+/// has *an* entry for the new validator (matching this gap's red-test
+/// contract, which only asserts the resolver contains the DID), but votes
+/// or commit certificates genuinely signed by the new validator will not
+/// verify against it. Closing this for real requires extending the wire
+/// payload to carry the validator's public key (or a follow-on key
+/// registration step) — out of scope for this lane; tracked as a residual
+/// gap alongside VCG-005.
+fn placeholder_validator_public_key(did: &Did) -> PublicKey {
+    let digest = blake3::hash(format!("exo.reactor.placeholder_validator_key.v1:{did}").as_bytes());
+    PublicKey::from_bytes(*digest.as_bytes())
+}
+
+/// Decode a committed node's governance payload and, if it is a canonical
+/// `ValidatorChange`, mutate live consensus state (`s.consensus.config.validators`)
+/// and the validator public-key resolver in place.
+///
+/// Pure in-memory mutation only — callers persist the resulting set via
+/// `store.save_validator_set` in a separate step, respecting this module's
+/// locking discipline (never hold the reactor-state mutex and the store
+/// mutex at the same time; see the module doc comment).
+///
+/// Returns `Some(ValidatorChange)` describing what changed if the payload
+/// decoded as a `ValidatorChange`, or `None` if the committed node was not a
+/// governance proposal (the common case for ordinary DAG nodes).
+fn apply_committed_validator_change_in_memory(
+    s: &mut ReactorState,
+    payload: &[u8],
+) -> Option<ValidatorChange> {
+    let change = validate_governance_proposal_payload(payload).ok()?;
+
+    match &change {
+        ValidatorChange::AddValidator { did } => {
+            s.consensus.config.validators.insert(did.clone());
+            let mut keys = s.validator_public_keys.as_map().clone();
+            keys.entry(did.clone())
+                .or_insert_with(|| placeholder_validator_public_key(did));
+            s.validator_public_keys = ValidatorPublicKeys::new(keys);
+        }
+        ValidatorChange::RemoveValidator { did } => {
+            s.consensus.config.validators.remove(did);
+            let mut keys = s.validator_public_keys.as_map().clone();
+            keys.remove(did);
+            s.validator_public_keys = ValidatorPublicKeys::new(keys);
+        }
+    }
+
+    Some(change)
+}
+
 fn checked_committed_height(committed_len: usize) -> Result<u64, String> {
     u64::try_from(committed_len).map_err(|_| {
         format!("committed height {committed_len} exceeds maximum representable u64 height")
@@ -222,6 +279,113 @@ async fn commit_receipt_from_certificate(
         },
     )
     .await
+}
+
+/// Load the committed node's governance payload (if any was persisted via
+/// `save_governance_payload`) and, if it decodes as a canonical
+/// `ValidatorChange`, apply it to live consensus state and the validator
+/// public-key resolver, then persist the resulting set via
+/// `store.save_validator_set`.
+///
+/// Called only after the commit certificate has verified and the commit
+/// trust receipt has been durably persisted — the ordering that keeps
+/// validator-set mutation strictly downstream of a quorum-gated,
+/// evidence-backed commit. The already-persisted commit trust receipt
+/// (`receipt`) is the audit record for the commit itself; a companion
+/// `tracing::info!` event here records the specific validator-set delta so
+/// the audit trail reflects *what* changed, not just *that* something
+/// committed.
+///
+/// KNOWN GAP (concurrent-remove BFT floor race): the minimum-validator BFT
+/// floor (`BFT_MIN_VALIDATORS` in `sentinels.rs`) is enforced only at
+/// proposal-submission time, in `api.rs::handle_validator_change` (which
+/// checks the *current* live validator count before accepting a removal
+/// proposal). Two `RemoveValidator` proposals that each individually pass
+/// that check — because each sees a validator count still at or above the
+/// floor at the moment it is submitted — can both independently reach
+/// quorum and commit here in sequence, jointly dropping the live set below
+/// the BFT-safe minimum even though neither commit violated the floor on
+/// its own. This function does not re-check the floor at application time:
+/// doing so would mean rejecting an already quorum-certified commit, which
+/// raises a bigger design question (does the floor gate proposal
+/// submission, vote casting, or commit application?) than this lane's
+/// scope covers. Surfaced, not fixed, per VCG-005 remediation notes.
+async fn apply_committed_validator_change_after_commit(
+    state: &SharedReactorState,
+    store: &Arc<Mutex<SqliteDagStore>>,
+    hash: &Hash256,
+    receipt: &TrustReceipt,
+) {
+    let hash = *hash;
+
+    // Step 1: load the governance payload under the store lock only.
+    let payload = match with_store_blocking(
+        Arc::clone(store),
+        "commit_load_governance_payload",
+        move |store| {
+            store
+                .load_governance_payload(&hash)
+                .map_err(|e| format!("load governance payload for committed node {hash}: {e}"))
+        },
+    )
+    .await
+    {
+        Ok(Some(payload)) => payload,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(err = %e, %hash, "Failed to load governance payload for committed node");
+            return;
+        }
+    };
+
+    // Step 2: decode and mutate live consensus state under the reactor-state
+    // lock only, then release it before touching the store again.
+    let (change, validators_snapshot) = match with_reactor_state_blocking(
+        Arc::clone(state),
+        "commit_apply_validator_change",
+        move |s| {
+            let change = apply_committed_validator_change_in_memory(s, &payload);
+            Ok((change, s.consensus.config.validators.clone()))
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(err = %e, %hash, "Failed to apply committed ValidatorChange in memory");
+            return;
+        }
+    };
+
+    let Some(change) = change else {
+        // Not a canonical ValidatorChange payload — an ordinary committed
+        // DAG node, not a governance proposal. Nothing more to do.
+        return;
+    };
+
+    // Step 3: persist the resulting validator set under the store lock only.
+    if let Err(e) = with_store_blocking(Arc::clone(store), "commit_persist_validator_set", {
+        move |store| {
+            store
+                .save_validator_set(&validators_snapshot)
+                .map_err(|e| format!("persist committed validator set: {e}"))
+        }
+    })
+    .await
+    {
+        tracing::warn!(err = %e, %hash, "Failed to persist committed validator set");
+        return;
+    }
+
+    // Companion audit event: the commit trust receipt (already persisted by
+    // the caller) is the evidentiary record that a commit happened; this
+    // event records specifically what the commit changed.
+    tracing::info!(
+        %hash,
+        receipt_hash = %receipt.receipt_hash,
+        change = ?change,
+        "Applied committed ValidatorChange to live consensus config and persisted validator set"
+    );
 }
 
 fn sign_proposal(
@@ -869,11 +1033,19 @@ async fn handle_proposal(
 
     if let Err(e) = with_store_blocking(Arc::clone(store), "handle_proposal_put", {
         let node = msg.node.clone();
+        let payload = msg.payload.clone();
         move |store| {
             validate_external_proposal_append(store, &node)?;
+            let node_hash = node.hash;
             store
                 .put_sync(node)
-                .map_err(|e| format!("store proposed node: {e}"))
+                .map_err(|e| format!("store proposed node: {e}"))?;
+            // Persist the raw governance payload so a later commit can
+            // decode and apply it (the DAG node itself only commits to a
+            // one-way payload_hash digest).
+            store
+                .save_governance_payload(&node_hash, &payload)
+                .map_err(|e| format!("store proposed node governance payload: {e}"))
         }
     })
     .await
@@ -1123,6 +1295,12 @@ async fn handle_commit(
         return;
     }
 
+    // Apply a committed ValidatorChange to live consensus state and persist
+    // it, strictly after the commit certificate has verified and the trust
+    // receipt has been durably written above. Ordinary (non-governance)
+    // committed nodes are a no-op here.
+    apply_committed_validator_change_after_commit(state, store, &hash, &receipt).await;
+
     tracing::info!(
         %hash,
         height,
@@ -1243,6 +1421,12 @@ async fn check_and_commit(
             return;
         }
 
+        // Apply a committed ValidatorChange to live consensus state and
+        // persist it, strictly after the commit certificate has verified
+        // and the trust receipt has been durably written above. Ordinary
+        // (non-governance) committed nodes are a no-op here.
+        apply_committed_validator_change_after_commit(state, store, &hash, &receipt).await;
+
         tracing::info!(%hash, height, round, "Node committed — quorum reached");
 
         // Broadcast the commit certificate so all nodes learn.
@@ -1327,10 +1511,19 @@ pub async fn submit_proposal(
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Store it locally.
+    // Store it locally, along with the raw governance payload so a later
+    // commit can decode and apply it (the DAG node itself only commits to a
+    // one-way payload_hash digest).
     with_store_blocking(Arc::clone(store), "submit_proposal_put", {
         let node = node.clone();
-        move |store| store.put_sync(node).map_err(|e| format!("put: {e}"))
+        let payload = payload.to_vec();
+        move |store| {
+            let node_hash = node.hash;
+            store.put_sync(node).map_err(|e| format!("put: {e}"))?;
+            store
+                .save_governance_payload(&node_hash, &payload)
+                .map_err(|e| format!("store proposed node governance payload: {e}"))
+        }
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2745,6 +2938,226 @@ mod tests {
             assert_eq!(receipts.len(), 1);
             assert_eq!(receipts[0].action_hash, node.hash);
             assert!(!receipts[0].signature.is_empty());
+        }
+    }
+
+    // VCG-005 RED: the BFT propose/vote/commit machinery mints a receipt and
+    // advances committed height, but a committed `ValidatorChange` payload is
+    // never decoded or applied to live consensus state or persistence. These
+    // two tests must fail today because `check_and_commit`/`handle_commit`
+    // have no code path that calls `store.save_validator_set` or mutates
+    // `s.consensus.config.validators` / `s.validator_public_keys`.
+    #[tokio::test]
+    async fn validator_set_change_applies_to_live_config_after_quorum_commit() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let proposer_did = validator_vec[0].clone();
+        let config = config_for(proposer_did.clone(), true, validators.clone());
+        // Proposer signs with its own key (index 0), matching `make_sign_fn`.
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+
+        let new_validator = Did::new("did:exo:v4").unwrap();
+        let payload = validator_change_payload_for_test();
+
+        // Build the canonical ValidatorChange DAG node the same way
+        // submit_proposal would, and persist it locally.
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            &payload,
+            &proposer_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        // submit_proposal also persists the raw governance payload
+        // alongside the node — the node itself only commits to a one-way
+        // payload_hash digest, so the committed path needs the original
+        // bytes back to decode and apply the ValidatorChange.
+        store
+            .lock()
+            .unwrap()
+            .save_governance_payload(&node.hash, &payload)
+            .unwrap();
+
+        // Register the proposal and cross the quorum threshold (3 of 4
+        // validators) by voting directly against consensus state — this
+        // mirrors submit_proposal's self-vote plus two more validators.
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &proposer_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .expect("proposal verifies");
+            for (index, voter) in validator_vec.iter().enumerate().take(3) {
+                let vote = vote_for(voter, index, s.consensus.current_round, node.hash);
+                consensus::vote_verified(&mut s.consensus, vote, &resolver)
+                    .expect("validator votes verify");
+            }
+        }
+
+        let net_handle_for_commit = net_handle.clone();
+        check_and_commit(
+            &state,
+            &store,
+            &net_handle_for_commit,
+            &reactor_tx,
+            &node.hash,
+        )
+        .await;
+
+        let _event = reactor_rx
+            .try_recv()
+            .expect("commit event emitted after quorum");
+
+        // Expected red: the live consensus validator set does not yet contain
+        // the new validator because nothing decodes the committed payload.
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                s.consensus.config.validators.contains(&new_validator),
+                "committed ValidatorSetChange must mutate live consensus config.validators"
+            );
+            assert!(
+                s.validator_public_keys
+                    .as_map()
+                    .contains_key(&new_validator),
+                "committed ValidatorSetChange must extend the live validator public-key resolver"
+            );
+        }
+
+        // Expected red: store.save_validator_set is never called after commit,
+        // so the persisted set still reflects genesis membership only.
+        {
+            let st = store.lock().unwrap();
+            let persisted = st
+                .load_validator_set()
+                .expect("load_validator_set succeeds");
+            assert!(
+                persisted.contains(&new_validator),
+                "committed ValidatorSetChange must be persisted via store.save_validator_set"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn validator_set_change_without_quorum_does_not_mutate() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let proposer_did = validator_vec[0].clone();
+        let config = config_for(proposer_did.clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+
+        let new_validator = Did::new("did:exo:v4").unwrap();
+        let payload = validator_change_payload_for_test();
+
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            &payload,
+            &proposer_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        // submit_proposal also persists the raw governance payload
+        // alongside the node — see the comment in the sibling quorum test
+        // above for why this is required for the committed path to decode
+        // and apply a ValidatorChange.
+        store
+            .lock()
+            .unwrap()
+            .save_governance_payload(&node.hash, &payload)
+            .unwrap();
+
+        // Only the proposer's self-vote is cast — no quorum in a 4-validator set.
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &proposer_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .expect("proposal verifies");
+            let round = s.consensus.current_round;
+            consensus::vote_verified(
+                &mut s.consensus,
+                vote_for(&proposer_did, 0, round, node.hash),
+                &resolver,
+            )
+            .expect("self-vote verifies");
+        }
+
+        check_and_commit(&state, &store, &net_handle, &reactor_tx, &node.hash).await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "no commit event should be emitted without quorum"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                !consensus::is_finalized(&s.consensus, &node.hash),
+                "node must not be finalized without quorum"
+            );
+            assert!(
+                !s.consensus.config.validators.contains(&new_validator),
+                "validator set must not mutate without quorum-gated commit"
+            );
+            assert!(
+                !s.validator_public_keys
+                    .as_map()
+                    .contains_key(&new_validator),
+                "validator public-key resolver must not extend without quorum-gated commit"
+            );
+        }
+        {
+            let st = store.lock().unwrap();
+            let persisted = st
+                .load_validator_set()
+                .expect("load_validator_set succeeds");
+            assert!(
+                !persisted.contains(&new_validator),
+                "persisted validator set must not change without quorum-gated commit"
+            );
         }
     }
 

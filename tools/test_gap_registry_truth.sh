@@ -75,7 +75,7 @@ assert_contains GAP-REGISTRY.md "bash tools/test_gap_registry_truth.sh"
 
 for id in \
   VCG-001 VCG-002 VCG-003 VCG-004 VCG-005 VCG-006 VCG-007 \
-  VCG-008 VCG-009 VCG-010 VCG-011 VCG-012 VCG-013 VCG-014
+  VCG-008 VCG-009 VCG-010 VCG-011 VCG-012 VCG-013 VCG-014 VCG-015
 do
   heading_count=$(grep -c "^## $id -" GAP-REGISTRY.md)
   if [[ "$heading_count" != "1" ]]; then
@@ -88,6 +88,7 @@ assert_contains GAP-REGISTRY.md "VCG-001 \\| P0 \\| Red"
 assert_contains GAP-REGISTRY.md "VCG-002 \\| P0 \\| Green-local"
 assert_contains GAP-REGISTRY.md "VCG-003 \\| P0 \\| Red"
 assert_contains GAP-REGISTRY.md "VCG-004 \\| P0 \\| Red"
+assert_contains GAP-REGISTRY.md "VCG-005 \\| P1 \\| Green-local"
 assert_contains GAP-REGISTRY.md "eDiscovery export is not an open origin-main gap"
 assert_contains GAP-REGISTRY.md "No VCG row is closed at ledger creation"
 
@@ -109,11 +110,11 @@ assert_contains GAP-REGISTRY.md "^## Ratified Decisions$"
 assert_contains GAP-REGISTRY.md "ratification precedes authority; authority follows evidence"
 assert_contains GAP-REGISTRY.md "invariant, adversary, evidence, detection, failure"
 
-# Every VCG section keeps the full row shape.
+# Every VCG section keeps the full row shape (15 rows: VCG-001..VCG-015).
 for label in "Evidence:" "Failure mode:" "Next red test:" "Remediation track:" "Closure gate:"; do
   label_count=$(grep -c "^${label}$" GAP-REGISTRY.md)
-  if [[ "$label_count" != "14" ]]; then
-    fail "expected 14 '${label}' sections, found ${label_count}"
+  if [[ "$label_count" != "15" ]]; then
+    fail "expected 15 '${label}' sections, found ${label_count}"
   fi
 done
 
