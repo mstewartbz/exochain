@@ -148,7 +148,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-005 | P1 | Green-local | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
 | VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
 | VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
-| VCG-008 | P1 | Open | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
+| VCG-008 | P1 | Green-local | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
 | VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
 | VCG-010 | P1 | Open | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
@@ -780,9 +780,41 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-008 - 0dentity First-Touch Onboarding Is Gated
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** 0dentity
+
+Lane record (2026-07-03, branch `vcg/008-zerodentity-freshness`):
+
+- Scout correction confirmed: the proof-of-possession contract already exists
+  and passes 34 tests; the genuine gap was the missing `created_ms` freshness
+  window (`submit_claim` checked only `created_ms != 0`).
+- Red evidence: `submit_claim_rejects_stale_created_ms`,
+  `submit_claim_rejects_future_created_ms_beyond_skew_window`, and
+  `bearer_gate_and_pop_gate_compose_through_full_router` — independently
+  verified to fail against the red commit alone (not a `created_ms == 0`
+  tautology; the stale test asserts `stale_created_ms > 0` defensively).
+- Green: a bounded 21-day past/future skew check in
+  `crates/exo-node/src/zerodentity/onboarding.rs` `submit_claim`, comparing
+  `created_ms` against the TRUSTED `SessionClock` (wraps `HybridClock`; fails
+  closed with 503 when untrusted) — NOT spoofable host wall-clock. The 21-day
+  window sits above the existing tests' 19.66-day values and below the red
+  tests' 30-day threshold. The pre-existing `created_ms != 0` check is
+  preserved and runs first (no collision).
+- Adversarial re-refutation (NOT-REFUTED): trusted-clock design confirmed (no
+  `SystemTime`/`Instant` fallback); freshness tests genuinely fail against the
+  red commit; `tests.rs` byte-identical red→green (no assertion weakened); 34
+  PoP tests intact; feature default not flipped. Gates: zerodentity 309 pass
+  (326 feature-on), clippy/doc/nightly-fmt clean.
+- Residual recorded: the freshness check is currently fail-closed DEAD CODE in
+  production — `main.rs` wires `SessionClock::unavailable()` (only
+  `new_with_clock`, never called in production, installs a trusted clock), so
+  live requests return 503 rather than a spoofable accept. This protects the
+  code path; wiring a trusted HLC into `main.rs` zerodentity onboarding is a
+  distinct future step where a wall-clock defect could land, and must be
+  reviewed as such (candidate follow-on row).
+- Status Green-local: local closure gate passes; Green-ci on lane PR CI;
+  Closed after merge. Default-flip remains a D8 ratification event.
 
 Evidence:
 
