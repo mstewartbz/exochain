@@ -57,7 +57,7 @@ git clone https://github.com/exochain/exochain.git
 cd exochain
 
 # 2. Build the node + SDK (release mode)
-cargo build --release -p exo-node -p exochain-sdk
+cargo build --release -p exochain-node -p exochain-sdk
 
 # 3. Launch the MCP server (stdio)
 ./target/release/exochain mcp
@@ -131,7 +131,7 @@ cargo test --workspace
 
 # Run tests for a specific crate
 cargo test -p exochain-sdk
-cargo test -p exo-gatekeeper
+cargo test -p exochain-gatekeeper
 
 # Lint (zero warnings — CI denies)
 cargo clippy --workspace --all-targets -- -D warnings
@@ -195,15 +195,15 @@ Combinators live in `exo-gatekeeper::combinator`. Add the variant, implement det
 ### Scaffold a new crate
 
 ```bash
-python3 tools/codegen/generate_crate.py exo-newcrate module1 module2 module3
+python3 tools/codegen/generate_crate.py exochain-newcrate module1 module2 module3
 ```
 
-This generates `Cargo.toml`, `lib.rs`, `error.rs`, per-module source + test skeletons, and adds the crate to the workspace.
+This generates `Cargo.toml`, `lib.rs`, `error.rs`, per-module source + test skeletons, and adds the crate to the workspace. Pass the package name with the `exochain-` prefix directly (the generator does not rename it for you).
 
 ```bash
-cargo build -p exo-newcrate
-cargo test  -p exo-newcrate
-cargo clippy -p exo-newcrate -- -D warnings
+cargo build -p exochain-newcrate
+cargo test  -p exochain-newcrate
+cargo clippy -p exochain-newcrate -- -D warnings
 ```
 
 ---
@@ -354,7 +354,7 @@ Existing resolutions:
 |---|---|
 | Build all | `cargo build --workspace` |
 | Test all | `cargo test --workspace` |
-| Test one crate | `cargo test -p exo-core` |
+| Test one crate | `cargo test -p exochain-core` |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Format | `cargo fmt --all` |
 | Format check | `cargo fmt --all -- --check` |

@@ -121,7 +121,7 @@ crate.
 
 ```bash
 # Release build — needed for reasonable startup time.
-cargo build --release -p exo-node
+cargo build --release -p exochain-node
 
 # Status on a fresh install: creates ~/.exochain/ and reports a clean state.
 ./target/release/exochain status
@@ -205,7 +205,7 @@ for first-week work:
 | `exo-consent`        | Bailment lifecycle, consent policies, default-deny gatekeeper                           |
 | `exo-authority`      | Authority chains, delegation registry, permission model, Ed25519 link verification      |
 | `exo-dag`            | Immutable DAG ledger, Merkle Mountain Range, Sparse Merkle Tree, BFT consensus adapter  |
-| `exo-proofs`         | SNARK, STARK, ZKML proof systems, unified verifier                                      |
+| `exo-proofs`         | SNARK, STARK, ZKML proof-system skeletons (unaudited, pedagogical — not production cryptography), unified verifier |
 | `exo-gatekeeper`     | CGR Kernel, 8 invariants, 6 MCP rules, combinator algebra, holons, TEE attestation       |
 | `exo-governance`     | Decisions, quorum, challenge, crosscheck, deliberation, conflict, audit, succession     |
 | `exo-escalation`     | Sybil detection, triage, 7-stage adjudication, kanban board, feedback loop              |
@@ -515,7 +515,7 @@ If you want a tight sequence to follow, here it is:
 - [ ] `git clone git@github.com:exochain/exochain.git && cd exochain`
 - [ ] `cargo build --workspace` (5 min)
 - [ ] `cargo test --workspace` (2 min; expect 0 failures)
-- [ ] `cargo build --release -p exo-node` (3 min)
+- [ ] `cargo build --release -p exochain-node` (3 min)
 - [ ] `./target/release/exochain status` — confirm data dir creation
 - [ ] `./target/release/exochain init`
 - [ ] `./target/release/exochain start --validator` (separate shell)
