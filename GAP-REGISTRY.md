@@ -145,7 +145,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-002 | P0 | Green-local | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
 | VCG-003 | P0 | Red | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Red | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
-| VCG-005 | P1 | Open | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
+| VCG-005 | P1 | Green-local | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
 | VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
 | VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
 | VCG-008 | P1 | Open | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
@@ -155,6 +155,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-012 | P2 | Open | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
 | VCG-013 | P2 | Open | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
 | VCG-014 | P2 | Open | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
+| VCG-015 | P1 | Open | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
 
 ## VCG-001 - Production ZK Proof Backend Absent
 
@@ -565,9 +566,46 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-005 - Admin Governance Shortcut Is Proposal-Only
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** Governance runtime
+
+Lane record (2026-07-03, branch `vcg/005-validator-set-lifecycle`):
+
+- Red evidence (commit `b70a0107`): `validator_set_change_applies_to_live_config_after_quorum_commit`
+  and `validator_set_change_without_quorum_does_not_mutate`, independently
+  verified to fail for the documented reason (commit path never decoded the
+  committed payload nor called `store.save_validator_set`).
+- Architectural discovery: the DAG persists only a one-way `payload_hash`,
+  never the raw application payload, so the commit path had nothing to decode.
+  Green added a `governance_payloads` store (crates/exo-node/src/store.rs) with
+  save/load, wired into production `submit_proposal` and `handle_proposal`
+  (reactor.rs:1524, 1047) where the raw payload genuinely exists.
+- Green-local (commit `594cb992`): `handle_commit`/`check_and_commit` now load
+  the committed payload, decode `ValidatorChange`, mutate
+  `s.consensus.config.validators`/`s.validator_public_keys`, persist via
+  `store.save_validator_set` (formerly `#[allow(dead_code)]`, never called),
+  and emit an audit event naming the applied change alongside the commit trust
+  receipt. Both red tests pass; full crate suite 1313 pass / 0 fail; clippy,
+  doc, and nightly fmt clean.
+- Test-modification note: green added one `store.save_governance_payload` call
+  to each red test after the existing `put_sync`, faithfully mirroring what
+  production `submit_proposal` now does (the test builds the node manually, so
+  it must establish the same precondition). Adversarial re-refutation
+  (NOT-REFUTED) confirmed no assertion was weakened and the call mirrors real
+  production code, not a test-only channel.
+- Residuals surfaced (both documented in code comments): (1) the placeholder
+  validator public key — see new row VCG-015; (2) the concurrent-remove BFT
+  floor race — two individually-valid `RemoveValidator` proposals can each
+  reach quorum and jointly drop the live set below `BFT_MIN_VALIDATORS`
+  because the floor is checked at proposal-submission time only (api.rs,
+  untouched), not at commit-application time. Recorded for a follow-on design
+  decision (proposal vs vote vs commit-application gating); tracked under
+  VCG-014 governance-completeness scope.
+- Status Green-local: the core lifecycle (committed ValidatorChange mutates and
+  persists live state with an audit receipt) is delivered and tested; the
+  admin-bearer authority surface (issue #737) is a separate lane (VCG-006);
+  the placeholder-key liveness gap is VCG-015. Closed after merge + CI.
 
 Evidence:
 
@@ -1097,6 +1135,52 @@ cargo test -p exochain-gatekeeper invariants
 cargo test -p exochain-governance
 cargo clippy -p exochain-gatekeeper --all-targets -- -D warnings
 cargo clippy -p exochain-governance --all-targets -- -D warnings
+```
+
+## VCG-015 - Added Validators Have No Registered Public Key
+
+**Priority:** P1
+**Status:** Open
+**Classification:** Core runtime adapter
+**Owner role:** Governance runtime
+
+Discovered by the VCG-005 lane (2026-07-03) and recorded here per the Single
+Source Rule before remediation.
+
+Evidence:
+
+- `crates/exo-node/src/reactor.rs:135-150` documents that
+  `ValidatorChange::AddValidator` carries only a DID, and a DID is a one-way
+  BLAKE3 hash of a public key with no recoverable inverse.
+- The VCG-005 apply path therefore inserts a deterministic placeholder public
+  key into `s.validator_public_keys` so the resolver has an entry, but no
+  secret key corresponds to it.
+
+Failure mode:
+
+A validator added through governance cannot cast verifiable votes or commit
+certificates until a real public key is registered - a liveness gap, not a
+security hole (the placeholder is cryptographically inert: no party, attacker
+included, can forge a signature against a keyless digest).
+
+Next red test:
+
+- A validator added via a committed `ValidatorChange` can produce a vote or
+  commit certificate that `crypto::verify` accepts against its registered key.
+
+Remediation track:
+
+- Carry a real public key (or a signed key-registration step) in the
+  `ValidatorChange::AddValidator` wire payload so the apply path registers a
+  verifiable key rather than a placeholder.
+- Coordinate with the VCG-005 apply path and the exo-dag `ValidatorChange`
+  type; keep the change fail-closed (reject adds without a valid key).
+
+Closure gate:
+
+```bash
+cargo test -p exochain-node governance
+cargo clippy -p exochain-node --all-targets -- -D warnings
 ```
 
 ## Ratified Decisions
