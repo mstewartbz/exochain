@@ -47,7 +47,7 @@
 //!    today: it has no `proof_bytes`/checkpoint-root/validator-signature
 //!    wire fields and no production CGR verifier wired, so it refuses
 //!    regardless of any feature flag (see the CGR proof-verification
-//!    lock tests in [`proofs::tests`] and
+//!    lock tests in the [`proofs`] module's `tests` submodule and
 //!    `Initiatives/fix-mcp-cgr-proof-verification-stub.md`).
 //!
 //! 3. **Feature-gated simulation tools** — otherwise-truthy-shaped
