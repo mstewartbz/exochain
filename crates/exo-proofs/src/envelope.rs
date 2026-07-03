@@ -95,14 +95,12 @@ pub enum ProofStatementKind {
 // BackendId
 // ---------------------------------------------------------------------------
 
-/// The numeric id space reserved for the crate's own unaudited pedagogical
-/// stand-in backend (`BackendId::UnauditedBlake3Standin` encodes to this
-/// value under `#[repr(u32)]`-style discriminant semantics via
-/// [`BackendId::registry_id`]).
+/// Named alias for the crate's own unaudited pedagogical stand-in backend,
+/// [`BackendId::UnauditedBlake3Standin`].
 ///
-/// Exposed as a `u32` constant (rather than only the enum variant) so that
-/// callers and tests can construct envelopes that name this backend without
-/// reaching into the enum's internal discriminant.
+/// Exposed as a named constant (rather than only the enum variant) so that
+/// callers and tests can construct envelopes that name this backend through
+/// a stable public path.
 pub const UNAUDITED_BLAKE3_STANDIN_BACKEND_ID: BackendId = BackendId::UnauditedBlake3Standin;
 
 /// Identifies which proof backend produced (and must verify) a
