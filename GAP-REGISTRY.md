@@ -661,6 +661,47 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 **Classification:** Core runtime adapter
 **Owner role:** AVC runtime
 
+Lane record (2026-07-03, branch `vcg/006a-avc-durability-bearer`, sub-lane
+VCG-006a — closes 2 of the 4 sub-issues; row stays Open until #734/#736):
+
+- **#735 (Postgres durability)** — Red evidence:
+  `avc_startup_fails_closed_when_durability_required_without_pool`. Green: the
+  `require_postgres_durability` bool is now threaded from `main.rs:514` (where
+  it was previously parsed and discarded — a structurally inert flag) into
+  `AvcApiState::with_durable_registry`, which returns `Err` when the flag is
+  set and `database_pool` is `None`, instead of silently using the file
+  fallback.
+- **#737 (subject-signature bearer carve-out)** — Red evidence:
+  `avc_receipts_emit_accepts_subject_signature_without_bearer` plus
+  `avc_receipts_emit_still_rejects_unsigned_without_bearer` (guards against an
+  unauthenticated hole). Green: an `is_avc_receipts_emit_route` +
+  `avc_emit_receipt_carve_out` in `auth.rs` that buffers the request body
+  (bounded 64KiB), confirms a genuine non-empty subject signature is present,
+  and only then exempts the bearer gate; unsigned requests fall through to
+  the normal 401. `verify_subject_action_signature` remains the sole
+  cryptographic authority gate, unweakened.
+- Adversarial re-refutation (NOT-REFUTED): traced every path — no combination
+  (malformed/oversized body, present-but-invalid signature, wrong
+  content-type) admits an unsigned or wrong-signed write; wrong-signed
+  requests reach the handler's unweakened crypto gate and are rejected at
+  preflight before any mutation; the all-zero-signature spoof is closed; the
+  body is correctly buffered and reconstructed for the downstream handler.
+- Gates: `cargo test -p exochain-node avc` 124 pass / 1 ignored; auth:: 39
+  pass; full crate 1314 pass; clippy, doc, nightly fmt clean.
+- Residuals recorded: (1) no full-wrapped-stack test for the
+  present-but-cryptographically-wrong-signature-without-bearer case (behavior
+  correct by trace, not asserted at that exact seam — fold into VCG-006b or a
+  follow-up test); (2) the carve-out intentionally makes `/receipts/emit`
+  reachable without a bearer by anyone shaping a plausible JSON body with a
+  non-empty signature, costing one registry lookup + one Ed25519 verify before
+  rejection — bounded (64KiB cap, no mutation on failure), a deliberate design
+  tradeoff, not a defect.
+- Remaining for lane VCG-006b: #736 (runtime issuer allow-list
+  registration/rotation endpoint, under the D3 one-authority-model rule) and
+  #734 (conformance-test-root feature with source-guard proving production
+  root-trust constants untouched when off). Row closes when all four
+  sub-issues land with source, CI, and runtime proof.
+
 Evidence:
 
 - Live `/ready` returned HTTP 200 with `dagdb_runtime_status=dagdb_active`.
