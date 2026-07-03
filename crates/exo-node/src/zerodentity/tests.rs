@@ -2903,4 +2903,211 @@ mod tests {
             "claims list must be non-empty"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // VCG-008 RED — created_ms freshness window (onboarding.rs submit_claim)
+    // -----------------------------------------------------------------------
+    //
+    // `submit_claim` today only checks `created_ms != 0` (onboarding.rs:429).
+    // An arbitrarily old or far-future signed payload is accepted as long as
+    // the exact bytes have not been seen before (replay dedup is keyed on the
+    // full signed payload + signature, not on `created_ms` freshness). These
+    // two tests assert a bounded skew window is enforced against the trusted
+    // session clock, mirroring `ZERODENTITY_ERASURE_MAX_FUTURE_SKEW_MS` in
+    // store.rs. Both are expected to FAIL (accepted with 200 OK instead of
+    // rejected) until a freshness/skew check is added.
+
+    // A realistic wall-clock "now" (2026-01-01T00:00:00Z in epoch ms) used for
+    // the freshness-window tests so that subtracting a 30-day skew stays well
+    // above zero — otherwise `created_ms` could accidentally collide with the
+    // pre-existing, unrelated `created_ms == 0` rejection and produce a false
+    // green result.
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+    const FRESHNESS_TEST_NOW_MS: u64 = 1_767_225_600_000;
+
+    #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+    async fn submit_claim_rejects_stale_created_ms() {
+        let store = new_shared_store();
+        let app = onboarding_app_with_fixed_clock(store.clone(), FRESHNESS_TEST_NOW_MS);
+        let keypair = test_keypair(140);
+        let did = derived_did(&keypair);
+
+        // 30 days before the trusted clock — well-formed, correctly signed,
+        // but stale by any reasonable bounded skew window.
+        const THIRTY_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+        let stale_created_ms = FRESHNESS_TEST_NOW_MS - THIRTY_DAYS_MS;
+        assert!(
+            stale_created_ms > 0,
+            "test fixture bug: stale_created_ms must stay positive so this test \
+             exercises the freshness window, not the unrelated created_ms == 0 check"
+        );
+
+        let resp = post_json(
+            &app,
+            "/api/v1/0dentity/claims",
+            signed_claim_body(
+                &did,
+                "DisplayName",
+                None,
+                None,
+                stale_created_ms,
+                &keypair,
+                &keypair,
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a claim signed 30 days in the past must be rejected as stale, \
+             not accepted because created_ms != 0 and the payload bytes are novel"
+        );
+        assert!(
+            store.lock().unwrap().get_claims(&did).unwrap().is_empty(),
+            "a stale-created_ms claim must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+    async fn submit_claim_rejects_future_created_ms_beyond_skew_window() {
+        let store = new_shared_store();
+        let app = onboarding_app_with_fixed_clock(store.clone(), FRESHNESS_TEST_NOW_MS);
+        let keypair = test_keypair(141);
+        let did = derived_did(&keypair);
+
+        // 30 days after the trusted clock — mirrors the stale-past case but
+        // on the future side of the window.
+        const THIRTY_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+        let future_created_ms = FRESHNESS_TEST_NOW_MS + THIRTY_DAYS_MS;
+
+        let resp = post_json(
+            &app,
+            "/api/v1/0dentity/claims",
+            signed_claim_body(
+                &did,
+                "DisplayName",
+                None,
+                None,
+                future_created_ms,
+                &keypair,
+                &keypair,
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a claim signed 30 days in the future must be rejected as beyond \
+             the trusted clock's bounded future-skew tolerance"
+        );
+        assert!(
+            store.lock().unwrap().get_claims(&did).unwrap().is_empty(),
+            "a future-created_ms claim beyond the skew window must not be persisted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // VCG-008 RED — bearer gate + PoP gate composition through the full router
+    // -----------------------------------------------------------------------
+    //
+    // Every existing onboarding test above drives `onboarding_app()`, which
+    // builds `onboarding_router` in isolation — it never passes through
+    // `auth::require_bearer_on_writes`. Production wires the two together
+    // (main.rs:1100-1136: `zerodentity_onboarding_router` merged into
+    // `extra_router`, then `.layer(axum::middleware::from_fn(... auth::require_bearer_on_writes))`).
+    // This test builds the router the way main.rs does, and proves both
+    // gates actually compose: a request with only a valid bearer token and
+    // no proof-of-possession must still be rejected (by the PoP gate inside
+    // the handler), and a request with valid PoP but no bearer token must be
+    // rejected at the bearer layer before it ever reaches the handler.
+
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+    fn full_router_with_bearer(
+        store: SharedZerodentityStore,
+        now_ms: u64,
+        bearer_token: &str,
+    ) -> Router {
+        let onboarding = onboarding_app_with_fixed_clock(store, now_ms);
+        let auth = crate::auth::BearerAuth {
+            token: std::sync::Arc::new(zeroize::Zeroizing::new(bearer_token.to_owned())),
+        };
+        onboarding.layer(axum::middleware::from_fn(move |req, next| {
+            let a = auth.clone();
+            crate::auth::require_bearer_on_writes(a, req, next)
+        }))
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+    async fn bearer_gate_and_pop_gate_compose_through_full_router() {
+        const BEARER_TOKEN: &str = "vcg-008-full-router-bearer-token";
+        let store = new_shared_store();
+        let app = full_router_with_bearer(store.clone(), API_TEST_NOW_MS, BEARER_TOKEN);
+        let keypair = test_keypair(142);
+        let did = derived_did(&keypair);
+
+        // Case 1: valid bearer token, but NO public_key/signature (no PoP).
+        // The bearer layer must let this through (POST /api/v1/0dentity/claims
+        // is not in the local-signed-write allowlist, so it actually requires
+        // the bearer token — but the request must still fail at the PoP gate
+        // inside the handler, proving the bearer token alone is insufficient).
+        let bearer_only_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/0dentity/claims")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {BEARER_TOKEN}"))
+            .body(Body::from(
+                serde_json::json!({
+                    "subject_did": did.as_str(),
+                    "claim_type": "DisplayName"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(bearer_only_req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "bearer token alone (no proof-of-possession) must not create a claim \
+             through the composed production router"
+        );
+        assert!(
+            store.lock().unwrap().get_claims(&did).unwrap().is_empty(),
+            "bearer-only request must not persist a claim"
+        );
+
+        // Case 2: valid PoP (signed claim body), but NO bearer token at all.
+        // The bearer layer must reject this before the handler's PoP check
+        // ever runs.
+        let pop_only_body = signed_claim_body(
+            &did,
+            "DisplayName",
+            None,
+            None,
+            API_TEST_NOW_MS,
+            &keypair,
+            &keypair,
+        );
+        let pop_only_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/0dentity/claims")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(pop_only_body.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(pop_only_req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a request with valid proof-of-possession but no bearer token must be \
+             rejected at the bearer-gate layer of the composed production router"
+        );
+        assert!(
+            store.lock().unwrap().get_claims(&did).unwrap().is_empty(),
+            "PoP-only request without a bearer token must not persist a claim"
+        );
+    }
 }
