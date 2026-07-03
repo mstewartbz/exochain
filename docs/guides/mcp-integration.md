@@ -77,7 +77,7 @@ From the repo root:
 ```bash
 git clone https://github.com/exochain/exochain.git
 cd exochain
-cargo build --release -p exo-node
+cargo build --release -p exochain-node
 ```
 
 The binary lands at `target/release/exochain`. Put it on your `PATH` for convenience:
@@ -667,7 +667,7 @@ Response (abridged): a filled-in multi-turn prompt instructing the agent to call
 
   Expected: `40`.
 
-- If the number is wrong, the binary is stale — rebuild with `cargo build --release -p exo-node`.
+- If the number is wrong, the binary is stale — rebuild with `cargo build --release -p exochain-node`.
 
 ### "tool not found" error at runtime
 

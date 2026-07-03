@@ -516,7 +516,7 @@ Here is what happens at each step:
 
 **Action Execution.** The governance action is performed -- the Decision Object is created in Draft status.
 
-**Proof Generation.** The system generates cryptographic proofs: a Merkle proof for inclusion in the directed acyclic graph (DAG), an optional zero-knowledge proof for privacy-preserving verification.
+**Proof Generation.** The system generates a Merkle proof for inclusion in the directed acyclic graph (DAG). It can also attach an optional zero-knowledge proof, but that path is an unaudited, pedagogical skeleton behind a default-off feature flag (not production cryptography) that fails closed unless explicitly enabled — see [Appendix A](#appendix-a-glossary).
 
 **DAG Append.** The action is appended to the immutable governance log with a typed node and an anchor receipt binding it to an external timestamp.
 
@@ -1225,9 +1225,9 @@ The system's approach to post-quantum readiness:
 
 Each phase transition is recorded as a governance decision in the system.
 
-**Hash-based archival proofs.** The STARK (Scalable Transparent Argument of Knowledge) proof system used for archival proofs is already quantum-resistant because it relies solely on hash functions, not elliptic curves. Historical records anchored with STARK proofs remain secure against quantum attack.
+**Hash-based archival proofs (planned).** The design intent is a STARK (Scalable Transparent Argument of Knowledge) proof system for archival proofs, chosen because a hash-based construction (not elliptic curves) can be made quantum-resistant. Today the `exo-proofs` STARK module is an unaudited, pedagogical skeleton — not production cryptography — that fails closed unless explicitly enabled; see [Appendix A](#appendix-a-glossary). No archival records are currently anchored with STARK proofs, and no quantum-resistance claim holds until a production backend replaces the skeleton (tracked in GAP-REGISTRY.md VCG-001/D1).
 
-**Historical re-anchoring.** Records signed with classical-only cryptography will be re-anchored with quantum-resistant proofs, providing a cryptographic bridge from the pre-quantum to the post-quantum era.
+**Historical re-anchoring (planned).** Once a production STARK backend lands, records signed with classical-only cryptography could be re-anchored with quantum-resistant proofs, providing a cryptographic bridge from the pre-quantum to the post-quantum era. This capability does not exist yet.
 
 ---
 
@@ -1401,9 +1401,9 @@ If you encounter an issue that is not addressed in this chapter:
 
 **SMT (Sparse Merkle Tree)** -- A Merkle tree over a large key space (2^256) that efficiently supports both inclusion proofs and non-inclusion proofs. Used for state membership verification.
 
-**SNARK (Succinct Non-Interactive Argument of Knowledge)** -- A type of zero-knowledge proof that produces compact proofs verifiable in constant time. Used for per-decision proofs in decision.forum.
+**SNARK (Succinct Non-Interactive Argument of Knowledge)** -- A type of zero-knowledge proof that produces compact proofs verifiable in constant time. Intended for per-decision proofs in decision.forum; today `exo-proofs`' SNARK module is an unaudited, pedagogical skeleton -- not production cryptography -- that fails closed unless explicitly enabled (see GAP-REGISTRY.md VCG-001).
 
-**STARK (Scalable Transparent Argument of Knowledge)** -- A type of zero-knowledge proof that requires no trusted setup and relies only on hash functions, making it quantum-resistant. Used for archival proofs.
+**STARK (Scalable Transparent Argument of Knowledge)** -- A type of zero-knowledge proof that requires no trusted setup and relies only on hash functions, making it quantum-resistant in principle. Intended for archival proofs; today `exo-proofs`' STARK module is an unaudited, pedagogical skeleton -- not production cryptography -- that fails closed unless explicitly enabled (see GAP-REGISTRY.md VCG-001).
 
 **Succession** -- The protocol for transferring governance authority when a role holder becomes unavailable. Triggered by voluntary declaration, unresponsiveness exceeding a threshold, or activation by a designated activator.
 
@@ -1421,7 +1421,7 @@ If you encounter an issue that is not addressed in this chapter:
 
 **Verification Gate** -- A checkpoint in the governance workflow where specific conditions must be satisfied before processing continues. Verification gates are synchronous -- the action cannot proceed until the gate passes.
 
-**ZKML (Zero-Knowledge Machine Learning)** -- A proof system that binds an AI model's identity (architecture, weights, version) to its output, providing verifiable evidence that a specific model produced a specific result.
+**ZKML (Zero-Knowledge Machine Learning)** -- A proof system intended to bind an AI model's identity (architecture, weights, version) to its output, providing verifiable evidence that a specific model produced a specific result. Today `exo-proofs`' ZKML module is a hash-based simulation (unaudited, pedagogical -- not production cryptography) that binds model, input, and output via BLAKE3 rather than executing the model inside a ZK circuit; it is not a cryptographic soundness claim and fails closed unless explicitly enabled (see GAP-REGISTRY.md VCG-001).
 
 ---
 
@@ -1858,7 +1858,7 @@ Constraints:
 **Z**
 
 - Zero-trust architecture, [Section 14.2](#142-zero-trust-architecture)
-- ZKML, [Appendix A](#appendix-a-glossary)
+- ZKML (unaudited, pedagogical), [Appendix A](#appendix-a-glossary)
 
 ---
 

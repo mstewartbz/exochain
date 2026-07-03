@@ -779,17 +779,18 @@ pub enum Signature {
 
 This allows adding post-quantum signature schemes without breaking existing signatures. Old Ed25519 signatures remain valid; new signatures can use quantum-resistant algorithms.
 
-## SNARK/STARK/ZKML
+## SNARK/STARK/ZKML (unaudited, pedagogical — not production cryptography)
 
-The [[crates/exo-proofs/src/]] crate provides:
+The [[crates/exo-proofs/src/]] crate provides unaudited, pedagogical proof-system
+skeletons — not production cryptography (see GAP-REGISTRY.md VCG-001):
 
-- **SNARK** proof generation and verification ([[crates/exo-proofs/src/snark.rs]])
-- **STARK** proof system ([[crates/exo-proofs/src/stark.rs]])
-- **ZKML** — Zero-Knowledge Machine Learning verification ([[crates/exo-proofs/src/zkml.rs]])
+- **SNARK** proof generation and verification, unaudited pedagogical skeleton ([[crates/exo-proofs/src/snark.rs]])
+- **STARK** proof system, unaudited pedagogical skeleton ([[crates/exo-proofs/src/stark.rs]])
+- **ZKML** — Zero-Knowledge Machine Learning verification, unaudited pedagogical skeleton ([[crates/exo-proofs/src/zkml.rs]])
 - **R1CS circuit abstraction** ([[crates/exo-proofs/src/circuit.rs]])
 - **Unified verifier** ([[crates/exo-proofs/src/verifier.rs]])
 
-These are used to prove governance properties without revealing the underlying data — for example, proving that a quorum was met without revealing who voted which way.
+These are structurally intended to prove governance properties without revealing the underlying data — for example, proving that a quorum was met without revealing who voted which way — but the current implementation is not a sound zero-knowledge argument and every public entry point fails closed unless the crate's `unaudited-pedagogical-proofs` feature is explicitly enabled. Production cryptographic delivery of this property is future work, gated on external cryptographic review.
 
 ## Merkle Structures
 
@@ -987,16 +988,17 @@ decision.forum tracks 12 production metrics via the `MetricsCollector` in [[crat
     +-----------+ +-----------+ +-----------+ +-----------+
          |              |             |             |
          v              v             v             v
-    +-----------+ +-----------+ +-----------+ +-----------+
-    | exo-dag   | | exo-proofs| | exo-api   | | exo-      |
-    | 2,883 LOC | | 1,916 LOC | | 283 LOC   | | gateway   |
-    | 87 tests  | | 61 tests  | | 22 tests  | | 2,135 LOC |
-    |           | |           | |           | | 48 tests  |
-    | DAG, BFT, | | SNARK,    | | REST API  | | Protocol, |
-    | SMT, MMR, | | STARK,    | | Endpoints | | Routing,  |
-    | Store     | | ZKML,     | |           | | Auth      |
-    |           | | Circuits  | |           | |           |
-    +-----------+ +-----------+ +-----------+ +-----------+
+    +-----------+ +-----------------+ +-----------+ +-----------+
+    | exo-dag   | | exo-proofs      | | exo-api   | | exo-      |
+    | 2,883 LOC | | 1,916 LOC       | | 283 LOC   | | gateway   |
+    | 87 tests  | | 61 tests        | | 22 tests  | | 2,135 LOC |
+    |           | | (unaudited,     | |           | | 48 tests  |
+    | DAG, BFT, | | pedagogical)    | | REST API  | | Protocol, |
+    | SMT, MMR, | | SNARK, STARK,   | | Endpoints | | Routing,  |
+    | Store     | | ZKML, Circuits  | |           | | Auth      |
+    |           | |                 | |           | |           |
+    +-----------+ +-----------------+ +-----------+ +-----------+
+    (exo-proofs SNARK/STARK/ZKML/circuits: unaudited, pedagogical skeletons — not production cryptography, see GAP-REGISTRY.md VCG-001)
                                                     |
                                               +-----------+
                                               | exo-tenant|
@@ -1022,7 +1024,7 @@ decision.forum tracks 12 production metrics via the `MetricsCollector` in [[crat
 | exo-escalation | 824 | 43 | Detection, triage, escalation pipeline |
 | exo-legal | 1,032 | 77 | Evidence, e-discovery, DGCL 144, privilege |
 | exo-dag | 2,883 | 87 | Append-only DAG, SMT, MMR, BFT consensus |
-| exo-proofs | 1,916 | 61 | SNARK, STARK, ZKML, circuit abstraction |
+| exo-proofs | 1,916 | 61 | SNARK, STARK, ZKML, circuit abstraction (unaudited, pedagogical skeletons — not production cryptography) |
 | exo-api | 283 | 22 | REST API endpoints |
 | exo-gateway | 2,135 | 48 | Protocol gateway, routing, auth |
 | exo-tenant | 482 | 46 | Multi-tenancy isolation |

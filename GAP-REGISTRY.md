@@ -142,7 +142,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | ID | Priority | Status | Classification | Owner role | Blocked claim | Next red test or guard | Closure gate |
 |----|----------|--------|----------------|------------|---------------|------------------------|--------------|
 | VCG-001 | P0 | Open | EXOCHAIN core | Proof architecture | Production SNARK/STARK/ZKML soundness | `crates/exo-proofs` production backend absence tests | `cargo test -p exochain-proofs` plus backend feature gates |
-| VCG-002 | P0 | Open | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
+| VCG-002 | P0 | Green-local | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
 | VCG-003 | P0 | Open | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Open | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Open | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
@@ -236,9 +236,46 @@ claims are upgraded.
 ## VCG-002 - Proof and Constitutional Claim Drift
 
 **Priority:** P0
-**Status:** Open
+**Status:** Green-local
 **Classification:** Governance/docs
 **Owner role:** Claim integrity
+
+Lane record (2026-07-02, branch `vcg/002-claim-integrity`):
+
+- Red evidence: the coordinator-authored guard
+  `tools/check_systemic_integrity_claims.sh` failed against the pre-lane tree
+  at `README.md:214` (red commit `affa16b8`); an independent verifier
+  reproduced both full-extent candidate scans exactly.
+- Guard evolution, coordinator-authored and hash-pinned throughout: v1
+  `781e45c5...3722056` (five claim files) to v2 `dd9d2863...b00896d3`
+  (adds THREAT-MODEL, COUNCIL-ASSESSMENT, SYSTEM-DOCUMENTATION; a
+  maturity-language scan for 'cryptographic level' and 'formal proofs'; the
+  `--packages` variant) to v3
+  `bff75fef3804e6ba056800bd1204e8daf904234036daa2eb68b9a3f8d8a6ae1f`
+  (adds ARCHITECTURE, USER-MANUAL, developer-onboarding). Each version was
+  proven red against the then-current tree before workers made it pass
+  honestly.
+- Green-local evidence: eleven claim files rewritten downward-only (the
+  flagship ASI-safety section split into delivered type/runtime enforcement
+  vs roadmap cryptographic enforcement; THREAT-MODEL Threat 6 downgraded from
+  live control to design intent; the five-tuple flagship invariant landed);
+  living command surfaces moved to `exochain-*` package names; the guard is
+  wired into the ci.yml hygiene job; both guards exit 0 (commits `a40f9980`,
+  `e9fe496a`, `45d9b425`).
+- Adversarial review: first green refuted (major, twice - untouched flagship
+  claim; THREAT-MODEL live-control overstatement; repo-wide gate residue;
+  `--packages` regex gap); two hardening passes; final fresh-eyes
+  re-refutation across five lenses returned NOT-REFUTED with sweep residue
+  zero outside exempt records.
+- Residual recorded, outside this row's charter: stale `-p exo-*` and
+  `--packages exo-*` command examples remain in living operational docs the
+  guard's LIVING_SURFACES list does not cover (docs/dagdb/*,
+  docs/avc/root-trust-install-intake.md,
+  docs/grant/CODEX-CYBERSECURITY-GRANT-CLAIMS.md) and in ratified resolutions
+  CR-003/CR-004 (records: annotate, never rewrite). Command-accuracy
+  follow-up, not proof-maturity drift.
+- Status Green-local: local closure gate passes; Green-ci on lane PR CI;
+  Closed after merge when source, tests, CI, docs, and this ledger agree.
 
 Evidence:
 

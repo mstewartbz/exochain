@@ -25,7 +25,7 @@ SPDX-License-Identifier: Apache-2.0
 ## Running
 
 ```bash
-cargo bench -p exo-dag
+cargo bench -p exochain-dag
 # Open the HTML report:
 open target/criterion/report/index.html
 ```
@@ -92,8 +92,8 @@ saved baseline; `<` means faster.
 To save a new baseline after an intentional performance change:
 
 ```bash
-cargo bench -p exo-dag -- --save-baseline my-baseline
-cargo bench -p exo-dag -- --baseline my-baseline
+cargo bench -p exochain-dag -- --save-baseline my-baseline
+cargo bench -p exochain-dag -- --baseline my-baseline
 ```
 
 ## Notes

@@ -144,7 +144,7 @@ The architecture panel's strongest finding: **EXO's state machine design is supe
 
 ### What EXO Lost — CRITICAL
 - **Sybil defenses** — CR-001 identifies 6 sub-threats. Exochain addresses several (`shamir.rs`, `crosscheck.rs`, `challenge.rs`, `clearance.rs`). EXO addresses NONE.
-- **ZK proofs** — `exo-proofs/` (SNARK, STARK, ZKML, verifier). Required for verifiable governance. Gone.
+- **ZK proofs** — `exo-proofs/` (SNARK, STARK, ZKML, verifier; unaudited, pedagogical skeletons — not production cryptography, see GAP-REGISTRY.md VCG-001). Required for verifiable governance. Gone.
 - **TEE attestation** — `exo-gatekeeper/tee.rs`. Hardware-rooted trust. Gone.
 - **Shamir secret sharing** — `exo-identity/shamir.rs` (14K bytes). Identity-layer defense. Gone.
 - **Independence-aware counting** — `clearance.rs` checks that quorum means independent approvals, not just sufficient approvals. Gone.
@@ -221,7 +221,7 @@ The architecture panel's strongest finding: **EXO's state machine design is supe
 | # | Action | Source | Target | Blocks |
 |---|--------|--------|--------|--------|
 | 11 | DAG-BFT consensus | exochain | `exo-dag` | Finality |
-| 12 | ZK proof system (SNARK/STARK) | exochain | `exo-proofs` | Verifiability |
+| 12 | ZK proof system (SNARK/STARK; unaudited, pedagogical skeletons) | exochain | `exo-proofs` | Verifiability |
 | 13 | Shamir + identity adjudication | exochain | `exo-identity` | Privacy |
 | 14 | P2P mesh networking | exochain | `exo-api` | Decentralization |
 | 15 | TEE attestation | exochain | `exo-gatekeeper` | Hardware trust |
