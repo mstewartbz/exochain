@@ -3172,6 +3172,54 @@ mod tests {
     }
 
     #[test]
+    fn governance_payload_round_trips_and_overwrites_on_sqlite() {
+        let mut store = temp_store();
+        let hash_a = Hash256::from_bytes([0xA1u8; 32]);
+        let hash_b = Hash256::from_bytes([0xB2u8; 32]);
+
+        // Not-found path: load before any save returns None. The reactor
+        // commit path only ever loads a payload it just persisted (the Some
+        // branch), so this None branch is exercised only here.
+        assert_eq!(store.load_governance_payload(&hash_a).unwrap(), None);
+
+        // Save then load round-trips the raw bytes.
+        let payload_v1 = b"validator-change-payload-v1".to_vec();
+        store.save_governance_payload(&hash_a, &payload_v1).unwrap();
+        assert_eq!(
+            store.load_governance_payload(&hash_a).unwrap(),
+            Some(payload_v1.clone())
+        );
+
+        // A different hash is still absent (per-node keying).
+        assert_eq!(store.load_governance_payload(&hash_b).unwrap(), None);
+
+        // INSERT OR REPLACE: re-saving the same hash overwrites in place.
+        let payload_v2 = b"validator-change-payload-v2-longer".to_vec();
+        store.save_governance_payload(&hash_a, &payload_v2).unwrap();
+        assert_eq!(
+            store.load_governance_payload(&hash_a).unwrap(),
+            Some(payload_v2)
+        );
+
+        // Empty payload is a valid, retrievable value (distinct from absent).
+        store.save_governance_payload(&hash_b, &[]).unwrap();
+        assert_eq!(
+            store.load_governance_payload(&hash_b).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn governance_payload_meta_key_is_stable_and_node_scoped() {
+        let hash_a = Hash256::from_bytes([0x01u8; 32]);
+        let hash_b = Hash256::from_bytes([0x02u8; 32]);
+        let key_a = governance_payload_meta_key(&hash_a);
+        assert!(key_a.starts_with("governance_payload:"));
+        assert_eq!(key_a, governance_payload_meta_key(&hash_a));
+        assert_ne!(key_a, governance_payload_meta_key(&hash_b));
+    }
+
+    #[test]
     fn load_validator_set_rejects_invalid_did() {
         let store = temp_store();
         store
