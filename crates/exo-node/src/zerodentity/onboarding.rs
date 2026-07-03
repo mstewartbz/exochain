@@ -62,6 +62,23 @@ const OTP_RESEND_DERIVATION_DOMAIN: &[u8] = b"exo.zerodentity.otp.resend.v1";
 type OnboardingError = (StatusCode, Json<serde_json::Value>);
 type OnboardingResult<T> = Result<T, OnboardingError>;
 
+/// Maximum age, in milliseconds, that a signed first-touch claim's
+/// `created_ms` may lag behind the trusted 0dentity session clock before it
+/// is rejected as stale. Mirrors `ZERODENTITY_ERASURE_MAX_FUTURE_SKEW_MS` in
+/// `store.rs`, but bounds the past side of the window rather than the future
+/// side: proof-of-possession signature/replay checks bind the payload bytes,
+/// not the freshness of the claimed time, so an arbitrarily old — but
+/// otherwise valid — signed payload would be accepted forever without this
+/// bound.
+#[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+const ZERODENTITY_CLAIM_MAX_PAST_SKEW_MS: u64 = 21 * 24 * 60 * 60 * 1_000;
+/// Maximum distance, in milliseconds, that a signed first-touch claim's
+/// `created_ms` may sit ahead of the trusted 0dentity session clock before it
+/// is rejected as beyond the trusted clock's tolerance. Same rationale as
+/// [`ZERODENTITY_CLAIM_MAX_PAST_SKEW_MS`], mirrored to the future side.
+#[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+const ZERODENTITY_CLAIM_MAX_FUTURE_SKEW_MS: u64 = 21 * 24 * 60 * 60 * 1_000;
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -430,6 +447,20 @@ pub async fn submit_claim(
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "created_ms must be non-zero",
+        ));
+    }
+
+    let trusted_now_ms = now_ms_blocking(state.clone()).await?;
+    if created_ms < trusted_now_ms.saturating_sub(ZERODENTITY_CLAIM_MAX_PAST_SKEW_MS) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "created_ms is outside the trusted freshness window: too far in the past",
+        ));
+    }
+    if created_ms > trusted_now_ms.saturating_add(ZERODENTITY_CLAIM_MAX_FUTURE_SKEW_MS) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "created_ms is outside the trusted freshness window: too far in the future",
         ));
     }
 
