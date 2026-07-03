@@ -45,7 +45,30 @@ EXOCHAIN takes a different approach. Instead of aspirational guidelines, it prov
 
 ## What EXOCHAIN Is
 
-EXOCHAIN is a constitutional trust fabric: 20 Rust workspace packages, 124165 lines of Rust under `crates/`, 3,001 listed tests, and a formal proof chain demonstrating its intended governance properties.
+EXOCHAIN makes power constitutional, not models aligned. The safety property
+it ships is the governed channel a system's actions must pass through — not a
+claim about what a model believes, wants, or has been trained to value.
+Alignment work asks whether the mind is trustworthy; EXOCHAIN asks whether the
+channel through which the mind acts can be bypassed, and answers no by
+construction (fail-closed, default-deny, judicially immutable). This is a
+socio-technical claim, not a purely technical one: EXOCHAIN governs what
+routes through the ledger. An actor that can act outside the governed
+channel — through an ungoverned side door, an unmonitored physical actuator,
+or a deployment that never wires the fabric in — is not covered by this
+guarantee. The scope condition is: **governance holds for actions that pass
+through the ledger; it makes no claim about actions that do not.**
+
+The flagship invariant, stated as a five-tuple:
+
+| Element | Statement |
+|---|---|
+| **Invariant** | No authority without lineage — no actor may exercise a capability it cannot trace, through an unbroken, independently verifiable chain, to an explicit grant. |
+| **Adversary** | Any actor (human or AI) attempting to self-grant capabilities, forge a delegation chain, or fabricate quorum/consensus without independent, attributable authorization. |
+| **Evidence** | Signed authority-chain records (Ed25519), consent bailments, and independence-aware quorum counts, all anchored to the append-only DAG with BLAKE3/canonical-CBOR hashing. |
+| **Detection** | `exo-authority` chain-integrity verification and `exo-governance` crosscheck/clearance checks run on every adjudicated action; a broken or missing lineage link fails the check. |
+| **Failure mode** | If detection is bypassed or the fabric is not wired into the acting surface, the surface can present authority-shaped output (e.g. an approval, a signature-shaped artifact) that has no real lineage — this is a governed-channel failure, not evidence that alignment or intent was compromised. |
+
+EXOCHAIN is a constitutional trust fabric: 20 Rust workspace packages, 124165 lines of Rust under `crates/`, 3,001 listed tests, and a protocol/state-machine formal proof chain (`docs/proofs/CONSTITUTIONAL-PROOFS.md`) demonstrating its intended governance properties — distinct from SNARK/STARK/ZKML cryptography, which remains unaudited and pedagogical (GAP-REGISTRY.md VCG-001).
 
 It implements a three-branch constitutional model — legislative, executive, and judicial — where:
 
@@ -175,15 +198,31 @@ The Syntaxis visual builder lets non-developers compose these pipelines graphica
 
 ---
 
-## Zero-Knowledge Proofs: Verifiable Without Revealing
+## Zero-Knowledge Proofs: The Roadmap, Honestly Stated
 
-EXOCHAIN includes three zero-knowledge proof systems:
+EXOCHAIN's `exo-proofs` crate contains three zero-knowledge proof-system
+*skeletons* — unaudited and pedagogical, not production cryptography (see
+GAP-REGISTRY.md VCG-001):
 
-- **SNARK** — Succinct proofs for governance compliance (efficient verification)
-- **STARK** — Hash-based proofs (post-quantum secure, no trusted setup)
-- **ZKML** — Verify that an AI model produced a specific output without revealing the model or input
+- **SNARK** — Structural API for succinct governance-compliance proofs; the
+  current implementation uses BLAKE3 hash stand-ins in place of elliptic-curve
+  pairings, not a sound zero-knowledge argument.
+- **STARK** — Structural API for hash-based, post-quantum-oriented proofs; the
+  FRI layer is simulated with iterative hashing rather than real polynomial
+  commitment.
+- **ZKML** — Structural API intended to verify that an AI model produced a
+  specific output without revealing the model or input; the current
+  implementation is a hash-based binding, not a real ZK circuit over the
+  model, and does not yet deliver that privacy property.
 
-ZKML is particularly relevant for ASI governance: you can verify that a superintelligent system's output was produced by a specific, audited model — without the verifier needing access to the model's weights or the user's input. This is privacy-preserving AI accountability.
+Every public entry point in these modules refuses to run (fails closed) unless
+the crate's `unaudited-pedagogical-proofs` feature is explicitly enabled, and
+none of the three is linked into default production builds. What EXOCHAIN
+ships today is the governed channel around AI action — consent, authority,
+and constitutional invariants enforced in production Rust with real Ed25519
+signatures and BLAKE3 hashing (see "What EXOCHAIN Is" above). Production
+(not pedagogical) zero-knowledge cryptography for model-provenance and
+compliance proofs is tracked as future work; it is not production today.
 
 ---
 
@@ -205,7 +244,7 @@ The conventional approach to AI safety assumes we need to solve alignment — ma
 
 The analogy is constitutional democracy. We don't require every citizen to have perfect values. We require every action to comply with constitutional constraints — and we enforce those constraints through an independent judiciary that cannot be overruled by popular vote or executive fiat.
 
-EXOCHAIN is that judiciary for AI systems. Its five constitutional properties, backed by formal proofs and 3,001 listed workspace tests, provide the structural guarantee that:
+EXOCHAIN is that judiciary for AI systems. Its five constitutional properties, backed by the protocol/state-machine formal proofs in `docs/proofs/CONSTITUTIONAL-PROOFS.md` and 3,001 listed workspace tests, provide the structural guarantee that:
 
 1. No AI system can grant itself capabilities
 2. No AI system can forge consensus
@@ -213,7 +252,7 @@ EXOCHAIN is that judiciary for AI systems. Its five constitutional properties, b
 4. A human can always intervene
 5. The rules themselves cannot be changed
 
-These aren't aspirational. They're enforced at the type level, the runtime level, and the cryptographic level. They are as immutable as the code that implements them — and that code is verified by formal proofs, 3,001 listed workspace tests, and a constitutional governance process that governs its own evolution.
+These aren't aspirational. They're enforced at the type level and the runtime level today — real Ed25519 signatures, BLAKE3 hashing, and constitutional invariants checked on every adjudicated action. Cryptographic-level enforcement (SNARK/STARK/ZKML proofs over model behavior and compliance) is roadmap, not delivered: `exo-proofs` ships unaudited, pedagogical proof-system skeletons, fails closed unless explicitly enabled, and is gated on external cryptographic review (GAP-REGISTRY.md VCG-001). "Formal proofs" here means the ten protocol/state-machine proofs in `docs/proofs/CONSTITUTIONAL-PROOFS.md` that the AEGIS constitutional properties hold across reachable system states — a distinct claim from SNARK/STARK/ZKML cryptography, which is not yet production. The type- and runtime-level enforcement is as immutable as the code that implements it and the append-only DAG it writes to; that code is verified by the protocol/state-machine formal proofs above, 3,001 listed workspace tests, and a constitutional governance process that governs its own evolution.
 
 ---
 
@@ -232,7 +271,7 @@ These aren't aspirational. They're enforced at the type level, the runtime level
 | Sybil sub-threats addressed | 6 |
 | Combinator types | 9 |
 | BCTS states | 14 (11 primary + 3 failure) |
-| ZK proof systems | 3 (SNARK, STARK, ZKML) |
+| ZK proof-system skeletons | 3 (SNARK, STARK, ZKML — unaudited, pedagogical, not production cryptography) |
 | MCP enforcement rules | 6 |
 | Formal proofs | 10 |
 
@@ -240,7 +279,7 @@ These aren't aspirational. They're enforced at the type level, the runtime level
 
 ## What's Next
 
-EXOCHAIN is open for review. The codebase, documentation, formal proofs, and governance artifacts are available for inspection. The council resolution (CR-001) establishing the AEGIS/SYBIL framework has been drafted and is pending ratification.
+EXOCHAIN is open for review. The codebase, documentation, protocol/state-machine formal proofs (`docs/proofs/CONSTITUTIONAL-PROOFS.md`), and governance artifacts are available for inspection. The council resolution (CR-001) establishing the AEGIS/SYBIL framework has been drafted and is pending ratification.
 
 The question isn't whether we need constitutional governance for superintelligent systems. The question is whether we'll build it before we need it.
 

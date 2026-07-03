@@ -37,7 +37,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Rust source files | 456 | `find crates -name '*.rs'` |
 | Rust LOC | 368034 | `wc -l` |
 | Workspace tests | 6,046 listed | `cargo test --workspace -- --list` |
-| CI quality gates | 22 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
+| CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
 | License | Apache-2.0 | `Cargo.toml` |
 | Live node health | Verified for https://exochain-production.up.railway.app/health on 2026-05-09 | `tools/verify_live_node_claim.sh` |
@@ -48,7 +48,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **22 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
+- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
 - **Traceability matrix** maps 119 requirements — see `governance/traceability_matrix.md`
 - **Threat model** covers 17 threats tracked: 17 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
@@ -115,7 +115,8 @@ Catalyst is named explicitly.
 ```
 Layer 1: CGR Kernel         (Rust, 31 crates, 368034 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
-         cryptographic proofs, 6,046 listed workspace tests
+         production Ed25519/BLAKE3 cryptography plus unaudited pedagogical
+         SNARK/STARK/ZKML skeletons, 6,046 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -211,7 +212,7 @@ These runtime docs do not claim billing savings or thesis acceptance.
 | `exo-dag-db-*` | Split DAG DB and graph-governed agent memory runtime crates |
 | `exo-gateway` | External gateway: REST, GraphQL, auth, health probes (28 endpoints) |
 | `exo-identity` | Decentralized Identity (DID), key management, Shamir secret sharing, vault |
-| `exo-proofs` | SNARK, STARK, ZKML proof systems, verifier infrastructure |
+| `exo-proofs` | SNARK, STARK, ZKML proof-system skeletons (unaudited, pedagogical — not production cryptography), verifier infrastructure |
 | `exo-authority` | Authority delegation, role-based access, attestation chains |
 | `exo-legal` | Legal compliance, audit admissibility, provenance tracking |
 | `exo-consent` | Bailment contracts, consent policies, gatekeeper enforcement |
