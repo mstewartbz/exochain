@@ -125,6 +125,19 @@ const MAX_EDISCOVERY_SEARCH_TERMS: usize = 64;
 const MAX_EDISCOVERY_SEARCH_TERM_BYTES: usize = 256;
 const MAX_EDISCOVERY_CORPUS_DOCUMENTS: usize = 1_000;
 const DAGDB_TENANT_HEADER: &str = "x-exo-tenant-id";
+/// DID-signature request headers accepted by the feature-gated GraphQL router
+/// for per-request actor-context injection (VCG-003). Mirrors the fields of
+/// `auth::Request`: a caller signs `auth::request_signing_payload` for these
+/// values and the gateway resolves the result to an `AuthenticatedActor`
+/// inserted into the GraphQL request context. Absent or invalid headers leave
+/// the request unauthenticated — resolvers that require an actor refuse with
+/// a typed `missing_authenticated_actor` error; there is no fallback identity.
+const GRAPHQL_ACTOR_DID_HEADER: &str = "x-exo-graphql-actor-did";
+const GRAPHQL_ACTOR_SIGNATURE_HEADER: &str = "x-exo-graphql-signature";
+const GRAPHQL_ACTOR_BODY_HASH_HEADER: &str = "x-exo-graphql-body-hash";
+const GRAPHQL_ACTOR_TIMESTAMP_PHYSICAL_MS_HEADER: &str = "x-exo-graphql-timestamp-physical-ms";
+const GRAPHQL_ACTOR_TIMESTAMP_LOGICAL_HEADER: &str = "x-exo-graphql-timestamp-logical";
+const GRAPHQL_ACTOR_ACTION: &str = "graphql";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DagDbRuntimeStatus {
@@ -4520,7 +4533,14 @@ fn build_unlayered_router(state: AppState) -> Router {
     // `resolveIdentity` queries see any DIDs registered via REST.
     let gql_state = graphql::AppState::new_arc_with_registry(state.registry.clone());
     let schema = graphql::build_schema(gql_state);
-    let gql_router = graphql::graphql_router(schema);
+    // Per-request actor-context injection (VCG-003): resolves an
+    // `AuthenticatedActor` from DID-signature headers and inserts it into the
+    // request extensions before the GraphQL handler executes. A no-op when
+    // the feature is off, since that router never reaches resolver bodies.
+    let gql_router = graphql::graphql_router(schema).route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        graphql_actor_context_middleware,
+    ));
 
     Router::new()
         // Probes
@@ -4736,6 +4756,71 @@ async fn enforce_gateway_rate_limit(
             gateway_rate_limit_response(retry_after_ms)
         }
     }
+}
+
+/// Per-request actor-context middleware for the feature-gated GraphQL router
+/// (VCG-003). Resolves an [`AuthenticatedActor`] from DID-signature headers
+/// (see `GRAPHQL_ACTOR_*_HEADER` constants) via [`authenticate`] against the
+/// gateway's shared [`LocalDidRegistry`], and inserts the result into the
+/// request extensions for [`graphql::graphql_post_handler`] to merge into the
+/// per-request GraphQL context.
+///
+/// This middleware never rejects a request at the transport layer: GraphQL
+/// resolvers report authorization failures as field-level errors, so a
+/// missing or invalid actor simply leaves `Option<AuthenticatedActor>` as
+/// `None` and resolvers that require an authenticated actor refuse with a
+/// typed `missing_authenticated_actor` error. There is no fallback identity.
+async fn graphql_actor_context_middleware(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let actor = resolve_graphql_actor_context(&state, request.headers());
+    request.extensions_mut().insert(actor);
+    next.run(request).await
+}
+
+fn resolve_graphql_actor_context(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<AuthenticatedActor> {
+    let actor_did = headers
+        .get(GRAPHQL_ACTOR_DID_HEADER)
+        .and_then(|v| v.to_str().ok())?;
+    let signature_hex = headers
+        .get(GRAPHQL_ACTOR_SIGNATURE_HEADER)
+        .and_then(|v| v.to_str().ok())?;
+    let body_hash_hex = headers
+        .get(GRAPHQL_ACTOR_BODY_HASH_HEADER)
+        .and_then(|v| v.to_str().ok())?;
+    let physical_ms: u64 = headers
+        .get(GRAPHQL_ACTOR_TIMESTAMP_PHYSICAL_MS_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())?;
+    let logical: u32 = headers
+        .get(GRAPHQL_ACTOR_TIMESTAMP_LOGICAL_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())?;
+
+    let signature =
+        parse_ed25519_signature_hex(signature_hex, GRAPHQL_ACTOR_SIGNATURE_HEADER).ok()?;
+    let body_hash_bytes = hex::decode(body_hash_hex).ok()?;
+    let body_hash_array: [u8; 32] = body_hash_bytes.try_into().ok()?;
+    let body_hash = Hash256::from_bytes(body_hash_array);
+    let timestamp = Timestamp::new(physical_ms, logical);
+
+    let auth_request = AuthRequest {
+        actor_did: actor_did.to_owned(),
+        action: GRAPHQL_ACTOR_ACTION.to_owned(),
+        body_hash,
+        signature,
+        timestamp,
+    };
+    let observed_at_ms = state.now_ms();
+    let observed_at = Timestamp::new(observed_at_ms, 0);
+    let metadata = AuthenticationMetadata::new(observed_at).ok()?;
+    let registry = state.registry.read().ok()?;
+    authenticate(&auth_request, &*registry, metadata).ok()
 }
 
 async fn require_dagdb_authenticated_session(
