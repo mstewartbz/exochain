@@ -2137,8 +2137,9 @@ mod tests {
         registry: &LocalDidRegistry,
         sk: &exo_core::SecretKey,
     ) -> crate::auth::AuthenticatedActor {
-        use crate::auth::{AuthenticationMetadata, Request as AuthRequest, authenticate};
         use exo_core::{Hash256, Signature, crypto::sign};
+
+        use crate::auth::{AuthenticationMetadata, Request as AuthRequest, authenticate};
 
         let observed_at = Timestamp::new(10_000, 0);
         let metadata = AuthenticationMetadata::new(observed_at).unwrap();
