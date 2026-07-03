@@ -47,6 +47,15 @@ fn sqlite_i64_to_u64(value: i64, field: &str) -> DagResult<u64> {
     u64::try_from(value).map_err(|_| store_err(format!("{field} value {value} is negative")))
 }
 
+/// Key used to stash a governance proposal's raw payload bytes in the
+/// generic consensus-meta key/value store, keyed by the proposed DAG node's
+/// hash. The node hash only commits to `payload_hash` (a one-way digest), so
+/// the committed governance path needs the original bytes back to decode a
+/// `ValidatorChange` and apply it after quorum commit.
+fn governance_payload_meta_key(node_hash: &Hash256) -> String {
+    format!("governance_payload:{node_hash}")
+}
+
 fn decode_hash_bytes(bytes: &[u8], field: &str) -> DagResult<Hash256> {
     let arr: [u8; 32] = bytes
         .try_into()
@@ -745,6 +754,51 @@ impl PostgresDagNodeStore {
             .collect()
     }
 
+    async fn save_governance_payload_async(
+        &self,
+        node_hash: Hash256,
+        payload: Vec<u8>,
+    ) -> DagResult<()> {
+        let key = governance_payload_meta_key(&node_hash);
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "INSERT INTO dagdb_node_consensus_meta (tenant_id, namespace, key, value) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (tenant_id, namespace, key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(&key)
+        .bind(hex::encode(&payload))
+        .execute(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        Ok(())
+    }
+
+    async fn load_governance_payload_async(
+        &self,
+        node_hash: Hash256,
+    ) -> DagResult<Option<Vec<u8>>> {
+        let key = governance_payload_meta_key(&node_hash);
+        let mut tx = self.begin().await?;
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM dagdb_node_consensus_meta \
+             WHERE tenant_id = $1 AND namespace = $2 AND key = $3",
+        )
+        .bind(&self.tenant_id)
+        .bind(&self.namespace)
+        .bind(&key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store_err)?;
+        tx.commit().await.map_err(store_err)?;
+        value
+            .map(|text| hex::decode(&text).map_err(store_err))
+            .transpose()
+    }
+
     async fn mark_committed_with_receipt_sync_async(
         &self,
         hash: Hash256,
@@ -1120,6 +1174,16 @@ impl SqliteDagStore {
             "CREATE TABLE IF NOT EXISTS dag_nodes (
                 hash         BLOB PRIMARY KEY NOT NULL,
                 cbor_payload BLOB NOT NULL
+            );
+
+            -- Raw application payload bytes for governance-mutating DAG nodes
+            -- (e.g. canonical ValidatorChange CBOR), keyed by node hash. The
+            -- node hash only commits to `payload_hash` (a one-way digest), so
+            -- the committed governance path needs the original bytes to
+            -- decode and apply a ValidatorChange after quorum commit.
+            CREATE TABLE IF NOT EXISTS governance_payloads (
+                node_hash BLOB PRIMARY KEY NOT NULL,
+                payload   BLOB NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS dag_parents (
@@ -1536,10 +1600,10 @@ impl SqliteDagStore {
 
     /// Save the current validator set to the database.
     ///
-    /// Reserved for the committed governance path that applies validator-set
-    /// updates after consensus. The HTTP validator endpoint must not call this
+    /// Called by the committed governance path (`check_and_commit` /
+    /// `handle_commit` in the reactor) that applies validator-set updates
+    /// after quorum commit. The HTTP validator endpoint must not call this
     /// directly.
-    #[allow(dead_code)]
     pub fn save_validator_set(&mut self, validators: &BTreeSet<Did>) -> DagResult<()> {
         if let Some(store) = self.dagdb() {
             let store = store.clone();
@@ -1585,6 +1649,66 @@ impl SqliteDagStore {
             set.insert(did);
         }
         Ok(set)
+    }
+
+    /// Save the raw application payload bytes for a proposed governance DAG
+    /// node, keyed by node hash.
+    ///
+    /// The DAG node itself only commits to `payload_hash` (a one-way
+    /// digest), so the committed governance path (`check_and_commit` /
+    /// `handle_commit` in the reactor) needs the original bytes back to
+    /// decode a canonical `ValidatorChange` and apply it to live consensus
+    /// state after quorum commit. Callers that submit or receive a
+    /// governance proposal must persist its payload here before (or as
+    /// part of) storing the DAG node so the payload is available once the
+    /// node commits.
+    pub fn save_governance_payload(
+        &mut self,
+        node_hash: &Hash256,
+        payload: &[u8],
+    ) -> DagResult<()> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let node_hash = *node_hash;
+            let payload = payload.to_vec();
+            return block_on_dagdb(async move {
+                store
+                    .save_governance_payload_async(node_hash, payload)
+                    .await
+            });
+        }
+        self.sqlite_conn_mut()?
+            .execute(
+                "INSERT OR REPLACE INTO governance_payloads (node_hash, payload) VALUES (?1, ?2)",
+                params![node_hash.0.as_slice(), payload],
+            )
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Load the raw application payload bytes for a proposed governance DAG
+    /// node, if one was persisted via `save_governance_payload`.
+    pub fn load_governance_payload(&self, node_hash: &Hash256) -> DagResult<Option<Vec<u8>>> {
+        if let Some(store) = self.dagdb() {
+            let store = store.clone();
+            let node_hash = *node_hash;
+            return block_on_dagdb(
+                async move { store.load_governance_payload_async(node_hash).await },
+            );
+        }
+        let mut stmt = self
+            .sqlite_conn()?
+            .prepare_cached("SELECT payload FROM governance_payloads WHERE node_hash = ?1")
+            .map_err(store_err)?;
+
+        let result: Result<Vec<u8>, rusqlite::Error> =
+            stmt.query_row(params![node_hash.0.as_slice()], |row| row.get(0));
+
+        match result {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(store_err(format!("governance_payloads.payload: {e}"))),
+        }
     }
 
     /// Save a trust receipt to the database.
