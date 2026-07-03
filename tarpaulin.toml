@@ -77,6 +77,8 @@ exclude-files = [
     "crates/exo-node/src/sync.rs",
     "crates/exo-node/src/sentinels.rs",
     "crates/exo-node/src/holons.rs",
+    # PostgresDagNodeStore live-DB adapter (requires DATABASE_URL + SQLx migrations)
+    "crates/exo-node/src/store/store_postgres.rs",
     "crates/exo-dag-db-lab/src/bin/dagdb_kg_export_manifest.rs",
     "crates/exo-dag-db-lab/src/bin/dagdb_kg_import_candidates.rs",
     "crates/exo-gateway/src/main.rs",
