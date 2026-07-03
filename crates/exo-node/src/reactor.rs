@@ -2748,6 +2748,204 @@ mod tests {
         }
     }
 
+    // VCG-005 RED: the BFT propose/vote/commit machinery mints a receipt and
+    // advances committed height, but a committed `ValidatorChange` payload is
+    // never decoded or applied to live consensus state or persistence. These
+    // two tests must fail today because `check_and_commit`/`handle_commit`
+    // have no code path that calls `store.save_validator_set` or mutates
+    // `s.consensus.config.validators` / `s.validator_public_keys`.
+    #[tokio::test]
+    async fn validator_set_change_applies_to_live_config_after_quorum_commit() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let proposer_did = validator_vec[0].clone();
+        let config = config_for(proposer_did.clone(), true, validators.clone());
+        // Proposer signs with its own key (index 0), matching `make_sign_fn`.
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+
+        let new_validator = Did::new("did:exo:v4").unwrap();
+        let payload = validator_change_payload_for_test();
+
+        // Build the canonical ValidatorChange DAG node the same way
+        // submit_proposal would, and persist it locally.
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            &payload,
+            &proposer_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+
+        // Register the proposal and cross the quorum threshold (3 of 4
+        // validators) by voting directly against consensus state — this
+        // mirrors submit_proposal's self-vote plus two more validators.
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &proposer_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .expect("proposal verifies");
+            for (index, voter) in validator_vec.iter().enumerate().take(3) {
+                let vote = vote_for(voter, index, s.consensus.current_round, node.hash);
+                consensus::vote_verified(&mut s.consensus, vote, &resolver)
+                    .expect("validator votes verify");
+            }
+        }
+
+        let net_handle_for_commit = net_handle.clone();
+        check_and_commit(
+            &state,
+            &store,
+            &net_handle_for_commit,
+            &reactor_tx,
+            &node.hash,
+        )
+        .await;
+
+        let _event = reactor_rx
+            .try_recv()
+            .expect("commit event emitted after quorum");
+
+        // Expected red: the live consensus validator set does not yet contain
+        // the new validator because nothing decodes the committed payload.
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                s.consensus.config.validators.contains(&new_validator),
+                "committed ValidatorSetChange must mutate live consensus config.validators"
+            );
+            assert!(
+                s.validator_public_keys.as_map().contains_key(&new_validator),
+                "committed ValidatorSetChange must extend the live validator public-key resolver"
+            );
+        }
+
+        // Expected red: store.save_validator_set is never called after commit,
+        // so the persisted set still reflects genesis membership only.
+        {
+            let st = store.lock().unwrap();
+            let persisted = st
+                .load_validator_set()
+                .expect("load_validator_set succeeds");
+            assert!(
+                persisted.contains(&new_validator),
+                "committed ValidatorSetChange must be persisted via store.save_validator_set"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn validator_set_change_without_quorum_does_not_mutate() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let proposer_did = validator_vec[0].clone();
+        let config = config_for(proposer_did.clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+
+        let new_validator = Did::new("did:exo:v4").unwrap();
+        let payload = validator_change_payload_for_test();
+
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            &payload,
+            &proposer_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+
+        // Only the proposer's self-vote is cast — no quorum in a 4-validator set.
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &proposer_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .expect("proposal verifies");
+            let round = s.consensus.current_round;
+            consensus::vote_verified(
+                &mut s.consensus,
+                vote_for(&proposer_did, 0, round, node.hash),
+                &resolver,
+            )
+            .expect("self-vote verifies");
+        }
+
+        check_and_commit(&state, &store, &net_handle, &reactor_tx, &node.hash).await;
+
+        assert!(
+            reactor_rx.try_recv().is_err(),
+            "no commit event should be emitted without quorum"
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                !consensus::is_finalized(&s.consensus, &node.hash),
+                "node must not be finalized without quorum"
+            );
+            assert!(
+                !s.consensus.config.validators.contains(&new_validator),
+                "validator set must not mutate without quorum-gated commit"
+            );
+            assert!(
+                !s.validator_public_keys.as_map().contains_key(&new_validator),
+                "validator public-key resolver must not extend without quorum-gated commit"
+            );
+        }
+        {
+            let st = store.lock().unwrap();
+            let persisted = st
+                .load_validator_set()
+                .expect("load_validator_set succeeds");
+            assert!(
+                !persisted.contains(&new_validator),
+                "persisted validator set must not change without quorum-gated commit"
+            );
+        }
+    }
+
     #[test]
     fn full_consensus_flow_local() {
         // Simulate a 4-validator consensus flow entirely in-process
