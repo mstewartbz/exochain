@@ -767,12 +767,17 @@ impl AvcApiState {
     /// Postgres database when available, otherwise from the node data directory.
     /// Public-key trust anchors are intentionally reloaded separately from
     /// verified startup configuration.
+    ///
+    /// When `require_postgres_durability` is `true` and no `database_pool` is
+    /// supplied, startup fails closed with an `Err` instead of silently
+    /// falling back to the local file-backed registry (VCG-006a / #735).
     pub async fn with_durable_registry(
         data_dir: &FsPath,
         validator_did: Did,
         receipt_signer: AvcReceiptSigner,
         database_pool: Option<PgPool>,
         finality_store: Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
+        require_postgres_durability: bool,
     ) -> anyhow::Result<Self> {
         let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
         let (registry, durability) = match database_pool {
@@ -783,6 +788,14 @@ impl AvcApiState {
                 (registry, AvcRegistryDurability::Postgres(pool.clone()))
             }
             None => {
+                if require_postgres_durability {
+                    anyhow::bail!(
+                        "{} is set but no Postgres database pool is configured; \
+                         refusing to fall back to the local AVC file registry \
+                         for production durability",
+                        AVC_REQUIRE_POSTGRES_DURABILITY_ENV
+                    );
+                }
                 tracing::warn!(
                     path = %durable_state_path.display(),
                     "AVC registry using local file fallback without Postgres-backed durability; set DATABASE_URL for production AVC registry durability"
@@ -2665,10 +2678,16 @@ mod tests {
 
     async fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let mut state =
-            AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None, None)
-                .await
-                .expect("durable AVC state");
+        let mut state = AvcApiState::with_durable_registry(
+            data_dir,
+            validator_did(),
+            signer,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("durable AVC state");
         state.external_timestamp_source =
             fixed_external_timestamp_source(Timestamp::new(1_600_000, 0));
         seed_avc_trust_keys(&state);
@@ -3221,6 +3240,7 @@ mod tests {
             signer,
             None,
             None,
+            false,
         )
         .await
         {
@@ -3290,6 +3310,7 @@ mod tests {
             Arc::clone(&signer),
             Some(pool.clone()),
             None,
+            false,
         )
         .await
         {
@@ -3344,6 +3365,7 @@ mod tests {
             Arc::clone(&signer),
             Some(pool.clone()),
             None,
+            false,
         )
         .await
         .expect("Postgres AVC state");
@@ -3426,6 +3448,7 @@ mod tests {
             signer,
             Some(pool.clone()),
             None,
+            false,
         )
         .await
         .expect("reloaded Postgres AVC state");
@@ -6620,6 +6643,168 @@ mod tests {
             production.contains("AvcRegistryDurability::File"),
             "AVC durable registry must keep a no-DATABASE_URL file fallback for local nodes"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // VCG-006a RED — #735 Postgres durability requirement is inert
+    // -----------------------------------------------------------------------
+    //
+    // `avc_require_postgres_durability_from_env()` is parsed at
+    // `main.rs:514` but its `bool` result is discarded — the flag never
+    // reaches `AvcApiState::with_durable_registry`, so a deployment that sets
+    // `EXO_AVC_REQUIRE_POSTGRES_DURABILITY=true` without `DATABASE_URL`
+    // silently falls back to the local file-backed registry instead of
+    // failing closed at startup.
+    //
+    // This test is COMPILE-RED today: `with_durable_registry` has no
+    // parameter through which to express "Postgres durability is required."
+    // The fix must thread a `require_postgres_durability: bool` (or
+    // equivalent) into `with_durable_registry`'s signature so that
+    // `database_pool: None` plus `require_postgres_durability: true` returns
+    // `Err` instead of constructing a file-backed registry. Until that
+    // parameter exists, this call site fails to compile — that compile
+    // failure IS the red evidence for #735.
+    #[tokio::test]
+    async fn avc_startup_fails_closed_when_durability_required_without_pool() {
+        let dir = tempfile::tempdir().expect("temp data dir");
+        let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
+
+        let result = AvcApiState::with_durable_registry(
+            dir.path(),
+            validator_did(),
+            signer,
+            None, // database_pool
+            None, // finality_store
+            true, // require_postgres_durability — parameter does not exist yet
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "startup must fail closed when Postgres durability is required but no database pool is configured"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // VCG-006a RED — #737 subject-signed /receipts/emit blocked by admin bearer gate
+    // -----------------------------------------------------------------------
+    //
+    // `handle_emit_receipt` already fully verifies the subject's Ed25519
+    // signature over the requested action (see
+    // `verify_subject_action_signature` calls at ~2282 and ~2304). The gap is
+    // purely in the router wiring: `main.rs:1127-1136` merges `avc_router`
+    // into `extra_router` and layers `auth::require_bearer_on_writes`
+    // uniformly over the whole merged router with no carve-out for
+    // subject-signed AVC writes — unlike the existing
+    // `is_zerodentity_local_signed_write` carve-out for 0dentity attest/delete.
+    //
+    // These tests build the SAME middleware stack production uses (avc_router
+    // wrapped in `require_bearer_on_writes`, not a bare handler call) so they
+    // prove something about the wired stack, not just the handler in
+    // isolation.
+    fn avc_router_with_bearer_gate(state: Arc<AvcApiState>) -> Router {
+        let auth = crate::auth::BearerAuth {
+            token: Arc::new(zeroize::Zeroizing::new("vcg-006a-admin-token".to_string())),
+        };
+        avc_router(state).layer(axum::middleware::from_fn(move |req, next| {
+            let auth = auth.clone();
+            crate::auth::require_bearer_on_writes(auth, req, next)
+        }))
+    }
+
+    #[tokio::test]
+    async fn avc_receipts_emit_accepts_subject_signature_without_bearer() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            subject_signature: sign_action(&request, &subject_keypair()),
+            validation: request,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                // Deliberately NO Authorization header — only a valid subject
+                // Ed25519 signature over the action authorizes this write.
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a request bearing a valid subject Ed25519 signature over the action must be \
+             admitted through the production require_bearer_on_writes gate without an admin \
+             bearer token, mirroring the existing is_zerodentity_local_signed_write carve-out"
+        );
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn avc_receipts_emit_still_rejects_unsigned_without_bearer() {
+        let state = fresh_state();
+        let credential = baseline_credential();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_credential(credential.clone())
+            .unwrap();
+        let request = AvcValidationRequest {
+            credential,
+            action: Some(baseline_action(Did::new("did:exo:agent").unwrap())),
+            now: Timestamp::new(1_500_000, 0),
+        };
+        // No genuine subject signature (empty signature, no admin bearer
+        // token) — this must NOT be admitted. Proves the carve-out only
+        // exempts genuinely subject-signed emits and never opens an
+        // unauthenticated hole.
+        let body = serde_json::to_vec(&EmitReceiptRequest {
+            subject_signature: Signature::empty(),
+            validation: request,
+            subject_public_key: None,
+        })
+        .unwrap();
+
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/receipts/emit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "an unsigned write with no admin bearer token must still be rejected by the \
+             production require_bearer_on_writes gate"
+        );
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 }
 

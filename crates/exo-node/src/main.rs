@@ -511,7 +511,7 @@ async fn start_node(
         "Node identity ready"
     );
 
-    avc_require_postgres_durability_from_env()?;
+    let avc_require_postgres_durability = avc_require_postgres_durability_from_env()?;
     let gateway_pool = gateway_pool_from_env().await?;
     let (dagdb_tenant_id, dagdb_namespace) = dagdb_node_scope_from_env()?;
 
@@ -1058,6 +1058,7 @@ async fn start_node(
             Arc::clone(&sign_fn),
             Some(gateway_pool.clone()),
             Some(Arc::clone(&shared_store)),
+            avc_require_postgres_durability,
         )
         .await?,
     );
