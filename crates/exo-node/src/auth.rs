@@ -187,6 +187,64 @@ fn is_zerodentity_local_signed_write(method: &axum::http::Method, path: &str) ->
     method == axum::http::Method::DELETE && segments.next().is_none()
 }
 
+/// Route-shape check for the AVC subject-signed receipt-emission write
+/// (VCG-006a / #737).
+///
+/// This only recognizes the exact `POST /api/v1/avc/receipts/emit` route by
+/// method and path — mirroring `is_zerodentity_local_signed_write`'s
+/// route-shape style. It makes no claim about authority; it just identifies
+/// which route may be eligible for the carve-out in
+/// `require_bearer_on_writes`, which independently confirms a genuine
+/// (non-empty) subject signature is present before admitting the request.
+fn is_avc_receipts_emit_route(method: &axum::http::Method, path: &str) -> bool {
+    method == axum::http::Method::POST && path == "/api/v1/avc/receipts/emit"
+}
+
+/// Maximum body size read while peeking for a subject signature on the AVC
+/// receipt-emission carve-out. Matches the AVC router's own request body cap
+/// (`MAX_AVC_API_BODY_BYTES` in `avc.rs`) so this check never admits a body
+/// the downstream router would have rejected anyway.
+const AVC_EMIT_RECEIPT_CARVE_OUT_MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Determine whether a `POST /api/v1/avc/receipts/emit` request carries a
+/// genuine (non-empty) subject signature, without weakening the real
+/// authority check.
+///
+/// This buffers the request body (bounded to
+/// `AVC_EMIT_RECEIPT_CARVE_OUT_MAX_BODY_BYTES`) and parses it as
+/// `crate::avc::EmitReceiptRequest`, reusing the exact same type and
+/// `Signature::is_empty()` predicate the handler and `verify_subject_action_signature`
+/// use — no duplicated signature-shape logic. It reconstructs an equivalent
+/// request from the buffered bytes so the downstream handler still receives
+/// the original body.
+///
+/// This function never performs cryptographic signature verification —
+/// that remains exclusively `verify_subject_action_signature` inside
+/// `handle_emit_receipt`. A body that merely contains a non-empty signature
+/// field is let through to the handler, which is the actual authority gate
+/// and can still reject an invalid signature. A body with no signature
+/// (empty, missing, or unparseable) is never let through — this carve-out
+/// must never open an unauthenticated hole.
+async fn avc_emit_receipt_carve_out(request: Request<Body>) -> (Request<Body>, bool) {
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, AVC_EMIT_RECEIPT_CARVE_OUT_MAX_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            // Body could not be buffered (too large or a read error).
+            // Reconstruct an empty-bodied request and fall through to the
+            // bearer-token check — never admit on a body we could not
+            // inspect.
+            return (Request::from_parts(parts, Body::empty()), false);
+        }
+    };
+
+    let has_subject_signature = serde_json::from_slice::<crate::avc::EmitReceiptRequest>(&bytes)
+        .is_ok_and(|parsed| !parsed.subject_signature.is_empty());
+
+    let rebuilt = Request::from_parts(parts, Body::from(bytes));
+    (rebuilt, has_subject_signature)
+}
+
 /// axum middleware: require bearer token on mutating requests and sensitive
 /// trust-object reads.
 ///
@@ -196,17 +254,29 @@ fn is_zerodentity_local_signed_write(method: &axum::http::Method, path: &str) ->
 /// The active economy policy remains public. All other methods (`POST`, `PUT`,
 /// `DELETE`, `PATCH`) require
 /// `Authorization: Bearer <token>` unless they are exact 0dentity signed-write
-/// routes whose handlers perform identity-session and request-signature checks.
+/// routes whose handlers perform identity-session and request-signature
+/// checks, or the exact AVC `/receipts/emit` route carrying a genuine
+/// (non-empty) subject signature, whose handler verifies that signature
+/// cryptographically.
 pub async fn require_bearer_on_writes(
     auth: BearerAuth,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let method = request.method().clone();
-    let path = request.uri().path();
+    let path = request.uri().path().to_owned();
     let is_public_read = (method == axum::http::Method::GET || method == axum::http::Method::HEAD)
-        && !is_sensitive_read_path(path);
-    if is_public_read || is_zerodentity_local_signed_write(&method, path) {
+        && !is_sensitive_read_path(&path);
+    if is_public_read || is_zerodentity_local_signed_write(&method, &path) {
+        return Ok(next.run(request).await);
+    }
+
+    if is_avc_receipts_emit_route(&method, &path) {
+        let (request, has_subject_signature) = avc_emit_receipt_carve_out(request).await;
+        if has_subject_signature {
+            return Ok(next.run(request).await);
+        }
+        verify_bearer_header(request.headers(), &auth)?;
         return Ok(next.run(request).await);
     }
 

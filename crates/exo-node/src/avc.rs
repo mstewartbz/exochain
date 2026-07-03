@@ -767,12 +767,17 @@ impl AvcApiState {
     /// Postgres database when available, otherwise from the node data directory.
     /// Public-key trust anchors are intentionally reloaded separately from
     /// verified startup configuration.
+    ///
+    /// When `require_postgres_durability` is `true` and no `database_pool` is
+    /// supplied, startup fails closed with an `Err` instead of silently
+    /// falling back to the local file-backed registry (VCG-006a / #735).
     pub async fn with_durable_registry(
         data_dir: &FsPath,
         validator_did: Did,
         receipt_signer: AvcReceiptSigner,
         database_pool: Option<PgPool>,
         finality_store: Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
+        require_postgres_durability: bool,
     ) -> anyhow::Result<Self> {
         let durable_state_path = data_dir.join(AVC_REGISTRY_DURABLE_STATE_FILE);
         let (registry, durability) = match database_pool {
@@ -783,6 +788,14 @@ impl AvcApiState {
                 (registry, AvcRegistryDurability::Postgres(pool.clone()))
             }
             None => {
+                if require_postgres_durability {
+                    anyhow::bail!(
+                        "{} is set but no Postgres database pool is configured; \
+                         refusing to fall back to the local AVC file registry \
+                         for production durability",
+                        AVC_REQUIRE_POSTGRES_DURABILITY_ENV
+                    );
+                }
                 tracing::warn!(
                     path = %durable_state_path.display(),
                     "AVC registry using local file fallback without Postgres-backed durability; set DATABASE_URL for production AVC registry durability"
@@ -2665,10 +2678,16 @@ mod tests {
 
     async fn fresh_durable_state(data_dir: &FsPath) -> Arc<AvcApiState> {
         let signer: AvcReceiptSigner = Arc::new(|payload: &[u8]| validator_keypair().sign(payload));
-        let mut state =
-            AvcApiState::with_durable_registry(data_dir, validator_did(), signer, None, None)
-                .await
-                .expect("durable AVC state");
+        let mut state = AvcApiState::with_durable_registry(
+            data_dir,
+            validator_did(),
+            signer,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("durable AVC state");
         state.external_timestamp_source =
             fixed_external_timestamp_source(Timestamp::new(1_600_000, 0));
         seed_avc_trust_keys(&state);
@@ -3221,6 +3240,7 @@ mod tests {
             signer,
             None,
             None,
+            false,
         )
         .await
         {
@@ -3290,6 +3310,7 @@ mod tests {
             Arc::clone(&signer),
             Some(pool.clone()),
             None,
+            false,
         )
         .await
         {
@@ -3344,6 +3365,7 @@ mod tests {
             Arc::clone(&signer),
             Some(pool.clone()),
             None,
+            false,
         )
         .await
         .expect("Postgres AVC state");
@@ -3426,6 +3448,7 @@ mod tests {
             signer,
             Some(pool.clone()),
             None,
+            false,
         )
         .await
         .expect("reloaded Postgres AVC state");
