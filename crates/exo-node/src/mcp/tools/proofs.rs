@@ -1333,6 +1333,141 @@ mod tests {
         assert!(result.is_error);
     }
 
+    /// Builds a well-formed, envelope-backed `exochain_verify_cgr_proof`
+    /// request: a real checkpoint root computed from events actually
+    /// persisted to an in-memory-backed `SqliteDagStore` (mirrors the
+    /// `context_with_store_node` pattern in `ledger.rs`'s test module),
+    /// a plausible validator-signature-shaped array, a plausible
+    /// proof-bytes-shaped invariant list, and a nonzero `verified_at_ms`.
+    ///
+    /// NOTE: `exochain_verify_cgr_proof`'s input schema is
+    /// `additionalProperties: false` with exactly three fields
+    /// (`proof_hash`, `invariants_checked`, `verified_at_ms`) — there is
+    /// no `proof_bytes`, `checkpoint_root`, or `validator_signatures`
+    /// field in the current wire contract. The "proof bytes" and
+    /// "validator signatures" shapes described by the work order are
+    /// therefore folded into the only hash-shaped and array-shaped
+    /// fields the tool actually accepts: the real checkpoint root goes
+    /// in as the 64-hex `proof_hash` claim, and plausible
+    /// validator-signature-style tokens go in as `invariants_checked`
+    /// entries. This is the most well-formed, semantically complete
+    /// request the current schema can express.
+    fn wellformed_cgr_envelope_params(node_context: &NodeContext) -> Value {
+        let _ = node_context;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = crate::store::SqliteDagStore::open(dir.path()).expect("store");
+
+        let mut dag = exo_dag::dag::Dag::new();
+        let mut clock = exo_dag::dag::DeterministicDagClock::new();
+        let creator = Did::new("did:exo:mcp-cgr-proof-test").expect("valid DID");
+        let sign_fn: Box<dyn Fn(&[u8]) -> exo_core::types::Signature> =
+            Box::new(|data: &[u8]| {
+                let digest = blake3::hash(data);
+                let mut signature = [0u8; 64];
+                signature[..32].copy_from_slice(digest.as_bytes());
+                exo_core::types::Signature::from_bytes(signature)
+            });
+
+        let genesis =
+            exo_dag::dag::append(&mut dag, &[], b"genesis", &creator, &*sign_fn, &mut clock)
+                .expect("genesis");
+        let child = exo_dag::dag::append(
+            &mut dag,
+            &[genesis.hash],
+            b"child",
+            &creator,
+            &*sign_fn,
+            &mut clock,
+        )
+        .expect("child");
+
+        store.put_sync(genesis.clone()).expect("put genesis");
+        store.put_sync(child.clone()).expect("put child");
+        store
+            .mark_committed_sync(&genesis.hash, 1)
+            .expect("commit genesis");
+
+        // The real checkpoint root: a Merkle root over the events that
+        // are actually persisted and committed in the store above, not
+        // an arbitrary/fabricated hash.
+        let leaves = [genesis.hash, child.hash];
+        let checkpoint_root = merkle_root_with_leaf_count(&leaves);
+
+        // Plausible validator-signature-shaped tokens (hex-encoded
+        // 64-byte Ed25519-shaped signatures), carried in the only
+        // array field the schema exposes.
+        let validator_signature_a = hex::encode(sign_fn(genesis.hash.as_bytes()).to_bytes());
+        let validator_signature_b = hex::encode(sign_fn(child.hash.as_bytes()).to_bytes());
+
+        // dir is intentionally leaked for the duration of the request:
+        // the store handle only needs to exist long enough to derive
+        // the real root above.
+        std::mem::forget(dir);
+
+        json!({
+            "proof_hash": checkpoint_root.to_string(),
+            "invariants_checked": [validator_signature_a, validator_signature_b],
+            "verified_at_ms": 1_700_000_000_123_u64,
+        })
+    }
+
+    /// REGRESSION LOCK — documented to PASS immediately.
+    ///
+    /// Proves `exochain_verify_cgr_proof` refuses even a fully
+    /// well-formed, semantically complete request: valid 64-hex
+    /// `proof_hash` (a real checkpoint root derived from events
+    /// actually committed to an in-memory store), plausible
+    /// validator-signature-shaped `invariants_checked` entries, and a
+    /// nonzero `verified_at_ms`. There is no code path today — real or
+    /// otherwise — by which this tool returns success; this test locks
+    /// that fail-closed posture so a future wiring change cannot
+    /// silently flip it without this test going red first.
+    #[test]
+    fn cgr_proof_fail_closed_with_wellformed_envelope() {
+        let context = NodeContext::empty();
+        let params = wellformed_cgr_envelope_params(&context);
+
+        let result = execute_verify_cgr_proof(&params, &context);
+
+        assert!(
+            result.is_error,
+            "exochain_verify_cgr_proof must fail closed even for a well-formed, \
+             semantically complete request"
+        );
+        let text = result.content[0].text();
+        assert!(
+            text.contains("CGR proof verification is unavailable"),
+            "refusal body must carry the handler's actual refusal message, got: {text}"
+        );
+    }
+
+    /// STANDING RED — documented to FAIL when run with `--ignored` today.
+    ///
+    /// Asserts that a well-formed, envelope-backed CGR proof request
+    /// verifies successfully once real CGR verification is wired in.
+    /// This is red until VCG-001b lands the production CGR proof
+    /// verifier and VCG-004b wires it into
+    /// `exochain_verify_cgr_proof`. Wiring to the pedagogical
+    /// `exo-proofs` verifiers is explicitly NOT an acceptable closure
+    /// for this red (see GAP-REGISTRY.md row VCG-004 / the VCG-004a
+    /// work order's ledger non-closure note).
+    #[test]
+    #[ignore = "red until VCG-001b production verifier and VCG-004b wiring land"]
+    fn cgr_real_verification_consumes_envelope() {
+        let context = NodeContext::empty();
+        let params = wellformed_cgr_envelope_params(&context);
+
+        let result = execute_verify_cgr_proof(&params, &context);
+
+        assert!(
+            !result.is_error,
+            "expected a well-formed, envelope-backed CGR proof request to verify \
+             successfully once real CGR verification is wired; got error: {}",
+            result.content[0].text()
+        );
+    }
+
     #[test]
     fn proof_tools_do_not_emit_authoritative_statuses_from_caller_metadata() {
         let source = include_str!("proofs.rs");

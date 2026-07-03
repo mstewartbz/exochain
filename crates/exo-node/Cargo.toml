@@ -187,12 +187,22 @@ unaudited-admin-governance-shortcut = []
 unaudited-crosschecked-receipt-anchor = []
 
 # GAP (Onyx pass 3, RED #2 and follow-on trust-surface scans): several
-# MCP tools return truthy-shaped responses without persisting to any
-# store, invoking the reactor, appending to the DAG, delivering a
-# message, or recording consent/escalation state — pure simulation.
-# Combined with the MCP middleware's hardcoded-true constitutional
-# context, this means AI agents calling these tools get "success"
-# signals for actions that have zero governance-fabric effect.
+# MCP tools would otherwise return truthy-shaped responses without
+# persisting to any store, invoking the reactor, appending to the DAG,
+# delivering a message, or recording consent/escalation state — pure
+# simulation. If enabled without a real backing store/reactor wire-up,
+# this means AI agents calling these tools would get "success" signals
+# for actions that have zero governance-fabric effect.
+#
+# This is independent of `ConstitutionalMiddleware` (see
+# `exo-node/src/mcp/middleware.rs`), which is not hardcoded-true: on
+# every `tools/call` it parses the caller-supplied `constitutional_context`,
+# verifies the signed authority chain and provenance, verifies a
+# domain-separated evidence signature over the full adjudication context,
+# derives MCP rule facts from the parsed context, and refuses the call
+# when that context is absent or invalid. A verified constitutional
+# context is necessary but not sufficient — it does not by itself make
+# the handlers below persist state; that is what this flag gates.
 #
 # Mitigation: tools don't mutate real state, so blast radius is
 # "AI agents acting on false success signals" — not state

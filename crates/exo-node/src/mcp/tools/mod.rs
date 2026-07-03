@@ -15,6 +15,51 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! MCP tool registry — maps tool names to implementations.
+//!
+//! # Honest tool classification
+//!
+//! Every tool gated by (or exempt from) the `unaudited-mcp-simulation-tools`
+//! feature falls into exactly one of three classes below. (DAG DB tools in
+//! [`dagdb`] are a separate, already self-documented family gated by the
+//! unrelated `dagdb-gateway-proxy` feature — see that module's own doc
+//! comment.) This classification is independent of `ConstitutionalMiddleware`
+//! (`exo-node/src/mcp/middleware.rs`), which verifies the caller-supplied
+//! signed `constitutional_context` on every `tools/call` regardless of
+//! class — a verified context is a precondition for dispatch, not a
+//! statement about what the handler itself does with real state.
+//!
+//! 1. **Live read-only tools** — always registered, never feature-gated,
+//!    and never refuse on principle. They compute or verify something
+//!    real from caller-supplied or store-backed data and return an
+//!    honest result: `verify_authority_chain`, `check_permission`,
+//!    `adjudicate_action` ([`authority`]), `verify_inclusion`,
+//!    `get_event`, `get_checkpoint` ([`ledger`]), `generate_merkle_proof`,
+//!    `verify_chain_of_custody`, `create_evidence` ([`proofs`]),
+//!    `evaluate_threat` ([`escalation`]), and `node_status` ([`node`]).
+//!
+//! 2. **Unconditionally fail-closed tools** — refuse in every build,
+//!    with no feature flag able to enable them, because the underlying
+//!    capability (key resolution, message storage, delivery transport)
+//!    does not exist yet. This is the strictest posture in the registry
+//!    and must be preserved: [`messaging`]'s `send_encrypted`,
+//!    `receive_encrypted`, and `configure_death_trigger` always refuse.
+//!    `verify_cgr_proof` ([`proofs`]) is also unconditionally fail-closed
+//!    today: it has no `proof_bytes`/checkpoint-root/validator-signature
+//!    wire fields and no production CGR verifier wired, so it refuses
+//!    regardless of any feature flag (see the CGR proof-verification
+//!    lock tests in the [`proofs`] module's `tests` submodule and
+//!    `Initiatives/fix-mcp-cgr-proof-verification-stub.md`).
+//!
+//! 3. **Feature-gated simulation tools** — otherwise-truthy-shaped
+//!    mutation handlers that have no live backing store or reactor
+//!    wiring yet ([`governance`], [`ledger`]'s `submit_event`,
+//!    [`escalation`]'s mutation tools, [`identity`], [`authority`]'s
+//!    `delegate_authority`, [`consent`], [`legal`]). These refuse by
+//!    default and stay refusing unless the crate is built with the
+//!    `unaudited-mcp-simulation-tools` feature (see
+//!    `exo-node/Cargo.toml`), which is never safe to enable in
+//!    production. Each family's refusal payload cites its own pointer
+//!    document under `Initiatives/`.
 
 pub mod authority;
 pub mod consent;
