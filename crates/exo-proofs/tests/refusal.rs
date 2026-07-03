@@ -83,3 +83,76 @@ fn zkml_daubert_admissibility_refuses_by_default() {
         "Daubert status must fail closed when unaudited proof APIs are disabled, got {status:?}"
     );
 }
+
+/// VCG-001a RED stage — see `GAP-REGISTRY.md` "VCG-001 - Production ZK Proof
+/// Backend Absent", ratified decision D1 (RISC Zero is the selected
+/// production backend family). This lane (VCG-001a) only introduces the
+/// proof statement registry, envelope, and a minimal audit-status accessor
+/// (`exo_proofs::envelope::{AuditStatus, default_registry}`); it does NOT
+/// vendor a production backend or wire a real verifier (that is lane
+/// VCG-001b, D1 risc0 vendoring — explicitly SCOPE OUT here).
+///
+/// Standing red: this test compiles and runs today (no feature gating, no
+/// panic-body placeholder) against the *real* backend registry
+/// (`exo_proofs::envelope::default_registry()`). It asserts two things that
+/// are jointly required before this test can pass:
+///
+/// 1. The default registry contains at least one
+///    [`exo_proofs::envelope::AuditStatus::ProductionReviewed`] backend
+///    descriptor.
+/// 2. That backend's [`exo_proofs::envelope::ProofEnvelope::verify`]
+///    succeeds WITHOUT the `unaudited-pedagogical-proofs` feature enabled
+///    (this test binary is compiled with that feature off — see the
+///    `#![cfg(not(feature = "unaudited-pedagogical-proofs"))]` crate-level
+///    gate above) — proving production backends are exempt from the
+///    pedagogical refusal gate because they carry their own audit evidence
+///    and a real wired verifier.
+///
+/// Today `default_registry()` returns exactly one entry —
+/// `BackendId::UnauditedBlake3Standin` marked `AuditStatus::Pedagogical` —
+/// so assertion (1) fails here, and this test is red. It is impossible to
+/// satisfy by declaring a feature flag: there is no `cfg` gate left to
+/// exploit. The only way to turn this green is to actually register a
+/// production-reviewed backend descriptor in `default_registry()` (VCG-001b)
+/// whose `verify()` is backed by a real wired verifier.
+#[ignore = "red until VCG-001b lands a production backend"]
+#[test]
+fn production_backend_variant_executes_without_unaudited_flag() {
+    use exo_proofs::envelope::AuditStatus;
+
+    let registry = exo_proofs::envelope::default_registry();
+
+    let production_backend = registry
+        .iter()
+        .find(|descriptor| descriptor.audit_status == AuditStatus::ProductionReviewed)
+        .unwrap_or_else(|| {
+            panic!(
+                "standing red (VCG-001a RED stage): default_registry() contains no \
+                 AuditStatus::ProductionReviewed backend yet (got {registry:?}). This must \
+                 fail here until VCG-001b actually registers a production-reviewed backend \
+                 with a wired verifier. See GAP-REGISTRY.md VCG-001 remediation track and \
+                 ratified decision D1."
+            )
+        });
+
+    let envelope = exo_proofs::envelope::ProofEnvelope {
+        statement_kind: exo_proofs::envelope::ProofStatementKind::ExecutionReceipt,
+        backend_id: production_backend.backend_id,
+        version: 1,
+        public_inputs: vec![],
+        commitment_roots: vec![],
+        verifier_key_or_image_id: vec![],
+        domain_separator: b"exo-proofs:envelope:v1:execution-receipt".to_vec(),
+    };
+
+    // Production backends must verify WITHOUT the
+    // unaudited-pedagogical-proofs feature enabled — this test binary is
+    // compiled with that feature off (see the `#![cfg(not(feature =
+    // "unaudited-pedagogical-proofs"))]` crate-level gate above).
+    let result = envelope.verify();
+    assert!(
+        result.is_ok(),
+        "a production-reviewed backend (e.g. RISC Zero, ratified decision D1) must \
+         verify without the unaudited-pedagogical-proofs feature enabled, got {result:?}"
+    );
+}

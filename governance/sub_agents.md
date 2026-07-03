@@ -52,13 +52,18 @@ Historical 2026-03-19 sub-agent completion record. Numeric status claims are sup
 * **Definition of Done**: `verify_integrity()` passes on complex DAG topologies (proptest).
 * **Status**: **DONE** — DAG engine, BFT consensus adapter, HLC, SMT, and MMR all implemented and tested.
 
-## E) PROOFS_INDEXER_AGENT (Executive/Judicial) — DONE
+## E) PROOFS_INDEXER_AGENT (Executive/Judicial) — PARTIAL
 
 * **Mission**: Implement verifiable query structures (MMR, SMT) and proofs.
 * **Inputs**: Spec Section 9.4 (Split Roots).
 * **Outputs**: MMR/SMT implementations, `EventInclusionProof` struct.
 * **Definition of Done**: Proof generation and verification roundtrip tests pass.
-* **Status**: **DONE** — SNARK, STARK, ZKML proof systems and verifier infrastructure complete.
+* **Status**: **PARTIAL** — MMR/SMT verifiable query structures and
+  `EventInclusionProof` are done. The SNARK, STARK, and ZKML proof-system
+  modules and unified verifier are structurally complete (API shape, fail-closed
+  refusal behavior when the `unaudited-pedagogical-proofs` feature is absent)
+  but remain unaudited, pedagogical skeletons — not production cryptography.
+  See GAP-REGISTRY.md VCG-001.
 
 ## F) IDENTITY_CONSENT_AGENT (Executive) — DONE
 

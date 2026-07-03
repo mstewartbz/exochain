@@ -55,6 +55,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod circuit;
+pub mod envelope;
 pub mod error;
 pub mod snark;
 pub mod stark;

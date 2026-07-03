@@ -109,13 +109,18 @@ Updated 2026-06-18 after DAG DB REST runtime activation evidence review. Maps ev
 
 ## ZK Proofs (Spec §12.5)
 
+SNARK, STARK, and ZKML rows below are structurally complete and fail closed
+(refuse to run outside the `unaudited-pedagogical-proofs` feature) but remain
+unaudited, pedagogical skeletons, not production cryptography. See
+GAP-REGISTRY.md VCG-001.
+
 | Spec | Requirement | Crate / Module | Test Location | Tests | Status |
 |---|---|---|---|---|---|
 | **12.5** | **R1CS Constraint System** | `exo-proofs::circuit` | `circuit.rs` (mod tests) | 16 | 🟢 |
-| 12.5 | SNARK (Groth16-like) | `exo-proofs::snark` | `snark.rs` (mod tests) | 10 | 🟢 |
-| 12.5 | STARK (hash-based, post-quantum) | `exo-proofs::stark` | `stark.rs` (mod tests) | 11 | 🟢 |
-| 12.5 | ZKML (verifiable inference) | `exo-proofs::zkml` | `zkml.rs` (mod tests) | 12 | 🟢 |
-| 12.5 | Unified verifier | `exo-proofs::verifier` | `verifier.rs` (mod tests) | 8 | 🟢 |
+| 12.5 | SNARK (Groth16-like, pedagogical — not production cryptography) | `exo-proofs::snark` | `snark.rs` (mod tests) | 10 | 🟡 |
+| 12.5 | STARK (hash-based, post-quantum, pedagogical — not production cryptography) | `exo-proofs::stark` | `stark.rs` (mod tests) | 11 | 🟡 |
+| 12.5 | ZKML (verifiable inference, pedagogical — not production cryptography) | `exo-proofs::zkml` | `zkml.rs` (mod tests) | 12 | 🟡 |
+| 12.5 | Unified verifier (dispatch structure; fails closed to unaudited SNARK/STARK/ZKML backends) | `exo-proofs::verifier` | `verifier.rs` (mod tests) | 8 | 🟢 |
 
 ## P2P, API, Gateway, Multi-Tenant (Spec §16–17)
 
@@ -172,7 +177,7 @@ requires maintainer confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
 
 | Req | Spec Candidate | Requirement | Module / Evidence | Status |
 |---|---|---|---|---|
-| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | Exactly `POST /api/v1/dag-db/route`, `POST /api/v1/dag-db/context-packet`, `POST /api/v1/dag-db/writeback`, `POST /api/v1/dag-db/import`, and `POST /api/v1/dag-db/export` must be served by the gateway runtime when Postgres and tenant/session authority are configured; reserved intake, validate, trust-check, council decision, receipt lookup, catalog lookup, and route lookup DTO surfaces remain unmounted; writes must pass tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export are live only with distinct import/export consent plus route-bound signatures, and missing or mismatched consent/signatures fail closed. | Current PR-head evidence is supplied by PR checks and the PR body; `INTEGRATION.md` DAG DB Runtime Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `crates/exo-node/src/mcp/tools/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/runtime-activation/rollback-canary-observability.md`; local verification commands include `RUSTFLAGS='-D warnings' cargo test -p exo-gateway dagdb --features production-db` and `RUSTFLAGS='-D warnings' cargo test -p exo-dag-db-postgres --features postgres --test dagdb_tenant_rls_live_path_contract -- --nocapture` | 🟢 Implemented |
+| **DAGDB-001** | Spec §12 Gatekeeper & Constitutional Enforcement; Spec §13 Governance threat model | Exactly `POST /api/v1/dag-db/route`, `POST /api/v1/dag-db/context-packet`, `POST /api/v1/dag-db/writeback`, `POST /api/v1/dag-db/import`, and `POST /api/v1/dag-db/export` must be served by the gateway runtime when Postgres and tenant/session authority are configured; reserved intake, validate, trust-check, council decision, receipt lookup, catalog lookup, and route lookup DTO surfaces remain unmounted; writes must pass tenant-scoped consent, Ed25519 provenance, and the constructible constitutional invariant subset before persistence; import/export are live only with distinct import/export consent plus route-bound signatures, and missing or mismatched consent/signatures fail closed. | Current PR-head evidence is supplied by PR checks and the PR body; `INTEGRATION.md` DAG DB Runtime Adapter Contract; `crates/exo-gatekeeper/src/dagdb_gate.rs`; `crates/exo-gateway/src/dagdb.rs`; `crates/exo-node/src/mcp/tools/dagdb.rs`; `governance/threat_matrix.md` T-17; `docs/dagdb/runtime-activation/rollback-canary-observability.md`; local verification commands include `RUSTFLAGS='-D warnings' cargo test -p exochain-gateway dagdb --features production-db` and `RUSTFLAGS='-D warnings' cargo test -p exochain-dag-db-postgres --features postgres --test dagdb_tenant_rls_live_path_contract -- --nocapture` | 🟢 Implemented |
 
 ## Autonomous Volition Credential (AVC) Layer
 
@@ -227,14 +232,14 @@ requires maintainer confirmation against `EXOCHAIN_Specification_v2.2.pdf`.
 | Governance (§13) | 8 | 8 | 0 | 0 |
 | Escalation (§14) | 6 | 6 | 0 | 0 |
 | Legal (§15) | 7 | 7 | 0 | 0 |
-| ZK Proofs (§12.5) | 5 | 5 | 0 | 0 |
+| ZK Proofs (§12.5) | 5 | 2 | 3 | 0 |
 | P2P/API/Gateway/Tenant (§16–17) | 4 | 4 | 0 | 0 |
 | Decision Forum (GOV/TNC/M) | 15 | 15 | 0 | 0 |
 | Governance Monitoring (MON) | 12 | 10 | 0 | 2 |
 | DAG DB Runtime Adapter (DAGDB) | 1 | 1 | 0 | 0 |
 | AVC (Autonomous Volition Credential) | 10 | 10 | 0 | 0 |
 | Custody-Native Economy (zero-launch) | 22 | 22 | 0 | 0 |
-| **TOTAL** | **119** | **117** | **0** | **2** |
+| **TOTAL** | **119** | **114** | **3** | **2** |
 
-**Coverage: 117/119 requirements implemented (98%). 2 planned (ExoForge scheduling + React dashboard). DAGDB-001 current PR-head evidence is supplied by PR checks and the PR body; scoped coverage claims must cite the exact producing command, package set, exclusions, numerator, and denominator. No coverage statement here is a universal production coverage claim.**
+**Coverage: 114/119 requirements implemented (96%), 3 partial (SNARK/STARK/ZKML — pedagogical, not production cryptography; see GAP-REGISTRY.md VCG-001), 2 planned (ExoForge scheduling + React dashboard). DAGDB-001 current PR-head evidence is supplied by PR checks and the PR body; scoped coverage claims must cite the exact producing command, package set, exclusions, numerator, and denominator. No coverage statement here is a universal production coverage claim.**
 **Workspace inventory: 5,974 listed workspace tests and 454 Rust source files.**

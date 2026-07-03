@@ -102,9 +102,10 @@ The separation is enforced structurally: the Judicial branch (CGR Kernel) has no
     │                 │              │
     │  ┌──────────┐  │  ┌────────┐  │  ┌────────────┐
     │  │exo-proofs│  │  │exo-dag │  │  │exo-identity│
-    │  │(SNARK,   │  │  │(SMT,   │  │  │(DID, keys, │
-    │  │ STARK,   │  │  │ MMR,   │  │  │ Shamir,    │
-    │  │ zkML)    │  │  │ DAG)   │  │  │ risk)      │
+    │  │(unaudited│  │  │(SMT,   │  │  │(DID, keys, │
+    │  │pedagogical│ │  │ MMR,   │  │  │ Shamir,    │
+    │  │SNARK/STARK│ │  │ DAG)   │  │  │ risk)      │
+    │  │/zkML)    │  │  │        │  │  │            │
     │  └────┬─────┘  │  └───┬────┘  │  └─────┬──────┘
     │       │        │      │       │        │
     │       └────────┴──────┴───────┴────────┘
@@ -116,6 +117,9 @@ The separation is enforced structurally: the Judicial branch (CGR Kernel) has no
     │              │  CBOR canonical)│
     └──────────────┴─────────────────┘
 ```
+`exo-proofs` SNARK/STARK/zkML modules are an unaudited, pedagogical skeleton —
+not production cryptography. See [Section 8.2](#82-zero-knowledge-proof-system)
+for the qualified description.
 
 ### 2.3 Data Flow: The BCTS Lifecycle
 
@@ -299,7 +303,7 @@ Standard governance systems count votes. EXOCHAIN counts *independent* votes. Th
 The `CrosscheckReport` in [[exo-governance/src/crosscheck.rs]] is the plural intelligence artifact:
 
 - **Methods**: QuickCheck (single model), Crosscheck (multi-model panel), Borg (multi-round refinement), Audit (adversarial), DevilsAdvocate, RedTeam, Jury
-- **zkML proof**: Optional `zkml_proof` field for cryptographic AI provenance verification (ARCH-002)
+- **zkML proof**: Optional `zkml_proof` field binding an unaudited, pedagogical ZKML attestation for AI provenance (ARCH-002) — not production cryptography
 - **Content-addressed**: Each report has a `content_hash` for integrity verification
 - **HLC-timestamped**: Reports carry `HybridLogicalClock` timestamps for causal ordering
 
@@ -333,7 +337,7 @@ Constitutional governance requires that two independent validators, given the sa
 | **BTreeMap only** | HashMap iteration order varies by seed | Governance structures use `Vec` with explicit sorting or `BTreeMap` |
 | **HLC ordering** | Wall-clock disagreements | `HybridLogicalClock` provides causal ordering; see [[exo-core/src/hlc.rs]] |
 | **Canonical CBOR serialization** | Encoding ambiguity | `serde_cbor::to_vec()` for all canonical forms; event IDs are `Blake3(CBOR(envelope))` |
-| **Domain-separated hashing** | Hash confusion across contexts | Every hash computation uses a domain separator: `EXOCHAIN-EVENT-SIG-v1`, `EXOCHAIN-INVARIANT-v1`, `EXOCHAIN-SMT-v1`, `EXOCHAIN-STARK-v1` |
+| **Domain-separated hashing** | Hash confusion across contexts | Every hash computation uses a domain separator: `EXOCHAIN-EVENT-SIG-v1`, `EXOCHAIN-INVARIANT-v1`, `EXOCHAIN-SMT-v1`, `EXOCHAIN-STARK-v1` (the STARK domain separator applies to the unaudited, pedagogical `exo-proofs` skeleton — see 8.2) |
 
 ### 7.3 Hybrid Logical Clock
 
@@ -368,17 +372,31 @@ The Shamir implementation uses the irreducible polynomial `x^8 + x^4 + x^3 + x +
 
 ### 8.2 Zero-Knowledge Proof System
 
-The `exo-proofs` crate ([[exo-proofs/src/lib.rs]]) provides three proof types:
+The `exo-proofs` crate ([[exo-proofs/src/lib.rs]]) provides an unaudited,
+pedagogical skeleton for three proof-shaped modules — not production
+cryptography (see GAP-REGISTRY.md VCG-001). Every public entry point in the
+SNARK, STARK, and ZKML modules refuses (fails closed) unless the crate's
+`unaudited-pedagogical-proofs` feature is explicitly enabled; the crate is not
+linked into default production builds. A production backend is tracked in
+GAP-REGISTRY.md VCG-001/D1.
 
-| Proof Type | Module | Properties | Use Case |
+| Proof Type | Module | Properties (pedagogical skeleton, not production cryptography) | Use Case |
 |---|---|---|---|
-| **zk-SNARK** | `snark.rs` | Succinct, non-interactive, requires trusted setup | Efficient on-chain verification of governance compliance |
-| **zk-STARK** | `stark.rs` | Transparent (no trusted setup), post-quantum secure | Public governance transparency proofs |
-| **zkML** | `zkml.rs` | AI provenance proofs | Prove that a specific model produced a specific output (ARCH-002) |
+| **zk-SNARK** | `snark.rs` | Structural demonstration of the SNARK API shape using BLAKE3 hash stand-ins in place of elliptic-curve pairings — not a sound zero-knowledge argument | Efficient on-chain verification of governance compliance (future, once a production backend lands) |
+| **zk-STARK** | `stark.rs` | Structural demonstration of the STARK API shape; FRI layers are simulated with iterative hashing rather than actual polynomial commitment — not a hardened proof system | Public governance transparency proofs (future, once a production backend lands) |
+| **zkML** | `zkml.rs` | Hash-based simulation binding model, input, and output via BLAKE3 rather than executing the model inside a ZK circuit — sufficient for provenance-binding demos, not a cryptographic soundness claim | Prove that a specific model produced a specific output (ARCH-002; not a cryptographic proof today) |
 
-STARKs use hash-based commitments (Blake3) rather than elliptic-curve pairings, making them resistant to quantum attacks on discrete-log assumptions. The `StarkProver` uses domain separation (`EXOCHAIN-STARK-v1`) and configurable security bits.
+The `stark.rs` module's STARKs use hash-based (Blake3) commitments as a
+pedagogical stand-in for elliptic-curve pairings; this is a structural
+demonstration of the STARK API shape, not a sound, quantum-resistant proof
+system. The `StarkProver` uses domain separation (`EXOCHAIN-STARK-v1`) and
+configurable security bits, both of which are structural properties of the
+unaudited, pedagogical skeleton, not evidence of cryptographic soundness.
 
-The `UnifiedVerifier` in `verifier.rs` provides a single entry point for verifying any proof type, returning a `VerificationResult`.
+The `UnifiedVerifier` in `verifier.rs` provides a single entry point for
+verifying any proof type, returning a `VerificationResult`; it dispatches
+across the same unaudited, pedagogical modules described above and inherits
+their fail-closed refusal behavior outside `unaudited-pedagogical-proofs`.
 
 ### 8.3 Merkle Structures
 
@@ -515,7 +533,7 @@ exo-core           (leaf node; no internal dependencies)
 | `exo-core` | 3,949 | 191 | 10 | Blake3, Ed25519, HLC, events, canonical CBOR |
 | `exo-gatekeeper` | 2,875 | 133 | 9 | CGR Kernel, invariants, combinators, Holons, TEE |
 | `exo-dag` | 2,590 | 86 | 7 | SMT, MMR, DAG consensus, checkpoints |
-| `exo-proofs` | 1,916 | 61 | 7 | SNARK, STARK, zkML, unified verifier |
+| `exo-proofs` | 1,916 | 61 | 7 | SNARK, STARK, zkML skeletons (unaudited, pedagogical — not production cryptography), unified verifier |
 | `exo-identity` | 1,533 | 67 | 7 | DID, key management, Shamir, PACE, risk scoring |
 | `exo-authority` | 1,235 | 66 | 6 | Delegation chains, scope narrowing, authority proofs |
 | `exo-governance` | 1,236 | 69 | 9 | Decisions, quorum, crosscheck, constitution, delegation |
@@ -560,5 +578,5 @@ exo-core           (leaf node; no internal dependencies)
 | [[exo-dag/src/smt.rs]] | Sparse Merkle Tree with domain-separated leaf hashing |
 | [[exo-dag/src/mmr.rs]] | Merkle Mountain Range with peaks-only representation |
 | [[exo-identity/src/shamir.rs]] | Shamir Secret Sharing over GF(256) |
-| [[exo-proofs/src/stark.rs]] | zk-STARK prover with post-quantum security |
-| [[exo-proofs/src/zkml.rs]] | zkML prover for AI provenance |
+| [[exo-proofs/src/stark.rs]] | zk-STARK prover skeleton (unaudited, pedagogical — not production cryptography); hash-simulated FRI layers, not a hardened proof system |
+| [[exo-proofs/src/zkml.rs]] | zkML prover skeleton for AI provenance (unaudited, pedagogical — not production cryptography); hash-based simulation, not a real ZK circuit |
