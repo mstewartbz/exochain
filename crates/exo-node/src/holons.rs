@@ -26,16 +26,28 @@
 //! - **INV-005 KernelImmutability**: AI cannot modify the governance kernel
 //! - **MCP-001/002**: AI operates within defined scope, cannot self-escalate
 //!
-//! # Audit status — Onyx-4 R5 (default-off runtime)
+//! # Audit status — Onyx-4 R5 / VCG-010 (default-off runtime)
 //!
-//! The infrastructure Holon adjudication context now requires a configured
+//! The infrastructure Holon adjudication context requires a configured
 //! Ed25519 authority key and signer. The authority chain and provenance are
 //! signed over the same canonical payloads enforced by `exo-gatekeeper`.
 //!
+//! Per ratified decision D5, a root authority is legitimate only with a
+//! witnessed ceremony, external attestation, and lineage distinct from the
+//! signer: a self-issued root (grantor key == signer key, no independent
+//! attestation) is rejected by the kernel's `AuthorityChainValid` invariant.
+//! The Scaling Holon's auto-promotion path is recommendation-only, full
+//! stop — it emits a `RecommendationOnly` governance event and never
+//! submits a `ValidatorSetChange` proposal; promotion is a ratification
+//! event with named evidence, not an automatic action.
+//!
 //! The runtime background manager is therefore disabled by default behind the
-//! `unaudited-infrastructure-holons` feature flag. Enabling the feature means
-//! the operator accepts the recommendation-only Holon runtime while the
-//! product decision for shipping infrastructure Holons is tracked in
+//! `unaudited-infrastructure-holons` feature flag: no external-attestation
+//! source is wired into production yet, so the default config's root
+//! authority is self-issued and every Holon step is rejected. Enabling the
+//! feature means the operator accepts the recommendation-only Holon runtime
+//! while the product decision for shipping infrastructure Holons (including a
+//! real external-attestation source) is tracked in
 //! `Initiatives/fix-onyx-4-r5-holons-stub-context.md`.
 //!
 //! ## Holons
@@ -138,6 +150,26 @@ pub enum HealthStatus {
 // Infrastructure Holon configuration
 // ---------------------------------------------------------------------------
 
+/// External attestation of the root authority's legitimacy — a witnessed
+/// ceremony record signed by a key distinct from `root_signer`.
+///
+/// Per ratified decision D5, a root authority is legitimate only with a
+/// witnessed ceremony, external attestation, and lineage distinct from the
+/// signer. A self-issued root (grantor key == signer key, no external
+/// delegation chain) must be rejected. This struct is the minimal carrier of
+/// that external lineage: `attester_did`/`attester_public_key` name a party
+/// distinct from `root_did`/`root_public_key`, and `attester_signer` signs
+/// the delegation link vouching for the root key.
+#[derive(Clone)]
+pub struct RootAttestation {
+    /// DID of the external attester (distinct from `root_did`).
+    pub attester_did: Did,
+    /// Ed25519 public key of the external attester.
+    pub attester_public_key: PublicKey,
+    /// Signs the attestation link that delegates authority to `root_did`.
+    pub attester_signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+}
+
 /// Configuration for infrastructure Holons.
 #[derive(Clone)]
 pub struct HolonManagerConfig {
@@ -149,6 +181,11 @@ pub struct HolonManagerConfig {
     pub root_public_key: PublicKey,
     /// Signs canonical authority/provenance payload hashes for infrastructure Holon context.
     pub root_signer: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+    /// External attestation of the root authority's legitimacy (witnessed
+    /// ceremony + lineage distinct from `root_signer`, per D5). `None` means
+    /// the root authority is self-issued with no external delegation chain,
+    /// which the kernel's `AuthorityChainValid` invariant must reject.
+    pub root_attestation: Option<RootAttestation>,
     /// Supplies deterministic HLC metadata for each signed Holon provenance record.
     pub provenance_timestamp_source: Arc<dyn Fn() -> Result<Timestamp, String> + Send + Sync>,
     /// How often to run the topology optimizer (seconds).
@@ -165,6 +202,10 @@ impl std::fmt::Debug for HolonManagerConfig {
             .field("node_did", &self.node_did)
             .field("root_did", &self.root_did)
             .field("root_public_key", &self.root_public_key)
+            .field(
+                "root_attestation",
+                &self.root_attestation.as_ref().map(|a| &a.attester_did),
+            )
             .field("provenance_timestamp_source", &"<deterministic-hlc-source>")
             .field("topology_interval_secs", &self.topology_interval_secs)
             .field("scaling_interval_secs", &self.scaling_interval_secs)
@@ -373,6 +414,29 @@ fn signed_authority_link(
     Ok(link)
 }
 
+/// Build the external-attestation link (attester → root_did) when `config`
+/// carries a `RootAttestation`. Per D5, this link is the witnessed-ceremony
+/// evidence that the root authority is not self-issued: its grantor is the
+/// attester's own DID/key, structurally distinct from `root_signer`.
+fn signed_attestation_link(
+    holon: &Holon,
+    config: &HolonManagerConfig,
+    attestation: &RootAttestation,
+) -> Result<AuthorityLink, String> {
+    let mut link = AuthorityLink {
+        grantor: attestation.attester_did.clone(),
+        grantee: config.root_did.clone(),
+        permissions: holon.capabilities.clone(),
+        signature: Vec::new(),
+        grantor_public_key: Some(attestation.attester_public_key.as_bytes().to_vec()),
+    };
+    let message = authority_link_signature_message(&link)
+        .map_err(|err| format!("failed to encode attestation-link signature payload: {err}"))?;
+    let signature = (attestation.attester_signer)(message.as_bytes());
+    link.signature = signature.to_bytes().to_vec();
+    Ok(link)
+}
+
 fn signed_provenance(
     holon: &Holon,
     config: &HolonManagerConfig,
@@ -429,15 +493,46 @@ pub fn build_holon_adjudication_context(
     config: &HolonManagerConfig,
 ) -> Result<AdjudicationContext, String> {
     let provenance_timestamp = next_provenance_timestamp(config)?;
-    let authority_chain = AuthorityChain {
-        links: vec![signed_authority_link(holon, config)?],
-    };
+    let root_link = signed_authority_link(holon, config)?;
+
+    // Per D5: a root authority is legitimate only with a witnessed ceremony,
+    // external attestation, and lineage distinct from the signer. The trust
+    // anchor for `root_did` therefore comes exclusively from an external
+    // attester's key when one is configured — never from the self-signed
+    // root→holon link itself, which would be a tautological trust check
+    // (trusting a key because it is the key that produced the signature).
+    //
+    // Without a configured `root_attestation`, `root_did` gets no entry in
+    // `trusted_authority_keys`, so the kernel's `AuthorityChainValid`
+    // invariant fails closed with "grantor_public_key is unresolved for
+    // grantor DID" and the self-issued root is rejected.
     let mut trusted_authority_keys = TrustedAuthorityKeys::default();
-    for link in &authority_chain.links {
-        if let Some(public_key) = &link.grantor_public_key {
-            trusted_authority_keys.insert(link.grantor.clone(), vec![public_key.clone()]);
+    let authority_chain = match &config.root_attestation {
+        Some(attestation) if attestation.attester_did != config.root_did => {
+            let attestation_link = signed_attestation_link(holon, config, attestation)?;
+            // The attester is the external trust anchor (the witnessed
+            // ceremony). Its key is independent of `root_signer` by
+            // construction (`attester_did != root_did`), so trusting it here
+            // is not self-referential in the way the rejected case is.
+            trusted_authority_keys.insert(
+                attestation.attester_did.clone(),
+                vec![attestation.attester_public_key.as_bytes().to_vec()],
+            );
+            // The root's key is trusted only because the external attester
+            // vouches for it via `attestation_link`, not because the root
+            // signed its own delegation to the Holon.
+            trusted_authority_keys.insert(
+                config.root_did.clone(),
+                vec![config.root_public_key.as_bytes().to_vec()],
+            );
+            AuthorityChain {
+                links: vec![attestation_link, root_link],
+            }
         }
-    }
+        _ => AuthorityChain {
+            links: vec![root_link],
+        },
+    };
     let mut trusted_provenance_keys = TrustedProvenanceKeys::default();
     trusted_provenance_keys.insert(
         holon.id.clone(),
@@ -571,25 +666,6 @@ fn analyze_health(consensus_round: u64, committed_height: u64) -> HealthStatus {
 // Holon action execution
 // ---------------------------------------------------------------------------
 
-/// Execute a governance action on behalf of a Holon.
-///
-/// This submits a DAG proposal for BFT consensus and broadcasts the
-/// governance event. The action must have been validated by kernel
-/// adjudication before calling this function.
-async fn execute_governance_action(
-    state: &SharedReactorState,
-    store: &std::sync::Arc<std::sync::Mutex<SqliteDagStore>>,
-    net_handle: &NetworkHandle,
-    action_type: GovernanceEventType,
-    payload: &[u8],
-) -> anyhow::Result<()> {
-    // Submit as a DAG proposal for BFT consensus.
-    reactor::submit_proposal(state, store, net_handle, payload).await?;
-
-    // Broadcast the governance event.
-    reactor::broadcast_governance_event(state, net_handle, action_type, payload.to_vec()).await
-}
-
 fn encode_validator_change(change: &ValidatorChange) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     ciborium::into_writer(change, &mut buf)
@@ -662,7 +738,12 @@ async fn read_holon_health_snapshot(
 pub async fn run_holon_manager(
     config: HolonManagerConfig,
     reactor_state: SharedReactorState,
-    shared_store: std::sync::Arc<std::sync::Mutex<SqliteDagStore>>,
+    // Retained for API stability (callers already pass the shared DAG
+    // store). No longer read here: per VCG-010/D5, the Scaling Holon's
+    // auto-promotion path is recommendation-only, full stop, and no longer
+    // submits a DAG proposal, so this manager has no state-changing use for
+    // direct store access.
+    _shared_store: std::sync::Arc<std::sync::Mutex<SqliteDagStore>>,
     net_handle: NetworkHandle,
     event_tx: mpsc::Sender<HolonEvent>,
 ) {
@@ -811,9 +892,13 @@ pub async fn run_holon_manager(
                             tracing::warn!("Holon event channel closed — ScalingRecommendation dropped");
                         }
 
-                        // Auto-action: if validator count is critical (< 3) and
-                        // we're a validator, attempt to propose validator promotion
-                        // for an eligible peer via a governance action.
+                        // Recommendation-only, full stop (D5): if validator count
+                        // is critical (< 3) and we're a validator, emit a named
+                        // promotion RECOMMENDATION for an eligible peer. This is
+                        // evidence for a human/governance ratification decision —
+                        // it never submits a state-changing ValidatorSetChange
+                        // proposal on its own. Promotion is a ratification event
+                        // with named evidence, not an automatic action.
                         if validator_count < 3
                             && node_count > validator_count
                             && scaling_snapshot.is_validator
@@ -825,29 +910,33 @@ pub async fn run_holon_manager(
                             ))
                             .unwrap_or_else(|_| static_did("did:exo:candidate"));
 
+                            // Same fail-closed CBOR encoding as a real
+                            // ValidatorSetChange payload would use — this value
+                            // is never submitted as a DAG proposal, only carried
+                            // as named evidence in a RecommendationOnly event.
                             let change = ValidatorChange::AddValidator {
                                 did: candidate.clone(),
                             };
                             match encode_validator_change(&change) {
                                 Ok(buf) => {
-                                    if let Err(e) = execute_governance_action(
+                                    if let Err(e) = reactor::broadcast_governance_event(
                                         &reactor_state,
-                                        &shared_store,
                                         &net_handle,
-                                        GovernanceEventType::ValidatorSetChange,
-                                        &buf,
+                                        GovernanceEventType::RecommendationOnly,
+                                        buf,
                                     )
                                     .await
                                     {
                                         tracing::warn!(
                                             err = %e,
                                             candidate = %candidate,
-                                            "Scaling Holon: auto-promotion failed"
+                                            "Scaling Holon: promotion recommendation broadcast failed"
                                         );
                                     } else {
                                         tracing::info!(
                                             candidate = %candidate,
-                                            "Scaling Holon: auto-promoted candidate"
+                                            "Scaling Holon: promotion recommendation emitted \
+                                             (recommendation-only, full stop — no proposal submitted)"
                                         );
                                     }
                                 }
@@ -986,6 +1075,12 @@ mod tests {
         })
     }
 
+    /// A `HolonManagerConfig` with a legitimate external attestation by
+    /// default: the root authority's key is vouched for by a distinct
+    /// attester DID/key (a witnessed ceremony), satisfying D5's
+    /// lineage-distinct-from-the-signer requirement. This is the config
+    /// used by tests that exercise the normal (non-adversarial) Holon step
+    /// path, including the Scaling Holon manager-loop tests.
     fn test_config_with_intervals(
         topology_interval_secs: u64,
         scaling_interval_secs: u64,
@@ -994,12 +1089,22 @@ mod tests {
         let keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x48; 32]).unwrap();
         let root_public_key = *keypair.public_key();
         let root_secret_key = keypair.secret_key().clone();
+        let attester_keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x99; 32]).unwrap();
+        let attester_public_key = *attester_keypair.public_key();
+        let attester_secret_key = attester_keypair.secret_key().clone();
         HolonManagerConfig {
             node_did: test_did(),
             root_did: Did::new("did:exo:test-root").unwrap(),
             root_public_key,
             root_signer: Arc::new(move |message: &[u8]| {
                 exo_core::crypto::sign(message, &root_secret_key)
+            }),
+            root_attestation: Some(RootAttestation {
+                attester_did: Did::new("did:exo:test-ceremony-witness").unwrap(),
+                attester_public_key,
+                attester_signer: Arc::new(move |message: &[u8]| {
+                    exo_core::crypto::sign(message, &attester_secret_key)
+                }),
             }),
             provenance_timestamp_source: deterministic_provenance_timestamp_source(1),
             topology_interval_secs,
@@ -1008,7 +1113,20 @@ mod tests {
         }
     }
 
+    /// A `HolonManagerConfig` with no external attestation: the D5
+    /// self-issued-root scenario (grantor key == signer key, no lineage
+    /// distinct from the signer), which the kernel must reject during
+    /// `holon::step`.
     fn test_config() -> HolonManagerConfig {
+        let mut config = test_config_with_intervals(60, 300, 30);
+        config.root_attestation = None;
+        config
+    }
+
+    /// Convenience alias for `test_config_with_intervals` at the default
+    /// intervals — reads at call sites as "a legitimately attested config",
+    /// contrasting with the self-issued `test_config()`.
+    fn test_config_with_attestation() -> HolonManagerConfig {
         test_config_with_intervals(60, 300, 30)
     }
 
@@ -1312,7 +1430,7 @@ mod tests {
     #[test]
     fn topology_holon_step_succeeds_with_peers() {
         let kernel = create_infrastructure_kernel();
-        let config = test_config();
+        let config = test_config_with_attestation();
         let mut h = create_topology_holon(&test_did());
         let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
@@ -1330,7 +1448,7 @@ mod tests {
     #[test]
     fn topology_holon_guard_rejects_no_peer_count() {
         let kernel = create_infrastructure_kernel();
-        let config = test_config();
+        let config = test_config_with_attestation();
         let mut h = create_topology_holon(&test_did());
         let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
@@ -1352,7 +1470,7 @@ mod tests {
     #[test]
     fn scaling_holon_step_succeeds() {
         let kernel = create_infrastructure_kernel();
-        let config = test_config();
+        let config = test_config_with_attestation();
         let mut h = create_scaling_holon(&test_did());
         let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
@@ -1368,7 +1486,7 @@ mod tests {
     #[test]
     fn health_holon_step_succeeds() {
         let kernel = create_infrastructure_kernel();
-        let config = test_config();
+        let config = test_config_with_attestation();
         let mut h = create_health_holon(&test_did());
         let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
 
@@ -1442,7 +1560,7 @@ mod tests {
         // Verify that a Holon with is_self_grant=true would be denied.
         // The kernel's NoSelfGrant invariant prevents AI from self-escalating.
         let kernel = create_infrastructure_kernel();
-        let config = test_config();
+        let config = test_config_with_attestation();
         let h = create_health_holon(&test_did());
 
         // Build context normally.
