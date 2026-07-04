@@ -151,7 +151,7 @@ fn production_backend_variant_executes_without_unaudited_flag() {
     // unaudited-pedagogical-proofs feature enabled — this test binary is
     // compiled with that feature off (see the `#![cfg(not(feature =
     // "unaudited-pedagogical-proofs"))]` crate-level gate above).
-    let result = envelope.verify();
+    let result = envelope.verify(&[]);
     assert!(
         result.is_ok(),
         "a production-reviewed backend (e.g. RISC Zero, ratified decision D1) must \

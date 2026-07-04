@@ -133,7 +133,7 @@ fn default_registry_contains_riscz_pending_external_review_backend() {
 fn riscz_backend_verify_fails_closed_pending_external_review() {
     let envelope = riscz_envelope();
 
-    let result = envelope.verify();
+    let result = envelope.verify(&[]);
     assert!(
         result.is_err(),
         "BackendId::RiscZero must fail closed at verify() until external review lands, \
@@ -163,7 +163,7 @@ fn riscz_backend_verify_fails_closed_pending_external_review() {
 fn riscz_backend_verify_still_fails_closed_with_pedagogical_feature_enabled() {
     let envelope = riscz_envelope();
 
-    let result = envelope.verify();
+    let result = envelope.verify(&[]);
     assert!(
         result.is_err(),
         "enabling 'unaudited-pedagogical-proofs' must not make BackendId::RiscZero verify() \
