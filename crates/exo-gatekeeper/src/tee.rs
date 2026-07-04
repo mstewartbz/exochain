@@ -247,6 +247,14 @@ pub trait TeeQuoteVerifier {
     ) -> Result<(), GatekeeperError>;
 }
 
+/// Blanket impl letting a bare closure stand in as a [`TeeQuoteVerifier`].
+///
+/// SEALED to `#[cfg(test)]` (VCG-011 R3.6 / O-11.1, 2026-07-04 ratification
+/// slate): a closure carries no named identity, audit trail, or pinned trust
+/// root, so it must never satisfy the production hardware-quote verification
+/// path. Production integrations implement [`TeeQuoteVerifier`] on a named
+/// type wired to a real vendor collateral chain; tests keep using closures.
+#[cfg(test)]
 impl<F> TeeQuoteVerifier for F
 where
     F: Fn(&TeeAttestation, &TeePolicy) -> Result<(), GatekeeperError>,

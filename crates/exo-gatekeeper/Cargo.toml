@@ -46,9 +46,6 @@ tracing = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 
-[features]
-allow-simulated-tee = []
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 exo-dag-db-core = { package = "exochain-dag-db-core", path = "../exo-dag-db-core", version = "=0.2.0-beta" }
 exo-dag-db-domain = { package = "exochain-dag-db-domain", path = "../exo-dag-db-domain", version = "=0.2.0-beta" }
