@@ -66,7 +66,10 @@ use exo_gatekeeper::{
         TrustedAuthorityKeys, TrustedProvenanceKeys,
     },
 };
-#[cfg(test)]
+// Only the `unaudited-gateway-graphql-api` mutation-adjudication tests use these
+// (they build genuinely-signed authority/provenance fixtures); gating to that
+// feature keeps the default-feature test build free of unused imports.
+#[cfg(all(test, feature = "unaudited-gateway-graphql-api"))]
 use exo_gatekeeper::{
     invariants::{authority_link_signature_message, provenance_signature_message},
     types::{AuthorityLink, GovernmentBranch},
