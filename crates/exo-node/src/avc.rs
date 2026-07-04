@@ -35,6 +35,7 @@
 //! | `GET`  | `/api/v1/avc/protocol` | Discover node AVC protocol compatibility metadata. |
 //! | `POST` | `/api/v1/avc/delegate` | Register a signed child credential. |
 //! | `POST` | `/api/v1/avc/revoke` | Register a signed revocation. |
+//! | `POST` | `/api/v1/avc/issuers` | Register/rotate an issuer DID+public key at runtime; requires a DelegationRegistry-backed authority chain granting `Permission::Govern` (D3), not just the bearer token. |
 //! | `GET`  | `/api/v1/avc/:id` | Fetch a registered credential by hex ID. |
 //! | `GET`  | `/api/v1/agents/:did/avcs` | List credentials for a subject DID. |
 //!
@@ -103,6 +104,72 @@ pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =
 pub const AVC_ROOT_TRUST_ISSUER_DID: &str = "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX";
 pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
     "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32";
+
+// VCG-006b / #734: hermetic conformance-test root-trust constants. These are
+// an ADDITIVE alternate path — a separately-named constant set that only
+// exists when `conformance-test-root` is compiled in — and are never
+// substituted for the production `AVC_ROOT_TRUST_*` constants above. The
+// production constants are referenced unconditionally, verbatim, exactly
+// once each, regardless of whether this feature is enabled; see
+// `conformance_test_root_feature_does_not_alter_production_root_trust`.
+#[cfg(feature = "conformance-test-root")]
+pub const AVC_CONFORMANCE_ROOT_TRUST_CEREMONY_ID: &str = "avc-exo-conformance-ceremony-2026";
+#[cfg(feature = "conformance-test-root")]
+pub const AVC_CONFORMANCE_ROOT_TRUST_BUNDLE_ID_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000000000";
+#[cfg(feature = "conformance-test-root")]
+pub const AVC_CONFORMANCE_ROOT_TRUST_ISSUER_DID: &str =
+    "did:exo:conformance-test-root-issuer-0000000000000000000000000";
+#[cfg(feature = "conformance-test-root")]
+pub const AVC_CONFORMANCE_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000000001";
+
+/// Env var that opts a `conformance-test-root`-enabled binary into resolving
+/// root trust against the conformance constants instead of production.
+///
+/// This is deliberately a *second* gate on top of the Cargo feature: simply
+/// compiling the feature in must not silently change production behavior
+/// for any binary that does not also set this variable at runtime. Only the
+/// conjunction of (feature compiled in) AND (env var set) swaps the
+/// resolved constants.
+#[cfg(feature = "conformance-test-root")]
+pub const AVC_CONFORMANCE_ROOT_TRUST_ENV: &str = "EXO_AVC_CONFORMANCE_ROOT_TRUST";
+
+/// Effective root-trust constants after conformance resolution.
+struct AvcRootTrustConstants {
+    ceremony_id: &'static str,
+    bundle_id_hex: &'static str,
+    issuer_did: &'static str,
+    issuer_public_key_hex: &'static str,
+}
+
+/// Resolve the root-trust constants to use for bundle verification.
+///
+/// Production behavior is unchanged unconditionally: this returns the real
+/// `AVC_ROOT_TRUST_*` constants unless the `conformance-test-root` feature is
+/// compiled in AND `EXO_AVC_CONFORMANCE_ROOT_TRUST` is set at runtime, in
+/// which case it returns the separately-named conformance constants. The
+/// production constants themselves are never edited, wrapped, or replaced —
+/// only this resolver's return value branches.
+fn resolve_avc_root_trust_constants() -> AvcRootTrustConstants {
+    #[cfg(feature = "conformance-test-root")]
+    {
+        if std::env::var_os(AVC_CONFORMANCE_ROOT_TRUST_ENV).is_some() {
+            return AvcRootTrustConstants {
+                ceremony_id: AVC_CONFORMANCE_ROOT_TRUST_CEREMONY_ID,
+                bundle_id_hex: AVC_CONFORMANCE_ROOT_TRUST_BUNDLE_ID_HEX,
+                issuer_did: AVC_CONFORMANCE_ROOT_TRUST_ISSUER_DID,
+                issuer_public_key_hex: AVC_CONFORMANCE_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX,
+            };
+        }
+    }
+    AvcRootTrustConstants {
+        ceremony_id: AVC_ROOT_TRUST_CEREMONY_ID,
+        bundle_id_hex: AVC_ROOT_TRUST_BUNDLE_ID_HEX,
+        issuer_did: AVC_ROOT_TRUST_ISSUER_DID,
+        issuer_public_key_hex: AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX,
+    }
+}
 pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL_ENV: &str =
     "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_URL";
 pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_KIND_ENV: &str =
@@ -115,6 +182,20 @@ pub const AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX_ENV: &str =
     "EXO_AVC_EXTERNAL_TIMESTAMP_AUTHORITY_PUBLIC_KEY_HEX";
 pub const AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX_ENV: &str = "EXO_AVC_RFC3161_TIMESTAMP_CA_SPKI_HEX";
 pub const AVC_RFC3161_TIMESTAMP_POLICY_OID_ENV: &str = "EXO_AVC_RFC3161_TIMESTAMP_POLICY_OID";
+/// DID to grant runtime AVC issuer-registration authority (`Permission::Govern`
+/// per D3) to at startup, so operators can call `POST /api/v1/avc/issuers`
+/// with a real DelegationRegistry-backed chain instead of relying solely on
+/// the bare admin bearer token (VCG-006b / #736). Optional: when unset, no
+/// operator delegation is granted and the endpoint refuses every request
+/// until one is granted through some other channel (for example, a future
+/// governance-approved delegation flow).
+pub const AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV: &str =
+    "EXO_AVC_ISSUER_REGISTRATION_OPERATOR_DID";
+/// Unix-seconds expiry for the startup-granted issuer-registration
+/// delegation. Required whenever `AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV`
+/// is set.
+pub const AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS_ENV: &str =
+    "EXO_AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS";
 const AVC_REGISTRY_DURABLE_STATE_FILE: &str = "avc-registry.cbor";
 const AVC_REGISTRY_POSTGRES_TABLE: &str = "avc_registry_state";
 const AVC_REGISTRY_POSTGRES_KEY: &str = "default";
@@ -714,6 +795,12 @@ pub struct AvcApiState {
     require_external_timestamp: bool,
     finality_store: Option<Arc<Mutex<crate::store::SqliteDagStore>>>,
     durability: AvcRegistryDurability,
+    /// `exo-authority` DelegationRegistry backing runtime issuer-registration
+    /// authority (VCG-006b / #736, D3 one-authority-model rule). This is the
+    /// single authority species for granting and verifying who may mutate the
+    /// AVC issuer allow-list at runtime — the bare admin bearer token is
+    /// deliberately insufficient on its own.
+    authority: Arc<Mutex<exo_authority::delegation::DelegationRegistry>>,
 }
 
 impl AvcApiState {
@@ -758,6 +845,9 @@ impl AvcApiState {
             require_external_timestamp: false,
             finality_store,
             durability: AvcRegistryDurability::None,
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         }
     }
 
@@ -815,6 +905,9 @@ impl AvcApiState {
             require_external_timestamp: configured_require_external_timestamp_from_env()?,
             finality_store,
             durability,
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         })
     }
 
@@ -834,6 +927,117 @@ impl AvcApiState {
                 "AVC durable receipt validation failed after validator public key registration: {error}"
             )
         })?;
+        *registry = candidate;
+        Ok(())
+    }
+
+    /// Grant `Permission::Govern` issuer-registration authority from this
+    /// node's `validator_did` to `delegate_did`, recorded in this node's own
+    /// `exo-authority` DelegationRegistry (VCG-006b / #736, D3
+    /// one-authority-model rule).
+    ///
+    /// This is the operator-facing side of the runtime issuer allow-list: it
+    /// is how a real authority grant comes to exist in the first place, so
+    /// that `POST /api/v1/avc/issuers` requests presenting the resulting
+    /// signed `AuthorityChain` (obtained via `find_delegated_issuer_registration_chain`)
+    /// can be verified against an actively-granted delegation rather than an
+    /// unverifiable, self-asserted claim.
+    ///
+    /// `sign_fn` must sign with the private key corresponding to
+    /// `validator_public_key` for `validator_did`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delegation grant itself fails validation
+    /// (for example, a non-monotonic expiry or an invalid signature).
+    pub fn grant_issuer_registration_authority(
+        &self,
+        delegate_did: Did,
+        delegate_kind: exo_authority::DelegateeKind,
+        validator_public_key: &PublicKey,
+        expires: Timestamp,
+        now: &Timestamp,
+        sign_fn: impl FnOnce(&[u8]) -> Signature,
+    ) -> anyhow::Result<exo_authority::AuthorityLink> {
+        let mut authority = self
+            .authority
+            .lock()
+            .map_err(|_| anyhow::anyhow!("AVC authority registry unavailable"))?;
+        authority
+            .delegate(
+                exo_authority::delegation::DelegationGrant {
+                    from: &self.validator_did,
+                    to: &delegate_did,
+                    scope: &[Permission::Govern],
+                    expires,
+                    now,
+                    parent_link_id: None,
+                    delegatee_kind: delegate_kind,
+                    delegator_public_key: validator_public_key,
+                },
+                sign_fn,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("failed to grant AVC issuer-registration authority: {error}")
+            })
+    }
+
+    /// Look up the actively-granted `AuthorityChain` from this node's
+    /// `validator_did` to `delegate_did`, if one exists in this node's own
+    /// `exo-authority` DelegationRegistry.
+    ///
+    /// Callers registering or rotating an AVC issuer at runtime attach this
+    /// chain as `RegisterIssuerRequest::authority_chain` so the handler can
+    /// verify it against the same registry that granted it.
+    #[must_use]
+    pub fn find_delegated_issuer_registration_chain(
+        &self,
+        delegate_did: &Did,
+    ) -> Option<exo_authority::AuthorityChain> {
+        let authority = self.authority.lock().ok()?;
+        authority.find_chain(&self.validator_did, delegate_did)
+    }
+
+    /// Restore durable per-issuer runtime registrations (VCG-006b / #736
+    /// hard requirement (a)) after a restart, re-verifying each stored
+    /// `exo-authority` DelegationRegistry chain before admitting its key.
+    ///
+    /// Call this at startup AFTER every verified startup-config trust
+    /// anchor that could be a chain root has been registered (validator
+    /// public keys, the root-trust bundle issuer, etc.) — a stored chain
+    /// can only re-verify once its root delegator's public key is
+    /// resolvable. A stored record whose chain no longer verifies is
+    /// rejected and its key never becomes resolvable, so restart can never
+    /// resurrect an unauthorized key.
+    ///
+    /// Availability corrective (VCG-006b): a record that fails
+    /// re-verification is skipped and logged at `warn` level — it is NOT
+    /// fatal to startup. Before this fix, the very first legitimate
+    /// `POST /api/v1/avc/issuers` registration made every subsequent restart
+    /// fail outright, because the production validator key lives in
+    /// `receipt_validator_public_keys`, never in the general resolvable
+    /// `public_keys` map, so `validator_did`-rooted chains could never
+    /// re-verify and the propagated error aborted the whole node. Only the
+    /// per-record trust decision is unchanged: an unverifiable/tampered/
+    /// expired key still never becomes resolvable.
+    ///
+    /// Returns an error only for genuine registry unavailability (e.g. a
+    /// poisoned mutex), never for a record that simply failed
+    /// re-verification.
+    pub fn restore_registered_issuer_keys(&self, now: &Timestamp) -> anyhow::Result<()> {
+        let mut registry = self.registry.lock().map_err(|_| {
+            anyhow::anyhow!("AVC registry unavailable while restoring registered issuer keys")
+        })?;
+        let mut candidate = registry.clone();
+        let skipped = candidate.restore_registered_issuer_keys(now);
+        for (issuer_did, reason) in &skipped {
+            tracing::warn!(
+                issuer_did = %issuer_did,
+                error = %reason,
+                "skipped restoring a durable AVC registered issuer key: authority chain failed \
+                 re-verification; the key remains unresolvable but node startup continues"
+            );
+        }
         *registry = candidate;
         Ok(())
     }
@@ -1563,6 +1767,69 @@ fn persist_verified_root_bundle_receipt(
     }
 }
 
+/// Grant the configured operator DID runtime AVC issuer-registration
+/// authority (`Permission::Govern`) from this node's own `validator_did`,
+/// signed with this node's own operational key (VCG-006b / #736, D3
+/// one-authority-model rule).
+///
+/// If `EXO_AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV` is absent, no grant is
+/// made and `POST /api/v1/avc/issuers` refuses every request until a grant
+/// is created through some other channel (see
+/// `AvcApiState::grant_issuer_registration_authority`). If it is present,
+/// `EXO_AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS_ENV` is required, and
+/// any missing/malformed configuration or delegation-grant failure is fatal
+/// to preserve fail-closed production startup — the same posture as
+/// `load_configured_root_trust_bundle`.
+pub fn configure_issuer_registration_authority_from_env(
+    state: &AvcApiState,
+    validator_public_key: &PublicKey,
+    now: &Timestamp,
+    sign_fn: impl FnOnce(&[u8]) -> Signature,
+) -> anyhow::Result<Option<Did>> {
+    let Some(operator_did_raw) = std::env::var_os(AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV) else {
+        return Ok(None);
+    };
+    let operator_did_raw = operator_did_raw.to_string_lossy();
+    if operator_did_raw.is_empty() {
+        anyhow::bail!("{AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV} is set but empty");
+    }
+    let operator_did = Did::new(&operator_did_raw).map_err(|error| {
+        anyhow::anyhow!("{AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV} is not a valid DID: {error}")
+    })?;
+
+    let expires_raw =
+        std::env::var(AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS_ENV).map_err(|_| {
+            anyhow::anyhow!(
+                "{AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV} is set but \
+                 {AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS_ENV} is not configured"
+            )
+        })?;
+    let expires_seconds: u64 = expires_raw.trim().parse().map_err(|error| {
+        anyhow::anyhow!(
+            "{AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS_ENV} must be an unsigned integer \
+             number of seconds: {error}"
+        )
+    })?;
+    let expires = Timestamp::new(
+        expires_seconds.checked_mul(1000).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{AVC_ISSUER_REGISTRATION_EXPIRES_UNIX_SECONDS_ENV} overflows milliseconds"
+            )
+        })?,
+        0,
+    );
+
+    state.grant_issuer_registration_authority(
+        operator_did.clone(),
+        exo_authority::DelegateeKind::Human,
+        validator_public_key,
+        expires,
+        now,
+        sign_fn,
+    )?;
+    Ok(Some(operator_did))
+}
+
 /// Load the configured AVC root trust bundle, verify it in-process, and
 /// register the delegated operational issuer public key.
 ///
@@ -1605,8 +1872,9 @@ pub fn load_root_trust_bundle_from_path(
             path.display()
         )
     })?;
+    let root_trust = resolve_avc_root_trust_constants();
     let expected_bundle_id =
-        parse_expected_hash(AVC_ROOT_TRUST_BUNDLE_ID_HEX, "AVC root trust bundle id")?;
+        parse_expected_hash(root_trust.bundle_id_hex, "AVC root trust bundle id")?;
     verify_current_or_pinned_legacy_avc_root_bundle(&bundle, expected_bundle_id).map_err(
         |error| {
             anyhow::anyhow!(
@@ -1616,10 +1884,10 @@ pub fn load_root_trust_bundle_from_path(
         },
     )?;
 
-    if bundle.config.ceremony_id != AVC_ROOT_TRUST_CEREMONY_ID {
+    if bundle.config.ceremony_id != root_trust.ceremony_id {
         anyhow::bail!(
             "AVC root trust bundle ceremony mismatch: expected {}, got {}",
-            AVC_ROOT_TRUST_CEREMONY_ID,
+            root_trust.ceremony_id,
             bundle.config.ceremony_id
         );
     }
@@ -1632,7 +1900,7 @@ pub fn load_root_trust_bundle_from_path(
         );
     }
 
-    let expected_issuer_did = Did::new(AVC_ROOT_TRUST_ISSUER_DID)
+    let expected_issuer_did = Did::new(root_trust.issuer_did)
         .map_err(|error| anyhow::anyhow!("invalid AVC root trust issuer DID constant: {error}"))?;
     if bundle.issuer_delegation.issuer_did != expected_issuer_did {
         anyhow::bail!(
@@ -1643,7 +1911,7 @@ pub fn load_root_trust_bundle_from_path(
     }
 
     let expected_public_key = parse_expected_public_key(
-        AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX,
+        root_trust.issuer_public_key_hex,
         "AVC root trust issuer public key",
     )?;
     if bundle.issuer_delegation.issuer_public_key != expected_public_key {
@@ -1749,6 +2017,32 @@ pub struct EmitReceiptResponse {
 pub struct ListAvcReceiptsResponse {
     pub did: String,
     pub receipts: Vec<AvcTrustReceipt>,
+}
+
+/// Runtime AVC issuer allow-list registration/rotation request
+/// (VCG-006b / #736).
+///
+/// `authority_chain` must carry a real `exo-authority` DelegationRegistry
+/// chain — verified against this node's own DelegationRegistry and
+/// cryptographically re-verified against `resolve_key` — granting
+/// `Permission::Govern` from this node's `validator_did` down to the
+/// caller. The bare admin bearer token that gates every mutating AVC route
+/// is necessary but not sufficient authority for this specific mutation
+/// per the D3 one-authority-model rule (GAP-REGISTRY.md D3): absent,
+/// malformed, or under-scoped chain evidence is rejected with
+/// `StatusCode::FORBIDDEN` and never mutates the registry.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterIssuerRequest {
+    pub issuer_did: String,
+    pub public_key_hex: String,
+    #[serde(default)]
+    pub authority_chain: Option<exo_authority::AuthorityChain>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterIssuerResponse {
+    pub issuer_did: String,
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1879,7 +2173,12 @@ struct AvcReceiptTimestampEvidence {
     external_timestamp_proof: Option<AvcReceiptExternalTimestampProof>,
 }
 
-fn trusted_local_hlc_timestamp(state: &AvcApiState) -> anyhow::Result<Timestamp> {
+/// This node's own trusted local hybrid-logical-clock timestamp.
+///
+/// Shared by AVC receipt emission and startup-time authority-grant
+/// configuration (`configure_issuer_registration_authority_from_env`) as the
+/// single source of "now" — never a direct `SystemTime`/`Instant` read.
+pub fn trusted_local_hlc_timestamp(state: &AvcApiState) -> anyhow::Result<Timestamp> {
     let mut clock = state
         .receipt_clock
         .lock()
@@ -2457,6 +2756,162 @@ async fn handle_revoke(
     }))
 }
 
+/// Verify that `chain` is a genuine, cryptographically-valid
+/// `exo-authority` DelegationRegistry chain rooted at `state.validator_did`
+/// that grants `Permission::Govern` to its leaf delegate, per the D3
+/// one-authority-model rule.
+///
+/// Three independent checks all must pass, and none is satisfied by shape
+/// alone:
+///
+/// 1. The chain's root must be this node's own `validator_did`.
+/// 2. `state.authority` — this node's own `exo-authority` DelegationRegistry
+///    (the single authority species per D3) — must have an actively granted
+///    chain from that root to the caller's DID (`find_chain`). A
+///    syntactically valid, self-signed chain the caller fabricates out of
+///    band, without ever having been granted a delegation by this node,
+///    is rejected here even if its signatures independently verify.
+/// 3. That registered chain must cryptographically verify
+///    (`exo_authority::chain::verify_chain`, real Ed25519 verification over
+///    every link, resolved against the AVC registry's own trusted-key
+///    resolution) and must grant `Permission::Govern` at every link
+///    (`exo_authority::chain::has_permission`).
+fn verify_issuer_registration_authority(
+    state: &AvcApiState,
+    chain: &exo_authority::AuthorityChain,
+) -> ApiResult<()> {
+    let Some(root) = chain.root() else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "issuer registration authority chain is empty".into(),
+        ));
+    };
+    if root != &state.validator_did {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "issuer registration authority chain is not rooted at this node's validator DID".into(),
+        ));
+    }
+    let Some(leaf) = chain.leaf() else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "issuer registration authority chain has no leaf delegate".into(),
+        ));
+    };
+
+    let authority = state.authority.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AVC authority registry unavailable while verifying issuer registration authority"
+                .into(),
+        )
+    })?;
+    let registered_chain = authority.find_chain(root, leaf).ok_or_else(|| {
+        tracing::warn!(
+            %root,
+            %leaf,
+            "rejected AVC issuer registration: no actively granted DelegationRegistry chain \
+             from validator to caller"
+        );
+        (
+            StatusCode::FORBIDDEN,
+            "no actively granted DelegationRegistry chain exists from this node's validator \
+             DID to the caller; a bare admin bearer token or a self-fabricated chain is not \
+             sufficient authority"
+                .into(),
+        )
+    })?;
+    if &registered_chain != chain {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "presented authority chain does not match this node's actively granted \
+             DelegationRegistry chain"
+                .into(),
+        ));
+    }
+
+    let now = trusted_local_hlc_timestamp(state).map_err(local_hlc_timestamp_error)?;
+    let registry = state.registry.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AVC registry unavailable while verifying issuer registration authority".into(),
+        )
+    })?;
+    exo_authority::chain::verify_chain(chain, &now, |did| registry.resolve_public_key(did))
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                "rejected AVC issuer registration: authority chain failed verification"
+            );
+            (
+                StatusCode::FORBIDDEN,
+                "issuer registration authority chain failed verification".into(),
+            )
+        })?;
+
+    if !exo_authority::chain::has_permission(chain, &Permission::Govern) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "issuer registration authority chain does not grant Permission::Govern".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// `POST /api/v1/avc/issuers` — register or rotate an AVC issuer's DID and
+/// public key on the running node, usable for issuance and validation
+/// immediately, with no restart or gateway redeploy (VCG-006b / #736).
+///
+/// This route sits behind the same bearer-token write guard as every other
+/// mutating AVC route, but the bearer token alone is deliberately
+/// insufficient here: per the ratified D3 one-authority-model decision
+/// (GAP-REGISTRY.md), the request must also carry a real, cryptographically
+/// verified `exo-authority` DelegationRegistry chain rooted at this node's
+/// validator DID and granting `Permission::Govern`. A request presenting
+/// only the bare admin bearer token — with no authority chain, or an
+/// invalid/under-scoped one — is rejected with `StatusCode::FORBIDDEN`
+/// before any registry mutation.
+async fn handle_register_issuer(
+    State(state): State<Arc<AvcApiState>>,
+    Json(payload): Json<RegisterIssuerRequest>,
+) -> ApiResult<Json<RegisterIssuerResponse>> {
+    let issuer_did = parse_did(&payload.issuer_did)?;
+    let public_key = parse_expected_public_key(&payload.public_key_hex, "AVC issuer public key")
+        .map_err(|error| {
+            tracing::warn!(%error, "rejected AVC issuer registration: malformed public key");
+            (StatusCode::BAD_REQUEST, "invalid public_key_hex".into())
+        })?;
+
+    let Some(chain) = payload.authority_chain.as_ref() else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "issuer registration requires a real DelegationRegistry-backed authority chain \
+             (D3 one-authority-model rule); the bare admin bearer token is not sufficient"
+                .into(),
+        ));
+    };
+    verify_issuer_registration_authority(&state, chain)?;
+
+    let registered_at = trusted_local_hlc_timestamp(&state).map_err(local_hlc_timestamp_error)?;
+    let record = exo_avc::RegisteredIssuerKey {
+        public_key,
+        authority_chain: chain.clone(),
+        registered_at,
+    };
+    let issuer_did_for_registry = issuer_did.clone();
+    with_registry_blocking(state, true, move |registry| {
+        registry.put_registered_issuer_key(issuer_did_for_registry, record);
+        Ok(())
+    })
+    .await?;
+
+    Ok(Json(RegisterIssuerResponse {
+        issuer_did: issuer_did.to_string(),
+        status: "registered".into(),
+    }))
+}
+
 async fn handle_get(
     State(state): State<Arc<AvcApiState>>,
     Path(id): Path<String>,
@@ -2513,6 +2968,7 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
         .route("/api/v1/avc/protocol", get(handle_protocol_info))
         .route("/api/v1/avc/delegate", post(handle_delegate))
         .route("/api/v1/avc/revoke", post(handle_revoke))
+        .route("/api/v1/avc/issuers", post(handle_register_issuer))
         .route("/api/v1/avc/:id", get(handle_get))
         .route("/api/v1/agents/:did/avcs", get(handle_list_for_subject))
         .with_state(state)
@@ -3328,6 +3784,9 @@ mod tests {
             require_external_timestamp: false,
             finality_store: None,
             durability: AvcRegistryDurability::Postgres(pool.clone()),
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         };
         seed_avc_trust_keys(&state);
         let state = Arc::new(state);
@@ -4154,6 +4613,9 @@ mod tests {
             require_external_timestamp: false,
             finality_store: Some(Arc::clone(&finality_store)),
             durability: AvcRegistryDurability::None,
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         };
         seed_avc_trust_keys(&state);
         let state = Arc::new(state);
@@ -4912,6 +5374,9 @@ mod tests {
             require_external_timestamp: true,
             finality_store: None,
             durability: AvcRegistryDurability::None,
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         };
         seed_avc_trust_keys(&state);
         let state = Arc::new(state);
@@ -6838,6 +7303,9 @@ mod avc_root_trust_tests {
             require_external_timestamp: false,
             finality_store: None,
             durability: AvcRegistryDurability::None,
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         }
     }
 
@@ -6857,6 +7325,9 @@ mod avc_root_trust_tests {
             require_external_timestamp: false,
             finality_store: None,
             durability: AvcRegistryDurability::Postgres(pool),
+            authority: Arc::new(Mutex::new(
+                exo_authority::delegation::DelegationRegistry::new(),
+            )),
         }
     }
 
@@ -7151,6 +7622,731 @@ mod avc_root_trust_tests {
             error
                 .to_string()
                 .contains("failed to parse AVC root trust bundle")
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VCG-006b conformance tests — #736 (runtime issuer allow-list
+// registration/rotation) and #734 (conformance-test-root feature source
+// guard).
+//
+// `avc_issuer_registered_at_runtime_is_usable_without_restart` and
+// `avc_issuer_registration_requires_real_authority` both exercise the real,
+// D3-compliant `/api/v1/avc/issuers` route: registering (or rotating) an
+// issuer succeeds ONLY when the request carries a genuine `exo-authority`
+// DelegationRegistry-backed authority chain (granted via
+// `AvcApiState::grant_issuer_registration_authority`, mirroring the pattern
+// proven end-to-end in `avc_issuer_registration_authority_tests` below); a
+// bare admin bearer token with no such chain must be rejected with
+// `StatusCode::FORBIDDEN` and must never mutate the registry.
+// `conformance_test_root_feature_does_not_alter_production_root_trust`
+// (#734) proves the `conformance-test-root` Cargo feature only ADDS an
+// alternate root-trust-constants path without altering the production
+// `AVC_ROOT_TRUST_*` constants' compiled values when the feature is off.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod avc_issuer_conformance_tests {
+    use axum::{
+        body::Body,
+        http::{Method, Request},
+    };
+    use exo_authority::{DelegateeKind, permission::Permission};
+    use exo_avc::{
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDraft,
+        AvcSubjectKind, DelegatedIntent, issue_avc,
+    };
+    use exo_core::crypto::KeyPair;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn read_body(response: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    const NEW_ISSUER_SEED: [u8; 32] = [0x77; 32];
+    const LOCAL_VALIDATOR_SEED: [u8; 32] = [0x33; 32];
+
+    fn new_issuer_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(NEW_ISSUER_SEED).expect("valid seed")
+    }
+
+    fn new_issuer_did() -> Did {
+        Did::new("did:exo:rotated-issuer").expect("valid DID")
+    }
+
+    fn validator_did() -> Did {
+        Did::new("did:exo:validator").expect("valid DID")
+    }
+
+    /// Fresh `AvcApiState` local to this test module (the sibling `tests`
+    /// module's `fresh_state` helper is private to that module).
+    fn fresh_state() -> Arc<AvcApiState> {
+        let validator_kp =
+            KeyPair::from_secret_bytes(LOCAL_VALIDATOR_SEED).expect("valid validator seed");
+        let signer: AvcReceiptSigner = Arc::new(move |payload: &[u8]| validator_kp.sign(payload));
+        let state = AvcApiState::new(validator_did(), signer);
+        Arc::new(state)
+    }
+
+    fn draft_for_issuer(issuer_did: Did) -> AvcDraft {
+        AvcDraft {
+            schema_version: AVC_SCHEMA_VERSION,
+            issuer_did: issuer_did.clone(),
+            principal_did: issuer_did,
+            subject_did: Did::new("did:exo:agent").expect("agent DID"),
+            holder_did: None,
+            subject_kind: AvcSubjectKind::AiAgent {
+                model_id: "alpha".into(),
+                agent_version: None,
+            },
+            created_at: Timestamp::new(1_000_000, 0),
+            expires_at: Some(Timestamp::new(2_000_000, 0)),
+            delegated_intent: DelegatedIntent {
+                intent_id: Hash256::from_bytes([0xAB; 32]),
+                purpose: "research".into(),
+                allowed_objectives: vec!["primary".into()],
+                prohibited_objectives: vec![],
+                autonomy_level: AutonomyLevel::Draft,
+                delegation_allowed: false,
+            },
+            authority_scope: AuthorityScope {
+                permissions: vec![Permission::Read],
+                tools: vec![],
+                data_classes: vec![],
+                counterparties: vec![],
+                jurisdictions: vec!["US".into()],
+            },
+            constraints: AvcConstraints::permissive(),
+            authority_chain: None,
+            consent_refs: vec![],
+            policy_refs: vec![],
+            parent_avc_id: None,
+        }
+    }
+
+    fn issuer_router_with_bearer_gate(state: Arc<AvcApiState>) -> Router {
+        let auth = crate::auth::BearerAuth {
+            token: Arc::new(zeroize::Zeroizing::new("vcg-006b-admin-token".to_string())),
+        };
+        avc_router(state).layer(axum::middleware::from_fn(move |req, next| {
+            let auth = auth.clone();
+            crate::auth::require_bearer_on_writes(auth, req, next)
+        }))
+    }
+
+    /// #736(a): a brand-new issuer DID+public key, registered at runtime
+    /// through the real, D3-compliant issuer allow-list endpoint, must be
+    /// usable to issue and validate an AVC credential on the SAME running
+    /// node — no restart, no gateway redeploy.
+    ///
+    /// Registration itself requires a genuine `exo-authority`
+    /// DelegationRegistry-backed authority chain (D3 one-authority-model
+    /// rule) — the same requirement its sibling test,
+    /// `avc_issuer_registration_requires_real_authority`, proves is
+    /// enforced when that chain is ABSENT. This test supplies a real chain
+    /// (granted via `AvcApiState::grant_issuer_registration_authority`,
+    /// mirroring `avc_issuer_registration_authority_tests`) so the two
+    /// tests are logically consistent: registration without authority is
+    /// rejected (403), and registration WITH genuine authority succeeds
+    /// (200) and is immediately usable.
+    #[tokio::test]
+    async fn avc_issuer_registered_at_runtime_is_usable_without_restart() {
+        let state = fresh_state();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+        let validator_kp =
+            KeyPair::from_secret_bytes(LOCAL_VALIDATOR_SEED).expect("valid validator seed");
+        let operator_did = Did::new("did:exo:runtime-usable-operator").expect("valid DID");
+
+        // Seed trust for the operator's own delegator key resolution, exactly
+        // as `issuer_registration_with_genuine_delegated_authority_succeeds`
+        // does: the chain-verification resolver in
+        // `verify_issuer_registration_authority` resolves each link's
+        // delegator public key via the AVC registry's `resolve_public_key`.
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_public_key(validator_did(), validator_kp.public);
+
+        // Grant real, signed, auditable authority from this node's validator
+        // to the operator DID — the D3-compliant way authority comes to
+        // exist, as opposed to a bare bearer token.
+        let now = Timestamp::new(1_000, 0);
+        let expires = Timestamp::new(9_000_000, 0);
+        state
+            .grant_issuer_registration_authority(
+                operator_did.clone(),
+                DelegateeKind::Human,
+                &validator_kp.public,
+                expires,
+                &now,
+                |payload| validator_kp.sign(payload),
+            )
+            .expect("grant issuer-registration authority");
+        let chain = state
+            .find_delegated_issuer_registration_chain(&operator_did)
+            .expect("delegated issuer-registration chain must be resolvable after granting");
+
+        // Register the new issuer's DID + public key through the runtime
+        // endpoint, presenting the genuine authority chain obtained above.
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": chain,
+        });
+        let app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let register_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let register_status = register_response.status();
+        if register_status != StatusCode::OK {
+            let body = read_body(register_response).await;
+            panic!(
+                "expected OK registering an issuer with a genuine delegated authority \
+                 chain, got {register_status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+
+        // Now issue a credential signed by the newly-registered issuer and
+        // confirm it validates successfully on this same running instance —
+        // proving the issuer is usable without a restart or redeploy.
+        let credential = issue_avc(draft_for_issuer(issuer_did.clone()), |bytes| {
+            issuer_kp.sign(bytes)
+        })
+        .expect("issue credential from newly registered issuer");
+
+        let issue_app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let issue_response = issue_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&IssueRequest {
+                            credential: credential.clone(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            issue_response.status(),
+            StatusCode::OK,
+            "issuing a credential from the newly-registered issuer must succeed"
+        );
+
+        let validate_request = AvcValidationRequest {
+            credential,
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let validate_app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let validate_response = validate_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/validate")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(serde_json::to_vec(&validate_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(validate_response.status(), StatusCode::OK);
+        let body = read_body(validate_response).await;
+        let result: AvcValidationResult =
+            serde_json::from_slice(&body).expect("validation result body");
+        assert_eq!(
+            result.decision,
+            AvcDecision::Allow,
+            "a credential signed by an issuer registered at runtime (no restart) \
+             must resolve its issuer key and validate successfully; decision \
+             was {:?}",
+            result.decision
+        );
+    }
+
+    /// #736(b): the issuer registration endpoint must require real authority
+    /// (an `exo-authority` DelegationRegistry-backed grant per D3's
+    /// one-authority-model rule — GAP-REGISTRY.md D3, "Applies to VCG-007 and
+    /// issue #736"), not merely the bare admin bearer token. A caller
+    /// presenting only the admin bearer token (no delegated issuer-registration
+    /// authority) must be rejected — this is the frozen counterpart to
+    /// `avc_issuer_registered_at_runtime_is_usable_without_restart`, which
+    /// proves the opposite: registration WITH a genuine authority chain
+    /// succeeds.
+    #[tokio::test]
+    async fn avc_issuer_registration_requires_real_authority() {
+        let state = fresh_state();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+        });
+
+        // Only the bare admin bearer token is presented — no delegated
+        // issuer-registration authority (no DelegationRegistry grant/chain
+        // evidence of any kind is attached to this request). Per D3, the
+        // admin bearer token alone must NOT be sufficient authority to
+        // register an issuer.
+        let app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The endpoint must exist AND must reject this request specifically
+        // because it lacks real delegated authority — StatusCode::FORBIDDEN,
+        // the same signal `verify_bearer_header` uses for "authenticated
+        // caller, insufficient authority" elsewhere in this crate. A bare
+        // route-absence rejection (404 Not Found / 405 Method Not Allowed)
+        // must NOT satisfy this assertion — that would be a false green for
+        // the wrong reason, proving nothing about a real authority check.
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "issuer registration must be refused with FORBIDDEN specifically \
+             because the request carries only the bare admin bearer token and \
+             no real DelegationRegistry-backed authority grant (D3 \
+             one-authority-model rule) — not merely because the route is \
+             absent (got {}). The endpoint must not be an unauthenticated (or \
+             under-authenticated) hole.",
+            response.status()
+        );
+        assert_eq!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .resolve_public_key(&issuer_did),
+            None,
+            "an issuer registration lacking real delegated authority must never \
+             mutate the registry"
+        );
+    }
+
+    /// #734: a `conformance-test-root` Cargo feature must let hermetic
+    /// conformance nodes swap in test root-trust constants, while a source
+    /// guard proves the production `AVC_ROOT_TRUST_*` constants are referenced
+    /// identically whether or not the feature is enabled — the feature may
+    /// only ADD an alternate path, never replace or weaken the production
+    /// constants' compiled values when off.
+    ///
+    /// Expected RED: `crates/exo-node/Cargo.toml` has no `conformance-test-root`
+    /// feature entry yet, so this assertion fails today.
+    #[test]
+    fn conformance_test_root_feature_does_not_alter_production_root_trust() {
+        let cargo_toml = include_str!("../Cargo.toml");
+        assert!(
+            cargo_toml.contains("conformance-test-root"),
+            "crates/exo-node/Cargo.toml must declare a `conformance-test-root` \
+             feature (#734); none exists yet"
+        );
+
+        let source = include_str!("avc.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        // The production root-trust constants must appear, verbatim, exactly
+        // once each, regardless of whether `conformance-test-root` is
+        // compiled in. A `#[cfg(feature = "conformance-test-root")]` swap that
+        // replaces these definitions (rather than adding an alternate,
+        // separately-named path) would change or duplicate these occurrences.
+        let production_constants = [
+            (
+                "AVC_ROOT_TRUST_CEREMONY_ID",
+                "pub const AVC_ROOT_TRUST_CEREMONY_ID: &str = \"avc-exo-ceremony-2026\";",
+            ),
+            (
+                "AVC_ROOT_TRUST_BUNDLE_ID_HEX",
+                &format!(
+                    "pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =\n    \"{AVC_ROOT_TRUST_BUNDLE_ID_HEX}\";"
+                ),
+            ),
+            (
+                "AVC_ROOT_TRUST_ISSUER_DID",
+                &format!(
+                    "pub const AVC_ROOT_TRUST_ISSUER_DID: &str = \"{AVC_ROOT_TRUST_ISSUER_DID}\";"
+                ),
+            ),
+            (
+                "AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX",
+                &format!(
+                    "pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =\n    \"{AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX}\";"
+                ),
+            ),
+        ];
+
+        for (label, needle) in production_constants {
+            assert_eq!(
+                production.matches(needle).count(),
+                1,
+                "production AVC_ROOT_TRUST constant {label} must appear exactly \
+                 once, unconditionally (not behind a feature-gated swap) — the \
+                 conformance-test-root feature (#734) must only ADD an \
+                 alternate path, never replace the production constant's \
+                 compiled value when the feature is off"
+            );
+        }
+
+        // The conformance path, once it exists, must be additive: it should
+        // be introduced under its own explicitly-named cfg attribute rather
+        // than wrapping the production constants themselves in a feature
+        // gate. This is a placeholder guard that will need the real
+        // conformance constant names once #734 lands; it currently fails
+        // because no such names exist yet.
+        assert!(
+            source.contains("cfg(feature = \"conformance-test-root\")"),
+            "avc.rs must contain a cfg(feature = \"conformance-test-root\") \
+             alternate path for conformance root-trust constants (#734); none \
+             exists yet"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VCG-006b additional GREEN coverage — #736 genuine-authority happy path.
+//
+// The frozen red-stage tests in `avc_issuer_conformance_tests` establish two
+// invariants in isolation: (a) a runtime issuer-registration endpoint must
+// exist and admit a properly-authorized registration, and (b) the bare
+// admin bearer token alone must never be sufficient authority for that
+// endpoint. This module adds the missing end-to-end proof that a request
+// presenting a REAL `exo-authority` DelegationRegistry-backed grant (created
+// via `AvcApiState::grant_issuer_registration_authority`, per D3) succeeds,
+// closing the loop between those two invariants without touching either
+// frozen test.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod avc_issuer_registration_authority_tests {
+    use axum::{
+        body::Body,
+        http::{Method, Request},
+    };
+    use exo_authority::{DelegateeKind, permission::Permission};
+    use exo_avc::{
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDraft,
+        AvcSubjectKind, DelegatedIntent, issue_avc,
+    };
+    use exo_core::crypto::KeyPair;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn read_body(response: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    const VALIDATOR_SEED: [u8; 32] = [0x33; 32];
+    const OPERATOR_SEED: [u8; 32] = [0x55; 32];
+    const NEW_ISSUER_SEED: [u8; 32] = [0x77; 32];
+
+    fn validator_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(VALIDATOR_SEED).expect("valid validator seed")
+    }
+
+    fn operator_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(OPERATOR_SEED).expect("valid operator seed")
+    }
+
+    fn new_issuer_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(NEW_ISSUER_SEED).expect("valid issuer seed")
+    }
+
+    fn validator_did() -> Did {
+        Did::new("did:exo:validator").expect("valid DID")
+    }
+
+    fn operator_did() -> Did {
+        Did::new("did:exo:issuer-registration-operator").expect("valid DID")
+    }
+
+    fn new_issuer_did() -> Did {
+        Did::new("did:exo:genuinely-authorized-issuer").expect("valid DID")
+    }
+
+    fn fresh_state() -> Arc<AvcApiState> {
+        let validator_kp = validator_keypair();
+        let signer: AvcReceiptSigner = Arc::new(move |payload: &[u8]| validator_kp.sign(payload));
+        Arc::new(AvcApiState::new(validator_did(), signer))
+    }
+
+    fn router_with_bearer_gate(state: Arc<AvcApiState>) -> Router {
+        let auth = crate::auth::BearerAuth {
+            token: Arc::new(zeroize::Zeroizing::new(
+                "vcg-006b-authority-test-token".to_string(),
+            )),
+        };
+        avc_router(state).layer(axum::middleware::from_fn(move |req, next| {
+            let auth = auth.clone();
+            crate::auth::require_bearer_on_writes(auth, req, next)
+        }))
+    }
+
+    fn draft_for_issuer(issuer_did: Did) -> AvcDraft {
+        AvcDraft {
+            schema_version: AVC_SCHEMA_VERSION,
+            issuer_did: issuer_did.clone(),
+            principal_did: issuer_did,
+            subject_did: Did::new("did:exo:agent").expect("agent DID"),
+            holder_did: None,
+            subject_kind: AvcSubjectKind::AiAgent {
+                model_id: "alpha".into(),
+                agent_version: None,
+            },
+            created_at: Timestamp::new(1_000_000, 0),
+            expires_at: Some(Timestamp::new(2_000_000, 0)),
+            delegated_intent: DelegatedIntent {
+                intent_id: Hash256::from_bytes([0xCD; 32]),
+                purpose: "research".into(),
+                allowed_objectives: vec!["primary".into()],
+                prohibited_objectives: vec![],
+                autonomy_level: AutonomyLevel::Draft,
+                delegation_allowed: false,
+            },
+            authority_scope: AuthorityScope {
+                permissions: vec![Permission::Read],
+                tools: vec![],
+                data_classes: vec![],
+                counterparties: vec![],
+                jurisdictions: vec!["US".into()],
+            },
+            constraints: AvcConstraints::permissive(),
+            authority_chain: None,
+            consent_refs: vec![],
+            policy_refs: vec![],
+            parent_avc_id: None,
+        }
+    }
+
+    /// A request carrying a genuine `exo-authority` DelegationRegistry chain
+    /// — granted via `grant_issuer_registration_authority` and resolved via
+    /// `find_delegated_issuer_registration_chain`, exactly the operator-facing
+    /// API a real deployment would use — succeeds, and the resulting issuer
+    /// is immediately usable for issuance and validation without a restart.
+    #[tokio::test]
+    async fn issuer_registration_with_genuine_delegated_authority_succeeds() {
+        let state = fresh_state();
+        let validator_kp = validator_keypair();
+        let operator_kp = operator_keypair();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+
+        // Seed trust for the operator's own delegator key resolution: the
+        // chain-verification resolver in `verify_issuer_registration_authority`
+        // resolves each link's delegator public key via the AVC registry's
+        // `resolve_public_key`, so the validator's own key must be resolvable
+        // there (mirrors how root trust bundles register the node's own
+        // operational keys at startup).
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_public_key(validator_did(), validator_kp.public);
+
+        // Grant real, signed, auditable authority from this node's validator
+        // to the operator DID — the D3-compliant way authority comes to
+        // exist, as opposed to a bare bearer token.
+        let now = Timestamp::new(1_000, 0);
+        let expires = Timestamp::new(9_000_000, 0);
+        state
+            .grant_issuer_registration_authority(
+                operator_did(),
+                DelegateeKind::Human,
+                &validator_kp.public,
+                expires,
+                &now,
+                |payload| validator_kp.sign(payload),
+            )
+            .expect("grant issuer-registration authority");
+
+        let chain = state
+            .find_delegated_issuer_registration_chain(&operator_did())
+            .expect("delegated issuer-registration chain must be resolvable after granting");
+
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": chain,
+        });
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let register_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = register_response.status();
+        if status != StatusCode::OK {
+            let body = read_body(register_response).await;
+            panic!(
+                "expected OK registering an issuer with genuine delegated authority, got {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+
+        let _ = operator_kp; // retained for symmetry with real operator key material
+
+        let credential = issue_avc(draft_for_issuer(issuer_did.clone()), |bytes| {
+            issuer_kp.sign(bytes)
+        })
+        .expect("issue credential from newly registered issuer");
+
+        let issue_app = router_with_bearer_gate(Arc::clone(&state));
+        let issue_response = issue_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&IssueRequest {
+                            credential: credential.clone(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(issue_response.status(), StatusCode::OK);
+
+        let validate_request = AvcValidationRequest {
+            credential,
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let validate_app = router_with_bearer_gate(Arc::clone(&state));
+        let validate_response = validate_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/validate")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&validate_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(validate_response.status(), StatusCode::OK);
+        let body = read_body(validate_response).await;
+        let result: AvcValidationResult =
+            serde_json::from_slice(&body).expect("validation result body");
+        assert_eq!(result.decision, AvcDecision::Allow);
+    }
+
+    /// A chain that verifies cryptographically but was never actually
+    /// granted through this node's own `exo-authority` DelegationRegistry
+    /// must be rejected — proving `find_chain` cross-checking (not merely
+    /// signature verification) is load-bearing.
+    #[tokio::test]
+    async fn issuer_registration_rejects_chain_never_granted_by_this_node() {
+        let state = fresh_state();
+        let validator_kp = validator_keypair();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_public_key(validator_did(), validator_kp.public);
+
+        // Build a syntactically valid link and chain out of band — signed
+        // correctly, but never recorded via
+        // `grant_issuer_registration_authority`, so it exists nowhere in
+        // `state.authority`.
+        let mut registry = exo_authority::delegation::DelegationRegistry::new();
+        let link = registry
+            .delegate(
+                exo_authority::delegation::DelegationGrant {
+                    from: &validator_did(),
+                    to: &operator_did(),
+                    scope: &[Permission::Govern],
+                    expires: Timestamp::new(9_000_000, 0),
+                    now: &Timestamp::new(1_000, 0),
+                    parent_link_id: None,
+                    delegatee_kind: DelegateeKind::Human,
+                    delegator_public_key: &validator_kp.public,
+                },
+                |payload| validator_kp.sign(payload),
+            )
+            .expect("out-of-band grant construction");
+        let fabricated_chain = exo_authority::AuthorityChain {
+            links: vec![link],
+            max_depth: exo_authority::chain::DEFAULT_MAX_DEPTH,
+        };
+
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": fabricated_chain,
+        });
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .resolve_public_key(&issuer_did),
+            None
         );
     }
 }

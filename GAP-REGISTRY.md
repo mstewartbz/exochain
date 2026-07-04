@@ -146,15 +146,15 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-003 | P0 | Red | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Red | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Green-local | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
-| VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
-| VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
+| VCG-006 | P1 | Green-local | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
+| VCG-007 | P1 | Green-local | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
 | VCG-008 | P1 | Green-local | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
 | VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
-| VCG-010 | P1 | Open | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
+| VCG-010 | P1 | Green-local | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
-| VCG-012 | P2 | Open | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
-| VCG-013 | P2 | Open | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
-| VCG-014 | P2 | Open | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
+| VCG-012 | P2 | Green-local | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
+| VCG-013 | P2 | Green-local | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
+| VCG-014 | P2 | Green-local | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
 | VCG-015 | P1 | Open | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
 
 ## VCG-001 - Production ZK Proof Backend Absent
@@ -657,7 +657,7 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-006 - AVC Runtime Integrity Issues Remain Open
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** AVC runtime
 
@@ -701,6 +701,53 @@ VCG-006a — closes 2 of the 4 sub-issues; row stays Open until #734/#736):
   #734 (conformance-test-root feature with source-guard proving production
   root-trust constants untouched when off). Row closes when all four
   sub-issues land with source, CI, and runtime proof.
+
+Lane record (2026-07-04, branch `vcg/006b-avc-issuer-conformance`, sub-lane
+VCG-006b — closes the remaining 2 of 4 sub-issues; row -> Green-local):
+
+- **#736 (runtime issuer allow-list registration/rotation)** — Green: durable
+  `register_registered_issuer_key` stores each runtime issuer key WITH its
+  authorizing `exo-authority` DelegationRegistry chain
+  (`RegisteredIssuerKey { public_key, authority_chain, registered_at }`) and
+  admits the key only after the chain verifies (signature, expiry,
+  rootedness) AND grants `Permission::Govern` — the single D3 authority model,
+  no parallel allow-list. `POST /api/v1/avc/issuers` is gated on a real
+  startup-granted operator delegation (`EXO_AVC_ISSUER_REGISTRATION_*`), not a
+  bare bearer; when unset the endpoint refuses every request. A registration
+  is immediately usable without restart AND survives restart:
+  `registered_issuer_key_survives_restart_and_credential_still_validates`
+  proves a fresh registry re-derives the key from the durable chain (not
+  resolvable until the validator's own key + `restore_registered_issuer_keys`
+  run) and a credential the issuer signs still validates end-to-end.
+- **Availability corrective (VCG-006b)** — the first landing made restart
+  fatal: because the production validator key lives in
+  `receipt_validator_public_keys`, not the resolvable `public_keys` map, the
+  first legitimate registration bricked every subsequent restart. Fix
+  (`AvcApiState::restore_registered_issuer_keys`): re-verification runs on a
+  registry CLONE and commits atomically; a record that fails re-verification
+  is skipped and logged at `warn` (never admitted — fail-closed on TRUST),
+  while startup continues (fail-open on AVAILABILITY). The node-side wrapper
+  errors ONLY on genuine registry unavailability (poisoned mutex), never on a
+  skipped record. Security-nuance test proves an unverifiable persisted record
+  is never resurrected yet never blocks startup.
+- **#734 (conformance-test-root feature + source-guard)** — Green:
+  `resolve_avc_root_trust_constants` returns the real production
+  `AVC_ROOT_TRUST_*` constants unconditionally UNLESS the
+  `conformance-test-root` feature is compiled in AND
+  `EXO_AVC_CONFORMANCE_ROOT_TRUST` is set at runtime (double-gated). The
+  production constants are never edited, wrapped, or replaced — only the
+  resolver's return value branches — asserted by
+  `conformance_test_root_feature_does_not_alter_production_root_trust`. Verified
+  both ways: default build (feature OFF) 12 issuer/conformance/restore tests
+  pass; feature ON, 3 conformance tests pass.
+- Adversarial re-refutation (NOT-REFUTED): traced the persistence path (not
+  theater — round-trip test admits the key only via re-verified durable
+  chain), the availability path (skip is fail-closed on trust), and the
+  conformance path (production trust unreachable without BOTH feature + env).
+  No unauthorized key admitted on any path; D3 single-authority preserved.
+- Gates: `exochain-avc` 208 pass; `exochain-node` avc+auth 221 pass;
+  conformance feature ON 3 pass; merged cleanly onto current main (006a
+  #735/#737 already landed via PR #745). All four sub-issues now delivered.
 
 Evidence:
 
@@ -771,9 +818,42 @@ cargo clippy -p exochain-gateway --features production-db --all-targets -- -D wa
 ## VCG-007 - CrossChecked Receipt Anchor Is Unaudited
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Adjacent adapter
 **Owner role:** CrossChecked boundary
+
+Lane record (2026-07-04, branch `vcg/007-crosschecked-intake`):
+
+- Scout correction confirmed: the route
+  (`handle_crosschecked_receipt_anchor`, api.rs:606-626) was an unconditional
+  403 with no minting path in any config (commit c730a0e4 had removed
+  enabled-path minting). The gap was a missing intake implementation.
+- Red evidence: `crosschecked_anchor_rejects_external_metadata_without_trusted_authority`,
+  `crosschecked_anchor_mints_when_authority_resolves_and_proof_verifies`,
+  `crosschecked_anchor_rejects_tenant_workspace_mismatch` — independently
+  verified to fail (all hit the blanket 403; none of the specific
+  behaviors reachable).
+- Green per D3: a `CrossCheckedTrustAnchor` resolves the trusted authority
+  from a REAL external, revocable `exo-authority::DelegationRegistry` chain
+  (verified via `chain::verify_chain` — per-link Ed25519, expiry,
+  scope-narrowing) plus `exo-identity::LocalDidRegistry` for key resolution;
+  the route mints a TrustReceipt ONLY after (1) DID parse, (2) chain
+  resolution+verification, (3) exact tenant/workspace scope match against the
+  authority's granted scope, and (4) Ed25519 verification of the external
+  proof signature over `payload_hash`. Any missing/invalid step refuses with a
+  specific typed error and leaves the receipts store empty. Default trust
+  anchor is empty (no CrossChecked authority trusted until an operator
+  delegates one) — fail-closed by default.
+- Adversarial review (three lenses): the trust root is genuinely external and
+  revocable (not a self-referential seed — the VCG-010 tautology is not
+  reproduced here); the mint path is an effect gated behind real verification
+  (not an unauthenticated hole); scope clean. NOT-REFUTED.
+- Gates: crosschecked 4/4 pass feature-on, default refusal test intact
+  feature-off; clippy/fmt clean. store.rs gained a standalone `save_receipt`
+  insert path for adjacent-surface (non-DAG-commit) receipts.
+- Status Green-local: verified CrossChecked provenance delivered; the
+  `unaudited-crosschecked-receipt-anchor` feature stays default-off (enabling
+  is a D8 ratification event). Closed after merge + CI.
 
 Evidence:
 
@@ -961,9 +1041,43 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-010 - Infrastructure Holons Are Gated
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** Holon runtime
+
+Lane record (2026-07-04, branch `vcg/010-holon-legitimacy`):
+
+- Red evidence: `holon_rejects_self_issued_root_authority` and
+  `scaling_holon_emits_zero_validator_set_change_proposals`, independently
+  verified to fail for the documented D5 reasons (tautological self-issued
+  trust at build_holon_adjudication_context; the Scaling Holon broadcasting a
+  real `ValidatorSetChange::AddValidator` proposal for a fabricated
+  `did:exo:auto-promoted-{n}` candidate).
+- Green per D5: (1) self-issued root authority is rejected — the trust anchor
+  for `root_did` is populated only from an external `RootAttestation` distinct
+  from the signer; (2) the Scaling Holon auto-promotion path emits a
+  recommendation event and submits ZERO DAG proposals (promotion is a
+  ratification event with named evidence); (3) the stale sentinel-bytes
+  Cargo.toml comment corrected and `Initiatives/fix-onyx-4-r5-holons-stub-context.md`
+  created.
+- Adversarial review found a MAJOR gap and it was fixed: the self-issued-root
+  guard originally checked only `attester_did != root_did` (DID-label
+  inequality), so a `RootAttestation` with a distinct DID label but the same
+  cryptographic key as the root signer could launder self-issuance one hop.
+  The guard now also requires `attester_public_key != root_public_key`; a new
+  red test (`holon_rejects_attestation_that_reuses_the_root_signer_key`) proves
+  the key-reusing attestation is rejected (genuine regression guard — fails
+  against pre-fix code). Re-refutation of the hardening: NOT-REFUTED (byte-for-
+  byte PublicKey comparison; both original D5 tests intact; scope clean).
+- Gates: holon 28 pass (both feature configs); full crate green; clippy, doc,
+  nightly fmt clean. Real Ed25519 signing (pre-existing) untouched; feature
+  default off.
+- Residual (documented in the initiative doc, not hidden): full D5 depth — a
+  witnessed multi-party ceremony and wiring a real external attestation into
+  the production default (currently `root_attestation: None`, fail-closed) —
+  remains follow-on work. Status Green-local: the row's stated deliverables
+  (reject self-issued root, Scaling Holon recommendation-only) are met and
+  tested; the deeper ceremony is out of this row's scope.
 
 Evidence:
 
@@ -1014,9 +1128,25 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-011 - Hardware TEE Quote Verification Requires Production Integration
 
 **Priority:** P1
-**Status:** Open
+**Status:** Open (Blocked-external)
 **Classification:** EXOCHAIN core
 **Owner role:** TEE integration
+
+Coordinator note (2026-07-04): this row has an external ceiling and is NOT
+internally closable by the remediation loop. Closing VCG-011 for real requires
+verifying live vendor attestation quotes (Intel SGX/TDX DCAP, AMD SEV-SNP, or
+equivalent) against genuine platform hardware and a real vendor
+quote-verification service — capability, hardware, and a vendor trust root the
+loop does not possess. The code is already fail-closed in the right direction
+(`tee.rs:342-372` rejects hardware quotes unless a real `TeeQuoteVerifier` is
+supplied; simulated platforms are refused outside testing at `tee.rs:145-151`),
+so there is no false hardware-trust claim to retract — the gap is the ABSENCE
+of a production verifier, which cannot be manufactured in-loop without
+overclaiming. Action required from Bob: commission an external
+platform-security review to supply and validate a real `TeeQuoteVerifier`
+implementation against actual TEE hardware; until then this row stays Open and
+must not be represented as Green. Flagged rather than closed, per
+"claims must never outrun evidence."
 
 Evidence:
 
@@ -1065,9 +1195,43 @@ claims are upgraded.
 ## VCG-012 - Distributed HLC Sync Protocol Is Not Built
 
 **Priority:** P2
-**Status:** Open
+**Status:** Green-local
 **Classification:** EXOCHAIN core
 **Owner role:** Distributed time
+
+Lane record (2026-07-04, branch `vcg/012-hlc-sync`):
+
+- Scout correction confirmed: `hlc.rs` local merge math (drift/overflow/
+  monotonicity guards, 25 tests) was already complete and untouched. The open
+  surface was the WIRE PROTOCOL — multi-node HLC exchange and partition
+  recovery — only.
+- Green per D6 (`exo-core/src/hlc.rs`, `exo-node/src/{wire,sync,network}.rs`):
+  a `WireMessage::HlcSync(HlcSyncMsg { sender, timestamp })` variant rides the
+  EXISTING DAG-sync (consensus) gossipsub topic — no dedicated clock topic.
+  The real receive path (`run_sync_engine` → `handle_message` →
+  `handle_hlc_sync`, spawned in `main.rs`) merges each remote timestamp via
+  `observe_remote_hlc_timestamp`, which calls `HybridClock::update` unmodified
+  and, on any drift/overflow anomaly, records a RETRIEVABLE `HlcAnomalyEvidence`
+  object (append-only `HlcAnomalyRecorder`) AND re-propagates the error —
+  satisfying D6's "time anomalies are constitutional events, not log lines"
+  and "fail-closed guard never weakened".
+- Partition recovery (`reconcile_partition_recovery`) converges to the quorum
+  MEDIAN (`sorted[(len-1)/2]`, deterministic lower-of-two-middle), never the
+  max — directly enforcing D6's "silent accept-max is forbidden". An empty
+  peer set fails closed. A wide-outlier peer is reported, not silently folded.
+- Adversarial correction (coordinator): the red-stage round-trip test was
+  internally contradictory (constant `|0|` clock asserting acceptance of a
+  2.7h-ahead timestamp the 5s drift guard must reject). The GREEN worker
+  correctly refused to weaken the guard and escalated (D3); the corrective
+  made the fixture coherent (fresh remote 100 ms ahead of a realistic base)
+  so it proves the real happy-path round-trip WITHOUT touching any guard.
+  Re-refutation: NOT-REFUTED (wiring real end-to-end; `MAX_DRIFT_MS` and
+  `HybridClock::update` unchanged; median-not-max verified).
+- Gates: `exochain-core` 321 pass; `exochain-node` full suite 1320 pass
+  (hlc 9/9); clippy `-D warnings` clean on both crates; nightly fmt clean.
+- Status Green-local: distributed HLC wire sync, partition-recovery median
+  reconciliation, and constitutional anomaly evidence delivered. Closed after
+  merge + CI.
 
 Evidence:
 
@@ -1111,9 +1275,38 @@ cargo clippy -p exochain-core --all-targets -- -D warnings
 ## VCG-013 - Tenant Metering, Billing, and Product Operations Are Structural
 
 **Priority:** P2
-**Status:** Open
+**Status:** Green-local
 **Classification:** EXOCHAIN core
 **Owner role:** Tenant platform
+
+Lane record (2026-07-04, branch `vcg/013-tenant-metering`):
+
+- Scout correction confirmed: per-tenant isolation was already built; the open
+  surface was metering/billing/subscription only.
+- Green per D7 (`crates/exo-tenant/src/metering.rs`): a `UsageMeter` records
+  per-tenant events; HLC-windowed aggregation via `exo_core::Timestamp` (not
+  wall-clock); deterministic invoices; and settlement that NEVER fires by
+  default — a tenant only settles under an explicit `PaidOptIn` billing plan
+  (HonorGood zero-fee metrology). No coupling to `exo-economy`.
+- Reconciliation hardened across two adversarial passes: the first green and
+  its first corrective both shipped forgeable byte totals (self-reported
+  amounts). Final fix makes `TenantData.content_hash`/`byte_len` private and
+  derived exclusively from the real payload by `TenantData::new`, so no
+  caller in any module can forge `byte_len`; `TenantStore::total_bytes` sums
+  the genuine recorded lengths and `reconcile_bytes_with_store` surfaces any
+  meter drift (over- or under-report). Re-refutation: NOT-REFUTED (byte_len
+  un-forgeable workspace-wide; drift genuinely caught).
+- D7 dependency-direction guard (coordinator-authored, this landing):
+  `tools/test_tenant_dependency_direction.sh` fails if any crate other than
+  `exo-tenant` declares a dependency on `exochain-tenant` — machine-checking
+  "metering observes, never gates trust." Two dead, machete-ignored
+  `exo-tenant` dependency edges (`exo-catapult`, `exochain-wasm`) were removed
+  so the workspace has zero inbound edges to `exochain-tenant`; both crates
+  still build. The guard is wired into the CI hygiene gate.
+- Gates: `exochain-tenant` 91 pass; clippy/fmt clean; the new guard passes on
+  the clean tree and fails when a dependency is re-added (TDD-verified).
+- Status Green-local: metering, billing export, subscription state, and the
+  machine-checked isolation invariant delivered. Closed after merge + CI.
 
 Evidence:
 
@@ -1161,9 +1354,38 @@ cargo clippy -p exochain-tenant --all-targets -- -D warnings
 ## VCG-014 - Governance and Legal Completeness Rows Remain Partial
 
 **Priority:** P2
-**Status:** Open
+**Status:** Green-local
 **Classification:** Governance/legal
 **Owner role:** Council/legal
+
+Lane record (2026-07-04, branch `vcg/014-governance-guard`, coordinator-authored):
+
+- This is the GUARD-FIRST deliverable the remediation track calls for. It does
+  NOT claim the Sybil sub-threats are mitigated or that constitutional
+  completeness is reached — it delivers machine-enforcement that no one can
+  SILENTLY claim they are.
+- `tools/test_cr001_completeness.sh` (new) pins the current unresolved state of
+  CR-001: the six Section 8.2 Sybil sub-threat rows (all still open,
+  unresolved), the nine Implementation-Tracking work-order rows (8.1-8.7 + 8.9
+  `🟡 PARTIAL`, 8.8 `✅ IMPLEMENTED`), and the six Section 9 release-blocking
+  acceptance boxes (all `- [ ]` unchecked, with a defense-in-depth check that
+  none appears in the ticked `- [x]` form). Any change that flips a
+  sub-threat's status, upgrades a work-order status, or ticks a release-blocking
+  box now fails CI unless it updates this guard in the same change set — which
+  is precisely the coordinator + council review checkpoint we want on a
+  completeness claim.
+- Complements the pre-existing `tools/test_cr001_status.sh` (which guards only
+  the DRAFT ratification status). Wired into the CI hygiene gate immediately
+  after it.
+- TDD-verified: passes on the clean tree; fails when a Sybil row's status is
+  flipped away from open; fails when a Section 9 box is ticked; passes again on
+  restore.
+- Substantive closure of each individual Sybil sub-threat (Identity, Review,
+  Quorum, Delegation, Mesh, Synthetic-Opinion) and each PARTIAL work order
+  proceeds as its own future lane; each such lane MUST update this guard as it
+  lands. Legal sign-off record remains a separate Council deliverable.
+- Status Green-local: the completeness drift-guard exists, is CI-enforced, and
+  pins every unresolved row. Closed after merge + CI.
 
 Evidence:
 

@@ -467,6 +467,15 @@ pub enum WireMessage {
     StateSnapshotRequest(StateSnapshotRequestMsg),
     /// A chunk of the state snapshot.
     StateSnapshotChunk(StateSnapshotChunkMsg),
+
+    // -- Distributed time (gossipsub broadcast) --
+    /// An HLC timestamp broadcast for causal-clock sync (VCG-012 / D6).
+    ///
+    /// Per ratified decision D6, HLC timestamps piggyback on the existing
+    /// DAG-sync gossipsub channel (`topics::CONSENSUS`) rather than a
+    /// dedicated clock topic — time rides the channel that already carries
+    /// causality.
+    HlcSync(HlcSyncMsg),
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +594,11 @@ pub enum GovernanceEventType {
     AuditEntry,
     /// Validator set change — add or remove a validator.
     ValidatorSetChange,
+    /// A recommendation-only signal (e.g. Scaling Holon auto-promotion
+    /// advice). Per ratified decision D5, this event type is informational
+    /// evidence only — it never authorizes a state change on its own.
+    /// Promotion remains a ratification event with named evidence.
+    RecommendationOnly,
 }
 
 /// A request to change the validator set.
@@ -627,6 +641,19 @@ pub struct StateSnapshotChunkMsg {
     pub to_height: u64,
     /// Whether there are more chunks.
     pub has_more: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Distributed time messages (gossipsub broadcast, VCG-012 / D6)
+// ---------------------------------------------------------------------------
+
+/// An HLC timestamp broadcast so peers can advance their own clocks past a
+/// causally-related remote event. Carried over the existing DAG-sync
+/// (consensus) gossipsub channel per D6 — there is no dedicated clock topic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HlcSyncMsg {
+    pub sender: Did,
+    pub timestamp: Timestamp,
 }
 
 // ---------------------------------------------------------------------------

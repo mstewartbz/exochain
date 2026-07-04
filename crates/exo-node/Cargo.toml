@@ -239,15 +239,21 @@ unaudited-mcp-simulation-tools = []
 # unaudited onboarding contract tracked by Onyx-4 R1."
 unaudited-zerodentity-first-touch-onboarding = []
 
-# ONYX-4 RED R5: infrastructure Holons currently build kernel adjudication
-# contexts with sentinel authority/provenance signatures (`vec![1, 2, 3]`) and
-# no public key. The Holons are recommendation-only today, but the runtime must
-# not start by default until the context carries real signed authority and
-# provenance.
+# ONYX-4 RED R5 / VCG-010 (ratified decision D5): infrastructure Holons build
+# kernel adjudication contexts with real Ed25519 authority/provenance
+# signatures (holons.rs) and reject a self-issued root authority (grantor key
+# == signer key with no external attestation distinct from the signer). The
+# Scaling Holon's auto-promotion path is recommendation-only, full stop — it
+# emits a `RecommendationOnly` governance event and never submits a
+# `ValidatorSetChange` proposal on its own; promotion remains a ratification
+# event with named evidence. The runtime still does not start by default: no
+# external-attestation source (a witnessed ceremony distinct from the node's
+# own signer) is wired into production yet, so the default config's root
+# authority is self-issued and the kernel would reject every Holon step.
 #
 # Do NOT enable this in production. Enabling it means: "I accept that
-# infrastructure Holons run with the unaudited R5 adjudication context tracked
-# by fix-onyx-4-r5-holons-stub-context.md."
+# infrastructure Holons run without a real external-attestation source for
+# the root authority, tracked by fix-onyx-4-r5-holons-stub-context.md."
 unaudited-infrastructure-holons = []
 
 # ONYX-4 RED R3: the 0dentity device fingerprint and behavioral biometric
@@ -260,3 +266,24 @@ unaudited-infrastructure-holons = []
 # device_trust and behavioral_signature axes are running under the unaudited R3
 # contract tracked by fix-onyx-4-r3-unwired-axes.md."
 unaudited-zerodentity-device-behavioral-axes = []
+
+# VCG-006b / #734: hermetic AVC conformance nodes need a way to swap in
+# test root-trust constants (ceremony id, bundle id, issuer DID, issuer
+# public key) instead of the real production ceremony values, so
+# conformance suites can exercise the full root-trust-bundle verification
+# path without possessing the production ceremony's signing material.
+#
+# This feature is strictly additive: it introduces a separately-named
+# `AVC_CONFORMANCE_ROOT_TRUST_*` constant set behind
+# `#[cfg(feature = "conformance-test-root")]` and a small resolver that
+# prefers the conformance constants only when the feature is compiled in.
+# The production `AVC_ROOT_TRUST_*` constants are never wrapped in a
+# feature gate and always compile to the same values whether this feature
+# is on or off — a source-guard test
+# (`conformance_test_root_feature_does_not_alter_production_root_trust` in
+# `avc.rs`) asserts this by construction.
+#
+# Do NOT enable this in production. Enabling it means: "I accept that this
+# node resolves AVC root trust against conformance-test constants instead
+# of the production ceremony, for hermetic test purposes only."
+conformance-test-root = []

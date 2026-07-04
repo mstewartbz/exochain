@@ -38,7 +38,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use exo_core::types::{Did, Hash256, PublicKey};
+use exo_core::{
+    hlc::HybridClock,
+    types::{Did, Hash256, PublicKey, Timestamp},
+};
 use exo_dag::{
     append::verify_node_creator_signature,
     consensus::{CommitCertificate, ConsensusConfig},
@@ -51,12 +54,100 @@ use crate::{
     network::{NetworkEvent, NetworkHandle},
     store::SqliteDagStore,
     wire::{
-        DagSyncRequestMsg, DagSyncResponseMsg, StateSnapshotChunkMsg, StateSnapshotRequestMsg,
-        WireMessage, topics,
+        DagSyncRequestMsg, DagSyncResponseMsg, HlcSyncMsg, StateSnapshotChunkMsg,
+        StateSnapshotRequestMsg, WireMessage, topics,
     },
 };
 
 const MAX_SNAPSHOT_CHUNK_SIZE: u32 = 500;
+
+// ---------------------------------------------------------------------------
+// Distributed HLC sync anomaly evidence (VCG-012 / D6)
+// ---------------------------------------------------------------------------
+//
+// Per ratified decision D6 (2026-07-02), any drift, replay, or partition
+// anomaly detected while syncing HLC timestamps over the wire is a
+// constitutional event — it must be recorded as a retrievable DAG evidence
+// object, never only emitted as a log line, because deliberation order is
+// legitimacy-relevant.
+
+/// A recorded HLC anomaly — a constitutional event describing a rejected or
+/// suspect remote timestamp observed during distributed HLC sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HlcAnomalyEvidence {
+    /// The physical millisecond component of the anomalous remote timestamp.
+    pub anomaly_physical_ms: u64,
+    /// The logical counter of the anomalous remote timestamp.
+    pub anomaly_logical: u32,
+    /// Human-readable reason the timestamp was flagged (drift, overflow, etc.).
+    pub reason: String,
+}
+
+/// Append-only recorder for HLC anomaly evidence objects.
+///
+/// This is intentionally the minimal, in-process DAG-evidence surface for
+/// VCG-012: every anomaly recorded here is retrievable, ordered, and never
+/// silently dropped. Production wiring may persist these into the durable
+/// DAG evidence store; the recorder is the constitutional seam that
+/// guarantees an anomaly is never *just* a log line.
+#[derive(Debug, Default)]
+pub struct HlcAnomalyRecorder {
+    evidence: Mutex<Vec<HlcAnomalyEvidence>>,
+}
+
+impl HlcAnomalyRecorder {
+    /// Create an empty recorder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a new anomaly evidence object.
+    fn record(&self, evidence: HlcAnomalyEvidence) {
+        let mut guard = self
+            .evidence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.push(evidence);
+    }
+
+    /// Return all recorded anomaly evidence objects, in recording order.
+    #[must_use]
+    pub fn recorded_evidence(&self) -> Vec<HlcAnomalyEvidence> {
+        self.evidence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Observe a remote HLC timestamp received over the wire: merge it into
+/// `clock` via [`HybridClock::update`], recording a DAG evidence object via
+/// `recorder` if the merge fails (excessive drift, overflow, etc.) instead of
+/// only logging the failure.
+///
+/// # Errors
+///
+/// Propagates the same error `HybridClock::update` returns — the clock
+/// layer's fail-closed guards are never weakened or bypassed here; this
+/// function only adds constitutional-evidence recording around them.
+pub fn observe_remote_hlc_timestamp(
+    clock: &mut HybridClock,
+    remote: &Timestamp,
+    recorder: &HlcAnomalyRecorder,
+) -> exo_core::Result<Timestamp> {
+    match clock.update(remote) {
+        Ok(advanced) => Ok(advanced),
+        Err(err) => {
+            recorder.record(HlcAnomalyEvidence {
+                anomaly_physical_ms: remote.physical_ms,
+                anomaly_logical: remote.logical,
+                reason: err.to_string(),
+            });
+            Err(err)
+        }
+    }
+}
 
 fn static_did(value: &'static str) -> Did {
     match Did::new(value) {
@@ -295,6 +386,15 @@ pub struct SyncEngine {
     syncing: bool,
     /// The height we're syncing to (from the peer).
     sync_target_height: u64,
+    /// This node's Hybrid Logical Clock, advanced by `HlcSync` wire messages
+    /// received over the existing DAG-sync gossipsub channel (VCG-012 / D6).
+    /// `Mutex`-wrapped (rather than held by value) so `SyncEngine` stays
+    /// `Send + Sync`, matching `HlcAnomalyRecorder` below — `HybridClock`'s
+    /// physical source is a boxed `Fn` that is `Send` but not `Sync`.
+    hlc: Arc<Mutex<HybridClock>>,
+    /// Records HLC drift/replay anomalies as DAG evidence objects rather
+    /// than silent log lines (D6: time anomalies are constitutional events).
+    hlc_anomalies: Arc<HlcAnomalyRecorder>,
 }
 
 impl SyncEngine {
@@ -312,6 +412,51 @@ impl SyncEngine {
             event_tx,
             syncing: false,
             sync_target_height: 0,
+            hlc: Arc::new(Mutex::new(HybridClock::new())),
+            hlc_anomalies: Arc::new(HlcAnomalyRecorder::new()),
+        }
+    }
+
+    /// This node's recorded HLC anomaly evidence (drift/replay events
+    /// detected while processing `HlcSync` messages).
+    #[must_use]
+    #[allow(dead_code)] // Constitutional-evidence introspection API; wired to observability once the DAG evidence store lands.
+    pub fn hlc_anomalies(&self) -> Vec<HlcAnomalyEvidence> {
+        self.hlc_anomalies.recorded_evidence()
+    }
+
+    /// This node's current HLC state, after any `HlcSync` updates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal HLC mutex is poisoned by a prior panic while
+    /// held — the same fail-loud posture the store helpers use elsewhere in
+    /// this module.
+    #[must_use]
+    #[allow(dead_code)] // Introspection API for callers that need this node's post-sync HLC state.
+    pub fn hlc_current(&self) -> Timestamp {
+        self.hlc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current()
+    }
+
+    /// Handle an inbound `HlcSync` wire message: merge the remote timestamp
+    /// into this node's `HybridClock`. A drift/replay anomaly is recorded as
+    /// a DAG evidence object (D6) rather than only logged.
+    async fn handle_hlc_sync(&mut self, msg: HlcSyncMsg) {
+        let mut clock = self
+            .hlc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(err) =
+            observe_remote_hlc_timestamp(&mut clock, &msg.timestamp, &self.hlc_anomalies)
+        {
+            tracing::warn!(
+                sender = %msg.sender,
+                err = %err,
+                "HLC sync anomaly recorded as DAG evidence"
+            );
         }
     }
 
@@ -381,6 +526,9 @@ impl SyncEngine {
             }
             WireMessage::DagSyncResponse(msg) => {
                 self.handle_dag_sync_response(msg).await;
+            }
+            WireMessage::HlcSync(msg) => {
+                self.handle_hlc_sync(msg).await;
             }
             _ => {} // Not a sync message
         }
@@ -794,7 +942,8 @@ pub async fn run_sync_engine(mut engine: SyncEngine, mut net_events: mpsc::Recei
                     WireMessage::StateSnapshotRequest(_)
                     | WireMessage::StateSnapshotChunk(_)
                     | WireMessage::DagSyncRequest(_)
-                    | WireMessage::DagSyncResponse(_) => {
+                    | WireMessage::DagSyncResponse(_)
+                    | WireMessage::HlcSync(_) => {
                         engine.handle_message(message).await;
                     }
                     _ => {} // Other messages handled by reactor

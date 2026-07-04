@@ -130,6 +130,7 @@ pub use receipt::{
 };
 pub use registry::{
     AvcRegistryDurableState, AvcRegistryRead, AvcRegistryWrite, InMemoryAvcRegistry,
+    RegisteredIssuerKey,
 };
 pub use revocation::{
     AVC_REVOCATION_SIGNING_DOMAIN, AvcRevocation, AvcRevocationReason, revoke_avc,
