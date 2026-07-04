@@ -546,8 +546,9 @@ mod riscz_seam_binding_unit {
     //! binding digest to the verifier, so the audited verifier can bind the
     //! receipt to the full statement context rather than certify an unbound
     //! statement.
-    use super::*;
     use std::cell::RefCell;
+
+    use super::*;
 
     /// Test-only verifier that records the journal digest it is handed, then
     /// still refuses — a spy must never manufacture a success-shaped result.
