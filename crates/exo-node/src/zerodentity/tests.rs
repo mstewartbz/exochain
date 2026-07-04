@@ -3192,7 +3192,8 @@ mod tests {
     fn device_behavioral_axes_score_tracks_feature_flag_exactly() {
         let did = td("vcg009-default-off");
         let fp = make_fingerprint("default-off", 1_000);
-        let sample = make_behavioral_sample("default-off", BehavioralSignalType::MouseDynamics, 1_000);
+        let sample =
+            make_behavioral_sample("default-off", BehavioralSignalType::MouseDynamics, 1_000);
 
         let score = ZerodentityScore::compute(&did, &[], &[fp], &[sample], 5_000);
 
@@ -3267,7 +3268,12 @@ mod tests {
              consent as the reason, got: {body}"
         );
         assert!(
-            store.lock().unwrap().get_fingerprints(&did).unwrap().is_empty(),
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&did)
+                .unwrap()
+                .is_empty(),
             "no consent record must mean nothing is persisted to the fingerprint store"
         );
         assert!(
@@ -3488,7 +3494,8 @@ mod tests {
         // and must be rejected as exceeding the documented ingestion cap.
         let mut signal_hashes = std::collections::BTreeMap::new();
         for i in 0..500u32 {
-            signal_hashes.insert(format!("UnknownSignal{i}"), hex::encode([i as u8; 32]));
+            let byte = u8::try_from(i % 256).unwrap_or(0);
+            signal_hashes.insert(format!("UnknownSignal{i}"), hex::encode([byte; 32]));
         }
 
         let body = device_behavioral_claim_body(
@@ -3512,7 +3519,12 @@ mod tests {
             resp.status()
         );
         assert!(
-            store.lock().unwrap().get_fingerprints(&did).unwrap().is_empty(),
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&did)
+                .unwrap()
+                .is_empty(),
             "a rejected oversized payload must not persist a partial fingerprint"
         );
     }

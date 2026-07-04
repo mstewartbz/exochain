@@ -31,13 +31,27 @@
 //! - **dashboard**    — GET /0dentity/dashboard/:did
 //! - **onboarding_ui**— GET /0dentity (onboarding flow HTML)
 //!
-//! # Audit status — Onyx-4 R3 (default-off axes)
+//! # Audit status — Onyx-4 R3 (default-off axes), extended by VCG-009
 //!
 //! The device fingerprint and behavioral biometric modules are deterministic
-//! and tested, and the score engine can consume stored samples. The public
-//! onboarding write path does not persist those client-collected samples, so
-//! `device_trust` and `behavioral_signature` are disabled by default behind
-//! `unaudited-zerodentity-device-behavioral-axes`.
+//! and tested, and the score engine consumes stored samples. `device_trust`
+//! and `behavioral_signature` remain disabled by default (pinned to `0`)
+//! behind `unaudited-zerodentity-device-behavioral-axes`.
+//!
+//! With the feature **on**, the onboarding write path (`POST
+//! /api/v1/0dentity/claims` in `onboarding.rs`) now persists client-collected
+//! `device_fingerprint`/`behavioral_hash`/`signal_hashes` samples via
+//! `store::ZerodentityStore::put_fingerprint`/`put_behavioral` — but only
+//! after a genuine consent check
+//! (`store::ZerodentityStore::check_device_behavioral_consent`, backed by
+//! `exo_consent::gatekeeper::ConsentGate`) grants the subject's own
+//! self-consent bailment. No consent record, no active session, an oversized
+//! `signal_hashes` map, or a rejected payload all mean nothing is persisted.
+//! Persistence is deduplicated by content hash, so replays are idempotent.
+//! `GET /:did/score` reads back the persisted samples, closing the
+//! ingestion → store → score loop strictly downstream of that consent gate.
+//! See `docs/0DENTITY-APP-SPEC.md` §11.1.1 for the full consent-scoping
+//! contract.
 //!
 //! The fingerprint timeline API is also disabled by default because it exposes
 //! the same unaudited data surface. The R3 initiative is

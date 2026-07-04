@@ -26,8 +26,13 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+#[cfg(any(
+    feature = "unaudited-zerodentity-first-touch-onboarding",
+    feature = "unaudited-zerodentity-device-behavioral-axes"
+))]
+use exo_core::types::Did;
 #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
-use exo_core::types::{Did, Hash256};
+use exo_core::types::Hash256;
 use exo_core::{
     crypto,
     hlc::HybridClock,
@@ -153,23 +158,85 @@ pub fn score_summary_from(score: &ZerodentityScore) -> ScoreSummary {
 // Request / Response types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(
-    not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+    not(any(
+        feature = "unaudited-zerodentity-first-touch-onboarding",
+        feature = "unaudited-zerodentity-device-behavioral-axes"
+    )),
     allow(dead_code)
 )]
 pub struct SubmitClaimRequest {
     pub subject_did: String,
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+        allow(dead_code)
+    )]
     pub claim_type: String,
     #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+        allow(dead_code)
+    )]
     pub provider: Option<String>,
     #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+        allow(dead_code)
+    )]
     pub created_ms: Option<u64>,
     #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+        allow(dead_code)
+    )]
     pub public_key: Option<String>,
     #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+        allow(dead_code)
+    )]
     pub signature: Option<String>,
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-first-touch-onboarding"),
+        allow(dead_code)
+    )]
     pub verification_channel: Option<String>,
+    /// Spec §7.1: hex-encoded composite device fingerprint hash. Gated on
+    /// `unaudited-zerodentity-device-behavioral-axes`; ignored otherwise.
+    #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-device-behavioral-axes"),
+        allow(dead_code)
+    )]
+    pub device_fingerprint: Option<String>,
+    /// Spec §7.1: hex-encoded BLAKE3 hash of the client's behavioral summary.
+    /// Gated on `unaudited-zerodentity-device-behavioral-axes`.
+    #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-device-behavioral-axes"),
+        allow(dead_code)
+    )]
+    pub behavioral_hash: Option<String>,
+    /// Spec §7.1: per-signal hashes (`FingerprintSignal` name -> hex hash).
+    /// Bounded to `FINGERPRINT_SIGNAL_COUNT` entries; gated on
+    /// `unaudited-zerodentity-device-behavioral-axes`.
+    #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-device-behavioral-axes"),
+        allow(dead_code)
+    )]
+    pub signal_hashes: std::collections::BTreeMap<String, String>,
+    /// VCG-009: caller-supplied consent receipt reference. Persistence of
+    /// `device_fingerprint`/`behavioral_hash`/`signal_hashes` requires a
+    /// valid, in-scope consent grant looked up from this receipt id — see
+    /// `store::ZerodentityStore::check_device_behavioral_consent`.
+    #[serde(default)]
+    #[cfg_attr(
+        not(feature = "unaudited-zerodentity-device-behavioral-axes"),
+        allow(dead_code)
+    )]
+    pub consent_receipt_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,7 +297,10 @@ fn build_rng() -> Result<StdRng, (StatusCode, Json<serde_json::Value>)> {
     Ok(StdRng::from_seed(seed))
 }
 
-#[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
+#[cfg(any(
+    feature = "unaudited-zerodentity-first-touch-onboarding",
+    feature = "unaudited-zerodentity-device-behavioral-axes"
+))]
 fn parse_did(s: &str) -> Result<Did, (StatusCode, Json<serde_json::Value>)> {
     Did::new(s).map_err(|_| {
         (
@@ -412,6 +482,280 @@ fn first_touch_onboarding_refusal() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 // ---------------------------------------------------------------------------
+// Device / behavioral sample ingestion (VCG-009)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of `signal_hashes` entries accepted in a single submit.
+/// Bounded to the documented `FingerprintSignal` variant count (spec §3.1):
+/// a real client can never legitimately report more distinct signal kinds
+/// than exist, so anything larger is rejected outright (VCG-009 bounded
+/// ingestion requirement), before any per-key parsing is attempted.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+const MAX_SIGNAL_HASHES: usize = super::types::FINGERPRINT_SIGNAL_COUNT;
+
+/// Whether a submit request is carrying the spec §7.1 device/behavioral
+/// sample fields at all. A request with none of these fields set is an
+/// ordinary claim submission and must fall through to the existing
+/// first-touch-onboarding path unchanged.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+fn carries_device_behavioral_fields(req: &SubmitClaimRequest) -> bool {
+    req.device_fingerprint.is_some()
+        || req.behavioral_hash.is_some()
+        || !req.signal_hashes.is_empty()
+}
+
+/// Handle a submit that carries device/behavioral sample fields: consent-gate,
+/// then persist via `put_fingerprint`/`put_behavioral`, replay-safe and
+/// bounded, and never touch the claim/OTP tables. Returns `None` only when
+/// the caller should fall through to ordinary claim handling (i.e. the
+/// request carries no device/behavioral fields at all) — every other outcome
+/// (success or refusal) is returned as `Some`.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+async fn try_handle_device_behavioral_ingestion(
+    state: &OnboardingState,
+    req: &SubmitClaimRequest,
+) -> Option<Result<Json<SubmitClaimResponse>, (StatusCode, Json<serde_json::Value>)>> {
+    if !carries_device_behavioral_fields(req) {
+        return None;
+    }
+    Some(handle_device_behavioral_ingestion(state.clone(), req.clone()).await)
+}
+
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+async fn handle_device_behavioral_ingestion(
+    state: OnboardingState,
+    req: SubmitClaimRequest,
+) -> Result<Json<SubmitClaimResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use std::collections::BTreeMap;
+
+    use super::types::{
+        BehavioralSample, BehavioralSignalType, ClaimStatus, DeviceFingerprint, FingerprintSignal,
+        IdentityClaim,
+    };
+
+    let subject_did = parse_did(&req.subject_did)?;
+    let now_ms = now_ms_blocking(state.clone()).await?;
+
+    // Bounded ingestion: reject an oversized signal_hashes map before any
+    // per-key parsing (VCG-009 (d)). Checked before the consent gate so an
+    // attacker cannot use an oversized payload to probe consent state.
+    if req.signal_hashes.len() > MAX_SIGNAL_HASHES {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signal_hashes must not exceed {MAX_SIGNAL_HASHES} entries \
+                 (documented FingerprintSignal variant count)"
+            ),
+        ));
+    }
+
+    // Proof of possession: the request's public_key must derive subject_did.
+    // This binds the samples to a subject who actually controls this DID,
+    // independent of whichever session/consent evidence follows.
+    let public_key_hex = req
+        .public_key
+        .as_deref()
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "public_key is required"))?;
+    let public_key =
+        public_key_from_hex(public_key_hex).map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
+    let derived_did = did_from_public_key(&public_key)
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if derived_did != subject_did {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "subject_did must equal did:exo:<bs58(blake3(public_key))>",
+        ));
+    }
+    let signature_hex = req
+        .signature
+        .as_deref()
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "signature is required"))?;
+    let signature =
+        signature_from_hex(signature_hex).map_err(|e| json_error(StatusCode::BAD_REQUEST, e))?;
+    if signature.is_empty() {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "signature must not be empty",
+        ));
+    }
+
+    // Consent gate: require a non-empty consent_receipt_id that resolves to
+    // a valid, in-scope grant. Nothing is persisted unless this passes.
+    let receipt_id = req.consent_receipt_id.clone().unwrap_or_default();
+    let subject_for_consent = subject_did.clone();
+    let receipt_for_consent = receipt_id.clone();
+    let granted = with_store_blocking(state.clone(), move |store| {
+        store
+            .check_device_behavioral_consent(&subject_for_consent, &receipt_for_consent, now_ms)
+            .map_err(|e| store_error_response("check_device_behavioral_consent", e))
+    })
+    .await?;
+    if !granted {
+        tracing::warn!(
+            subject_did = %subject_did,
+            "refusing 0dentity device/behavioral sample ingestion: no valid, in-scope consent record"
+        );
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "device/behavioral sample ingestion requires a valid, in-scope consent record \
+             (consent_receipt_id missing, empty, or not grantable — see \
+             ZerodentityStore::check_device_behavioral_consent)",
+        ));
+    }
+
+    // Parse the fingerprint composite + per-signal hashes, if present.
+    let parsed_fingerprint =
+        req.device_fingerprint
+            .as_deref()
+            .map(
+                |hex_hash| -> Result<DeviceFingerprint, (StatusCode, Json<serde_json::Value>)> {
+                    let composite_hash = parse_hash256(hex_hash, "device_fingerprint")?;
+                    let mut signal_hashes = BTreeMap::new();
+                    for (name, hash_hex) in &req.signal_hashes {
+                        let signal = name.parse::<FingerprintSignal>().map_err(|()| {
+                    json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("signal_hashes key '{name}' is not a recognised FingerprintSignal"),
+                    )
+                })?;
+                        let hash = parse_hash256(hash_hex, "signal_hashes value")?;
+                        signal_hashes.insert(signal, hash);
+                    }
+                    Ok(DeviceFingerprint {
+                        composite_hash,
+                        signal_hashes,
+                        captured_ms: now_ms,
+                        consistency_score_bp: None,
+                    })
+                },
+            )
+            .transpose()?;
+
+    // Parse the behavioral sample, if present. The spec §7.1 wire format
+    // carries a single composite `behavioral_hash` (no signal-type
+    // discriminant), so the categorisation tag used for scoring diversity
+    // defaults to `KeystrokeDynamics`; this does not affect the axis
+    // computation's use of the hash itself.
+    let parsed_behavioral = req
+        .behavioral_hash
+        .as_deref()
+        .map(
+            |hex_hash| -> Result<BehavioralSample, (StatusCode, Json<serde_json::Value>)> {
+                let sample_hash = parse_hash256(hex_hash, "behavioral_hash")?;
+                Ok(BehavioralSample {
+                    sample_hash,
+                    signal_type: BehavioralSignalType::KeystrokeDynamics,
+                    captured_ms: now_ms,
+                    baseline_similarity_bp: None,
+                })
+            },
+        )
+        .transpose()?;
+
+    // A consented sample submission also asserts the accompanying claim (the
+    // spec §7.1 wire format bundles `claim_type` with the sample fields in
+    // one request) so the DID is discoverable through the ordinary claims
+    // store — `GET /score` and `GET /claims` key off `get_claims` non-empty,
+    // and a subject with samples but no claim would be otherwise invisible.
+    // The claim id is content-derived from (subject_did, claim_type,
+    // public_key) — NOT from created_ms/samples — so a replay with the same
+    // logical claim is idempotent (VCG-009 (c)) regardless of created_ms
+    // jitter or which sample payload accompanied it.
+    let claim_type = parse_claim_type(&req.claim_type, req.provider.as_deref());
+    let claim_to_persist = claim_type.map(|claim_type| {
+        let mut claim_id_input = subject_did.as_str().as_bytes().to_vec();
+        claim_id_input.extend_from_slice(req.claim_type.as_bytes());
+        claim_id_input.extend_from_slice(public_key.as_bytes());
+        let claim_hash = exo_core::types::Hash256::digest(&claim_id_input);
+        let claim_id = hex::encode(claim_hash.as_bytes());
+        let claim = IdentityClaim {
+            claim_hash,
+            subject_did: subject_did.clone(),
+            claim_type,
+            status: ClaimStatus::Pending,
+            created_ms: now_ms,
+            verified_ms: None,
+            expires_ms: None,
+            signature,
+            dag_node_hash: exo_core::types::Hash256::digest(claim_id.as_bytes()),
+        };
+        (claim_id, claim)
+    });
+
+    let subject_for_store = subject_did.clone();
+    with_store_blocking(state.clone(), move |store| {
+        // Replay-safety: dedupe by content hash. A resubmission of the exact
+        // same composite/sample hash for this DID is treated as an
+        // idempotent success rather than appended again.
+        if let Some(fp) = parsed_fingerprint {
+            let already_stored = store
+                .get_fingerprints(&subject_for_store)
+                .map_err(|e| store_error_response("device_behavioral_get_fingerprints", e))?
+                .iter()
+                .any(|existing| existing.composite_hash == fp.composite_hash);
+            if !already_stored {
+                store
+                    .put_fingerprint(&subject_for_store, fp)
+                    .map_err(|e| store_error_response("device_behavioral_put_fingerprint", e))?;
+            }
+        }
+        if let Some(sample) = parsed_behavioral {
+            let already_stored = store
+                .get_behavioral_samples(&subject_for_store)
+                .map_err(|e| store_error_response("device_behavioral_get_behavioral_samples", e))?
+                .iter()
+                .any(|existing| existing.sample_hash == sample.sample_hash);
+            if !already_stored {
+                store
+                    .put_behavioral(&subject_for_store, sample)
+                    .map_err(|e| store_error_response("device_behavioral_put_behavioral", e))?;
+            }
+        }
+        if let Some((claim_id, claim)) = claim_to_persist {
+            let already_stored = store
+                .get_claims(&subject_for_store)
+                .map_err(|e| store_error_response("device_behavioral_get_claims", e))?
+                .iter()
+                .any(|(existing_id, _)| existing_id == &claim_id);
+            if !already_stored {
+                store
+                    .insert_claim(&claim_id, &claim)
+                    .map_err(|e| store_error_response("device_behavioral_insert_claim", e))?;
+            }
+        }
+        Ok(())
+    })
+    .await?;
+
+    Ok(Json(SubmitClaimResponse {
+        claim_id: String::new(),
+        status: "DeviceBehavioralSamplesAccepted".into(),
+        challenge_id: None,
+        challenge_ttl_ms: None,
+    }))
+}
+
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+fn parse_hash256(
+    hex_str: &str,
+    field: &str,
+) -> Result<exo_core::types::Hash256, (StatusCode, Json<serde_json::Value>)> {
+    let bytes = hex::decode(hex_str).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be hex-encoded"),
+        )
+    })?;
+    let array: [u8; 32] = bytes.try_into().map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be exactly 32 bytes"),
+        )
+    })?;
+    Ok(exo_core::types::Hash256::from_bytes(array))
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/v1/0dentity/claims
 // ---------------------------------------------------------------------------
 
@@ -421,6 +765,10 @@ pub async fn submit_claim(
     State(state): State<OnboardingState>,
     Json(req): Json<SubmitClaimRequest>,
 ) -> Result<Json<SubmitClaimResponse>, (StatusCode, Json<serde_json::Value>)> {
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    if let Some(result) = try_handle_device_behavioral_ingestion(&state, &req).await {
+        return result;
+    }
     let _ = (state, req);
     Err(first_touch_onboarding_refusal())
 }
@@ -431,6 +779,10 @@ pub async fn submit_claim(
     State(state): State<OnboardingState>,
     Json(req): Json<SubmitClaimRequest>,
 ) -> Result<Json<SubmitClaimResponse>, (StatusCode, Json<serde_json::Value>)> {
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    if let Some(result) = try_handle_device_behavioral_ingestion(&state, &req).await {
+        return result;
+    }
     let subject_did = parse_did(&req.subject_did)?;
 
     let claim_type =

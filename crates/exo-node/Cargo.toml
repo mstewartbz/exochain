@@ -143,7 +143,9 @@ tempfile = "3"
 
 [package.metadata.cargo-machete]
 # Pre-existing workspace deps used via re-exports or conditional compilation.
-ignored = ["ed25519-dalek", "exo-consent", "exo-governance", "exo-identity", "zeroize", "exochain-sdk"]
+# exo-consent is genuinely used: crates/exo-node/src/zerodentity/store.rs
+# gates device/behavioral sample persistence on exo_consent::gatekeeper::ConsentGate.
+ignored = ["ed25519-dalek", "exo-governance", "exo-identity", "zeroize", "exochain-sdk"]
 
 [features]
 # Default node builds compile the gateway production DB-backed DAG DB path and
