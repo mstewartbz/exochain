@@ -110,6 +110,54 @@ impl HybridClock {
         self.max_drift_ms
     }
 
+    /// Reconcile a partition-recovery peer set to the quorum **median** of
+    /// their last-known timestamps.
+    ///
+    /// Per ratified decision D6 (2026-07-02): on reconnect after a network
+    /// partition, the recovering node converges its causal-ordering view to
+    /// the median of its peers' latest known HLC timestamps — never the
+    /// maximum. Silent accept-max would let a single drifted or malicious
+    /// peer steer history ordering for the whole network; the median is
+    /// resilient to any single outlier as long as a majority of the peer set
+    /// is honest.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ExoError::ClockUnavailable` if `peer_timestamps` is empty —
+    /// there is nothing to reconcile against.
+    pub fn reconcile_partition_recovery(peer_timestamps: &[Timestamp]) -> Result<Timestamp> {
+        Ok(quorum_median(peer_timestamps)?.0)
+    }
+
+    /// Reconcile a partition-recovery peer set to the quorum median, and
+    /// additionally report any peer whose timestamp is a wide outlier
+    /// relative to that median.
+    ///
+    /// Per D6, time anomalies detected during partition recovery are
+    /// constitutional events, not silent log lines — the caller is expected
+    /// to record `anomalous_peers` as DAG evidence rather than folding the
+    /// outlier silently into the reconciled median.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ExoError::ClockUnavailable` if `peer_timestamps` is empty.
+    pub fn reconcile_partition_recovery_with_anomaly_report(
+        peer_timestamps: &[Timestamp],
+    ) -> Result<PartitionRecoveryOutcome> {
+        let (median, max_drift_ms) = quorum_median(peer_timestamps)?;
+
+        let anomalous_peers: Vec<Timestamp> = peer_timestamps
+            .iter()
+            .copied()
+            .filter(|peer| is_wide_outlier(peer, &median, max_drift_ms))
+            .collect();
+
+        Ok(PartitionRecoveryOutcome {
+            median,
+            anomalous_peers,
+        })
+    }
+
     /// Generate the next timestamp.
     ///
     /// Guarantees: the returned timestamp is strictly greater than any
@@ -177,6 +225,46 @@ impl HybridClock {
     pub fn current(&self) -> Timestamp {
         Timestamp::new(self.physical, self.logical)
     }
+}
+
+/// Outcome of [`HybridClock::reconcile_partition_recovery_with_anomaly_report`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionRecoveryOutcome {
+    /// The quorum-median timestamp the recovering node should adopt.
+    pub median: Timestamp,
+    /// Peers whose last-known timestamp was a wide outlier relative to the
+    /// median (a candidate constitutional-event / DAG-evidence anomaly).
+    pub anomalous_peers: Vec<Timestamp>,
+}
+
+/// A wide outlier is a peer timestamp whose physical component differs from
+/// the reconciled median by more than the quorum's own drift tolerance. This
+/// reuses the same `MAX_DRIFT_MS` semantics as `HybridClock::update` so
+/// "anomalous" has one consistent meaning across the sync protocol.
+fn is_wide_outlier(peer: &Timestamp, median: &Timestamp, max_drift_ms: u64) -> bool {
+    peer.physical_ms.abs_diff(median.physical_ms) > max_drift_ms
+}
+
+/// Compute the quorum median of a peer timestamp set, ordering by the total
+/// `Timestamp` order (physical, then logical) so ties are broken
+/// deterministically. Returns the median timestamp plus the drift tolerance
+/// to apply against it.
+///
+/// For an even-sized peer set the lower of the two middle elements is used —
+/// deterministic and reproducible across nodes without floating-point
+/// averaging (which `Timestamp`'s integer fields do not support losslessly).
+fn quorum_median(peer_timestamps: &[Timestamp]) -> Result<(Timestamp, u64)> {
+    if peer_timestamps.is_empty() {
+        return Err(ExoError::ClockUnavailable {
+            reason: "cannot reconcile partition recovery: empty peer timestamp set".to_string(),
+        });
+    }
+
+    let mut sorted: Vec<Timestamp> = peer_timestamps.to_vec();
+    sorted.sort_unstable();
+
+    let mid = (sorted.len() - 1) / 2;
+    Ok((sorted[mid], MAX_DRIFT_MS))
 }
 
 fn advance_logical_or_carry_physical(physical: &mut u64, logical: &mut u32) -> Result<()> {
