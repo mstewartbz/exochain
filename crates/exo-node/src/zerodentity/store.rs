@@ -28,23 +28,30 @@
 //!
 //! Spec reference: §9, §12.1.
 
+// VCG-009: OnceLock is only used by the device/behavioral ingestion-service
+// keypair helper, which is gated behind the axes feature.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
+// `ConsentGate` types the always-present `device_behavioral_consent_gate`
+// store field (kept ungated so the struct keeps deriving `Default`); the rest
+// of the consent machinery is compiled only under the axes feature.
+use exo_consent::gatekeeper::ConsentGate;
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 use exo_consent::{
     ConsentDecision, ConsentPolicy, ConsentRequirement,
     bailment::{self, BailmentType},
-    gatekeeper::ConsentGate,
 };
-use exo_core::{
-    crypto::KeyPair,
-    types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt},
-};
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use exo_core::crypto::KeyPair;
+use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt};
 use exo_dag::dag::{DagNode, compute_node_hash};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -74,30 +81,30 @@ pub const ZERODENTITY_STORE_PERSISTENCE_WARNING: &str =
 /// fingerprint and behavioral biometric samples. Only registered under
 /// `unaudited-zerodentity-device-behavioral-axes`; the feature-off path never
 /// consults consent because it never reaches the ingestion branch at all.
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 pub const DEVICE_BEHAVIORAL_CONSENT_ACTION: &str = "zerodentity.device_behavioral_ingest";
 /// Consent policy role required of the subject granting device/behavioral
 /// ingestion consent over their own claim.
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 const DEVICE_BEHAVIORAL_CONSENT_ROLE: &str = "subject";
 /// Minimum clearance level for the device/behavioral ingestion consent grant.
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 const DEVICE_BEHAVIORAL_CONSENT_CLEARANCE: u32 = 1;
 /// Fixed DID for the in-process 0dentity device/behavioral ingestion service.
 /// This is the bailee in every self-consent bailment a subject grants over
 /// their own device/behavioral samples: the subject (bailor) entrusts THIS
 /// service with processing rights over evidence it is about to persist.
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 const DEVICE_BEHAVIORAL_INGESTION_SERVICE_DID: &str =
     "did:exo:zerodentity-device-behavioral-ingestion-service";
 /// Deterministic seed for the ingestion service's Ed25519 keypair. The
 /// service signs its own bailment acceptance (it is the bailee); there is no
 /// secret-material exposure here because this key only ever authorizes the
 /// service to receive consent grants, never to act on a subject's behalf.
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 const DEVICE_BEHAVIORAL_INGESTION_SERVICE_KEY_SEED: [u8; 32] = [0x0d; 32];
 
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 fn device_behavioral_ingestion_service_keypair() -> anyhow::Result<&'static KeyPair> {
     static KEYPAIR: OnceLock<anyhow::Result<KeyPair>> = OnceLock::new();
     KEYPAIR
@@ -112,13 +119,13 @@ fn device_behavioral_ingestion_service_keypair() -> anyhow::Result<&'static KeyP
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 fn device_behavioral_ingestion_service_did() -> anyhow::Result<Did> {
     Did::new(DEVICE_BEHAVIORAL_INGESTION_SERVICE_DID)
         .map_err(|error| anyhow::anyhow!("0dentity ingestion service DID malformed: {error}"))
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
 fn device_behavioral_consent_policy() -> ConsentPolicy {
     ConsentPolicy {
         id: "zerodentity-device-behavioral-v1".into(),
@@ -1154,7 +1161,7 @@ impl ZerodentityStore {
     // -----------------------------------------------------------------------
 
     /// Lazily construct the device/behavioral consent gate.
-    #[allow(dead_code)]
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     fn device_behavioral_consent_gate(&mut self) -> &mut ConsentGate {
         self.device_behavioral_consent_gate
             .get_or_insert_with(|| ConsentGate::new(device_behavioral_consent_policy()))
@@ -1167,7 +1174,7 @@ impl ZerodentityStore {
     /// who has already proven control of the DID through OTP-verified
     /// session bootstrap; a DID with no live session has no basis to
     /// self-consent to anything.
-    #[allow(dead_code)]
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     fn has_active_session_for(&self, did: &Did, now_ms: u64) -> bool {
         self.sessions.values().any(|session| {
             session.subject_did == *did
@@ -1191,7 +1198,7 @@ impl ZerodentityStore {
     /// A subject with no active session can register nothing: no bailment is
     /// proposed/accepted and the gate is never granted, so callers must
     /// treat `Ok(false)` as "reject and persist nothing" (default-deny).
-    #[allow(dead_code)]
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     pub fn check_device_behavioral_consent(
         &mut self,
         subject_did: &Did,
@@ -1226,7 +1233,7 @@ impl ZerodentityStore {
     /// register a bailment granting the 0dentity device/behavioral
     /// ingestion service processing rights over `subject_did`'s own
     /// client-collected samples for the given `receipt_id`.
-    #[allow(dead_code)]
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     fn register_device_behavioral_consent_bailment(
         &mut self,
         subject_did: &Did,
