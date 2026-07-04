@@ -34,4 +34,8 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    // Production serving on Railway (`npm run start`) — custom domains must pass Vite's host check.
+    allowedHosts: ['livesafe.ai', 'www.livesafe.ai', '.up.railway.app'],
+  },
 });
