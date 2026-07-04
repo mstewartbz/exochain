@@ -150,7 +150,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
 | VCG-008 | P1 | Green-local | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
 | VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
-| VCG-010 | P1 | Open | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
+| VCG-010 | P1 | Green-local | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
 | VCG-012 | P2 | Open | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
 | VCG-013 | P2 | Open | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
@@ -961,9 +961,43 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-010 - Infrastructure Holons Are Gated
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** Holon runtime
+
+Lane record (2026-07-04, branch `vcg/010-holon-legitimacy`):
+
+- Red evidence: `holon_rejects_self_issued_root_authority` and
+  `scaling_holon_emits_zero_validator_set_change_proposals`, independently
+  verified to fail for the documented D5 reasons (tautological self-issued
+  trust at build_holon_adjudication_context; the Scaling Holon broadcasting a
+  real `ValidatorSetChange::AddValidator` proposal for a fabricated
+  `did:exo:auto-promoted-{n}` candidate).
+- Green per D5: (1) self-issued root authority is rejected — the trust anchor
+  for `root_did` is populated only from an external `RootAttestation` distinct
+  from the signer; (2) the Scaling Holon auto-promotion path emits a
+  recommendation event and submits ZERO DAG proposals (promotion is a
+  ratification event with named evidence); (3) the stale sentinel-bytes
+  Cargo.toml comment corrected and `Initiatives/fix-onyx-4-r5-holons-stub-context.md`
+  created.
+- Adversarial review found a MAJOR gap and it was fixed: the self-issued-root
+  guard originally checked only `attester_did != root_did` (DID-label
+  inequality), so a `RootAttestation` with a distinct DID label but the same
+  cryptographic key as the root signer could launder self-issuance one hop.
+  The guard now also requires `attester_public_key != root_public_key`; a new
+  red test (`holon_rejects_attestation_that_reuses_the_root_signer_key`) proves
+  the key-reusing attestation is rejected (genuine regression guard — fails
+  against pre-fix code). Re-refutation of the hardening: NOT-REFUTED (byte-for-
+  byte PublicKey comparison; both original D5 tests intact; scope clean).
+- Gates: holon 28 pass (both feature configs); full crate green; clippy, doc,
+  nightly fmt clean. Real Ed25519 signing (pre-existing) untouched; feature
+  default off.
+- Residual (documented in the initiative doc, not hidden): full D5 depth — a
+  witnessed multi-party ceremony and wiring a real external attestation into
+  the production default (currently `root_attestation: None`, fail-closed) —
+  remains follow-on work. Status Green-local: the row's stated deliverables
+  (reject self-issued root, Scaling Holon recommendation-only) are met and
+  tested; the deeper ceremony is out of this row's scope.
 
 Evidence:
 
