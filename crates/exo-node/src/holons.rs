@@ -1410,11 +1410,10 @@ mod tests {
         // control" laundering case.
         let mut config = test_config_with_attestation();
         let root_public_key = config.root_public_key;
-        let same_key_secret =
-            exo_core::crypto::KeyPair::from_secret_bytes([0x48; 32])
-                .unwrap()
-                .secret_key()
-                .clone();
+        let same_key_secret = exo_core::crypto::KeyPair::from_secret_bytes([0x48; 32])
+            .unwrap()
+            .secret_key()
+            .clone();
         config.root_attestation = Some(RootAttestation {
             attester_did: Did::new("did:exo:laundered-witness").unwrap(),
             attester_public_key: root_public_key,
