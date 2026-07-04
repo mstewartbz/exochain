@@ -147,7 +147,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-004 | P0 | Red | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Green-local | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
 | VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
-| VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
+| VCG-007 | P1 | Green-local | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
 | VCG-008 | P1 | Green-local | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
 | VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
 | VCG-010 | P1 | Open | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
@@ -771,9 +771,42 @@ cargo clippy -p exochain-gateway --features production-db --all-targets -- -D wa
 ## VCG-007 - CrossChecked Receipt Anchor Is Unaudited
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Adjacent adapter
 **Owner role:** CrossChecked boundary
+
+Lane record (2026-07-04, branch `vcg/007-crosschecked-intake`):
+
+- Scout correction confirmed: the route
+  (`handle_crosschecked_receipt_anchor`, api.rs:606-626) was an unconditional
+  403 with no minting path in any config (commit c730a0e4 had removed
+  enabled-path minting). The gap was a missing intake implementation.
+- Red evidence: `crosschecked_anchor_rejects_external_metadata_without_trusted_authority`,
+  `crosschecked_anchor_mints_when_authority_resolves_and_proof_verifies`,
+  `crosschecked_anchor_rejects_tenant_workspace_mismatch` — independently
+  verified to fail (all hit the blanket 403; none of the specific
+  behaviors reachable).
+- Green per D3: a `CrossCheckedTrustAnchor` resolves the trusted authority
+  from a REAL external, revocable `exo-authority::DelegationRegistry` chain
+  (verified via `chain::verify_chain` — per-link Ed25519, expiry,
+  scope-narrowing) plus `exo-identity::LocalDidRegistry` for key resolution;
+  the route mints a TrustReceipt ONLY after (1) DID parse, (2) chain
+  resolution+verification, (3) exact tenant/workspace scope match against the
+  authority's granted scope, and (4) Ed25519 verification of the external
+  proof signature over `payload_hash`. Any missing/invalid step refuses with a
+  specific typed error and leaves the receipts store empty. Default trust
+  anchor is empty (no CrossChecked authority trusted until an operator
+  delegates one) — fail-closed by default.
+- Adversarial review (three lenses): the trust root is genuinely external and
+  revocable (not a self-referential seed — the VCG-010 tautology is not
+  reproduced here); the mint path is an effect gated behind real verification
+  (not an unauthenticated hole); scope clean. NOT-REFUTED.
+- Gates: crosschecked 4/4 pass feature-on, default refusal test intact
+  feature-off; clippy/fmt clean. store.rs gained a standalone `save_receipt`
+  insert path for adjacent-surface (non-DAG-commit) receipts.
+- Status Green-local: verified CrossChecked provenance delivered; the
+  `unaudited-crosschecked-receipt-anchor` feature stays default-off (enabling
+  is a D8 ratification event). Closed after merge + CI.
 
 Evidence:
 
