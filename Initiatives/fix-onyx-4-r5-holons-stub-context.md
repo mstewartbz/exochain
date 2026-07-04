@@ -37,10 +37,19 @@ Two residual gaps were closed under this initiative:
 1. **Self-issued root rejection.** `build_holon_adjudication_context` no
    longer trusts `config.root_did`'s key merely because it is the key that
    signed the root→Holon authority link. Trust for the root authority is
-   populated only from an independent `RootAttestation` (a distinct
-   attester DID/key vouching for the root), when one is configured. With
-   no `root_attestation` configured, the kernel's `AuthorityChainValid`
-   invariant fails closed and `holon::step` rejects the self-issued root.
+   populated only from an independent `RootAttestation` that is distinct
+   from the signer on **both** axes D5 requires: a different `attester_did`
+   label **and** a different `attester_public_key` from
+   `config.root_public_key`. An attestation carrying a distinct DID label
+   but reusing the root's own key (self-issuance laundered through a second
+   label) fails the key-inequality guard and falls through to the
+   self-issued arm. With no `root_attestation` configured, or a
+   key-reusing one, the kernel's `AuthorityChainValid` invariant fails
+   closed and `holon::step` rejects the root.
+   Remaining D5 depth (a fully witnessed multi-party ceremony and wiring an
+   external attestation into the production default, which currently sets
+   `root_attestation: None` and is therefore fail-closed) is tracked as
+   follow-on work, not claimed complete by this change.
 2. **Scaling Holon recommendation-only, full stop.** The Scaling Holon's
    auto-promotion path no longer calls `reactor::submit_proposal`. It
    emits a `GovernanceEventType::RecommendationOnly` event carrying the

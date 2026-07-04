@@ -508,12 +508,18 @@ pub fn build_holon_adjudication_context(
     // grantor DID" and the self-issued root is rejected.
     let mut trusted_authority_keys = TrustedAuthorityKeys::default();
     let authority_chain = match &config.root_attestation {
-        Some(attestation) if attestation.attester_did != config.root_did => {
+        Some(attestation)
+            if attestation.attester_did != config.root_did
+                && attestation.attester_public_key != config.root_public_key =>
+        {
             let attestation_link = signed_attestation_link(holon, config, attestation)?;
             // The attester is the external trust anchor (the witnessed
-            // ceremony). Its key is independent of `root_signer` by
-            // construction (`attester_did != root_did`), so trusting it here
-            // is not self-referential in the way the rejected case is.
+            // ceremony). D5 requires lineage genuinely distinct from the
+            // signer, so both the attester DID *and* its cryptographic key
+            // must differ from the root's: a differently-labelled DID under
+            // the same key control is still self-issuance and is rejected by
+            // the guard above (it falls through to the self-issued arm, where
+            // `root_did` gets no trusted key and the kernel fails closed).
             trusted_authority_keys.insert(
                 attestation.attester_did.clone(),
                 vec![attestation.attester_public_key.as_bytes().to_vec()],
@@ -1385,6 +1391,62 @@ mod tests {
             "a self-issued root authority (grantor key == signer key, no external \
              delegation/attestation chain) must be REJECTED per D5, but holon::step \
              returned {result:?}"
+        );
+    }
+
+    /// D5 requires lineage genuinely distinct from the signer. A
+    /// `RootAttestation` that carries a *different* attester DID label but the
+    /// *same* cryptographic key as the root signer is still self-issuance,
+    /// laundered one hop through a second label. The key-inequality guard in
+    /// `build_holon_adjudication_context` must treat this as self-issued (no
+    /// trusted key for `root_did`), so `holon::step` fails closed.
+    #[test]
+    fn holon_rejects_attestation_that_reuses_the_root_signer_key() {
+        let kernel = create_infrastructure_kernel();
+
+        // Start from a legitimately-attested config, then rewrite the
+        // attestation so it keeps a distinct DID label but reuses the root's
+        // own key + signer — the "differently-labelled DID under the same key
+        // control" laundering case.
+        let mut config = test_config_with_attestation();
+        let root_public_key = config.root_public_key;
+        let same_key_secret =
+            exo_core::crypto::KeyPair::from_secret_bytes([0x48; 32])
+                .unwrap()
+                .secret_key()
+                .clone();
+        config.root_attestation = Some(RootAttestation {
+            attester_did: Did::new("did:exo:laundered-witness").unwrap(),
+            attester_public_key: root_public_key,
+            attester_signer: Arc::new(move |message: &[u8]| {
+                exo_core::crypto::sign(message, &same_key_secret)
+            }),
+        });
+
+        let mut h = create_health_holon(&test_did());
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
+
+        // The key-inequality guard must reject the laundered attestation and
+        // fall through to the self-issued arm: a single self-issued link with
+        // no independently-trusted key for root_did.
+        assert_eq!(
+            ctx.authority_chain.links.len(),
+            1,
+            "attestation reusing the root key must fall through to the \
+             self-issued (single-link) arm, not be trusted as external lineage"
+        );
+
+        let input = CombinatorInput::new()
+            .with("consensus_round", "1")
+            .with("committed_height", "1");
+
+        let result = holon::step(&mut h, &input, &kernel, &ctx);
+
+        assert!(
+            result.is_err(),
+            "an attestation whose key equals the root signer key (distinct DID \
+             label only) is self-issuance laundered through a second label and \
+             must be REJECTED per D5, but holon::step returned {result:?}"
         );
     }
 
