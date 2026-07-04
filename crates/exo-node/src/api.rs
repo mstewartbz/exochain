@@ -1350,6 +1350,320 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // VCG-007 RED stage — CrossChecked intake must resolve a TRUSTED authority
+    // (exo-authority DelegationRegistry entry per D3), verify the external
+    // receipt's proof/signature against that authority, and enforce
+    // tenant/workspace scope before minting any EXOCHAIN TrustReceipt. Today
+    // the route is an unconditional 403 refusal with no minting path in any
+    // configuration (see api.rs::handle_crosschecked_receipt_anchor), so all
+    // three tests below are expected RED: they fail because the route never
+    // reaches authority resolution, proof verification, or scope enforcement
+    // — it refuses everything with the blanket `crosschecked_receipt_anchor_disabled`
+    // 403 regardless of feature flag or request content.
+
+    /// A CrossChecked anchor request body carrying an external authority
+    /// reference and an external proof signature that a production intake
+    /// implementation would need to resolve/verify against an
+    /// `exo-authority::DelegationRegistry` entry (D3: registry entries are
+    /// the single authority species). These fields do not exist on
+    /// `CrossCheckedReceiptAnchorRequest` yet — they are extra JSON keys the
+    /// current struct silently ignores (no `deny_unknown_fields`), which is
+    /// exactly why the route cannot distinguish an unresolvable authority
+    /// from a resolvable one today: it 403s before parsing the intent.
+    fn crosschecked_anchor_body_with_authority(
+        authority_did: &str,
+        proof_signature_hex: &str,
+        tenant_id: &str,
+        workspace_id: &str,
+    ) -> serde_json::Value {
+        let mut body = crosschecked_receipt_anchor_body();
+        body["tenant_id"] = serde_json::json!(tenant_id);
+        body["workspace_id"] = serde_json::json!(workspace_id);
+        body["crosschecked_authority_did"] = serde_json::json!(authority_did);
+        body["external_proof_signature_hex"] = serde_json::json!(proof_signature_hex);
+        body
+    }
+
+    /// (1) An external receipt whose claimed CrossChecked authority is not
+    /// registered in the node's `exo-authority::DelegationRegistry` at all —
+    /// i.e. cryptographically unresolvable. A correct implementation must
+    /// reject this with a specific authority-verification error distinct from
+    /// the blanket disabled-feature 403, and must never persist a receipt.
+    ///
+    /// Expected RED: the route refuses unconditionally with
+    /// `crosschecked_receipt_anchor_disabled` regardless of authority
+    /// resolvability, so the specific-error assertion fails.
+    #[cfg(feature = "unaudited-crosschecked-receipt-anchor")]
+    #[tokio::test]
+    async fn crosschecked_anchor_rejects_external_metadata_without_trusted_authority() {
+        let state = test_api_state();
+        let app = governance_router(Arc::clone(&state));
+
+        // Unknown/unregistered authority DID — no corresponding
+        // DelegationRegistry entry exists anywhere in this node.
+        let unresolvable_authority_did = "did:exo:crosschecked-authority-unregistered";
+        let bogus_signature_hex = "ab".repeat(64);
+        let body = crosschecked_anchor_body_with_authority(
+            unresolvable_authority_did,
+            &bogus_signature_hex,
+            "00000000-0000-0000-0000-000000000101",
+            "00000000-0000-0000-0000-000000000102",
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/receipts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+
+        // Must be rejected — but with a specific authority-verification
+        // error, not the blanket disabled-feature refusal. A worker cannot
+        // pass this by leaving the unconditional 403 in place.
+        assert_ne!(
+            result["error"], "crosschecked_receipt_anchor_disabled",
+            "expected a specific authority-resolution error, got the blanket refusal \
+             (status {status}): {result}"
+        );
+        assert!(
+            result["error"] == "crosschecked_authority_unresolved"
+                || result["error"] == "crosschecked_authority_not_trusted",
+            "expected an authority-verification-specific error code, got: {result}"
+        );
+
+        let receipts = state
+            .store
+            .lock()
+            .unwrap()
+            .load_receipts_by_actor("did:exo:v0", 10)
+            .unwrap();
+        assert!(
+            receipts.is_empty(),
+            "rejected CrossChecked anchor with unresolvable authority must not \
+             persist a node-signed trust receipt"
+        );
+    }
+
+    /// (2) A CrossChecked authority IS registered in the node's
+    /// `DelegationRegistry` (per D3, reused via `exo-authority` +
+    /// `exo-identity::LocalDidRegistry`), and the external receipt carries a
+    /// proof that verifies against that authority's resolved key/scope. A
+    /// correct implementation mints a node-signed `TrustReceipt` whose
+    /// `exochain_receipt_hash` is derivable from the request's `payload_hash`,
+    /// and the receipt must be retrievable afterward.
+    ///
+    /// Expected RED: the route refuses unconditionally, so no receipt is ever
+    /// minted and the retrieval assertion fails.
+    #[cfg(feature = "unaudited-crosschecked-receipt-anchor")]
+    #[tokio::test]
+    async fn crosschecked_anchor_mints_when_authority_resolves_and_proof_verifies() {
+        let state = test_api_state();
+        let app = governance_router(Arc::clone(&state));
+
+        // Register a trusted CrossChecked authority as a DelegationRegistry
+        // entry — the single authority species per D3 (same species as a
+        // future council seat). This models what a production intake path
+        // would resolve via exo-authority + exo-identity::LocalDidRegistry.
+        let authority_keypair = KeyPair::from_secret_bytes([7u8; 32]).unwrap();
+        let authority_did = Did::new("did:exo:crosschecked-authority-trusted").unwrap();
+
+        let mut registry = exo_authority::DelegationRegistry::new();
+        let root_did = Did::new("did:exo:root-authority").unwrap();
+        let root_keypair = KeyPair::from_secret_bytes([9u8; 32]).unwrap();
+        let now = exo_core::types::Timestamp::new(1_000, 0);
+        let expires = exo_core::types::Timestamp::new(9_999_999_999_999, 0);
+
+        let link = registry
+            .delegate(
+                exo_authority::delegation::DelegationGrant {
+                    from: &root_did,
+                    to: &authority_did,
+                    scope: &[exo_authority::Permission::Challenge],
+                    expires,
+                    now: &now,
+                    parent_link_id: None,
+                    delegatee_kind: exo_authority::DelegateeKind::AiAgent {
+                        model_id: "crosschecked-verifier".to_string(),
+                    },
+                    delegator_public_key: root_keypair.public_key(),
+                },
+                |payload| root_keypair.sign(payload),
+            )
+            .unwrap();
+        assert!(registry.find_chain(&root_did, &authority_did).is_some());
+        let _ = link;
+
+        // A signed external proof from the trusted authority's key over the
+        // receipt's payload hash — this is what a production verifier must
+        // check against the resolved authority's public key.
+        let payload_hash_hex = "22".repeat(32);
+        let proof_signature = authority_keypair.sign(payload_hash_hex.as_bytes());
+        let proof_signature_hex = hex::encode(proof_signature.to_bytes());
+
+        let body = crosschecked_anchor_body_with_authority(
+            authority_did.as_str(),
+            &proof_signature_hex,
+            "00000000-0000-0000-0000-000000000101",
+            "00000000-0000-0000-0000-000000000102",
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/receipts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a resolvable trusted authority with a verifying proof must mint, not refuse"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let minted: serde_json::Value = serde_json::from_slice(&resp_body)
+            .expect("successful mint must return a JSON CrossCheckedReceiptAnchorResponse body");
+        assert_eq!(minted["status"], "minted");
+        let minted_hash = minted["exochain_receipt_hash"]
+            .as_str()
+            .expect("minted response must carry exochain_receipt_hash")
+            .to_string();
+
+        // The minted receipt hash must be derivable from payload_hash and
+        // must actually be retrievable from the receipt store afterward.
+        let receipts = state
+            .store
+            .lock()
+            .unwrap()
+            .load_receipts_by_actor("did:exo:v0", 10)
+            .unwrap();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "authority-verified CrossChecked anchor must persist exactly one trust receipt"
+        );
+        assert_eq!(
+            hex::encode(receipts[0].receipt_hash.0),
+            minted_hash,
+            "returned exochain_receipt_hash must match the persisted receipt"
+        );
+    }
+
+    /// (3) The external receipt's proof verifies against a resolved, trusted
+    /// authority, but the request's tenant/workspace scope does not match the
+    /// scope that authority was actually granted. This must be rejected even
+    /// though the signature checks out — tenant/workspace authorization is a
+    /// separate, mandatory gate (SCOPE IN item 3 of the VCG-007 work order).
+    ///
+    /// Expected RED: the route refuses unconditionally before any
+    /// authority/scope logic runs, so the specific scope-mismatch assertion
+    /// fails (today every request — matching scope or not — gets the same
+    /// blanket 403).
+    #[cfg(feature = "unaudited-crosschecked-receipt-anchor")]
+    #[tokio::test]
+    async fn crosschecked_anchor_rejects_tenant_workspace_mismatch() {
+        let state = test_api_state();
+        let app = governance_router(Arc::clone(&state));
+
+        let authority_keypair = KeyPair::from_secret_bytes([7u8; 32]).unwrap();
+        let authority_did = Did::new("did:exo:crosschecked-authority-trusted").unwrap();
+
+        let mut registry = exo_authority::DelegationRegistry::new();
+        let root_did = Did::new("did:exo:root-authority").unwrap();
+        let root_keypair = KeyPair::from_secret_bytes([9u8; 32]).unwrap();
+        let now = exo_core::types::Timestamp::new(1_000, 0);
+        let expires = exo_core::types::Timestamp::new(9_999_999_999_999, 0);
+
+        // Authority is granted scope for a *different* tenant/workspace than
+        // the one in the request below (modeled here via delegatee kind +
+        // scope narrative; the production implementation decides the actual
+        // scope-carrying type per the work order's explicit-scope-decision
+        // requirement). The request below targets a tenant/workspace the
+        // authority was never granted.
+        registry
+            .delegate(
+                exo_authority::delegation::DelegationGrant {
+                    from: &root_did,
+                    to: &authority_did,
+                    scope: &[exo_authority::Permission::Challenge],
+                    expires,
+                    now: &now,
+                    parent_link_id: None,
+                    delegatee_kind: exo_authority::DelegateeKind::AiAgent {
+                        model_id: "crosschecked-verifier".to_string(),
+                    },
+                    delegator_public_key: root_keypair.public_key(),
+                },
+                |payload| root_keypair.sign(payload),
+            )
+            .unwrap();
+
+        let payload_hash_hex = "22".repeat(32);
+        let proof_signature = authority_keypair.sign(payload_hash_hex.as_bytes());
+        let proof_signature_hex = hex::encode(proof_signature.to_bytes());
+
+        // Mismatched tenant/workspace relative to what the authority was
+        // granted for.
+        let body = crosschecked_anchor_body_with_authority(
+            authority_did.as_str(),
+            &proof_signature_hex,
+            "00000000-0000-0000-0000-000000000999",
+            "00000000-0000-0000-0000-000000000998",
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/receipts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+
+        assert_ne!(
+            result["error"], "crosschecked_receipt_anchor_disabled",
+            "expected a specific tenant/workspace scope-mismatch error, got the \
+             blanket refusal (status {status}): {result}"
+        );
+        assert_eq!(
+            result["error"], "crosschecked_authority_scope_mismatch",
+            "expected the tenant/workspace scope-mismatch error code, got: {result}"
+        );
+
+        let receipts = state
+            .store
+            .lock()
+            .unwrap()
+            .load_receipts_by_actor("did:exo:v0", 10)
+            .unwrap();
+        assert!(
+            receipts.is_empty(),
+            "tenant/workspace scope mismatch must never mint a trust receipt, \
+             even when the external proof signature verifies"
+        );
+    }
+
     #[tokio::test]
     async fn receipt_lookup_not_found() {
         let state = test_api_state();
