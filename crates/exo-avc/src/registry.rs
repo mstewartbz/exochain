@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use exo_authority::permission::Permission;
+use exo_authority::{AuthorityChain, permission::Permission};
 use exo_core::{Did, Hash256, PublicKey, Timestamp, crypto};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,19 @@ pub trait AvcRegistryWrite: AvcRegistryRead {
     fn put_revocation(&mut self, revocation: AvcRevocation) -> Result<(), AvcError>;
     fn put_receipt(&mut self, receipt: AvcTrustReceipt) -> Result<(), AvcError>;
     fn put_public_key(&mut self, did: Did, public_key: PublicKey);
+    /// Register a runtime issuer key WITH its authorizing
+    /// `exo-authority` DelegationRegistry chain, durably (VCG-006b / #736
+    /// hard requirement (a)). Unlike [`AvcRegistryWrite::put_public_key`]
+    /// (used for verified startup-config trust anchors, which are
+    /// deliberately never persisted), this both makes the key immediately
+    /// resolvable via [`AvcRegistryRead::resolve_public_key`] AND records it
+    /// in the durable per-issuer registered-key collection so it survives a
+    /// restart. The stored `authority_chain` is the durable evidence of
+    /// authorization: on reload, the chain is re-verified before the key is
+    /// ever re-admitted, so a chain that would no longer verify (e.g. because
+    /// the chain's root DID no longer resolves to a trusted startup key, or
+    /// the signature is invalid) cannot resurrect a trusted key.
+    fn put_registered_issuer_key(&mut self, did: Did, record: RegisteredIssuerKey);
     fn put_receipt_validator_public_key(&mut self, did: Did, public_key: PublicKey);
     fn put_issuer_permission_grant(&mut self, did: Did, granted_permissions: Vec<Permission>);
     fn put_human_approval_key(&mut self, did: Did, public_key: PublicKey);
@@ -72,11 +85,40 @@ pub trait AvcRegistryWrite: AvcRegistryRead {
     fn revoke_authority_chain(&mut self, chain_hash: &Hash256);
 }
 
+/// A runtime-registered issuer public key together with the
+/// `exo-authority` DelegationRegistry chain that authorized its
+/// registration (VCG-006b / #736 hard requirement (a)).
+///
+/// This is the durable provenance record that lets a runtime-registered
+/// issuer key survive a restart without weakening the security posture of
+/// verified startup-config trust anchors: the `authority_chain` is
+/// re-verified (signature, expiry, rootedness, and `Permission::Govern`
+/// scope) before the key is ever re-admitted to the live registry, so a
+/// stored record whose chain would no longer verify can never resurrect an
+/// unauthorized key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredIssuerKey {
+    pub public_key: PublicKey,
+    pub authority_chain: AuthorityChain,
+    pub registered_at: Timestamp,
+}
+
 /// Durable AVC runtime records.
 ///
-/// This intentionally persists issued credentials, revocations, and receipts,
-/// but not issuer/actor public-key trust anchors. Runtime adapters must
-/// re-establish key trust from verified configuration on startup.
+/// This intentionally persists issued credentials, revocations, and
+/// receipts. Startup-config issuer/actor public-key trust anchors
+/// (registered via [`AvcRegistryWrite::put_public_key`]) are deliberately
+/// NOT persisted here; runtime adapters must re-establish that trust from
+/// verified configuration on startup.
+///
+/// Runtime-registered issuer keys (registered via
+/// [`AvcRegistryWrite::put_registered_issuer_key`], VCG-006b / #736) ARE
+/// persisted here, per-issuer, together with the `exo-authority`
+/// DelegationRegistry chain that authorized each one — distinct from the
+/// startup-config trust anchors above. They are restored by
+/// [`InMemoryAvcRegistry::restore_registered_issuer_keys`] only after each
+/// stored chain re-verifies against the reconstructed registry's resolvable
+/// keys, so reload can never trust an unauthorized key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvcRegistryDurableState {
     pub credentials: BTreeMap<Hash256, AutonomousVolitionCredential>,
@@ -84,6 +126,8 @@ pub struct AvcRegistryDurableState {
     pub receipts: BTreeMap<Hash256, AvcTrustReceipt>,
     #[serde(default)]
     pub receipt_chain_head: Option<Hash256>,
+    #[serde(default)]
+    pub registered_issuer_keys: BTreeMap<Did, RegisteredIssuerKey>,
 }
 
 /// Deterministic in-memory implementation of the registry traits.
@@ -101,6 +145,14 @@ pub struct InMemoryAvcRegistry {
     consent_refs: BTreeSet<Hash256>,
     policy_refs: BTreeSet<(Hash256, u16)>,
     authority_chains: BTreeSet<Hash256>,
+    /// Durable per-issuer runtime registrations, keyed by issuer DID, each
+    /// carrying the `exo-authority` DelegationRegistry chain that authorized
+    /// it (VCG-006b / #736). Distinct from `public_keys`: entries here are
+    /// what gets persisted and re-verified on reload; `public_keys` is what
+    /// validation actually resolves against right now (populated both for
+    /// startup-config anchors via `put_public_key` and for runtime
+    /// registrations via `put_registered_issuer_key` / restore).
+    registered_issuer_keys: BTreeMap<Did, RegisteredIssuerKey>,
 }
 
 impl InMemoryAvcRegistry {
@@ -117,14 +169,28 @@ impl InMemoryAvcRegistry {
             revocations: self.revocations.clone(),
             receipts: self.receipts.clone(),
             receipt_chain_head: self.receipt_chain_head,
+            registered_issuer_keys: self.registered_issuer_keys.clone(),
         }
     }
 
     /// Reconstruct an in-memory registry from durable runtime records.
     ///
-    /// Issuer and actor public-key trust anchors are deliberately not restored
-    /// from this state; the node must re-register those from verified startup
-    /// configuration before validation can allow credentials.
+    /// Startup-config issuer/actor public-key trust anchors are deliberately
+    /// not restored from this state; the node must re-register those from
+    /// verified startup configuration before validation can allow
+    /// credentials.
+    ///
+    /// Durable per-issuer runtime registrations (VCG-006b / #736) ARE loaded
+    /// structurally here (so `registered_issuer_key_count` and
+    /// `resolve_registered_issuer_key_record` see them), but their public
+    /// keys are deliberately NOT yet admitted into `public_keys` /
+    /// `resolve_public_key` — a stored `authority_chain` is only cryptographic
+    /// *evidence* of a past authorization, and re-verifying it requires the
+    /// reconstructed registry's own resolvable keys (e.g. this node's
+    /// validator key), which are not available until after verified startup
+    /// configuration has run. Call
+    /// [`InMemoryAvcRegistry::restore_registered_issuer_keys`] once those
+    /// startup anchors are in place to complete restoration.
     pub fn from_durable_state(state: AvcRegistryDurableState) -> Result<Self, AvcError> {
         let mut registry = Self::new();
 
@@ -205,6 +271,40 @@ impl InMemoryAvcRegistry {
         registry.validate_durable_receipt_evidence(state.receipt_chain_head)?;
         registry.receipt_chain_head = state.receipt_chain_head;
 
+        // Structural load only: the chain's cryptographic validity, expiry,
+        // and rootedness are re-verified later by
+        // `restore_registered_issuer_keys`, once verified startup
+        // configuration has registered this node's own resolvable keys. Until
+        // that runs, these records are NOT reflected in `public_keys`, so
+        // `resolve_public_key` cannot resolve them yet.
+        for (stored_did, record) in state.registered_issuer_keys {
+            if record.authority_chain.is_empty() {
+                return Err(AvcError::Registry {
+                    reason: format!(
+                        "durable registered issuer key for {stored_did} carries an empty \
+                         authority chain"
+                    ),
+                });
+            }
+            let Some(leaf) = record.authority_chain.leaf() else {
+                return Err(AvcError::Registry {
+                    reason: format!(
+                        "durable registered issuer key for {stored_did} authority chain has no \
+                         leaf delegate"
+                    ),
+                });
+            };
+            if leaf != &stored_did {
+                return Err(AvcError::Registry {
+                    reason: format!(
+                        "durable registered issuer key {stored_did} does not match its stored \
+                         authority chain's leaf delegate {leaf}"
+                    ),
+                });
+            }
+            registry.registered_issuer_keys.insert(stored_did, record);
+        }
+
         Ok(registry)
     }
 
@@ -223,6 +323,12 @@ impl InMemoryAvcRegistry {
         candidate.revocations.clear();
         candidate.receipts = durable.receipts;
         candidate.receipt_chain_head = durable.receipt_chain_head;
+        // Structural carry-over only, matching `from_durable_state`: the
+        // caller must invoke `restore_registered_issuer_keys` afterwards
+        // (this node's own trust anchors are already live at this call site,
+        // unlike cold start) to re-verify each chain before its key becomes
+        // resolvable.
+        candidate.registered_issuer_keys = durable.registered_issuer_keys;
 
         for revocation in durable.revocations.into_values() {
             candidate.validate_revocation(&revocation)?;
@@ -237,6 +343,7 @@ impl InMemoryAvcRegistry {
         self.revocations = candidate.revocations;
         self.receipts = candidate.receipts;
         self.receipt_chain_head = candidate.receipt_chain_head;
+        self.registered_issuer_keys = candidate.registered_issuer_keys;
         Ok(())
     }
 
@@ -259,6 +366,100 @@ impl InMemoryAvcRegistry {
             self.validate_receipt(receipt)?;
         }
         Ok(())
+    }
+
+    /// Restore durable per-issuer runtime registrations (VCG-006b / #736
+    /// hard requirement (a)) into the live, resolvable key set.
+    ///
+    /// Call this AFTER verified startup configuration (root-trust ceremony
+    /// bundles, validator public keys, etc.) has registered this node's own
+    /// resolvable keys via [`AvcRegistryWrite::put_public_key`] — each stored
+    /// [`RegisteredIssuerKey::authority_chain`] is only durable *evidence* of
+    /// a past authorization, and re-verifying it (signature, expiry,
+    /// `Permission::Govern` scope) requires the chain's root delegator key to
+    /// already be resolvable.
+    ///
+    /// This is the security-critical gate that prevents reload from
+    /// resurrecting an unauthorized key: a stored record whose chain no
+    /// longer verifies (root key no longer resolves as trusted, signature
+    /// invalid, chain expired as of `now`, or scope no longer grants
+    /// `Permission::Govern`) is REJECTED — its public key is never admitted
+    /// into `public_keys`, so it never becomes resolvable for validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AvcError::Registry` (fail-closed) the first time a stored
+    /// chain fails re-verification, naming the offending issuer DID and
+    /// reason.
+    pub fn restore_registered_issuer_keys(&mut self, now: &Timestamp) -> Result<(), AvcError> {
+        let records: Vec<(Did, RegisteredIssuerKey)> = self
+            .registered_issuer_keys
+            .iter()
+            .map(|(did, record)| (did.clone(), record.clone()))
+            .collect();
+        for (issuer_did, record) in records {
+            self.verify_registered_issuer_key_chain(&issuer_did, &record, now)?;
+            self.public_keys.insert(issuer_did, record.public_key);
+        }
+        Ok(())
+    }
+
+    /// Cryptographically re-verify a single stored registered-issuer-key
+    /// chain against this registry's OWN resolvable keys (never against the
+    /// candidate key itself), and confirm it grants `Permission::Govern` —
+    /// the same permission `verify_issuer_registration_authority` requires
+    /// at registration time. This is deliberately independent of any live
+    /// `exo-authority::delegation::DelegationRegistry` (that registry is
+    /// runtime/in-memory and does not itself survive a restart); the
+    /// durable, cryptographically-signed chain IS the surviving evidence of
+    /// authorization.
+    fn verify_registered_issuer_key_chain(
+        &self,
+        issuer_did: &Did,
+        record: &RegisteredIssuerKey,
+        now: &Timestamp,
+    ) -> Result<(), AvcError> {
+        let chain = &record.authority_chain;
+        if chain.leaf() != Some(issuer_did) {
+            return Err(AvcError::Registry {
+                reason: format!(
+                    "registered issuer key {issuer_did} authority chain leaf does not match \
+                     the registered issuer DID"
+                ),
+            });
+        }
+        exo_authority::chain::verify_chain(chain, now, |did| self.resolve_public_key(did))
+            .map_err(|error| AvcError::Registry {
+                reason: format!(
+                    "registered issuer key {issuer_did} authority chain failed re-verification \
+                     on restore: {error}"
+                ),
+            })?;
+        if !exo_authority::chain::has_permission(chain, &Permission::Govern) {
+            return Err(AvcError::Registry {
+                reason: format!(
+                    "registered issuer key {issuer_did} authority chain no longer grants \
+                     Permission::Govern"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Number of durable per-issuer runtime registrations currently loaded
+    /// (irrespective of whether they have been re-verified into
+    /// `public_keys` yet via `restore_registered_issuer_keys`).
+    #[must_use]
+    pub fn registered_issuer_key_count(&self) -> usize {
+        self.registered_issuer_keys.len()
+    }
+
+    /// Look up the durable provenance record for a runtime-registered
+    /// issuer, if one exists (irrespective of whether it has been
+    /// re-verified into `public_keys` yet).
+    #[must_use]
+    pub fn registered_issuer_key_record(&self, issuer_did: &Did) -> Option<&RegisteredIssuerKey> {
+        self.registered_issuer_keys.get(issuer_did)
     }
 
     /// Number of credentials currently stored.
@@ -718,6 +919,16 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
 
     fn put_public_key(&mut self, did: Did, public_key: PublicKey) {
         self.public_keys.insert(did, public_key);
+    }
+
+    fn put_registered_issuer_key(&mut self, did: Did, record: RegisteredIssuerKey) {
+        // Immediately resolvable on this running node (no restart needed) ...
+        self.public_keys.insert(did.clone(), record.public_key);
+        // ... AND durably recorded with its authorizing provenance so it
+        // survives a restart (VCG-006b / #736 hard requirement (a)). Distinct
+        // from `put_public_key`'s startup-config anchors, which are never
+        // persisted.
+        self.registered_issuer_keys.insert(did, record);
     }
 
     fn put_receipt_validator_public_key(&mut self, did: Did, public_key: PublicKey) {
@@ -2035,5 +2246,203 @@ mod tests {
         assert!(reg.get_credential(&h256(0xFF)).is_none());
         assert!(reg.get_revocation(&h256(0xFF)).is_none());
         assert!(reg.get_receipt(&h256(0xFF)).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // VCG-006b #736 hard requirement (a) — durable per-issuer persistence.
+    // -----------------------------------------------------------------
+
+    /// Build a genuine, cryptographically valid single-link `AuthorityChain`
+    /// granting `Permission::Govern` from `root_did` to `leaf_did`, exactly
+    /// the shape `AvcApiState::grant_issuer_registration_authority` /
+    /// `find_delegated_issuer_registration_chain` produce in `exo-node`.
+    fn genuine_governance_chain(
+        root_did: &Did,
+        root_keypair: &KeyPair,
+        leaf_did: &Did,
+        now: Timestamp,
+        expires: Timestamp,
+    ) -> AuthorityChain {
+        let mut registry = exo_authority::delegation::DelegationRegistry::new();
+        let link = registry
+            .delegate(
+                exo_authority::delegation::DelegationGrant {
+                    from: root_did,
+                    to: leaf_did,
+                    scope: &[Permission::Govern],
+                    expires,
+                    now: &now,
+                    parent_link_id: None,
+                    delegatee_kind: exo_authority::DelegateeKind::Human,
+                    delegator_public_key: &root_keypair.public,
+                },
+                |payload| root_keypair.sign(payload),
+            )
+            .expect("valid delegation grant");
+        exo_authority::chain::build_chain(std::slice::from_ref(&link)).expect("valid chain")
+    }
+
+    /// #736 hard requirement (a): a runtime-registered issuer key must
+    /// survive a restart. Register an issuer via `put_registered_issuer_key`,
+    /// reconstruct the registry via `from_durable_state` (simulating a
+    /// restart) followed by `restore_registered_issuer_keys` (simulating
+    /// verified startup configuration having re-established this node's own
+    /// resolvable keys), and confirm the issuer's key is resolvable again and
+    /// a credential from that issuer still validates end-to-end.
+    #[test]
+    fn registered_issuer_key_survives_restart_and_credential_still_validates() {
+        let root_did = did("validator");
+        let root_keypair = keypair(0x33);
+        let issuer_did = did("runtime-issuer");
+        let issuer_keypair = keypair(0x44);
+        let now = ts(1);
+        let expires = ts(9_000_000);
+
+        let chain = genuine_governance_chain(&root_did, &root_keypair, &issuer_did, now, expires);
+
+        let mut live = fresh_registry();
+        // This node's own key must be resolvable for the chain to verify —
+        // mirrors verified startup configuration registering the validator's
+        // own operational key.
+        live.put_public_key(root_did.clone(), root_keypair.public);
+        live.put_registered_issuer_key(
+            issuer_did.clone(),
+            RegisteredIssuerKey {
+                public_key: issuer_keypair.public,
+                authority_chain: chain,
+                registered_at: now,
+            },
+        );
+
+        // Immediately usable pre-restart (VCG-006b / #736 hard requirement,
+        // no-restart path), and durably recorded.
+        assert_eq!(
+            live.resolve_public_key(&issuer_did),
+            Some(issuer_keypair.public)
+        );
+        assert_eq!(live.registered_issuer_key_count(), 1);
+
+        // Simulate a restart: export durable state, reconstruct fresh, then
+        // restore verified startup configuration (the validator's own key)
+        // before restoring registered issuer keys.
+        let durable = live.durable_state();
+        let mut restarted = InMemoryAvcRegistry::from_durable_state(durable).unwrap();
+        assert_eq!(
+            restarted.resolve_public_key(&issuer_did),
+            None,
+            "issuer key must not be resolvable before verified startup configuration \
+             and restore_registered_issuer_keys have run"
+        );
+        assert_eq!(restarted.registered_issuer_key_count(), 1);
+
+        restarted.put_public_key(root_did.clone(), root_keypair.public);
+        restarted
+            .restore_registered_issuer_keys(&ts(2))
+            .expect("stored chain must re-verify after restart");
+
+        assert_eq!(
+            restarted.resolve_public_key(&issuer_did),
+            Some(issuer_keypair.public),
+            "runtime-registered issuer key must survive a restart (#736 hard requirement (a))"
+        );
+
+        // A credential from that issuer still validates end-to-end on the
+        // "restarted" registry.
+        let mut draft = baseline_draft();
+        draft.issuer_did = issuer_did.clone();
+        draft.principal_did = issuer_did.clone();
+        let credential = issue_avc(draft, |bytes| issuer_keypair.sign(bytes)).unwrap();
+        restarted
+            .put_credential(credential)
+            .expect("credential signed by the restart-surviving issuer key must still validate");
+    }
+
+    /// Security nuance: a stored chain whose root no longer resolves as a
+    /// trusted key (e.g. the startup configuration that would have
+    /// registered it is absent or has changed) must NOT resurrect the
+    /// issuer key on restore — restore must fail closed rather than silently
+    /// admitting an unauthorized key.
+    #[test]
+    fn restore_registered_issuer_keys_fails_closed_when_root_key_unresolvable() {
+        let root_did = did("validator");
+        let root_keypair = keypair(0x33);
+        let issuer_did = did("runtime-issuer");
+        let issuer_keypair = keypair(0x44);
+        let now = ts(1);
+        let expires = ts(9_000_000);
+
+        let chain = genuine_governance_chain(&root_did, &root_keypair, &issuer_did, now, expires);
+
+        let mut live = fresh_registry();
+        live.put_public_key(root_did.clone(), root_keypair.public);
+        live.put_registered_issuer_key(
+            issuer_did.clone(),
+            RegisteredIssuerKey {
+                public_key: issuer_keypair.public,
+                authority_chain: chain,
+                registered_at: now,
+            },
+        );
+
+        let durable = live.durable_state();
+        let mut restarted = InMemoryAvcRegistry::from_durable_state(durable).unwrap();
+        // Deliberately do NOT re-register the root's key this time — as if
+        // verified startup configuration no longer trusts this root.
+        let err = restarted
+            .restore_registered_issuer_keys(&ts(2))
+            .unwrap_err();
+        match err {
+            AvcError::Registry { reason } => assert!(
+                reason.contains("runtime-issuer") || reason.contains("failed re-verification"),
+                "unexpected error reason: {reason}"
+            ),
+            other => panic!("expected AvcError::Registry, got {other:?}"),
+        }
+        assert_eq!(
+            restarted.resolve_public_key(&issuer_did),
+            None,
+            "an issuer key whose authority chain cannot be re-verified must never become \
+             resolvable — restore must fail closed, never resurrecting an unauthorized key"
+        );
+    }
+
+    /// A stored chain that has since expired must also fail closed on
+    /// restore rather than resurrecting the key.
+    #[test]
+    fn restore_registered_issuer_keys_fails_closed_when_chain_expired() {
+        let root_did = did("validator");
+        let root_keypair = keypair(0x33);
+        let issuer_did = did("runtime-issuer");
+        let issuer_keypair = keypair(0x44);
+        let now = ts(1);
+        let expires = ts(100);
+
+        let chain = genuine_governance_chain(&root_did, &root_keypair, &issuer_did, now, expires);
+
+        let mut live = fresh_registry();
+        live.put_public_key(root_did.clone(), root_keypair.public);
+        live.put_registered_issuer_key(
+            issuer_did.clone(),
+            RegisteredIssuerKey {
+                public_key: issuer_keypair.public,
+                authority_chain: chain,
+                registered_at: now,
+            },
+        );
+
+        let durable = live.durable_state();
+        let mut restarted = InMemoryAvcRegistry::from_durable_state(durable).unwrap();
+        restarted.put_public_key(root_did.clone(), root_keypair.public);
+
+        // "Now" is well past the chain's expiry.
+        let err = restarted
+            .restore_registered_issuer_keys(&ts(9_000_000_000))
+            .unwrap_err();
+        assert!(matches!(err, AvcError::Registry { .. }));
+        assert_eq!(
+            restarted.resolve_public_key(&issuer_did),
+            None,
+            "an expired authority chain must never resurrect its issuer key on restore"
+        );
     }
 }

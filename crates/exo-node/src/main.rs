@@ -1109,6 +1109,16 @@ async fn start_node(
             );
         }
     }
+    // Restore durable per-issuer runtime registrations (VCG-006b / #736 hard
+    // requirement (a)) now that every verified startup-config trust anchor
+    // that could be a chain root has been registered above. Each stored
+    // `exo-authority` DelegationRegistry chain is re-verified before its key
+    // becomes resolvable again, so a restart can never resurrect an
+    // unauthorized key.
+    {
+        let restore_now = avc::trusted_local_hlc_timestamp(avc_state.as_ref())?;
+        avc_state.restore_registered_issuer_keys(&restore_now)?;
+    }
     let avc_router = avc::avc_router(Arc::clone(&avc_state));
     tracing::info!(
         "AVC router ready — /api/v1/avc/{{issue,validate,receipts,receipts/emit,protocol,delegate,revoke,:id}}, /api/v1/agents/:did/avcs"
