@@ -386,22 +386,42 @@ impl InMemoryAvcRegistry {
     /// `Permission::Govern`) is REJECTED — its public key is never admitted
     /// into `public_keys`, so it never becomes resolvable for validation.
     ///
-    /// # Errors
+    /// Availability note (VCG-006b corrective): a record that fails
+    /// re-verification is skipped, not fatal. Restoring durable state is a
+    /// startup operation that must never take the whole node down — a single
+    /// legitimate issuer registration followed by a restart (e.g. the root
+    /// trust anchor rotated, or a chain simply expired) must not leave the
+    /// node permanently unable to start. Every skipped record is returned to
+    /// the caller (issuer DID + reason) so it can be logged; the trust
+    /// decision itself is unchanged and still fails closed per-record — a
+    /// skipped key is never admitted into `public_keys` and therefore never
+    /// becomes resolvable.
     ///
-    /// Returns `AvcError::Registry` (fail-closed) the first time a stored
-    /// chain fails re-verification, naming the offending issuer DID and
-    /// reason.
-    pub fn restore_registered_issuer_keys(&mut self, now: &Timestamp) -> Result<(), AvcError> {
+    /// Returns the list of `(issuer_did, reason)` pairs for every stored
+    /// record that was skipped because it failed re-verification. An empty
+    /// vector means every durable record re-verified and was restored.
+    pub fn restore_registered_issuer_keys(&mut self, now: &Timestamp) -> Vec<(Did, AvcError)> {
         let records: Vec<(Did, RegisteredIssuerKey)> = self
             .registered_issuer_keys
             .iter()
             .map(|(did, record)| (did.clone(), record.clone()))
             .collect();
+        let mut skipped = Vec::new();
         for (issuer_did, record) in records {
-            self.verify_registered_issuer_key_chain(&issuer_did, &record, now)?;
-            self.public_keys.insert(issuer_did, record.public_key);
+            match self.verify_registered_issuer_key_chain(&issuer_did, &record, now) {
+                Ok(()) => {
+                    self.public_keys.insert(issuer_did, record.public_key);
+                }
+                Err(error) => {
+                    // Fail closed on trust (the key is never admitted), but
+                    // fail open on availability (startup continues so the
+                    // node still comes up and can serve every other,
+                    // legitimately-verifiable registration).
+                    skipped.push((issuer_did, error));
+                }
+            }
         }
-        Ok(())
+        skipped
     }
 
     /// Cryptographically re-verify a single stored registered-issuer-key
@@ -2336,9 +2356,11 @@ mod tests {
         assert_eq!(restarted.registered_issuer_key_count(), 1);
 
         restarted.put_public_key(root_did.clone(), root_keypair.public);
-        restarted
-            .restore_registered_issuer_keys(&ts(2))
-            .expect("stored chain must re-verify after restart");
+        let skipped = restarted.restore_registered_issuer_keys(&ts(2));
+        assert!(
+            skipped.is_empty(),
+            "stored chain must re-verify after restart, got skipped: {skipped:?}"
+        );
 
         assert_eq!(
             restarted.resolve_public_key(&issuer_did),
@@ -2360,8 +2382,11 @@ mod tests {
     /// Security nuance: a stored chain whose root no longer resolves as a
     /// trusted key (e.g. the startup configuration that would have
     /// registered it is absent or has changed) must NOT resurrect the
-    /// issuer key on restore — restore must fail closed rather than silently
-    /// admitting an unauthorized key.
+    /// issuer key on restore — restore must fail closed on TRUST (the key is
+    /// never admitted), but must NOT fail closed on AVAILABILITY: restore
+    /// itself must not error, so a single unverifiable persisted record can
+    /// never prevent the node from starting (VCG-006b availability
+    /// corrective).
     #[test]
     fn restore_registered_issuer_keys_fails_closed_when_root_key_unresolvable() {
         let root_did = did("validator");
@@ -2388,10 +2413,16 @@ mod tests {
         let mut restarted = InMemoryAvcRegistry::from_durable_state(durable).unwrap();
         // Deliberately do NOT re-register the root's key this time — as if
         // verified startup configuration no longer trusts this root.
-        let err = restarted
-            .restore_registered_issuer_keys(&ts(2))
-            .unwrap_err();
-        match err {
+        let skipped = restarted.restore_registered_issuer_keys(&ts(2));
+        assert_eq!(
+            skipped.len(),
+            1,
+            "restore must not error the whole startup — it must report the \
+             unverifiable record as skipped instead"
+        );
+        let (skipped_did, reason) = &skipped[0];
+        assert_eq!(skipped_did, &issuer_did);
+        match reason {
             AvcError::Registry { reason } => assert!(
                 reason.contains("runtime-issuer") || reason.contains("failed re-verification"),
                 "unexpected error reason: {reason}"
@@ -2402,12 +2433,14 @@ mod tests {
             restarted.resolve_public_key(&issuer_did),
             None,
             "an issuer key whose authority chain cannot be re-verified must never become \
-             resolvable — restore must fail closed, never resurrecting an unauthorized key"
+             resolvable — restore must fail closed on trust, never resurrecting an \
+             unauthorized key"
         );
     }
 
-    /// A stored chain that has since expired must also fail closed on
-    /// restore rather than resurrecting the key.
+    /// A stored chain that has since expired must also fail closed on trust
+    /// (never resurrecting the key), while restore itself still succeeds so
+    /// startup is not blocked by an expired persisted record.
     #[test]
     fn restore_registered_issuer_keys_fails_closed_when_chain_expired() {
         let root_did = did("validator");
@@ -2435,14 +2468,110 @@ mod tests {
         restarted.put_public_key(root_did.clone(), root_keypair.public);
 
         // "Now" is well past the chain's expiry.
-        let err = restarted
-            .restore_registered_issuer_keys(&ts(9_000_000_000))
-            .unwrap_err();
-        assert!(matches!(err, AvcError::Registry { .. }));
+        let skipped = restarted.restore_registered_issuer_keys(&ts(9_000_000_000));
+        assert_eq!(
+            skipped.len(),
+            1,
+            "an expired record must be skipped, not turned into a startup-fatal error"
+        );
+        assert_eq!(skipped[0].0, issuer_did);
+        assert!(matches!(skipped[0].1, AvcError::Registry { .. }));
         assert_eq!(
             restarted.resolve_public_key(&issuer_did),
             None,
             "an expired authority chain must never resurrect its issuer key on restore"
+        );
+    }
+
+    /// VCG-006b availability corrective: `restore_registered_issuer_keys`
+    /// must never abort the whole restore because ONE stored record fails
+    /// re-verification. Given durable state with one verifiable record and
+    /// one unverifiable record (unresolvable root), restore must not error,
+    /// the verifiable key must be admitted, and the unverifiable key must
+    /// NOT be admitted — proving both non-fatal startup and preserved
+    /// fail-closed trust in the same call.
+    #[test]
+    fn restore_registered_issuer_keys_skips_unverifiable_records_without_erroring() {
+        let good_root_did = did("validator");
+        let good_root_keypair = keypair(0x33);
+        let good_issuer_did = did("good-issuer");
+        let good_issuer_keypair = keypair(0x44);
+
+        let bad_root_did = did("orphaned-root");
+        let bad_root_keypair = keypair(0x55);
+        let bad_issuer_did = did("bad-issuer");
+        let bad_issuer_keypair = keypair(0x66);
+
+        let now = ts(1);
+        let expires = ts(9_000_000);
+
+        let good_chain = genuine_governance_chain(
+            &good_root_did,
+            &good_root_keypair,
+            &good_issuer_did,
+            now,
+            expires,
+        );
+        // Signed by a root whose key will never be re-registered after
+        // restart — simulates a trust anchor that no longer resolves.
+        let bad_chain = genuine_governance_chain(
+            &bad_root_did,
+            &bad_root_keypair,
+            &bad_issuer_did,
+            now,
+            expires,
+        );
+
+        let mut live = fresh_registry();
+        live.put_public_key(good_root_did.clone(), good_root_keypair.public);
+        live.put_public_key(bad_root_did.clone(), bad_root_keypair.public);
+        live.put_registered_issuer_key(
+            good_issuer_did.clone(),
+            RegisteredIssuerKey {
+                public_key: good_issuer_keypair.public,
+                authority_chain: good_chain,
+                registered_at: now,
+            },
+        );
+        live.put_registered_issuer_key(
+            bad_issuer_did.clone(),
+            RegisteredIssuerKey {
+                public_key: bad_issuer_keypair.public,
+                authority_chain: bad_chain,
+                registered_at: now,
+            },
+        );
+        assert_eq!(live.registered_issuer_key_count(), 2);
+
+        // Simulate a restart: only the good root's key is re-established by
+        // verified startup configuration. The orphaned root is gone.
+        let durable = live.durable_state();
+        let mut restarted = InMemoryAvcRegistry::from_durable_state(durable).unwrap();
+        restarted.put_public_key(good_root_did.clone(), good_root_keypair.public);
+
+        let skipped = restarted.restore_registered_issuer_keys(&ts(2));
+
+        // Non-fatal startup: the call returns normally (a `Vec`, never a
+        // `Result::Err`) even though one of the two records is unverifiable.
+        assert_eq!(
+            skipped.len(),
+            1,
+            "exactly the unverifiable record must be reported as skipped"
+        );
+        assert_eq!(skipped[0].0, bad_issuer_did);
+
+        // Preserved fail-closed trust: the verifiable key IS admitted...
+        assert_eq!(
+            restarted.resolve_public_key(&good_issuer_did),
+            Some(good_issuer_keypair.public),
+            "a genuinely re-verifiable record must still be restored"
+        );
+        // ...and the unverifiable key is NOT admitted.
+        assert_eq!(
+            restarted.resolve_public_key(&bad_issuer_did),
+            None,
+            "an unverifiable record must never be admitted into public_keys, even though \
+             restore as a whole must not error"
         );
     }
 }

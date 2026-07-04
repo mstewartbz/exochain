@@ -1009,16 +1009,35 @@ impl AvcApiState {
     /// resolvable. A stored record whose chain no longer verifies is
     /// rejected and its key never becomes resolvable, so restart can never
     /// resurrect an unauthorized key.
+    ///
+    /// Availability corrective (VCG-006b): a record that fails
+    /// re-verification is skipped and logged at `warn` level — it is NOT
+    /// fatal to startup. Before this fix, the very first legitimate
+    /// `POST /api/v1/avc/issuers` registration made every subsequent restart
+    /// fail outright, because the production validator key lives in
+    /// `receipt_validator_public_keys`, never in the general resolvable
+    /// `public_keys` map, so `validator_did`-rooted chains could never
+    /// re-verify and the propagated error aborted the whole node. Only the
+    /// per-record trust decision is unchanged: an unverifiable/tampered/
+    /// expired key still never becomes resolvable.
+    ///
+    /// Returns an error only for genuine registry unavailability (e.g. a
+    /// poisoned mutex), never for a record that simply failed
+    /// re-verification.
     pub fn restore_registered_issuer_keys(&self, now: &Timestamp) -> anyhow::Result<()> {
         let mut registry = self.registry.lock().map_err(|_| {
             anyhow::anyhow!("AVC registry unavailable while restoring registered issuer keys")
         })?;
         let mut candidate = registry.clone();
-        candidate
-            .restore_registered_issuer_keys(now)
-            .map_err(|error| {
-                anyhow::anyhow!("failed to restore durable AVC registered issuer keys: {error}")
-            })?;
+        let skipped = candidate.restore_registered_issuer_keys(now);
+        for (issuer_did, reason) in &skipped {
+            tracing::warn!(
+                issuer_did = %issuer_did,
+                error = %reason,
+                "skipped restoring a durable AVC registered issuer key: authority chain failed \
+                 re-verification; the key remains unresolvable but node startup continues"
+            );
+        }
         *registry = candidate;
         Ok(())
     }
