@@ -113,6 +113,44 @@ pub struct Invoice {
     pub settlement_authorized: bool,
 }
 
+/// The result of reconciling a meter's self-reported byte total against
+/// [`TenantStore`]'s own authoritative, durably recorded byte total for a
+/// tenant.
+///
+/// `store_total` is always computed directly from the store's real stored
+/// state ([`TenantStore::total_bytes`]) — it is never influenced by the
+/// meter's self-reported `amount` fields. This means a meter that has
+/// drifted from reality (including one that *over-reports*, recording more
+/// bytes than were actually put) cannot silently pass reconciliation: the
+/// discrepancy is always visible via [`ReconciledBytes::is_drifted`] and the
+/// authoritative number is always available via
+/// [`ReconciledBytes::store_total`], regardless of what the meter claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconciledBytes {
+    /// The store's own authoritative byte total for the tenant, summed from
+    /// actually persisted item byte lengths.
+    pub store_total: u64,
+    /// The meter's self-reported byte total for the tenant (sum of recorded
+    /// `BytesWritten` event amounts). Never used as the trusted value.
+    pub meter_total: u64,
+}
+
+impl ReconciledBytes {
+    /// True when the meter's self-reported total agrees exactly with the
+    /// store's authoritative total.
+    #[must_use]
+    pub fn matches(&self) -> bool {
+        self.meter_total == self.store_total
+    }
+
+    /// True when the meter's self-reported total disagrees with the store's
+    /// authoritative total — in either direction (under- or over-report).
+    #[must_use]
+    pub fn is_drifted(&self) -> bool {
+        !self.matches()
+    }
+}
+
 /// Records tenant usage events and reconciles them against actual
 /// [`TenantStore`] state, aggregates over HLC windows, and produces
 /// deterministic billing exports. Metering never gates the isolation/trust
@@ -179,30 +217,40 @@ impl UsageMeter {
         totals
     }
 
-    /// Reconcile this meter's recorded byte totals for `tenant_id` against
-    /// the actual items present in `store`: only the first `store.count`
-    /// recorded `BytesWritten` events (in HLC order) for the tenant are
-    /// credited, so a meter that has drifted ahead of what is really
-    /// persisted cannot silently inflate the reconciled total. This is a
-    /// reconciliation check against actual store state, not a second
-    /// independently-tracked counter.
-    pub fn reconcile_bytes_with_store(&self, tenant_id: &Uuid, store: &TenantStore) -> Result<u64> {
-        let stored_item_count = store.count(tenant_id);
+    /// Reconcile this meter's self-reported byte totals for `tenant_id`
+    /// against the store's own authoritative byte total
+    /// ([`TenantStore::total_bytes`]) — the actual, durably recorded byte
+    /// lengths of every item really persisted for the tenant.
+    ///
+    /// This is a genuine store-backed check, not merely gating on item
+    /// *count*: the meter's summed `BytesWritten` amount is compared
+    /// directly against the store's real recorded byte total, so a meter
+    /// whose self-reported amounts have drifted from reality — even while
+    /// reporting the correct number of *events* — cannot pass silently.
+    ///
+    /// Returns [`ReconciledBytes`], which always carries the store's
+    /// authoritative total plus whether the meter agreed with it. Callers
+    /// that only want the trustworthy number should use
+    /// [`ReconciledBytes::store_total`], which is never derived from the
+    /// meter's self-reported sum.
+    pub fn reconcile_bytes_with_store(
+        &self,
+        tenant_id: &Uuid,
+        store: &TenantStore,
+    ) -> Result<ReconciledBytes> {
+        let store_total = store.total_bytes(tenant_id);
 
-        let mut tenant_events: Vec<&UsageEvent> = self
+        let meter_total: u64 = self
             .events
             .iter()
             .filter(|e| e.tenant_id == *tenant_id && e.kind == UsageKind::BytesWritten)
-            .collect();
-        tenant_events.sort_by_key(|e| e.at);
-
-        let reconciled: u64 = tenant_events
-            .into_iter()
-            .take(stored_item_count)
             .map(|e| e.amount)
             .sum();
 
-        Ok(reconciled)
+        Ok(ReconciledBytes {
+            store_total,
+            meter_total,
+        })
     }
 
     /// Register (or replace) a tenant's billing plan. Absent a call to this
@@ -253,18 +301,21 @@ mod tests {
         Timestamp::new(ms, 0)
     }
 
-    fn item(tenant_id: Uuid, item_id: Uuid, tag: &str) -> TenantData {
+    fn item(tenant_id: Uuid, item_id: Uuid, tag: &str, byte_len: u64) -> TenantData {
         TenantData {
             id: item_id,
             tenant_id,
             owner: Did::new("did:exo:owner").unwrap(),
             content_hash: Hash256::digest(tag.as_bytes()),
+            byte_len,
         }
     }
 
     /// (1) Usage totals must reconcile against TenantStore's ACTUAL stored
-    /// state across multiple tenants — not a counter that can silently
-    /// drift away from what is really persisted.
+    /// byte state across multiple tenants — not a counter that can silently
+    /// drift away from what is really persisted. Writes items of known,
+    /// different byte sizes and asserts the reconciled total equals the
+    /// store's real recorded byte total per tenant.
     #[test]
     fn usage_meter_totals_match_tenant_store_state() {
         let mut store = TenantStore::new();
@@ -273,47 +324,118 @@ mod tests {
         let t1 = uuid(1);
         let t2 = uuid(2);
 
-        // Tenant 1: two writes of known sizes.
+        // Tenant 1: two writes of known, different sizes.
         let t1_sizes = [128u64, 256u64];
         for (i, size) in t1_sizes.iter().enumerate() {
             let item_id = uuid(10 + i as u8);
             store
-                .put(t1, item(t1, item_id, &format!("t1-{i}")))
+                .put(t1, item(t1, item_id, &format!("t1-{i}"), *size))
                 .unwrap();
             meter
                 .record_bytes_written(t1, *size, ts(1_000 + i as u64))
                 .unwrap();
         }
 
-        // Tenant 2: three writes of known sizes.
+        // Tenant 2: three writes of known, different sizes.
         let t2_sizes = [64u64, 32u64, 512u64];
         for (i, size) in t2_sizes.iter().enumerate() {
             let item_id = uuid(20 + i as u8);
             store
-                .put(t2, item(t2, item_id, &format!("t2-{i}")))
+                .put(t2, item(t2, item_id, &format!("t2-{i}"), *size))
                 .unwrap();
             meter
                 .record_bytes_written(t2, *size, ts(2_000 + i as u64))
                 .unwrap();
         }
 
-        // Reconciliation must confirm the meter's totals match what the
-        // store actually holds for each tenant, and must report the byte
-        // totals themselves (matching the sums above) — not merely "ok".
+        // Reconciliation must confirm the meter's totals match the store's
+        // REAL recorded byte total for each tenant — the store-authoritative
+        // number, not merely "ok".
         let t1_reconciled = meter.reconcile_bytes_with_store(&t1, &store).unwrap();
         let t2_reconciled = meter.reconcile_bytes_with_store(&t2, &store).unwrap();
 
-        assert_eq!(t1_reconciled, t1_sizes.iter().sum::<u64>());
-        assert_eq!(t2_reconciled, t2_sizes.iter().sum::<u64>());
+        assert_eq!(t1_reconciled.store_total, t1_sizes.iter().sum::<u64>());
+        assert_eq!(t2_reconciled.store_total, t2_sizes.iter().sum::<u64>());
+        assert_eq!(t1_reconciled.meter_total, t1_sizes.iter().sum::<u64>());
+        assert_eq!(t2_reconciled.meter_total, t2_sizes.iter().sum::<u64>());
+        assert!(t1_reconciled.matches());
+        assert!(t2_reconciled.matches());
+        assert!(!t1_reconciled.is_drifted());
+        assert!(!t2_reconciled.is_drifted());
 
-        // Store item counts must independently agree with what was written.
-        assert_eq!(store.count(&t1), t1_sizes.len());
-        assert_eq!(store.count(&t2), t2_sizes.len());
+        // The store's own byte total must independently agree with what was
+        // actually put — this is the genuine store-backed check.
+        assert_eq!(store.total_bytes(&t1), t1_sizes.iter().sum::<u64>());
+        assert_eq!(store.total_bytes(&t2), t2_sizes.iter().sum::<u64>());
 
         // A tenant with no store activity and no meter records reconciles
         // to zero, not an error and not a stale nonzero value.
         let t3 = uuid(3);
-        assert_eq!(meter.reconcile_bytes_with_store(&t3, &store).unwrap(), 0);
+        let t3_reconciled = meter.reconcile_bytes_with_store(&t3, &store).unwrap();
+        assert_eq!(t3_reconciled.store_total, 0);
+        assert_eq!(t3_reconciled.meter_total, 0);
+        assert!(t3_reconciled.matches());
+    }
+
+    /// (1b) A meter that OVER-REPORTS — claiming more bytes were written
+    /// than were actually persisted in the store — must be caught by
+    /// reconciliation, not silently trusted. This is the exact defect the
+    /// adversarial review flagged: summing the meter's own self-reported
+    /// `amount` field without ever checking it against real stored bytes.
+    #[test]
+    fn reconciliation_catches_a_meter_that_over_reports_bytes() {
+        let mut store = TenantStore::new();
+        let mut meter = UsageMeter::new();
+
+        let tenant = uuid(4);
+
+        // Only 100 bytes are ever actually stored...
+        store
+            .put(tenant, item(tenant, uuid(40), "real-item", 100))
+            .unwrap();
+
+        // ...but the meter claims 100,000 bytes were written (drifted /
+        // buggy / malicious self-report far exceeding reality).
+        meter
+            .record_bytes_written(tenant, 100_000, ts(1_000))
+            .unwrap();
+
+        let reconciled = meter.reconcile_bytes_with_store(&tenant, &store).unwrap();
+
+        // The store-authoritative total must reflect ONLY what is really
+        // persisted, never the meter's inflated claim.
+        assert_eq!(reconciled.store_total, 100);
+        assert_eq!(reconciled.meter_total, 100_000);
+
+        // The discrepancy must be visible — reconciliation must not report
+        // "matches" when the meter has drifted from real store state.
+        assert!(reconciled.is_drifted());
+        assert!(!reconciled.matches());
+        assert_ne!(reconciled.store_total, reconciled.meter_total);
+    }
+
+    /// (1c) A meter that UNDER-REPORTS is likewise caught: the store's
+    /// authoritative total is always what is real, regardless of direction
+    /// of drift.
+    #[test]
+    fn reconciliation_catches_a_meter_that_under_reports_bytes() {
+        let mut store = TenantStore::new();
+        let mut meter = UsageMeter::new();
+
+        let tenant = uuid(5);
+
+        store
+            .put(tenant, item(tenant, uuid(50), "real-item", 9_000))
+            .unwrap();
+
+        // The meter only claims 10 bytes were written.
+        meter.record_bytes_written(tenant, 10, ts(1_000)).unwrap();
+
+        let reconciled = meter.reconcile_bytes_with_store(&tenant, &store).unwrap();
+
+        assert_eq!(reconciled.store_total, 9_000);
+        assert_eq!(reconciled.meter_total, 10);
+        assert!(reconciled.is_drifted());
     }
 
     /// (2) Aggregation must use exo_core::Timestamp (HLC) ordering for the
