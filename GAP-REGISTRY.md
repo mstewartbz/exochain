@@ -152,7 +152,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
 | VCG-010 | P1 | Open | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
-| VCG-012 | P2 | Open | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
+| VCG-012 | P2 | Green-local | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
 | VCG-013 | P2 | Open | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
 | VCG-014 | P2 | Green-local | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
 | VCG-015 | P1 | Open | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
@@ -1065,9 +1065,43 @@ claims are upgraded.
 ## VCG-012 - Distributed HLC Sync Protocol Is Not Built
 
 **Priority:** P2
-**Status:** Open
+**Status:** Green-local
 **Classification:** EXOCHAIN core
 **Owner role:** Distributed time
+
+Lane record (2026-07-04, branch `vcg/012-hlc-sync`):
+
+- Scout correction confirmed: `hlc.rs` local merge math (drift/overflow/
+  monotonicity guards, 25 tests) was already complete and untouched. The open
+  surface was the WIRE PROTOCOL — multi-node HLC exchange and partition
+  recovery — only.
+- Green per D6 (`exo-core/src/hlc.rs`, `exo-node/src/{wire,sync,network}.rs`):
+  a `WireMessage::HlcSync(HlcSyncMsg { sender, timestamp })` variant rides the
+  EXISTING DAG-sync (consensus) gossipsub topic — no dedicated clock topic.
+  The real receive path (`run_sync_engine` → `handle_message` →
+  `handle_hlc_sync`, spawned in `main.rs`) merges each remote timestamp via
+  `observe_remote_hlc_timestamp`, which calls `HybridClock::update` unmodified
+  and, on any drift/overflow anomaly, records a RETRIEVABLE `HlcAnomalyEvidence`
+  object (append-only `HlcAnomalyRecorder`) AND re-propagates the error —
+  satisfying D6's "time anomalies are constitutional events, not log lines"
+  and "fail-closed guard never weakened".
+- Partition recovery (`reconcile_partition_recovery`) converges to the quorum
+  MEDIAN (`sorted[(len-1)/2]`, deterministic lower-of-two-middle), never the
+  max — directly enforcing D6's "silent accept-max is forbidden". An empty
+  peer set fails closed. A wide-outlier peer is reported, not silently folded.
+- Adversarial correction (coordinator): the red-stage round-trip test was
+  internally contradictory (constant `|0|` clock asserting acceptance of a
+  2.7h-ahead timestamp the 5s drift guard must reject). The GREEN worker
+  correctly refused to weaken the guard and escalated (D3); the corrective
+  made the fixture coherent (fresh remote 100 ms ahead of a realistic base)
+  so it proves the real happy-path round-trip WITHOUT touching any guard.
+  Re-refutation: NOT-REFUTED (wiring real end-to-end; `MAX_DRIFT_MS` and
+  `HybridClock::update` unchanged; median-not-max verified).
+- Gates: `exochain-core` 321 pass; `exochain-node` full suite 1320 pass
+  (hlc 9/9); clippy `-D warnings` clean on both crates; nightly fmt clean.
+- Status Green-local: distributed HLC wire sync, partition-recovery median
+  reconciliation, and constitutional anomaly evidence delivered. Closed after
+  merge + CI.
 
 Evidence:
 

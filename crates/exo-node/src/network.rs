@@ -931,4 +931,135 @@ mod tests {
         .unwrap_or(0);
         assert_eq!(count, 1, "Should have exactly 1 peer");
     }
+
+    // -----------------------------------------------------------------
+    // VCG-012 RED — distributed HLC sync (D6: HLC rides the existing
+    // gossipsub DAG-sync channel; no dedicated clock topic).
+    // -----------------------------------------------------------------
+
+    /// RED (expected compile failure until D6 lands): there is no
+    /// `WireMessage` variant carrying an HLC `Timestamp` today. D6 requires
+    /// HLC timestamps to piggyback on the existing gossipsub DAG-sync
+    /// channel (`topics::CONSENSUS`) rather than adding a dedicated clock
+    /// topic. This test performs a REAL two-node wire round trip: node A
+    /// publishes an HLC-carrying wire message over gossipsub, node B
+    /// receives it via its real `NetworkEvent::MessageReceived` stream and
+    /// must call `HybridClock::update` on receipt, advancing its local
+    /// clock past the received remote timestamp.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hlc_timestamp_round_trips_over_gossipsub() {
+        let mut swarm1 = build_swarm().unwrap();
+        let mut swarm2 = build_swarm().unwrap();
+        let peer2 = *swarm2.local_peer_id();
+
+        swarm1
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .unwrap();
+        swarm2
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .unwrap();
+
+        let mut addr2 = wait_for_tcp_listen_addr(&mut swarm2).await;
+        addr2.push(Protocol::P2p(peer2));
+
+        let (cmd_tx1, cmd_rx1) = mpsc::channel(32);
+        let (event_tx1, _event_rx1) = mpsc::channel(32);
+        // Node B is a pure receiver in this round-trip; its command sender is
+        // never used to publish, but must stay bound (underscore, not dropped)
+        // so node B's network loop keeps a live command channel for its
+        // lifetime.
+        let (_cmd_tx2, cmd_rx2) = mpsc::channel(32);
+        let (event_tx2, mut event_rx2) = mpsc::channel(32);
+
+        tokio::spawn(run_network_loop(swarm1, cmd_rx1, event_tx1));
+        tokio::spawn(run_network_loop(swarm2, cmd_rx2, event_tx2));
+
+        let handle1 = NetworkHandle::new(cmd_tx1);
+
+        handle1.dial(addr2).await.unwrap();
+
+        // Wait for the gossipsub mesh to form on the existing DAG-sync
+        // (consensus) topic before publishing — no dedicated clock topic.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // A *legitimately fresh* remote HLC timestamp: node B's physical clock
+        // sits at a realistic base and node A's timestamp is only 100 ms ahead
+        // — well inside HybridClock's 5 s drift tolerance. This is the
+        // happy-path round trip: a fresh remote reading is received over the
+        // wire and merged. The pathological "far-future" timestamp that must
+        // be rejected-and-recorded is the domain of
+        // clock_anomaly_emits_dag_evidence_object, not this test.
+        let node_b_physical_ms: u64 = 1_000_000;
+        let remote_timestamp = Timestamp::new(node_b_physical_ms + 100, 3);
+
+        // HLC rides the existing DAG-sync (consensus) gossipsub channel per
+        // D6 — it does not get a dedicated clock topic.
+        let hlc_message = WireMessage::HlcSync(wire::HlcSyncMsg {
+            sender: Did::new("did:exo:hlc-node-a").unwrap(),
+            timestamp: remote_timestamp,
+        });
+
+        handle1
+            .publish(topics::CONSENSUS, hlc_message)
+            .await
+            .expect("HLC wire message should publish over the existing DAG-sync channel");
+
+        let mut node_b_clock =
+            exo_core::hlc::HybridClock::with_wall_clock(move || node_b_physical_ms);
+
+        let advanced = tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(event) = event_rx2.recv().await {
+                if let NetworkEvent::MessageReceived { message, .. } = event {
+                    if let WireMessage::HlcSync(hlc) = message {
+                        node_b_clock
+                            .update(&hlc.timestamp)
+                            .expect("HLC update should accept a fresh remote timestamp");
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            advanced,
+            "node B should receive the HLC wire message over gossipsub and call HybridClock::update"
+        );
+        assert!(
+            node_b_clock.current() > remote_timestamp,
+            "node B's HybridClock must advance strictly past the received remote HLC timestamp"
+        );
+    }
+
+    /// RED (expected behavioral failure until D6 lands): D6 requires that
+    /// any drift/replay anomaly detected during HLC sync is recorded as a
+    /// DAG evidence object (a constitutional event), not merely logged.
+    /// This test simulates a replay/drift anomaly arriving over the wire
+    /// and asserts a retrievable evidence object was recorded.
+    #[tokio::test]
+    async fn clock_anomaly_emits_dag_evidence_object() {
+        // No such recorder exists yet on the exo-node side — compile-red.
+        let recorder = crate::sync::HlcAnomalyRecorder::new();
+
+        let mut clock = exo_core::hlc::HybridClock::with_wall_clock(|| 1_000);
+        let excessive_drift = Timestamp::new(1_000 + clock.max_drift_ms() + 1, 0);
+
+        let outcome =
+            crate::sync::observe_remote_hlc_timestamp(&mut clock, &excessive_drift, &recorder);
+
+        assert!(
+            outcome.is_err(),
+            "excessive drift must still fail closed at the clock layer"
+        );
+
+        let recorded = recorder.recorded_evidence();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "a clock drift anomaly must record exactly one DAG evidence object, not just a log line"
+        );
+        assert_eq!(recorded[0].anomaly_physical_ms, excessive_drift.physical_ms);
+    }
 }
