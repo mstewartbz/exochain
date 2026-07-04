@@ -371,6 +371,13 @@ pub struct OtpChallenge {
 // FingerprintSignal
 // ---------------------------------------------------------------------------
 
+/// Number of documented `FingerprintSignal` variants (spec §3.1). Used to
+/// bound client-submitted `signal_hashes` maps: a map larger than this count
+/// cannot correspond to real signal types and is rejected as an oversized
+/// ingestion payload (VCG-009).
+#[allow(dead_code)]
+pub const FINGERPRINT_SIGNAL_COUNT: usize = 15;
+
 /// The 15 client-side device signals used in fingerprinting.
 ///
 /// Only their BLAKE3 hashes are transmitted — raw values are never sent.
@@ -414,6 +421,30 @@ impl fmt::Display for FingerprintSignal {
             Self::WebRTCLocalIPs => "WebRTCLocalIPs",
         };
         f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for FingerprintSignal {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "AudioContext" => Ok(Self::AudioContext),
+            "BatteryStatus" => Ok(Self::BatteryStatus),
+            "CanvasRendering" => Ok(Self::CanvasRendering),
+            "ColorDepthDPR" => Ok(Self::ColorDepthDPR),
+            "DeviceMemory" => Ok(Self::DeviceMemory),
+            "DoNotTrack" => Ok(Self::DoNotTrack),
+            "FontEnumeration" => Ok(Self::FontEnumeration),
+            "HardwareConcurrency" => Ok(Self::HardwareConcurrency),
+            "Platform" => Ok(Self::Platform),
+            "ScreenGeometry" => Ok(Self::ScreenGeometry),
+            "TimezoneLocale" => Ok(Self::TimezoneLocale),
+            "TouchSupport" => Ok(Self::TouchSupport),
+            "UserAgent" => Ok(Self::UserAgent),
+            "WebGLParameters" => Ok(Self::WebGLParameters),
+            "WebRTCLocalIPs" => Ok(Self::WebRTCLocalIPs),
+            _ => Err(()),
+        }
     }
 }
 
