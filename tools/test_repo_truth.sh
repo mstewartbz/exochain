@@ -132,13 +132,35 @@ grep -F 'expect_used = "deny"' Cargo.toml >/dev/null \
 test_mode=$(jq -r '.tests.mode' "$json_file")
 [ "$test_mode" = "skipped" ] || fail "--skip-tests should report tests.mode=skipped, got $test_mode"
 
-grep -F "| Rust crates | $expected_crates |" README.md >/dev/null || fail "README crate count is not repo-truth derived"
-grep -F "| Rust source files | $expected_rs_files |" README.md >/dev/null || fail "README Rust source file count is not repo-truth derived"
-grep -F "| Rust LOC | $expected_rs_loc |" README.md >/dev/null || fail "README Rust LOC is not repo-truth derived"
-readme_tests_listed=$(awk -F'|' '/Workspace tests/ { gsub(/[^0-9]/, "", $3); print $3; exit }' README.md)
-[ "$readme_tests_listed" = "$expected_tests_listed" ] \
-  || fail "README workspace test count $readme_tests_listed != listed test count $expected_tests_listed"
-grep -F "| CI quality gates | $expected_gates |" README.md >/dev/null || fail "README CI gate count is not repo-truth derived"
+# ============================================================================
+# README VERACITY GATE — TEMPORARILY DISABLED 2026-07-04 (Bob's directive).
+#
+# The exact-number README assertions below (crate / file / LOC / test / gate /
+# traceability / threat counts) force EVERY concurrent PR to touch the same
+# README repo-truth lines and collide on merge — a recurring merge tax on
+# parallel lanes. Disabled to remove that tax while multiple lanes are in
+# flight.
+#
+# RE-ENABLE at the 2026-07-05 truing-up: set README_VERACITY_GATE=on (or flip
+# the default below), regenerate the numbers with `bash tools/repo_truth.sh`,
+# and update README.md to match the true tree.
+#
+# Everything ELSE in this script stays enforced: unresolved merge-conflict
+# markers, license consistency, cargo-metadata crate-count sanity, the
+# JSON-vs-tree file/LOC checks, clippy/deny lint presence, and the static
+# README claim checks (published-releases, coverage scoping, no stale claims).
+# ============================================================================
+README_VERACITY_GATE="${README_VERACITY_GATE:-off}"
+
+if [ "$README_VERACITY_GATE" = "on" ]; then
+  grep -F "| Rust crates | $expected_crates |" README.md >/dev/null || fail "README crate count is not repo-truth derived"
+  grep -F "| Rust source files | $expected_rs_files |" README.md >/dev/null || fail "README Rust source file count is not repo-truth derived"
+  grep -F "| Rust LOC | $expected_rs_loc |" README.md >/dev/null || fail "README Rust LOC is not repo-truth derived"
+  readme_tests_listed=$(awk -F'|' '/Workspace tests/ { gsub(/[^0-9]/, "", $3); print $3; exit }' README.md)
+  [ "$readme_tests_listed" = "$expected_tests_listed" ] \
+    || fail "README workspace test count $readme_tests_listed != listed test count $expected_tests_listed"
+  grep -F "| CI quality gates | $expected_gates |" README.md >/dev/null || fail "README CI gate count is not repo-truth derived"
+fi
 
 trace_total=$(jq '.traceability.total' "$json_file")
 trace_implemented=$(jq '.traceability.implemented' "$json_file")
@@ -150,11 +172,13 @@ threat_partial=$(jq '.threats.partial' "$json_file")
 threat_planned=$(jq '.threats.planned' "$json_file")
 tag_count=$(jq '.releases.tag_count' "$json_file")
 
-grep -F "**Traceability matrix** maps $trace_total requirements" README.md >/dev/null \
-  || fail "README traceability count is not repo-truth derived"
+if [ "$README_VERACITY_GATE" = "on" ]; then
+  grep -F "**Traceability matrix** maps $trace_total requirements" README.md >/dev/null \
+    || fail "README traceability count is not repo-truth derived"
 
-grep -F "**Threat model** covers $threat_total threats tracked: $threat_implemented implemented, $threat_partial partial, $threat_planned planned" README.md >/dev/null \
-  || fail "README threat count/status is not repo-truth derived"
+  grep -F "**Threat model** covers $threat_total threats tracked: $threat_implemented implemented, $threat_partial partial, $threat_planned planned" README.md >/dev/null \
+    || fail "README threat count/status is not repo-truth derived"
+fi
 
 if [ "$tag_count" -gt 0 ]; then
   if grep -F "| Published releases | None (pre-release) | \`git tag -l\` |" README.md >/dev/null; then
