@@ -737,8 +737,9 @@ mod tests {
             Timestamp::new(999_999, 0), // wide outlier vs. the quorum
         ];
 
-        let outcome = HybridClock::reconcile_partition_recovery_with_anomaly_report(&peer_timestamps)
-            .expect("reconciliation with anomaly reporting must succeed");
+        let outcome =
+            HybridClock::reconcile_partition_recovery_with_anomaly_report(&peer_timestamps)
+                .expect("reconciliation with anomaly reporting must succeed");
 
         assert_eq!(outcome.median, Timestamp::new(100_200, 0));
         assert!(

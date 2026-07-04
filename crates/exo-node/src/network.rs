@@ -964,7 +964,11 @@ mod tests {
 
         let (cmd_tx1, cmd_rx1) = mpsc::channel(32);
         let (event_tx1, _event_rx1) = mpsc::channel(32);
-        let (cmd_tx2, cmd_rx2) = mpsc::channel(32);
+        // Node B is a pure receiver in this round-trip; its command sender is
+        // never used to publish, but must stay bound (underscore, not dropped)
+        // so node B's network loop keeps a live command channel for its
+        // lifetime.
+        let (_cmd_tx2, cmd_rx2) = mpsc::channel(32);
         let (event_tx2, mut event_rx2) = mpsc::channel(32);
 
         tokio::spawn(run_network_loop(swarm1, cmd_rx1, event_tx1));
@@ -978,11 +982,18 @@ mod tests {
         // (consensus) topic before publishing — no dedicated clock topic.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let remote_timestamp = Timestamp::new(9_999_999, 3);
+        // A *legitimately fresh* remote HLC timestamp: node B's physical clock
+        // sits at a realistic base and node A's timestamp is only 100 ms ahead
+        // — well inside HybridClock's 5 s drift tolerance. This is the
+        // happy-path round trip: a fresh remote reading is received over the
+        // wire and merged. The pathological "far-future" timestamp that must
+        // be rejected-and-recorded is the domain of
+        // clock_anomaly_emits_dag_evidence_object, not this test.
+        let node_b_physical_ms: u64 = 1_000_000;
+        let remote_timestamp = Timestamp::new(node_b_physical_ms + 100, 3);
 
-        // This variant does not exist yet — compile-red until the D6 wire
-        // protocol change lands. HLC rides the existing DAG-sync channel,
-        // it does not get a dedicated clock topic.
+        // HLC rides the existing DAG-sync (consensus) gossipsub channel per
+        // D6 — it does not get a dedicated clock topic.
         let hlc_message = WireMessage::HlcSync(wire::HlcSyncMsg {
             sender: Did::new("did:exo:hlc-node-a").unwrap(),
             timestamp: remote_timestamp,
@@ -993,7 +1004,8 @@ mod tests {
             .await
             .expect("HLC wire message should publish over the existing DAG-sync channel");
 
-        let mut node_b_clock = exo_core::hlc::HybridClock::with_wall_clock(|| 0);
+        let mut node_b_clock =
+            exo_core::hlc::HybridClock::with_wall_clock(move || node_b_physical_ms);
 
         let advanced = tokio::time::timeout(Duration::from_secs(15), async {
             while let Some(event) = event_rx2.recv().await {
@@ -1034,7 +1046,8 @@ mod tests {
         let mut clock = exo_core::hlc::HybridClock::with_wall_clock(|| 1_000);
         let excessive_drift = Timestamp::new(1_000 + clock.max_drift_ms() + 1, 0);
 
-        let outcome = crate::sync::observe_remote_hlc_timestamp(&mut clock, &excessive_drift, &recorder);
+        let outcome =
+            crate::sync::observe_remote_hlc_timestamp(&mut clock, &excessive_drift, &recorder);
 
         assert!(
             outcome.is_err(),
