@@ -41,7 +41,6 @@ exo-legal      = { package = "exochain-legal", path = "../exo-legal", version = 
 exo-dag        = { package = "exochain-dag", path = "../exo-dag", version = "=0.2.0-beta" }
 exo-proofs     = { package = "exochain-proofs", path = "../exo-proofs", version = "=0.2.0-beta" }
 exo-api        = { package = "exochain-api", path = "../exo-api", version = "=0.2.0-beta" }
-exo-tenant     = { package = "exochain-tenant", path = "../exo-tenant", version = "=0.2.0-beta" }
 decision-forum = { package = "exochain-decision-forum", path = "../decision-forum", version = "=0.2.0-beta" }
 exo-catapult   = { package = "exochain-catapult", path = "../exo-catapult", version = "=0.2.0-beta" }
 exo-messaging  = { package = "exochain-messaging", path = "../exo-messaging", version = "=0.2.0-beta" }
@@ -77,4 +76,4 @@ wasm-bindgen-test = "0.3"
 wasm-opt = false
 
 [package.metadata.cargo-machete]
-ignored = ["ed25519-dalek", "exo-api", "exo-catapult", "exo-dag", "exo-messaging", "exo-proofs", "exo-tenant", "getrandom", "rand", "serde-wasm-bindgen"]
+ignored = ["ed25519-dalek", "exo-api", "exo-catapult", "exo-dag", "exo-messaging", "exo-proofs", "getrandom", "rand", "serde-wasm-bindgen"]

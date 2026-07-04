@@ -23,12 +23,49 @@ use uuid::Uuid;
 use crate::error::{Result, TenantError};
 
 /// A tenant-scoped data item.
+///
+/// `content_hash` and `byte_len` are private and derived exclusively from the
+/// real payload by [`TenantData::new`] — there is no way for a caller (or a
+/// meter) to construct a `TenantData` that claims a `byte_len` different from
+/// the actual payload length. This is what makes byte-total reconciliation
+/// (`TenantStore::total_bytes`) a genuine check against real stored state
+/// rather than against a self-reported, forgeable number.
 #[derive(Debug, Clone)]
 pub struct TenantData {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub owner: Did,
-    pub content_hash: Hash256,
+    content_hash: Hash256,
+    byte_len: u64,
+}
+
+impl TenantData {
+    /// Construct a tenant item from its real payload. `content_hash` is the
+    /// BLAKE3 digest of `payload` and `byte_len` is `payload.len()` — both
+    /// are computed here and cannot be supplied or overridden by the caller,
+    /// so a meter cannot inflate/deflate the store's authoritative byte size.
+    #[must_use]
+    pub fn new(id: Uuid, tenant_id: Uuid, owner: Did, payload: &[u8]) -> Self {
+        Self {
+            id,
+            tenant_id,
+            owner,
+            content_hash: Hash256::digest(payload),
+            byte_len: u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// The BLAKE3 content hash of the payload this item was created from.
+    #[must_use]
+    pub fn content_hash(&self) -> Hash256 {
+        self.content_hash
+    }
+
+    /// The real byte length of the payload this item was created from.
+    #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
 }
 
 /// Tenant-aware key-value store with isolation guarantees.
@@ -120,6 +157,25 @@ impl TenantStore {
     pub fn count(&self, tenant_id: &Uuid) -> usize {
         self.data.get(tenant_id).map_or(0, |m| m.len())
     }
+
+    /// Return the sum of the recorded, actual byte lengths of every item
+    /// stored for `tenant_id`. This is the store's own authoritative byte
+    /// total — computed directly from durably recorded `TenantData::byte_len`
+    /// values, not from any externally reported counter — so callers can
+    /// reconcile a meter's self-reported usage against genuine stored state.
+    #[must_use]
+    pub fn total_bytes(&self, tenant_id: &Uuid) -> u64 {
+        self.data
+            .get(tenant_id)
+            .map_or(0, |m| m.values().map(|item| item.byte_len).sum())
+    }
+
+    /// Return the actual recorded byte length of a single stored item, or
+    /// `None` if it is not present for the given tenant.
+    #[must_use]
+    pub fn item_bytes(&self, tenant_id: &Uuid, item_id: &Uuid) -> Option<u64> {
+        self.get(tenant_id, item_id).map(|item| item.byte_len)
+    }
 }
 
 #[cfg(test)]
@@ -131,12 +187,21 @@ mod tests {
     }
 
     fn td(tid: Uuid, item_id: Uuid) -> TenantData {
-        TenantData {
-            id: item_id,
-            tenant_id: tid,
-            owner: Did::new("did:exo:owner").unwrap(),
-            content_hash: Hash256::digest(format!("{tid}:{item_id}").as_bytes()),
-        }
+        // Real payload seeded by the ids so content_hash is distinct per item
+        // and byte_len is genuinely derived (never hand-set).
+        let payload = format!("{tid}:{item_id}").into_bytes();
+        TenantData::new(item_id, tid, Did::new("did:exo:owner").unwrap(), &payload)
+    }
+
+    /// A `TenantData` whose stored `byte_len` is exactly `len`, backed by a
+    /// real payload of that length — no field is hand-set.
+    fn td_sized(tid: Uuid, item_id: Uuid, len: usize) -> TenantData {
+        TenantData::new(
+            item_id,
+            tid,
+            Did::new("did:exo:owner").unwrap(),
+            &vec![0u8; len],
+        )
     }
 
     #[test]
@@ -171,8 +236,32 @@ mod tests {
     fn put_rejects_zero_content_hash() {
         let mut s = TenantStore::new();
         let mut item = td(uuid(1), uuid(10));
+        // Deliberately corrupt the (in-module-accessible) hash to exercise the
+        // store's defensive validation branch. External modules cannot do this
+        // — `TenantData::new` always derives a non-zero digest — so this path
+        // is only reachable in the store's own tests.
         item.content_hash = Hash256::ZERO;
         assert!(s.put(uuid(1), item).is_err());
+    }
+
+    #[test]
+    fn byte_len_is_derived_from_payload_and_cannot_be_forged() {
+        // `byte_len` is derived by `TenantData::new` from the real payload
+        // length, and the field is private with no setter — there is no API
+        // by which a caller could store a `byte_len` that disagrees with the
+        // data it wrote. This is the invariant that makes `total_bytes`
+        // reconciliation genuine rather than self-reported.
+        let item = TenantData::new(
+            uuid(10),
+            uuid(1),
+            Did::new("did:exo:owner").unwrap(),
+            &vec![0u8; 4096],
+        );
+        assert_eq!(item.byte_len(), 4096);
+
+        let empty = TenantData::new(uuid(11), uuid(1), Did::new("did:exo:owner").unwrap(), &[]);
+        assert_eq!(empty.byte_len(), 0);
+        assert_ne!(empty.content_hash(), Hash256::ZERO);
     }
 
     #[test]
@@ -242,5 +331,38 @@ mod tests {
     #[test]
     fn default() {
         assert_eq!(TenantStore::default().count(&Uuid::nil()), 0);
+    }
+
+    #[test]
+    fn total_bytes_sums_actual_recorded_lengths() {
+        let mut s = TenantStore::new();
+        let tid = uuid(1);
+        let a = td_sized(tid, uuid(10), 128);
+        let b = td_sized(tid, uuid(11), 256);
+        s.put(tid, a).unwrap();
+        s.put(tid, b).unwrap();
+        assert_eq!(s.total_bytes(&tid), 128 + 256);
+    }
+
+    #[test]
+    fn total_bytes_is_zero_for_unknown_tenant() {
+        let s = TenantStore::new();
+        assert_eq!(s.total_bytes(&Uuid::nil()), 0);
+    }
+
+    #[test]
+    fn item_bytes_returns_recorded_length() {
+        let mut s = TenantStore::new();
+        let tid = uuid(1);
+        let iid = uuid(10);
+        let item = td_sized(tid, iid, 42);
+        s.put(tid, item).unwrap();
+        assert_eq!(s.item_bytes(&tid, &iid), Some(42));
+    }
+
+    #[test]
+    fn item_bytes_none_for_missing_item() {
+        let s = TenantStore::new();
+        assert_eq!(s.item_bytes(&Uuid::nil(), &Uuid::nil()), None);
     }
 }

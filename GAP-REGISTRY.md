@@ -153,7 +153,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-010 | P1 | Open | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
 | VCG-012 | P2 | Green-local | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
-| VCG-013 | P2 | Open | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
+| VCG-013 | P2 | Green-local | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
 | VCG-014 | P2 | Green-local | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
 | VCG-015 | P1 | Open | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
 
@@ -1145,9 +1145,38 @@ cargo clippy -p exochain-core --all-targets -- -D warnings
 ## VCG-013 - Tenant Metering, Billing, and Product Operations Are Structural
 
 **Priority:** P2
-**Status:** Open
+**Status:** Green-local
 **Classification:** EXOCHAIN core
 **Owner role:** Tenant platform
+
+Lane record (2026-07-04, branch `vcg/013-tenant-metering`):
+
+- Scout correction confirmed: per-tenant isolation was already built; the open
+  surface was metering/billing/subscription only.
+- Green per D7 (`crates/exo-tenant/src/metering.rs`): a `UsageMeter` records
+  per-tenant events; HLC-windowed aggregation via `exo_core::Timestamp` (not
+  wall-clock); deterministic invoices; and settlement that NEVER fires by
+  default — a tenant only settles under an explicit `PaidOptIn` billing plan
+  (HonorGood zero-fee metrology). No coupling to `exo-economy`.
+- Reconciliation hardened across two adversarial passes: the first green and
+  its first corrective both shipped forgeable byte totals (self-reported
+  amounts). Final fix makes `TenantData.content_hash`/`byte_len` private and
+  derived exclusively from the real payload by `TenantData::new`, so no
+  caller in any module can forge `byte_len`; `TenantStore::total_bytes` sums
+  the genuine recorded lengths and `reconcile_bytes_with_store` surfaces any
+  meter drift (over- or under-report). Re-refutation: NOT-REFUTED (byte_len
+  un-forgeable workspace-wide; drift genuinely caught).
+- D7 dependency-direction guard (coordinator-authored, this landing):
+  `tools/test_tenant_dependency_direction.sh` fails if any crate other than
+  `exo-tenant` declares a dependency on `exochain-tenant` — machine-checking
+  "metering observes, never gates trust." Two dead, machete-ignored
+  `exo-tenant` dependency edges (`exo-catapult`, `exochain-wasm`) were removed
+  so the workspace has zero inbound edges to `exochain-tenant`; both crates
+  still build. The guard is wired into the CI hygiene gate.
+- Gates: `exochain-tenant` 91 pass; clippy/fmt clean; the new guard passes on
+  the clean tree and fails when a dependency is re-added (TDD-verified).
+- Status Green-local: metering, billing export, subscription state, and the
+  machine-checked isolation invariant delivered. Closed after merge + CI.
 
 Evidence:
 
