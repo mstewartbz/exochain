@@ -48,6 +48,8 @@ use sha2::Sha256;
 
 #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
 use super::session_auth::claim_submission_signing_payload;
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use super::session_auth::device_behavioral_submission_signing_payload;
 #[cfg(feature = "unaudited-zerodentity-first-touch-onboarding")]
 use super::types::{ClaimStatus, IdentityClaim, OtpChannel};
 use super::{
@@ -576,6 +578,31 @@ async fn handle_device_behavioral_ingestion(
         return Err(json_error(
             StatusCode::UNAUTHORIZED,
             "signature must not be empty",
+        ));
+    }
+
+    // Real proof-of-possession: the signature must cryptographically verify
+    // against `public_key` over the canonical, sample-bound payload — not
+    // merely be present. `derived_did == subject_did` above only proves the
+    // DID/public_key pairing is well-formed (both are Public per spec §7.1);
+    // this is what proves the caller actually holds the matching private
+    // key over exactly these sample bytes, closing the cross-account
+    // (attacker's key over a victim's DID/public_key) and sample-
+    // substitution (subject's own valid signature over different sample
+    // bytes) attacks regardless of session/consent state.
+    let signing_payload = device_behavioral_submission_signing_payload(
+        &subject_did,
+        req.device_fingerprint.as_deref(),
+        req.behavioral_hash.as_deref(),
+        &req.signal_hashes,
+        &public_key,
+    )
+    .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !crypto::verify(&signing_payload, &signature, &public_key) {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "signature does not verify against the canonical device/behavioral \
+             sample-bound payload — proof of possession failed",
         ));
     }
 

@@ -36,17 +36,39 @@ Sections 3, 5.2, 7.1, and 11 is gated end-to-end behind the
 evidence supplied, and the write path refuses (`403`) any request that names them.
 
 With the flag **on**, persistence of client-collected `device_fingerprint`,
-`behavioral_hash`, and `signal_hashes` sample fields is **consent-scoped**: a submit is
-rejected (`403`/`400`) and nothing is written unless the caller presents a
-non-empty `consent_receipt_id` AND the subject DID holds an active, OTP-verified
-0dentity session. On first use of a given `(subject_did, consent_receipt_id)` pair, the
-server proposes and self-accepts a `exo_consent::bailment::Bailment` (the subject as
-bailor, the fixed 0dentity ingestion service as bailee) and registers it with an
-`exo_consent::gatekeeper::ConsentGate`; every submit — including replays — is then
-checked through that gate before any sample is persisted. This is genuine use of the
-`exo-consent` crate (`exochain-consent`), not a bespoke stand-in — see
-`crates/exo-node/src/zerodentity/store.rs` (`check_device_behavioral_consent`,
-`register_device_behavioral_consent_bailment`).
+`behavioral_hash`, and `signal_hashes` sample fields requires BOTH of the following,
+independently of each other:
+
+1. **Cryptographic proof of possession** (VCG-009 corrective fix): the request's
+   `signature` must verify via `crypto::verify` against `public_key` over a canonical,
+   domain-separated CBOR payload that binds `subject_did`, `device_fingerprint`,
+   `behavioral_hash`, and the full `signal_hashes` map (in `BTreeMap` — i.e.
+   deterministic key-sorted — order), plus `public_key` itself. See
+   `crates/exo-node/src/zerodentity/session_auth.rs`
+   (`device_behavioral_submission_signing_payload`,
+   domain tag `exo.zerodentity.device_behavioral_submission.v1`). Merely having
+   `public_key` derive `subject_did` (both are Public per §7.1) proves nothing about
+   possession of the matching private key and is **not** sufficient on its own — this
+   is what closes the cross-account (attacker's key over a victim's public
+   DID/public_key) and sample-substitution (a validly-signed request over one sample
+   set replayed with different sample bytes) attacks. A request whose signature does
+   not verify is rejected `401` and nothing is persisted, regardless of session or
+   consent state.
+2. **Consent scoping**: a submit is rejected (`403`/`400`) and nothing is written
+   unless the caller presents a non-empty `consent_receipt_id` AND the subject DID
+   holds an active, OTP-verified 0dentity session. On first use of a given
+   `(subject_did, consent_receipt_id)` pair, the server proposes and self-accepts a
+   `exo_consent::bailment::Bailment` (the subject as bailor, the fixed 0dentity
+   ingestion service as bailee) and registers it with an
+   `exo_consent::gatekeeper::ConsentGate`; every submit — including replays — is then
+   checked through that gate before any sample is persisted. This is genuine use of
+   the `exo-consent` crate (`exochain-consent`), not a bespoke stand-in — see
+   `crates/exo-node/src/zerodentity/store.rs` (`check_device_behavioral_consent`,
+   `register_device_behavioral_consent_bailment`).
+
+The signature check runs first (before the consent gate) so an attacker cannot use
+consent-gate error text to distinguish "no consent" from "bad signature" while probing
+with an unverified signature.
 
 Persisted samples are deduplicated by content hash (`composite_hash` / `sample_hash`):
 resubmitting the identical evidence is idempotent, not double-counted. Ingestion is
@@ -1539,8 +1561,20 @@ POST /api/v1/0dentity/claims
     consent-scoped device/behavioral sample evidence.
   Auth: none at the transport layer — proof of possession is a body-level
     Ed25519 signature (subject_did must equal did:exo:<bs58(blake3(public_key))>).
-    Device/behavioral persistence additionally requires an active session for
-    subject_did (Section 4) plus a valid consent_receipt_id (Section 11.1).
+    For ordinary claim submission this signature is over the
+    claim_submission_signing_payload (Section 4). For device/behavioral sample
+    ingestion (any of device_fingerprint/behavioral_hash/signal_hashes set),
+    the signature MUST instead verify via crypto::verify over the canonical
+    device_behavioral_submission_signing_payload — domain-tagged CBOR binding
+    subject_did, device_fingerprint, behavioral_hash, the full signal_hashes
+    map (BTreeMap key-sorted order), and public_key (see
+    crates/exo-node/src/zerodentity/session_auth.rs). A signature that merely
+    decodes as 64 bytes but does not verify (or verifies against different
+    sample bytes than the ones submitted) is rejected 401 regardless of
+    session/consent state. Device/behavioral persistence additionally
+    requires an active session for subject_did (Section 4) plus a valid
+    consent_receipt_id (Section 11.1) — checked only after the signature
+    verifies.
   Request body (JSON):
     {
       "subject_did": "did:exo:...",
@@ -1582,6 +1616,15 @@ POST /api/v1/0dentity/claims
                 { "error": "signal_hashes must not exceed 15 entries ..." } |
                 { "error": "signal_hashes key '<name>' is not a recognised FingerprintSignal" } |
                 { "error": "subject_did must equal did:exo:<bs58(blake3(public_key))>" }
+  Response 401 (device/behavioral fields present, signature does not verify):
+    { "error": "signature does not verify against the canonical device/behavioral
+                sample-bound payload — proof of possession failed" }
+    Checked BEFORE the consent gate. Covers: garbage/non-verifying signatures,
+    an attacker's key signed over a victim's real subject_did/public_key
+    (cross-account), and a subject's own valid signature over a DIFFERENT
+    sample set than the one actually submitted (sample-substitution). Nothing
+    is persisted on this path, even when an active session exists for
+    subject_did and a consent_receipt_id is present.
   Response 403 (first-touch onboarding disabled, no sample fields present):
     { "error": "zerodentity_first_touch_onboarding_disabled", "message": "...",
       "feature_flag": "unaudited-zerodentity-first-touch-onboarding", ... }
@@ -2154,8 +2197,32 @@ Composite fingerprint hashes and behavioral sample hashes are the only two data
 categories in this table gated by an explicit consent check, because they are the only
 categories capable of persistently re-identifying a device/person across sessions
 independent of the claims the subject chose to make. The gate, implemented in
-`crates/exo-node/src/zerodentity/store.rs`:
+`crates/exo-node/src/zerodentity/store.rs` and
+`crates/exo-node/src/zerodentity/onboarding.rs`:
 
+0. **Cryptographically proven possession (VCG-009 corrective fix — checked first).**
+   Before consent is even consulted, `handle_device_behavioral_ingestion` requires
+   `crypto::verify(&payload, &signature, &public_key)` to succeed, where `payload` is
+   the canonical, domain-separated CBOR encoding of
+   `DeviceBehavioralSubmissionSigningPayload { domain:
+   "exo.zerodentity.device_behavioral_submission.v1", subject_did, device_fingerprint,
+   behavioral_hash, signal_hashes, public_key }` (built by
+   `session_auth::device_behavioral_submission_signing_payload`). Confirming that
+   `public_key` derives `subject_did` (as the original design did) only proves the
+   DID/public_key pairing is internally consistent — both values are Public per §7.1,
+   so that check alone proves nothing about who is submitting. Binding the full sample
+   content (not just the identity fields) into the signed payload means a signature
+   only verifies for the EXACT samples on the wire, for the EXACT subject, closing two
+   distinct attacks regardless of session/consent state:
+   - **Cross-account:** an attacker who knows a victim's public DID + public key
+     (harvestable — both are Public) cannot submit under the victim's identity, because
+     the attacker cannot produce a signature over the payload that verifies against the
+     victim's public key without the victim's private key.
+   - **Sample-substitution:** a signature the subject validly produced over one sample
+     set cannot be replayed with different sample bytes substituted on the wire,
+     because the substituted bytes change the payload and invalidate the signature.
+   A request whose signature does not verify is rejected `401` and nothing is
+   persisted — not partially, not pending consent evaluation.
 1. **Feature-gated.** Compiled out entirely unless
    `unaudited-zerodentity-device-behavioral-axes` is enabled on the node. With the
    feature off, `ZerodentityScore::compute` hard-pins `device_trust` and
@@ -2163,10 +2230,12 @@ independent of the claims the subject chose to make. The gate, implemented in
    slice, and the onboarding write path never reaches the ingestion branch at all.
 2. **Session-scoped.** A submit is only eligible for a consent grant if `subject_did`
    holds an active (non-revoked, unexpired) `IdentitySession` at submit time — proof the
-   caller already completed OTP-verified proof-of-possession for that DID. A DID with no
-   live session cannot self-consent to anything.
+   caller already completed OTP-verified proof-of-possession for that DID at bootstrap
+   time. This is necessary but, on its own, was not sufficient — see (0) above — because
+   "some session exists for this DID" does not prove the CURRENT request came from the
+   session holder.
 3. **`exo_consent`-backed, not a stand-in.** On first use of a given
-   `(subject_did, consent_receipt_id)` pair meeting (2), the server proposes a
+   `(subject_did, consent_receipt_id)` pair meeting (0) and (2), the server proposes a
    `exo_consent::bailment::Bailment` (`BailmentType::Processing`; bailor = the subject
    DID, bailee = the fixed 0dentity device/behavioral ingestion service DID) and
    self-accepts it with the service's own Ed25519 keypair — a genuine, verifiable
@@ -2175,17 +2244,18 @@ independent of the claims the subject chose to make. The gate, implemented in
    `"subject"` at clearance `>= 1` for the action `zerodentity.device_behavioral_ingest`.
    Every submit — first use and every replay — is checked through
    `ConsentGate::check`; persistence proceeds only on `ConsentDecision::Granted`.
-4. **Nothing partial.** If the consent check fails, the response is `403`/`400` citing
-   consent as the reason, and neither the fingerprint, the behavioral sample, nor the
-   accompanying claim is written — not even a partial fingerprint from a
-   within-bounds-but-otherwise-rejected payload.
+4. **Nothing partial.** If either the signature check (0) or the consent check (3)
+   fails, the response is `401` (signature) or `403`/`400` (consent) and neither the
+   fingerprint, the behavioral sample, nor the accompanying claim is written — not even
+   a partial fingerprint from a within-bounds-but-otherwise-rejected payload.
 5. **Replay-safe.** Persistence is deduplicated by content hash
    (`DeviceFingerprint.composite_hash` / `BehavioralSample.sample_hash`) against what is
    already stored for that DID — a resubmission of the identical evidence is an
    idempotent no-op, never a second stored entry and never a doubled score contribution.
 6. **Bounded.** A `signal_hashes` map larger than the documented `FingerprintSignal`
-   variant count (15) is rejected before any per-key parsing, regardless of consent
-   state — an oversized payload cannot be used to probe whether a consent record exists.
+   variant count (15) is rejected before any per-key parsing, regardless of signature or
+   consent state — an oversized payload cannot be used to probe whether a consent record
+   exists.
 
 ### 11.2 Cryptographic Primitives
 
@@ -2209,6 +2279,7 @@ independent of the claims the subject chose to make. The gate, implemented in
 | Sybil identity | Behavioral signatures are unique; device fingerprints resist duplication; peer attestations require real trust relationships |
 | Session hijack | Tokens bound to DID + public key; fingerprint consistency check on each request |
 | Device/behavioral persistence without consent | `unaudited-zerodentity-device-behavioral-axes` default-off; when on, `check_device_behavioral_consent` requires an active session AND a granted `exo_consent::gatekeeper::ConsentGate` decision before any `put_fingerprint`/`put_behavioral` call — see §11.1.1 |
+| Device/behavioral sample submission without proof of possession (cross-account / sample-substitution, VCG-009) | `handle_device_behavioral_ingestion` requires `crypto::verify` over the canonical `device_behavioral_submission_signing_payload` (binds subject_did + all sample fields + public_key) before consent is even consulted; a non-verifying signature is rejected `401` with nothing persisted, regardless of session/consent state — see §11.1.1 item 0 |
 | Oversized ingestion payload used to probe consent state | `signal_hashes` bounded to the documented `FingerprintSignal` count (15), checked before the consent lookup runs |
 
 ### 11.4 Right to Erasure

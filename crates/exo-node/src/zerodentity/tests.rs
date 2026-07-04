@@ -3136,6 +3136,15 @@ mod tests {
     /// yet declare. Built independently of `signed_claim_body` (which is
     /// gated on `unaudited-zerodentity-first-touch-onboarding`, a feature
     /// this test group does not enable per Gate 23 isolation).
+    ///
+    /// GREEN (VCG-009 corrective) closed the proof-of-possession hole by
+    /// requiring `crypto::verify` over the canonical, sample-bound
+    /// `device_behavioral_submission_signing_payload` (see below). This
+    /// helper now signs over that exact same payload shape locally
+    /// (duplicated here per Gate 23 isolation — this test group cannot
+    /// depend on the production `session_auth` module) so that callers
+    /// exercising the "well-formed, self-signed, real samples" happy path
+    /// continue to verify against the production handler.
     #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
     #[allow(clippy::too_many_arguments)]
     fn device_behavioral_claim_body(
@@ -3149,23 +3158,14 @@ mod tests {
         signal_hashes: &std::collections::BTreeMap<String, String>,
         consent_receipt_id: Option<&str>,
     ) -> Value {
-        // NOTE: once `SubmitClaimRequest` gains the sample fields, the
-        // signing payload must bind them too (otherwise a MITM could swap
-        // device/behavioral evidence onto an otherwise-valid signed claim).
-        // This test group builds under `unaudited-zerodentity-device-
-        // behavioral-axes` alone (Gate 23 isolation), so it cannot call the
-        // real `claim_submission_signing_payload` helper, which lives behind
-        // `unaudited-zerodentity-first-touch-onboarding`. We sign a
-        // locally-built placeholder payload instead; under the current
-        // refusal-stub `submit_claim` handler no signature is even checked,
-        // so this only needs to be well-formed, not identical to production
-        // framing. GREEN must decide the real signing payload shape once the
-        // sample fields are wired.
-        let mut placeholder_payload = subject_did.as_str().as_bytes().to_vec();
-        placeholder_payload.extend_from_slice(claim_type.as_bytes());
-        placeholder_payload.extend_from_slice(&created_ms.to_le_bytes());
-        placeholder_payload.extend_from_slice(public_keypair.public_key().as_bytes());
-        let signature = signing_keypair.sign(&placeholder_payload);
+        let payload = device_behavioral_submission_signing_payload(
+            subject_did,
+            Some(device_fingerprint_hex),
+            Some(behavioral_hash_hex),
+            signal_hashes,
+            public_keypair.public_key(),
+        );
+        let signature = signing_keypair.sign(&payload);
         serde_json::json!({
             "subject_did": subject_did.as_str(),
             "claim_type": claim_type,
