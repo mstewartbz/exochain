@@ -123,33 +123,33 @@ fn validate_governance_proposal_payload(payload: &[u8]) -> Result<ValidatorChang
     let change: ValidatorChange = ciborium::from_reader(payload)
         .map_err(|e| format!("proposal payload must be canonical ValidatorChange CBOR: {e}"))?;
     match &change {
-        ValidatorChange::AddValidator { did } | ValidatorChange::RemoveValidator { did } => {
+        ValidatorChange::AddValidator { did, public_key } => {
+            if did.as_str().trim().is_empty() {
+                return Err("proposal payload validator DID must not be empty".into());
+            }
+            // VCG-015: fail-closed cross-check. The wire payload carries
+            // both the claimed DID and the validator's real Ed25519 public
+            // key; a DID is a one-way hash of its owning key
+            // (`identity::did_from_public_key`), so we can and must verify
+            // the two actually correspond before accepting the change. A
+            // key that does not hash to the claimed DID is rejected
+            // outright — never substituted with a placeholder.
+            let derived_did = crate::identity::did_from_public_key(public_key)
+                .map_err(|e| format!("proposal payload AddValidator public key is invalid: {e}"))?;
+            if &derived_did != did {
+                return Err(format!(
+                    "proposal payload AddValidator public key derives DID {derived_did}, \
+                     which does not match the claimed DID {did}"
+                ));
+            }
+        }
+        ValidatorChange::RemoveValidator { did } => {
             if did.as_str().trim().is_empty() {
                 return Err("proposal payload validator DID must not be empty".into());
             }
         }
     }
     Ok(change)
-}
-
-/// Derive a placeholder public-key resolver entry for a newly-added
-/// validator DID.
-///
-/// KNOWN GAP: the canonical `ValidatorChange::AddValidator` payload (see
-/// `wire.rs`) carries only the target DID, not its Ed25519 public key. A DID
-/// is a one-way hash of its owning key (`did_from_public_key` in
-/// `identity.rs`), so the real public key cannot be recovered from the DID
-/// alone. This derives a deterministic 32-byte placeholder so the resolver
-/// has *an* entry for the new validator (matching this gap's red-test
-/// contract, which only asserts the resolver contains the DID), but votes
-/// or commit certificates genuinely signed by the new validator will not
-/// verify against it. Closing this for real requires extending the wire
-/// payload to carry the validator's public key (or a follow-on key
-/// registration step) — out of scope for this lane; tracked as a residual
-/// gap alongside VCG-005.
-fn placeholder_validator_public_key(did: &Did) -> PublicKey {
-    let digest = blake3::hash(format!("exo.reactor.placeholder_validator_key.v1:{did}").as_bytes());
-    PublicKey::from_bytes(*digest.as_bytes())
 }
 
 /// Decode a committed node's governance payload and, if it is a canonical
@@ -163,7 +163,12 @@ fn placeholder_validator_public_key(did: &Did) -> PublicKey {
 ///
 /// Returns `Some(ValidatorChange)` describing what changed if the payload
 /// decoded as a `ValidatorChange`, or `None` if the committed node was not a
-/// governance proposal (the common case for ordinary DAG nodes).
+/// governance proposal (the common case for ordinary DAG nodes) or the
+/// payload failed the fail-closed validation in
+/// `validate_governance_proposal_payload` (e.g. an `AddValidator` whose
+/// supplied public key does not hash to its claimed DID — no validator is
+/// added and no key, placeholder or otherwise, is ever registered in that
+/// case).
 fn apply_committed_validator_change_in_memory(
     s: &mut ReactorState,
     payload: &[u8],
@@ -171,11 +176,15 @@ fn apply_committed_validator_change_in_memory(
     let change = validate_governance_proposal_payload(payload).ok()?;
 
     match &change {
-        ValidatorChange::AddValidator { did } => {
+        ValidatorChange::AddValidator { did, public_key } => {
+            // VCG-015: register the SUPPLIED, validated public key — never
+            // a placeholder. `validate_governance_proposal_payload` has
+            // already confirmed `public_key` hashes to `did`, so the key
+            // registered here is one the new validator can genuinely sign
+            // against.
             s.consensus.config.validators.insert(did.clone());
             let mut keys = s.validator_public_keys.as_map().clone();
-            keys.entry(did.clone())
-                .or_insert_with(|| placeholder_validator_public_key(did));
+            keys.insert(did.clone(), *public_key);
             s.validator_public_keys = ValidatorPublicKeys::new(keys);
         }
         ValidatorChange::RemoveValidator { did } => {
@@ -1754,9 +1763,28 @@ mod tests {
         }
     }
 
+    /// Deterministic keypair for the "new validator v4" fixture used by the
+    /// shared `validator_change_payload_for_test` helper below. Distinct
+    /// seed from the VCG-015-specific fixtures (200, 201) further down this
+    /// module.
+    fn new_validator_v4_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes([199u8; 32]).expect("deterministic new-validator-v4 keypair")
+    }
+
+    /// DID derived from `new_validator_v4_keypair`'s real public key.
+    /// VCG-015 requires an `AddValidator` payload's DID to actually hash
+    /// from its accompanying public key, so this fixture's "new validator"
+    /// identity can no longer be an arbitrary hand-picked string like the
+    /// pre-VCG-015 `"did:exo:v4"` literal.
+    fn new_validator_v4_did() -> Did {
+        crate::identity::did_from_public_key(new_validator_v4_keypair().public_key())
+            .expect("derive DID from new-validator-v4 public key")
+    }
+
     fn validator_change_payload_for_test() -> Vec<u8> {
         let change = crate::wire::ValidatorChange::AddValidator {
-            did: Did::new("did:exo:v4").unwrap(),
+            did: new_validator_v4_did(),
+            public_key: *new_validator_v4_keypair().public_key(),
         };
         let mut payload = Vec::new();
         ciborium::into_writer(&change, &mut payload).unwrap();
@@ -2975,7 +3003,7 @@ mod tests {
         let net_handle = NetworkHandle::new(cmd_tx);
         let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
 
-        let new_validator = Did::new("did:exo:v4").unwrap();
+        let new_validator = new_validator_v4_did();
         let payload = validator_change_payload_for_test();
 
         // Build the canonical ValidatorChange DAG node the same way
@@ -3087,7 +3115,7 @@ mod tests {
         let net_handle = NetworkHandle::new(cmd_tx);
         let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
 
-        let new_validator = Did::new("did:exo:v4").unwrap();
+        let new_validator = new_validator_v4_did();
         let payload = validator_change_payload_for_test();
 
         let mut dag = Dag::new();
@@ -3170,6 +3198,267 @@ mod tests {
             assert!(
                 !persisted.contains(&new_validator),
                 "persisted validator set must not change without quorum-gated commit"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // VCG-015: added validators must register a REAL public key, not the
+    // deterministic-but-cryptographically-inert placeholder minted by
+    // `placeholder_validator_public_key`. A validator admitted via a
+    // committed `ValidatorChange::AddValidator` must be able to cast a
+    // vote / commit certificate that `crypto::verify` (transitively, via
+    // the `ValidatorPublicKeys` resolver) ACCEPTS against the key
+    // registered for its DID.
+    // ------------------------------------------------------------------
+
+    /// Build a canonical `AddValidator` CBOR payload carrying the target
+    /// validator's REAL Ed25519 public key (VCG-015 wire extension), keyed
+    /// to `did`. Compile-red until `ValidatorChange::AddValidator` grows a
+    /// `public_key` field.
+    fn validator_change_payload_with_key(did: &Did, public_key: PublicKey) -> Vec<u8> {
+        let change = crate::wire::ValidatorChange::AddValidator {
+            did: did.clone(),
+            public_key,
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&change, &mut payload).unwrap();
+        payload
+    }
+
+    #[tokio::test]
+    async fn added_validator_real_key_is_registered_and_accepts_its_own_vote_signature() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let proposer_did = validator_vec[0].clone();
+        let config = config_for(proposer_did.clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+
+        // A genuine, freshly-generated Ed25519 keypair for the incoming
+        // validator — NOT one of the four genesis `validator_keypair(index)`
+        // fixtures, and its DID is derived (not hand-picked), matching how a
+        // real node would onboard.
+        let new_validator_keypair =
+            KeyPair::from_secret_bytes([200u8; 32]).expect("deterministic new-validator keypair");
+        let new_validator_public_key = *new_validator_keypair.public_key();
+        let new_validator_did = crate::identity::did_from_public_key(&new_validator_public_key)
+            .expect("derive DID from new validator's real public key");
+
+        let payload =
+            validator_change_payload_with_key(&new_validator_did, new_validator_public_key);
+
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            &payload,
+            &proposer_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .save_governance_payload(&node.hash, &payload)
+            .unwrap();
+
+        // Cross quorum (3 of 4) exactly as the sibling VCG-005 test does.
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &proposer_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .expect("proposal verifies");
+            for (index, voter) in validator_vec.iter().enumerate().take(3) {
+                let vote = vote_for(voter, index, s.consensus.current_round, node.hash);
+                consensus::vote_verified(&mut s.consensus, vote, &resolver)
+                    .expect("validator votes verify");
+            }
+        }
+
+        check_and_commit(&state, &store, &net_handle, &reactor_tx, &node.hash).await;
+        let _event = reactor_rx
+            .try_recv()
+            .expect("commit event emitted after quorum");
+
+        // The REAL public key — not a placeholder — must be registered
+        // against the new validator's DID.
+        let registered_key = {
+            let s = state.lock().unwrap();
+            assert!(
+                s.consensus.config.validators.contains(&new_validator_did),
+                "committed AddValidator must mutate live consensus config.validators"
+            );
+            *s.validator_public_keys
+                .as_map()
+                .get(&new_validator_did)
+                .expect("committed AddValidator must register a public key for the new validator")
+        };
+        assert_eq!(
+            registered_key, new_validator_public_key,
+            "registered key must be the validator's REAL supplied public key, not a placeholder"
+        );
+
+        // The newly-added validator now signs a vote of its own — this is
+        // the crux of VCG-015: the key registered for its DID must be able
+        // to verify a signature it genuinely produced.
+        let new_round = {
+            let s = state.lock().unwrap();
+            s.consensus.current_round
+        };
+        let mut vote = Vote {
+            voter: new_validator_did.clone(),
+            round: new_round,
+            node_hash: node.hash,
+            signature: Signature::empty(),
+        };
+        let vote_payload = vote.signing_payload().expect("vote signing payload");
+        vote.signature = new_validator_keypair.sign(&vote_payload);
+
+        assert!(
+            crypto::verify(&vote_payload, &vote.signature, &registered_key),
+            "crypto::verify must ACCEPT a genuine vote signed by the newly-added validator \
+             against the key registered in s.validator_public_keys — a placeholder key can \
+             never satisfy this because no secret key corresponds to it"
+        );
+
+        {
+            let s = state.lock().unwrap();
+            let resolver = &s.validator_public_keys;
+            consensus::vote_verified(&mut s.consensus.clone(), vote, resolver)
+                .expect("consensus::vote_verified must accept the new validator's genuine vote");
+        }
+    }
+
+    #[tokio::test]
+    async fn add_validator_with_key_not_matching_claimed_did_is_rejected_fail_closed() {
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let proposer_did = validator_vec[0].clone();
+        let config = config_for(proposer_did.clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        drop(cmd_rx);
+        let net_handle = NetworkHandle::new(cmd_tx);
+        let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
+
+        // Claimed DID belongs to nobody in particular ("did:exo:v4", the
+        // shared fixture DID), but the supplied key is a real, unrelated
+        // keypair — i.e. `did != did_from_public_key(public_key)`. A
+        // fail-closed implementation must reject this outright: no
+        // validator added, no placeholder substituted.
+        let claimed_did = Did::new("did:exo:v4").unwrap();
+        let mismatched_keypair =
+            KeyPair::from_secret_bytes([201u8; 32]).expect("deterministic mismatched keypair");
+        let mismatched_public_key = *mismatched_keypair.public_key();
+        assert_ne!(
+            crate::identity::did_from_public_key(&mismatched_public_key)
+                .expect("derive DID from mismatched key"),
+            claimed_did,
+            "test fixture invariant: the supplied key must NOT hash to the claimed DID"
+        );
+
+        let payload = validator_change_payload_with_key(&claimed_did, mismatched_public_key);
+
+        // Fail-closed validation must happen in
+        // `validate_governance_proposal_payload` itself.
+        assert!(
+            validate_governance_proposal_payload(&payload).is_err(),
+            "an AddValidator whose public key does not hash to its claimed DID must be \
+             rejected by validate_governance_proposal_payload, never accepted or placeholdered"
+        );
+
+        // End-to-end: even if such a payload reached the commit path, no
+        // validator may be added and no key may be registered.
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+        let node = append(
+            &mut dag,
+            &[],
+            &payload,
+            &proposer_did,
+            &*sign_fn,
+            &mut clock,
+        )
+        .unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .save_governance_payload(&node.hash, &payload)
+            .unwrap();
+
+        {
+            let mut s = state.lock().unwrap();
+            let resolver = s.validator_public_keys.clone();
+            let proposal = Proposal {
+                proposer: proposer_did.clone(),
+                round: s.consensus.current_round,
+                node_hash: node.hash,
+            };
+            let proposal_sig = sign_proposal_for_index(&proposal, 0);
+            consensus::propose_verified(
+                &mut s.consensus,
+                &node,
+                &proposer_did,
+                &proposal_sig,
+                &resolver,
+            )
+            .expect("proposal verifies");
+            for (index, voter) in validator_vec.iter().enumerate().take(3) {
+                let vote = vote_for(voter, index, s.consensus.current_round, node.hash);
+                consensus::vote_verified(&mut s.consensus, vote, &resolver)
+                    .expect("validator votes verify");
+            }
+        }
+
+        check_and_commit(&state, &store, &net_handle, &reactor_tx, &node.hash).await;
+        let _event = reactor_rx
+            .try_recv()
+            .expect("commit event still emitted — the DAG node itself commits under quorum");
+
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                !s.consensus.config.validators.contains(&claimed_did),
+                "a mismatched-key AddValidator must NEVER add the claimed DID to the validator set"
+            );
+            assert!(
+                !s.validator_public_keys.as_map().contains_key(&claimed_did),
+                "a mismatched-key AddValidator must NEVER register any key (placeholder or \
+                 otherwise) for the claimed DID"
+            );
+        }
+        {
+            let st = store.lock().unwrap();
+            let persisted = st
+                .load_validator_set()
+                .expect("load_validator_set succeeds");
+            assert!(
+                !persisted.contains(&claimed_did),
+                "a mismatched-key AddValidator must never be persisted via save_validator_set"
             );
         }
     }

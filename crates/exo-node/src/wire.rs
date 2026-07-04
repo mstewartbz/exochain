@@ -28,7 +28,7 @@
 
 use std::{fmt, marker::PhantomData};
 
-use exo_core::types::{Did, Hash256, Signature, Timestamp};
+use exo_core::types::{Did, Hash256, PublicKey, Signature, Timestamp};
 use exo_dag::{
     consensus::{CommitCertificate, Proposal, Vote},
     dag::DagNode,
@@ -606,7 +606,16 @@ pub enum GovernanceEventType {
 #[cfg_attr(not(feature = "unaudited-infrastructure-holons"), allow(dead_code))]
 pub enum ValidatorChange {
     /// Promote a node to validator status.
-    AddValidator { did: Did },
+    ///
+    /// VCG-015: carries the validator's real Ed25519 public key alongside
+    /// its DID. A DID is a one-way hash of its owning key
+    /// (`identity::did_from_public_key`), so the key cannot be recovered
+    /// from the DID alone — it must be supplied on the wire so the applying
+    /// node can register a key that the new validator's genuine
+    /// votes/commit certificates will actually verify against. This is a
+    /// wire/CBOR format change to the governance proposal payload
+    /// (acceptable pre-1.0).
+    AddValidator { did: Did, public_key: PublicKey },
     /// Remove a node from the validator set.
     RemoveValidator { did: Did },
 }

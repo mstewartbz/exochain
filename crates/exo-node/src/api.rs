@@ -608,30 +608,37 @@ async fn handle_validator_change(
         let did = Did::new(&req.did)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid DID: {e}")))?;
 
-        if req.action == "add" {
-            let public_key_hex = req.public_key_hex.as_deref().ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "public_key_hex is required when adding a validator".to_string(),
-                )
-            })?;
-            let public_key = parse_validator_public_key_hex(public_key_hex)?;
-            let derived_did = identity::did_from_public_key(&public_key).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("public_key_hex does not derive a valid validator DID: {e}"),
-                )
-            })?;
-            if derived_did != did {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("public_key_hex derives {derived_did}, not {did}"),
-                ));
-            }
-        }
-
+        // VCG-015: `AddValidator` now carries the validator's real Ed25519
+        // public key on the wire, fail-closed-validated against the claimed
+        // DID. The HTTP "add" action must supply a valid `public_key_hex`
+        // — an add request lacking one, or whose key does not hash to
+        // `did`, is rejected here rather than fabricating a placeholder.
         let change = match req.action.as_str() {
-            "add" => ValidatorChange::AddValidator { did: did.clone() },
+            "add" => {
+                let public_key_hex = req.public_key_hex.as_deref().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "public_key_hex is required when adding a validator".to_string(),
+                    )
+                })?;
+                let public_key = parse_validator_public_key_hex(public_key_hex)?;
+                let derived_did = identity::did_from_public_key(&public_key).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("public_key_hex does not derive a valid validator DID: {e}"),
+                    )
+                })?;
+                if derived_did != did {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("public_key_hex derives {derived_did}, not {did}"),
+                    ));
+                }
+                ValidatorChange::AddValidator {
+                    did: did.clone(),
+                    public_key,
+                }
+            }
             "remove" => {
                 let validator_count = read_validator_count(Arc::clone(&api.reactor_state)).await?;
                 if validator_count <= 4 {
@@ -1131,9 +1138,14 @@ mod tests {
 
     #[cfg(feature = "unaudited-admin-governance-shortcut")]
     fn validator_change_payload_hex_for_test() -> String {
-        let change = ValidatorChange::AddValidator {
-            did: Did::new("did:exo:v4").unwrap(),
-        };
+        // VCG-015: the payload's DID must actually hash from the
+        // accompanying public key (fail-closed cross-check in
+        // `validate_governance_proposal_payload`), so this fixture uses a
+        // real deterministic keypair rather than a hand-picked DID string.
+        let keypair = KeyPair::from_secret_bytes([222u8; 32]).unwrap();
+        let public_key = *keypair.public_key();
+        let did = identity::did_from_public_key(&public_key).unwrap();
+        let change = ValidatorChange::AddValidator { did, public_key };
         let mut payload = Vec::new();
         ciborium::into_writer(&change, &mut payload).unwrap();
         hex::encode(payload)
