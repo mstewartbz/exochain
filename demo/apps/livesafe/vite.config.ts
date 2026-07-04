@@ -34,4 +34,10 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    // Production serving on Railway (`npm run start`). Host check disabled: preview only
+    // serves static dist/, and Railway's healthchecker uses an internal Host header
+    // (healthcheck.railway.app) that an allowlist would 403, failing every deploy.
+    allowedHosts: true,
+  },
 });
