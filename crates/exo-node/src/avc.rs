@@ -7154,3 +7154,368 @@ mod avc_root_trust_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// VCG-006b RED tests — #736 (runtime issuer allow-list registration/rotation)
+// and #734 (conformance-test-root feature source guard).
+//
+// These are RED-STAGE tests only. No production code changes accompany them.
+// They are expected to fail today because:
+//   - #736: no runtime HTTP surface exists to register or rotate an AVC
+//     issuer's DID+public key on a running node. `register_validator_public_keys`
+//     only covers receipt *validators*, not AVC credential *issuers*, and it is
+//     a Rust-level fn invoked once at startup (`main.rs`), not an HTTP route.
+//     Issuer trust today is established exclusively at startup via
+//     `load_configured_root_trust_bundle` (env-configured bundle file) — there
+//     is no `/api/v1/avc/issuers` route in `avc_router` (see the route table
+//     doc-comment and `avc_router` definition above).
+//   - #734: no `conformance-test-root` Cargo feature exists in
+//     `crates/exo-node/Cargo.toml`, so the source-guard assertion about the
+//     production `AVC_ROOT_TRUST_*` constants compiling identically with the
+//     feature on/off cannot yet be satisfied by construction.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod avc_issuer_conformance_tests {
+    use axum::{
+        body::Body,
+        http::{Method, Request},
+    };
+    use exo_authority::permission::Permission;
+    use exo_avc::{
+        AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel, AvcConstraints, AvcDraft,
+        AvcSubjectKind, DelegatedIntent, issue_avc,
+    };
+    use exo_core::crypto::KeyPair;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn read_body(response: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    const NEW_ISSUER_SEED: [u8; 32] = [0x77; 32];
+    const LOCAL_VALIDATOR_SEED: [u8; 32] = [0x33; 32];
+
+    fn new_issuer_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(NEW_ISSUER_SEED).expect("valid seed")
+    }
+
+    fn new_issuer_did() -> Did {
+        Did::new("did:exo:rotated-issuer").expect("valid DID")
+    }
+
+    /// Fresh `AvcApiState` local to this test module (the sibling `tests`
+    /// module's `fresh_state` helper is private to that module).
+    fn fresh_state() -> Arc<AvcApiState> {
+        let validator_kp =
+            KeyPair::from_secret_bytes(LOCAL_VALIDATOR_SEED).expect("valid validator seed");
+        let signer: AvcReceiptSigner = Arc::new(move |payload: &[u8]| validator_kp.sign(payload));
+        let state = AvcApiState::new(Did::new("did:exo:validator").expect("valid DID"), signer);
+        Arc::new(state)
+    }
+
+    fn draft_for_issuer(issuer_did: Did) -> AvcDraft {
+        AvcDraft {
+            schema_version: AVC_SCHEMA_VERSION,
+            issuer_did: issuer_did.clone(),
+            principal_did: issuer_did,
+            subject_did: Did::new("did:exo:agent").expect("agent DID"),
+            holder_did: None,
+            subject_kind: AvcSubjectKind::AiAgent {
+                model_id: "alpha".into(),
+                agent_version: None,
+            },
+            created_at: Timestamp::new(1_000_000, 0),
+            expires_at: Some(Timestamp::new(2_000_000, 0)),
+            delegated_intent: DelegatedIntent {
+                intent_id: Hash256::from_bytes([0xAB; 32]),
+                purpose: "research".into(),
+                allowed_objectives: vec!["primary".into()],
+                prohibited_objectives: vec![],
+                autonomy_level: AutonomyLevel::Draft,
+                delegation_allowed: false,
+            },
+            authority_scope: AuthorityScope {
+                permissions: vec![Permission::Read],
+                tools: vec![],
+                data_classes: vec![],
+                counterparties: vec![],
+                jurisdictions: vec!["US".into()],
+            },
+            constraints: AvcConstraints::permissive(),
+            authority_chain: None,
+            consent_refs: vec![],
+            policy_refs: vec![],
+            parent_avc_id: None,
+        }
+    }
+
+    fn issuer_router_with_bearer_gate(state: Arc<AvcApiState>) -> Router {
+        let auth = crate::auth::BearerAuth {
+            token: Arc::new(zeroize::Zeroizing::new(
+                "vcg-006b-admin-token".to_string(),
+            )),
+        };
+        avc_router(state).layer(axum::middleware::from_fn(move |req, next| {
+            let auth = auth.clone();
+            crate::auth::require_bearer_on_writes(auth, req, next)
+        }))
+    }
+
+    /// #736(a): a brand-new issuer DID+public key, registered at runtime
+    /// through the (not-yet-existing) issuer allow-list endpoint, must be
+    /// usable to issue and validate an AVC credential on the SAME running
+    /// node — no restart, no gateway redeploy.
+    ///
+    /// Expected RED: there is no route that can register an issuer key at
+    /// runtime, so this request 404s (or otherwise fails) rather than
+    /// admitting the credential from `new_issuer_did()`, and the subsequent
+    /// validate call fails because the issuer key was never resolvable.
+    #[tokio::test]
+    async fn avc_issuer_registered_at_runtime_is_usable_without_restart() {
+        let state = fresh_state();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+
+        // Attempt to register the new issuer's DID + public key through a
+        // runtime endpoint. This route does not exist yet on `avc_router`.
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+        });
+        let app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let register_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            register_response.status(),
+            StatusCode::OK,
+            "registering a new issuer DID+public key at runtime must succeed \
+             through a real issuer allow-list endpoint (#736); today no such \
+             route exists on avc_router"
+        );
+
+        // Now issue a credential signed by the newly-registered issuer and
+        // confirm it validates successfully on this same running instance —
+        // proving the issuer is usable without a restart or redeploy.
+        let credential = issue_avc(draft_for_issuer(issuer_did.clone()), |bytes| {
+            issuer_kp.sign(bytes)
+        })
+        .expect("issue credential from newly registered issuer");
+
+        let issue_app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let issue_response = issue_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issue")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&IssueRequest {
+                            credential: credential.clone(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            issue_response.status(),
+            StatusCode::OK,
+            "issuing a credential from the newly-registered issuer must succeed"
+        );
+
+        let validate_request = AvcValidationRequest {
+            credential,
+            action: None,
+            now: Timestamp::new(1_500_000, 0),
+        };
+        let validate_app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let validate_response = validate_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/validate")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(serde_json::to_vec(&validate_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(validate_response.status(), StatusCode::OK);
+        let body = read_body(validate_response).await;
+        let result: AvcValidationResult =
+            serde_json::from_slice(&body).expect("validation result body");
+        assert_eq!(
+            result.decision,
+            AvcDecision::Allow,
+            "a credential signed by an issuer registered at runtime (no restart) \
+             must resolve its issuer key and validate successfully; decision \
+             was {:?} — issuer public key was never registered because no \
+             runtime issuer registration endpoint exists (#736)",
+            result.decision
+        );
+    }
+
+    /// #736(b): the issuer registration endpoint must require real authority
+    /// (an `exo-authority` DelegationRegistry-backed grant per D3's
+    /// one-authority-model rule — GAP-REGISTRY.md D3, "Applies to VCG-007 and
+    /// issue #736"), not merely the bare admin bearer token. A caller
+    /// presenting only the admin bearer token (no delegated issuer-registration
+    /// authority) must be rejected.
+    ///
+    /// Expected RED: the endpoint does not exist at all, so this currently
+    /// fails for the wrong reason (no route) rather than proving a genuine
+    /// authority check exists and is enforced.
+    #[tokio::test]
+    async fn avc_issuer_registration_requires_real_authority() {
+        let state = fresh_state();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+        });
+
+        // Only the bare admin bearer token is presented — no delegated
+        // issuer-registration authority (no DelegationRegistry grant/chain
+        // evidence of any kind is attached to this request). Per D3, the
+        // admin bearer token alone must NOT be sufficient authority to
+        // register an issuer.
+        let app = issuer_router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-admin-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The endpoint must exist AND must reject this request specifically
+        // because it lacks real delegated authority — StatusCode::FORBIDDEN,
+        // the same signal `verify_bearer_header` uses for "authenticated
+        // caller, insufficient authority" elsewhere in this crate. A bare
+        // route-absence rejection (404 Not Found / 405 Method Not Allowed)
+        // must NOT satisfy this assertion — that would be a false green for
+        // the wrong reason, proving nothing about a real authority check.
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "issuer registration must be refused with FORBIDDEN specifically \
+             because the request carries only the bare admin bearer token and \
+             no real DelegationRegistry-backed authority grant (D3 \
+             one-authority-model rule) — not merely because the route is \
+             absent (got {}). The endpoint must not be an unauthenticated (or \
+             under-authenticated) hole.",
+            response.status()
+        );
+        assert_eq!(
+            state.registry.lock().unwrap().resolve_public_key(&issuer_did),
+            None,
+            "an issuer registration lacking real delegated authority must never \
+             mutate the registry"
+        );
+    }
+
+    /// #734: a `conformance-test-root` Cargo feature must let hermetic
+    /// conformance nodes swap in test root-trust constants, while a source
+    /// guard proves the production `AVC_ROOT_TRUST_*` constants are referenced
+    /// identically whether or not the feature is enabled — the feature may
+    /// only ADD an alternate path, never replace or weaken the production
+    /// constants' compiled values when off.
+    ///
+    /// Expected RED: `crates/exo-node/Cargo.toml` has no `conformance-test-root`
+    /// feature entry yet, so this assertion fails today.
+    #[test]
+    fn conformance_test_root_feature_does_not_alter_production_root_trust() {
+        let cargo_toml = include_str!("../Cargo.toml");
+        assert!(
+            cargo_toml.contains("conformance-test-root"),
+            "crates/exo-node/Cargo.toml must declare a `conformance-test-root` \
+             feature (#734); none exists yet"
+        );
+
+        let source = include_str!("avc.rs");
+        let production = source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        // The production root-trust constants must appear, verbatim, exactly
+        // once each, regardless of whether `conformance-test-root` is
+        // compiled in. A `#[cfg(feature = "conformance-test-root")]` swap that
+        // replaces these definitions (rather than adding an alternate,
+        // separately-named path) would change or duplicate these occurrences.
+        let production_constants = [
+            (
+                "AVC_ROOT_TRUST_CEREMONY_ID",
+                "pub const AVC_ROOT_TRUST_CEREMONY_ID: &str = \"avc-exo-ceremony-2026\";",
+            ),
+            (
+                "AVC_ROOT_TRUST_BUNDLE_ID_HEX",
+                &format!(
+                    "pub const AVC_ROOT_TRUST_BUNDLE_ID_HEX: &str =\n    \"{AVC_ROOT_TRUST_BUNDLE_ID_HEX}\";"
+                ),
+            ),
+            (
+                "AVC_ROOT_TRUST_ISSUER_DID",
+                &format!(
+                    "pub const AVC_ROOT_TRUST_ISSUER_DID: &str = \"{AVC_ROOT_TRUST_ISSUER_DID}\";"
+                ),
+            ),
+            (
+                "AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX",
+                &format!(
+                    "pub const AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX: &str =\n    \"{AVC_ROOT_TRUST_ISSUER_PUBLIC_KEY_HEX}\";"
+                ),
+            ),
+        ];
+
+        for (label, needle) in production_constants {
+            assert_eq!(
+                production.matches(needle).count(),
+                1,
+                "production AVC_ROOT_TRUST constant {label} must appear exactly \
+                 once, unconditionally (not behind a feature-gated swap) — the \
+                 conformance-test-root feature (#734) must only ADD an \
+                 alternate path, never replace the production constant's \
+                 compiled value when the feature is off"
+            );
+        }
+
+        // The conformance path, once it exists, must be additive: it should
+        // be introduced under its own explicitly-named cfg attribute rather
+        // than wrapping the production constants themselves in a feature
+        // gate. This is a placeholder guard that will need the real
+        // conformance constant names once #734 lands; it currently fails
+        // because no such names exist yet.
+        assert!(
+            source.contains("cfg(feature = \"conformance-test-root\")"),
+            "avc.rs must contain a cfg(feature = \"conformance-test-root\") \
+             alternate path for conformance root-trust constants (#734); none \
+             exists yet"
+        );
+    }
+}
