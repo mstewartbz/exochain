@@ -123,33 +123,33 @@ fn validate_governance_proposal_payload(payload: &[u8]) -> Result<ValidatorChang
     let change: ValidatorChange = ciborium::from_reader(payload)
         .map_err(|e| format!("proposal payload must be canonical ValidatorChange CBOR: {e}"))?;
     match &change {
-        ValidatorChange::AddValidator { did } | ValidatorChange::RemoveValidator { did } => {
+        ValidatorChange::AddValidator { did, public_key } => {
+            if did.as_str().trim().is_empty() {
+                return Err("proposal payload validator DID must not be empty".into());
+            }
+            // VCG-015: fail-closed cross-check. The wire payload carries
+            // both the claimed DID and the validator's real Ed25519 public
+            // key; a DID is a one-way hash of its owning key
+            // (`identity::did_from_public_key`), so we can and must verify
+            // the two actually correspond before accepting the change. A
+            // key that does not hash to the claimed DID is rejected
+            // outright — never substituted with a placeholder.
+            let derived_did = crate::identity::did_from_public_key(public_key)
+                .map_err(|e| format!("proposal payload AddValidator public key is invalid: {e}"))?;
+            if &derived_did != did {
+                return Err(format!(
+                    "proposal payload AddValidator public key derives DID {derived_did}, \
+                     which does not match the claimed DID {did}"
+                ));
+            }
+        }
+        ValidatorChange::RemoveValidator { did } => {
             if did.as_str().trim().is_empty() {
                 return Err("proposal payload validator DID must not be empty".into());
             }
         }
     }
     Ok(change)
-}
-
-/// Derive a placeholder public-key resolver entry for a newly-added
-/// validator DID.
-///
-/// KNOWN GAP: the canonical `ValidatorChange::AddValidator` payload (see
-/// `wire.rs`) carries only the target DID, not its Ed25519 public key. A DID
-/// is a one-way hash of its owning key (`did_from_public_key` in
-/// `identity.rs`), so the real public key cannot be recovered from the DID
-/// alone. This derives a deterministic 32-byte placeholder so the resolver
-/// has *an* entry for the new validator (matching this gap's red-test
-/// contract, which only asserts the resolver contains the DID), but votes
-/// or commit certificates genuinely signed by the new validator will not
-/// verify against it. Closing this for real requires extending the wire
-/// payload to carry the validator's public key (or a follow-on key
-/// registration step) — out of scope for this lane; tracked as a residual
-/// gap alongside VCG-005.
-fn placeholder_validator_public_key(did: &Did) -> PublicKey {
-    let digest = blake3::hash(format!("exo.reactor.placeholder_validator_key.v1:{did}").as_bytes());
-    PublicKey::from_bytes(*digest.as_bytes())
 }
 
 /// Decode a committed node's governance payload and, if it is a canonical
@@ -163,7 +163,12 @@ fn placeholder_validator_public_key(did: &Did) -> PublicKey {
 ///
 /// Returns `Some(ValidatorChange)` describing what changed if the payload
 /// decoded as a `ValidatorChange`, or `None` if the committed node was not a
-/// governance proposal (the common case for ordinary DAG nodes).
+/// governance proposal (the common case for ordinary DAG nodes) or the
+/// payload failed the fail-closed validation in
+/// `validate_governance_proposal_payload` (e.g. an `AddValidator` whose
+/// supplied public key does not hash to its claimed DID — no validator is
+/// added and no key, placeholder or otherwise, is ever registered in that
+/// case).
 fn apply_committed_validator_change_in_memory(
     s: &mut ReactorState,
     payload: &[u8],
@@ -171,11 +176,15 @@ fn apply_committed_validator_change_in_memory(
     let change = validate_governance_proposal_payload(payload).ok()?;
 
     match &change {
-        ValidatorChange::AddValidator { did } => {
+        ValidatorChange::AddValidator { did, public_key } => {
+            // VCG-015: register the SUPPLIED, validated public key — never
+            // a placeholder. `validate_governance_proposal_payload` has
+            // already confirmed `public_key` hashes to `did`, so the key
+            // registered here is one the new validator can genuinely sign
+            // against.
             s.consensus.config.validators.insert(did.clone());
             let mut keys = s.validator_public_keys.as_map().clone();
-            keys.entry(did.clone())
-                .or_insert_with(|| placeholder_validator_public_key(did));
+            keys.insert(did.clone(), *public_key);
             s.validator_public_keys = ValidatorPublicKeys::new(keys);
         }
         ValidatorChange::RemoveValidator { did } => {
@@ -1741,9 +1750,28 @@ mod tests {
         }
     }
 
+    /// Deterministic keypair for the "new validator v4" fixture used by the
+    /// shared `validator_change_payload_for_test` helper below. Distinct
+    /// seed from the VCG-015-specific fixtures (200, 201) further down this
+    /// module.
+    fn new_validator_v4_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes([199u8; 32]).expect("deterministic new-validator-v4 keypair")
+    }
+
+    /// DID derived from `new_validator_v4_keypair`'s real public key.
+    /// VCG-015 requires an `AddValidator` payload's DID to actually hash
+    /// from its accompanying public key, so this fixture's "new validator"
+    /// identity can no longer be an arbitrary hand-picked string like the
+    /// pre-VCG-015 `"did:exo:v4"` literal.
+    fn new_validator_v4_did() -> Did {
+        crate::identity::did_from_public_key(new_validator_v4_keypair().public_key())
+            .expect("derive DID from new-validator-v4 public key")
+    }
+
     fn validator_change_payload_for_test() -> Vec<u8> {
         let change = crate::wire::ValidatorChange::AddValidator {
-            did: Did::new("did:exo:v4").unwrap(),
+            did: new_validator_v4_did(),
+            public_key: *new_validator_v4_keypair().public_key(),
         };
         let mut payload = Vec::new();
         ciborium::into_writer(&change, &mut payload).unwrap();
@@ -2962,7 +2990,7 @@ mod tests {
         let net_handle = NetworkHandle::new(cmd_tx);
         let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
 
-        let new_validator = Did::new("did:exo:v4").unwrap();
+        let new_validator = new_validator_v4_did();
         let payload = validator_change_payload_for_test();
 
         // Build the canonical ValidatorChange DAG node the same way
@@ -3074,7 +3102,7 @@ mod tests {
         let net_handle = NetworkHandle::new(cmd_tx);
         let (reactor_tx, mut reactor_rx) = mpsc::channel(8);
 
-        let new_validator = Did::new("did:exo:v4").unwrap();
+        let new_validator = new_validator_v4_did();
         let payload = validator_change_payload_for_test();
 
         let mut dag = Dag::new();

@@ -825,37 +825,66 @@ pub async fn run_holon_manager(
                             ))
                             .unwrap_or_else(|_| static_did("did:exo:candidate"));
 
-                            let change = ValidatorChange::AddValidator {
-                                did: candidate.clone(),
-                            };
-                            match encode_validator_change(&change) {
-                                Ok(buf) => {
-                                    if let Err(e) = execute_governance_action(
-                                        &reactor_state,
-                                        &shared_store,
-                                        &net_handle,
-                                        GovernanceEventType::ValidatorSetChange,
-                                        &buf,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            err = %e,
-                                            candidate = %candidate,
-                                            "Scaling Holon: auto-promotion failed"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            candidate = %candidate,
-                                            "Scaling Holon: auto-promoted candidate"
-                                        );
+                            // VCG-015: `AddValidator` now carries the
+                            // candidate's real Ed25519 public key,
+                            // fail-closed-validated against its DID
+                            // (`did == did_from_public_key(public_key)`).
+                            // `PeerRegistry` (see `network.rs`) tracks
+                            // libp2p `PeerId`s, not Ed25519 consensus
+                            // public keys, so there is no real key to
+                            // attach to a synthetic candidate DID today.
+                            // Fabricating one here would be exactly the
+                            // placeholder-key anti-pattern VCG-015 removes
+                            // from the reactor's apply path — so, absent a
+                            // genuine candidate key source, auto-promotion
+                            // is a no-op rather than a doomed-to-fail-closed
+                            // proposal. Tracked as a residual gap alongside
+                            // the PeerRegistry key-lookup initiative.
+                            let candidate_public_key: Option<PublicKey> = None;
+                            match candidate_public_key {
+                                Some(public_key) => {
+                                    let change = ValidatorChange::AddValidator {
+                                        did: candidate.clone(),
+                                        public_key,
+                                    };
+                                    match encode_validator_change(&change) {
+                                        Ok(buf) => {
+                                            if let Err(e) = execute_governance_action(
+                                                &reactor_state,
+                                                &shared_store,
+                                                &net_handle,
+                                                GovernanceEventType::ValidatorSetChange,
+                                                &buf,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    err = %e,
+                                                    candidate = %candidate,
+                                                    "Scaling Holon: auto-promotion failed"
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    candidate = %candidate,
+                                                    "Scaling Holon: auto-promoted candidate"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                err = %e,
+                                                candidate = %candidate,
+                                                "Scaling Holon: validator-set change encoding failed"
+                                            );
+                                        }
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        err = %e,
+                                None => {
+                                    tracing::debug!(
                                         candidate = %candidate,
-                                        "Scaling Holon: validator-set change encoding failed"
+                                        "Scaling Holon: auto-promotion skipped — no registered \
+                                         public key available for candidate (VCG-015 fail-closed; \
+                                         requires PeerRegistry key-lookup follow-on)"
                                     );
                                 }
                             }
