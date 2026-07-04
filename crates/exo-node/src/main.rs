@@ -1063,6 +1063,36 @@ async fn start_node(
         .await?,
     );
     avc_state.register_validator_public_keys(sync_validator_public_keys.clone())?;
+    {
+        let issuer_registration_now = avc::trusted_local_hlc_timestamp(avc_state.as_ref())?;
+        let issuer_registration_sign_fn = Arc::clone(&sign_fn);
+        match avc::configure_issuer_registration_authority_from_env(
+            avc_state.as_ref(),
+            &node_identity.public_key,
+            &issuer_registration_now,
+            move |payload| issuer_registration_sign_fn(payload),
+        )? {
+            Some(operator_did) => {
+                let chain_link_count = avc_state
+                    .find_delegated_issuer_registration_chain(&operator_did)
+                    .map(|chain| chain.depth())
+                    .unwrap_or(0);
+                tracing::info!(
+                    operator_did = %operator_did,
+                    chain_link_count,
+                    "AVC runtime issuer-registration authority granted to configured operator"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    env = avc::AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV,
+                    "AVC runtime issuer-registration operator not configured; \
+                     POST /api/v1/avc/issuers will refuse every request until \
+                     an authority grant exists"
+                );
+            }
+        }
+    }
     match avc::load_configured_root_trust_bundle(avc_state.as_ref())? {
         Some(registration) => {
             tracing::info!(

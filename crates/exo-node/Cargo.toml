@@ -260,3 +260,24 @@ unaudited-infrastructure-holons = []
 # device_trust and behavioral_signature axes are running under the unaudited R3
 # contract tracked by fix-onyx-4-r3-unwired-axes.md."
 unaudited-zerodentity-device-behavioral-axes = []
+
+# VCG-006b / #734: hermetic AVC conformance nodes need a way to swap in
+# test root-trust constants (ceremony id, bundle id, issuer DID, issuer
+# public key) instead of the real production ceremony values, so
+# conformance suites can exercise the full root-trust-bundle verification
+# path without possessing the production ceremony's signing material.
+#
+# This feature is strictly additive: it introduces a separately-named
+# `AVC_CONFORMANCE_ROOT_TRUST_*` constant set behind
+# `#[cfg(feature = "conformance-test-root")]` and a small resolver that
+# prefers the conformance constants only when the feature is compiled in.
+# The production `AVC_ROOT_TRUST_*` constants are never wrapped in a
+# feature gate and always compile to the same values whether this feature
+# is on or off — a source-guard test
+# (`conformance_test_root_feature_does_not_alter_production_root_trust` in
+# `avc.rs`) asserts this by construction.
+#
+# Do NOT enable this in production. Enabling it means: "I accept that this
+# node resolves AVC root trust against conformance-test constants instead
+# of the production ceremony, for hermetic test purposes only."
+conformance-test-root = []
