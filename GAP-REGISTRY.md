@@ -77,6 +77,41 @@ authored only by the coordinator; workers never edit this ledger or any guard sc
   all agree.
 - **Blocked-external:** qualified external review or external account/action is
   required; the internal fail-closed boundary remains tested.
+- **Pending-External (OGP annotation):** the row's green objectives are ratified
+  (2026-07-04 slate P2); engineering proceeds now; an independent external review
+  runs against the frozen artifact; the row green-lights through the Green-Light
+  Protocol without a second ratification round. Layered on `Red` — the internal
+  fail-closed boundary stays tested. Used by VCG-001.
+- **Pending-Activation (OGP annotation):** the refusal mechanism is verified; the
+  remaining gap is dormant-capability activation via a real, separately-ratified
+  consumer, not a live vulnerability. Layered on `Open (Blocked-external)`.
+  Green-lights through the Green-Light Protocol on the ratified consumer. Used by
+  VCG-011.
+
+### Objective-Gated Pending (OGP) and the Green-Light Protocol
+
+Ratified 2026-07-04 (slate P2, `docs/governance/RATIFICATION-SLATE-2026-07-04.md`).
+For externally-gated rows the deadlock — a review needs finished code while the row
+reads "blocked" waiting on review — is resolved by ratifying the row's
+mechanism-anchored green objectives NOW; the build proceeds independently of row
+status; independent processes run against the frozen artifact; and passing every
+ratified objective green-lights the row WITHOUT a second ratification round. The
+slate is the ratification event; external reports are evidence, never authority.
+
+Green-Light Protocol (mechanized pre-flip; adjudicator separation is mandatory):
+(a) the lane produces a Green-Light Memo enumerating each objective with one
+evidence artifact — frozen commit hash, test logs, report hash — no objective
+satisfied by assertion; (b) a non-lane integrity verifier issues a written CONFIRM,
+included in the flip commit — the building lane never adjudicates its own
+objectives; (c) the memo + CONFIRM go to Bob with a 72-hour objection window before
+the flip (silence green-lights; objection halts); (d) machine-checkable deviation
+triggers each halt the flip and escalate to Bob unconditionally — any diff hunk
+outside the pre-declared file set, any dependency-graph delta vs the frozen commit,
+any severity or classification change between a vendor's draft and final report, any
+objective ambiguity or scope change. Scope carve-out (D8 preserved): OGP green-lights
+ROW STATUS only; any feature-default flip, Holon promotion, or charter amendment
+stays a distinct ratification event unless that exact diff is pre-declared in the
+objectives.
 
 ## Current Evidence Stack
 
@@ -216,6 +251,47 @@ VCG-001b — RISC Zero verifier-integration SCAFFOLD; row STAYS Red):
   external cryptographic review of the risc0 verify path; once it lands,
   promoting RiscZero to ProductionReviewed + swapping in the audited verifier is
   a small localized change that flips the standing red green.
+
+Ratified 2026-07-04 (slate R2, `docs/governance/RATIFICATION-SLATE-2026-07-04.md`)
+— status annotation **Pending-External (objectives ratified)** layered on Red. The
+build proceeds now (W1); the row green-lights through the Green-Light Protocol
+(P2.5) on the objectives below, not on a second ratification round:
+
+- Pass criterion REWORDED (R2.2): "auditor certifies the verifier is sound" is
+  struck (no firm issues that artifact); the report is evidence, this slate is the
+  ratification.
+- O-1.1 the `RiscZeroReceiptVerifier` seam binds `domain_separator`,
+  `commitment_roots`, and `statement_kind` through to verification (the current seam
+  at `envelope.rs:268-272` drops all three) — fixed before freeze.
+- O-1.2 pinned risc0 vendored into the cargo-deny perimeter pre-freeze; Groth16
+  receipt verifier behind the seam; commit frozen + tagged (audited artifact equals
+  shipped dependency graph).
+- O-1.3 upstream-coverage confirmation comes from the engagement (vendor
+  countersignature or in-engagement delta review), never lane self-attestation;
+  recorded in this row.
+- O-1.4 independent review passes at the frozen commit with ZERO unresolved findings
+  in the protected class — defined by MECHANISM (any receipt/journal accepted under a
+  `domain_separator`/`commitment_roots`/`statement_kind` other than the one verified),
+  not by vendor label — and zero unresolved high/critical elsewhere; "resolved" = a
+  fix verified in the addendum or a Bob-ratified risk acceptance recorded here.
+- O-1.5 scope held (pedagogical blake3 out except the production gate-bypass check;
+  supply-chain = pinning discipline; no re-audit of risc0 internals).
+- O-1.6 the green diff is pre-declared and carries ZERO Cargo.lock/deny.toml delta
+  vs the frozen commit (any dependency hunk is a deviation trigger): registry
+  promotion + seam swap + un-ignore the standing red + the two anti-overclaim locks
+  replaced with named successor assertions, in one reviewed change.
+- O-1.7 standing pin-and-monitor: advisory subscription + exact pins/checksums + a CI
+  check failing on any risc0 version change without a linked re-review record.
+- Certificate standard (R2.4): named firm with a verifiable ZK track record; report
+  pinned to the frozen commit; scope matching the O-1.5 in/out list verbatim;
+  fix-verification addendum; archived in-repo as named review evidence.
+- Green semantic boundary: green attests crate-boundary verifier soundness,
+  feature-off, at the pinned commit; no production component produces or consumes
+  proofs yet (updated when O-4.4 lands the first consumer); the end-to-end production
+  proof flow is a later row.
+- Commissioning (R2.5): the Stage-1 paid design review and the 3-4 firm RFQ are
+  staged for Bob to send (external engagement is his commercial act under Human
+  Primacy); the RFQ scope packet is drafted per O-1.5.
 
 Evidence:
 
@@ -562,16 +638,48 @@ delivered; row STAYS Red):
   (a) building a governance-decision consensus payload type (missing
   infrastructure), OR (b) granting MCP the authority to propose validator-set
   changes — a RATIFICATION-LEVEL governance decision, not a coordinator fix.
-- The node-attached infrastructure the attempt prototyped is sound and reusable
-  (`NodeContext.net_handle`, `McpCapabilityProfile::NodeAttachedInterim`,
-  `is_node_attached()` gating; standalone `exochain mcp` stays fail-closed). The
-  CGR-verification half remains fail-closed and inherits VCG-001's external-audit
-  ceiling.
-- DECISION REQUIRED (principal): (1) whether to build a governance-decision
-  consensus payload type, and/or (2) whether MCP may be granted
-  validator-set-proposal authority under the named capability profile. Until
-  then the mutation-effect half stays blocked and VCG-004 stays Red — distinct
-  from the CGR half's VCG-001 ceiling. Not faked.
+- The refuted prototype's attribution defect is STRUCTURAL, not incidental: the
+  MCP caller is invisible behind the node signature (`reactor.rs:1511-1531`) — the
+  same defect class as the prior fake. Both refuted tips are quarantined
+  (`refuted-do-not-merge/vcg-004b-mcp-mutation-effect` on `50753c3b`,
+  `refuted-do-not-merge/vcg-004b-mcp-mutation-effect-work` on `fbd675e8`); only the
+  `NodeContext.net_handle` design notes are salvageable, and the
+  `McpCapabilityProfile::NodeAttachedInterim` node-attributed path is REJECTED
+  (R1.1). Accurate blast radius for the A-narrow build: it extends exo-node's
+  payload layer; the BFT engine is unchanged. The CGR-verification half remains
+  fail-closed and inherits VCG-001's external-review ceiling.
+- RATIFIED 2026-07-04 (slate R1, `docs/governance/RATIFICATION-SLATE-2026-07-04.md`).
+  Option B (grant MCP `ValidatorChange` authority) and "both (B interim then A)" are
+  REJECTED: consensus adjudication is authenticity-and-ordering only (validators
+  auto-vote structurally valid proposals, `reactor.rs:1097-1114`); default config
+  self-commits at quorum 1 (`main.rs:147-151`); the BFT min-4 floor lives only in
+  the HTTP handler (`api.rs:643-650`), bypassed by direct `submit_proposal` callers;
+  a node-attached mutation exceeds ratified D2's read-scoped end state. Reopening B
+  needs ALL of: a deliberative/human co-sign gate, the min-4 floor at the validate
+  layer, end-to-end authenticated caller identity, a deployed multi-validator
+  quorum.
+- A-narrow is the committed design (R1.3): one `DecisionCreate` consensus payload
+  variant; a mirrored canonical wire type in exo-node (no decision-forum dependency)
+  guarded by a cross-crate round-trip test; a strict canonical CBOR validation arm
+  parallel to `validate_governance_proposal_payload`; an apply-on-commit arm writing
+  to a decision-application store; `cast_vote`/`advance_decision` excluded from v1.
+- Green objectives (OGP, ratified now): O-4.1 A-narrow implemented. O-4.2 the MCP
+  caller's DID is cryptographically present in the committed payload provenance
+  (caller signs; node signature transport-only) over a write-capable authenticated
+  transport — green ALSO requires the W2 write-scope amendment ratified by Bob;
+  node-attributed `DecisionCreate` without caller identity is recorded progress,
+  never green. O-4.3 a >=4-validator harness (nodes share no store; node 2 applies
+  via its own commit path from network-delivered consensus; the closing assertion
+  reads node 2's independent store) commits an MCP-originated `DecisionCreate` at
+  quorum with the verified caller DID, the min-validator floor asserted at the
+  validate layer, and both refutation defects locked as named passing tests. O-4.4
+  the CGR half greens only when `exochain_verify_cgr_proof` dispatches to the
+  VCG-001-reviewed verifier with positive + fail-closed-negative wire tests; full
+  row green needs both halves.
+- Status is Red-with-reason (R1.2) until the objectives are met — the ledger
+  functioning, not failing. Hardening (R1.5) executes under W3: push the BFT min-4
+  floor into the validate layer, coordinated with the VCG-014 concurrent-remove race
+  so it lands once. Decision resolved — no longer awaiting the principal.
 
 Lane record (2026-07-02, branch `vcg/004a-cgr-lock-and-reclass`, sub-lane
 VCG-004a):
@@ -1296,6 +1404,44 @@ implementation against actual TEE hardware; until then this row stays Open and
 must not be represented as Green. Flagged rather than closed, per
 "claims must never outrun evidence."
 
+Ratified 2026-07-04 (slate R3, `docs/governance/RATIFICATION-SLATE-2026-07-04.md`)
+— status annotation **Pending-Activation (trigger + objectives ratified)** layered
+on Open (Blocked-external). The refusal mechanism is VERIFIED (41/41 at `2c1a8f65`),
+so the remaining gap is dormant-capability activation via a real consumer, not a
+live vulnerability:
+
+- R3.1 the "supply a bespoke verifier" brief is REJECTED as shaped — quote
+  verification is a maintained ecosystem capability (Intel QVL bindings, Phala
+  `dcap-qvl`, VirTEE `sev`); a bespoke verifier is a depreciating fork against a
+  ~30-day collateral expiry and TCB recovery. Struck: the "and/or SEV-SNP" scope.
+- R3.3 split trigger: W5 authorizes designing/building toward a candidate consumer
+  (ARCH-007 tenant isolation); the trigger fires only on a SEPARATE one-line Bob
+  ratification of the named consumer at design-complete (stating the production
+  surface that exercises the flow). A different consumer returns to Bob.
+- O-11.1 a named production verifier type (the closure blanket impl sealed to
+  `#[cfg(test)]` — done in W4) wired into >=1 REAL consumer flow (exercised by a
+  production surface or its own ratified row; never a flow whose only caller is the
+  validation harness).
+- O-11.2 platform scope inherits D4 exactly: SGX/DCAP slice one; TrustZone as a
+  vendor-plugin interface. Any TDX-first design needs its own one-line ratification.
+- O-11.3 a LIVE-generated quote from real hardware verifies against a pinned vendor
+  trust root (self-hosted collateral; hosted services are a cross-check oracle only).
+  A replayed fixture under mocked time does not satisfy this.
+- O-11.4 red tests pass: mutated quote fails; revoked/OutOfDate TCB visibly
+  downgrades dependent claims as DAG evidence; stale collateral fails closed;
+  simulated attestation stays refused in production.
+- O-11.5 `TeeAttestation` struct evolution (quote + cert-chain material) landed as
+  internal engineering BEFORE external validation. O-11.6 external validation under
+  the R2.4 certificate standard (TEE track record; report pinned to the validated
+  commit; scope matching the O-11.x in/out list; the `dcap-qvl` targeted-review
+  condition if that crate is chosen). O-11.7 production policy (freshness bound,
+  measurement pinning) recorded in the consumer's ratification line itself.
+- R3.5 the FHE footnote is STRUCK (confidentiality, not attestation — wrong evidence
+  class). R3.6 hygiene done in W4: dead `allow-simulated-tee` flag deleted, closure
+  blanket impl sealed to `#[cfg(test)]`, `docs/council/PANEL-4-SECURITY.md` stale
+  claim corrected; no TEE / hardware-rooted-trust language on external surfaces while
+  the row is pending.
+
 Evidence:
 
 - `crates/exo-gatekeeper/src/tee.rs:39-53` distinguishes simulated testing from
@@ -1682,6 +1828,15 @@ Ratified by the principal on 2026-07-02.
 Master doctrine: **ratification precedes authority; authority follows evidence.**
 Feature-default flips, Holon promotion, and charter amendments are ratification
 events with named review evidence, never lane outcomes.
+
+Amended 2026-07-04: the principal ratified a second slate resolving VCG-004
+(A-narrow committed; Option B rejected), VCG-001 (Pending-External; objectives
+O-1.1..O-1.7), and VCG-011 (Pending-Activation; objectives O-11.1..O-11.7), plus the
+Objective-Gated Pending pattern, the Green-Light Protocol, and heavy-lift
+workstreams W1-W5. Verbatim record:
+`docs/governance/RATIFICATION-SLATE-2026-07-04.md`. Per Human Primacy the write-scope
+bridge extension (the O-4.2 precondition) and each named TEE consumer (R3.3) remain
+separate ratification events.
 
 - **D1 - Proof backend:** RISC Zero, server-side proving only, Groth16 wrapping
   as receipt compression; verifier minimalism (small, in-workspace, pinned,

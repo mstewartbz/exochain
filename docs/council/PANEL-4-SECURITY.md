@@ -566,7 +566,7 @@ The entire codebase currently uses Ed25519 exclusively. Given the 50-year retent
 GOV-009 specifies emergency constraints (scope, duration, ratification, frequency) but the TNC enforcer only partially covers ratification (TNC-10). Per-actor limits, scope enforcement, TTL enforcement, and automatic voiding on missed ratification are all specified but not enforced in code.
 
 **Risk 5: TEE ATTESTATION USES DETERMINISTIC MOCK IN CODEBASE (MEDIUM)**
-`exo-gatekeeper::tee.rs` generates attestation signatures using blake3 hash (deterministic, not hardware-bound). While appropriate for testing, the `TeePlatform::Simulated` variant must be categorically rejected in production builds. No production-mode gate currently exists to prevent simulated attestation from being accepted.
+`exo-gatekeeper::tee.rs` generates attestation signatures using blake3 hash (deterministic, not hardware-bound) for fixtures. As of the VCG-011 refusal-mechanism work the `TeePlatform::Simulated` variant is now categorically rejected in production builds, and hardware quotes are refused unless a named `TeeQuoteVerifier` is supplied — the fail-closed production gate exists and is test-covered (41/41 at `2c1a8f65`). The remaining gap is the absence of a real hardware quote verifier and a live consumer, not the absence of the gate; see `GAP-REGISTRY.md` VCG-011 (Pending-Activation).
 
 ### Overall Assessment
 
