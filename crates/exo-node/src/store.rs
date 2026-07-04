@@ -800,7 +800,13 @@ impl SqliteDagStore {
     }
 
     /// Save a trust receipt to the database.
-    #[cfg(test)]
+    ///
+    /// Unlike [`Self::mark_committed_with_receipt_sync`] and
+    /// [`Self::persist_commit_certificate_with_receipt_sync`], this does not
+    /// require (or check) an associated committed DAG node — it is the
+    /// standalone insert path for receipts that anchor an adjacent-surface
+    /// event rather than a DAG commit (e.g. the VCG-007 CrossChecked
+    /// receipt-anchor intake).
     pub fn save_receipt(&mut self, receipt: &TrustReceipt) -> DagResult<()> {
         if let Some(store) = self.dagdb() {
             let store = store.clone();
