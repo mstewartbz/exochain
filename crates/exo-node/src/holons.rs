@@ -1719,9 +1719,8 @@ mod tests {
             validator_public_keys,
             round_timeout_ms: 5000,
         };
-        let sign_fn: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync> = Arc::new(move |message| {
-            exo_core::crypto::sign(message, &node_secret_key)
-        });
+        let sign_fn: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync> =
+            Arc::new(move |message| exo_core::crypto::sign(message, &node_secret_key));
         let reactor_state = crate::reactor::create_reactor_state(&reactor_config, sign_fn, None);
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
