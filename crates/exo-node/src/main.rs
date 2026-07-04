@@ -925,12 +925,21 @@ async fn start_node(
     );
 
     // Build the governance API router.
+    //
+    // `crosschecked_trust` starts empty: no CrossChecked authority is
+    // trusted until an operator explicitly delegates one via the root
+    // authority (VCG-007, D3), which keeps `POST /api/v1/receipts`
+    // fail-closed by default even when the
+    // `unaudited-crosschecked-receipt-anchor` feature is compiled in.
     let api_state = Arc::new(api::NodeApiState {
         reactor_state: Arc::clone(&reactor_state),
         store: Arc::clone(&shared_store),
         net_handle: net_handle.clone(),
         node_did: node_identity.did.clone(),
         sign_fn: Arc::clone(&sign_fn),
+        crosschecked_trust: Arc::new(std::sync::Mutex::new(api::CrossCheckedTrustAnchor::empty(
+            node_identity.did.clone(),
+        ))),
     });
     let governance_router = api::governance_router(api_state);
 
