@@ -239,15 +239,21 @@ unaudited-mcp-simulation-tools = []
 # unaudited onboarding contract tracked by Onyx-4 R1."
 unaudited-zerodentity-first-touch-onboarding = []
 
-# ONYX-4 RED R5: infrastructure Holons currently build kernel adjudication
-# contexts with sentinel authority/provenance signatures (`vec![1, 2, 3]`) and
-# no public key. The Holons are recommendation-only today, but the runtime must
-# not start by default until the context carries real signed authority and
-# provenance.
+# ONYX-4 RED R5 / VCG-010 (ratified decision D5): infrastructure Holons build
+# kernel adjudication contexts with real Ed25519 authority/provenance
+# signatures (holons.rs) and reject a self-issued root authority (grantor key
+# == signer key with no external attestation distinct from the signer). The
+# Scaling Holon's auto-promotion path is recommendation-only, full stop — it
+# emits a `RecommendationOnly` governance event and never submits a
+# `ValidatorSetChange` proposal on its own; promotion remains a ratification
+# event with named evidence. The runtime still does not start by default: no
+# external-attestation source (a witnessed ceremony distinct from the node's
+# own signer) is wired into production yet, so the default config's root
+# authority is self-issued and the kernel would reject every Holon step.
 #
 # Do NOT enable this in production. Enabling it means: "I accept that
-# infrastructure Holons run with the unaudited R5 adjudication context tracked
-# by fix-onyx-4-r5-holons-stub-context.md."
+# infrastructure Holons run without a real external-attestation source for
+# the root authority, tracked by fix-onyx-4-r5-holons-stub-context.md."
 unaudited-infrastructure-holons = []
 
 # ONYX-4 RED R3: the 0dentity device fingerprint and behavioral biometric

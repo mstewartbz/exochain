@@ -594,6 +594,11 @@ pub enum GovernanceEventType {
     AuditEntry,
     /// Validator set change — add or remove a validator.
     ValidatorSetChange,
+    /// A recommendation-only signal (e.g. Scaling Holon auto-promotion
+    /// advice). Per ratified decision D5, this event type is informational
+    /// evidence only — it never authorizes a state change on its own.
+    /// Promotion remains a ratification event with named evidence.
+    RecommendationOnly,
 }
 
 /// A request to change the validator set.

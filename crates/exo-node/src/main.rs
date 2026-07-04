@@ -791,6 +791,14 @@ async fn start_node(
             root_did: holon_authority_did,
             root_public_key: holon_authority_public_key,
             root_signer: holon_authority_signer,
+            // No external attestation is wired yet: `root_did`/`root_public_key`/
+            // `root_signer` above are all derived from the same freshly-loaded
+            // node identity, i.e. a self-issued root authority with no
+            // witnessed ceremony or lineage distinct from the signer. Per
+            // ratified decision D5, the kernel must reject this until a real
+            // external attestation source (a distinct witnessing party) is
+            // wired in — tracked in `Initiatives/fix-onyx-4-r5-holons-stub-context.md`.
+            root_attestation: None,
             provenance_timestamp_source: holons::hlc_provenance_timestamp_source(),
             topology_interval_secs: 60,
             scaling_interval_secs: 300,

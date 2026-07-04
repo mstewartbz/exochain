@@ -388,6 +388,12 @@ async fn apply_committed_validator_change_after_commit(
     );
 }
 
+// Reachable in production only via `submit_proposal` under the
+// `unaudited-admin-governance-shortcut` feature (see `api.rs`); the
+// infrastructure-Holon Scaling path no longer calls `submit_proposal` as of
+// VCG-010/D5 (recommendation-only, full stop — it never submits a DAG
+// proposal). Exercised directly by `reactor::tests` regardless of feature.
+#[cfg_attr(not(feature = "unaudited-admin-governance-shortcut"), allow(dead_code))]
 fn sign_proposal(
     proposal: &Proposal,
     sign_fn: &(dyn Fn(&[u8]) -> Signature + Send + Sync),
@@ -1455,7 +1461,14 @@ async fn check_and_commit(
 
 /// Submit a governance mutation as a DAG node and propose it for consensus.
 ///
-/// Called by the API layer when a new governance action is requested.
+/// Called by the API layer when a new governance action is requested, behind
+/// the `unaudited-admin-governance-shortcut` feature (see `api.rs`). The
+/// infrastructure-Holon Scaling path no longer calls this as of VCG-010/D5
+/// (recommendation-only, full stop — it emits a `RecommendationOnly`
+/// governance event via `broadcast_governance_event` instead of submitting a
+/// DAG proposal). Exercised directly by `reactor::tests` regardless of
+/// feature.
+#[cfg_attr(not(feature = "unaudited-admin-governance-shortcut"), allow(dead_code))]
 pub async fn submit_proposal(
     state: &SharedReactorState,
     store: &Arc<Mutex<SqliteDagStore>>,
