@@ -1063,6 +1063,36 @@ async fn start_node(
         .await?,
     );
     avc_state.register_validator_public_keys(sync_validator_public_keys.clone())?;
+    {
+        let issuer_registration_now = avc::trusted_local_hlc_timestamp(avc_state.as_ref())?;
+        let issuer_registration_sign_fn = Arc::clone(&sign_fn);
+        match avc::configure_issuer_registration_authority_from_env(
+            avc_state.as_ref(),
+            &node_identity.public_key,
+            &issuer_registration_now,
+            move |payload| issuer_registration_sign_fn(payload),
+        )? {
+            Some(operator_did) => {
+                let chain_link_count = avc_state
+                    .find_delegated_issuer_registration_chain(&operator_did)
+                    .map(|chain| chain.depth())
+                    .unwrap_or(0);
+                tracing::info!(
+                    operator_did = %operator_did,
+                    chain_link_count,
+                    "AVC runtime issuer-registration authority granted to configured operator"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    env = avc::AVC_ISSUER_REGISTRATION_OPERATOR_DID_ENV,
+                    "AVC runtime issuer-registration operator not configured; \
+                     POST /api/v1/avc/issuers will refuse every request until \
+                     an authority grant exists"
+                );
+            }
+        }
+    }
     match avc::load_configured_root_trust_bundle(avc_state.as_ref())? {
         Some(registration) => {
             tracing::info!(
@@ -1078,6 +1108,20 @@ async fn start_node(
                 "AVC root trust bundle not configured; issuer registry starts without root delegation"
             );
         }
+    }
+    // Restore durable per-issuer runtime registrations (VCG-006b / #736 hard
+    // requirement (a)) now that every verified startup-config trust anchor
+    // that could be a chain root has been registered above. Each stored
+    // `exo-authority` DelegationRegistry chain is re-verified before its key
+    // becomes resolvable again, so a restart can never resurrect an
+    // unauthorized key. A record that fails re-verification is skipped and
+    // logged at `warn` level rather than aborting startup (VCG-006b
+    // availability corrective) — the `?` below only propagates genuine
+    // registry-unavailable errors (e.g. a poisoned mutex), never a
+    // per-record verification failure.
+    {
+        let restore_now = avc::trusted_local_hlc_timestamp(avc_state.as_ref())?;
+        avc_state.restore_registered_issuer_keys(&restore_now)?;
     }
     let avc_router = avc::avc_router(Arc::clone(&avc_state));
     tracing::info!(

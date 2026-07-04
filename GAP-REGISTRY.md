@@ -146,7 +146,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-003 | P0 | Red | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Red | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Green-local | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
-| VCG-006 | P1 | Open | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
+| VCG-006 | P1 | Green-local | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
 | VCG-007 | P1 | Open | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
 | VCG-008 | P1 | Green-local | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
 | VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
@@ -657,7 +657,7 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-006 - AVC Runtime Integrity Issues Remain Open
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** AVC runtime
 
@@ -701,6 +701,53 @@ VCG-006a — closes 2 of the 4 sub-issues; row stays Open until #734/#736):
   #734 (conformance-test-root feature with source-guard proving production
   root-trust constants untouched when off). Row closes when all four
   sub-issues land with source, CI, and runtime proof.
+
+Lane record (2026-07-04, branch `vcg/006b-avc-issuer-conformance`, sub-lane
+VCG-006b — closes the remaining 2 of 4 sub-issues; row -> Green-local):
+
+- **#736 (runtime issuer allow-list registration/rotation)** — Green: durable
+  `register_registered_issuer_key` stores each runtime issuer key WITH its
+  authorizing `exo-authority` DelegationRegistry chain
+  (`RegisteredIssuerKey { public_key, authority_chain, registered_at }`) and
+  admits the key only after the chain verifies (signature, expiry,
+  rootedness) AND grants `Permission::Govern` — the single D3 authority model,
+  no parallel allow-list. `POST /api/v1/avc/issuers` is gated on a real
+  startup-granted operator delegation (`EXO_AVC_ISSUER_REGISTRATION_*`), not a
+  bare bearer; when unset the endpoint refuses every request. A registration
+  is immediately usable without restart AND survives restart:
+  `registered_issuer_key_survives_restart_and_credential_still_validates`
+  proves a fresh registry re-derives the key from the durable chain (not
+  resolvable until the validator's own key + `restore_registered_issuer_keys`
+  run) and a credential the issuer signs still validates end-to-end.
+- **Availability corrective (VCG-006b)** — the first landing made restart
+  fatal: because the production validator key lives in
+  `receipt_validator_public_keys`, not the resolvable `public_keys` map, the
+  first legitimate registration bricked every subsequent restart. Fix
+  (`AvcApiState::restore_registered_issuer_keys`): re-verification runs on a
+  registry CLONE and commits atomically; a record that fails re-verification
+  is skipped and logged at `warn` (never admitted — fail-closed on TRUST),
+  while startup continues (fail-open on AVAILABILITY). The node-side wrapper
+  errors ONLY on genuine registry unavailability (poisoned mutex), never on a
+  skipped record. Security-nuance test proves an unverifiable persisted record
+  is never resurrected yet never blocks startup.
+- **#734 (conformance-test-root feature + source-guard)** — Green:
+  `resolve_avc_root_trust_constants` returns the real production
+  `AVC_ROOT_TRUST_*` constants unconditionally UNLESS the
+  `conformance-test-root` feature is compiled in AND
+  `EXO_AVC_CONFORMANCE_ROOT_TRUST` is set at runtime (double-gated). The
+  production constants are never edited, wrapped, or replaced — only the
+  resolver's return value branches — asserted by
+  `conformance_test_root_feature_does_not_alter_production_root_trust`. Verified
+  both ways: default build (feature OFF) 12 issuer/conformance/restore tests
+  pass; feature ON, 3 conformance tests pass.
+- Adversarial re-refutation (NOT-REFUTED): traced the persistence path (not
+  theater — round-trip test admits the key only via re-verified durable
+  chain), the availability path (skip is fail-closed on trust), and the
+  conformance path (production trust unreachable without BOTH feature + env).
+  No unauthorized key admitted on any path; D3 single-authority preserved.
+- Gates: `exochain-avc` 208 pass; `exochain-node` avc+auth 221 pass;
+  conformance feature ON 3 pass; merged cleanly onto current main (006a
+  #735/#737 already landed via PR #745). All four sub-issues now delivered.
 
 Evidence:
 
