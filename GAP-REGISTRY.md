@@ -154,7 +154,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
 | VCG-012 | P2 | Open | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
 | VCG-013 | P2 | Open | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
-| VCG-014 | P2 | Open | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
+| VCG-014 | P2 | Green-local | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
 | VCG-015 | P1 | Open | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
 
 ## VCG-001 - Production ZK Proof Backend Absent
@@ -1161,9 +1161,38 @@ cargo clippy -p exochain-tenant --all-targets -- -D warnings
 ## VCG-014 - Governance and Legal Completeness Rows Remain Partial
 
 **Priority:** P2
-**Status:** Open
+**Status:** Green-local
 **Classification:** Governance/legal
 **Owner role:** Council/legal
+
+Lane record (2026-07-04, branch `vcg/014-governance-guard`, coordinator-authored):
+
+- This is the GUARD-FIRST deliverable the remediation track calls for. It does
+  NOT claim the Sybil sub-threats are mitigated or that constitutional
+  completeness is reached — it delivers machine-enforcement that no one can
+  SILENTLY claim they are.
+- `tools/test_cr001_completeness.sh` (new) pins the current unresolved state of
+  CR-001: the six Section 8.2 Sybil sub-threat rows (all still open,
+  unresolved), the nine Implementation-Tracking work-order rows (8.1-8.7 + 8.9
+  `🟡 PARTIAL`, 8.8 `✅ IMPLEMENTED`), and the six Section 9 release-blocking
+  acceptance boxes (all `- [ ]` unchecked, with a defense-in-depth check that
+  none appears in the ticked `- [x]` form). Any change that flips a
+  sub-threat's status, upgrades a work-order status, or ticks a release-blocking
+  box now fails CI unless it updates this guard in the same change set — which
+  is precisely the coordinator + council review checkpoint we want on a
+  completeness claim.
+- Complements the pre-existing `tools/test_cr001_status.sh` (which guards only
+  the DRAFT ratification status). Wired into the CI hygiene gate immediately
+  after it.
+- TDD-verified: passes on the clean tree; fails when a Sybil row's status is
+  flipped away from open; fails when a Section 9 box is ticked; passes again on
+  restore.
+- Substantive closure of each individual Sybil sub-threat (Identity, Review,
+  Quorum, Delegation, Mesh, Synthetic-Opinion) and each PARTIAL work order
+  proceeds as its own future lane; each such lane MUST update this guard as it
+  lands. Legal sign-off record remains a separate Council deliverable.
+- Status Green-local: the completeness drift-guard exists, is CI-enforced, and
+  pins every unresolved row. Closed after merge + CI.
 
 Evidence:
 

@@ -90,6 +90,7 @@ assert_contains GAP-REGISTRY.md "VCG-003 \\| P0 \\| Red"
 assert_contains GAP-REGISTRY.md "VCG-004 \\| P0 \\| Red"
 assert_contains GAP-REGISTRY.md "VCG-005 \\| P1 \\| Green-local"
 assert_contains GAP-REGISTRY.md "VCG-008 \\| P1 \\| Green-local"
+assert_contains GAP-REGISTRY.md "VCG-014 \\| P2 \\| Green-local"
 assert_contains GAP-REGISTRY.md "eDiscovery export is not an open origin-main gap"
 assert_contains GAP-REGISTRY.md "No VCG row is closed at ledger creation"
 

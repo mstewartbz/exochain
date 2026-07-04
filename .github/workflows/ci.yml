@@ -299,6 +299,8 @@ jobs:
         run: bash tools/test_consensus_liveness_docs.sh
       - name: CR-001 status consistency
         run: bash tools/test_cr001_status.sh
+      - name: CR-001 completeness (VCG-014 drift guard)
+        run: bash tools/test_cr001_completeness.sh
       - name: GAP registry truth
         run: bash tools/test_gap_registry_truth.sh
       - name: Systemic integrity claims
