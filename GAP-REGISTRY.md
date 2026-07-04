@@ -1128,9 +1128,25 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-011 - Hardware TEE Quote Verification Requires Production Integration
 
 **Priority:** P1
-**Status:** Open
+**Status:** Open (Blocked-external)
 **Classification:** EXOCHAIN core
 **Owner role:** TEE integration
+
+Coordinator note (2026-07-04): this row has an external ceiling and is NOT
+internally closable by the remediation loop. Closing VCG-011 for real requires
+verifying live vendor attestation quotes (Intel SGX/TDX DCAP, AMD SEV-SNP, or
+equivalent) against genuine platform hardware and a real vendor
+quote-verification service — capability, hardware, and a vendor trust root the
+loop does not possess. The code is already fail-closed in the right direction
+(`tee.rs:342-372` rejects hardware quotes unless a real `TeeQuoteVerifier` is
+supplied; simulated platforms are refused outside testing at `tee.rs:145-151`),
+so there is no false hardware-trust claim to retract — the gap is the ABSENCE
+of a production verifier, which cannot be manufactured in-loop without
+overclaiming. Action required from Bob: commission an external
+platform-security review to supply and validate a real `TeeQuoteVerifier`
+implementation against actual TEE hardware; until then this row stays Open and
+must not be represented as Green. Flagged rather than closed, per
+"claims must never outrun evidence."
 
 Evidence:
 
