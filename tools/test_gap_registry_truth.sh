@@ -86,7 +86,7 @@ done
 
 assert_contains GAP-REGISTRY.md "VCG-001 \\| P0 \\| Red"
 assert_contains GAP-REGISTRY.md "VCG-002 \\| P0 \\| Green-local"
-assert_contains GAP-REGISTRY.md "VCG-003 \\| P0 \\| Red"
+assert_contains GAP-REGISTRY.md "VCG-003 \\| P0 \\| Green-local"
 assert_contains GAP-REGISTRY.md "VCG-004 \\| P0 \\| Red"
 assert_contains GAP-REGISTRY.md "VCG-005 \\| P1 \\| Green-local"
 assert_contains GAP-REGISTRY.md "VCG-006 \\| P1 \\| Green-local"

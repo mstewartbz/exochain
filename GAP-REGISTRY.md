@@ -143,7 +143,7 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 |----|----------|--------|----------------|------------|---------------|------------------------|--------------|
 | VCG-001 | P0 | Red | EXOCHAIN core | Proof architecture | Production SNARK/STARK/ZKML soundness | `crates/exo-proofs` production backend absence tests | `cargo test -p exochain-proofs` plus backend feature gates |
 | VCG-002 | P0 | Green-local | Governance/docs | Claim integrity | Accurate proof and constitutional claims | `tools/check_systemic_integrity_claims.sh` | claim guard plus docs source scan |
-| VCG-003 | P0 | Red | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
+| VCG-003 | P0 | Green-local | Core runtime adapter | Gateway | Production GraphQL governance/API execution | GraphQL no-fabrication resolver tests | `cargo test -p exochain-gateway graphql --features production-db` |
 | VCG-004 | P0 | Red | Core runtime adapter | MCP runtime | MCP tools as constitutional runtime actions | MCP mutation-effect and CGR verifier tests | `cargo test -p exochain-node mcp` |
 | VCG-005 | P1 | Green-local | Core runtime adapter | Governance runtime | Complete validator-set lifecycle | proposal-vote-commit application tests | `cargo test -p exochain-node governance` |
 | VCG-006 | P1 | Green-local | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
@@ -187,6 +187,35 @@ Lane record (2026-07-02, branch `vcg/001a-proof-envelope`):
 - Row stays Red, not Green: this lane delivers the envelope/registry
   remediation item only; production backend soundness (D1: RISC Zero,
   server-side) and external cryptographic review remain open.
+
+Lane record (2026-07-04, branch `vcg/001b-riscz-verifier-scaffold`, sub-lane
+VCG-001b — RISC Zero verifier-integration SCAFFOLD; row STAYS Red):
+
+- Delivers the honest integration SEAM only. Per D1 the production verifier
+  "carries the external audit budget", so marking any backend
+  `AuditStatus::ProductionReviewed` IS the cryptographic-review claim — which has
+  NOT happened, so the row cannot go Green without overclaiming.
+- Delivered (`crates/exo-proofs/src/envelope.rs`): a third audit status
+  `AuditStatus::PendingExternalReview`; a genuine `BackendId::RiscZero` variant;
+  registration of RiscZero as PendingExternalReview in `default_registry()`; a
+  `RiscZeroReceiptVerifier` trait + `FailClosedRiscZeroVerifier` default impl
+  that ALWAYS returns `Err` (documenting exactly where the audited risc0 verify
+  call plugs in); and a `ProofEnvelope::verify()` RiscZero arm that fails closed
+  independent of the `unaudited-pedagogical-proofs` feature.
+- Anti-overclaim locks: `default_registry()` has ZERO ProductionReviewed
+  backends; RiscZero is never ProductionReviewed; `verify()` never returns
+  `Ok(true)` for RiscZero. The standing red
+  `production_backend_variant_executes_without_unaudited_flag` is UNTOUCHED
+  (0-line diff), still `#[ignore]d`, still fails for the honest reason. NO
+  external zk dependency vendored (0-line Cargo diff) — D1 makes that the
+  audit-gated supply-chain event.
+- Re-refutation NOT-REFUTED (coordinator independent verification). Gates:
+  exochain-proofs tests pass both feature configs; clippy `-D warnings` clean;
+  nightly fmt clean.
+- **Row VCG-001 STAYS RED (Blocked-external).** Action required: commission the
+  external cryptographic review of the risc0 verify path; once it lands,
+  promoting RiscZero to ProductionReviewed + swapping in the audited verifier is
+  a small localized change that flips the standing red green.
 
 Evidence:
 
@@ -367,9 +396,55 @@ cargo fmt --all -- --check
 ## VCG-003 - GraphQL Surface Is Default-Off and Unaudited
 
 **Priority:** P0
-**Status:** Red
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** Gateway
+
+Lane record (2026-07-04, branch `vcg/003b-graphql-adjudication`, follow-on —
+Red -> Green-local):
+
+- Delivered: the unconditional GraphQL mutation kill-switch
+  (`refuse_graphql_mutation_execution`) is REMOVED from all nine mutation
+  resolvers and the function deleted. Each resolver now routes through
+  `require_permitted_actor` -> `AppState::adjudicate_mutation` -> the real
+  `exo_gatekeeper::Kernel::adjudicate` against `InvariantSet::all()` (all 8
+  constitutional invariants), gating the write on `Verdict::Permitted`. A
+  structural meta-test (`graphql_mutation_resolvers_fail_closed_before_state_mutation`)
+  asserts at source level that every resolver calls the gate and that the
+  retired kill-switch string never reappears.
+- Integrity guarantee (why this can't be gamed): the kernel's
+  `AuthorityChainValid`, `ConsentRequired`, and `ProvenanceVerifiable`
+  invariants each require REAL Ed25519 signatures over canonical messages, so a
+  forged authority grant CANNOT pass adjudication. An authenticated-but-ungranted
+  actor falls to `graphql_deny_all_adjudication_context()` and is DENIED by the
+  real kernel (deny-by-default, proven by `graphql_mutation_denied_for_unauthorized_actor`
+  and `mutations_bind_injected_authenticated_actor`). The standing red
+  `mutations_execute_with_actor_after_adjudication_wiring` (un-ignored) passes
+  ONLY because its setup seeds a genuinely-signed authority grant via the
+  test-only `seed_actor_grant`; the resolver code never auto-authorizes. The
+  audit actor is always `actor.did`; a caller-supplied `reason` can never become
+  the actor (`graphql_mutation_actor_is_bound_not_caller_reason`).
+- HONEST PRODUCTION CAVEAT (recorded loudly): the surface stays default-off
+  (`unaudited-gateway-graphql-api`). In production `actor_grants` is empty —
+  there is NO production authority-grant source wired (`seed_actor_grant` is
+  currently test-only) — so EVERY GraphQL mutation DENIES by default in
+  production. This is the CORRECT posture for a default-off, unaudited surface:
+  auto-authorizing actors on an unaudited surface would be the wrong thing.
+  Follow-on (deliberately NOT done here to avoid premature production
+  authorization): wire a real per-actor grant source — either convert the
+  existing `delegations` map to signed `AuthorityLink`s, or route through
+  `server::AppState`'s production-db `build_adjudication_context` — as part of
+  the eventual audit-and-enable of the GraphQL surface.
+- Adversarial re-refutation NOT-REFUTED (workflow refuter + independent
+  coordinator verification): kill-switch genuinely removed; deny-by-default real
+  (kernel-enforced, crypto-backed); no fabrication; actor-bound; feature-off
+  refuses; un-wired-nothing (all nine gated).
+- Gates: exochain-gateway graphql feature-off 18 pass / feature-on 34 pass
+  (incl. the previously-ignored standing red); full crate no regression; clippy
+  `-D warnings` clean; nightly fmt + doc (`-D warnings`) clean.
+- Status Green-local: real constitutional adjudication replaces the kill-switch,
+  deny-by-default enforced by the crypto-backed kernel. The surface remains
+  default-off pending audit + a production grant source. Closed after merge + CI.
 
 Lane record (2026-07-02, branch `vcg/003-graphql-actor-context`):
 
@@ -467,6 +542,36 @@ cargo clippy -p exochain-gateway --features production-db --all-targets -- -D wa
 **Status:** Red
 **Classification:** Core runtime adapter
 **Owner role:** MCP runtime
+
+Coordinator finding (2026-07-04, VCG-004b attempt — mutation-effect half NOT
+delivered; row STAYS Red):
+
+- A RED->GREEN->REFUTE lane attempted the mutation-effect half. The green was
+  REFUTED for two real defects: (1) misattribution — a caller-supplied
+  `proposer_did` was echoed as if attributed while `reactor::submit_proposal`
+  cryptographically binds the node's OWN `node_did`; there is no MCP-caller
+  authentication; (2) mutation theater — it submitted a
+  `ValidatorChange::RemoveValidator{ did: hash(proposer_did, title) }` for a
+  synthetic, non-existent validator (a DAG node with no real governance effect;
+  removing a non-validator is a no-op even at quorum). It was NOT landed.
+- Architectural blocker (the real reason this half is hard): `submit_proposal` /
+  `validate_governance_proposal_payload` accept ONLY `ValidatorChange` payloads.
+  There is NO governance-decision consensus payload type, so NO MCP governance
+  tool (create_decision, cast_vote, propose_amendment, ...) can honestly route a
+  mutation through consensus today. A genuine MCP mutation-effect requires EITHER
+  (a) building a governance-decision consensus payload type (missing
+  infrastructure), OR (b) granting MCP the authority to propose validator-set
+  changes — a RATIFICATION-LEVEL governance decision, not a coordinator fix.
+- The node-attached infrastructure the attempt prototyped is sound and reusable
+  (`NodeContext.net_handle`, `McpCapabilityProfile::NodeAttachedInterim`,
+  `is_node_attached()` gating; standalone `exochain mcp` stays fail-closed). The
+  CGR-verification half remains fail-closed and inherits VCG-001's external-audit
+  ceiling.
+- DECISION REQUIRED (principal): (1) whether to build a governance-decision
+  consensus payload type, and/or (2) whether MCP may be granted
+  validator-set-proposal authority under the named capability profile. Until
+  then the mutation-effect half stays blocked and VCG-004 stays Red — distinct
+  from the CGR half's VCG-001 ceiling. Not faked.
 
 Lane record (2026-07-02, branch `vcg/004a-cgr-lock-and-reclass`, sub-lane
 VCG-004a):
