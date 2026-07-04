@@ -34,7 +34,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 # Build the distributed node binary and standalone gateway with DB-backed
 # adjudication enabled for production container deployments.
-RUN cargo build --release --bin exochain --bin exo-gateway --features exochain-gateway/production-db
+# EXTRA_CARGO_FEATURES is empty by default (image unchanged). Private-network
+# deployments may pass e.g. ",exochain-gateway/unaudited-gateway-graphql-api"
+# to compile the GraphQL surface into an instance that is never publicly
+# exposed. The public build must keep this empty until VCG-003/Spline R1 land.
+ARG EXTRA_CARGO_FEATURES=""
+RUN cargo build --release --bin exochain --bin exo-gateway --features "exochain-gateway/production-db${EXTRA_CARGO_FEATURES}"
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
