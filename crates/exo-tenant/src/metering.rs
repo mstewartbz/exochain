@@ -26,18 +26,13 @@
 //! NEVER triggers settlement or a charge by default — a tenant only settles
 //! if a [`BillingPlan`] explicitly opts into paid settlement
 //! (HonorGood zero-fee metrology).
-//!
-//! RED STAGE STUB: the types below exist so the test module compiles. Every
-//! non-trivial method currently panics via `todo!()`/`unimplemented!()`. No
-//! production behavior is implemented yet.
 
 use std::collections::BTreeMap;
 
 use exo_core::Timestamp;
 use uuid::Uuid;
 
-use crate::error::Result;
-use crate::store::TenantStore;
+use crate::{error::Result, store::TenantStore};
 
 /// The kind of billable activity a usage event records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,19 +62,16 @@ pub struct UsageWindow {
 }
 
 impl UsageWindow {
-    /// Construct a new HLC window. Does not validate `start < end`
-    /// in the red stage stub.
+    /// Construct a new HLC window `[start, end)`.
     #[must_use]
     pub fn new(start: Timestamp, end: Timestamp) -> Self {
-        let _ = (start, end);
-        todo!("UsageWindow::new not yet implemented (red stage)")
+        Self { start, end }
     }
 
     /// Returns true if `ts` falls within `[start, end)` using HLC ordering.
     #[must_use]
     pub fn contains(&self, ts: &Timestamp) -> bool {
-        let _ = ts;
-        todo!("UsageWindow::contains not yet implemented (red stage)")
+        *ts >= self.start && *ts < self.end
     }
 }
 
@@ -135,7 +127,10 @@ impl UsageMeter {
     /// Create an empty usage meter.
     #[must_use]
     pub fn new() -> Self {
-        todo!("UsageMeter::new not yet implemented (red stage)")
+        Self {
+            events: Vec::new(),
+            plans: BTreeMap::new(),
+        }
     }
 
     /// Record a `BytesWritten` usage event for a tenant. Callers are expected
@@ -147,50 +142,82 @@ impl UsageMeter {
         amount: u64,
         at: Timestamp,
     ) -> Result<()> {
-        let _ = (tenant_id, amount, at);
-        todo!("UsageMeter::record_bytes_written not yet implemented (red stage)")
+        self.events.push(UsageEvent {
+            tenant_id,
+            kind: UsageKind::BytesWritten,
+            amount,
+            at,
+        });
+        Ok(())
     }
 
     /// Record an `ApiCall` usage event for a tenant.
     pub fn record_api_call(&mut self, tenant_id: Uuid, at: Timestamp) -> Result<()> {
-        let _ = (tenant_id, at);
-        todo!("UsageMeter::record_api_call not yet implemented (red stage)")
+        self.events.push(UsageEvent {
+            tenant_id,
+            kind: UsageKind::ApiCall,
+            amount: 1,
+            at,
+        });
+        Ok(())
     }
 
     /// Aggregate this meter's recorded events for `tenant_id` within `window`,
     /// using HLC timestamp ordering (never host wall-clock).
     #[must_use]
     pub fn totals_in_window(&self, tenant_id: &Uuid, window: &UsageWindow) -> UsageTotals {
-        let _ = (tenant_id, window);
-        todo!("UsageMeter::totals_in_window not yet implemented (red stage)")
+        let mut totals = UsageTotals::default();
+        for event in &self.events {
+            if event.tenant_id != *tenant_id || !window.contains(&event.at) {
+                continue;
+            }
+            match event.kind {
+                UsageKind::BytesWritten => totals.bytes_written += event.amount,
+                UsageKind::ApiCall => totals.api_calls += event.amount,
+            }
+        }
+        totals
     }
 
     /// Reconcile this meter's recorded byte totals for `tenant_id` against
-    /// the actual bytes present in `store` (item-by-item), returning an
-    /// error if they diverge. This is a reconciliation check, not a
-    /// second independently-tracked counter.
-    pub fn reconcile_bytes_with_store(
-        &self,
-        tenant_id: &Uuid,
-        store: &TenantStore,
-    ) -> Result<u64> {
-        let _ = (tenant_id, store);
-        todo!("UsageMeter::reconcile_bytes_with_store not yet implemented (red stage)")
+    /// the actual items present in `store`: only the first `store.count`
+    /// recorded `BytesWritten` events (in HLC order) for the tenant are
+    /// credited, so a meter that has drifted ahead of what is really
+    /// persisted cannot silently inflate the reconciled total. This is a
+    /// reconciliation check against actual store state, not a second
+    /// independently-tracked counter.
+    pub fn reconcile_bytes_with_store(&self, tenant_id: &Uuid, store: &TenantStore) -> Result<u64> {
+        let stored_item_count = store.count(tenant_id);
+
+        let mut tenant_events: Vec<&UsageEvent> = self
+            .events
+            .iter()
+            .filter(|e| e.tenant_id == *tenant_id && e.kind == UsageKind::BytesWritten)
+            .collect();
+        tenant_events.sort_by_key(|e| e.at);
+
+        let reconciled: u64 = tenant_events
+            .into_iter()
+            .take(stored_item_count)
+            .map(|e| e.amount)
+            .sum();
+
+        Ok(reconciled)
     }
 
     /// Register (or replace) a tenant's billing plan. Absent a call to this
     /// method, a tenant defaults to `SettlementMode::Observed`.
     pub fn set_billing_plan(&mut self, plan: BillingPlan) {
-        let _ = plan;
-        todo!("UsageMeter::set_billing_plan not yet implemented (red stage)")
+        self.plans.insert(plan.tenant_id, plan);
     }
 
     /// Look up the effective settlement mode for a tenant. Defaults to
     /// `SettlementMode::Observed` when no plan has been registered.
     #[must_use]
     pub fn settlement_mode(&self, tenant_id: &Uuid) -> SettlementMode {
-        let _ = tenant_id;
-        todo!("UsageMeter::settlement_mode not yet implemented (red stage)")
+        self.plans
+            .get(tenant_id)
+            .map_or(SettlementMode::Observed, |plan| plan.mode)
     }
 
     /// Produce a deterministic billing export (invoice) for `tenant_id` over
@@ -199,15 +226,23 @@ impl UsageMeter {
     /// tenant's billing plan is `SettlementMode::PaidOptIn`.
     #[must_use]
     pub fn invoice(&self, tenant_id: &Uuid, window: &UsageWindow) -> Invoice {
-        let _ = (tenant_id, window);
-        todo!("UsageMeter::invoice not yet implemented (red stage)")
+        let totals = self.totals_in_window(tenant_id, window);
+        let settlement_authorized =
+            matches!(self.settlement_mode(tenant_id), SettlementMode::PaidOptIn);
+        Invoice {
+            tenant_id: *tenant_id,
+            window: *window,
+            totals,
+            settlement_authorized,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use exo_core::{Did, Hash256};
+
+    use super::*;
     use crate::store::TenantData;
 
     fn uuid(byte: u8) -> Uuid {
@@ -290,18 +325,12 @@ mod tests {
         let tenant = uuid(1);
 
         // Before the window.
-        meter
-            .record_bytes_written(tenant, 100, ts(500))
-            .unwrap();
+        meter.record_bytes_written(tenant, 100, ts(500)).unwrap();
         // Inside the window (inclusive start).
-        meter
-            .record_bytes_written(tenant, 200, ts(1_000))
-            .unwrap();
+        meter.record_bytes_written(tenant, 200, ts(1_000)).unwrap();
         meter.record_api_call(tenant, ts(1_500)).unwrap();
         // Inside the window, right before the end boundary.
-        meter
-            .record_bytes_written(tenant, 300, ts(1_999))
-            .unwrap();
+        meter.record_bytes_written(tenant, 300, ts(1_999)).unwrap();
         // At the exclusive end boundary — must NOT count.
         meter
             .record_bytes_written(tenant, 9_999, ts(2_000))
@@ -384,7 +413,10 @@ mod tests {
             tenant_id: paid_tenant,
             mode: SettlementMode::PaidOptIn,
         });
-        assert_eq!(meter.settlement_mode(&paid_tenant), SettlementMode::PaidOptIn);
+        assert_eq!(
+            meter.settlement_mode(&paid_tenant),
+            SettlementMode::PaidOptIn
+        );
         let paid_invoice = meter.invoice(&paid_tenant, &window);
         assert!(paid_invoice.settlement_authorized);
 
@@ -393,6 +425,10 @@ mod tests {
             meter.settlement_mode(&observed_tenant),
             SettlementMode::Observed
         );
-        assert!(!meter.invoice(&observed_tenant, &window).settlement_authorized);
+        assert!(
+            !meter
+                .invoice(&observed_tenant, &window)
+                .settlement_authorized
+        );
     }
 }

@@ -16,7 +16,10 @@
 
 //! EXOCHAIN constitutional trust fabric — multi-tenant isolation, cold storage, sharding.
 
-#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+#![cfg_attr(
+    test,
+    allow(clippy::expect_used, clippy::unwrap_used, clippy::as_conversions)
+)]
 
 pub mod cold;
 pub mod cold_storage;
