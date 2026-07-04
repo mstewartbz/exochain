@@ -1204,6 +1204,72 @@ mod tests {
         );
     }
 
+    /// VCG-010 / D5 red test: a root authority is legitimate only with a
+    /// witnessed ceremony, external attestation, and lineage distinct from
+    /// the signer. `test_config()` wires `root_public_key` as the exact key
+    /// that `root_signer` uses to sign the authority link — i.e. the
+    /// grantor key equals the signer key with no external delegation chain
+    /// (this mirrors the production wiring in `main.rs:783-798`, where
+    /// `holon_authority_did`/`holon_authority_public_key`/`holon_authority_signer`
+    /// are all derived from the same freshly-loaded node identity).
+    ///
+    /// `build_holon_adjudication_context` (holons.rs:435-440) currently
+    /// inserts `config.root_public_key` into `trusted_authority_keys` keyed
+    /// by `config.root_did` directly from the link it just signed — a
+    /// tautological trust check with no independent/external resolution.
+    /// The kernel's `AuthorityChainValid` invariant then "verifies" the
+    /// signature against that self-supplied key and the holon step is
+    /// permitted.
+    ///
+    /// Expected red: today this self-issued root authority is trusted and
+    /// `holon::step` returns `Ok(..)`. Per D5, a self-issued root authority
+    /// with no external attestation/delegation chain distinct from the
+    /// signer must be REJECTED.
+    #[test]
+    fn holon_rejects_self_issued_root_authority() {
+        let kernel = create_infrastructure_kernel();
+        let config = test_config();
+
+        // Sanity-check the self-issuance premise this test exercises: the
+        // configured signer produces signatures verifiable under
+        // config.root_public_key, i.e. grantor key == signer key.
+        let probe_message = b"vcg-010-self-issuance-probe";
+        let probe_signature = (config.root_signer)(probe_message);
+        assert!(
+            exo_core::crypto::verify(probe_message, &probe_signature, &config.root_public_key),
+            "test premise: root_signer must produce signatures under root_public_key"
+        );
+
+        let mut h = create_health_holon(&test_did());
+        let ctx = build_holon_adjudication_context(&h, &config).expect("holon context");
+
+        // The authority chain's sole link is self-issued: its grantor is
+        // config.root_did and its grantor_public_key is config.root_public_key
+        // — the same key that produced the signature. There is no external
+        // attestation or delegation link distinct from the signer anywhere
+        // in the chain.
+        assert_eq!(ctx.authority_chain.links.len(), 1);
+        let root_link = &ctx.authority_chain.links[0];
+        assert_eq!(root_link.grantor, config.root_did);
+        assert_eq!(
+            root_link.grantor_public_key.as_deref(),
+            Some(config.root_public_key.as_bytes().as_slice())
+        );
+
+        let input = CombinatorInput::new()
+            .with("consensus_round", "1")
+            .with("committed_height", "1");
+
+        let result = holon::step(&mut h, &input, &kernel, &ctx);
+
+        assert!(
+            result.is_err(),
+            "a self-issued root authority (grantor key == signer key, no external \
+             delegation/attestation chain) must be REJECTED per D5, but holon::step \
+             returned {result:?}"
+        );
+    }
+
     #[cfg(not(feature = "unaudited-infrastructure-holons"))]
     #[test]
     fn infrastructure_holons_disabled_without_feature_flag() {
@@ -1478,5 +1544,166 @@ mod tests {
         }
 
         manager.abort();
+    }
+
+    /// VCG-010 / D5 red test: the Scaling Holon is recommendation-only, full
+    /// stop. Per the module doc (holons.rs:29-39) and D5, promotion is a
+    /// ratification event with named evidence — never an automatic
+    /// state-changing action.
+    ///
+    /// Today (holons.rs:787-860), whenever `validator_count < 3` and the
+    /// node `is_validator`, the Scaling Holon fabricates a candidate DID
+    /// (`did:exo:auto-promoted-{node_count}`) and calls
+    /// `execute_governance_action` -> `reactor::submit_proposal`, which is a
+    /// real `ValidatorSetChange::AddValidator` DAG proposal, plus a matching
+    /// `GovernanceEvent` broadcast over the network `Publish` command. This
+    /// test drains the network-command channel and does NOT suppress the
+    /// scaling path (unlike `holon_manager_emits_health_event`, which sets
+    /// `scaling_interval_secs` to 3600 to dodge it) — it fires the scaling
+    /// tick quickly with `validator_count == 1 < 3` and `is_validator == true`
+    /// and asserts zero `ValidatorSetChange::AddValidator` proposals are ever
+    /// submitted or broadcast.
+    ///
+    /// Expected red: today at least one `GovernanceEvent` with
+    /// `event_type: ValidatorSetChange` decoding to
+    /// `ValidatorChange::AddValidator { did: "did:exo:auto-promoted-*" }` is
+    /// published, and the DAG store gains a matching committed/pending node.
+    #[tokio::test]
+    async fn scaling_holon_emits_zero_validator_set_change_proposals() {
+        use std::{
+            collections::BTreeSet,
+            sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        };
+
+        use exo_core::types::Signature;
+
+        // Single-validator set with this node as the sole validator: any
+        // node_count > validator_count (guaranteed once at least one peer is
+        // reported) keeps validator_count(1) < 3 true throughout the test.
+        let validators: BTreeSet<Did> = std::iter::once(test_did()).collect();
+
+        // A real keypair is required: `submit_proposal` verifies the
+        // self-proposal/self-vote signature against `validator_public_keys`,
+        // so an empty resolver (as in `holon_manager_emits_health_event`,
+        // which never reaches consensus signing) would make the proposal
+        // path reject before ever reaching the network layer — masking the
+        // very state-changing behavior D5 says must not happen.
+        let node_keypair = exo_core::crypto::KeyPair::from_secret_bytes([0x51; 32]).unwrap();
+        let node_public_key = *node_keypair.public_key();
+        let node_secret_key = node_keypair.secret_key().clone();
+        let mut validator_public_keys = std::collections::BTreeMap::new();
+        validator_public_keys.insert(test_did(), node_public_key);
+
+        let reactor_config = crate::reactor::ReactorConfig {
+            node_did: test_did(),
+            is_validator: true,
+            validators,
+            validator_public_keys,
+            round_timeout_ms: 5000,
+        };
+        let sign_fn: Arc<dyn Fn(&[u8]) -> Signature + Send + Sync> = Arc::new(move |message| {
+            exo_core::crypto::sign(message, &node_secret_key)
+        });
+        let reactor_state = crate::reactor::create_reactor_state(&reactor_config, sign_fn, None);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
+        let net_handle = NetworkHandle::new(cmd_tx);
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        // Scaling fires quickly and is NOT suppressed. Topology/health are
+        // slow so this test isolates the scaling-tick auto-promotion path.
+        let config = test_config_with_intervals(3600, 1, 3600);
+
+        let validator_set_change_proposals = Arc::new(AtomicUsize::new(0));
+        let observed_governance_events = Arc::new(AtomicUsize::new(0));
+
+        // Drain network commands, recording every ValidatorSetChange
+        // governance-event broadcast that decodes to AddValidator instead of
+        // suppressing/ignoring it as the existing health test does.
+        let counter = Arc::clone(&validator_set_change_proposals);
+        let governance_seen = Arc::clone(&observed_governance_events);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    crate::network::NetworkCommand::Publish { message, reply, .. } => {
+                        if let crate::wire::WireMessage::GovernanceEvent(event) = &message {
+                            governance_seen.fetch_add(1, AtomicOrdering::SeqCst);
+                            if matches!(
+                                event.event_type,
+                                crate::wire::GovernanceEventType::ValidatorSetChange
+                            ) {
+                                let decoded: Result<ValidatorChange, _> =
+                                    ciborium::from_reader(event.payload.as_slice());
+                                if let Ok(ValidatorChange::AddValidator { did }) = decoded {
+                                    assert!(
+                                        did.to_string().starts_with("did:exo:auto-promoted-"),
+                                        "unexpected AddValidator candidate: {did}"
+                                    );
+                                    counter.fetch_add(1, AtomicOrdering::SeqCst);
+                                }
+                            }
+                        }
+                        let _ = reply.send(Ok(()));
+                    }
+                    crate::network::NetworkCommand::PeerCount { reply } => {
+                        // node_count = peer_count + 1 = 2, keeping
+                        // validator_count(1) < 3 and node_count > validator_count.
+                        let _ = reply.send(1);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Create a temporary store for the test and keep a handle to inspect
+        // the DAG tips after the run (a real proposal appends a node).
+        let dir = tempfile::tempdir().unwrap();
+        let shared_store = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::store::SqliteDagStore::open(dir.path()).unwrap(),
+        ));
+        let tips_before = shared_store.lock().unwrap().tips_sync().unwrap();
+
+        let manager = tokio::spawn(run_holon_manager(
+            config,
+            reactor_state,
+            Arc::clone(&shared_store),
+            net_handle,
+            event_tx,
+        ));
+
+        // Wait for at least one ScalingRecommendation event (first scaling
+        // tick fires immediately), then give the auto-promotion branch a
+        // moment to run before inspecting side effects.
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("Should receive an event within 5s")
+                .expect("Channel should not be closed");
+            if matches!(event, HolonEvent::ScalingRecommendation { .. }) {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        manager.abort();
+
+        assert!(
+            observed_governance_events.load(AtomicOrdering::SeqCst) > 0,
+            "test premise: scaling tick must have run at least once and reached the network layer"
+        );
+
+        assert_eq!(
+            validator_set_change_proposals.load(AtomicOrdering::SeqCst),
+            0,
+            "Scaling Holon must emit recommendation objects only and submit ZERO \
+             ValidatorSetChange::AddValidator proposals per D5 (recommendation-only, \
+             full stop), but at least one was broadcast"
+        );
+
+        let tips_after = shared_store.lock().unwrap().tips_sync().unwrap();
+        assert_eq!(
+            tips_after, tips_before,
+            "Scaling Holon must not append a real DAG proposal for auto-promotion \
+             (recommendation-only, full stop)"
+        );
     }
 }
