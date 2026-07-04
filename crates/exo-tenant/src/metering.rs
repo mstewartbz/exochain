@@ -288,7 +288,7 @@ impl UsageMeter {
 
 #[cfg(test)]
 mod tests {
-    use exo_core::{Did, Hash256};
+    use exo_core::Did;
 
     use super::*;
     use crate::store::TenantData;
@@ -301,14 +301,28 @@ mod tests {
         Timestamp::new(ms, 0)
     }
 
+    /// Build a `TenantData` backed by a REAL payload of exactly `byte_len`
+    /// bytes. The store's `byte_len` is derived by `TenantData::new` from this
+    /// payload's actual length — the helper cannot forge a `byte_len` that
+    /// disagrees with the data, so reconciliation is tested against genuine
+    /// store state (the meter, separately, may still misreport its own
+    /// `UsageEvent` amounts — that is the drift these tests catch).
     fn item(tenant_id: Uuid, item_id: Uuid, tag: &str, byte_len: u64) -> TenantData {
-        TenantData {
-            id: item_id,
-            tenant_id,
-            owner: Did::new("did:exo:owner").unwrap(),
-            content_hash: Hash256::digest(tag.as_bytes()),
-            byte_len,
+        let seed = if tag.is_empty() {
+            b"x".as_slice()
+        } else {
+            tag.as_bytes()
+        };
+        let mut payload = vec![0u8; byte_len as usize];
+        for (i, byte) in payload.iter_mut().enumerate() {
+            *byte = seed[i % seed.len()];
         }
+        TenantData::new(
+            item_id,
+            tenant_id,
+            Did::new("did:exo:owner").unwrap(),
+            &payload,
+        )
     }
 
     /// (1) Usage totals must reconcile against TenantStore's ACTUAL stored
