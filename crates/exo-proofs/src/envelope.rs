@@ -257,8 +257,16 @@ pub fn default_registry() -> Vec<BackendDescriptor> {
 /// Until then, [`FailClosedRiscZeroVerifier`] is the only implementation,
 /// and it never returns `Ok(true)`.
 pub trait RiscZeroReceiptVerifier {
-    /// Verifies a RISC Zero execution receipt against the given image id
-    /// (or verifier key bytes) and public inputs.
+    /// Verifies a RISC Zero execution receipt against the given image id (or
+    /// verifier key bytes) and the envelope's journal-binding digest.
+    ///
+    /// `journal_digest` is [`ProofEnvelope::binding_digest`] — the canonical
+    /// digest over the full envelope context (`statement_kind`,
+    /// `commitment_roots`, `domain_separator`, `public_inputs`, ...). An audited
+    /// implementation MUST check both that the receipt verifies against the
+    /// image id AND that the receipt's journal commits to exactly this digest
+    /// (objective O-1.1), so a receipt proven for one context can never be
+    /// replayed under another.
     ///
     /// # Errors
     ///
@@ -268,7 +276,7 @@ pub trait RiscZeroReceiptVerifier {
     fn verify_receipt(
         &self,
         image_id_or_verifier_key: &[u8],
-        public_inputs: &[Vec<u8>],
+        journal_digest: &Hash256,
     ) -> Result<bool>;
 }
 
@@ -291,7 +299,7 @@ impl RiscZeroReceiptVerifier for FailClosedRiscZeroVerifier {
     fn verify_receipt(
         &self,
         _image_id_or_verifier_key: &[u8],
-        _public_inputs: &[Vec<u8>],
+        _journal_digest: &Hash256,
     ) -> Result<bool> {
         Err(ProofError::VerificationFailed(
             "BackendId::RiscZero verifier is a pending-review scaffold: no external \
@@ -338,6 +346,28 @@ pub struct ProofEnvelope {
     pub domain_separator: Vec<u8>,
 }
 
+/// Domain-separation tag for [`ProofEnvelope::binding_digest`]. Bump only if
+/// the binding-tuple shape changes.
+const ENVELOPE_BINDING_DOMAIN: &str = "exo-proofs:envelope-binding:v1";
+
+/// The canonical, field-named binding tuple hashed by
+/// [`ProofEnvelope::binding_digest`].
+///
+/// Serialized (canonical CBOR) instead of the [`ProofEnvelope`] struct itself
+/// so the digest pre-image is an explicit, domain-tagged shape, and so
+/// `backend_id`/`version` are bound alongside the statement context.
+#[derive(Serialize)]
+struct EnvelopeBinding<'a> {
+    domain: &'a str,
+    statement_kind: &'a ProofStatementKind,
+    backend_id: &'a BackendId,
+    version: u32,
+    public_inputs: &'a [Vec<u8>],
+    commitment_roots: &'a [Hash256],
+    verifier_key_or_image_id: &'a [u8],
+    domain_separator: &'a [u8],
+}
+
 impl ProofEnvelope {
     /// Validates that [`Self::backend_id`] names a known, registered
     /// backend.
@@ -356,6 +386,54 @@ impl ProofEnvelope {
                 self.backend_id
             )))
         }
+    }
+
+    /// Canonical journal-binding digest for a RISC Zero receipt (objective
+    /// O-1.1, 2026-07-04 ratification slate).
+    ///
+    /// Folds the ENTIRE envelope context — `statement_kind`, `backend_id`,
+    /// `version`, `public_inputs`, `commitment_roots`,
+    /// `verifier_key_or_image_id`, and `domain_separator` — into a single
+    /// BLAKE3 digest over canonical CBOR, under a fixed domain tag. This is the
+    /// value a RISC Zero receipt's journal must commit to: the audited
+    /// [`RiscZeroReceiptVerifier`] checks the receipt verifies against the image
+    /// id AND that its journal equals this digest, so a receipt proven for one
+    /// (statement, roots, domain) context can never be replayed as valid under
+    /// another. Before O-1.1 the seam received only the image id and the raw
+    /// public inputs, dropping `statement_kind`, `commitment_roots`, and
+    /// `domain_separator` — an unbound statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofError::InvalidProofFormat`] if canonical CBOR encoding of
+    /// the binding tuple fails.
+    pub fn binding_digest(&self) -> Result<Hash256> {
+        let binding = EnvelopeBinding {
+            domain: ENVELOPE_BINDING_DOMAIN,
+            statement_kind: &self.statement_kind,
+            backend_id: &self.backend_id,
+            version: self.version,
+            public_inputs: &self.public_inputs,
+            commitment_roots: &self.commitment_roots,
+            verifier_key_or_image_id: &self.verifier_key_or_image_id,
+            domain_separator: &self.domain_separator,
+        };
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&binding, &mut encoded).map_err(|err| {
+            ProofError::InvalidProofFormat(format!(
+                "failed to canonical-CBOR encode envelope binding for digest: {err}"
+            ))
+        })?;
+        Ok(Hash256(*blake3::hash(&encoded).as_bytes()))
+    }
+
+    /// Runs the RISC Zero seam against `verifier`, binding the full envelope
+    /// context via [`Self::binding_digest`] (objective O-1.1). Production
+    /// [`Self::verify`] passes [`FailClosedRiscZeroVerifier`]; tests inject a
+    /// spy to assert the binding digest actually reaches the verifier.
+    fn verify_riscz(&self, verifier: &dyn RiscZeroReceiptVerifier) -> Result<bool> {
+        let journal_digest = self.binding_digest()?;
+        verifier.verify_receipt(&self.verifier_key_or_image_id, &journal_digest)
     }
 
     /// Verifies the envelope's named backend is both registered and, if
@@ -414,10 +492,12 @@ impl ProofEnvelope {
                 // FailClosedRiscZeroVerifier always refuses, regardless of
                 // feature state, because no external cryptographic review
                 // of the risc0 verify path has landed yet (ratified
-                // decision D1). See RiscZeroReceiptVerifier for exactly
-                // where the audited verify call plugs in once review lands.
-                FailClosedRiscZeroVerifier
-                    .verify_receipt(&self.verifier_key_or_image_id, &self.public_inputs)
+                // decision D1). O-1.1: verify_riscz binds the full envelope
+                // context (statement_kind, commitment_roots, domain_separator,
+                // ...) into the journal digest the audited verifier will check
+                // the receipt against, so it can never certify an unbound
+                // statement once wired.
+                self.verify_riscz(&FailClosedRiscZeroVerifier)
             }
             BackendId::Unknown(_) => unreachable!(
                 "validate_backend() above must have already refused an unregistered backend id"
@@ -456,5 +536,87 @@ mod canonical_encoding_contract_tests {
         assert!(BackendId::UnauditedBlake3Standin.is_registered());
         assert!(!BackendId::Unknown(0).is_registered());
         assert!(!BackendId::Unknown(u32::MAX).is_registered());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod riscz_seam_binding_unit {
+    //! O-1.1 (2026-07-04 slate): prove the RiscZero seam threads the envelope's
+    //! binding digest to the verifier, so the audited verifier can bind the
+    //! receipt to the full statement context rather than certify an unbound
+    //! statement.
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Test-only verifier that records the journal digest it is handed, then
+    /// still refuses — a spy must never manufacture a success-shaped result.
+    struct SpyVerifier {
+        seen_digest: RefCell<Option<Hash256>>,
+    }
+
+    impl RiscZeroReceiptVerifier for SpyVerifier {
+        fn verify_receipt(
+            &self,
+            _image_id_or_verifier_key: &[u8],
+            journal_digest: &Hash256,
+        ) -> Result<bool> {
+            *self.seen_digest.borrow_mut() = Some(*journal_digest);
+            Err(ProofError::VerificationFailed(
+                "spy verifier records the digest only; it never manufactures success".to_string(),
+            ))
+        }
+    }
+
+    fn riscz_env() -> ProofEnvelope {
+        ProofEnvelope {
+            statement_kind: ProofStatementKind::ExecutionReceipt,
+            backend_id: BackendId::RiscZero,
+            version: 1,
+            public_inputs: vec![b"pi".to_vec()],
+            commitment_roots: vec![Hash256([3u8; 32])],
+            verifier_key_or_image_id: b"img".to_vec(),
+            domain_separator: b"dom".to_vec(),
+        }
+    }
+
+    #[test]
+    fn seam_passes_binding_digest_to_verifier() {
+        let env = riscz_env();
+        let spy = SpyVerifier {
+            seen_digest: RefCell::new(None),
+        };
+        // Refuses (fail-closed spy), but must have received the digest.
+        let _ = env.verify_riscz(&spy);
+        assert_eq!(
+            *spy.seen_digest.borrow(),
+            Some(env.binding_digest().expect("binding digest")),
+            "the seam must hand the verifier exactly the envelope's binding digest"
+        );
+    }
+
+    #[test]
+    fn seam_binding_digest_reflects_domain_separator_change() {
+        let mut env = riscz_env();
+        let spy1 = SpyVerifier {
+            seen_digest: RefCell::new(None),
+        };
+        let _ = env.verify_riscz(&spy1);
+
+        env.domain_separator = b"dom-CHANGED".to_vec();
+        let spy2 = SpyVerifier {
+            seen_digest: RefCell::new(None),
+        };
+        let _ = env.verify_riscz(&spy2);
+
+        assert!(
+            spy1.seen_digest.borrow().is_some(),
+            "spy1 verifier must have been called"
+        );
+        assert_ne!(
+            *spy1.seen_digest.borrow(),
+            *spy2.seen_digest.borrow(),
+            "the digest reaching the verifier must change with domain_separator"
+        );
     }
 }
