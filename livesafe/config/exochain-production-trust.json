@@ -1,0 +1,96 @@
+{
+  "sourceBasis": [
+    "https://exochain-production.up.railway.app/health",
+    "https://exochain-production.up.railway.app/ready",
+    "https://exochain-production.up.railway.app/api/v1/governance/status",
+    "https://exochain-production.up.railway.app/api/v1/sentinels",
+    "/Users/bobstewart/Documents/meshcore/exochain/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json",
+    "/Users/bobstewart/Documents/meshcore/exochain/artifacts/trust/avc-exo-ceremony-2026/install-manifest.json",
+    "/Users/bobstewart/Documents/meshcore/exochain/artifacts/trust/avc-exo-ceremony-2026/root-trust-pointer.6131feb462d3a4c2.json",
+    "/Users/bobstewart/Documents/meshcore/exochain/artifacts/trust/avc-exo-ceremony-2026/runtime-activation.2026-05-31.json",
+    "/tmp/exochain-origin-main-verify"
+  ],
+  "production": {
+    "baseUrl": "https://exochain-production.up.railway.app",
+    "healthPath": "/health",
+    "readyPath": "/ready",
+    "governanceStatusPath": "/api/v1/governance/status",
+    "sentinelsPath": "/api/v1/sentinels",
+    "railwayEdge": "railway/us-east4-eqdc4a"
+  },
+  "rootTrustBundle": {
+    "artifactId": "avc-exo-ceremony-2026",
+    "bundleIdHex": "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58",
+    "ceremonyId": "avc-exo-ceremony-2026",
+    "networkId": "exochain-main",
+    "threshold": 7,
+    "maxSigners": 13,
+    "signerIds": [1, 2, 3, 4, 5, 6, 7],
+    "issuerDid": "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX",
+    "issuerPublicKeyHex": "6b765381964de7f74e77e4f9d265105f415e58722d19ff71603f62c31d5aff32",
+    "bundleSha256": "0fc1f6c087b14cffefdfe8c0413bdec6b8453a52a344749ac01f11c37a3b0bda",
+    "manifestSha256": "037774aa9ee9a5d2a420ec262ccada46750931d593bd045b0eeb74cf933a04be",
+    "pointerSha256": "7559226290709cfa08746dcf8c791aa6aa5396170db3c19b6dfd6e4000f71fd0",
+    "runtimePathEnv": "EXO_AVC_ROOT_TRUST_BUNDLE",
+    "runtimePath": "/app/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json"
+  },
+  "verification": {
+    "status": "verified",
+    "verifiedAt": "2026-06-03T21:24:50Z",
+    "verifierCommit": "379a45e1d9ab092ecd446d095a7b524570530efd",
+    "verifierWorktree": "/tmp/exochain-origin-main-verify",
+    "command": "CARGO_TARGET_DIR=/tmp/exochain-origin-main-verify-target cargo run -p exo-node -- genesis verify-bundle --input <(jq '{bundle:.}' /Users/bobstewart/Documents/meshcore/exochain/artifacts/trust/avc-exo-ceremony-2026/root-trust-bundle.canonical.json)",
+    "result": {
+      "verified": true
+    }
+  },
+  "runtimeActivation": {
+    "activationDate": "2026-05-31",
+    "loaderVerification": "exo_root::verify_root_bundle",
+    "failClosedWhenConfigured": true,
+    "registersRuntimeEndpoint": false
+  },
+  "latestProductionProbe": {
+    "observedAt": "2026-06-03T21:18:57Z",
+    "health": {
+      "status": "ok",
+      "version": "0.1.0-beta"
+    },
+    "ready": {
+      "status": "ok",
+      "version": "0.1.0-beta"
+    },
+    "sentinels": [
+      {
+        "check": "Liveness",
+        "healthy": true
+      },
+      {
+        "check": "QuorumHealth",
+        "healthy": false,
+        "message": "1 validator self-set - BELOW BFT MINIMUM (need >= 4); quorum expansion required"
+      },
+      {
+        "check": "ReceiptIntegrity",
+        "healthy": true,
+        "message": "Verified 8 recent trust receipt hash(es)"
+      },
+      {
+        "check": "StoreConsistency",
+        "healthy": true
+      },
+      {
+        "check": "ScoreIntegrity",
+        "healthy": true
+      },
+      {
+        "check": "OtpCleanup",
+        "healthy": true
+      }
+    ]
+  },
+  "sentinelPolicy": {
+    "requiredHealthy": ["Liveness", "ReceiptIntegrity"],
+    "nonBlockingObservations": ["QuorumHealth"]
+  }
+}

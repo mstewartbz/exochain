@@ -40,14 +40,18 @@
 //!
 //! ## Unaudited backend gating
 //!
-//! The only backend currently registered is
-//! [`UNAUDITED_BLAKE3_STANDIN_BACKEND_ID`] — the same blake3 "stand-in"
-//! cryptography described in the crate-root docs. Wrapping that backend id
-//! in an envelope does not exempt it from the crate's unaudited-refusal
-//! doctrine: [`ProofEnvelope::verify`] refuses with
+//! Two backends are currently registered (see [`default_registry`]): the
+//! blake3 "stand-in" cryptography ([`BackendId::UnauditedBlake3Standin`],
+//! marked [`AuditStatus::Pedagogical`]) described in the crate-root docs, and
+//! the RISC Zero integration seam ([`BackendId::RiscZero`], marked
+//! [`AuditStatus::PendingExternalReview`] — wired but not yet cryptographically
+//! reviewed). Neither is exempt from the crate's unaudited-refusal doctrine:
+//! [`ProofEnvelope::verify`] refuses the blake3 stand-in with
 //! [`crate::error::ProofError::UnauditedImplementation`] unless the opt-in
-//! `unaudited-pedagogical-proofs` Cargo feature is enabled, mirroring the
-//! [`crate::guard_unaudited`] pattern used by `snark`, `stark`, and `zkml`.
+//! `unaudited-pedagogical-proofs` Cargo feature is enabled (mirroring the
+//! [`crate::guard_unaudited`] pattern used by `snark`, `stark`, and `zkml`),
+//! and fails the RISC Zero seam closed unconditionally until its external
+//! review lands.
 //!
 //! ## Wire format
 //!
@@ -148,8 +152,8 @@ pub enum BackendId {
 }
 
 impl BackendId {
-    /// Returns `true` for the crate's only currently-registered *known*
-    /// backend variant (i.e. not [`BackendId::Unknown`]).
+    /// Returns `true` for any of the crate's registered *known* backend
+    /// variants (i.e. not [`BackendId::Unknown`]).
     #[must_use]
     pub const fn is_registered(&self) -> bool {
         !matches!(self, BackendId::Unknown(_))

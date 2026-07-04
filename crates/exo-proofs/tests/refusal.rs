@@ -108,13 +108,15 @@ fn zkml_daubert_admissibility_refuses_by_default() {
 ///    pedagogical refusal gate because they carry their own audit evidence
 ///    and a real wired verifier.
 ///
-/// Today `default_registry()` returns exactly one entry —
-/// `BackendId::UnauditedBlake3Standin` marked `AuditStatus::Pedagogical` —
-/// so assertion (1) fails here, and this test is red. It is impossible to
-/// satisfy by declaring a feature flag: there is no `cfg` gate left to
-/// exploit. The only way to turn this green is to actually register a
-/// production-reviewed backend descriptor in `default_registry()` (VCG-001b)
-/// whose `verify()` is backed by a real wired verifier.
+/// Today `default_registry()` returns two entries —
+/// `BackendId::UnauditedBlake3Standin` marked `AuditStatus::Pedagogical` and
+/// `BackendId::RiscZero` marked `AuditStatus::PendingExternalReview` — and
+/// neither is `AuditStatus::ProductionReviewed`, so assertion (1) fails here
+/// and this test is red. It is impossible to satisfy by declaring a feature
+/// flag: there is no `cfg` gate left to exploit. The only way to turn this
+/// green is to actually register a production-reviewed backend descriptor in
+/// `default_registry()` (VCG-001c) whose `verify()` is backed by a real
+/// wired, externally reviewed verifier.
 #[ignore = "red until VCG-001b lands a production backend"]
 #[test]
 fn production_backend_variant_executes_without_unaudited_flag() {

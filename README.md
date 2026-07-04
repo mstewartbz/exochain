@@ -35,7 +35,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 462 | `find crates -name '*.rs'` |
-| Rust LOC | 377857 | `wc -l` |
+| Rust LOC | 377871 | `wc -l` |
 | Workspace tests | 6,110 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
@@ -343,7 +343,9 @@ Float arithmetic is denied workspace-wide via `#[deny(clippy::float_arithmetic)]
 
 ## License
 
-Apache-2.0 — See [LICENSE](LICENSE) and [docs/legal/LICENSING-POSITION.md](docs/legal/LICENSING-POSITION.md).
+Apache-2.0 for all of this repository **except** the [`livesafe/`](livesafe/) subtree, which
+is proprietary and commercial (all rights reserved) — see [livesafe/LICENSE](livesafe/LICENSE).
+See also [LICENSE](LICENSE) and [docs/legal/LICENSING-POSITION.md](docs/legal/LICENSING-POSITION.md).
 
 ---
 *EXOCHAIN Foundation — Judicial Build Governance*

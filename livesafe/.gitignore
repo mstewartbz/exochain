@@ -1,0 +1,73 @@
+.playwright-cli/
+.playwright/
+
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+client/dist/
+responder/dist/
+dist/
+coverage/
+.vitest/
+target/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+.env.local
+.env.production
+
+# Logs
+*.log
+/tmp/livesafe-*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Uploaded files
+server/uploads/
+
+# PostgreSQL data
+data/
+
+# Features database (managed by MCP)
+.autoforge/
+.claude/
+.pg-data/
+test-*.js
+start-pg.sh
+kill-and-restart.sh
+verify-health.js
+
+# Local scratch and regression test scripts
+check-*.js
+regtest-*.js
+test-*.js
+find-*.js
+apply-*.js
+setup-*.js
+cleanup-*.js
+feat*-*.js
+verify-*.js
+add-*.js
+scroll-*.js
+set-*.js
+boost-*.js
+0dentity_addendum.xml
+app_spec.txt
+get-auth-*.js
+regression-test-*.js
+test-*.json
+
+# Context intake safety
+context/private/
+tmp/
